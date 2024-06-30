@@ -65,6 +65,12 @@ static void quirk_no_pps_backlight_power_hook(struct intel_display *display)
 	drm_info(display->drm, "Applying no pps backlight power quirk\n");
 }
 
+static void quirk_no_vlv_disp_pw_dpio_cmn_bc_init(struct intel_display *display)
+{
+	intel_set_quirk(display, QUIRK_NO_VLV_DISP_PW_DPIO_CMN_BC_INIT);
+	drm_info(display->drm, "Applying no dpio-common-bc powerwell init quirk\n");
+}
+
 struct intel_quirk {
 	int device;
 	int subsystem_vendor;
@@ -201,6 +207,8 @@ static struct intel_quirk intel_quirks[] = {
 	{ 0x3184, 0x1019, 0xa94d, quirk_increase_ddi_disabled_time },
 	/* HP Notebook - 14-r206nv */
 	{ 0x0f31, 0x103c, 0x220f, quirk_invert_brightness },
+	/* Xiaomi Mi Pad 2 */
+	{ 0x22b0, 0x1d72, 0x1502, quirk_no_vlv_disp_pw_dpio_cmn_bc_init },
 };
 
 void intel_init_quirks(struct intel_display *display)
