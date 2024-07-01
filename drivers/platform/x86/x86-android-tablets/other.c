@@ -748,9 +748,24 @@ static const struct x86_i2c_client_info xiaomi_mipad2_i2c_clients[] __initconst 
 	},
 };
 
+static struct gpiod_lookup_table xiaomi_mipad2_codec_rt5659_gpios = {
+	.dev_id = "rt5659",
+	.table = {
+		GPIO_LOOKUP("INT33FF:00", 81, "ldo1-en", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("INT33FF:01", 46, "reset", GPIO_ACTIVE_HIGH),
+		{ }
+	},
+};
+
+static struct gpiod_lookup_table * const xiaomi_mipad2_gpios[] = {
+	&xiaomi_mipad2_codec_rt5659_gpios,
+	NULL
+};
+
 const struct x86_dev_info xiaomi_mipad2_info __initconst = {
 	.i2c_client_info = xiaomi_mipad2_i2c_clients,
 	.i2c_client_count = ARRAY_SIZE(xiaomi_mipad2_i2c_clients),
 	.init = xiaomi_mipad2_init,
 	.exit = xiaomi_mipad2_exit,
+	.gpiod_lookup_tables = xiaomi_mipad2_gpios,
 };
