@@ -139,6 +139,8 @@ static const struct i2c_hid_quirks {
 	{ USB_VENDOR_ID_ELAN, HID_ANY_ID,
 		 I2C_HID_QUIRK_NO_WAKEUP_AFTER_RESET |
 		 I2C_HID_QUIRK_BOGUS_IRQ },
+	// Mipad 2
+	{ 0x2808, 0x509c, I2C_HID_QUIRK_BAD_INPUT_SIZE},
 	{ 0, 0 }
 };
 
