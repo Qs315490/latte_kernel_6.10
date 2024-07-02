@@ -27,6 +27,18 @@ config LEDS_KTD202X
 	  To compile this driver as a module, choose M here: the module
 	  will be called leds-ktd202x.
 
+config LEDS_KTD2026_ACPI
+	tristate "LED support for KTD2026 ACPI Chips"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  This option enables support for the Kinetic KTD2026
+	  RGB/White LED driver found in different BQ mobile phones.
+	  It is a 3 channel LED driver programmed via an I2C interface.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called leds-ktd2026-acpi.
+
 config LEDS_NCP5623
 	tristate "LED support for NCP5623"
 	depends on I2C
