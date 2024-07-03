@@ -1330,8 +1330,18 @@ static irqreturn_t rt5659_irq(int irq, void *data)
 {
 	struct rt5659_priv *rt5659 = data;
 
-	queue_delayed_work(system_power_efficient_wq,
-			   &rt5659->jack_detect_work, msecs_to_jiffies(250));
+	int entry_is_empty = list_empty(&rt5659->jack_detect_work.work.entry);
+	printk("rt5659 [%s]: jack_detect_work entry is empty: %s\n", __func__,entry_is_empty? "true":"false");
+	if (!entry_is_empty){
+		printk("rt5659 [%s]: jack_detect_work func is %pS\n", __func__,rt5659->jack_detect_work.work.func);
+	}
+
+	if (rt5659->pdata.jd_src == RT5659_JD_NULL){
+		printk("rt5659 [%s]: rt5659->pdata.jd_src = RT5659_JD_NULL, jack_detect_work not init.", __func__);
+	} else {
+		queue_delayed_work(system_power_efficient_wq,
+					&rt5659->jack_detect_work, msecs_to_jiffies(250));
+	}
 
 	return IRQ_HANDLED;
 }
