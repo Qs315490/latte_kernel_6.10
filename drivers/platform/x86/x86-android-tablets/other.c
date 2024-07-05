@@ -9,6 +9,7 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/gpio.h>
 #include <linux/gpio/machine.h>
 #include <linux/input.h>
 #include <linux/leds.h>
@@ -692,6 +693,10 @@ static int __init xiaomi_mipad2_init(struct device *dev)
 	struct led_classdev *led_cdev;
 	int ret;
 
+	// rt5659 相关gpio初始化
+	gpio_request_one(593, GPIOF_OUT_INIT_HIGH, "ldo1-en");
+	gpio_request_one(656, GPIOF_OUT_INIT_HIGH, "reset");
+
 	xiaomi_mipad2_led_pwm = devm_pwm_get(dev, "pwm_soc_lpss_2");
 	if (IS_ERR(xiaomi_mipad2_led_pwm))
 		return dev_err_probe(dev, PTR_ERR(xiaomi_mipad2_led_pwm), "getting pwm\n");
@@ -737,6 +742,22 @@ static const struct x86_i2c_client_info xiaomi_mipad2_i2c_clients[] __initconst 
 		},
 		.adapter_path = "\\_SB_.PCI0.I2C1",
 	}, {
+		/* TFA9890A audio amplifier */
+		.board_info = {
+			.type = "tfa9890",
+			.addr = 0x34,
+			.dev_name = "tfa9890:00",
+		},
+		.adapter_path = "\\_SB_.PCI0.I2C2",
+	}, {
+		/* TFA9890A audio amplifier */
+		.board_info = {
+			.type = "tfa9890",
+			.addr = 0x37,
+			.dev_name = "tfa9890:01",
+		},
+		.adapter_path = "\\_SB_.PCI0.I2C2",
+	}, {
 		/* KTD2026 RGB notification LED controller */
 		.board_info = {
 			.type = "ktd2026",
@@ -745,9 +766,9 @@ static const struct x86_i2c_client_info xiaomi_mipad2_i2c_clients[] __initconst 
 			.swnode = &ktd2026_node,
 		},
 		.adapter_path = "\\_SB_.PCI0.I2C3",
-	},
+	}, 
 };
-
+/* 无法注册gpio，改为直接设置为高电平
 static struct gpiod_lookup_table xiaomi_mipad2_codec_rt5659_gpios = {
 	.dev_id = "rt5659",
 	.table = {
@@ -761,11 +782,11 @@ static struct gpiod_lookup_table * const xiaomi_mipad2_gpios[] = {
 	&xiaomi_mipad2_codec_rt5659_gpios,
 	NULL
 };
-
+*/
 const struct x86_dev_info xiaomi_mipad2_info __initconst = {
 	.i2c_client_info = xiaomi_mipad2_i2c_clients,
 	.i2c_client_count = ARRAY_SIZE(xiaomi_mipad2_i2c_clients),
 	.init = xiaomi_mipad2_init,
 	.exit = xiaomi_mipad2_exit,
-	.gpiod_lookup_tables = xiaomi_mipad2_gpios,
+	// .gpiod_lookup_tables = xiaomi_mipad2_gpios,
 };
