@@ -231,6 +231,11 @@ struct snd_soc_acpi_mach  snd_soc_acpi_intel_cherrytrail_machines[] = {
 		.board = "bytcht_nocodec",
 	},
 #endif
+	{
+		.id = "10EC5659",
+		.drv_name = "cht-bsw-rt5659",
+		.fw_filename = "intel/fw_sst_22a8.bin",
+	},
 	{},
 };
 EXPORT_SYMBOL_GPL(snd_soc_acpi_intel_cherrytrail_machines);
