@@ -132,6 +132,11 @@ static const struct snd_soc_acpi_codecs da7213_comp_ids = {
 /* Cherryview-based platforms: CherryTrail and Braswell */
 struct snd_soc_acpi_mach  snd_soc_acpi_intel_cherrytrail_machines[] = {
 	{
+		.id = "10EC5659",
+		.drv_name = "cht-bsw-rt5659",
+		.fw_filename = "intel/fw_sst_22a8.bin",
+	},
+	{
 		.comp_ids = &rt5670_comp_ids,
 		.drv_name = "cht-bsw-rt5672",
 		.fw_filename = "intel/fw_sst_22a8.bin",
@@ -231,11 +236,6 @@ struct snd_soc_acpi_mach  snd_soc_acpi_intel_cherrytrail_machines[] = {
 		.board = "bytcht_nocodec",
 	},
 #endif
-	{
-		.id = "10EC5659",
-		.drv_name = "cht-bsw-rt5659",
-		.fw_filename = "intel/fw_sst_22a8.bin",
-	},
 	{},
 };
 EXPORT_SYMBOL_GPL(snd_soc_acpi_intel_cherrytrail_machines);

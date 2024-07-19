@@ -13,6 +13,7 @@
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <sound/soc.h>
+#include <linux/device.h>
 
 #define TFA989X_STATUSREG		0x00
 #define TFA989X_BATTERYVOLTAGE		0x01
@@ -162,6 +163,8 @@ static int tfa989x_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_component *component = dai->component;
 	int sr;
 
+    pr_info("tfa989x received sample_rate: %d\n",params_rate(params));
+
 	sr = tfa989x_find_sample_rate(params_rate(params));
 	if (sr < 0)
 		return sr;
@@ -170,9 +173,59 @@ static int tfa989x_hw_params(struct snd_pcm_substream *substream,
 					     TFA989X_I2SREG_I2SSR_MSK,
 					     sr << TFA989X_I2SREG_I2SSR);
 }
+/*****************************************************************************/
+/* Params masks */
+#define TFA98XX_FORMAT_MASK		(0x7)
+#define TFA98XX_FORMAT_LSB		(0x4)
+#define TFA98XX_FORMAT_MSB		(0x2)
+
+static int tfa989x_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
+{
+	struct snd_soc_component *component = codec_dai->component;
+	//struct tfa989x *tfa989x = snd_soc_component_get_drvdata(component);
+	u16 val;
+
+	pr_debug("\n");
+    pr_info("tfa989x received fmt: %d\n",fmt);
+
+	/* set master/slave audio interface */
+	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBS_CFS:
+		/* default value */
+		break;
+	case SND_SOC_DAIFMT_CBM_CFM:
+	default:
+		/* only supports Slave mode */
+		pr_err("tfa989x: invalid DAI master/slave interface\n");
+		return -EINVAL;
+	}
+	val = snd_soc_component_read(component, TFA989X_I2SREG);
+	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
+	case SND_SOC_DAIFMT_I2S:
+		/* default value */
+		break;
+	case SND_SOC_DAIFMT_RIGHT_J:
+		val &= ~(TFA98XX_FORMAT_MASK);
+		val |= TFA98XX_FORMAT_LSB;
+		break;
+	case SND_SOC_DAIFMT_LEFT_J:
+		val &= ~(TFA98XX_FORMAT_MASK);
+		val |= TFA98XX_FORMAT_MSB;
+		break;
+	default:
+		pr_err("tfa989x: invalid DAI interface format\n");
+		return -EINVAL;
+	}
+
+	snd_soc_component_write(component, TFA989X_I2SREG, val);
+
+	return 0;
+}
+/*****************************************************************************/
 
 static const struct snd_soc_dai_ops tfa989x_dai_ops = {
 	.hw_params = tfa989x_hw_params,
+	.set_fmt   = tfa989x_set_dai_fmt,
 };
 
 static struct snd_soc_dai_driver tfa989x_dai = {
@@ -314,6 +367,42 @@ static void tfa989x_regulator_disable(void *data)
 	regulator_disable(tfa989x->vddd_supply);
 }
 
+
+static int my_i2c_read_reg(struct i2c_client *client, u8 reg, u16 *val)
+{
+    int ret = 0;
+    unsigned char reg_buf[4] = {0x00};
+    unsigned char val_buf[4] = {0x00};
+    struct i2c_msg msg[] = 
+    {
+        {
+            .addr = client->addr,
+            .flags = 0,
+            .len = 1,
+            .buf = &reg_buf[0],
+        },
+        {
+            .addr = client->addr,
+            .flags = I2C_M_RD,
+            .len = 2,
+            .buf = &val_buf[0],
+        },
+    };
+
+    reg_buf[0] = reg & 0xFF;
+
+    ret = i2c_transfer(client->adapter,msg,2);
+    pr_debug("my i2c read ret got: %d \n", ret);
+
+    if(ret == 2)
+    {
+        *val = (val_buf[0] << 8) | val_buf[1];
+    }
+    
+    return ret;
+}
+
+
 static int tfa989x_i2c_probe(struct i2c_client *i2c)
 {
 	struct device *dev = &i2c->dev;
@@ -323,15 +412,43 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
 	unsigned int val;
 	int ret;
 
+    u8 myreg = 0x03;
+	u16 myval = 0x0000;
+	//const struct acpi_device_id *id;
+
+    dev_dbg(&i2c->dev, "tfa989x i2c addr is: %x \n",i2c->addr);
+
+    pr_info("tfa989x test 0 \n");
+
+	if (!i2c_check_functionality(i2c->adapter, I2C_FUNC_I2C)) {
+		dev_err(&i2c->dev, "tfa989x check_functionality failed\n");
+		return -EIO;
+	}
+    else{
+        pr_info("tfa989x check_functionality OK \n");
+    }
+
+    my_i2c_read_reg(i2c, myreg, &myval);
+    dev_dbg(&i2c->dev, "tfa989x i2c read got: %x \n",myval);
+
+
 	rev = device_get_match_data(dev);
 	if (!rev) {
-		dev_err(dev, "unknown device revision\n");
-		return -ENODEV;
+	    pr_info("tfa989x dev name: %s", dev_name(dev));
+        if (strstr(dev_name(dev), "i2c-tfa9890")) {
+	        rev = &tfa9890_rev;
+        }
+        else{
+			dev_err(dev, "unknown device revision\n");
+			return -ENODEV;
+		}
 	}
 
 	tfa989x = devm_kzalloc(dev, sizeof(*tfa989x), GFP_KERNEL);
 	if (!tfa989x)
 		return -ENOMEM;
+
+    pr_info("tfa989x test 1 \n");
 
 	tfa989x->rev = rev;
 	i2c_set_clientdata(i2c, tfa989x);
@@ -350,6 +467,8 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
 	regmap = devm_regmap_init_i2c(i2c, &tfa989x_regmap);
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
+
+    pr_info("tfa989x test 2 \n");
 
 	ret = regulator_enable(tfa989x->vddd_supply);
 	if (ret) {
@@ -373,12 +492,17 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
 		return ret;
 	}
 
+    pr_info("tfa989x test 3 \n");
+
 	val &= TFA989X_REVISIONNUMBER_REV_MSK;
 	if (val != rev->rev) {
 		dev_err(dev, "invalid revision number, expected %#x, got %#x\n",
 			rev->rev, val);
 		return -ENODEV;
 	}
+
+    pr_info("tfa989x revision number, expected %#x, got %#x\n",
+			rev->rev, val);
 
 	ret = regmap_write(regmap, TFA989X_SYS_CTRL, BIT(TFA989X_SYS_CTRL_I2CR));
 	if (ret) {
@@ -399,9 +523,21 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
 	}
 	regcache_cache_bypass(regmap, false);
 
+    pr_info("tfa989x test 4 \n");
+
 	return devm_snd_soc_register_component(dev, &tfa989x_component,
 					       &tfa989x_dai, 1);
 }
+
+static const struct i2c_device_id tfa989x_i2c_id[] = {
+	{ "tfa989x", 0 },
+	{ "tfa9890", 0 },
+#ifdef CONFIG_ACPI
+	{ "i2c-tfa9890", 0},
+#endif
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, tfa989x_i2c_id);
 
 static const struct of_device_id tfa989x_of_match[] = {
 	{ .compatible = "nxp,tfa9890", .data = &tfa9890_rev },
@@ -411,12 +547,21 @@ static const struct of_device_id tfa989x_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, tfa989x_of_match);
 
+static const struct acpi_device_id tfa9890_acpi_match[] = {
+	{ "NXP9890", 0},
+	{ "TFA9890", 0},
+	{ },
+};
+MODULE_DEVICE_TABLE(acpi, tfa9890_acpi_match);
+
 static struct i2c_driver tfa989x_i2c_driver = {
 	.driver = {
 		.name = "tfa989x",
 		.of_match_table = tfa989x_of_match,
+		.acpi_match_table = tfa9890_acpi_match,
 	},
 	.probe = tfa989x_i2c_probe,
+	.id_table = tfa989x_i2c_id,
 };
 module_i2c_driver(tfa989x_i2c_driver);
 

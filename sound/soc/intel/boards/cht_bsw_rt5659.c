@@ -19,6 +19,7 @@
 #include <sound/soc.h>
 #include <sound/jack.h>
 #include <sound/soc-acpi.h>
+#include <asm/platform_sst_audio.h>
 #include "../../codecs/rt5659.h"
 #include "../atom/sst-atom-controls.h"
 #include "../common/soc-intel-quirks.h"
@@ -402,7 +403,9 @@ static int cht_codec_fixup(struct snd_soc_pcm_runtime *rtd,
 						SNDRV_PCM_HW_PARAM_CHANNELS);
 	// int ret, bits;
 
-	/* The DSP will convert the FE rate to 48k, stereo, 24bits */
+	pr_debug("Invoked %s for dailink %s\n", __func__, rtd->dai_link->name);
+
+	/* The DSP will covert the FE rate to 48k, stereo, 24bits */
 	rate->min = rate->max = 48000;
 	channels->min = channels->max = 4;
 
@@ -450,6 +453,22 @@ static int cht_codec_fixup(struct snd_soc_pcm_runtime *rtd,
 
 static int cht_aif1_startup(struct snd_pcm_substream *substream)
 {
+    struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+    struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+    struct snd_soc_dapm_widget_list *list_1;
+	struct snd_soc_dapm_widget *widget;
+	int stream = 0;
+	int paths, i;
+
+	pr_info("%s runtime=%p\n", __func__, substream->runtime);
+
+    paths = snd_soc_dapm_dai_get_connected_widgets(cpu_dai, stream, &list_1, NULL);
+    pr_info("%d paths got\n", paths);
+
+    for_each_dapm_widgets(list_1, i, widget) {
+        pr_info("rt5659 path widget: name=%s, sname=%s\n", widget->name,widget->sname);
+    }
+
 	return snd_pcm_hw_constraint_single(substream->runtime,
 			SNDRV_PCM_HW_PARAM_RATE, 48000);
 }
@@ -485,11 +504,11 @@ SND_SOC_DAILINK_DEF(rt5659_aif2_cpu,
 
 SND_SOC_DAILINK_DEF(spk_l_codec,
 	DAILINK_COMP_ARRAY(COMP_CODEC("i2c-tfa9890:00",
-				      "tfa989x")));
+				      "tfa989x-hifi")));
 
-SND_SOC_DAILINK_DEF(spk_r_codec,
-	DAILINK_COMP_ARRAY(COMP_CODEC("i2c-tfa9890:01",
-				      "tfa989x")));
+// SND_SOC_DAILINK_DEF(spk_r_codec,
+// 	DAILINK_COMP_ARRAY(COMP_CODEC("i2c-tfa9890:01",
+// 				      "tfa989x-hifi")));
 
 static const struct snd_soc_pcm_stream nxp_tfa989x_params[] = {
     {
@@ -551,32 +570,19 @@ static struct snd_soc_dai_link cht_dailink[] = {
 			SND_SOC_DAIFMT_CBS_CFS,
 		.c2c_params = nxp_tfa989x_params,
         .num_c2c_params = 1,
-	},{
-		.name = "rt5659_AIF2-TFA989x_Speaker_R",
-		.stream_name = "aif2-spk_r",
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
-		SND_SOC_DAILINK_REG(rt5659_aif2_cpu, spk_r_codec),
-		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
-			SND_SOC_DAIFMT_CBS_CFS,
-		.c2c_params = nxp_tfa989x_params,
-        .num_c2c_params = 1,
 	},
+	// },{
+	// 	.name = "rt5659_AIF2-TFA989x_Speaker_R",
+	// 	.stream_name = "aif2-spk_r",
+	// 	.dpcm_playback = 1,
+	// 	.dpcm_capture = 1,
+	// 	SND_SOC_DAILINK_REG(rt5659_aif2_cpu, spk_r_codec),
+	// 	.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
+	// 		SND_SOC_DAIFMT_CBS_CFS,
+	// 	.c2c_params = nxp_tfa989x_params,
+    //     .num_c2c_params = 1,
+	// },
 };
-
-static void cht_fixup_controls(struct snd_soc_card *cht_card)
-{
-    struct snd_card *card = cht_card->snd_card;
-    struct snd_kcontrol *kctl;
-    
-    list_for_each_entry(kctl, &card->controls, list)
-	{
-		if (!strncmp(kctl->id.name, "codec_out0 Gain 0", sizeof(kctl->id.name)))
-			snprintf(kctl->id.name, sizeof(kctl->id.name), "Master Playback Volume");
-    }
-    
-    return;
-}
 
 static int cht_suspend_pre(struct snd_soc_card *card)
 {
@@ -631,7 +637,6 @@ static struct snd_soc_card snd_soc_card_cht = {
 	.num_dapm_routes = ARRAY_SIZE(cht_audio_map),
 	.controls = cht_mc_controls,
 	.num_controls = ARRAY_SIZE(cht_mc_controls),
-	.fixup_controls = cht_fixup_controls,
 	.suspend_pre = cht_suspend_pre,
 	.resume_post = cht_resume_post,
 };
@@ -643,11 +648,20 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
 	int ret_val = 0;
 	struct cht_mc_private *drv;
 	struct snd_soc_acpi_mach *mach = pdev->dev.platform_data;
+	struct sst_platform_info *pdata;
 	const char *platform_name;
 	struct acpi_device *adev;
 	bool sof_parent;
 	int dai_index = 0;
 	int i;
+
+    pr_info("rt5659 mach pdev name %s\n", pdev->name);
+
+    pr_info("rt5659 mach id %s\n", mach->id);
+    pr_info("rt5659 mach drv_name %s\n", mach->drv_name);
+    pr_info("rt5659 mach fw_filename %s\n", mach->fw_filename);
+
+    dev_dbg(&pdev->dev, "rt5659 mach test 0\n");
 
 	drv = devm_kzalloc(&pdev->dev, sizeof(*drv), GFP_KERNEL);
 	if (!drv)
@@ -663,25 +677,39 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
 			break;
 		}
 	}
+    if(i == ARRAY_SIZE(cht_dailink)){
+        pr_info("rt5659 default codec name %s not found\n", drv->codec_name);
+    }
+    else{
+        pr_info("rt5659 index %d dai codec name %s\n", dai_index, cht_dailink[dai_index].codecs->name);
 
-	/* fixup codec name based on HID */
-	adev = acpi_dev_get_first_match_dev(mach->id, NULL, -1);
-	if (adev) {
-		snprintf(drv->codec_name, sizeof(drv->codec_name),
-			 "i2c-%s", acpi_dev_name(adev));
-		cht_dailink[dai_index].codecs->name = drv->codec_name;
-	}
-	acpi_dev_put(adev);
+		/* fixup codec name based on HID */
+		adev = acpi_dev_get_first_match_dev(mach->id, NULL, -1);
+		if (adev) {
+			snprintf(drv->codec_name, sizeof(drv->codec_name),
+				 "i2c-%s", acpi_dev_name(adev));
+			cht_dailink[dai_index].codecs->name = drv->codec_name;
+		}
+		acpi_dev_put(adev);
 
-	/* Use SSP0 on Bay Trail CR devices */
-	if (soc_intel_is_byt() && mach->mach_params.acpi_ipc_irq_index == 0) {
-		cht_dailink[dai_index].cpus->dai_name = "ssp0-port";
-		drv->use_ssp0 = true;
-	}
+        pr_info("rt5659 acpi_device name %s\n", acpi_dev_name(adev));
+        pr_info("rt5659 fixuped index %d dai codec name %s\n", dai_index, cht_dailink[dai_index].codecs->name);
+
+		/* Use SSP0 on Bay Trail CR devices */
+		if (soc_intel_is_byt() && mach->mach_params.acpi_ipc_irq_index == 0) {
+			cht_dailink[dai_index].cpus->dai_name = "ssp0-port";
+			drv->use_ssp0 = true;
+		}
+    }
 
 	/* override platform name, if required */
 	snd_soc_card_cht.dev = &pdev->dev;
 	platform_name = mach->mach_params.platform;
+    pdata = mach->pdata;
+	//platform_name = padata->platform;
+
+    pr_info("rt5659 mach platform_name %s\n", pdata->platform);
+    pr_info("rt5659 mach test 1\n");
 
 	ret_val = snd_soc_fixup_dai_links_platform_name(&snd_soc_card_cht,
 							platform_name);
@@ -700,6 +728,8 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
 	snd_soc_card_set_drvdata(&snd_soc_card_cht, drv);
 
 	sof_parent = snd_soc_acpi_sof_parent(&pdev->dev);
+
+    pr_info("rt5659 mach test 2\n");
 
 	/* set card and driver name */
 	if (sof_parent) {
@@ -722,6 +752,9 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
 		return ret_val;
 	}
 	platform_set_drvdata(pdev, &snd_soc_card_cht);
+
+    pr_info("rt5659 mach test 3\n");
+
 	return ret_val;
 }
 
