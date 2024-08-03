@@ -655,13 +655,13 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
 	int dai_index = 0;
 	int i;
 
-    pr_info("rt5659 mach pdev name %s\n", pdev->name);
+    pr_info("cht-bsw-rt5659 mach pdev name %s\n", pdev->name);
 
-    pr_info("rt5659 mach id %s\n", mach->id);
-    pr_info("rt5659 mach drv_name %s\n", mach->drv_name);
-    pr_info("rt5659 mach fw_filename %s\n", mach->fw_filename);
+    pr_info("cht-bsw-rt5659 mach id %s\n", mach->id);
+    pr_info("cht-bsw-rt5659 mach drv_name %s\n", mach->drv_name);
+    pr_info("cht-bsw-rt5659 mach fw_filename %s\n", mach->fw_filename);
 
-    dev_dbg(&pdev->dev, "rt5659 mach test 0\n");
+    dev_dbg(&pdev->dev, "cht-bsw-rt5659 mach test 0\n");
 
 	drv = devm_kzalloc(&pdev->dev, sizeof(*drv), GFP_KERNEL);
 	if (!drv)
@@ -678,10 +678,10 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
 		}
 	}
     if(i == ARRAY_SIZE(cht_dailink)){
-        pr_info("rt5659 default codec name %s not found\n", drv->codec_name);
+        pr_info("cht-bsw-rt5659 default codec name %s not found\n", drv->codec_name);
     }
     else{
-        pr_info("rt5659 index %d dai codec name %s\n", dai_index, cht_dailink[dai_index].codecs->name);
+        pr_info("cht-bsw-rt5659 index %d dai codec name %s\n", dai_index, cht_dailink[dai_index].codecs->name);
 
 		/* fixup codec name based on HID */
 		adev = acpi_dev_get_first_match_dev(mach->id, NULL, -1);
@@ -692,8 +692,8 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
 		}
 		acpi_dev_put(adev);
 
-        pr_info("rt5659 acpi_device name %s\n", acpi_dev_name(adev));
-        pr_info("rt5659 fixuped index %d dai codec name %s\n", dai_index, cht_dailink[dai_index].codecs->name);
+        pr_info("cht-bsw-rt5659 acpi_device name %s\n", acpi_dev_name(adev));
+        pr_info("cht-bsw-rt5659 fixuped index %d dai codec name %s\n", dai_index, cht_dailink[dai_index].codecs->name);
 
 		/* Use SSP0 on Bay Trail CR devices */
 		if (soc_intel_is_byt() && mach->mach_params.acpi_ipc_irq_index == 0) {
@@ -708,8 +708,8 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
     pdata = mach->pdata;
 	//platform_name = padata->platform;
 
-    pr_info("rt5659 mach platform_name %s\n", pdata->platform);
-    pr_info("rt5659 mach test 1\n");
+    pr_info("cht-bsw-rt5659 mach platform_name %s\n", pdata->platform);
+    pr_info("cht-bsw-rt5659 mach test 1\n");
 
 	ret_val = snd_soc_fixup_dai_links_platform_name(&snd_soc_card_cht,
 							platform_name);
@@ -729,7 +729,7 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
 
 	sof_parent = snd_soc_acpi_sof_parent(&pdev->dev);
 
-    pr_info("rt5659 mach test 2\n");
+    pr_info("cht-bsw-rt5659 mach test 2\n");
 
 	/* set card and driver name */
 	if (sof_parent) {
@@ -753,7 +753,7 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
 	}
 	platform_set_drvdata(pdev, &snd_soc_card_cht);
 
-    pr_info("rt5659 mach test 3\n");
+    pr_info("cht-bsw-rt5659 mach test 3\n");
 
 	return ret_val;
 }
@@ -765,7 +765,19 @@ static struct platform_driver snd_cht_mc_driver = {
 	.probe = snd_cht_mc_probe,
 };
 
-module_platform_driver(snd_cht_mc_driver);
+static int __init snd_cht_mc_init(void)
+{
+	return platform_driver_register(&snd_cht_mc_driver);
+}
+late_initcall(snd_cht_mc_init);
+
+static void __exit snd_cht_mc_exit(void)
+{
+	platform_driver_unregister(&snd_cht_mc_driver);
+}
+module_exit(snd_cht_mc_exit);
+
+// module_platform_driver(snd_cht_mc_driver);
 
 MODULE_DESCRIPTION("ASoC Intel(R) Baytrail CR Machine driver");
 MODULE_AUTHOR("Subhransu S. Prusty, Mengdong Lin");
