@@ -506,9 +506,9 @@ SND_SOC_DAILINK_DEF(spk_l_codec,
 	DAILINK_COMP_ARRAY(COMP_CODEC("i2c-tfa9890:00",
 				      "tfa989x-hifi")));
 
-// SND_SOC_DAILINK_DEF(spk_r_codec,
-// 	DAILINK_COMP_ARRAY(COMP_CODEC("i2c-tfa9890:01",
-// 				      "tfa989x-hifi")));
+SND_SOC_DAILINK_DEF(spk_r_codec,
+	DAILINK_COMP_ARRAY(COMP_CODEC("i2c-tfa9890:01",
+				      "tfa989x-hifi")));
 
 static const struct snd_soc_pcm_stream nxp_tfa989x_params[] = {
     {
@@ -570,18 +570,17 @@ static struct snd_soc_dai_link cht_dailink[] = {
 			SND_SOC_DAIFMT_CBS_CFS,
 		.c2c_params = nxp_tfa989x_params,
         .num_c2c_params = 1,
+	},{
+		.name = "rt5659_AIF2-TFA989x_Speaker_R",
+		.stream_name = "aif2-spk_r",
+		.dpcm_playback = 1,
+		.dpcm_capture = 1,
+		SND_SOC_DAILINK_REG(rt5659_aif2_cpu, spk_r_codec),
+		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
+			SND_SOC_DAIFMT_CBS_CFS,
+		.c2c_params = nxp_tfa989x_params,
+        .num_c2c_params = 1,
 	},
-	// },{
-	// 	.name = "rt5659_AIF2-TFA989x_Speaker_R",
-	// 	.stream_name = "aif2-spk_r",
-	// 	.dpcm_playback = 1,
-	// 	.dpcm_capture = 1,
-	// 	SND_SOC_DAILINK_REG(rt5659_aif2_cpu, spk_r_codec),
-	// 	.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
-	// 		SND_SOC_DAIFMT_CBS_CFS,
-	// 	.c2c_params = nxp_tfa989x_params,
-    //     .num_c2c_params = 1,
-	// },
 };
 
 static int cht_suspend_pre(struct snd_soc_card *card)
