@@ -1,3 +1,8 @@
+# 驱动加载顺序调整
+/etc/modules-load.d/modules.conf 新起一行填写
+```
+snd_soc_rt5659
+```
 # 声音修复
 /usr/share/alsa/ucm2/conf.d/cht-bsw-rt5659/ 文件夹下
 cht-bsw-rt5659.conf
@@ -154,7 +159,15 @@ SectionDevice."Speaker".0 {
 	]
 }
 ```
-至此声音设备正常识别，如果没有识别尝试以下配置
+# 设置声卡模式
+## 安装声音调整面板
+```bash
+apt install pavucontrol
+```
+## 将声卡模式设置为专业音频
+配置 -> Built-in Audio -> 专业音频(Pro Audio)
+
+# 至此声音设备正常识别，如果没有识别尝试以下配置
 # pipewire设备识别不正常
 /usr/share/pipewire/pipewire.conf 249行新增。参照Dummy-Driver配置后添加即可
 ```

@@ -85,10 +85,7 @@ static const struct regmap_config tfa989x_regmap = {
 static const char * const chsa_text[] = { "Left", "Right", /* "DSP" */ };
 static SOC_ENUM_SINGLE_DECL(chsa_enum, TFA989X_I2SREG, TFA989X_I2SREG_CHSA, chsa_text);
 static const struct snd_kcontrol_new chsa_mux = SOC_DAPM_ENUM("Amp Input", chsa_enum);
-
-static const char * const chsa_text_1[] = { "Left", "Right", /* "DSP" */ };
-static SOC_ENUM_SINGLE_DECL(chsa_enum_1, TFA989X_I2SREG, TFA989X_I2SREG_CHSA, chsa_text_1);
-static const struct snd_kcontrol_new chsa_mux_1 = SOC_DAPM_ENUM("Amp Input1", chsa_enum_1);
+static const struct snd_kcontrol_new chsa_mux_1 = SOC_DAPM_ENUM("Amp Input1", chsa_enum);
 
 static const struct snd_soc_dapm_widget tfa989x_dapm_widgets[] = {
 	SND_SOC_DAPM_OUTPUT("OUT Left"),
@@ -114,7 +111,7 @@ static const struct snd_soc_dapm_widget tfa9890_dapm_widgets[] = {
 	SND_SOC_DAPM_OUT_DRV("AMPE1", TFA989X_SYS_CTRL, TFA989X_SYS_CTRL_AMPE, 0, NULL, 0),
 
 	SND_SOC_DAPM_MUX("Amp Input1", SND_SOC_NOPM, 0, 0, &chsa_mux_1),
-	// SND_SOC_DAPM_AIF_IN("AIFINL1", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
+	// SND_SOC_DAPM_AIF_IN("AIFINL", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 1, SND_SOC_NOPM, 0, 0),
 };
 
@@ -122,7 +119,6 @@ static const struct snd_soc_dapm_route tfa9890_dapm_routes[] = {
 	{"OUT Right", NULL, "AMPE1"},
 	{"AMPE1", NULL, "POWER1"},
 	{"AMPE1", NULL, "Amp Input1"},
-	// {"Amp Input1", "Left", "AIFINL1"},
 	{"Amp Input1", "Right", "AIFINR"},
 };
 
@@ -564,13 +560,10 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
 		pr_info("tfa989x --> Right\n");
 		return devm_snd_soc_register_component(dev, &tfa9890_component,
 	 				       					&tfa989x_dai, 1);
-	}else{
-		pr_info("tfa989x --> Left\n");
-		return devm_snd_soc_register_component(dev, &tfa989x_component,
-	 				       					&tfa989x_dai, 1);
 	}
-	// return devm_snd_soc_register_component(dev, &tfa989x_component,
-	// 				       &tfa989x_dai, 1);
+	pr_info("tfa989x --> Left\n");
+	return devm_snd_soc_register_component(dev, &tfa989x_component,
+	 				        &tfa989x_dai, 1);
 }
 
 static const struct i2c_device_id tfa989x_i2c_id[] = {
