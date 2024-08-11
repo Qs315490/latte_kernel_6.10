@@ -94,7 +94,9 @@ static const struct snd_soc_dapm_widget tfa989x_dapm_widgets[] = {
 
 	SND_SOC_DAPM_MUX("Amp Input", SND_SOC_NOPM, 0, 0, &chsa_mux),
 	SND_SOC_DAPM_AIF_IN("AIFINL", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
+	// rt5659 未区分通道 
 	// SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 1, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
 };
 
 static const struct snd_soc_dapm_route tfa989x_dapm_routes[] = {
@@ -102,7 +104,7 @@ static const struct snd_soc_dapm_route tfa989x_dapm_routes[] = {
 	{"AMPE", NULL, "POWER"},
 	{"AMPE", NULL, "Amp Input"},
 	{"Amp Input", "Left", "AIFINL"},
-	// {"Amp Input", "Right", "AIFINR"},
+	{"Amp Input", "Right", "AIFINR"},
 };
 // 第二芯片
 static const struct snd_soc_dapm_widget tfa9890_dapm_widgets[] = {
@@ -111,14 +113,17 @@ static const struct snd_soc_dapm_widget tfa9890_dapm_widgets[] = {
 	SND_SOC_DAPM_OUT_DRV("AMPE1", TFA989X_SYS_CTRL, TFA989X_SYS_CTRL_AMPE, 0, NULL, 0),
 
 	SND_SOC_DAPM_MUX("Amp Input1", SND_SOC_NOPM, 0, 0, &chsa_mux_1),
-	// SND_SOC_DAPM_AIF_IN("AIFINL", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
-	SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 1, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("AIFINL", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
+	// rt5659 未区分通道
+	// SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 1, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
 };
 
 static const struct snd_soc_dapm_route tfa9890_dapm_routes[] = {
 	{"OUT Right", NULL, "AMPE1"},
 	{"AMPE1", NULL, "POWER1"},
 	{"AMPE1", NULL, "Amp Input1"},
+	{"Amp Input1", "Left", "AIFINL"},
 	{"Amp Input1", "Right", "AIFINR"},
 };
 
