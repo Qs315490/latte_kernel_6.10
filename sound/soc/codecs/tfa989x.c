@@ -85,46 +85,25 @@ static const struct regmap_config tfa989x_regmap = {
 static const char * const chsa_text[] = { "Left", "Right", /* "DSP" */ };
 static SOC_ENUM_SINGLE_DECL(chsa_enum, TFA989X_I2SREG, TFA989X_I2SREG_CHSA, chsa_text);
 static const struct snd_kcontrol_new chsa_mux = SOC_DAPM_ENUM("Amp Input", chsa_enum);
-static const struct snd_kcontrol_new chsa_mux_1 = SOC_DAPM_ENUM("Amp Input1", chsa_enum);
 
 static const struct snd_soc_dapm_widget tfa989x_dapm_widgets[] = {
-	SND_SOC_DAPM_OUTPUT("OUT Left"),
+	SND_SOC_DAPM_OUTPUT("OUT"),
 	SND_SOC_DAPM_SUPPLY("POWER", TFA989X_SYS_CTRL, TFA989X_SYS_CTRL_PWDN, 1, NULL, 0),
 	SND_SOC_DAPM_OUT_DRV("AMPE", TFA989X_SYS_CTRL, TFA989X_SYS_CTRL_AMPE, 0, NULL, 0),
 
 	SND_SOC_DAPM_MUX("Amp Input", SND_SOC_NOPM, 0, 0, &chsa_mux),
-	SND_SOC_DAPM_AIF_IN("AIFINL", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
-	// rt5659 未区分通道 
-	// SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 1, SND_SOC_NOPM, 0, 0),
-	SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
-};
-
-static const struct snd_soc_dapm_route tfa989x_dapm_routes[] = {
-	{"OUT Left", NULL, "AMPE"},
-	{"AMPE", NULL, "POWER"},
-	{"AMPE", NULL, "Amp Input"},
-	{"Amp Input", "Left", "AIFINL"},
-	{"Amp Input", "Right", "AIFINR"},
-};
-// 第二芯片
-static const struct snd_soc_dapm_widget tfa9890_dapm_widgets[] = {
-	SND_SOC_DAPM_OUTPUT("OUT Right"),
-	SND_SOC_DAPM_SUPPLY("POWER1", TFA989X_SYS_CTRL, TFA989X_SYS_CTRL_PWDN, 1, NULL, 0),
-	SND_SOC_DAPM_OUT_DRV("AMPE1", TFA989X_SYS_CTRL, TFA989X_SYS_CTRL_AMPE, 0, NULL, 0),
-
-	SND_SOC_DAPM_MUX("Amp Input1", SND_SOC_NOPM, 0, 0, &chsa_mux_1),
 	SND_SOC_DAPM_AIF_IN("AIFINL", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
 	// rt5659 未区分通道
 	// SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 1, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_IN("AIFINR", "HiFi Playback", 0, SND_SOC_NOPM, 0, 0),
 };
 
-static const struct snd_soc_dapm_route tfa9890_dapm_routes[] = {
-	{"OUT Right", NULL, "AMPE1"},
-	{"AMPE1", NULL, "POWER1"},
-	{"AMPE1", NULL, "Amp Input1"},
-	{"Amp Input1", "Left", "AIFINL"},
-	{"Amp Input1", "Right", "AIFINR"},
+static const struct snd_soc_dapm_route tfa989x_dapm_routes[] = {
+	{"OUT", NULL, "AMPE"},
+	{"AMPE", NULL, "POWER"},
+	{"AMPE", NULL, "Amp Input"},
+	{"Amp Input", "Left", "AIFINL"},
+	{"Amp Input", "Right", "AIFINR"},
 };
 
 static int tfa989x_put_mode(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
@@ -160,16 +139,6 @@ static const struct snd_soc_component_driver tfa989x_component = {
 	.num_dapm_widgets	= ARRAY_SIZE(tfa989x_dapm_widgets),
 	.dapm_routes		= tfa989x_dapm_routes,
 	.num_dapm_routes	= ARRAY_SIZE(tfa989x_dapm_routes),
-	.use_pmdown_time	= 1,
-	.endianness		= 1,
-};
-// 第二芯片
-static const struct snd_soc_component_driver tfa9890_component = {
-	.probe			= tfa989x_probe,
-	.dapm_widgets		= tfa9890_dapm_widgets,
-	.num_dapm_widgets	= ARRAY_SIZE(tfa9890_dapm_widgets),
-	.dapm_routes		= tfa9890_dapm_routes,
-	.num_dapm_routes	= ARRAY_SIZE(tfa9890_dapm_routes),
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
 };
@@ -444,7 +413,6 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
 	struct regmap *regmap;
 	unsigned int val;
 	int ret;
-	const char* name = dev_name(dev);
 
     u8 myreg = 0x03;
 	u16 myval = 0x0000;
@@ -466,16 +434,14 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
     dev_dbg(&i2c->dev, "tfa989x i2c read got: %x \n",myval);
 
 
-	rev = device_get_match_data(dev);
+	/*
+	 * i2c_get_match_data() 在 device_get_match_data() 返回 NULL 时会回落到
+	 * id_table[].driver_data，因此 ACPI/手工创建的 client 也能拿到 rev。
+	 */
+	rev = i2c_get_match_data(i2c);
 	if (!rev) {
-	    pr_info("tfa989x dev name: %s", name);
-        if (strstr(name, "i2c-tfa9890")) {
-	        rev = &tfa9890_rev;
-        }
-        else{
-			dev_err(dev, "unknown device revision\n");
-			return -ENODEV;
-		}
+		dev_err(dev, "unknown device revision\n");
+		return -ENODEV;
 	}
 
 	tfa989x = devm_kzalloc(dev, sizeof(*tfa989x), GFP_KERNEL);
@@ -557,26 +523,13 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
 	}
 	regcache_cache_bypass(regmap, false);
 
-	const char id = name[13];
-
-    pr_info("tfa989x test 4, id = %c\n", id);
-
-	if (id == '1') {
-		pr_info("tfa989x --> Right\n");
-		return devm_snd_soc_register_component(dev, &tfa9890_component,
-	 				       					&tfa989x_dai, 1);
-	}
-	pr_info("tfa989x --> Left\n");
 	return devm_snd_soc_register_component(dev, &tfa989x_component,
-	 				        &tfa989x_dai, 1);
+					       &tfa989x_dai, 1);
 }
 
 static const struct i2c_device_id tfa989x_i2c_id[] = {
-	{ "tfa989x", 0 },
-	{ "tfa9890", 0 },
-#ifdef CONFIG_ACPI
-	{ "i2c-tfa9890", 0},
-#endif
+	{ "tfa989x", (kernel_ulong_t)&tfa9890_rev },
+	{ "tfa9890", (kernel_ulong_t)&tfa9890_rev },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tfa989x_i2c_id);
@@ -590,8 +543,8 @@ static const struct of_device_id tfa989x_of_match[] = {
 MODULE_DEVICE_TABLE(of, tfa989x_of_match);
 
 static const struct acpi_device_id tfa9890_acpi_match[] = {
-	{ "NXP9890", 0},
-	{ "TFA9890", 0},
+	{ "NXP9890", (kernel_ulong_t)&tfa9890_rev },
+	{ "TFA9890", (kernel_ulong_t)&tfa9890_rev },
 	{ },
 };
 MODULE_DEVICE_TABLE(acpi, tfa9890_acpi_match);

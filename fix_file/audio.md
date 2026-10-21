@@ -4,9 +4,10 @@
 snd_soc_rt5659
 ```
 # 声音修复
-注意。如果开机后右扬声器没声音，请执行以下命令。无需root，普通用户执行。
+注意。如果开机后扬声器某个声道没声音，请执行以下命令。无需root，普通用户执行。
 ```bash
-amixer -c0 cset "name='Amp Input1'" Right
+amixer -c0 cset "name='Left Amp Input'" Left
+amixer -c0 cset "name='Right Amp Input'" Right
 ```
 /usr/share/alsa/ucm2/conf.d/cht-bsw-rt5659/ 文件夹下
 cht-bsw-rt5659.conf
@@ -39,8 +40,7 @@ SectionVerb {
 		cset "name='IF3 ADC Mux' IF_ADC1"
 		# 音量50%
 		# cset "name='DAC1 Playback Volume' 50%"
-		# 设置右扬声器使用右声道
-		cset "name='Amp Input1' Right" 
+		# 功放左右声道归属属于扬声器路径，见 Speaker 段的 EnableSequence
     ]
 
 	DisableSequence [
@@ -73,6 +73,10 @@ SectionDevice."Speaker" {
 
 	EnableSequence [
 		cset "name='DAC1 Playback Switch' on"
+		# 两颗 TFA9890 共用同一 I2S，各自放大一个声道。
+		# 控件名的 Left/Right 前缀由板级 codec_conf 提供。
+		cset "name='Left Amp Input' Left"
+		cset "name='Right Amp Input' Right"
 	]
 	DisableSequence [
 		cset "name='DAC1 Playback Switch' off"
