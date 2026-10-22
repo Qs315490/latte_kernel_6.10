@@ -128,12 +128,55 @@ static const struct snd_soc_acpi_codecs da7213_comp_ids = {
 
 };
 
+#if IS_ENABLED(CONFIG_SND_SOC_INTEL_SOF_CHT_RT5659_MACH) && \
+	IS_ENABLED(CONFIG_SND_SOC_SOF_BAYTRAIL)
+/*
+ * Only take over the 10EC5659 mapping when the SOF machine driver and the
+ * SOF Bay Trail/Cherry Trail stack are built; SST-only kernels keep the
+ * legacy cht-bsw-rt5659 mapping for every board.
+ *
+ * The Mi Pad 2 is the only known Cherry Trail board whose RT5659 is
+ * driven by a SOF-specific machine driver, so match it through DMI and
+ * leave the other 10EC5659 devices on the original mapping.
+ */
+static const struct dmi_system_id latte_sof_dmi_table[] = {
+	{
+		.ident = "Xiaomi Mi Pad 2",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Xiaomi Inc"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Mipad2"),
+		},
+	},
+	{ }
+};
+
+static struct snd_soc_acpi_mach latte_sof_mach = {
+	.id = "10EC5659",
+	.drv_name = "sof_cht_rt5659",
+	.fw_filename = "intel/fw_sst_22a8.bin",
+	.sof_tplg_filename = "sof-cht-rt5659.tplg",
+};
+
+static struct snd_soc_acpi_mach *latte_sof_quirk(void *arg)
+{
+	struct snd_soc_acpi_mach *mach = arg;
+
+	if (dmi_check_system(latte_sof_dmi_table))
+		return &latte_sof_mach;
+	return mach;
+}
+#endif
+
 /* Cherryview-based platforms: CherryTrail and Braswell */
 struct snd_soc_acpi_mach  snd_soc_acpi_intel_cherrytrail_machines[] = {
 	{
 		.id = "10EC5659",
 		.drv_name = "cht-bsw-rt5659",
 		.fw_filename = "intel/fw_sst_22a8.bin",
+#if IS_ENABLED(CONFIG_SND_SOC_INTEL_SOF_CHT_RT5659_MACH) && \
+	IS_ENABLED(CONFIG_SND_SOC_SOF_BAYTRAIL)
+		.machine_quirk = latte_sof_quirk,
+#endif
 	},
 	{
 		.comp_ids = &rt5670_comp_ids,
