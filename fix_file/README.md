@@ -12,10 +12,9 @@
 
 ## 摄像头
 OV5693 主线驱动，效果一般。  
-T4KA3 社区驱动，目前无法使用。  
-体验驱动请将当前目录下 `latte-camera-t4ka3.patch` 应用到内核源码中，重新编译内核。  
-这个驱动是根据 [[PATCH v7] media: Add t4ka3 camera sensor driver](https://lore.kernel.org/all/20241108091844.151033-1-hpa@redhat.com/) 修改的，感谢 `Kate Hsuan <hpa@redhat.com>` 的贡献。  
-u由于没有找到对应修改后的仓库，我根据他们的谈话手动修改了驱动，如果后续有更新，请自行更新。
+T4KA3 主线驱动，7.2 起已收录，开启 `CONFIG_VIDEO_T4KA3`（模块名 `t4ka3`）即可，ACPI HID 为 `XMCC0003`。  
+> 7.2 起后置 T4KA3 摄像头使用上游驱动（`drivers/media/i2c/t4ka3.c`，`CONFIG_VIDEO_T4KA3`，ACPI HID `XMCC0003`），本地 patch 已失效并移除。  
+这个驱动是根据 [[PATCH v7] media: Add t4ka3 camera sensor driver](https://lore.kernel.org/all/20241108091844.151033-1-hpa@redhat.com/) 修改的，感谢 `Kate Hsuan <hpa@redhat.com>` 的贡献。
 
 # 触摸屏底部按键
 内容来自 [systemd/systemd-stable](https://github.com/systemd/systemd-stable/blob/v255-stable/hwdb.d/60-keyboard.hwdb)

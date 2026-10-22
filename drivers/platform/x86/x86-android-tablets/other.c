@@ -852,6 +852,13 @@ static int match_rt5659_client(struct device *dev, const void *data)
 	return 1;
 }
 
+/*
+ * RT5659 是 ACPI 枚举的 I2C 设备，其 swnode 只能作为 secondary fwnode 挂上，
+ * 而 gpiod_get_index() 只把 primary fwnode 交给 gpiod_find_and_request()，
+ * 故 swnode 里的 PROPERTY_ENTRY_GPIO() 在这条路径上取不到 GPIO。
+ * 这里沿用名字查找表：dev_id 是 ACPI 生成的 I2C client 名，provider 是
+ * Cherryview 的 ACPI gpiochip（INT33FF:00 / INT33FF:01）。
+ */
 static struct gpiod_lookup_table xiaomi_mipad2_codec_rt5659_gpios = {
 	.dev_id = "i2c-10EC5659:01",
 	.table = {
@@ -867,8 +874,6 @@ static int __init xiaomi_mipad2_init(struct device *dev)
 	struct i2c_client *client;
 	struct led_classdev *led_cdev;
 	int ret;
-
-	gpiod_add_lookup_table(&xiaomi_mipad2_codec_rt5659_gpios);
 
 	xiaomi_mipad2_led_pwm = devm_pwm_get(dev, "pwm_soc_lpss_2");
 	if (IS_ERR(xiaomi_mipad2_led_pwm))
@@ -890,6 +895,8 @@ static int __init xiaomi_mipad2_init(struct device *dev)
 		return dev_err_probe(dev, ret, "registering LED\n");
 
 	/* ktd2026 的 swnode group 由 x86-android-tablets core 统一注册 */
+	gpiod_add_lookup_table(&xiaomi_mipad2_codec_rt5659_gpios);
+
 	ret = software_node_register(&rt5659_swnode);
 	if (ret)
 		return ret;
@@ -913,8 +920,8 @@ static int __init xiaomi_mipad2_init(struct device *dev)
 static void xiaomi_mipad2_exit(void)
 {
 	/* ktd2026 的 swnode group 由 x86-android-tablets core 统一注销 */
-	software_node_unregister(&rt5659_swnode);
 	gpiod_remove_lookup_table(&xiaomi_mipad2_codec_rt5659_gpios);
+	software_node_unregister(&rt5659_swnode);
 }
 
 /*
