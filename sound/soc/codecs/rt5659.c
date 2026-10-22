@@ -16,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
 #include <linux/acpi.h>
+#include <linux/dmi.h>
 #include <linux/gpio/consumer.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -1367,8 +1368,16 @@ static void rt5659_jack_detect_work(struct work_struct *work)
 		container_of(work, struct rt5659_priv, jack_detect_work.work);
 	int val, btn_type, report = 0;
 
-	if (!rt5659->component)
+	if (!rt5659->component) {
+		/* The Mi Pad 2 has no usable jack IRQ, keep polling until
+		 * the component is registered.
+		 */
+		if (rt5659->jack_poll)
+			queue_delayed_work(system_power_efficient_wq,
+					   &rt5659->jack_detect_work,
+					   msecs_to_jiffies(500));
 		return;
+	}
 
 	val = snd_soc_component_read(rt5659->component, RT5659_INT_ST_1) & 0x0080;
 	if (!val) {
@@ -1430,6 +1439,12 @@ static void rt5659_jack_detect_work(struct work_struct *work)
 	snd_soc_jack_report(rt5659->hs_jack, report, SND_JACK_HEADSET |
 			    SND_JACK_BTN_0 | SND_JACK_BTN_1 |
 			    SND_JACK_BTN_2 | SND_JACK_BTN_3);
+
+	/* Mi Pad 2 has no usable jack IRQ, poll the status register */
+	if (rt5659->jack_poll)
+		queue_delayed_work(system_power_efficient_wq,
+				   &rt5659->jack_detect_work,
+				   msecs_to_jiffies(500));
 }
 
 static void rt5659_jack_detect_intel_hd_header(struct work_struct *work)
@@ -4103,6 +4118,22 @@ static void rt5659_intel_hd_header_probe_setup(struct rt5659_priv *rt5659)
 		RT5659_IL_IRQ_MASK, RT5659_IL_IRQ_EN);
 }
 
+/*
+ * The Mi Pad 2 wires jack detection to JD3 but its ACPI tables carry no
+ * realtek,jd-src property and the codec IRQ is not usable, so fall back
+ * to polling the jack status register.
+ */
+static const struct dmi_system_id rt5659_jd3_dmi_table[] = {
+	{
+		.ident = "Xiaomi Mi Pad 2",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Xiaomi Inc"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Mipad2"),
+		},
+	},
+	{ }
+};
+
 static int rt5659_i2c_probe(struct i2c_client *i2c)
 {
 	struct rt5659_platform_data *pdata = dev_get_platdata(&i2c->dev);
@@ -4122,6 +4153,12 @@ static int rt5659_i2c_probe(struct i2c_client *i2c)
 		rt5659->pdata = *pdata;
 	else
 		rt5659_parse_dt(rt5659, &i2c->dev);
+
+	if (rt5659->pdata.jd_src == RT5659_JD_NULL &&
+	    dmi_check_system(rt5659_jd3_dmi_table)) {
+		rt5659->pdata.jd_src = RT5659_JD3;
+		rt5659->jack_poll = true;
+	}
 
 	rt5659->gpiod_ldo1_en = devm_gpiod_get_optional(&i2c->dev, "ldo1-en",
 							GPIOD_OUT_HIGH);
@@ -4311,9 +4348,26 @@ static int rt5659_i2c_probe(struct i2c_client *i2c)
 				   RT5659_GP1_PIN_MASK, RT5659_GP1_PIN_IRQ);
 	}
 
-	return devm_snd_soc_register_component(&i2c->dev,
-			&soc_component_dev_rt5659,
-			rt5659_dai, ARRAY_SIZE(rt5659_dai));
+	ret = devm_snd_soc_register_component(&i2c->dev,
+					      &soc_component_dev_rt5659,
+					      rt5659_dai, ARRAY_SIZE(rt5659_dai));
+	if (ret)
+		return ret;
+
+	if (rt5659->jack_poll)
+		queue_delayed_work(system_power_efficient_wq,
+				   &rt5659->jack_detect_work,
+				   msecs_to_jiffies(500));
+
+	return 0;
+}
+
+static void rt5659_i2c_remove(struct i2c_client *client)
+{
+	struct rt5659_priv *rt5659 = i2c_get_clientdata(client);
+
+	if (rt5659->jack_poll)
+		cancel_delayed_work_sync(&rt5659->jack_detect_work);
 }
 
 static void rt5659_i2c_shutdown(struct i2c_client *client)
@@ -4348,6 +4402,7 @@ static struct i2c_driver rt5659_i2c_driver = {
 		.acpi_match_table = ACPI_PTR(rt5659_acpi_match),
 	},
 	.probe = rt5659_i2c_probe,
+	.remove = rt5659_i2c_remove,
 	.shutdown = rt5659_i2c_shutdown,
 	.id_table = rt5659_i2c_id,
 };
