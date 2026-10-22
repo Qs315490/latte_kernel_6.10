@@ -157,6 +157,20 @@ config SND_SOC_INTEL_CHT_BSW_RT5659_MACH
 	  Say Y or m if you have such a device. This is a recommended option.
 	  If unsure select "N".
 
+config SND_SOC_INTEL_SOF_CHT_RT5659_MACH
+	tristate "SOF with RT5659 codec on Cherrytrail (Xiaomi Mi Pad 2)"
+	depends on I2C && ACPI
+	depends on SND_SOC_SOF_BAYTRAIL || COMPILE_TEST
+	select SND_SOC_ACPI
+	select SND_SOC_RT5659
+	help
+	  This adds support for the SOF machine driver for the Xiaomi Mi Pad 2,
+	  which uses an RT5659 codec on SSP2 and the BCM4356 BT/FM PCM bus on
+	  SSP1.  The SSP1 capture stream is exposed by the
+	  sof-cht-rt5659.tplg topology.
+	  Say Y or m if you have such a device.
+	  If unsure select "N".
+
 config SND_SOC_INTEL_CHT_BSW_RT5672_MACH
 	tristate "Cherrytrail & Braswell with RT5672 codec"
 	depends on I2C && ACPI
