@@ -112,6 +112,10 @@ static void test_cubic(void)
 
 	ASSERT_EQ(cubic_skel->bss->bpf_cubic_acked_called, 1, "pkts_acked called");
 
+	ASSERT_TRUE(cubic_skel->bss->nodelay_init_reject, "init reject nodelay option");
+	ASSERT_TRUE(cubic_skel->bss->nodelay_cwnd_event_tx_start_reject,
+		    "cwnd_event_tx_start reject nodelay option");
+
 	bpf_link__destroy(link);
 	bpf_cubic__destroy(cubic_skel);
 }
@@ -281,7 +285,7 @@ static void test_dctcp_fallback(void)
 	dctcp_skel = bpf_dctcp__open();
 	if (!ASSERT_OK_PTR(dctcp_skel, "dctcp_skel"))
 		return;
-	strcpy(dctcp_skel->rodata->fallback_cc, "cubic");
+	strscpy(dctcp_skel->rodata->fallback_cc, "cubic");
 	if (!ASSERT_OK(bpf_dctcp__load(dctcp_skel), "bpf_dctcp__load"))
 		goto done;
 

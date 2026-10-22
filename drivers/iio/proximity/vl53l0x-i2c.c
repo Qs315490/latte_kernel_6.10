@@ -57,11 +57,6 @@ struct vl53l0x_data {
 	struct regulator *vdd_supply;
 	struct gpio_desc *reset_gpio;
 	struct iio_trigger *trig;
-
-	struct {
-		u16 chan;
-		aligned_s64 timestamp;
-	} scan;
 };
 
 static int vl53l0x_clear_irq(struct vl53l0x_data *data)
@@ -84,19 +79,22 @@ static irqreturn_t vl53l0x_trigger_handler(int irq, void *priv)
 	struct vl53l0x_data *data = iio_priv(indio_dev);
 	u8 buffer[12];
 	int ret;
+	struct {
+		u16 chan;
+		aligned_s64 timestamp;
+	} scan = { };
 
 	ret = i2c_smbus_read_i2c_block_data(data->client,
 					VL_REG_RESULT_RANGE_STATUS,
 					sizeof(buffer), buffer);
-	if (ret < 0)
-		return ret;
-	else if (ret != 12)
-		return -EREMOTEIO;
+	if (ret != 12)
+		goto done;
 
-	data->scan.chan = get_unaligned_be16(&buffer[10]);
-	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan,
-					iio_get_time_ns(indio_dev));
+	scan.chan = get_unaligned_be16(&buffer[10]);
+	iio_push_to_buffers_with_ts(indio_dev, &scan, sizeof(scan),
+				    iio_get_time_ns(indio_dev));
 
+done:
 	iio_trigger_notify_done(indio_dev->trig);
 	vl53l0x_clear_irq(data);
 
@@ -312,7 +310,6 @@ static int vl53l0x_probe(struct i2c_client *client)
 {
 	struct vl53l0x_data *data;
 	struct iio_dev *indio_dev;
-	int error;
 	int ret;
 
 	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
@@ -345,15 +342,14 @@ static int vl53l0x_probe(struct i2c_client *client)
 		return dev_err_probe(&client->dev, PTR_ERR(data->reset_gpio),
 				     "Cannot get reset GPIO\n");
 
-	error = vl53l0x_power_on(data);
-	if (error)
-		return dev_err_probe(&client->dev, error,
+	ret = vl53l0x_power_on(data);
+	if (ret)
+		return dev_err_probe(&client->dev, ret,
 				     "Failed to power on the chip\n");
 
-	error = devm_add_action_or_reset(&client->dev, vl53l0x_power_off, data);
-	if (error)
-		return dev_err_probe(&client->dev, error,
-				     "Failed to install poweroff action\n");
+	ret = devm_add_action_or_reset(&client->dev, vl53l0x_power_off, data);
+	if (ret)
+		return ret;
 
 	indio_dev->name = "vl53l0x";
 	indio_dev->info = &vl53l0x_info;
@@ -396,7 +392,7 @@ static int vl53l0x_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id vl53l0x_id[] = {
-	{ "vl53l0x" },
+	{ .name = "vl53l0x" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, vl53l0x_id);

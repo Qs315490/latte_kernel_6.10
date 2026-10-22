@@ -10,7 +10,6 @@
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/mm.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
@@ -135,7 +134,7 @@ int fdtv_start_iso(struct firedtv *fdtv)
 	struct fw_device *device = device_of(fdtv);
 	int i, err;
 
-	ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kmalloc_obj(*ctx);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -255,7 +254,7 @@ static int node_probe(struct fw_unit *unit, const struct ieee1394_device_id *id)
 	char name[MAX_MODEL_NAME_LEN];
 	int name_len, i, err;
 
-	fdtv = kzalloc(sizeof(*fdtv), GFP_KERNEL);
+	fdtv = kzalloc_obj(*fdtv);
 	if (!fdtv)
 		return -ENOMEM;
 

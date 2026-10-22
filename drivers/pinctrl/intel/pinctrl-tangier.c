@@ -2,7 +2,7 @@
 /*
  * Intel Tangier pinctrl driver
  *
- * Copyright (C) 2016, 2023 Intel Corporation
+ * Copyright (C) 2016-2023 Intel Corporation
  *
  * Authors: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
  *          Raag Jadav <raag.jadav@intel.com>
@@ -518,15 +518,18 @@ static const struct pinctrl_desc tng_pinctrl_desc = {
 	.owner = THIS_MODULE,
 };
 
-static int tng_pinctrl_probe(struct platform_device *pdev,
-			     const struct tng_pinctrl *data)
+int devm_tng_pinctrl_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	const struct tng_pinctrl *data;
 	struct tng_family *families;
 	struct tng_pinctrl *tp;
-	size_t families_len;
 	void __iomem *regs;
 	unsigned int i;
+
+	data = device_get_match_data(dev);
+	if (!data)
+		return -ENODATA;
 
 	tp = devm_kmemdup(dev, data, sizeof(*data), GFP_KERNEL);
 	if (!tp)
@@ -543,8 +546,8 @@ static int tng_pinctrl_probe(struct platform_device *pdev,
 	 * Make a copy of the families which we can use to hold pointers
 	 * to the registers.
 	 */
-	families_len = size_mul(sizeof(*families), tp->nfamilies);
-	families = devm_kmemdup(dev, tp->families, families_len, GFP_KERNEL);
+	families = devm_kmemdup_array(dev, tp->families, tp->nfamilies,
+				      sizeof(*tp->families), GFP_KERNEL);
 	if (!families)
 		return -ENOMEM;
 
@@ -563,21 +566,9 @@ static int tng_pinctrl_probe(struct platform_device *pdev,
 
 	tp->pctldev = devm_pinctrl_register(dev, &tp->pctldesc, tp);
 	if (IS_ERR(tp->pctldev))
-		return dev_err_probe(dev, PTR_ERR(tp->pctldev),
-				     "failed to register pinctrl driver\n");
+		return PTR_ERR(tp->pctldev);
 
 	return 0;
-}
-
-int devm_tng_pinctrl_probe(struct platform_device *pdev)
-{
-	const struct tng_pinctrl *data;
-
-	data = device_get_match_data(&pdev->dev);
-	if (!data)
-		return -ENODATA;
-
-	return tng_pinctrl_probe(pdev, data);
 }
 EXPORT_SYMBOL_NS_GPL(devm_tng_pinctrl_probe, "PINCTRL_TANGIER");
 

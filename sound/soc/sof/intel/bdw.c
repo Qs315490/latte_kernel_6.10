@@ -315,9 +315,6 @@ static irqreturn_t bdw_irq_thread(int irq, void *context)
 		snd_sof_dsp_update_bits_unlocked(sdev, BDW_DSP_BAR,
 						 SHIM_IMRX, SHIM_IMRX_DONE,
 						 SHIM_IMRX_DONE);
-
-		spin_lock_irq(&sdev->ipc_lock);
-
 		/*
 		 * handle immediate reply from DSP core. If the msg is
 		 * found, set done bit in cmd_done which is called at the
@@ -325,11 +322,9 @@ static irqreturn_t bdw_irq_thread(int irq, void *context)
 		 * because the done bit can't be set in cmd_done function
 		 * which is triggered by msg
 		 */
+		guard(spinlock_irq)(&sdev->ipc_lock);
 		snd_sof_ipc_process_reply(sdev, ipcx);
-
 		bdw_dsp_done(sdev);
-
-		spin_unlock_irq(&sdev->ipc_lock);
 	}
 
 	ipcd = snd_sof_dsp_read(sdev, BDW_DSP_BAR, SHIM_IPCD);
@@ -686,7 +681,7 @@ static struct platform_driver snd_sof_acpi_intel_bdw_driver = {
 	.remove = sof_acpi_remove,
 	.driver = {
 		.name = "sof-audio-acpi-intel-bdw",
-		.pm = &sof_acpi_pm,
+		.pm = pm_ptr(&sof_acpi_pm),
 		.acpi_match_table = sof_broadwell_match,
 	},
 };
@@ -694,6 +689,5 @@ module_platform_driver(snd_sof_acpi_intel_bdw_driver);
 
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("SOF support for Broadwell platforms");
-MODULE_IMPORT_NS("SND_SOC_SOF_INTEL_HIFI_EP_IPC");
 MODULE_IMPORT_NS("SND_SOC_SOF_XTENSA");
 MODULE_IMPORT_NS("SND_SOC_SOF_ACPI_DEV");

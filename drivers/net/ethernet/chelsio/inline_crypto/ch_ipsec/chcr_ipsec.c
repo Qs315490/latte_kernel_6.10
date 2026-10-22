@@ -71,21 +71,22 @@
 static LIST_HEAD(uld_ctx_list);
 static DEFINE_MUTEX(dev_mutex);
 
-static bool ch_ipsec_offload_ok(struct sk_buff *skb, struct xfrm_state *x);
 static int ch_ipsec_uld_state_change(void *handle, enum cxgb4_state new_state);
 static int ch_ipsec_xmit(struct sk_buff *skb, struct net_device *dev);
 static void *ch_ipsec_uld_add(const struct cxgb4_lld_info *infop);
 static void ch_ipsec_advance_esn_state(struct xfrm_state *x);
-static void ch_ipsec_xfrm_free_state(struct xfrm_state *x);
-static void ch_ipsec_xfrm_del_state(struct xfrm_state *x);
-static int ch_ipsec_xfrm_add_state(struct xfrm_state *x,
+static void ch_ipsec_xfrm_free_state(struct net_device *dev,
+				     struct xfrm_state *x);
+static void ch_ipsec_xfrm_del_state(struct net_device *dev,
+				    struct xfrm_state *x);
+static int ch_ipsec_xfrm_add_state(struct net_device *dev,
+				   struct xfrm_state *x,
 				   struct netlink_ext_ack *extack);
 
 static const struct xfrmdev_ops ch_ipsec_xfrmdev_ops = {
 	.xdo_dev_state_add      = ch_ipsec_xfrm_add_state,
 	.xdo_dev_state_delete   = ch_ipsec_xfrm_del_state,
 	.xdo_dev_state_free     = ch_ipsec_xfrm_free_state,
-	.xdo_dev_offload_ok     = ch_ipsec_offload_ok,
 	.xdo_dev_state_advance_esn = ch_ipsec_advance_esn_state,
 };
 
@@ -103,7 +104,7 @@ static void *ch_ipsec_uld_add(const struct cxgb4_lld_info *infop)
 
 	pr_info_once("%s - version %s\n", CHIPSEC_DRV_DESC,
 		     CHIPSEC_DRV_VERSION);
-	u_ctx = kzalloc(sizeof(*u_ctx), GFP_KERNEL);
+	u_ctx = kzalloc_obj(*u_ctx);
 	if (!u_ctx) {
 		u_ctx = ERR_PTR(-ENOMEM);
 		goto out;
@@ -169,7 +170,7 @@ static int ch_ipsec_setkey(struct xfrm_state *x,
 	unsigned char *key = x->aead->alg_key;
 	int ck_size, key_ctx_size = 0;
 	unsigned char ghash_h[AEAD_H_SIZE];
-	struct crypto_aes_ctx aes;
+	struct aes_enckey aes;
 	int ret = 0;
 
 	if (keylen > 3) {
@@ -203,7 +204,7 @@ static int ch_ipsec_setkey(struct xfrm_state *x,
 	/* Calculate the H = CIPH(K, 0 repeated 16 times).
 	 * It will go in key context
 	 */
-	ret = aes_expandkey(&aes, key, keylen);
+	ret = aes_prepareenckey(&aes, key, keylen);
 	if (ret) {
 		sa_entry->enckey_len = 0;
 		goto out;
@@ -225,7 +226,8 @@ out:
  * returns 0 on success, negative error if failed to send message to FPGA
  * positive error if FPGA returned a bad response
  */
-static int ch_ipsec_xfrm_add_state(struct xfrm_state *x,
+static int ch_ipsec_xfrm_add_state(struct net_device *dev,
+				   struct xfrm_state *x,
 				   struct netlink_ext_ack *extack)
 {
 	struct ipsec_sa_entry *sa_entry;
@@ -288,9 +290,15 @@ static int ch_ipsec_xfrm_add_state(struct xfrm_state *x,
 		return -EINVAL;
 	}
 
-	sa_entry = kzalloc(sizeof(*sa_entry), GFP_KERNEL);
+	if (unlikely(!try_module_get(THIS_MODULE))) {
+		NL_SET_ERR_MSG_MOD(extack, "Failed to acquire module reference");
+		return -ENODEV;
+	}
+
+	sa_entry = kzalloc_obj(*sa_entry);
 	if (!sa_entry) {
 		res = -ENOMEM;
+		module_put(THIS_MODULE);
 		goto out;
 	}
 
@@ -299,19 +307,20 @@ static int ch_ipsec_xfrm_add_state(struct xfrm_state *x,
 		sa_entry->esn = 1;
 	ch_ipsec_setkey(x, sa_entry);
 	x->xso.offload_handle = (unsigned long)sa_entry;
-	try_module_get(THIS_MODULE);
 out:
 	return res;
 }
 
-static void ch_ipsec_xfrm_del_state(struct xfrm_state *x)
+static void ch_ipsec_xfrm_del_state(struct net_device *dev,
+				    struct xfrm_state *x)
 {
 	/* do nothing */
 	if (!x->xso.offload_handle)
 		return;
 }
 
-static void ch_ipsec_xfrm_free_state(struct xfrm_state *x)
+static void ch_ipsec_xfrm_free_state(struct net_device *dev,
+				     struct xfrm_state *x)
 {
 	struct ipsec_sa_entry *sa_entry;
 
@@ -321,20 +330,6 @@ static void ch_ipsec_xfrm_free_state(struct xfrm_state *x)
 	sa_entry = (struct ipsec_sa_entry *)x->xso.offload_handle;
 	kfree(sa_entry);
 	module_put(THIS_MODULE);
-}
-
-static bool ch_ipsec_offload_ok(struct sk_buff *skb, struct xfrm_state *x)
-{
-	if (x->props.family == AF_INET) {
-		/* Offload with IP options is not supported yet */
-		if (ip_hdr(skb)->ihl > 5)
-			return false;
-	} else {
-		/* Offload with IPv6 extension headers is not support yet */
-		if (ipv6_ext_hdr(ipv6_hdr(skb)->nexthdr))
-			return false;
-	}
-	return true;
 }
 
 static void ch_ipsec_advance_esn_state(struct xfrm_state *x)

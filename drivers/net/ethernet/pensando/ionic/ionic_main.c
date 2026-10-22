@@ -72,7 +72,7 @@ static const char *ionic_error_to_str(enum ionic_status_code code)
 	}
 }
 
-static int ionic_error_to_errno(enum ionic_status_code code)
+int ionic_error_to_errno(enum ionic_status_code code)
 {
 	switch (code) {
 	case IONIC_RC_SUCCESS:
@@ -114,6 +114,7 @@ static int ionic_error_to_errno(enum ionic_status_code code)
 		return -EIO;
 	}
 }
+EXPORT_SYMBOL_NS(ionic_error_to_errno, "NET_IONIC");
 
 static const char *ionic_opcode_to_str(enum ionic_cmd_opcode opcode)
 {
@@ -282,7 +283,7 @@ bool ionic_notifyq_service(struct ionic_cq *cq)
 		if (lif->ionic->idev.fw_status_ready &&
 		    !test_bit(IONIC_LIF_F_FW_RESET, lif->state) &&
 		    !test_and_set_bit(IONIC_LIF_F_FW_STOPPING, lif->state)) {
-			work = kzalloc(sizeof(*work), GFP_ATOMIC);
+			work = kzalloc_obj(*work, GFP_ATOMIC);
 			if (!work) {
 				netdev_err(lif->netdev, "Reset event dropped\n");
 				clear_bit(IONIC_LIF_F_FW_STOPPING, lif->state);
@@ -480,6 +481,7 @@ int ionic_adminq_post_wait(struct ionic_lif *lif, struct ionic_admin_ctx *ctx)
 {
 	return __ionic_adminq_post_wait(lif, ctx, true);
 }
+EXPORT_SYMBOL_NS(ionic_adminq_post_wait, "NET_IONIC");
 
 int ionic_adminq_post_wait_nomsg(struct ionic_lif *lif, struct ionic_admin_ctx *ctx)
 {
@@ -516,9 +518,9 @@ static int __ionic_dev_cmd_wait(struct ionic *ionic, unsigned long max_seconds,
 	unsigned long start_time;
 	unsigned long max_wait;
 	unsigned long duration;
-	int done = 0;
 	bool fw_up;
 	int opcode;
+	bool done;
 	int err;
 
 	/* Wait for dev cmd to complete, retrying if we get EAGAIN,
@@ -526,6 +528,7 @@ static int __ionic_dev_cmd_wait(struct ionic *ionic, unsigned long max_seconds,
 	 */
 	max_wait = jiffies + (max_seconds * HZ);
 try_again:
+	done = false;
 	opcode = idev->opcode;
 	start_time = jiffies;
 	for (fw_up = ionic_is_fw_running(idev);
@@ -727,6 +730,14 @@ int ionic_port_init(struct ionic *ionic)
 		if (!idev->port_info)
 			return -ENOMEM;
 	}
+
+	/* If the driver knows about more "extra stats" than the firmware,
+	 * make sure these stats are marked as invalid.
+	 */
+	memset(&idev->port_info->extra_stats, 0xff,
+	       sizeof(idev->port_info->extra_stats));
+
+	WRITE_ONCE(idev->link_down_count_init, false);
 
 	sz = min(sizeof(ident->port.config), sizeof(idev->dev_cmd_regs->data));
 

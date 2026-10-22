@@ -5,8 +5,7 @@
  *  Copyright IBM Corp. 2024
  */
 
-#define KMSG_COMPONENT "pkey"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "pkey: " fmt
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -216,7 +215,8 @@ out:
 }
 
 static int pckmo_key2protkey(const u8 *key, u32 keylen,
-			     u8 *protkey, u32 *protkeylen, u32 *protkeytype)
+			     u8 *protkey, u32 *protkeylen, u32 *protkeytype,
+			     u32 xflags)
 {
 	struct keytoken_header *hdr = (struct keytoken_header *)key;
 	int rc = -EINVAL;
@@ -257,6 +257,10 @@ static int pckmo_key2protkey(const u8 *key, u32 keylen,
 				goto out;
 			break;
 		}
+		if (t->len > *protkeylen) {
+			rc = -EINVAL;
+			goto out;
+		}
 		memcpy(protkey, t->protkey, t->len);
 		*protkeylen = t->len;
 		*protkeytype = t->keytype;
@@ -267,6 +271,11 @@ static int pckmo_key2protkey(const u8 *key, u32 keylen,
 		struct clearkeytoken *t = (struct clearkeytoken *)key;
 		u32 keysize;
 
+		if (xflags & PKEY_XFLAG_NOCLEARKEY) {
+			PKEY_DBF_ERR("%s clear key token but xflag NOCLEARKEY\n",
+				     __func__);
+			goto out;
+		}
 		if (keylen < sizeof(*t) ||
 		    keylen < sizeof(*t) + t->len)
 			goto out;
@@ -406,16 +415,18 @@ out:
 static int pkey_pckmo_key2protkey(const struct pkey_apqn *_apqns,
 				  size_t _nr_apqns,
 				  const u8 *key, u32 keylen,
-				  u8 *protkey, u32 *protkeylen, u32 *keyinfo)
+				  u8 *protkey, u32 *protkeylen, u32 *keyinfo,
+				  u32 xflags)
 {
 	return pckmo_key2protkey(key, keylen,
-				 protkey, protkeylen, keyinfo);
+				 protkey, protkeylen, keyinfo, xflags);
 }
 
 static int pkey_pckmo_gen_key(const struct pkey_apqn *_apqns, size_t _nr_apqns,
 			      u32 keytype, u32 keysubtype,
 			      u32 _keybitsize, u32 _flags,
-			      u8 *keybuf, u32 *keybuflen, u32 *keyinfo)
+			      u8 *keybuf, u32 *keybuflen, u32 *keyinfo,
+			      u32 _xflags __always_unused)
 {
 	return pckmo_gen_protkey(keytype, keysubtype,
 				 keybuf, keybuflen, keyinfo);
@@ -423,7 +434,8 @@ static int pkey_pckmo_gen_key(const struct pkey_apqn *_apqns, size_t _nr_apqns,
 
 static int pkey_pckmo_verifykey(const u8 *key, u32 keylen,
 				u16 *_card, u16 *_dom,
-				u32 *_keytype, u32 *_keybitsize, u32 *_flags)
+				u32 *_keytype, u32 *_keybitsize,
+				u32 *_flags, u32 _xflags __always_unused)
 {
 	return pckmo_verify_key(key, keylen);
 }

@@ -11,7 +11,6 @@
 #include <linux/err.h>
 #include <linux/iio/consumer.h>
 #include <linux/iio/iio.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/mux/consumer.h>
@@ -448,7 +447,7 @@ static int mux_probe(struct platform_device *pdev)
 
 static const struct of_device_id mux_match[] = {
 	{ .compatible = "io-channel-mux" },
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(of, mux_match);
 

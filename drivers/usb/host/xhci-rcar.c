@@ -11,9 +11,12 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/usb/phy.h>
+#include <linux/reset.h>
 
 #include "xhci.h"
 #include "xhci-plat.h"
+#include "xhci-rcar-regs.h"
+#include "xhci-rzg3e-regs.h"
 #include "xhci-rzv2m.h"
 
 #define XHCI_RCAR_FIRMWARE_NAME_V1	"r8a779x_usb3_v1.dlmem"
@@ -29,73 +32,6 @@
 MODULE_FIRMWARE(XHCI_RCAR_FIRMWARE_NAME_V1);
 MODULE_FIRMWARE(XHCI_RCAR_FIRMWARE_NAME_V3);
 
-/*** Register Offset ***/
-#define RCAR_USB3_AXH_STA	0x104	/* AXI Host Control Status */
-#define RCAR_USB3_INT_ENA	0x224	/* Interrupt Enable */
-#define RCAR_USB3_DL_CTRL	0x250	/* FW Download Control & Status */
-#define RCAR_USB3_FW_DATA0	0x258	/* FW Data0 */
-
-#define RCAR_USB3_LCLK		0xa44	/* LCLK Select */
-#define RCAR_USB3_CONF1		0xa48	/* USB3.0 Configuration1 */
-#define RCAR_USB3_CONF2		0xa5c	/* USB3.0 Configuration2 */
-#define RCAR_USB3_CONF3		0xaa8	/* USB3.0 Configuration3 */
-#define RCAR_USB3_RX_POL	0xab0	/* USB3.0 RX Polarity */
-#define RCAR_USB3_TX_POL	0xab8	/* USB3.0 TX Polarity */
-
-/*** Register Settings ***/
-/* AXI Host Control Status */
-#define RCAR_USB3_AXH_STA_B3_PLL_ACTIVE		0x00010000
-#define RCAR_USB3_AXH_STA_B2_PLL_ACTIVE		0x00000001
-#define RCAR_USB3_AXH_STA_PLL_ACTIVE_MASK (RCAR_USB3_AXH_STA_B3_PLL_ACTIVE | \
-					   RCAR_USB3_AXH_STA_B2_PLL_ACTIVE)
-
-/* Interrupt Enable */
-#define RCAR_USB3_INT_XHC_ENA	0x00000001
-#define RCAR_USB3_INT_PME_ENA	0x00000002
-#define RCAR_USB3_INT_HSE_ENA	0x00000004
-#define RCAR_USB3_INT_ENA_VAL	(RCAR_USB3_INT_XHC_ENA | \
-				RCAR_USB3_INT_PME_ENA | RCAR_USB3_INT_HSE_ENA)
-
-/* FW Download Control & Status */
-#define RCAR_USB3_DL_CTRL_ENABLE	0x00000001
-#define RCAR_USB3_DL_CTRL_FW_SUCCESS	0x00000010
-#define RCAR_USB3_DL_CTRL_FW_SET_DATA0	0x00000100
-
-/* LCLK Select */
-#define RCAR_USB3_LCLK_ENA_VAL	0x01030001
-
-/* USB3.0 Configuration */
-#define RCAR_USB3_CONF1_VAL	0x00030204
-#define RCAR_USB3_CONF2_VAL	0x00030300
-#define RCAR_USB3_CONF3_VAL	0x13802007
-
-/* USB3.0 Polarity */
-#define RCAR_USB3_RX_POL_VAL	BIT(21)
-#define RCAR_USB3_TX_POL_VAL	BIT(4)
-
-static void xhci_rcar_start_gen2(struct usb_hcd *hcd)
-{
-	/* LCLK Select */
-	writel(RCAR_USB3_LCLK_ENA_VAL, hcd->regs + RCAR_USB3_LCLK);
-	/* USB3.0 Configuration */
-	writel(RCAR_USB3_CONF1_VAL, hcd->regs + RCAR_USB3_CONF1);
-	writel(RCAR_USB3_CONF2_VAL, hcd->regs + RCAR_USB3_CONF2);
-	writel(RCAR_USB3_CONF3_VAL, hcd->regs + RCAR_USB3_CONF3);
-	/* USB3.0 Polarity */
-	writel(RCAR_USB3_RX_POL_VAL, hcd->regs + RCAR_USB3_RX_POL);
-	writel(RCAR_USB3_TX_POL_VAL, hcd->regs + RCAR_USB3_TX_POL);
-}
-
-static int xhci_rcar_is_gen2(struct device *dev)
-{
-	struct device_node *node = dev->of_node;
-
-	return of_device_is_compatible(node, "renesas,xhci-r8a7790") ||
-		of_device_is_compatible(node, "renesas,xhci-r8a7791") ||
-		of_device_is_compatible(node, "renesas,xhci-r8a7793") ||
-		of_device_is_compatible(node, "renesas,rcar-gen2-xhci");
-}
-
 static void xhci_rcar_start(struct usb_hcd *hcd)
 {
 	u32 temp;
@@ -105,9 +41,66 @@ static void xhci_rcar_start(struct usb_hcd *hcd)
 		temp = readl(hcd->regs + RCAR_USB3_INT_ENA);
 		temp |= RCAR_USB3_INT_ENA_VAL;
 		writel(temp, hcd->regs + RCAR_USB3_INT_ENA);
-		if (xhci_rcar_is_gen2(hcd->self.controller))
-			xhci_rcar_start_gen2(hcd);
 	}
+}
+
+static void xhci_rcar_gen2_start(struct usb_hcd *hcd)
+{
+	if (hcd->regs != NULL) {
+		xhci_rcar_start(hcd);
+
+		/* LCLK Select */
+		writel(RCAR_USB3_LCLK_ENA_VAL, hcd->regs + RCAR_USB3_LCLK);
+		/* USB3.0 Configuration */
+		writel(RCAR_USB3_CONF1_VAL, hcd->regs + RCAR_USB3_CONF1);
+		writel(RCAR_USB3_CONF2_VAL, hcd->regs + RCAR_USB3_CONF2);
+		writel(RCAR_USB3_CONF3_VAL, hcd->regs + RCAR_USB3_CONF3);
+		/* USB3.0 Polarity */
+		writel(RCAR_USB3_RX_POL_VAL, hcd->regs + RCAR_USB3_RX_POL);
+		writel(RCAR_USB3_TX_POL_VAL, hcd->regs + RCAR_USB3_TX_POL);
+	}
+}
+
+static void xhci_rzg3e_start(struct usb_hcd *hcd)
+{
+	u32 int_en;
+
+	if (hcd->regs) {
+		/* Update the controller initial setting */
+		writel(0x03130200, hcd->regs + RZG3E_USB3_HOST_U3P0PIPESC(0));
+		writel(0x00160200, hcd->regs + RZG3E_USB3_HOST_U3P0PIPESC(1));
+		writel(0x03150000, hcd->regs + RZG3E_USB3_HOST_U3P0PIPESC(2));
+		writel(0x03130200, hcd->regs + RZG3E_USB3_HOST_U3P0PIPESC(3));
+		writel(0x00180000, hcd->regs + RZG3E_USB3_HOST_U3P0PIPESC(4));
+
+		/* Interrupt Enable */
+		int_en = readl(hcd->regs + RZG3E_USB3_HOST_INTEN);
+		int_en |= RZG3E_USB3_HOST_INTEN_ENA;
+		writel(int_en, hcd->regs + RZG3E_USB3_HOST_INTEN);
+	}
+}
+
+static int xhci_rzg3e_resume(struct usb_hcd *hcd)
+{
+	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+
+	return reset_control_deassert(xhci->reset);
+}
+
+static int xhci_rzg3e_post_resume(struct usb_hcd *hcd)
+{
+	xhci_rzg3e_start(hcd);
+
+	return 0;
+}
+
+static int xhci_rzg3e_suspend(struct usb_hcd *hcd)
+{
+	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+
+	reset_control_assert(xhci->reset);
+
+	return 0;
 }
 
 static int xhci_rcar_download_firmware(struct usb_hcd *hcd)
@@ -191,13 +184,16 @@ static int xhci_rcar_init_quirk(struct usb_hcd *hcd)
 
 static int xhci_rcar_resume_quirk(struct usb_hcd *hcd)
 {
+	struct xhci_plat_priv *priv;
 	int ret;
 
 	ret = xhci_rcar_download_firmware(hcd);
-	if (!ret)
-		xhci_rcar_start(hcd);
+	if (ret)
+		return ret;
 
-	return ret;
+	priv = hcd_to_xhci_priv(hcd);
+	priv->plat_start(hcd);
+	return 0;
 }
 
 /*
@@ -212,25 +208,34 @@ static int xhci_rcar_resume_quirk(struct usb_hcd *hcd)
  * long delay for the handshake of STS_HALT is neeed in xhci_suspend()
  * by using the XHCI_SLOW_SUSPEND quirk.
  */
-#define SET_XHCI_PLAT_PRIV_FOR_RCAR(firmware)				\
-	.firmware_name = firmware,					\
-	.quirks = XHCI_NO_64BIT_SUPPORT |  XHCI_SLOW_SUSPEND,		\
-	.init_quirk = xhci_rcar_init_quirk,				\
-	.plat_start = xhci_rcar_start,					\
-	.resume_quirk = xhci_rcar_resume_quirk,
-
 static const struct xhci_plat_priv xhci_plat_renesas_rcar_gen2 = {
-	SET_XHCI_PLAT_PRIV_FOR_RCAR(XHCI_RCAR_FIRMWARE_NAME_V1)
+	.firmware_name = XHCI_RCAR_FIRMWARE_NAME_V1,
+	.quirks = XHCI_NO_64BIT_SUPPORT |  XHCI_SLOW_SUSPEND,
+	.init_quirk = xhci_rcar_init_quirk,
+	.plat_start = xhci_rcar_gen2_start,
+	.resume_quirk = xhci_rcar_resume_quirk,
 };
 
 static const struct xhci_plat_priv xhci_plat_renesas_rcar_gen3 = {
-	SET_XHCI_PLAT_PRIV_FOR_RCAR(XHCI_RCAR_FIRMWARE_NAME_V3)
+	.firmware_name = XHCI_RCAR_FIRMWARE_NAME_V3,
+	.quirks = XHCI_NO_64BIT_SUPPORT |  XHCI_SLOW_SUSPEND,
+	.init_quirk = xhci_rcar_init_quirk,
+	.plat_start = xhci_rcar_start,
+	.resume_quirk = xhci_rcar_resume_quirk,
 };
 
 static const struct xhci_plat_priv xhci_plat_renesas_rzv2m = {
 	.quirks = XHCI_NO_64BIT_SUPPORT | XHCI_SLOW_SUSPEND,
 	.init_quirk = xhci_rzv2m_init_quirk,
 	.plat_start = xhci_rzv2m_start,
+};
+
+static const struct xhci_plat_priv xhci_plat_renesas_rzg3e = {
+	.quirks = XHCI_NO_64BIT_SUPPORT | XHCI_RESET_ON_RESUME | XHCI_SUSPEND_RESUME_CLKS,
+	.plat_start = xhci_rzg3e_start,
+	.suspend_quirk = xhci_rzg3e_suspend,
+	.resume_quirk = xhci_rzg3e_resume,
+	.post_resume_quirk = xhci_rzg3e_post_resume,
 };
 
 static const struct of_device_id usb_xhci_of_match[] = {
@@ -249,6 +254,9 @@ static const struct of_device_id usb_xhci_of_match[] = {
 	}, {
 		.compatible = "renesas,xhci-r8a7796",
 		.data = &xhci_plat_renesas_rcar_gen3,
+	}, {
+		.compatible = "renesas,r9a09g047-xhci",
+		.data = &xhci_plat_renesas_rzg3e,
 	}, {
 		.compatible = "renesas,rcar-gen2-xhci",
 		.data = &xhci_plat_renesas_rcar_gen2,

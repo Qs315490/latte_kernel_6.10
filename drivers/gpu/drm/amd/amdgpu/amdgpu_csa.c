@@ -76,7 +76,8 @@ int amdgpu_map_static_csa(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 			r = drm_exec_lock_obj(&exec, &bo->tbo.base);
 		drm_exec_retry_on_contention(&exec);
 		if (unlikely(r)) {
-			DRM_ERROR("failed to reserve CSA,PD BOs: err=%d\n", r);
+			drm_err(adev_to_drm(adev),
+				"failed to reserve CSA,PD BOs: err=%d\n", r);
 			goto error;
 		}
 	}
@@ -92,7 +93,8 @@ int amdgpu_map_static_csa(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 			     AMDGPU_PTE_EXECUTABLE);
 
 	if (r) {
-		DRM_ERROR("failed to do bo_map on static CSA, err=%d\n", r);
+		drm_err(adev_to_drm(adev),
+			"failed to do bo_map on static CSA, err=%d\n", r);
 		amdgpu_vm_bo_del(adev, *bo_va);
 		goto error;
 	}
@@ -109,21 +111,23 @@ int amdgpu_unmap_static_csa(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 	struct drm_exec exec;
 	int r;
 
-	drm_exec_init(&exec, DRM_EXEC_INTERRUPTIBLE_WAIT, 0);
+	drm_exec_init(&exec, 0, 0);
 	drm_exec_until_all_locked(&exec) {
 		r = amdgpu_vm_lock_pd(vm, &exec, 0);
 		if (likely(!r))
 			r = drm_exec_lock_obj(&exec, &bo->tbo.base);
 		drm_exec_retry_on_contention(&exec);
 		if (unlikely(r)) {
-			DRM_ERROR("failed to reserve CSA,PD BOs: err=%d\n", r);
+			drm_err(adev_to_drm(adev),
+				"failed to reserve CSA,PD BOs: err=%d\n", r);
 			goto error;
 		}
 	}
 
 	r = amdgpu_vm_bo_unmap(adev, bo_va, csa_addr);
 	if (r) {
-		DRM_ERROR("failed to do bo_unmap on static CSA, err=%d\n", r);
+		drm_err(adev_to_drm(adev),
+			"failed to do bo_unmap on static CSA, err=%d\n", r);
 		goto error;
 	}
 

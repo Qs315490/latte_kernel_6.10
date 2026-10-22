@@ -25,6 +25,7 @@
 #include <scsi/scsicam.h>
 #include <scsi/scsi_transport.h>
 #include <scsi/scsi_transport_fc.h>
+#include <net/netdev_lock.h>
 #include <net/rtnetlink.h>
 
 #include <scsi/fc/fc_encaps.h>
@@ -737,7 +738,9 @@ static int fcoe_netdev_config(struct fc_lport *lport, struct net_device *netdev)
 	port->fcoe_pending_queue_active = 0;
 	timer_setup(&port->timer, fcoe_queue_timer, 0);
 
+	netdev_lock_ops(netdev);
 	fcoe_link_speed_update(lport);
+	netdev_unlock_ops(netdev);
 
 	if (!lport->vport) {
 		if (fcoe_get_wwn(netdev, &wwnn, NETDEV_FCOE_WWNN))
@@ -820,7 +823,7 @@ static void fcoe_fdmi_info(struct fc_lport *lport, struct net_device *netdev)
 
 	if (realdev->netdev_ops->ndo_fcoe_get_hbainfo) {
 		struct netdev_fcoe_hbainfo *fdmi;
-		fdmi = kzalloc(sizeof(*fdmi), GFP_KERNEL);
+		fdmi = kzalloc_obj(*fdmi);
 		if (!fdmi)
 			return;
 
@@ -1013,7 +1016,7 @@ static void fcoe_if_destroy(struct fc_lport *lport)
 	fc_lport_destroy(lport);
 
 	/* Stop the transmit retry timer */
-	del_timer_sync(&port->timer);
+	timer_delete_sync(&port->timer);
 
 	/* Free existing transmit skbs */
 	fcoe_clean_pending_queue(lport);
@@ -1300,26 +1303,6 @@ static void fcoe_thread_cleanup_local(unsigned int cpu)
 }
 
 /**
- * fcoe_select_cpu() - Selects CPU to handle post-processing of incoming
- *			command.
- *
- * This routine selects next CPU based on cpumask to distribute
- * incoming requests in round robin.
- *
- * Returns: int CPU number
- */
-static inline unsigned int fcoe_select_cpu(void)
-{
-	static unsigned int selected_cpu;
-
-	selected_cpu = cpumask_next(selected_cpu, cpu_online_mask);
-	if (selected_cpu >= nr_cpu_ids)
-		selected_cpu = cpumask_first(cpu_online_mask);
-
-	return selected_cpu;
-}
-
-/**
  * fcoe_rcv() - Receive packets from a net device
  * @skb:    The received packet
  * @netdev: The net device that the packet was received on
@@ -1405,7 +1388,7 @@ static int fcoe_rcv(struct sk_buff *skb, struct net_device *netdev,
 		cpu = ntohs(fh->fh_ox_id) & fc_cpu_mask;
 	else {
 		if (ntohs(fh->fh_rx_id) == FC_XID_UNKNOWN)
-			cpu = fcoe_select_cpu();
+			cpu = skb->alloc_cpu;
 		else
 			cpu = ntohs(fh->fh_rx_id) & fc_cpu_mask;
 	}
@@ -1861,6 +1844,7 @@ static int fcoe_device_notification(struct notifier_block *notifier,
 		break;
 	case NETDEV_UP:
 	case NETDEV_CHANGE:
+		fcoe_link_speed_update(lport);
 		break;
 	case NETDEV_CHANGEMTU:
 		if (netdev->fcoe_mtu)
@@ -1890,8 +1874,6 @@ static int fcoe_device_notification(struct notifier_block *notifier,
 		FCOE_NETDEV_DBG(netdev, "Unknown event %ld "
 				"from netdev netlink\n", event);
 	}
-
-	fcoe_link_speed_update(lport);
 
 	cdev = fcoe_ctlr_to_ctlr_dev(ctlr);
 
@@ -2458,7 +2440,7 @@ static int __init fcoe_init(void)
 	unsigned int cpu;
 	int rc = 0;
 
-	fcoe_wq = alloc_workqueue("fcoe", 0, 0);
+	fcoe_wq = alloc_workqueue("fcoe", WQ_PERCPU, 0);
 	if (!fcoe_wq)
 		return -ENOMEM;
 

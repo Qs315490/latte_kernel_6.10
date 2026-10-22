@@ -501,7 +501,7 @@ void sprd_dpu_stop(struct sprd_dpu *dpu)
 }
 
 static int sprd_plane_atomic_check(struct drm_plane *plane,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *plane_state = drm_atomic_get_new_plane_state(state,
 									     plane);
@@ -526,7 +526,7 @@ static int sprd_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void sprd_plane_atomic_update(struct drm_plane *drm_plane,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
 									   drm_plane);
@@ -537,7 +537,7 @@ static void sprd_plane_atomic_update(struct drm_plane *drm_plane,
 }
 
 static void sprd_plane_atomic_disable(struct drm_plane *drm_plane,
-				      struct drm_atomic_state *state)
+				      struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state,
 									   drm_plane);
@@ -636,7 +636,7 @@ static void sprd_crtc_mode_set_nofb(struct drm_crtc *crtc)
 }
 
 static void sprd_crtc_atomic_enable(struct drm_crtc *crtc,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct sprd_dpu *dpu = to_sprd_crtc(crtc);
 
@@ -646,7 +646,7 @@ static void sprd_crtc_atomic_enable(struct drm_crtc *crtc,
 }
 
 static void sprd_crtc_atomic_disable(struct drm_crtc *crtc,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct sprd_dpu *dpu = to_sprd_crtc(crtc);
 	struct drm_device *drm = dpu->base.dev;
@@ -664,7 +664,7 @@ static void sprd_crtc_atomic_disable(struct drm_crtc *crtc,
 }
 
 static void sprd_crtc_atomic_flush(struct drm_crtc *crtc,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 
 {
 	struct sprd_dpu *dpu = to_sprd_crtc(crtc);
@@ -784,19 +784,12 @@ static int sprd_dpu_context_init(struct sprd_dpu *dpu,
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct dpu_context *ctx = &dpu->ctx;
-	struct resource *res;
 	int ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		dev_err(dev, "failed to get I/O resource\n");
-		return -EINVAL;
-	}
-
-	ctx->base = devm_ioremap(dev, res->start, resource_size(res));
-	if (!ctx->base) {
+	ctx->base = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(ctx->base)) {
 		dev_err(dev, "failed to map dpu registers\n");
-		return -EFAULT;
+		return PTR_ERR(ctx->base);
 	}
 
 	ctx->irq = platform_get_irq(pdev, 0);

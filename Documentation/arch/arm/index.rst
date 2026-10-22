@@ -76,10 +76,4 @@ SoC-specific documents
 
    vfp/release-notes
 
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`
+   zte/index

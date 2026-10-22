@@ -34,6 +34,7 @@ MODULE_PARM_DESC(cryptd_max_cpu_qlen, "Set cryptd Max queue depth");
 static struct workqueue_struct *cryptd_wq;
 
 struct cryptd_cpu_queue {
+	local_lock_t bh_lock;
 	struct crypto_queue queue;
 	struct work_struct work;
 };
@@ -110,6 +111,7 @@ static int cryptd_init_queue(struct cryptd_queue *queue,
 		cpu_queue = per_cpu_ptr(queue->cpu_queue, cpu);
 		crypto_init_queue(&cpu_queue->queue, max_cpu_qlen);
 		INIT_WORK(&cpu_queue->work, cryptd_queue_worker);
+		local_lock_init(&cpu_queue->bh_lock);
 	}
 	pr_info("cryptd: max_cpu_qlen set to %d\n", max_cpu_qlen);
 	return 0;
@@ -135,6 +137,7 @@ static int cryptd_enqueue_request(struct cryptd_queue *queue,
 	refcount_t *refcnt;
 
 	local_bh_disable();
+	local_lock_nested_bh(&queue->cpu_queue->bh_lock);
 	cpu_queue = this_cpu_ptr(queue->cpu_queue);
 	err = crypto_enqueue_request(&cpu_queue->queue, request);
 
@@ -151,6 +154,7 @@ static int cryptd_enqueue_request(struct cryptd_queue *queue,
 	refcount_inc(refcnt);
 
 out:
+	local_unlock_nested_bh(&queue->cpu_queue->bh_lock);
 	local_bh_enable();
 
 	return err;
@@ -169,8 +173,10 @@ static void cryptd_queue_worker(struct work_struct *work)
 	 * Only handle one request at a time to avoid hogging crypto workqueue.
 	 */
 	local_bh_disable();
+	__local_lock_nested_bh(&cpu_queue->bh_lock);
 	backlog = crypto_get_backlog(&cpu_queue->queue);
 	req = crypto_dequeue_request(&cpu_queue->queue);
+	__local_unlock_nested_bh(&cpu_queue->bh_lock);
 	local_bh_enable();
 
 	if (!req)
@@ -446,21 +452,6 @@ static int cryptd_hash_init_tfm(struct crypto_ahash *tfm)
 	return 0;
 }
 
-static int cryptd_hash_clone_tfm(struct crypto_ahash *ntfm,
-				 struct crypto_ahash *tfm)
-{
-	struct cryptd_hash_ctx *nctx = crypto_ahash_ctx(ntfm);
-	struct cryptd_hash_ctx *ctx = crypto_ahash_ctx(tfm);
-	struct crypto_shash *hash;
-
-	hash = crypto_clone_shash(ctx->child);
-	if (IS_ERR(hash))
-		return PTR_ERR(hash);
-
-	nctx->child = hash;
-	return 0;
-}
-
 static void cryptd_hash_exit_tfm(struct crypto_ahash *tfm)
 {
 	struct cryptd_hash_ctx *ctx = crypto_ahash_ctx(tfm);
@@ -640,7 +631,8 @@ static int cryptd_hash_import(struct ahash_request *req, const void *in)
 {
 	struct crypto_ahash *tfm = crypto_ahash_reqtfm(req);
 	struct cryptd_hash_ctx *ctx = crypto_ahash_ctx(tfm);
-	struct shash_desc *desc = cryptd_shash_desc(req);
+	struct cryptd_hash_request_ctx *rctx = ahash_request_ctx(req);
+	struct shash_desc *desc = &rctx->desc;
 
 	desc->tfm = ctx->child;
 
@@ -693,7 +685,6 @@ static int cryptd_create_hash(struct crypto_template *tmpl, struct rtattr **tb,
 	inst->alg.halg.base.cra_ctxsize = sizeof(struct cryptd_hash_ctx);
 
 	inst->alg.init_tfm = cryptd_hash_init_tfm;
-	inst->alg.clone_tfm = cryptd_hash_clone_tfm;
 	inst->alg.exit_tfm = cryptd_hash_exit_tfm;
 
 	inst->alg.init   = cryptd_hash_init_enqueue;
@@ -946,115 +937,6 @@ static struct crypto_template cryptd_tmpl = {
 	.module = THIS_MODULE,
 };
 
-struct cryptd_skcipher *cryptd_alloc_skcipher(const char *alg_name,
-					      u32 type, u32 mask)
-{
-	char cryptd_alg_name[CRYPTO_MAX_ALG_NAME];
-	struct cryptd_skcipher_ctx *ctx;
-	struct crypto_skcipher *tfm;
-
-	if (snprintf(cryptd_alg_name, CRYPTO_MAX_ALG_NAME,
-		     "cryptd(%s)", alg_name) >= CRYPTO_MAX_ALG_NAME)
-		return ERR_PTR(-EINVAL);
-
-	tfm = crypto_alloc_skcipher(cryptd_alg_name, type, mask);
-	if (IS_ERR(tfm))
-		return ERR_CAST(tfm);
-
-	if (tfm->base.__crt_alg->cra_module != THIS_MODULE) {
-		crypto_free_skcipher(tfm);
-		return ERR_PTR(-EINVAL);
-	}
-
-	ctx = crypto_skcipher_ctx(tfm);
-	refcount_set(&ctx->refcnt, 1);
-
-	return container_of(tfm, struct cryptd_skcipher, base);
-}
-EXPORT_SYMBOL_GPL(cryptd_alloc_skcipher);
-
-struct crypto_skcipher *cryptd_skcipher_child(struct cryptd_skcipher *tfm)
-{
-	struct cryptd_skcipher_ctx *ctx = crypto_skcipher_ctx(&tfm->base);
-
-	return ctx->child;
-}
-EXPORT_SYMBOL_GPL(cryptd_skcipher_child);
-
-bool cryptd_skcipher_queued(struct cryptd_skcipher *tfm)
-{
-	struct cryptd_skcipher_ctx *ctx = crypto_skcipher_ctx(&tfm->base);
-
-	return refcount_read(&ctx->refcnt) - 1;
-}
-EXPORT_SYMBOL_GPL(cryptd_skcipher_queued);
-
-void cryptd_free_skcipher(struct cryptd_skcipher *tfm)
-{
-	struct cryptd_skcipher_ctx *ctx = crypto_skcipher_ctx(&tfm->base);
-
-	if (refcount_dec_and_test(&ctx->refcnt))
-		crypto_free_skcipher(&tfm->base);
-}
-EXPORT_SYMBOL_GPL(cryptd_free_skcipher);
-
-struct cryptd_ahash *cryptd_alloc_ahash(const char *alg_name,
-					u32 type, u32 mask)
-{
-	char cryptd_alg_name[CRYPTO_MAX_ALG_NAME];
-	struct cryptd_hash_ctx *ctx;
-	struct crypto_ahash *tfm;
-
-	if (snprintf(cryptd_alg_name, CRYPTO_MAX_ALG_NAME,
-		     "cryptd(%s)", alg_name) >= CRYPTO_MAX_ALG_NAME)
-		return ERR_PTR(-EINVAL);
-	tfm = crypto_alloc_ahash(cryptd_alg_name, type, mask);
-	if (IS_ERR(tfm))
-		return ERR_CAST(tfm);
-	if (tfm->base.__crt_alg->cra_module != THIS_MODULE) {
-		crypto_free_ahash(tfm);
-		return ERR_PTR(-EINVAL);
-	}
-
-	ctx = crypto_ahash_ctx(tfm);
-	refcount_set(&ctx->refcnt, 1);
-
-	return __cryptd_ahash_cast(tfm);
-}
-EXPORT_SYMBOL_GPL(cryptd_alloc_ahash);
-
-struct crypto_shash *cryptd_ahash_child(struct cryptd_ahash *tfm)
-{
-	struct cryptd_hash_ctx *ctx = crypto_ahash_ctx(&tfm->base);
-
-	return ctx->child;
-}
-EXPORT_SYMBOL_GPL(cryptd_ahash_child);
-
-struct shash_desc *cryptd_shash_desc(struct ahash_request *req)
-{
-	struct cryptd_hash_request_ctx *rctx = ahash_request_ctx(req);
-	return &rctx->desc;
-}
-EXPORT_SYMBOL_GPL(cryptd_shash_desc);
-
-bool cryptd_ahash_queued(struct cryptd_ahash *tfm)
-{
-	struct cryptd_hash_ctx *ctx = crypto_ahash_ctx(&tfm->base);
-
-	return refcount_read(&ctx->refcnt) - 1;
-}
-EXPORT_SYMBOL_GPL(cryptd_ahash_queued);
-
-void cryptd_free_ahash(struct cryptd_ahash *tfm)
-{
-	struct cryptd_hash_ctx *ctx = crypto_ahash_ctx(&tfm->base);
-
-	if (refcount_dec_and_test(&ctx->refcnt))
-		crypto_free_ahash(&tfm->base);
-}
-EXPORT_SYMBOL_GPL(cryptd_free_ahash);
-
 struct cryptd_aead *cryptd_alloc_aead(const char *alg_name,
 						  u32 type, u32 mask)
 {
@@ -1109,7 +991,8 @@ static int __init cryptd_init(void)
 {
 	int err;
 
-	cryptd_wq = alloc_workqueue("cryptd", WQ_MEM_RECLAIM | WQ_CPU_INTENSIVE,
+	cryptd_wq = alloc_workqueue("cryptd",
+				    WQ_MEM_RECLAIM | WQ_CPU_INTENSIVE | WQ_PERCPU,
 				    1);
 	if (!cryptd_wq)
 		return -ENOMEM;
@@ -1138,7 +1021,7 @@ static void __exit cryptd_exit(void)
 	crypto_unregister_template(&cryptd_tmpl);
 }
 
-subsys_initcall(cryptd_init);
+module_init(cryptd_init);
 module_exit(cryptd_exit);
 
 MODULE_LICENSE("GPL");

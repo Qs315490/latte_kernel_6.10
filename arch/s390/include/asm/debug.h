@@ -45,7 +45,7 @@ typedef struct debug_info {
 	struct debug_info *next;
 	struct debug_info *prev;
 	refcount_t ref_count;
-	spinlock_t lock;
+	raw_spinlock_t lock;
 	int level;
 	int nr_areas;
 	int pages_per_area;
@@ -440,7 +440,7 @@ static int VNAME(var, active_entries)[EARLY_AREAS] __initdata
 	.next = NULL,							\
 	.prev = NULL,							\
 	.ref_count = REFCOUNT_INIT(1),					\
-	.lock = __SPIN_LOCK_UNLOCKED(var.lock),				\
+	.lock = __RAW_SPIN_LOCK_UNLOCKED(var.lock),			\
 	.level = DEBUG_DEFAULT_LEVEL,					\
 	.nr_areas = EARLY_AREAS,					\
 	.pages_per_area = EARLY_PAGES,					\
@@ -490,6 +490,7 @@ arch_initcall(VNAME(var, reg))
 __DEFINE_STATIC_AREA(var);						\
 static debug_info_t __refdata var =					\
 	__DEBUG_INFO_INIT(var, (name), (buf_size));			\
+static debug_info_t __used __section(".s390dbf_info") *VNAME(var, info) = &var; \
 __REGISTER_STATIC_DEBUG_INFO(var, name, pages, nr_areas, view)
 
 void debug_register_static(debug_info_t *id, int pages_per_area, int nr_areas);

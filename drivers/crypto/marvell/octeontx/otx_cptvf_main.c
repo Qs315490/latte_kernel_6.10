@@ -31,7 +31,7 @@ static int init_worker_threads(struct otx_cptvf *cptvf)
 	struct otx_cptvf_wqe_info *cwqe_info;
 	int i;
 
-	cwqe_info = kzalloc(sizeof(*cwqe_info), GFP_KERNEL);
+	cwqe_info = kzalloc_obj(*cwqe_info);
 	if (!cwqe_info)
 		return -ENOMEM;
 
@@ -100,7 +100,7 @@ static int alloc_pending_queues(struct otx_cpt_pending_qinfo *pqinfo, u32 qlen,
 	pqinfo->num_queues = num_queues;
 
 	for_each_pending_queue(pqinfo, queue, i) {
-		queue->head = kcalloc(qlen, sizeof(*queue->head), GFP_KERNEL);
+		queue->head = kzalloc_objs(*queue->head, qlen);
 		if (!queue->head) {
 			ret = -ENOMEM;
 			goto pending_qfail;
@@ -168,7 +168,8 @@ static void free_command_queues(struct otx_cptvf *cptvf,
 			chunk = list_first_entry(&cqinfo->queue[i].chead,
 					struct otx_cpt_cmd_chunk, nextchunk);
 
-			dma_free_coherent(&pdev->dev, chunk->size,
+			dma_free_coherent(&pdev->dev,
+					  chunk->size + OTX_CPT_NEXT_CHUNK_PTR_SIZE,
 					  chunk->head,
 					  chunk->dma_addr);
 			chunk->head = NULL;
@@ -211,7 +212,7 @@ static int alloc_command_queues(struct otx_cptvf *cptvf,
 		queue = &cqinfo->queue[i];
 		INIT_LIST_HEAD(&queue->chead);
 		do {
-			curr = kzalloc(sizeof(*curr), GFP_KERNEL);
+			curr = kzalloc_obj(*curr);
 			if (!curr)
 				goto cmd_qfail;
 
@@ -956,9 +957,10 @@ static void otx_cptvf_remove(struct pci_dev *pdev)
 
 /* Supported devices */
 static const struct pci_device_id otx_cptvf_id_table[] = {
-	{PCI_VDEVICE(CAVIUM, OTX_CPT_PCI_VF_DEVICE_ID), 0},
-	{ 0, }  /* end of table */
+	{ PCI_VDEVICE(CAVIUM, OTX_CPT_PCI_VF_DEVICE_ID) },
+	{ }  /* end of table */
 };
+MODULE_DEVICE_TABLE(pci, otx_cptvf_id_table);
 
 static struct pci_driver otx_cptvf_pci_driver = {
 	.name = DRV_NAME,
@@ -973,4 +975,3 @@ MODULE_AUTHOR("Marvell International Ltd.");
 MODULE_DESCRIPTION("Marvell OcteonTX CPT Virtual Function Driver");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION(DRV_VERSION);
-MODULE_DEVICE_TABLE(pci, otx_cptvf_id_table);

@@ -296,7 +296,7 @@ static int sifive_spi_probe(struct platform_device *pdev)
 	u32 cs_bits, max_bits_per_word;
 	struct spi_controller *host;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(struct sifive_spi));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(struct sifive_spi));
 	if (!host) {
 		dev_err(&pdev->dev, "out of memory\n");
 		return -ENOMEM;
@@ -307,23 +307,19 @@ static int sifive_spi_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, host);
 
 	spi->regs = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(spi->regs)) {
-		ret = PTR_ERR(spi->regs);
-		goto put_host;
-	}
+	if (IS_ERR(spi->regs))
+		return PTR_ERR(spi->regs);
 
-	spi->clk = devm_clk_get(&pdev->dev, NULL);
+	/* Spin up the bus clock before hitting registers */
+	spi->clk = devm_clk_get_enabled(&pdev->dev, NULL);
 	if (IS_ERR(spi->clk)) {
 		dev_err(&pdev->dev, "Unable to find bus clock\n");
-		ret = PTR_ERR(spi->clk);
-		goto put_host;
+		return PTR_ERR(spi->clk);
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		ret = irq;
-		goto put_host;
-	}
+	if (irq < 0)
+		return irq;
 
 	/* Optional parameters */
 	ret =
@@ -338,15 +334,7 @@ static int sifive_spi_probe(struct platform_device *pdev)
 
 	if (!ret && max_bits_per_word < 8) {
 		dev_err(&pdev->dev, "Only 8bit SPI words supported by the driver\n");
-		ret = -EINVAL;
-		goto put_host;
-	}
-
-	/* Spin up the bus clock before hitting registers */
-	ret = clk_prepare_enable(spi->clk);
-	if (ret) {
-		dev_err(&pdev->dev, "Unable to enable bus clock\n");
-		goto put_host;
+		return -EINVAL;
 	}
 
 	/* probe the number of CS lines */
@@ -356,19 +344,16 @@ static int sifive_spi_probe(struct platform_device *pdev)
 	sifive_spi_write(spi, SIFIVE_SPI_REG_CSDEF, spi->cs_inactive);
 	if (!cs_bits) {
 		dev_err(&pdev->dev, "Could not auto probe CS lines\n");
-		ret = -EINVAL;
-		goto disable_clk;
+		return -EINVAL;
 	}
 
 	num_cs = ilog2(cs_bits) + 1;
 	if (num_cs > SIFIVE_SPI_MAX_CS) {
 		dev_err(&pdev->dev, "Invalid number of spi targets\n");
-		ret = -EINVAL;
-		goto disable_clk;
+		return -EINVAL;
 	}
 
 	/* Define our host */
-	host->dev.of_node = pdev->dev.of_node;
 	host->bus_num = pdev->id;
 	host->num_chipselect = num_cs;
 	host->mode_bits = SPI_CPHA | SPI_CPOL
@@ -393,26 +378,19 @@ static int sifive_spi_probe(struct platform_device *pdev)
 			       dev_name(&pdev->dev), spi);
 	if (ret) {
 		dev_err(&pdev->dev, "Unable to bind to interrupt\n");
-		goto disable_clk;
+		return ret;
 	}
 
 	dev_info(&pdev->dev, "mapped; irq=%d, cs=%d\n",
 		 irq, host->num_chipselect);
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "spi_register_host failed\n");
-		goto disable_clk;
+		return ret;
 	}
 
 	return 0;
-
-disable_clk:
-	clk_disable_unprepare(spi->clk);
-put_host:
-	spi_controller_put(host);
-
-	return ret;
 }
 
 static void sifive_spi_remove(struct platform_device *pdev)
@@ -420,9 +398,10 @@ static void sifive_spi_remove(struct platform_device *pdev)
 	struct spi_controller *host = platform_get_drvdata(pdev);
 	struct sifive_spi *spi = spi_controller_get_devdata(host);
 
+	spi_unregister_controller(host);
+
 	/* Disable all the interrupts just in case */
 	sifive_spi_write(spi, SIFIVE_SPI_REG_IE, 0);
-	clk_disable_unprepare(spi->clk);
 }
 
 static int sifive_spi_suspend(struct device *dev)

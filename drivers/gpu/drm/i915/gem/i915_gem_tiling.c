@@ -1,6 +1,5 @@
+// SPDX-License-Identifier: MIT
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2008 Intel Corporation
  */
 
@@ -39,7 +38,7 @@
  * Since neither of this applies for new tiling layouts on modern platforms like
  * W, Ys and Yf tiling GEM only allows object tiling to be set to X or Y tiled.
  * Anything else can be handled in userspace entirely without the kernel's
- * invovlement.
+ * involvement.
  */
 
 /**
@@ -146,8 +145,9 @@ i915_tiling_ok(struct drm_i915_gem_object *obj,
 			return false;
 	}
 
-	if (GRAPHICS_VER(i915) == 2 ||
-	    (tiling == I915_TILING_Y && HAS_128_BYTE_Y_TILING(i915)))
+	if (tiling == I915_TILING_Y && HAS_128_BYTE_Y_TILING(i915))
+		tile_width = 128;
+	else if (GRAPHICS_VER(i915) == 2)
 		tile_width = 128;
 	else
 		tile_width = 512;

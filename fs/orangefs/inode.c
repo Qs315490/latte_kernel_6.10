@@ -16,60 +16,50 @@
 #include "orangefs-kernel.h"
 #include "orangefs-bufmap.h"
 
-static int orangefs_writepage_locked(struct page *page,
-    struct writeback_control *wbc)
+static int orangefs_writepage_locked(struct folio *folio,
+		struct writeback_control *wbc)
 {
-	struct inode *inode = page->mapping->host;
+	struct inode *inode = folio->mapping->host;
 	struct orangefs_write_range *wr = NULL;
 	struct iov_iter iter;
 	struct bio_vec bv;
-	size_t len, wlen;
+	size_t wlen;
 	ssize_t ret;
-	loff_t off;
+	loff_t len, off;
 
-	set_page_writeback(page);
+	folio_start_writeback(folio);
 
 	len = i_size_read(inode);
-	if (PagePrivate(page)) {
-		wr = (struct orangefs_write_range *)page_private(page);
-		WARN_ON(wr->pos >= len);
+	if (folio->private) {
+		wr = folio->private;
 		off = wr->pos;
-		if (off + wr->len > len)
+		if ((off + wr->len > len) && (off <= len))
 			wlen = len - off;
 		else
 			wlen = wr->len;
+		if (wlen == 0)
+			wlen = wr->len;
 	} else {
 		WARN_ON(1);
-		off = page_offset(page);
-		if (off + PAGE_SIZE > len)
+		off = folio_pos(folio);
+		wlen = folio_size(folio);
+
+		if (wlen > len - off)
 			wlen = len - off;
-		else
-			wlen = PAGE_SIZE;
 	}
-	/* Should've been handled in orangefs_invalidate_folio. */
-	WARN_ON(off == len || off + wlen > len);
 
 	WARN_ON(wlen == 0);
-	bvec_set_page(&bv, page, wlen, off % PAGE_SIZE);
+	bvec_set_folio(&bv, folio, wlen, offset_in_folio(folio, off));
 	iov_iter_bvec(&iter, ITER_SOURCE, &bv, 1, wlen);
 
 	ret = wait_for_direct_io(ORANGEFS_IO_WRITE, inode, &off, &iter, wlen,
 	    len, wr, NULL, NULL);
 	if (ret < 0) {
-		mapping_set_error(page->mapping, ret);
+		mapping_set_error(folio->mapping, ret);
 	} else {
 		ret = 0;
 	}
-	kfree(detach_page_private(page));
-	return ret;
-}
-
-static int orangefs_writepage(struct page *page, struct writeback_control *wbc)
-{
-	int ret;
-	ret = orangefs_writepage_locked(page, wbc);
-	unlock_page(page);
-	end_page_writeback(page);
+	kfree(folio_detach_private(folio));
 	return ret;
 }
 
@@ -79,33 +69,33 @@ struct orangefs_writepages {
 	kuid_t uid;
 	kgid_t gid;
 	int maxpages;
-	int npages;
-	struct page **pages;
+	int nfolios;
+	struct address_space *mapping;
+	struct folio **folios;
 	struct bio_vec *bv;
 };
 
 static int orangefs_writepages_work(struct orangefs_writepages *ow,
-    struct writeback_control *wbc)
+		struct writeback_control *wbc)
 {
-	struct inode *inode = ow->pages[0]->mapping->host;
+	struct inode *inode = ow->mapping->host;
 	struct orangefs_write_range *wrp, wr;
 	struct iov_iter iter;
 	ssize_t ret;
-	size_t len;
-	loff_t off;
+	size_t start;
+	loff_t len, off;
 	int i;
 
 	len = i_size_read(inode);
 
-	for (i = 0; i < ow->npages; i++) {
-		set_page_writeback(ow->pages[i]);
-		bvec_set_page(&ow->bv[i], ow->pages[i],
-			      min(page_offset(ow->pages[i]) + PAGE_SIZE,
-			          ow->off + ow->len) -
-			      max(ow->off, page_offset(ow->pages[i])),
-			      i == 0 ? ow->off - page_offset(ow->pages[i]) : 0);
+	start = offset_in_folio(ow->folios[0], ow->off);
+	for (i = 0; i < ow->nfolios; i++) {
+		folio_start_writeback(ow->folios[i]);
+		bvec_set_folio(&ow->bv[i], ow->folios[i],
+				folio_size(ow->folios[i]) - start, start);
+		start = 0;
 	}
-	iov_iter_bvec(&iter, ITER_SOURCE, ow->bv, ow->npages, ow->len);
+	iov_iter_bvec(&iter, ITER_SOURCE, ow->bv, ow->nfolios, ow->len);
 
 	WARN_ON(ow->off >= len);
 	if (ow->off + ow->len > len)
@@ -116,40 +106,24 @@ static int orangefs_writepages_work(struct orangefs_writepages *ow,
 	wr.gid = ow->gid;
 	ret = wait_for_direct_io(ORANGEFS_IO_WRITE, inode, &off, &iter, ow->len,
 	    0, &wr, NULL, NULL);
-	if (ret < 0) {
-		for (i = 0; i < ow->npages; i++) {
-			mapping_set_error(ow->pages[i]->mapping, ret);
-			if (PagePrivate(ow->pages[i])) {
-				wrp = (struct orangefs_write_range *)
-				    page_private(ow->pages[i]);
-				ClearPagePrivate(ow->pages[i]);
-				put_page(ow->pages[i]);
-				kfree(wrp);
-			}
-			end_page_writeback(ow->pages[i]);
-			unlock_page(ow->pages[i]);
-		}
-	} else {
+	if (ret < 0)
+		mapping_set_error(ow->mapping, ret);
+	else
 		ret = 0;
-		for (i = 0; i < ow->npages; i++) {
-			if (PagePrivate(ow->pages[i])) {
-				wrp = (struct orangefs_write_range *)
-				    page_private(ow->pages[i]);
-				ClearPagePrivate(ow->pages[i]);
-				put_page(ow->pages[i]);
-				kfree(wrp);
-			}
-			end_page_writeback(ow->pages[i]);
-			unlock_page(ow->pages[i]);
-		}
+
+	for (i = 0; i < ow->nfolios; i++) {
+		wrp = folio_detach_private(ow->folios[i]);
+		kfree(wrp);
+		folio_end_writeback(ow->folios[i]);
+		folio_unlock(ow->folios[i]);
 	}
+
 	return ret;
 }
 
 static int orangefs_writepages_callback(struct folio *folio,
-		struct writeback_control *wbc, void *data)
+		struct writeback_control *wbc, struct orangefs_writepages *ow)
 {
-	struct orangefs_writepages *ow = data;
 	struct orangefs_write_range *wr = folio->private;
 	int ret;
 
@@ -162,41 +136,41 @@ static int orangefs_writepages_callback(struct folio *folio,
 	}
 
 	ret = -1;
-	if (ow->npages == 0) {
+	if (ow->nfolios == 0) {
 		ow->off = wr->pos;
 		ow->len = wr->len;
 		ow->uid = wr->uid;
 		ow->gid = wr->gid;
-		ow->pages[ow->npages++] = &folio->page;
+		ow->folios[ow->nfolios++] = folio;
 		ret = 0;
 		goto done;
 	}
 	if (!uid_eq(ow->uid, wr->uid) || !gid_eq(ow->gid, wr->gid)) {
 		orangefs_writepages_work(ow, wbc);
-		ow->npages = 0;
+		ow->nfolios = 0;
 		ret = -1;
 		goto done;
 	}
 	if (ow->off + ow->len == wr->pos) {
 		ow->len += wr->len;
-		ow->pages[ow->npages++] = &folio->page;
+		ow->folios[ow->nfolios++] = folio;
 		ret = 0;
 		goto done;
 	}
 done:
 	if (ret == -1) {
-		if (ow->npages) {
+		if (ow->nfolios) {
 			orangefs_writepages_work(ow, wbc);
-			ow->npages = 0;
+			ow->nfolios = 0;
 		}
-		ret = orangefs_writepage_locked(&folio->page, wbc);
+		ret = orangefs_writepage_locked(folio, wbc);
 		mapping_set_error(folio->mapping, ret);
 		folio_unlock(folio);
 		folio_end_writeback(folio);
 	} else {
-		if (ow->npages == ow->maxpages) {
+		if (ow->nfolios == ow->maxpages) {
 			orangefs_writepages_work(ow, wbc);
-			ow->npages = 0;
+			ow->nfolios = 0;
 		}
 	}
 	return ret;
@@ -207,31 +181,35 @@ static int orangefs_writepages(struct address_space *mapping,
 {
 	struct orangefs_writepages *ow;
 	struct blk_plug plug;
-	int ret;
-	ow = kzalloc(sizeof(struct orangefs_writepages), GFP_KERNEL);
+	int error;
+	struct folio *folio = NULL;
+
+	ow = kzalloc_obj(struct orangefs_writepages);
 	if (!ow)
 		return -ENOMEM;
 	ow->maxpages = orangefs_bufmap_size_query()/PAGE_SIZE;
-	ow->pages = kcalloc(ow->maxpages, sizeof(struct page *), GFP_KERNEL);
-	if (!ow->pages) {
+	ow->folios = kzalloc_objs(struct folio *, ow->maxpages);
+	if (!ow->folios) {
 		kfree(ow);
 		return -ENOMEM;
 	}
-	ow->bv = kcalloc(ow->maxpages, sizeof(struct bio_vec), GFP_KERNEL);
+	ow->bv = kzalloc_objs(struct bio_vec, ow->maxpages);
 	if (!ow->bv) {
-		kfree(ow->pages);
+		kfree(ow->folios);
 		kfree(ow);
 		return -ENOMEM;
 	}
+	ow->mapping = mapping;
 	blk_start_plug(&plug);
-	ret = write_cache_pages(mapping, wbc, orangefs_writepages_callback, ow);
-	if (ow->npages)
-		ret = orangefs_writepages_work(ow, wbc);
+	while ((folio = writeback_iter(mapping, wbc, folio, &error)))
+		error = orangefs_writepages_callback(folio, wbc, ow);
+	if (ow->nfolios)
+		error = orangefs_writepages_work(ow, wbc);
 	blk_finish_plug(&plug);
-	kfree(ow->pages);
+	kfree(ow->folios);
 	kfree(ow->bv);
 	kfree(ow);
-	return ret;
+	return error;
 }
 
 static int orangefs_launder_folio(struct folio *);
@@ -246,6 +224,8 @@ static void orangefs_readahead(struct readahead_control *rac)
 	loff_t new_start = readahead_pos(rac);
 	int ret;
 	size_t new_len = 0;
+	size_t this_size;
+	size_t remaining;
 
 	loff_t bytes_remaining = inode->i_size - readahead_pos(rac);
 	loff_t pages_remaining = bytes_remaining / PAGE_SIZE;
@@ -261,17 +241,33 @@ static void orangefs_readahead(struct readahead_control *rac)
 	offset = readahead_pos(rac);
 	i_pages = &rac->mapping->i_pages;
 
-	iov_iter_xarray(&iter, ITER_DEST, i_pages, offset, readahead_length(rac));
+	iov_iter_xarray(&iter, ITER_DEST, i_pages,
+				offset, readahead_length(rac));
 
-	/* read in the pages. */
-	if ((ret = wait_for_direct_io(ORANGEFS_IO_READ, inode,
-			&offset, &iter, readahead_length(rac),
-			inode->i_size, NULL, NULL, rac->file)) < 0)
-		gossip_debug(GOSSIP_FILE_DEBUG,
-			"%s: wait_for_direct_io failed. \n", __func__);
-	else
-		ret = 0;
+	remaining = readahead_length(rac);
+	while (remaining) {
+		if (remaining > 4194304)
+			this_size = 4194304;
+		else
+			this_size = remaining;
 
+		/* read in the pages. */
+		if ((ret = wait_for_direct_io(ORANGEFS_IO_READ, inode,
+				&offset, &iter, this_size,
+				inode->i_size, NULL, NULL, rac->file)) < 0) {
+			gossip_debug(GOSSIP_FILE_DEBUG,
+				"%s: wait_for_direct_io failed. :%d: \n",
+				__func__, ret);
+			goto cleanup;
+		} else {
+			ret = 0;
+		}
+
+		remaining -= this_size;
+		offset += this_size;
+	}
+
+cleanup:
 	/* clean up. */
 	while ((folio = readahead_folio(rac))) {
 		if (!ret)
@@ -307,9 +303,10 @@ static int orangefs_read_folio(struct file *file, struct folio *folio)
 	return ret;
 }
 
-static int orangefs_write_begin(struct file *file,
-		struct address_space *mapping, loff_t pos, unsigned len,
-		struct folio **foliop, void **fsdata)
+static int orangefs_write_begin(const struct kiocb *iocb,
+				struct address_space *mapping, loff_t pos,
+				unsigned len, struct folio **foliop,
+				void **fsdata)
 {
 	struct orangefs_write_range *wr;
 	struct folio *folio;
@@ -341,13 +338,15 @@ static int orangefs_write_begin(struct file *file,
 			wr->len += len;
 			goto okay;
 		} else {
+			wr->pos = pos;
+			wr->len = len;
 			ret = orangefs_launder_folio(folio);
 			if (ret)
 				return ret;
 		}
 	}
 
-	wr = kmalloc(sizeof *wr, GFP_KERNEL);
+	wr = kmalloc_obj(*wr);
 	if (!wr)
 		return -ENOMEM;
 
@@ -360,9 +359,10 @@ okay:
 	return 0;
 }
 
-static int orangefs_write_end(struct file *file, struct address_space *mapping,
-		loff_t pos, unsigned len, unsigned copied, struct folio *folio,
-		void *fsdata)
+static int orangefs_write_end(const struct kiocb *iocb,
+			      struct address_space *mapping,
+			      loff_t pos, unsigned len, unsigned copied,
+			      struct folio *folio, void *fsdata)
 {
 	struct inode *inode = folio->mapping->host;
 	loff_t last_pos = pos + copied;
@@ -392,7 +392,7 @@ static int orangefs_write_end(struct file *file, struct address_space *mapping,
 	folio_unlock(folio);
 	folio_put(folio);
 
-	mark_inode_dirty_sync(file_inode(file));
+	mark_inode_dirty_sync(file_inode(iocb->ki_filp));
 	return copied;
 }
 
@@ -484,7 +484,7 @@ static int orangefs_launder_folio(struct folio *folio)
 	};
 	folio_wait_writeback(folio);
 	if (folio_clear_dirty_for_io(folio)) {
-		r = orangefs_writepage_locked(&folio->page, &wbc);
+		r = orangefs_writepage_locked(folio, &wbc);
 		folio_end_writeback(folio);
 	}
 	return r;
@@ -606,7 +606,6 @@ out:
 
 /** ORANGEFS2 implementation of address space operations */
 static const struct address_space_operations orangefs_address_operations = {
-	.writepage = orangefs_writepage,
 	.readahead = orangefs_readahead,
 	.read_folio = orangefs_read_folio,
 	.writepages = orangefs_writepages,
@@ -616,6 +615,7 @@ static const struct address_space_operations orangefs_address_operations = {
 	.invalidate_folio = orangefs_invalidate_folio,
 	.release_folio = orangefs_release_folio,
 	.free_folio = orangefs_free_folio,
+	.migrate_folio = filemap_migrate_folio,
 	.launder_folio = orangefs_launder_folio,
 	.direct_IO = orangefs_direct_IO,
 };
@@ -662,7 +662,7 @@ vm_fault_t orangefs_page_mkwrite(struct vm_fault *vmf)
 			}
 		}
 	}
-	wr = kmalloc(sizeof *wr, GFP_KERNEL);
+	wr = kmalloc_obj(*wr);
 	if (!wr) {
 		ret = VM_FAULT_LOCKED|VM_FAULT_RETRY;
 		goto out;
@@ -890,24 +890,31 @@ int orangefs_permission(struct mnt_idmap *idmap,
 	return generic_permission(&nop_mnt_idmap, inode, mask);
 }
 
-int orangefs_update_time(struct inode *inode, int flags)
+int orangefs_update_time(struct inode *inode, enum fs_update_time type,
+		unsigned int flags)
 {
-	struct iattr iattr;
+	struct iattr iattr = { };
+	int dirty;
 
-	gossip_debug(GOSSIP_INODE_DEBUG, "orangefs_update_time: %pU\n",
-	    get_khandle_from_ino(inode));
-	flags = generic_update_time(inode, flags);
-	memset(&iattr, 0, sizeof iattr);
-        if (flags & S_ATIME)
-		iattr.ia_valid |= ATTR_ATIME;
-	if (flags & S_CTIME)
-		iattr.ia_valid |= ATTR_CTIME;
-	if (flags & S_MTIME)
-		iattr.ia_valid |= ATTR_MTIME;
+	if (flags & IOCB_NOWAIT)
+		return -EAGAIN;
+
+	switch (type) {
+	case FS_UPD_ATIME:
+		iattr.ia_valid = ATTR_ATIME;
+		break;
+	case FS_UPD_CMTIME:
+		iattr.ia_valid = ATTR_CTIME | ATTR_MTIME;
+		break;
+	}
+
+	dirty = inode_update_time(inode, type, flags);
+	if (dirty <= 0)
+		return dirty;
 	return __orangefs_setattr(inode, &iattr);
 }
 
-static int orangefs_fileattr_get(struct dentry *dentry, struct fileattr *fa)
+static int orangefs_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 {
 	u64 val = 0;
 	int ret;
@@ -928,7 +935,7 @@ static int orangefs_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 }
 
 static int orangefs_fileattr_set(struct mnt_idmap *idmap,
-				 struct dentry *dentry, struct fileattr *fa)
+				 struct dentry *dentry, struct file_kattr *fa)
 {
 	u64 val = 0;
 
@@ -1059,7 +1066,7 @@ struct inode *orangefs_iget(struct super_block *sb,
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 
-	if (!(inode->i_state & I_NEW))
+	if (!(inode_state_read_once(inode) & I_NEW))
 		return inode;
 
 	error = orangefs_inode_getattr(inode, ORANGEFS_GETATTR_NEW);
@@ -1073,7 +1080,7 @@ struct inode *orangefs_iget(struct super_block *sb,
 	unlock_new_inode(inode);
 
 	gossip_debug(GOSSIP_INODE_DEBUG,
-		     "iget handle %pU, fsid %d hash %ld i_ino %lu\n",
+		     "iget handle %pU, fsid %d hash %ld i_ino %llu\n",
 		     &ref->khandle,
 		     ref->fs_id,
 		     hash,

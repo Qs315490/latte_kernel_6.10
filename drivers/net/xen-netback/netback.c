@@ -198,7 +198,8 @@ static void tx_add_credit(struct xenvif_queue *queue)
 
 void xenvif_tx_credit_callback(struct timer_list *t)
 {
-	struct xenvif_queue *queue = from_timer(queue, t, credit_timeout);
+	struct xenvif_queue *queue = timer_container_of(queue, t,
+							credit_timeout);
 	tx_add_credit(queue);
 	xenvif_napi_schedule_or_enable_events(queue);
 }
@@ -854,7 +855,7 @@ static int xenvif_mcast_add(struct xenvif *vif, const u8 *addr)
 		return -ENOSPC;
 	}
 
-	mcast = kzalloc(sizeof(*mcast), GFP_ATOMIC);
+	mcast = kzalloc_obj(*mcast, GFP_ATOMIC);
 	if (!mcast)
 		return -ENOMEM;
 

@@ -1,16 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
   FUSE: Filesystem in Userspace
   Copyright (C) 2001-2008  Miklos Szeredi <miklos@szeredi.hu>
-
-  This program can be distributed under the terms of the GNU GPL.
-  See the file COPYING.
 */
 
 #include "fuse_i.h"
+#include "dev.h"
 
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/fs_context.h>
+#include <linux/namei.h>
 
 #define FUSE_CTL_SUPER_MAGIC 0x65735543
 
@@ -36,9 +36,7 @@ static ssize_t fuse_conn_abort_write(struct file *file, const char __user *buf,
 {
 	struct fuse_conn *fc = fuse_ctl_file_conn_get(file);
 	if (fc) {
-		if (fc->abort_err)
-			fc->aborted = true;
-		fuse_abort_conn(fc);
+		fuse_chan_abort(fc->chan, fc->abort_err);
 		fuse_conn_put(fc);
 	}
 	return count;
@@ -56,7 +54,7 @@ static ssize_t fuse_conn_waiting_read(struct file *file, char __user *buf,
 		if (!fc)
 			return 0;
 
-		value = atomic_read(&fc->num_waiting);
+		value = fuse_chan_num_waiting(fc->chan);
 		file->private_data = (void *)value;
 		fuse_conn_put(fc);
 	}
@@ -110,7 +108,7 @@ static ssize_t fuse_conn_max_background_read(struct file *file,
 	if (!fc)
 		return 0;
 
-	val = READ_ONCE(fc->max_background);
+	val = fuse_chan_max_background(fc->chan);
 	fuse_conn_put(fc);
 
 	return fuse_conn_limit_read(file, buf, len, ppos, val);
@@ -120,7 +118,7 @@ static ssize_t fuse_conn_max_background_write(struct file *file,
 					      const char __user *buf,
 					      size_t count, loff_t *ppos)
 {
-	unsigned val;
+	unsigned int val = 0;
 	ssize_t ret;
 
 	ret = fuse_conn_limit_write(file, buf, count, ppos, &val,
@@ -128,12 +126,7 @@ static ssize_t fuse_conn_max_background_write(struct file *file,
 	if (ret > 0) {
 		struct fuse_conn *fc = fuse_ctl_file_conn_get(file);
 		if (fc) {
-			spin_lock(&fc->bg_lock);
-			fc->max_background = val;
-			fc->blocked = fc->num_background >= fc->max_background;
-			if (!fc->blocked)
-				wake_up(&fc->blocked_waitq);
-			spin_unlock(&fc->bg_lock);
+			fuse_chan_max_background_set(fc->chan, val);
 			fuse_conn_put(fc);
 		}
 	}
@@ -162,7 +155,7 @@ static ssize_t fuse_conn_congestion_threshold_write(struct file *file,
 						    const char __user *buf,
 						    size_t count, loff_t *ppos)
 {
-	unsigned val;
+	unsigned int val = 0;
 	struct fuse_conn *fc;
 	ssize_t ret;
 
@@ -204,15 +197,13 @@ static const struct file_operations fuse_conn_congestion_threshold_ops = {
 
 static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
 					  struct fuse_conn *fc,
-					  const char *name,
-					  int mode, int nlink,
+					  const char *name, int mode,
 					  const struct inode_operations *iop,
 					  const struct file_operations *fop)
 {
 	struct dentry *dentry;
 	struct inode *inode;
 
-	BUG_ON(fc->ctl_ndents >= FUSE_CTL_NUM_DENTRIES);
 	dentry = d_alloc_name(parent, name);
 	if (!dentry)
 		return NULL;
@@ -232,12 +223,19 @@ static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
 	if (iop)
 		inode->i_op = iop;
 	inode->i_fop = fop;
-	set_nlink(inode, nlink);
+	if (S_ISDIR(mode)) {
+		inc_nlink(d_inode(parent));
+		inc_nlink(inode);
+	}
 	inode->i_private = fc;
-	d_add(dentry, inode);
+	d_make_persistent(dentry, inode);
+	dput(dentry);
 
-	fc->ctl_dentry[fc->ctl_ndents++] = dentry;
-
+	/*
+	 * We are returning a borrowed reference here - it's only good while
+	 * fuse_mutex is held.  Actually it's d_make_persistent() return
+	 * value...
+	 */
 	return dentry;
 }
 
@@ -254,22 +252,21 @@ int fuse_ctl_add_conn(struct fuse_conn *fc)
 		return 0;
 
 	parent = fuse_control_sb->s_root;
-	inc_nlink(d_inode(parent));
 	sprintf(name, "%u", fc->dev);
-	parent = fuse_ctl_add_dentry(parent, fc, name, S_IFDIR | 0500, 2,
+	parent = fuse_ctl_add_dentry(parent, fc, name, S_IFDIR | 0500,
 				     &simple_dir_inode_operations,
 				     &simple_dir_operations);
 	if (!parent)
 		goto err;
 
-	if (!fuse_ctl_add_dentry(parent, fc, "waiting", S_IFREG | 0400, 1,
+	if (!fuse_ctl_add_dentry(parent, fc, "waiting", S_IFREG | 0400,
 				 NULL, &fuse_ctl_waiting_ops) ||
-	    !fuse_ctl_add_dentry(parent, fc, "abort", S_IFREG | 0200, 1,
+	    !fuse_ctl_add_dentry(parent, fc, "abort", S_IFREG | 0200,
 				 NULL, &fuse_ctl_abort_ops) ||
 	    !fuse_ctl_add_dentry(parent, fc, "max_background", S_IFREG | 0600,
-				 1, NULL, &fuse_conn_max_background_ops) ||
+				 NULL, &fuse_conn_max_background_ops) ||
 	    !fuse_ctl_add_dentry(parent, fc, "congestion_threshold",
-				 S_IFREG | 0600, 1, NULL,
+				 S_IFREG | 0600, NULL,
 				 &fuse_conn_congestion_threshold_ops))
 		goto err;
 
@@ -280,27 +277,24 @@ int fuse_ctl_add_conn(struct fuse_conn *fc)
 	return -ENOMEM;
 }
 
+static void remove_one(struct dentry *dentry)
+{
+	d_inode(dentry)->i_private = NULL;
+}
+
 /*
  * Remove a connection from the control filesystem (if it exists).
  * Caller must hold fuse_mutex
  */
 void fuse_ctl_remove_conn(struct fuse_conn *fc)
 {
-	int i;
+	char name[32];
 
 	if (!fuse_control_sb || fc->no_control)
 		return;
 
-	for (i = fc->ctl_ndents - 1; i >= 0; i--) {
-		struct dentry *dentry = fc->ctl_dentry[i];
-		d_inode(dentry)->i_private = NULL;
-		if (!i) {
-			/* Get rid of submounts: */
-			d_invalidate(dentry);
-		}
-		dput(dentry);
-	}
-	drop_nlink(d_inode(fuse_control_sb->s_root));
+	sprintf(name, "%u", fc->dev);
+	simple_remove_by_name(fuse_control_sb->s_root, name, remove_one);
 }
 
 static int fuse_ctl_fill_super(struct super_block *sb, struct fs_context *fsc)
@@ -346,15 +340,11 @@ static int fuse_ctl_init_fs_context(struct fs_context *fsc)
 
 static void fuse_ctl_kill_sb(struct super_block *sb)
 {
-	struct fuse_conn *fc;
-
 	mutex_lock(&fuse_mutex);
 	fuse_control_sb = NULL;
-	list_for_each_entry(fc, &fuse_conn_list, entry)
-		fc->ctl_ndents = 0;
 	mutex_unlock(&fuse_mutex);
 
-	kill_litter_super(sb);
+	kill_anon_super(sb);
 }
 
 static struct file_system_type fuse_ctl_fs_type = {

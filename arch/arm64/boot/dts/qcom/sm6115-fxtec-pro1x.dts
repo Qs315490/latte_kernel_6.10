@@ -121,10 +121,10 @@
 
 &gpu {
 	status = "okay";
+};
 
-	zap-shader {
-		firmware-name = "qcom/sm6115/Fxtec/QX1050/a610_zap.mbn";
-	};
+&gpu_zap_shader {
+	firmware-name = "qcom/sm6115/Fxtec/QX1050/a610_zap.mbn";
 };
 
 &i2c1 {
@@ -250,6 +250,8 @@
 
 		typec-power-opmode = "default";
 		pd-disable;
+
+		vbus-supply = <&pmi632_vbus>;
 
 		ports {
 			#address-cells = <1>;
@@ -566,7 +568,7 @@
 	vdd-1.3-rfa-supply = <&pm6125_l17a>;
 	vdd-3.3-ch0-supply = <&pm6125_l23a>;
 
-	qcom,ath10k-calibration-variant = "Fxtec_QX1050";
+	qcom,calibration-variant = "Fxtec_QX1050";
 
 	status = "okay";
 };

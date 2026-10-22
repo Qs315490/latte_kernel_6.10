@@ -50,8 +50,8 @@ int main(int argc, char **argv)
 {
 	struct bpf_object *obj;
 	int ret, lircfd, progfd, inputfd;
-	int testir1 = 0x1dead;
-	int testir2 = 0x20101;
+	int testir1 = 0x1ead;
+	int testir2 = 0x2101;
 	u32 prog_ids[10], prog_flags[10], prog_cnt;
 
 	if (argc != 3) {
@@ -74,7 +74,7 @@ int main(int argc, char **argv)
 
 	/* Let's try detach it before it was ever attached */
 	ret = bpf_prog_detach2(progfd, lircfd, BPF_LIRC_MODE2);
-	if (ret != -1 || errno != ENOENT) {
+	if (ret != -ENOENT) {
 		printf("bpf_prog_detach2 not attached should fail: %m\n");
 		return 1;
 	}
@@ -125,7 +125,7 @@ int main(int argc, char **argv)
 		}
 
 		if (event.type == EV_MSC && event.code == MSC_SCAN &&
-		    event.value == 0xdead) {
+		    event.value == 0x1ead) {
 			break;
 		}
 	}

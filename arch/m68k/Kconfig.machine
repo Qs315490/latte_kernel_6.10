@@ -133,6 +133,8 @@ config VIRT
 	select GOLDFISH_TIMER
 	select GOLDFISH_TTY
 	select M68040
+	select POWER_RESET
+	select POWER_RESET_QEMU_VIRT_CTRL
 	select RTC_CLASS
 	select RTC_DRV_GOLDFISH
 	select TTY
@@ -275,16 +277,16 @@ config M5407C3
 	  Support for the Motorola M5407C3 board.
 
 config AMCORE
-	bool "Sysam AMCORE board support"
+	bool "Kernelspace AMCORE board support"
 	depends on M5307
 	help
-	  Support for the Sysam AMCORE open-hardware generic board.
+	  Support for the Kernelspace AMCORE open-hardware generic board.
 
 config STMARK2
-	bool "Sysam stmark2 board support"
+	bool "Kernelspace stmark2 board support"
 	depends on M5441x
 	help
-	  Support for the Sysam stmark2 open-hardware generic board.
+	  Support for the Kernelspace stmark2 open-hardware generic board.
 
 config FIREBEE
 	bool "FireBee board support"

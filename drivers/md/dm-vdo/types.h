@@ -227,6 +227,9 @@ struct device_config {
 	bool compression;
 	struct thread_count_config thread_counts;
 	block_count_t max_discard_blocks;
+	block_count_t slab_blocks;
+	int index_memory;
+	bool index_sparse;
 };
 
 enum vdo_completion_type {
@@ -375,6 +378,9 @@ struct vio {
 
 	/* The size of this vio in blocks */
 	unsigned int block_count;
+
+	/* The amount of data to be read or written, in bytes */
+	unsigned int io_size;
 
 	/* The data being read or written. */
 	char *data;

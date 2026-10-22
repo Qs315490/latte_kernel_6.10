@@ -122,7 +122,7 @@ static int migor_ts_probe(struct i2c_client *client)
 	struct input_dev *input;
 	int error;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	input = input_allocate_device();
 	if (!priv || !input) {
 		dev_err(&client->dev, "failed to allocate memory\n");
@@ -211,7 +211,7 @@ static int migor_ts_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(migor_ts_pm, migor_ts_suspend, migor_ts_resume);
 
 static const struct i2c_device_id migor_ts_id[] = {
-	{ "migor_ts" },
+	{ .name = "migor_ts" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, migor_ts_id);

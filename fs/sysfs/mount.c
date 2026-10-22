@@ -23,20 +23,6 @@
 static struct kernfs_root *sysfs_root;
 struct kernfs_node *sysfs_root_kn;
 
-static int sysfs_get_tree(struct fs_context *fc)
-{
-	struct kernfs_fs_context *kfc = fc->fs_private;
-	int ret;
-
-	ret = kernfs_get_tree(fc);
-	if (ret)
-		return ret;
-
-	if (kfc->new_sb_created)
-		fc->root->d_sb->s_iflags |= SB_I_USERNS_VISIBLE;
-	return 0;
-}
-
 static void sysfs_fs_context_free(struct fs_context *fc)
 {
 	struct kernfs_fs_context *kfc = fc->fs_private;
@@ -49,29 +35,31 @@ static void sysfs_fs_context_free(struct fs_context *fc)
 
 static const struct fs_context_operations sysfs_fs_context_ops = {
 	.free		= sysfs_fs_context_free,
-	.get_tree	= sysfs_get_tree,
+	.get_tree	= kernfs_get_tree,
 };
 
 static int sysfs_init_fs_context(struct fs_context *fc)
 {
 	struct kernfs_fs_context *kfc;
-	struct net *netns;
+	struct ns_common *ns;
 
 	if (!(fc->sb_flags & SB_KERNMOUNT)) {
 		if (!kobj_ns_current_may_mount(KOBJ_NS_TYPE_NET))
 			return -EPERM;
 	}
 
-	kfc = kzalloc(sizeof(struct kernfs_fs_context), GFP_KERNEL);
+	kfc = kzalloc_obj(struct kernfs_fs_context);
 	if (!kfc)
 		return -ENOMEM;
 
-	kfc->ns_tag = netns = kobj_ns_grab_current(KOBJ_NS_TYPE_NET);
+	kfc->ns_tag = ns = kobj_ns_grab_current(KOBJ_NS_TYPE_NET);
 	kfc->root = sysfs_root;
 	kfc->magic = SYSFS_MAGIC;
 	fc->fs_private = kfc;
 	fc->ops = &sysfs_fs_context_ops;
-	if (netns) {
+	if (ns) {
+		struct net *netns = to_net_ns(ns);
+
 		put_user_ns(fc->user_ns);
 		fc->user_ns = get_user_ns(netns->user_ns);
 	}
@@ -81,7 +69,7 @@ static int sysfs_init_fs_context(struct fs_context *fc)
 
 static void sysfs_kill_sb(struct super_block *sb)
 {
-	void *ns = (void *)kernfs_super_ns(sb);
+	struct ns_common *ns = (struct ns_common *)kernfs_super_ns(sb);
 
 	kernfs_kill_sb(sb);
 	kobj_ns_drop(KOBJ_NS_TYPE_NET, ns);
@@ -91,7 +79,7 @@ static struct file_system_type sysfs_fs_type = {
 	.name			= "sysfs",
 	.init_fs_context	= sysfs_init_fs_context,
 	.kill_sb		= sysfs_kill_sb,
-	.fs_flags		= FS_USERNS_MOUNT,
+	.fs_flags		= FS_USERNS_MOUNT | FS_USERNS_MOUNT_RESTRICTED,
 };
 
 int __init sysfs_init(void)

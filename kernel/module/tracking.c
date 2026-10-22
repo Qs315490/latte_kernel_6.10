@@ -21,8 +21,6 @@ int try_add_tainted_module(struct module *mod)
 {
 	struct mod_unload_taint *mod_taint;
 
-	module_assert_mutex_or_preempt();
-
 	if (!mod->taints)
 		goto out;
 
@@ -35,7 +33,7 @@ int try_add_tainted_module(struct module *mod)
 		}
 	}
 
-	mod_taint = kmalloc(sizeof(*mod_taint), GFP_KERNEL);
+	mod_taint = kmalloc_obj(*mod_taint);
 	if (unlikely(!mod_taint))
 		return -ENOMEM;
 	strscpy(mod_taint->name, mod->name, MODULE_NAME_LEN);

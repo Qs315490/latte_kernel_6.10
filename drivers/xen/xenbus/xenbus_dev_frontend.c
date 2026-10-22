@@ -195,7 +195,7 @@ static int queue_reply(struct list_head *queue, const void *data, size_t len)
 	if (len > XENSTORE_PAYLOAD_MAX)
 		return -EINVAL;
 
-	rb = kmalloc(struct_size(rb, msg, len), GFP_KERNEL);
+	rb = kmalloc_flex(*rb, msg, len);
 	if (rb == NULL)
 		return -ENOMEM;
 
@@ -242,7 +242,7 @@ static struct watch_adapter *alloc_watch_adapter(const char *path,
 {
 	struct watch_adapter *watch;
 
-	watch = kzalloc(sizeof(*watch), GFP_KERNEL);
+	watch = kzalloc_obj(*watch);
 	if (watch == NULL)
 		goto out_fail;
 
@@ -406,7 +406,7 @@ void xenbus_dev_queue_reply(struct xb_req_data *req)
 	mutex_unlock(&u->reply_mutex);
 
 	kfree(req->body);
-	kfree(req);
+	kref_put(&req->kref, xs_free_req);
 
 	kref_put(&u->kref, xenbus_file_free);
 
@@ -454,7 +454,7 @@ static int xenbus_write_transaction(unsigned msg_type,
 	} *msg = (void *)u->u.buffer;
 
 	if (msg_type == XS_TRANSACTION_START) {
-		trans = kzalloc(sizeof(*trans), GFP_KERNEL);
+		trans = kzalloc_obj(*trans);
 		if (!trans) {
 			rc = -ENOMEM;
 			goto out;
@@ -655,7 +655,7 @@ static int xenbus_file_open(struct inode *inode, struct file *filp)
 
 	stream_open(inode, filp);
 
-	u = kzalloc(sizeof(*u), GFP_KERNEL);
+	u = kzalloc_obj(*u);
 	if (u == NULL)
 		return -ENOMEM;
 

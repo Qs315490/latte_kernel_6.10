@@ -3,7 +3,7 @@
  * Copyright (c) 2020-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -103,18 +103,15 @@ xrep_setup_rtrmapbt(
 	struct xfs_scrub	*sc)
 {
 	struct xrep_rtrmap	*rr;
-	char			*descr;
 	int			error;
 
 	xchk_fsgates_enable(sc, XCHK_FSGATES_RMAP);
 
-	descr = xchk_xfile_rtgroup_descr(sc, "reverse mapping records");
-	error = xrep_setup_xfbtree(sc, descr);
-	kfree(descr);
+	error = xrep_setup_xfbtree(sc, "realtime reverse mapping records");
 	if (error)
 		return error;
 
-	rr = kzalloc(sizeof(struct xrep_rtrmap), XCHK_GFP_FLAGS);
+	rr = kzalloc_obj(struct xrep_rtrmap, XCHK_GFP_FLAGS);
 	if (!rr)
 		return -ENOMEM;
 
@@ -327,7 +324,7 @@ xrep_rtrmap_scan_dfork(
 	struct xfs_inode	*ip)
 {
 	struct xrep_rtrmap_ifork rf = {
-		.accum		= { .rm_owner = ip->i_ino, },
+		.accum		= { .rm_owner = I_INO(ip), },
 		.rr		= rr,
 	};
 	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, XFS_DATA_FORK);
@@ -395,7 +392,7 @@ xrep_rtrmap_walk_rmap(
 		return error;
 
 	/* Skip extents which are not owned by this inode and fork. */
-	if (rec->rm_owner != rr->sc->ip->i_ino)
+	if (rec->rm_owner != I_INO(rr->sc->ip))
 		return 0;
 
 	error = xrep_check_ino_btree_mapping(rr->sc, rec);
@@ -580,9 +577,7 @@ xrep_rtrmap_find_rmaps(
 	 */
 	xchk_trans_cancel(sc);
 	xchk_rtgroup_unlock(&sc->sr);
-	error = xchk_trans_alloc_empty(sc);
-	if (error)
-		return error;
+	xchk_trans_alloc_empty(sc);
 
 	while ((error = xchk_iscan_iter(&rr->iscan, &ip)) == 1) {
 		error = xrep_rtrmap_scan_inode(rr, ip);
@@ -810,28 +805,6 @@ err_cur:
 
 /* Reaping the old btree. */
 
-/* Reap the old rtrmapbt blocks. */
-STATIC int
-xrep_rtrmap_remove_old_tree(
-	struct xrep_rtrmap	*rr)
-{
-	int			error;
-
-	/*
-	 * Free all the extents that were allocated to the former rtrmapbt and
-	 * aren't cross-linked with something else.
-	 */
-	error = xrep_reap_metadir_fsblocks(rr->sc, &rr->old_rtrmapbt_blocks);
-	if (error)
-		return error;
-
-	/*
-	 * Ensure the proper reservation for the rtrmap inode so that we don't
-	 * fail to expand the new btree.
-	 */
-	return xrep_reset_metafile_resv(rr->sc);
-}
-
 static inline bool
 xrep_rtrmapbt_want_live_update(
 	struct xchk_iscan		*iscan,
@@ -868,7 +841,6 @@ xrep_rtrmapbt_live_update(
 	struct xfs_mount		*mp;
 	struct xfs_btree_cur		*mcur;
 	struct xfs_trans		*tp;
-	void				*txcookie;
 	int				error;
 
 	rr = container_of(nb, struct xrep_rtrmap, rhook.rmap_hook.nb);
@@ -879,9 +851,7 @@ xrep_rtrmapbt_live_update(
 
 	trace_xrep_rmap_live_update(rtg_group(rr->sc->sr.rtg), action, p);
 
-	error = xrep_trans_alloc_hook_dummy(mp, &txcookie, &tp);
-	if (error)
-		goto out_abort;
+	tp = xfs_trans_alloc_empty(mp);
 
 	mutex_lock(&rr->lock);
 	mcur = xfs_rtrmapbt_mem_cursor(rr->sc->sr.rtg, tp, &rr->rtrmap_btree);
@@ -895,14 +865,13 @@ xrep_rtrmapbt_live_update(
 	if (error)
 		goto out_cancel;
 
-	xrep_trans_cancel_hook_dummy(&txcookie, tp);
+	xfs_trans_cancel(tp);
 	mutex_unlock(&rr->lock);
 	return NOTIFY_DONE;
 
 out_cancel:
 	xfbtree_trans_cancel(&rr->rtrmap_btree, tp);
-	xrep_trans_cancel_hook_dummy(&txcookie, tp);
-out_abort:
+	xfs_trans_cancel(tp);
 	xchk_iscan_abort(&rr->iscan);
 	mutex_unlock(&rr->lock);
 out_unlock:
@@ -995,8 +964,11 @@ xrep_rtrmapbt(
 	if (error)
 		goto out_records;
 
-	/* Kill the old tree. */
-	error = xrep_rtrmap_remove_old_tree(rr);
+	/*
+	 * Free all the extents that were allocated to the former rtrmapbt and
+	 * aren't cross-linked with something else.
+	 */
+	error = xrep_reap_metadir_fsblocks(rr->sc, &rr->old_rtrmapbt_blocks);
 	if (error)
 		goto out_records;
 

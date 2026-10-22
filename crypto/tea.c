@@ -2,7 +2,7 @@
 /* 
  * Cryptographic API.
  *
- * TEA, XTEA, and XETA crypto alogrithms
+ * TEA, XTEA, and XETA crypto algorithms
  *
  * The TEA and Xtended TEA algorithms were developed by David Wheeler 
  * and Roger Needham at the Computer Laboratory of Cambridge University.
@@ -255,7 +255,7 @@ MODULE_ALIAS_CRYPTO("tea");
 MODULE_ALIAS_CRYPTO("xtea");
 MODULE_ALIAS_CRYPTO("xeta");
 
-subsys_initcall(tea_mod_init);
+module_init(tea_mod_init);
 module_exit(tea_mod_fini);
 
 MODULE_LICENSE("GPL");

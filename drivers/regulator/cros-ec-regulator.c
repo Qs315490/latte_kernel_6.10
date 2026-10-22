@@ -138,8 +138,8 @@ static int cros_ec_regulator_init_info(struct device *dev,
 	data->num_voltages =
 		min_t(u16, ARRAY_SIZE(resp.voltages_mv), resp.num_voltages);
 	data->voltages_mV =
-		devm_kmemdup(dev, resp.voltages_mv,
-			     sizeof(u16) * data->num_voltages, GFP_KERNEL);
+		devm_kmemdup_array(dev, resp.voltages_mv, data->num_voltages,
+				   sizeof(resp.voltages_mv[0]), GFP_KERNEL);
 	if (!data->voltages_mV)
 		return -ENOMEM;
 
@@ -183,6 +183,7 @@ static int cros_ec_regulator_probe(struct platform_device *pdev)
 	desc->owner = THIS_MODULE;
 	desc->type = REGULATOR_VOLTAGE;
 	desc->ops = &cros_ec_regulator_voltage_ops;
+	desc->supply_name = "vin";
 
 	ret = cros_ec_regulator_init_info(dev, drvdata);
 	if (ret < 0)

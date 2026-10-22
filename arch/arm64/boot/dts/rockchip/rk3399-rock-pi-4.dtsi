@@ -43,7 +43,7 @@
 	sdio_pwrseq: sdio-pwrseq {
 		compatible = "mmc-pwrseq-simple";
 		clocks = <&rk808 1>;
-		clock-names = "lpo";
+		clock-names = "ext_clock";
 		pinctrl-names = "default";
 		pinctrl-0 = <&wifi_enable_h>;
 		reset-gpios = <&gpio0 RK_PB2 GPIO_ACTIVE_LOW>;
@@ -455,6 +455,14 @@
 		regulator-state-mem {
 			regulator-off-in-suspend;
 		};
+	};
+
+	eeprom: eeprom@50 {
+		compatible = "belling,bl24c04a", "atmel,24c04";
+		reg = <0x50>;
+		pagesize = <16>;
+		read-only;
+		vcc-supply = <&vcc_3v0>;
 	};
 };
 

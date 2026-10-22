@@ -6,11 +6,12 @@
 
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/hex.h>
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/atomic.h>
 #include <linux/uaccess.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/ap.h>
 
 #include "ap_bus.h"
 #include "zcrypt_api.h"
@@ -79,14 +80,12 @@ static ssize_t cca_serialnr_show(struct device *dev,
 				 struct device_attribute *attr,
 				 char *buf)
 {
-	struct zcrypt_card *zc = dev_get_drvdata(dev);
-	struct cca_info ci;
 	struct ap_card *ac = to_ap_card(dev);
+	struct cca_info ci;
 
 	memset(&ci, 0, sizeof(ci));
 
-	if (ap_domain_index >= 0)
-		cca_get_info(ac->id, ap_domain_index, &ci, zc->online);
+	cca_get_info(ac->id, AUTOSEL_DOM, &ci, 0);
 
 	return sysfs_emit(buf, "%s\n", ci.serial);
 }
@@ -103,90 +102,116 @@ static const struct attribute_group cca_card_attr_grp = {
 	.attrs = cca_card_attrs,
 };
 
- /*
-  * CCA queue additional device attributes
-  */
+/*
+ * Simple helper macro to format raw mkvp byte array into hex
+ */
+#define MKVP_TO_HEXBUF(mkvp, buf) \
+	do { \
+		BUILD_BUG_ON(sizeof(buf) <= 2 * sizeof(mkvp)); \
+		bin2hex(buf, mkvp, sizeof(mkvp)); \
+		buf[2 * sizeof(mkvp)] = '\0'; \
+	} while (0)
+
+/*
+ * CCA queue additional device attributes
+ */
 static ssize_t cca_mkvps_show(struct device *dev,
 			      struct device_attribute *attr,
 			      char *buf)
 {
-	struct zcrypt_queue *zq = dev_get_drvdata(dev);
-	int n = 0;
-	struct cca_info ci;
-	static const char * const cao_state[] = { "invalid", "valid" };
 	static const char * const new_state[] = { "empty", "partial", "full" };
+	static const char * const cao_state[] = { "invalid", "valid" };
+	struct zcrypt_queue *zq = dev_get_drvdata(dev);
+	struct cca_info ci;
+	char hexbuf[2 * 16 + 1];
+	int n = 0;
 
 	memset(&ci, 0, sizeof(ci));
 
 	cca_get_info(AP_QID_CARD(zq->queue->qid),
 		     AP_QID_QUEUE(zq->queue->qid),
-		     &ci, zq->online);
+		     &ci, 0);
 
-	if (ci.new_aes_mk_state >= '1' && ci.new_aes_mk_state <= '3')
-		n += sysfs_emit_at(buf, n, "AES NEW: %s 0x%016llx\n",
+	if (ci.new_aes_mk_state >= '1' && ci.new_aes_mk_state <= '3') {
+		MKVP_TO_HEXBUF(ci.new_aes_mkvp, hexbuf);
+		n += sysfs_emit_at(buf, n, "AES NEW: %s 0x%s\n",
 				   new_state[ci.new_aes_mk_state - '1'],
-				   ci.new_aes_mkvp);
-	else
+				   hexbuf);
+	} else {
 		n += sysfs_emit_at(buf, n, "AES NEW: - -\n");
+	}
 
-	if (ci.cur_aes_mk_state >= '1' && ci.cur_aes_mk_state <= '2')
-		n += sysfs_emit_at(buf, n, "AES CUR: %s 0x%016llx\n",
+	if (ci.cur_aes_mk_state >= '1' && ci.cur_aes_mk_state <= '2') {
+		MKVP_TO_HEXBUF(ci.cur_aes_mkvp, hexbuf);
+		n += sysfs_emit_at(buf, n, "AES CUR: %s 0x%s\n",
 				   cao_state[ci.cur_aes_mk_state - '1'],
-				   ci.cur_aes_mkvp);
-	else
+				   hexbuf);
+	} else {
 		n += sysfs_emit_at(buf, n, "AES CUR: - -\n");
+	}
 
-	if (ci.old_aes_mk_state >= '1' && ci.old_aes_mk_state <= '2')
-		n += sysfs_emit_at(buf, n, "AES OLD: %s 0x%016llx\n",
+	if (ci.old_aes_mk_state >= '1' && ci.old_aes_mk_state <= '2') {
+		MKVP_TO_HEXBUF(ci.old_aes_mkvp, hexbuf);
+		n += sysfs_emit_at(buf, n, "AES OLD: %s 0x%s\n",
 				   cao_state[ci.old_aes_mk_state - '1'],
-				   ci.old_aes_mkvp);
-	else
+				   hexbuf);
+	} else {
 		n += sysfs_emit_at(buf, n, "AES OLD: - -\n");
+	}
 
-	if (ci.new_apka_mk_state >= '1' && ci.new_apka_mk_state <= '3')
-		n += sysfs_emit_at(buf, n, "APKA NEW: %s 0x%016llx\n",
+	if (ci.new_apka_mk_state >= '1' && ci.new_apka_mk_state <= '3') {
+		MKVP_TO_HEXBUF(ci.new_apka_mkvp, hexbuf);
+		n += sysfs_emit_at(buf, n, "APKA NEW: %s 0x%s\n",
 				   new_state[ci.new_apka_mk_state - '1'],
-				   ci.new_apka_mkvp);
-	else
+				   hexbuf);
+	} else {
 		n += sysfs_emit_at(buf, n, "APKA NEW: - -\n");
+	}
 
-	if (ci.cur_apka_mk_state >= '1' && ci.cur_apka_mk_state <= '2')
-		n += sysfs_emit_at(buf, n, "APKA CUR: %s 0x%016llx\n",
+	if (ci.cur_apka_mk_state >= '1' && ci.cur_apka_mk_state <= '2') {
+		MKVP_TO_HEXBUF(ci.cur_apka_mkvp, hexbuf);
+		n += sysfs_emit_at(buf, n, "APKA CUR: %s 0x%s\n",
 				   cao_state[ci.cur_apka_mk_state - '1'],
-				   ci.cur_apka_mkvp);
-	else
+				   hexbuf);
+	} else {
 		n += sysfs_emit_at(buf, n, "APKA CUR: - -\n");
+	}
 
-	if (ci.old_apka_mk_state >= '1' && ci.old_apka_mk_state <= '2')
-		n += sysfs_emit_at(buf, n, "APKA OLD: %s 0x%016llx\n",
+	if (ci.old_apka_mk_state >= '1' && ci.old_apka_mk_state <= '2') {
+		MKVP_TO_HEXBUF(ci.old_apka_mkvp, hexbuf);
+		n += sysfs_emit_at(buf, n, "APKA OLD: %s 0x%s\n",
 				   cao_state[ci.old_apka_mk_state - '1'],
-				   ci.old_apka_mkvp);
-	else
+				   hexbuf);
+	} else {
 		n += sysfs_emit_at(buf, n, "APKA OLD: - -\n");
+	}
 
-	if (ci.new_asym_mk_state >= '1' && ci.new_asym_mk_state <= '3')
-		n += sysfs_emit_at(buf, n, "ASYM NEW: %s 0x%016llx%016llx\n",
+	if (ci.new_asym_mk_state >= '1' && ci.new_asym_mk_state <= '3') {
+		MKVP_TO_HEXBUF(ci.new_asym_mkvp, hexbuf);
+		n += sysfs_emit_at(buf, n, "ASYM NEW: %s 0x%s\n",
 				   new_state[ci.new_asym_mk_state - '1'],
-				   *((u64 *)(ci.new_asym_mkvp)),
-				   *((u64 *)(ci.new_asym_mkvp + sizeof(u64))));
-	else
+				   hexbuf);
+	} else {
 		n += sysfs_emit_at(buf, n, "ASYM NEW: - -\n");
+	}
 
-	if (ci.cur_asym_mk_state >= '1' && ci.cur_asym_mk_state <= '2')
-		n += sysfs_emit_at(buf, n, "ASYM CUR: %s 0x%016llx%016llx\n",
+	if (ci.cur_asym_mk_state >= '1' && ci.cur_asym_mk_state <= '2') {
+		MKVP_TO_HEXBUF(ci.cur_asym_mkvp, hexbuf);
+		n += sysfs_emit_at(buf, n, "ASYM CUR: %s 0x%s\n",
 				   cao_state[ci.cur_asym_mk_state - '1'],
-				   *((u64 *)(ci.cur_asym_mkvp)),
-				   *((u64 *)(ci.cur_asym_mkvp + sizeof(u64))));
-	else
+				   hexbuf);
+	} else {
 		n += sysfs_emit_at(buf, n, "ASYM CUR: - -\n");
+	}
 
-	if (ci.old_asym_mk_state >= '1' && ci.old_asym_mk_state <= '2')
-		n += sysfs_emit_at(buf, n, "ASYM OLD: %s 0x%016llx%016llx\n",
+	if (ci.old_asym_mk_state >= '1' && ci.old_asym_mk_state <= '2') {
+		MKVP_TO_HEXBUF(ci.old_asym_mkvp, hexbuf);
+		n += sysfs_emit_at(buf, n, "ASYM OLD: %s 0x%s\n",
 				   cao_state[ci.old_asym_mk_state - '1'],
-				   *((u64 *)(ci.old_asym_mkvp)),
-				   *((u64 *)(ci.old_asym_mkvp + sizeof(u64))));
-	else
+				   hexbuf);
+	} else {
 		n += sysfs_emit_at(buf, n, "ASYM OLD: - -\n");
+	}
 
 	return n;
 }
@@ -210,13 +235,12 @@ static ssize_t ep11_api_ordinalnr_show(struct device *dev,
 				       struct device_attribute *attr,
 				       char *buf)
 {
-	struct zcrypt_card *zc = dev_get_drvdata(dev);
-	struct ep11_card_info ci;
 	struct ap_card *ac = to_ap_card(dev);
+	struct ep11_card_info ci;
 
 	memset(&ci, 0, sizeof(ci));
 
-	ep11_get_card_info(ac->id, &ci, zc->online);
+	ep11_get_card_info(ac->id, &ci, 0);
 
 	if (ci.API_ord_nr > 0)
 		return sysfs_emit(buf, "%u\n", ci.API_ord_nr);
@@ -231,13 +255,12 @@ static ssize_t ep11_fw_version_show(struct device *dev,
 				    struct device_attribute *attr,
 				    char *buf)
 {
-	struct zcrypt_card *zc = dev_get_drvdata(dev);
-	struct ep11_card_info ci;
 	struct ap_card *ac = to_ap_card(dev);
+	struct ep11_card_info ci;
 
 	memset(&ci, 0, sizeof(ci));
 
-	ep11_get_card_info(ac->id, &ci, zc->online);
+	ep11_get_card_info(ac->id, &ci, 0);
 
 	if (ci.FW_version > 0)
 		return sysfs_emit(buf, "%d.%d\n",
@@ -254,13 +277,12 @@ static ssize_t ep11_serialnr_show(struct device *dev,
 				  struct device_attribute *attr,
 				  char *buf)
 {
-	struct zcrypt_card *zc = dev_get_drvdata(dev);
-	struct ep11_card_info ci;
 	struct ap_card *ac = to_ap_card(dev);
+	struct ep11_card_info ci;
 
 	memset(&ci, 0, sizeof(ci));
 
-	ep11_get_card_info(ac->id, &ci, zc->online);
+	ep11_get_card_info(ac->id, &ci, 0);
 
 	if (ci.serial[0])
 		return sysfs_emit(buf, "%16.16s\n", ci.serial);
@@ -291,14 +313,13 @@ static ssize_t ep11_card_op_modes_show(struct device *dev,
 				       struct device_attribute *attr,
 				       char *buf)
 {
-	struct zcrypt_card *zc = dev_get_drvdata(dev);
-	int i, n = 0;
-	struct ep11_card_info ci;
 	struct ap_card *ac = to_ap_card(dev);
+	struct ep11_card_info ci;
+	int i, n = 0;
 
 	memset(&ci, 0, sizeof(ci));
 
-	ep11_get_card_info(ac->id, &ci, zc->online);
+	ep11_get_card_info(ac->id, &ci, 0);
 
 	for (i = 0; ep11_op_modes[i].mode_txt; i++) {
 		if (ci.op_mode & (1ULL << ep11_op_modes[i].mode_bit)) {
@@ -348,7 +369,7 @@ static ssize_t ep11_mkvps_show(struct device *dev,
 	if (zq->online)
 		ep11_get_domain_info(AP_QID_CARD(zq->queue->qid),
 				     AP_QID_QUEUE(zq->queue->qid),
-				     &di);
+				     &di, 0);
 
 	if (di.cur_wk_state == '0') {
 		n = sysfs_emit(buf, "WK CUR: %s -\n",
@@ -395,7 +416,7 @@ static ssize_t ep11_queue_op_modes_show(struct device *dev,
 	if (zq->online)
 		ep11_get_domain_info(AP_QID_CARD(zq->queue->qid),
 				     AP_QID_QUEUE(zq->queue->qid),
-				     &di);
+				     &di, 0);
 
 	for (i = 0; ep11_op_modes[i].mode_txt; i++) {
 		if (di.op_mode & (1ULL << ep11_op_modes[i].mode_bit)) {

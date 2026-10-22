@@ -268,7 +268,7 @@ static void zonefs_handle_io_error(struct inode *inode, struct blk_zone *zone,
 	 * Check the zone condition: if the zone is not "bad" (offline or
 	 * read-only), read errors are simply signaled to the IO issuer as long
 	 * as there is no inconsistency between the inode size and the amount of
-	 * data writen in the zone (data_size).
+	 * data written in the zone (data_size).
 	 */
 	data_size = zonefs_check_zone_condition(sb, z, zone);
 	isize = i_size_read(inode);
@@ -282,7 +282,7 @@ static void zonefs_handle_io_error(struct inode *inode, struct blk_zone *zone,
 	 * For the latter case, the cause may be a write IO error or an external
 	 * action on the device. Two error patterns exist:
 	 * 1) The inode size is lower than the amount of data in the zone:
-	 *    a write operation partially failed and data was writen at the end
+	 *    a write operation partially failed and data was written at the end
 	 *    of the file. This can happen in the case of a large direct IO
 	 *    needing several BIOs and/or write requests to be processed.
 	 * 2) The inode size is larger than the amount of data in the zone:
@@ -297,7 +297,7 @@ static void zonefs_handle_io_error(struct inode *inode, struct blk_zone *zone,
 	 */
 	if (isize != data_size)
 		zonefs_warn(sb,
-			    "inode %lu: invalid size %lld (should be %lld)\n",
+			    "inode %llu: invalid size %lld (should be %lld)\n",
 			    inode->i_ino, isize, data_size);
 
 	/*
@@ -308,7 +308,7 @@ static void zonefs_handle_io_error(struct inode *inode, struct blk_zone *zone,
 	 */
 	if ((z->z_flags & ZONEFS_ZONE_OFFLINE) ||
 	    (sbi->s_mount_opts & ZONEFS_MNTOPT_ERRORS_ZOL)) {
-		zonefs_warn(sb, "inode %lu: read/write access disabled\n",
+		zonefs_warn(sb, "inode %llu: read/write access disabled\n",
 			    inode->i_ino);
 		if (!(z->z_flags & ZONEFS_ZONE_OFFLINE))
 			z->z_flags |= ZONEFS_ZONE_OFFLINE;
@@ -316,7 +316,7 @@ static void zonefs_handle_io_error(struct inode *inode, struct blk_zone *zone,
 		data_size = 0;
 	} else if ((z->z_flags & ZONEFS_ZONE_READONLY) ||
 		   (sbi->s_mount_opts & ZONEFS_MNTOPT_ERRORS_ZRO)) {
-		zonefs_warn(sb, "inode %lu: write access disabled\n",
+		zonefs_warn(sb, "inode %llu: write access disabled\n",
 			    inode->i_ino);
 		if (!(z->z_flags & ZONEFS_ZONE_READONLY))
 			z->z_flags |= ZONEFS_ZONE_READONLY;
@@ -402,7 +402,7 @@ void __zonefs_io_error(struct inode *inode, bool write)
 	memalloc_noio_restore(noio_flag);
 
 	if (ret != 1) {
-		zonefs_err(sb, "Get inode %lu zone information failed %d\n",
+		zonefs_err(sb, "Get inode %llu zone information failed %d\n",
 			   inode->i_ino, ret);
 		zonefs_warn(sb, "remounting filesystem read-only\n");
 		sb->s_flags |= SB_RDONLY;
@@ -610,10 +610,14 @@ static long zonefs_fname_to_fno(const struct qstr *fname)
 		return c - '0';
 
 	for (i = 0, rname = name + len - 1; i < len; i++, rname--) {
+		long digit;
+
 		c = *rname;
 		if (!isdigit(c))
 			return -ENOENT;
-		fno += (c - '0') * shift;
+		digit = (c - '0') * shift;
+		if (check_add_overflow(fno, digit, &fno))
+			return -ENOENT;
 		shift *= 10;
 	}
 
@@ -644,7 +648,7 @@ static struct inode *zonefs_get_file_inode(struct inode *dir,
 	inode = iget_locked(sb, ino);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	if (!(inode->i_state & I_NEW)) {
+	if (!(inode_state_read_once(inode) & I_NEW)) {
 		WARN_ON_ONCE(inode->i_private != z);
 		return inode;
 	}
@@ -683,7 +687,7 @@ static struct inode *zonefs_get_zgroup_inode(struct super_block *sb,
 	inode = iget_locked(sb, ino);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	if (!(inode->i_state & I_NEW))
+	if (!(inode_state_read_once(inode) & I_NEW))
 		return inode;
 
 	inode->i_ino = ino;
@@ -903,8 +907,7 @@ static int zonefs_get_zone_info(struct zonefs_zone_data *zd)
 	struct block_device *bdev = zd->sb->s_bdev;
 	int ret;
 
-	zd->zones = kvcalloc(bdev_nr_zones(bdev), sizeof(struct blk_zone),
-			     GFP_KERNEL);
+	zd->zones = kvzalloc_objs(struct blk_zone, bdev_nr_zones(bdev));
 	if (!zd->zones)
 		return -ENOMEM;
 
@@ -948,8 +951,7 @@ static int zonefs_init_zgroup(struct super_block *sb,
 	if (!zgroup->g_nr_zones)
 		return 0;
 
-	zgroup->g_zones = kvcalloc(zgroup->g_nr_zones,
-				   sizeof(struct zonefs_zone), GFP_KERNEL);
+	zgroup->g_zones = kvzalloc_objs(struct zonefs_zone, zgroup->g_nr_zones);
 	if (!zgroup->g_zones)
 		return -ENOMEM;
 
@@ -1111,28 +1113,20 @@ static int zonefs_read_super(struct super_block *sb)
 	struct zonefs_sb_info *sbi = ZONEFS_SB(sb);
 	struct zonefs_super *super;
 	u32 crc, stored_crc;
-	struct page *page;
-	struct bio_vec bio_vec;
-	struct bio bio;
 	int ret;
 
-	page = alloc_page(GFP_KERNEL);
-	if (!page)
+	super = kmalloc(ZONEFS_SUPER_SIZE, GFP_KERNEL);
+	if (!super)
 		return -ENOMEM;
 
-	bio_init(&bio, sb->s_bdev, &bio_vec, 1, REQ_OP_READ);
-	bio.bi_iter.bi_sector = 0;
-	__bio_add_page(&bio, page, PAGE_SIZE, 0);
-
-	ret = submit_bio_wait(&bio);
+	ret = bdev_rw_virt(sb->s_bdev, 0, super, ZONEFS_SUPER_SIZE,
+			   REQ_OP_READ);
 	if (ret)
-		goto free_page;
-
-	super = page_address(page);
+		goto free_super;
 
 	ret = -EINVAL;
 	if (le32_to_cpu(super->s_magic) != ZONEFS_MAGIC)
-		goto free_page;
+		goto free_super;
 
 	stored_crc = le32_to_cpu(super->s_crc);
 	super->s_crc = 0;
@@ -1140,14 +1134,14 @@ static int zonefs_read_super(struct super_block *sb)
 	if (crc != stored_crc) {
 		zonefs_err(sb, "Invalid checksum (Expected 0x%08x, got 0x%08x)",
 			   crc, stored_crc);
-		goto free_page;
+		goto free_super;
 	}
 
 	sbi->s_features = le64_to_cpu(super->s_features);
 	if (sbi->s_features & ~ZONEFS_F_DEFINED_FEATURES) {
 		zonefs_err(sb, "Unknown features set 0x%llx\n",
 			   sbi->s_features);
-		goto free_page;
+		goto free_super;
 	}
 
 	if (sbi->s_features & ZONEFS_F_UID) {
@@ -1155,7 +1149,7 @@ static int zonefs_read_super(struct super_block *sb)
 				       le32_to_cpu(super->s_uid));
 		if (!uid_valid(sbi->s_uid)) {
 			zonefs_err(sb, "Invalid UID feature\n");
-			goto free_page;
+			goto free_super;
 		}
 	}
 
@@ -1164,7 +1158,7 @@ static int zonefs_read_super(struct super_block *sb)
 				       le32_to_cpu(super->s_gid));
 		if (!gid_valid(sbi->s_gid)) {
 			zonefs_err(sb, "Invalid GID feature\n");
-			goto free_page;
+			goto free_super;
 		}
 	}
 
@@ -1173,15 +1167,14 @@ static int zonefs_read_super(struct super_block *sb)
 
 	if (memchr_inv(super->s_reserved, 0, sizeof(super->s_reserved))) {
 		zonefs_err(sb, "Reserved area is being used\n");
-		goto free_page;
+		goto free_super;
 	}
 
 	import_uuid(&sbi->s_uuid, super->s_uuid);
 	ret = 0;
 
-free_page:
-	__free_page(page);
-
+free_super:
+	kfree(super);
 	return ret;
 }
 
@@ -1252,7 +1245,7 @@ static int zonefs_fill_super(struct super_block *sb, struct fs_context *fc)
 	 * ZONEFS_F_AGGRCNV which increases the maximum file size of a file
 	 * beyond the zone size is taken into account.
 	 */
-	sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
+	sbi = kzalloc_obj(*sbi);
 	if (!sbi)
 		return -ENOMEM;
 
@@ -1397,7 +1390,7 @@ static int zonefs_init_fs_context(struct fs_context *fc)
 {
 	struct zonefs_context *ctx;
 
-	ctx = kzalloc(sizeof(struct zonefs_context), GFP_KERNEL);
+	ctx = kzalloc_obj(struct zonefs_context);
 	if (!ctx)
 		return -ENOMEM;
 	ctx->s_mount_opts = ZONEFS_MNTOPT_ERRORS_RO;

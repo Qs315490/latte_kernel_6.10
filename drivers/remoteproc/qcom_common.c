@@ -28,7 +28,6 @@
 #define to_ssr_subdev(d) container_of(d, struct qcom_rproc_ssr, subdev)
 #define to_pdm_subdev(d) container_of(d, struct qcom_rproc_pdm, subdev)
 
-#define MAX_NUM_OF_SS           10
 #define MAX_REGION_NAME_LENGTH  16
 #define SBL_MINIDUMP_SMEM_ID	602
 #define MINIDUMP_REGION_VALID		('V' << 24 | 'A' << 16 | 'L' << 8 | 'I' << 0)
@@ -80,7 +79,7 @@ struct minidump_global_toc {
 	__le32				status;
 	__le32				md_revision;
 	__le32				enabled;
-	struct minidump_subsystem	subsystems[MAX_NUM_OF_SS];
+	struct minidump_subsystem	subsystems[];
 };
 
 struct qcom_ssr_subsystem {
@@ -110,6 +109,7 @@ static int qcom_add_minidump_segments(struct rproc *rproc, struct minidump_subsy
 	struct minidump_region __iomem *ptr;
 	struct minidump_region region;
 	int seg_cnt, i;
+	int ret = 0;
 	dma_addr_t da;
 	size_t size;
 	char *name;
@@ -130,17 +130,22 @@ static int qcom_add_minidump_segments(struct rproc *rproc, struct minidump_subsy
 		if (le32_to_cpu(region.valid) == MINIDUMP_REGION_VALID) {
 			name = kstrndup(region.name, MAX_REGION_NAME_LENGTH - 1, GFP_KERNEL);
 			if (!name) {
-				iounmap(ptr);
-				return -ENOMEM;
+				ret = -ENOMEM;
+				break;
 			}
 			da = le64_to_cpu(region.address);
 			size = le64_to_cpu(region.size);
-			rproc_coredump_add_custom_segment(rproc, da, size, rproc_dumpfn_t, name);
+			ret = rproc_coredump_add_custom_segment(rproc, da, size, rproc_dumpfn_t,
+								name);
+			if (ret) {
+				kfree(name);
+				break;
+			}
 		}
 	}
 
 	iounmap(ptr);
-	return 0;
+	return ret;
 }
 
 void qcom_minidump(struct rproc *rproc, unsigned int minidump_id,
@@ -151,13 +156,25 @@ void qcom_minidump(struct rproc *rproc, unsigned int minidump_id,
 	int ret;
 	struct minidump_subsystem *subsystem;
 	struct minidump_global_toc *toc;
+	unsigned int num_ss;
+	size_t toc_size;
 
 	/* Get Global minidump ToC*/
-	toc = qcom_smem_get(QCOM_SMEM_HOST_ANY, SBL_MINIDUMP_SMEM_ID, NULL);
+	toc = qcom_smem_get(QCOM_SMEM_HOST_ANY, SBL_MINIDUMP_SMEM_ID, &toc_size);
 
 	/* check if global table pointer exists and init is set */
 	if (IS_ERR(toc) || !toc->status) {
 		dev_err(&rproc->dev, "Minidump TOC not found in SMEM\n");
+		return;
+	}
+
+	/* Derive the number of subsystems from the actual SMEM item size */
+	num_ss = (toc_size - offsetof(struct minidump_global_toc, subsystems)) /
+		 sizeof(struct minidump_subsystem);
+
+	if (minidump_id >= num_ss) {
+		dev_err(&rproc->dev, "Minidump id %d is out of range: %d\n",
+			minidump_id, num_ss);
 		return;
 	}
 
@@ -370,7 +387,7 @@ static struct qcom_ssr_subsystem *qcom_ssr_get_subsys(const char *name)
 		if (!strcmp(info->name, name))
 			goto out;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info) {
 		info = ERR_PTR(-ENOMEM);
 		goto out;
@@ -534,7 +551,7 @@ static int pdm_notify_prepare(struct rproc_subdev *subdev)
 	struct auxiliary_device *adev;
 	int ret;
 
-	adev = kzalloc(sizeof(*adev), GFP_KERNEL);
+	adev = kzalloc_obj(*adev);
 	if (!adev)
 		return -ENOMEM;
 

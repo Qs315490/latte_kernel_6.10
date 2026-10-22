@@ -21,8 +21,7 @@
 #include "rvu.h"
 #include "lmac_common.h"
 
-#define DRV_NAME	"Marvell-CGX/RPM"
-#define DRV_STRING      "Marvell CGX/RPM Driver"
+#define DRV_NAME	"Marvell-CGX-RPM"
 
 #define CGX_RX_STAT_GLOBAL_INDEX	9
 
@@ -66,8 +65,18 @@ static int cgx_fwi_link_change(struct cgx *cgx, int lmac_id, bool en);
 /* Supported devices */
 static const struct pci_device_id cgx_id_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_OCTEONTX2_CGX) },
-	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CN10K_RPM) },
-	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CN10KB_RPM) },
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CN10K_RPM,
+	  PCI_ANY_ID, PCI_SUBSYS_DEVID_CN10K_A) },
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CN10K_RPM,
+	  PCI_ANY_ID, PCI_SUBSYS_DEVID_CNF10K_A) },
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CN10K_RPM,
+	  PCI_ANY_ID, PCI_SUBSYS_DEVID_CNF10K_B) },
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CN10KB_RPM,
+	  PCI_ANY_ID, PCI_SUBSYS_DEVID_CN10K_B) },
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CN10KB_RPM,
+	  PCI_ANY_ID, PCI_SUBSYS_DEVID_CN20KA) },
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CN10KB_RPM,
+	  PCI_ANY_ID, PCI_SUBSYS_DEVID_CNF20KA) },
 	{ 0, }  /* end of table */
 };
 
@@ -509,6 +518,18 @@ int cgx_set_pkind(void *cgxd, u8 lmac_id, int pkind)
 	return 0;
 }
 
+int cgx_get_pkind(void *cgxd, u8 lmac_id, int *pkind)
+{
+	struct cgx *cgx = cgxd;
+
+	if (!is_lmac_valid(cgx, lmac_id))
+		return -ENODEV;
+
+	*pkind = cgx_read(cgx, lmac_id, cgx->mac_ops->rxid_map_offset);
+	*pkind = *pkind & 0x3F;
+	return 0;
+}
+
 static u8 cgx_get_lmac_type(void *cgxd, int lmac_id)
 {
 	struct cgx *cgx = cgxd;
@@ -707,6 +728,11 @@ int cgx_get_rx_stats(void *cgxd, int lmac_id, int idx, u64 *rx_stat)
 
 	if (!is_lmac_valid(cgx, lmac_id))
 		return -ENODEV;
+
+	/* pass lmac as 0 for CGX_CMR_RX_STAT9-12 */
+	if (idx >= CGX_RX_STAT_GLOBAL_INDEX)
+		lmac_id = 0;
+
 	*rx_stat =  cgx_read(cgx, lmac_id, CGXX_CMRX_RX_STAT0 + (idx * 8));
 	return 0;
 }
@@ -1167,17 +1193,25 @@ static int cgx_link_usertable_index_map(int speed)
 static void set_mod_args(struct cgx_set_link_mode_args *args,
 			 u32 speed, u8 duplex, u8 autoneg, u64 mode)
 {
-	/* Fill default values incase of user did not pass
-	 * valid parameters
+	int mode_baseidx;
+	u8 cgx_mode;
+
+	if (args->multimode) {
+		args->mode |= mode;
+		return;
+	}
+
+	/* Derive mode_base_idx and mode fields based
+	 * on cgx_mode value
 	 */
-	if (args->duplex == DUPLEX_UNKNOWN)
-		args->duplex = duplex;
-	if (args->speed == SPEED_UNKNOWN)
-		args->speed = speed;
-	if (args->an == AUTONEG_UNKNOWN)
-		args->an = autoneg;
+	cgx_mode = find_first_bit((unsigned long *)&mode,
+				  CGX_MODE_MAX);
 	args->mode = mode;
-	args->ports = 0;
+	mode_baseidx = cgx_mode - 41;
+	if (mode_baseidx > 0) {
+		args->mode_baseidx = 1;
+		args->mode = BIT_ULL(mode_baseidx);
+	}
 }
 
 static void otx2_map_ethtool_link_modes(u64 bitmask,
@@ -1185,16 +1219,16 @@ static void otx2_map_ethtool_link_modes(u64 bitmask,
 {
 	switch (bitmask) {
 	case ETHTOOL_LINK_MODE_10baseT_Half_BIT:
-		set_mod_args(args, 10, 1, 1, BIT_ULL(CGX_MODE_SGMII));
+		set_mod_args(args, 10, 1, 1, BIT_ULL(CGX_MODE_SGMII_10M_BIT));
 		break;
 	case  ETHTOOL_LINK_MODE_10baseT_Full_BIT:
-		set_mod_args(args, 10, 0, 1, BIT_ULL(CGX_MODE_SGMII));
+		set_mod_args(args, 10, 0, 1, BIT_ULL(CGX_MODE_SGMII_10M_BIT));
 		break;
 	case  ETHTOOL_LINK_MODE_100baseT_Half_BIT:
-		set_mod_args(args, 100, 1, 1, BIT_ULL(CGX_MODE_SGMII));
+		set_mod_args(args, 100, 1, 1, BIT_ULL(CGX_MODE_SGMII_100M_BIT));
 		break;
 	case  ETHTOOL_LINK_MODE_100baseT_Full_BIT:
-		set_mod_args(args, 100, 0, 1, BIT_ULL(CGX_MODE_SGMII));
+		set_mod_args(args, 100, 0, 1, BIT_ULL(CGX_MODE_SGMII_100M_BIT));
 		break;
 	case  ETHTOOL_LINK_MODE_1000baseT_Half_BIT:
 		set_mod_args(args, 1000, 1, 1, BIT_ULL(CGX_MODE_SGMII));
@@ -1272,12 +1306,17 @@ static inline void link_status_user_format(u64 lstat,
 					   struct cgx_link_user_info *linfo,
 					   struct cgx *cgx, u8 lmac_id)
 {
+	unsigned int speed;
+
 	linfo->link_up = FIELD_GET(RESP_LINKSTAT_UP, lstat);
 	linfo->full_duplex = FIELD_GET(RESP_LINKSTAT_FDUPLEX, lstat);
-	linfo->speed = cgx_speed_mbps[FIELD_GET(RESP_LINKSTAT_SPEED, lstat)];
 	linfo->an = FIELD_GET(RESP_LINKSTAT_AN, lstat);
 	linfo->fec = FIELD_GET(RESP_LINKSTAT_FEC, lstat);
 	linfo->lmac_type_id = FIELD_GET(RESP_LINKSTAT_LMAC_TYPE, lstat);
+
+	speed = FIELD_GET(RESP_LINKSTAT_SPEED, lstat);
+	linfo->speed = speed < ARRAY_SIZE(cgx_speed_mbps) ?
+		       cgx_speed_mbps[speed] : 0;
 
 	if (linfo->lmac_type_id >= LMAC_MODE_MAX) {
 		dev_err(&cgx->pdev->dev, "Unknown lmac_type_id %d reported by firmware on cgx port%d:%d",
@@ -1466,25 +1505,36 @@ int cgx_get_fwdata_base(u64 *base)
 }
 
 int cgx_set_link_mode(void *cgxd, struct cgx_set_link_mode_args args,
+		      struct cgx_lmac_fwdata_s *linkmodes,
 		      int cgx_id, int lmac_id)
 {
 	struct cgx *cgx = cgxd;
 	u64 req = 0, resp;
+	u8 bit;
 
 	if (!cgx)
 		return -ENODEV;
 
-	if (args.mode)
-		otx2_map_ethtool_link_modes(args.mode, &args);
-	if (!args.speed && args.duplex && !args.an)
-		return -EINVAL;
+	for_each_set_bit(bit, args.advertising,
+			 __ETHTOOL_LINK_MODE_MASK_NBITS)
+		otx2_map_ethtool_link_modes(bit, &args);
+
+	if (args.multimode) {
+		if (linkmodes->advertised_link_modes_own != CGX_CMD_OWN_NS)
+			return -EBUSY;
+
+		linkmodes->advertised_link_modes = args.mode;
+		/* Update ownership */
+		linkmodes->advertised_link_modes_own = CGX_CMD_OWN_FIRMWARE;
+		args.mode = GENMASK_ULL(41, 0);
+	}
 
 	req = FIELD_SET(CMDREG_ID, CGX_CMD_MODE_CHANGE, req);
 	req = FIELD_SET(CMDMODECHANGE_SPEED,
 			cgx_link_usertable_index_map(args.speed), req);
 	req = FIELD_SET(CMDMODECHANGE_DUPLEX, args.duplex, req);
 	req = FIELD_SET(CMDMODECHANGE_AN, args.an, req);
-	req = FIELD_SET(CMDMODECHANGE_PORT, args.ports, req);
+	req = FIELD_SET(CMDMODECHANGE_MODE_BASEIDX, args.mode_baseidx, req);
 	req = FIELD_SET(CMDMODECHANGE_FLAGS, args.mode, req);
 
 	return cgx_fwi_cmd_generic(req, &resp, cgx, lmac_id);
@@ -1670,9 +1720,11 @@ unsigned long cgx_get_lmac_bmap(void *cgxd)
 
 static int cgx_lmac_init(struct cgx *cgx)
 {
+	u8 max_dmac_filters;
 	struct lmac *lmac;
+	int err, filter;
+	unsigned int i;
 	u64 lmac_list;
-	int i, err;
 
 	/* lmac_list specifies which lmacs are enabled
 	 * when bit n is set to 1, LMAC[n] is enabled
@@ -1690,7 +1742,7 @@ static int cgx_lmac_init(struct cgx *cgx)
 		cgx->lmac_count = cgx->max_lmac_per_mac;
 
 	for (i = 0; i < cgx->lmac_count; i++) {
-		lmac = kzalloc(sizeof(struct lmac), GFP_KERNEL);
+		lmac = kzalloc_obj(struct lmac);
 		if (!lmac)
 			return -ENOMEM;
 		lmac->name = kcalloc(1, sizeof("cgx_fwi_xxx_yyy"), GFP_KERNEL);
@@ -1698,7 +1750,7 @@ static int cgx_lmac_init(struct cgx *cgx)
 			err = -ENOMEM;
 			goto err_lmac_free;
 		}
-		sprintf(lmac->name, "cgx_fwi_%d_%d", cgx->cgx_id, i);
+		sprintf(lmac->name, "cgx_fwi_%u_%u", cgx->cgx_id, i);
 		if (cgx->mac_ops->non_contiguous_serdes_lane) {
 			lmac->lmac_id = __ffs64(lmac_list);
 			lmac_list   &= ~BIT_ULL(lmac->lmac_id);
@@ -1710,6 +1762,8 @@ static int cgx_lmac_init(struct cgx *cgx)
 		lmac->mac_to_index_bmap.max =
 				cgx->mac_ops->dmac_filter_count /
 				cgx->lmac_count;
+
+		max_dmac_filters = lmac->mac_to_index_bmap.max;
 
 		err = rvu_alloc_bitmap(&lmac->mac_to_index_bmap);
 		if (err)
@@ -1740,6 +1794,15 @@ static int cgx_lmac_init(struct cgx *cgx)
 		set_bit(lmac->lmac_id, &cgx->lmac_bmap);
 		cgx->mac_ops->mac_pause_frm_config(cgx, lmac->lmac_id, true);
 		lmac->lmac_type = cgx->mac_ops->get_lmac_type(cgx, lmac->lmac_id);
+
+		/* Disable stale DMAC filters for sane state */
+		for (filter = 0; filter < max_dmac_filters; filter++)
+			cgx_lmac_addr_del(cgx->cgx_id, lmac->lmac_id, filter);
+
+		/* As cgx_lmac_addr_del does not clear entry for index 0
+		 * so it needs to be done explicitly
+		 */
+		cgx_lmac_addr_reset(cgx->cgx_id, lmac->lmac_id);
 	}
 
 	/* Start X2P reset on given MAC block */
@@ -1776,7 +1839,9 @@ static int cgx_lmac_exit(struct cgx *cgx)
 			continue;
 		cgx->mac_ops->mac_pause_frm_config(cgx, lmac->lmac_id, false);
 		cgx_configure_interrupt(cgx, lmac, lmac->lmac_id, true);
-		kfree(lmac->mac_to_index_bmap.bmap);
+		rvu_free_bitmap(&lmac->mac_to_index_bmap);
+		rvu_free_bitmap(&lmac->rx_fc_pfvf_bmap);
+		rvu_free_bitmap(&lmac->tx_fc_pfvf_bmap);
 		kfree(lmac->name);
 		kfree(lmac);
 	}
@@ -1917,11 +1982,25 @@ static int cgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto err_disable_device;
 	}
 
+	err = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(48));
+	if (err) {
+		dev_err(dev, "DMA mask config failed, abort\n");
+		goto err_release_regions;
+	}
+
 	/* MAP configuration registers */
 	cgx->reg_base = pcim_iomap(pdev, PCI_CFG_REG_BAR_NUM, 0);
 	if (!cgx->reg_base) {
 		dev_err(dev, "CGX: Cannot map CSR memory space, aborting\n");
 		err = -ENOMEM;
+		goto err_release_regions;
+	}
+
+	if (!is_cn20k(pdev) &&
+	    !is_cgx_mapped_to_nix(pdev->subsystem_device, cgx->cgx_id)) {
+		dev_notice(dev, "CGX %d not mapped to NIX, skipping probe\n",
+			   cgx->cgx_id);
+		err = -ENODEV;
 		goto err_release_regions;
 	}
 
@@ -1934,7 +2013,7 @@ static int cgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	nvec = pci_msix_vec_count(cgx->pdev);
 	err = pci_alloc_irq_vectors(pdev, nvec, nvec, PCI_IRQ_MSIX);
-	if (err < 0 || err != nvec) {
+	if (err < 0) {
 		dev_err(dev, "Request for %d msix vectors failed, err %d\n",
 			nvec, err);
 		goto err_release_regions;
@@ -1945,7 +2024,7 @@ static int cgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	/* init wq for processing linkup requests */
 	INIT_WORK(&cgx->cgx_cmd_work, cgx_lmac_linkup_work);
-	cgx->cgx_cmd_workq = alloc_workqueue("cgx_cmd_workq", 0, 0);
+	cgx->cgx_cmd_workq = alloc_workqueue("cgx_cmd_workq", WQ_PERCPU, 0);
 	if (!cgx->cgx_cmd_workq) {
 		dev_err(dev, "alloc workqueue failed for cgx cmd");
 		err = -ENOMEM;

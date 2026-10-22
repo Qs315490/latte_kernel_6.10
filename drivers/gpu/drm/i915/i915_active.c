@@ -193,7 +193,7 @@ active_retire(struct i915_active *ref)
 		return;
 
 	if (ref->flags & I915_ACTIVE_RETIRE_SLEEPS) {
-		queue_work(system_unbound_wq, &ref->work);
+		queue_work(system_dfl_wq, &ref->work);
 		return;
 	}
 
@@ -257,10 +257,9 @@ static struct active_node *__active_lookup(struct i915_active *ref, u64 idx)
 		 * claimed the cache and we know that is does not match our
 		 * idx. If, and only if, the timeline is currently zero is it
 		 * worth competing to claim it atomically for ourselves (for
-		 * only the winner of that race will cmpxchg return the old
-		 * value of 0).
+		 * only the winner of that race will cmpxchg succeed).
 		 */
-		if (!cached && !cmpxchg64(&it->timeline, 0, idx))
+		if (!cached && try_cmpxchg64(&it->timeline, &cached, idx))
 			return it;
 	}
 
@@ -319,7 +318,7 @@ active_instance(struct i915_active *ref, u64 idx)
 	 */
 	node = kmem_cache_alloc(slab_cache, GFP_ATOMIC);
 	if (!node)
-		goto out;
+		goto err;
 
 	__i915_active_fence_init(&node->base, NULL, node_retire);
 	node->ref = ref;
@@ -333,6 +332,11 @@ out:
 	spin_unlock_irq(&ref->tree_lock);
 
 	return &node->base;
+
+err:
+	spin_unlock_irq(&ref->tree_lock);
+
+	return NULL;
 }
 
 void __i915_active_init(struct i915_active *ref,
@@ -651,7 +655,7 @@ static int __await_barrier(struct i915_active *ref, struct i915_sw_fence *fence)
 {
 	struct wait_barrier *wb;
 
-	wb = kmalloc(sizeof(*wb), GFP_KERNEL);
+	wb = kmalloc_obj(*wb);
 	if (unlikely(!wb))
 		return -ENOMEM;
 
@@ -1046,9 +1050,10 @@ __i915_active_fence_set(struct i915_active_fence *active,
 	 * nesting rules for the fence->lock; the inner lock is always the
 	 * older lock.
 	 */
-	spin_lock_irqsave(fence->lock, flags);
+	dma_fence_lock_irqsave(fence, flags);
 	if (prev)
-		spin_lock_nested(prev->lock, SINGLE_DEPTH_NESTING);
+		spin_lock_nested(dma_fence_spinlock(prev),
+				 SINGLE_DEPTH_NESTING);
 
 	/*
 	 * A does the cmpxchg first, and so it sees C or NULL, as before, or
@@ -1062,17 +1067,18 @@ __i915_active_fence_set(struct i915_active_fence *active,
 	 */
 	while (cmpxchg(__active_fence_slot(active), prev, fence) != prev) {
 		if (prev) {
-			spin_unlock(prev->lock);
+			spin_unlock(dma_fence_spinlock(prev));
 			dma_fence_put(prev);
 		}
-		spin_unlock_irqrestore(fence->lock, flags);
+		dma_fence_unlock_irqrestore(fence, flags);
 
 		prev = i915_active_fence_get(active);
 		GEM_BUG_ON(prev == fence);
 
-		spin_lock_irqsave(fence->lock, flags);
+		dma_fence_lock_irqsave(fence, flags);
 		if (prev)
-			spin_lock_nested(prev->lock, SINGLE_DEPTH_NESTING);
+			spin_lock_nested(dma_fence_spinlock(prev),
+					 SINGLE_DEPTH_NESTING);
 	}
 
 	/*
@@ -1089,10 +1095,11 @@ __i915_active_fence_set(struct i915_active_fence *active,
 	 */
 	if (prev) {
 		__list_del_entry(&active->cb.node);
-		spin_unlock(prev->lock); /* serialise with prev->cb_list */
+		/* serialise with prev->cb_list */
+		spin_unlock(dma_fence_spinlock(prev));
 	}
 	list_add_tail(&active->cb.node, &fence->cb_list);
-	spin_unlock_irqrestore(fence->lock, flags);
+	dma_fence_unlock_irqrestore(fence, flags);
 
 	return prev;
 }
@@ -1161,7 +1168,7 @@ struct i915_active *i915_active_create(void)
 {
 	struct auto_active *aa;
 
-	aa = kmalloc(sizeof(*aa), GFP_KERNEL);
+	aa = kmalloc_obj(*aa);
 	if (!aa)
 		return NULL;
 

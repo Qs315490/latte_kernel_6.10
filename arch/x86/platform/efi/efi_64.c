@@ -55,6 +55,7 @@
  */
 static u64 efi_va = EFI_VA_START;
 static struct mm_struct *efi_prev_mm;
+static unsigned long efi_cr4_lass;
 
 /*
  * We need our own copy of the higher levels of the page tables
@@ -73,7 +74,7 @@ int __init efi_alloc_page_tables(void)
 	gfp_t gfp_mask;
 
 	gfp_mask = GFP_KERNEL | __GFP_ZERO;
-	efi_pgd = (pgd_t *)__get_free_pages(gfp_mask, PGD_ALLOCATION_ORDER);
+	efi_pgd = (pgd_t *)__get_free_pages(gfp_mask, pgd_allocation_order());
 	if (!efi_pgd)
 		goto fail;
 
@@ -89,6 +90,7 @@ int __init efi_alloc_page_tables(void)
 	efi_mm.pgd = efi_pgd;
 	mm_init_cpumask(&efi_mm);
 	init_new_context(NULL, &efi_mm);
+	set_notrack_mm(&efi_mm);
 
 	return 0;
 
@@ -96,7 +98,7 @@ free_p4d:
 	if (pgtable_l5_enabled())
 		free_page((unsigned long)pgd_page_vaddr(*pgd));
 free_pgd:
-	free_pages((unsigned long)efi_pgd, PGD_ALLOCATION_ORDER);
+	free_pages((unsigned long)efi_pgd, pgd_allocation_order());
 fail:
 	return -ENOMEM;
 }
@@ -215,8 +217,8 @@ int __init efi_setup_page_tables(unsigned long pa_memmap, unsigned num_pages)
 	 * When SEV-ES is active, the GHCB as set by the kernel will be used
 	 * by firmware. Create a 1:1 unencrypted mapping for each GHCB.
 	 */
-	if (sev_es_efi_map_ghcbs(pgd)) {
-		pr_err("Failed to create 1:1 mapping for the GHCBs!\n");
+	if (sev_es_efi_map_ghcbs_cas(pgd)) {
+		pr_err("Failed to create 1:1 mapping for the GHCBs and CAs!\n");
 		return 1;
 	}
 
@@ -434,15 +436,44 @@ void __init efi_dump_pagetable(void)
  */
 static void efi_enter_mm(void)
 {
-	efi_prev_mm = current->active_mm;
-	current->active_mm = &efi_mm;
-	switch_mm(efi_prev_mm, &efi_mm, NULL);
+	efi_prev_mm = use_temporary_mm(&efi_mm);
 }
 
 static void efi_leave_mm(void)
 {
-	current->active_mm = efi_prev_mm;
-	switch_mm(&efi_mm, efi_prev_mm, NULL);
+	unuse_temporary_mm(efi_prev_mm);
+}
+
+/*
+ * Toggle LASS to allow EFI to access any 1:1 mapped region in the lower
+ * half.
+ *
+ * Disable LASS only after switching to EFI-mm, as userspace is not
+ * mapped in it. Similar to EFI-mm, these rely on preemption being
+ * disabled and the calls being serialized.
+ */
+
+static void efi_disable_lass(void)
+{
+	if (!cpu_feature_enabled(X86_FEATURE_LASS))
+		return;
+
+	lockdep_assert_preemption_disabled();
+
+	/* Save current CR4.LASS state */
+	efi_cr4_lass = cr4_read_shadow() & X86_CR4_LASS;
+	cr4_clear_bits(efi_cr4_lass);
+}
+
+static void efi_enable_lass(void)
+{
+	if (!cpu_feature_enabled(X86_FEATURE_LASS))
+		return;
+
+	lockdep_assert_preemption_disabled();
+
+	/* Reprogram CR4.LASS only if it was set earlier */
+	cr4_set_bits(efi_cr4_lass);
 }
 
 void arch_efi_call_virt_setup(void)
@@ -451,10 +482,12 @@ void arch_efi_call_virt_setup(void)
 	efi_fpu_begin();
 	firmware_restrict_branch_speculation_start();
 	efi_enter_mm();
+	efi_disable_lass();
 }
 
 void arch_efi_call_virt_teardown(void)
 {
+	efi_enable_lass();
 	efi_leave_mm();
 	firmware_restrict_branch_speculation_end();
 	efi_fpu_end();

@@ -12,10 +12,5 @@ more additions are needed here:
 
    rtla/index
    rv/index
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`
+   python
+   sbom/sbom

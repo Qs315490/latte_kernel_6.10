@@ -590,6 +590,28 @@ struct uapi_definition {
 			    UA_OPTIONAL,                                       \
 			    .is_udata = 1)
 
+/*
+ * Per-attribute UMEM descriptor. The payload is a single
+ * struct ib_uverbs_buffer_desc identifying a memory region backed by
+ * dma-buf or user virtual address. _access selects UA_OPTIONAL or
+ * UA_MANDATORY. Drivers obtain a umem from the attribute via the
+ * ib_umem_get_*() wrapper helpers.
+ */
+#define UVERBS_ATTR_UMEM(_attr_id, _access)                                    \
+	UVERBS_ATTR_PTR_IN(_attr_id,                                           \
+			   UVERBS_ATTR_TYPE(struct ib_uverbs_buffer_desc),     \
+			   _access)
+
+/*
+ * Bit masks of the @flags / @optional_flags fields of struct
+ * ib_uverbs_buffer_desc that the kernel understands. @flags is strict:
+ * any bit outside the known mask makes the call fail with -EINVAL.
+ * @optional_flags is advisory: bits outside the known mask are silently
+ * dropped. Both masks are extended as new bits are introduced.
+ */
+#define IB_UVERBS_BUFFER_DESC_FLAGS_KNOWN_MASK		0U
+#define IB_UVERBS_BUFFER_DESC_OPTIONAL_FLAGS_KNOWN_MASK	0U
+
 /* =================================================
  *              Parsing infrastructure
  * =================================================
@@ -635,6 +657,7 @@ struct uverbs_attr_bundle {
 		struct ib_uverbs_file *ufile;
 		struct ib_ucontext *context;
 		struct ib_uobject *uobject;
+		const struct uverbs_api_ioctl_method *method_elm;
 		DECLARE_BITMAP(attr_present, UVERBS_API_ATTR_BKEY_LEN);
 	);
 	struct uverbs_attr attrs[];
@@ -861,6 +884,8 @@ int uverbs_get_flags32(u32 *to, const struct uverbs_attr_bundle *attrs_bundle,
 		       size_t idx, u64 allowed_bits);
 int uverbs_copy_to(const struct uverbs_attr_bundle *attrs_bundle, size_t idx,
 		   const void *from, size_t size);
+int uverbs_get_buffer_desc(const struct uverbs_attr_bundle *attrs_bundle,
+			   u16 attr_id, struct ib_uverbs_buffer_desc *desc);
 __malloc void *_uverbs_alloc(struct uverbs_attr_bundle *bundle, size_t size,
 			     gfp_t flags);
 
@@ -895,6 +920,12 @@ int _uverbs_get_const_unsigned(u64 *to,
 			       size_t idx, u64 upper_bound, u64 *def_val);
 int uverbs_copy_to_struct_or_zero(const struct uverbs_attr_bundle *bundle,
 				  size_t idx, const void *from, size_t size);
+
+int _ib_copy_validate_udata_in(struct ib_udata *udata, void *req,
+			       size_t kernel_size, size_t minimum_size);
+int _ib_respond_udata(struct ib_udata *udata, const void *src, size_t len);
+int _ib_copy_validate_udata_cm_fail(struct ib_udata *udata, u64 req_cm,
+				    u64 valid_cm);
 #else
 static inline int
 uverbs_get_flags64(u64 *to, const struct uverbs_attr_bundle *attrs_bundle,
@@ -910,6 +941,12 @@ uverbs_get_flags32(u32 *to, const struct uverbs_attr_bundle *attrs_bundle,
 }
 static inline int uverbs_copy_to(const struct uverbs_attr_bundle *attrs_bundle,
 				 size_t idx, const void *from, size_t size)
+{
+	return -EINVAL;
+}
+static inline int
+uverbs_get_buffer_desc(const struct uverbs_attr_bundle *attrs_bundle,
+		       u16 attr_id, struct ib_uverbs_buffer_desc *desc)
 {
 	return -EINVAL;
 }
@@ -948,6 +985,25 @@ static inline int
 _uverbs_get_const_unsigned(u64 *to,
 			   const struct uverbs_attr_bundle *attrs_bundle,
 			   size_t idx, u64 upper_bound, u64 *def_val)
+{
+	return -EINVAL;
+}
+
+static inline int _ib_copy_validate_udata_in(struct ib_udata *udata, void *req,
+					     size_t kernel_size,
+					     size_t minimum_size)
+{
+	return -EINVAL;
+}
+
+static inline int _ib_respond_udata(struct ib_udata *udata, const void *src,
+				    size_t len)
+{
+	return -EINVAL;
+}
+
+static inline int _ib_copy_validate_udata_cm_fail(struct ib_udata *udata,
+						  u64 req_cm, u64 valid_cm)
 {
 	return -EINVAL;
 }
@@ -1014,6 +1070,85 @@ uverbs_get_raw_fd(int *to, const struct uverbs_attr_bundle *attrs_bundle,
 		  size_t idx)
 {
 	return uverbs_get_const_signed(to, attrs_bundle, idx);
+}
+
+/**
+ * ib_copy_validate_udata_in - Copy and validate that the request structure is
+ *                             compatible with this kernel
+ * @_udata: The system calls ib_udata struct
+ * @_req: The name of an on-stack structure that holds the driver data
+ * @_end_member: The member in the struct that is the original end of struct
+ *               from the first kernel to introduce it.
+ *
+ * Check that the udata input request struct is properly formed for this kernel.
+ * Then copy it into req
+ */
+#define ib_copy_validate_udata_in(_udata, _req, _end_member)      \
+	_ib_copy_validate_udata_in(_udata, &(_req), sizeof(_req), \
+				   offsetofend(typeof(_req), _end_member))
+
+/**
+ * ib_copy_validate_udata_in_cm - Copy the req structure and check the comp_mask
+ * @_udata: The system calls ib_udata struct
+ * @_req: The name of an on-stack structure that holds the driver data
+ * @_end_member: The member in the struct that is the original end of struct
+ *               from the first kernel to introduce it.
+ * @_valid_cm: A bitmask of bits permitted in the comp_mask_field.
+ *
+ * Check that the udata input request struct is properly formed for this kernel.
+ * Then copy it into req
+ */
+#define ib_copy_validate_udata_in_cm(_udata, _req, _end_member, _valid_cm)    \
+	({                                                                    \
+		typeof((_req).comp_mask) __valid_cm = _valid_cm;              \
+		int ret =                                                     \
+			ib_copy_validate_udata_in(_udata, _req, _end_member); \
+		if (!ret && ((_req).comp_mask & ~__valid_cm))                 \
+			ret = _ib_copy_validate_udata_cm_fail(                \
+				_udata, (_req).comp_mask, __valid_cm);        \
+		ret;                                                          \
+	})
+
+/**
+ * ib_is_udata_in_empty - Check if the udata input buffer is all zeros
+ * @udata: The system calls ib_udata struct
+ *
+ * This should be used if the driver does not currently define a driver data
+ * struct. Returns 0 if the buffer is empty or all zeros, -EOPNOTSUPP if
+ * non-zero data is present, or a negative error code on failure.
+ */
+static inline int ib_is_udata_in_empty(struct ib_udata *udata)
+{
+	if (!udata || udata->inlen == 0)
+		return 0;
+	return _ib_copy_validate_udata_in(udata, NULL, 0, 0);
+}
+
+/**
+ * ib_respond_udata - Copy a driver data response to userspace
+ * @_udata: The system calls ib_udata struct
+ * @_rep: Kernel buffer containing the response driver data on the stack
+ *
+ * Copy driver data response structures back to userspace in a way that
+ * is forwards and backwards compatible. Longer kernel structs are truncated,
+ * userspace has made some kind of error if it needed the truncated information.
+ * Shorter structs are zero padded.
+ */
+#define ib_respond_udata(_udata, _rep) \
+	_ib_respond_udata(_udata, &(_rep), sizeof(_rep))
+
+/**
+ * ib_respond_empty_udata - Zero fill the response buffer to userspace
+ * @_udata: The system calls ib_udata struct
+ *
+ * Used when there is no driver response data to return. Provides forward
+ * compatability by zeroing any buffer the user may have provided.
+ */
+static inline int ib_respond_empty_udata(struct ib_udata *udata)
+{
+	if (udata && udata->outlen && clear_user(udata->outbuf, udata->outlen))
+		return -EFAULT;
+	return 0;
 }
 
 #endif

@@ -1,10 +1,8 @@
+// SPDX-License-Identifier: MIT
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2014-2016 Intel Corporation
  */
 
-#include "display/intel_display.h"
 #include "gt/intel_gt.h"
 
 #include "i915_drv.h"
@@ -17,8 +15,6 @@
 #include "i915_gem_object.h"
 #include "i915_gem_object_frontbuffer.h"
 #include "i915_vma.h"
-
-#define VTD_GUARD (168u * I915_GTT_PAGE_SIZE) /* 168 or tile-row PTE padding */
 
 static bool gpu_write_needs_clflush(struct drm_i915_gem_object *obj)
 {
@@ -72,7 +68,7 @@ flush_write_domain(struct drm_i915_gem_object *obj, unsigned int flush_domains)
 			i915_vma_flush_writes(vma);
 		spin_unlock(&obj->vma.lock);
 
-		i915_gem_object_flush_frontbuffer(obj, ORIGIN_CPU);
+		i915_gem_object_frontbuffer_flush(obj, ORIGIN_CPU);
 		break;
 
 	case I915_GEM_DOMAIN_WC:
@@ -276,7 +272,7 @@ int i915_gem_object_set_cache_level(struct drm_i915_gem_object *obj,
 	 * For objects created by userspace through GEM_CREATE with pat_index
 	 * set by set_pat extension, simply return 0 here without touching
 	 * the cache setting, because such objects should have an immutable
-	 * cache setting by desgin and always managed by userspace.
+	 * cache setting by design and always managed by userspace.
 	 */
 	if (i915_gem_object_has_cache_level(obj, cache_level))
 		return 0;
@@ -424,7 +420,7 @@ out:
 struct i915_vma *
 i915_gem_object_pin_to_display_plane(struct drm_i915_gem_object *obj,
 				     struct i915_gem_ww_ctx *ww,
-				     u32 alignment,
+				     u32 alignment, unsigned int guard,
 				     const struct i915_gtt_view *view,
 				     unsigned int flags)
 {
@@ -453,15 +449,8 @@ i915_gem_object_pin_to_display_plane(struct drm_i915_gem_object *obj,
 		return ERR_PTR(ret);
 
 	/* VT-d may overfetch before/after the vma, so pad with scratch */
-	if (intel_scanout_needs_vtd_wa(i915)) {
-		unsigned int guard = VTD_GUARD;
-
-		if (i915_gem_object_is_tiled(obj))
-			guard = max(guard,
-				    i915_gem_object_get_tile_row_size(obj));
-
-		flags |= PIN_OFFSET_GUARD | guard;
-	}
+	if (guard)
+		flags |= PIN_OFFSET_GUARD | (guard * I915_GTT_PAGE_SIZE);
 
 	/*
 	 * As the user may map the buffer once pinned in the display plane
@@ -658,7 +647,7 @@ out_unlock:
 	i915_gem_object_unlock(obj);
 
 	if (!err && write_domain)
-		i915_gem_object_invalidate_frontbuffer(obj, ORIGIN_CPU);
+		i915_gem_object_frontbuffer_invalidate(obj, ORIGIN_CPU);
 
 out:
 	i915_gem_object_put(obj);
@@ -770,7 +759,7 @@ int i915_gem_object_prepare_write(struct drm_i915_gem_object *obj,
 	}
 
 out:
-	i915_gem_object_invalidate_frontbuffer(obj, ORIGIN_CPU);
+	i915_gem_object_frontbuffer_invalidate(obj, ORIGIN_CPU);
 	obj->mm.dirty = true;
 	/* return with the pages pinned */
 	return 0;

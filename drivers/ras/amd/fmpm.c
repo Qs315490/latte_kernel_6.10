@@ -52,6 +52,7 @@
 #include <acpi/apei.h>
 
 #include <asm/cpu_device_id.h>
+#include <asm/cpuid/api.h>
 #include <asm/mce.h>
 
 #include "../debugfs.h"
@@ -250,6 +251,13 @@ static bool rec_has_valid_entries(struct fru_rec *rec)
 	return true;
 }
 
+/*
+ * Row retirement is done on MI300 systems, and some bits are 'don't
+ * care' for comparing addresses with unique physical rows.  This
+ * includes all column bits and the row[13] bit.
+ */
+#define MASK_ADDR(addr)	((addr) & ~(MI300_UMC_MCA_ROW13 | MI300_UMC_MCA_COL))
+
 static bool fpds_equal(struct cper_fru_poison_desc *old, struct cper_fru_poison_desc *new)
 {
 	/*
@@ -258,7 +266,7 @@ static bool fpds_equal(struct cper_fru_poison_desc *old, struct cper_fru_poison_
 	 *
 	 * Also, order the checks from most->least likely to fail to shortcut the code.
 	 */
-	if (old->addr != new->addr)
+	if (MASK_ADDR(old->addr) != MASK_ADDR(new->addr))
 		return false;
 
 	if (old->hw_id != new->hw_id)
@@ -812,7 +820,7 @@ static int allocate_records(void)
 {
 	int i, ret = 0;
 
-	fru_records = kcalloc(max_nr_fru, sizeof(struct fru_rec *), GFP_KERNEL);
+	fru_records = kzalloc_objs(struct fru_rec *, max_nr_fru);
 	if (!fru_records) {
 		ret = -ENOMEM;
 		goto out;

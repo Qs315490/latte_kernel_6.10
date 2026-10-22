@@ -17,7 +17,6 @@
 #include <linux/regmap.h>
 
 static const struct regmap_config mx25_tsadc_regmap_config = {
-	.fast_io = true,
 	.max_register = 8,
 	.reg_bits = 32,
 	.val_bits = 32,
@@ -65,15 +64,14 @@ static int mx25_tsadc_setup_irq(struct platform_device *pdev,
 				struct mx25_tsadc *tsadc)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *np = dev->of_node;
 	int irq;
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
 
-	tsadc->domain = irq_domain_add_simple(np, 2, 0, &mx25_tsadc_domain_ops,
-					      tsadc);
+	tsadc->domain = irq_domain_create_simple(dev_fwnode(dev), 2, 0, &mx25_tsadc_domain_ops,
+						 tsadc);
 	if (!tsadc->domain) {
 		dev_err(dev, "Failed to add irq domain\n");
 		return -ENOMEM;

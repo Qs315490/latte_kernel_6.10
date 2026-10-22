@@ -18,7 +18,12 @@ allOf:
 
 properties:
   compatible:
-    const: qcom,sc7180-venus
+    oneOf:
+      - items:
+          - enum:
+              - qcom,qcs615-venus
+          - const: qcom,sc7180-venus
+      - const: qcom,sc7180-venus
 
   power-domains:
     minItems: 2
@@ -85,6 +90,21 @@ properties:
 
     deprecated: true
     additionalProperties: false
+
+  video-firmware:
+    type: object
+    additionalProperties: false
+
+    description: |
+      Firmware subnode is needed when the platform does not
+      have TrustZone.
+
+    properties:
+      iommus:
+        maxItems: 1
+
+    required:
+      - iommus
 
 required:
   - compatible

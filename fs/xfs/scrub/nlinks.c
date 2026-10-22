@@ -3,7 +3,7 @@
  * Copyright (c) 2021-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -58,7 +58,7 @@ xchk_setup_nlinks(
 			return error;
 	}
 
-	xnc = kvzalloc(sizeof(struct xchk_nlink_ctrs), XCHK_GFP_FLAGS);
+	xnc = kvzalloc_obj(struct xchk_nlink_ctrs, XCHK_GFP_FLAGS);
 	if (!xnc)
 		return -ENOMEM;
 	xnc->xname.name = xnc->namebuf;
@@ -175,7 +175,7 @@ xchk_nlinks_live_update(
 	if (xrep_is_tempfile(p->dp))
 		return NOTIFY_DONE;
 
-	trace_xchk_nlinks_live_update(xnc->sc->mp, p->dp, action, p->ip->i_ino,
+	trace_xchk_nlinks_live_update(xnc->sc->mp, p->dp, action, I_INO(p->ip),
 			p->delta, p->name->name, p->name->len);
 
 	/*
@@ -183,12 +183,12 @@ xchk_nlinks_live_update(
 	 * to @ip.  If @ip is a subdirectory, update the number of child links
 	 * going out of @dp.
 	 */
-	if (xchk_iscan_want_live_update(&xnc->collect_iscan, p->dp->i_ino)) {
+	if (xchk_iscan_want_live_update(&xnc->collect_iscan, I_INO(p->dp))) {
 		mutex_lock(&xnc->lock);
-		error = xchk_nlinks_update_incore(xnc, p->ip->i_ino, p->delta,
+		error = xchk_nlinks_update_incore(xnc, I_INO(p->ip), p->delta,
 				0, 0);
 		if (!error && S_ISDIR(VFS_IC(p->ip)->i_mode))
-			error = xchk_nlinks_update_incore(xnc, p->dp->i_ino, 0,
+			error = xchk_nlinks_update_incore(xnc, I_INO(p->dp), 0,
 					0, p->delta);
 		mutex_unlock(&xnc->lock);
 		if (error)
@@ -200,9 +200,9 @@ xchk_nlinks_live_update(
 	 * number of backrefs pointing to @dp.
 	 */
 	if (S_ISDIR(VFS_IC(p->ip)->i_mode) &&
-	    xchk_iscan_want_live_update(&xnc->collect_iscan, p->ip->i_ino)) {
+	    xchk_iscan_want_live_update(&xnc->collect_iscan, I_INO(p->ip))) {
 		mutex_lock(&xnc->lock);
-		error = xchk_nlinks_update_incore(xnc, p->dp->i_ino, 0,
+		error = xchk_nlinks_update_incore(xnc, I_INO(p->dp), 0,
 				p->delta, 0);
 		mutex_unlock(&xnc->lock);
 		if (error)
@@ -243,7 +243,7 @@ xchk_nlinks_collect_dirent(
 		dotdot = true;
 
 	/* Don't accept a '.' entry that points somewhere else. */
-	if (dot && ino != dp->i_ino) {
+	if (dot && ino != I_INO(dp)) {
 		error = -ECANCELED;
 		goto out_abort;
 	}
@@ -304,7 +304,7 @@ xchk_nlinks_collect_dirent(
 	 * number of child links of dp.
 	 */
 	if (!dot && !dotdot && name->type == XFS_DIR3_FT_DIR) {
-		error = xchk_nlinks_update_incore(xnc, dp->i_ino, 0, 0, 1);
+		error = xchk_nlinks_update_incore(xnc, I_INO(dp), 0, 0, 1);
 		if (error)
 			goto out_unlock;
 	}
@@ -376,6 +376,37 @@ out_incomplete:
 	return error;
 }
 
+static uint
+xchk_nlinks_ilock_dir(
+	struct xfs_inode	*ip)
+{
+	uint			lock_mode = XFS_ILOCK_SHARED;
+
+	/*
+	 * Take the IOLOCK so that other threads cannot start a directory
+	 * update while we're scanning.
+	 */
+	xfs_ilock(ip, XFS_IOLOCK_SHARED);
+
+	/*
+	 * We're going to scan the directory entries, so we must be ready to
+	 * pull the data fork mappings into memory if they aren't already.
+	 */
+	if (xfs_need_iread_extents(&ip->i_df))
+		lock_mode = XFS_ILOCK_EXCL;
+
+	/*
+	 * We're going to scan the parent pointers, so we must be ready to
+	 * pull the attr fork mappings into memory if they aren't already.
+	 */
+	if (xfs_has_parent(ip->i_mount) && xfs_inode_has_attr_fork(ip) &&
+	    xfs_need_iread_extents(&ip->i_af))
+		lock_mode = XFS_ILOCK_EXCL;
+
+	xfs_ilock(ip, lock_mode);
+	return lock_mode | XFS_IOLOCK_SHARED;
+}
+
 /* Walk a directory to bump the observed link counts of the children. */
 STATIC int
 xchk_nlinks_collect_dir(
@@ -394,8 +425,7 @@ xchk_nlinks_collect_dir(
 		return 0;
 
 	/* Prevent anyone from changing this directory while we walk it. */
-	xfs_ilock(dp, XFS_IOLOCK_SHARED);
-	lock_mode = xfs_ilock_data_map_shared(dp);
+	lock_mode = xchk_nlinks_ilock_dir(dp);
 
 	/*
 	 * The dotdot entry of an unlinked directory still points to the last
@@ -452,7 +482,6 @@ out_abort:
 	xchk_iscan_abort(&xnc->collect_iscan);
 out_unlock:
 	xfs_iunlock(dp, lock_mode);
-	xfs_iunlock(dp, XFS_IOLOCK_SHARED);
 	return error;
 }
 
@@ -555,9 +584,7 @@ xchk_nlinks_collect(
 	 * do not take sb_internal.
 	 */
 	xchk_trans_cancel(sc);
-	error = xchk_trans_alloc_empty(sc);
-	if (error)
-		return error;
+	xchk_trans_alloc_empty(sc);
 
 	while ((error = xchk_iscan_iter(&xnc->collect_iscan, &ip)) == 1) {
 		if (S_ISDIR(VFS_I(ip)->i_mode))
@@ -666,7 +693,7 @@ xchk_nlinks_compare_inode(
 		goto out_scanlock;
 	}
 
-	error = xchk_nlinks_comparison_read(xnc, ip->i_ino, &obs);
+	error = xchk_nlinks_comparison_read(xnc, I_INO(ip), &obs);
 	if (error)
 		goto out_scanlock;
 
@@ -692,15 +719,15 @@ xchk_nlinks_compare_inode(
 	 * count, but it will let them decrease it.
 	 */
 	if (total_links > XFS_NLINK_PINNED) {
-		xchk_ino_set_corrupt(sc, ip->i_ino);
+		xchk_ip_set_corrupt(sc, ip);
 		goto out_corrupt;
 	} else if (total_links > XFS_MAXLINK) {
-		xchk_ino_set_warning(sc, ip->i_ino);
+		xchk_ino_set_warning(sc, I_INO(ip));
 	}
 
 	/* Link counts should match. */
 	if (total_links != actual_nlink) {
-		xchk_ino_set_corrupt(sc, ip->i_ino);
+		xchk_ip_set_corrupt(sc, ip);
 		goto out_corrupt;
 	}
 
@@ -714,14 +741,14 @@ xchk_nlinks_compare_inode(
 		 * number of subdirectory entries in the directory.
 		 */
 		if (obs.children != obs.backrefs)
-			xchk_ino_xref_set_corrupt(sc, ip->i_ino);
+			xchk_ip_xref_set_corrupt(sc, ip);
 	} else {
 		/*
 		 * Non-directories and unlinked directories should not have
 		 * back references.
 		 */
 		if (obs.backrefs != 0) {
-			xchk_ino_set_corrupt(sc, ip->i_ino);
+			xchk_ip_set_corrupt(sc, ip);
 			goto out_corrupt;
 		}
 
@@ -730,7 +757,7 @@ xchk_nlinks_compare_inode(
 		 * children.
 		 */
 		if (obs.children != 0) {
-			xchk_ino_set_corrupt(sc, ip->i_ino);
+			xchk_ip_set_corrupt(sc, ip);
 			goto out_corrupt;
 		}
 	}
@@ -743,7 +770,7 @@ xchk_nlinks_compare_inode(
 		 * the root directory.
 		 */
 		if (obs.parents != 1) {
-			xchk_ino_set_corrupt(sc, ip->i_ino);
+			xchk_ip_set_corrupt(sc, ip);
 			goto out_corrupt;
 		}
 	} else if (actual_nlink > 0) {
@@ -752,7 +779,7 @@ xchk_nlinks_compare_inode(
 		 * least one parent.
 		 */
 		if (obs.parents == 0) {
-			xchk_ino_set_corrupt(sc, ip->i_ino);
+			xchk_ip_set_corrupt(sc, ip);
 			goto out_corrupt;
 		}
 	}
@@ -880,9 +907,7 @@ xchk_nlinks_compare(
 	 * inactivation workqueue.
 	 */
 	xchk_trans_cancel(sc);
-	error = xchk_trans_alloc_empty(sc);
-	if (error)
-		return error;
+	xchk_trans_alloc_empty(sc);
 
 	/*
 	 * Use the inobt to walk all allocated inodes to compare the link
@@ -947,7 +972,8 @@ xchk_nlinks_teardown_scan(
 
 	xfs_dir_hook_del(xnc->sc->mp, &xnc->dhook);
 
-	xfarray_destroy(xnc->nlinks);
+	if (xnc->nlinks)
+		xfarray_destroy(xnc->nlinks);
 	xnc->nlinks = NULL;
 
 	xchk_iscan_teardown(&xnc->collect_iscan);
@@ -966,7 +992,6 @@ xchk_nlinks_setup_scan(
 	struct xchk_nlink_ctrs	*xnc)
 {
 	struct xfs_mount	*mp = sc->mp;
-	char			*descr;
 	unsigned long long	max_inos;
 	xfs_agnumber_t		last_agno = mp->m_sb.sb_agcount - 1;
 	xfs_agino_t		first_agino, last_agino;
@@ -983,10 +1008,9 @@ xchk_nlinks_setup_scan(
 	 */
 	xfs_agino_range(mp, last_agno, &first_agino, &last_agino);
 	max_inos = XFS_AGINO_TO_INO(mp, last_agno, last_agino) + 1;
-	descr = xchk_xfile_descr(sc, "file link counts");
-	error = xfarray_create(descr, min(XFS_MAXINUMBER + 1, max_inos),
+	error = xfarray_create("file link counts",
+			min(XFS_MAXINUMBER + 1, max_inos),
 			sizeof(struct xchk_nlink), &xnc->nlinks);
-	kfree(descr);
 	if (error)
 		goto out_teardown;
 

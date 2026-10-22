@@ -192,7 +192,7 @@ static unsigned long pvr2fb_map;
 
 #ifdef CONFIG_PVR2_DMA
 static unsigned int shdma = PVR2_CASCADE_CHAN;
-static unsigned int pvr2dma = ONCHIP_NR_DMA_CHANNELS;
+static unsigned int pvr2dma = CONFIG_NR_ONCHIP_DMA_CHANNELS;
 #endif
 
 static struct fb_videomode pvr2_modedb[] = {
@@ -652,7 +652,7 @@ static ssize_t pvr2fb_write(struct fb_info *info, const char *buf,
 
 	nr_pages = (count + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
-	pages = kmalloc_array(nr_pages, sizeof(struct page *), GFP_KERNEL);
+	pages = kmalloc_objs(struct page *, nr_pages);
 	if (!pages)
 		return -ENOMEM;
 
@@ -993,9 +993,8 @@ static void pvr2fb_pci_remove(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id pvr2fb_pci_tbl[] = {
-	{ PCI_VENDOR_ID_NEC, PCI_DEVICE_ID_NEC_NEON250,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
-	{ 0, },
+	{ PCI_VDEVICE(NEC, PCI_DEVICE_ID_NEC_NEON250) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, pvr2fb_pci_tbl);

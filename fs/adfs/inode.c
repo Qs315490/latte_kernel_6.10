@@ -53,13 +53,14 @@ static void adfs_write_failed(struct address_space *mapping, loff_t to)
 		truncate_pagecache(inode, inode->i_size);
 }
 
-static int adfs_write_begin(struct file *file, struct address_space *mapping,
-			loff_t pos, unsigned len,
-			struct folio **foliop, void **fsdata)
+static int adfs_write_begin(const struct kiocb *iocb,
+			    struct address_space *mapping,
+			    loff_t pos, unsigned len,
+			    struct folio **foliop, void **fsdata)
 {
 	int ret;
 
-	ret = cont_write_begin(file, mapping, pos, len, foliop, fsdata,
+	ret = cont_write_begin(iocb, mapping, pos, len, foliop, fsdata,
 				adfs_get_block,
 				&ADFS_I(mapping->host)->mmu_private);
 	if (unlikely(ret))
@@ -298,8 +299,7 @@ out:
  * later.
  */
 int
-adfs_notify_change(struct mnt_idmap *idmap, struct dentry *dentry,
-		   struct iattr *attr)
+adfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = d_inode(dentry);
 	struct super_block *sb = inode->i_sb;
@@ -354,8 +354,7 @@ out:
 
 /*
  * write an existing inode back to the directory, and therefore the disk.
- * The adfs-specific inode data has already been updated by
- * adfs_notify_change()
+ * The adfs-specific inode data has already been updated by * adfs_setattr().
  */
 int adfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {

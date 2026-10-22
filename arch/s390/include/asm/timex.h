@@ -12,32 +12,15 @@
 
 #include <linux/preempt.h>
 #include <linux/time64.h>
+#include <asm/tod_types.h>
 #include <asm/lowcore.h>
+#include <asm/machine.h>
 #include <asm/asm.h>
 
 /* The value of the TOD clock for 1.1.1970. */
 #define TOD_UNIX_EPOCH 0x7d91048bca000000ULL
 
 extern u64 clock_comparator_max;
-
-union tod_clock {
-	__uint128_t val;
-	struct {
-		__uint128_t ei	:  8; /* epoch index */
-		__uint128_t tod : 64; /* bits 0-63 of tod clock */
-		__uint128_t	: 40;
-		__uint128_t pf	: 16; /* programmable field */
-	};
-	struct {
-		__uint128_t eitod : 72; /* epoch index + bits 0-63 tod clock */
-		__uint128_t	  : 56;
-	};
-	struct {
-		__uint128_t us	: 60; /* micro-seconds */
-		__uint128_t sus	: 12; /* sub-microseconds */
-		__uint128_t	: 56;
-	};
-} __packed;
 
 /* Inline functions for clock register access. */
 static inline int set_tod_clock(__u64 time)
@@ -80,7 +63,7 @@ static inline void set_tod_programmable_field(u16 val)
 {
 	asm volatile(
 		"	lgr	0,%[val]\n"
-		"	sckpf\n"
+		"	sckpf"
 		:
 		: [val] "d" ((unsigned long)val)
 		: "0");
@@ -195,13 +178,6 @@ static inline unsigned long get_tod_clock_fast(void)
 	asm volatile("stckf %0" : "=Q" (clk) : : "cc");
 	return clk;
 }
-
-static inline cycles_t get_cycles(void)
-{
-	return (cycles_t) get_tod_clock() >> 2;
-}
-#define get_cycles get_cycles
-
 int get_phys_clock(unsigned long *clock);
 void init_cpu_timer(void);
 
@@ -228,6 +204,12 @@ static inline unsigned long get_tod_clock_monotonic(void)
 	preempt_enable_notrace();
 	return tod;
 }
+
+static inline cycles_t get_cycles(void)
+{
+	return (cycles_t)get_tod_clock_monotonic() >> 2;
+}
+#define get_cycles get_cycles
 
 /**
  * tod_to_ns - convert a TOD format value to nanoseconds
@@ -267,7 +249,7 @@ static __always_inline u128 eitod_to_ns(u128 todval)
  */
 static inline int tod_after(unsigned long a, unsigned long b)
 {
-	if (MACHINE_HAS_SCC)
+	if (machine_has_scc())
 		return (long) a > (long) b;
 	return a > b;
 }
@@ -281,7 +263,7 @@ static inline int tod_after(unsigned long a, unsigned long b)
  */
 static inline int tod_after_eq(unsigned long a, unsigned long b)
 {
-	if (MACHINE_HAS_SCC)
+	if (machine_has_scc())
 		return (long) a >= (long) b;
 	return a >= b;
 }

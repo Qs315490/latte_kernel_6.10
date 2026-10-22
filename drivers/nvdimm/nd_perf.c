@@ -123,7 +123,7 @@ static ssize_t nvdimm_pmu_cpumask_show(struct device *dev,
 
 	nd_pmu = container_of(pmu, struct nvdimm_pmu, pmu);
 
-	return cpumap_print_to_pagebuf(true, buf, cpumask_of(nd_pmu->cpu));
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpumask_of(nd_pmu->cpu)));
 }
 
 static int nvdimm_pmu_cpu_offline(unsigned int cpu, struct hlist_node *node)
@@ -184,7 +184,7 @@ static int create_cpumask_attr_group(struct nvdimm_pmu *nd_pmu)
 	struct attribute **attrs_group;
 	struct attribute_group *nvdimm_pmu_cpumask_group;
 
-	pmu_events_attr = kzalloc(sizeof(*pmu_events_attr), GFP_KERNEL);
+	pmu_events_attr = kzalloc_obj(*pmu_events_attr);
 	if (!pmu_events_attr)
 		return -ENOMEM;
 
@@ -195,7 +195,7 @@ static int create_cpumask_attr_group(struct nvdimm_pmu *nd_pmu)
 	}
 
 	/* Allocate memory for cpumask attribute group */
-	nvdimm_pmu_cpumask_group = kzalloc(sizeof(*nvdimm_pmu_cpumask_group), GFP_KERNEL);
+	nvdimm_pmu_cpumask_group = kzalloc_obj(*nvdimm_pmu_cpumask_group);
 	if (!nvdimm_pmu_cpumask_group) {
 		kfree(pmu_events_attr);
 		kfree(attrs_group);

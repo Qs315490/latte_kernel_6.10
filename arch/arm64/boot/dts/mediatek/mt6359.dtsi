@@ -15,10 +15,13 @@
 			#io-channel-cells = <1>;
 		};
 
-		mt6359codec: mt6359codec {
+		mt6359codec: audio-codec {
+			compatible = "mediatek,mt6359-codec";
 		};
 
 		regulators {
+			compatible = "mediatek,mt6359-regulator";
+
 			mt6359_vs1_buck_reg: buck_vs1 {
 				regulator-name = "vs1";
 				regulator-min-microvolt = <800000>;
@@ -161,15 +164,8 @@
 				regulator-min-microvolt = <900000>;
 				regulator-max-microvolt = <1300000>;
 			};
-			mt6359_vcn33_1_bt_ldo_reg: ldo_vcn33_1_bt {
-				regulator-name = "vcn33_1_bt";
-				regulator-min-microvolt = <2800000>;
-				regulator-max-microvolt = <3500000>;
-			};
-			mt6359_vcn33_1_wifi_ldo_reg: ldo_vcn33_1_wifi {
-				regulator-name = "vcn33_1_wifi";
-				regulator-min-microvolt = <2800000>;
-				regulator-max-microvolt = <3500000>;
+			mt6359_vcn33_1_ldo_reg: ldo_vcn33_1 {
+				regulator-name = "vcn33_1";
 			};
 			mt6359_vaux18_ldo_reg: ldo_vaux18 {
 				regulator-name = "vaux18";
@@ -202,7 +198,7 @@
 				regulator-max-microvolt = <1700000>;
 			};
 			mt6359_vrfck_1_ldo_reg: ldo_vrfck_1 {
-				regulator-name = "vrfck";
+				regulator-name = "vrfck_1";
 				regulator-min-microvolt = <1240000>;
 				regulator-max-microvolt = <1600000>;
 			};
@@ -224,19 +220,12 @@
 				regulator-max-microvolt = <3300000>;
 			};
 			mt6359_vemc_1_ldo_reg: ldo_vemc_1 {
-				regulator-name = "vemc";
+				regulator-name = "vemc_1";
 				regulator-min-microvolt = <2500000>;
 				regulator-max-microvolt = <3300000>;
 			};
-			mt6359_vcn33_2_bt_ldo_reg: ldo_vcn33_2_bt {
-				regulator-name = "vcn33_2_bt";
-				regulator-min-microvolt = <2800000>;
-				regulator-max-microvolt = <3500000>;
-			};
-			mt6359_vcn33_2_wifi_ldo_reg: ldo_vcn33_2_wifi {
-				regulator-name = "vcn33_2_wifi";
-				regulator-min-microvolt = <2800000>;
-				regulator-max-microvolt = <3500000>;
+			mt6359_vcn33_2_ldo_reg: ldo_vcn33_2 {
+				regulator-name = "vcn33_2";
 			};
 			mt6359_va12_ldo_reg: ldo_va12 {
 				regulator-name = "va12";
@@ -297,7 +286,7 @@
 			};
 		};
 
-		mt6359rtc: mt6359rtc {
+		mt6359rtc: rtc {
 			compatible = "mediatek,mt6358-rtc";
 		};
 	};

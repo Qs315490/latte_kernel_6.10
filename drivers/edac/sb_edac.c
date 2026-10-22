@@ -19,7 +19,6 @@
 #include <linux/smp.h>
 #include <linux/bitmap.h>
 #include <linux/math64.h>
-#include <linux/mod_devicetable.h>
 #include <asm/cpu_device_id.h>
 #include <asm/intel-family.h>
 #include <asm/processor.h>
@@ -364,11 +363,11 @@ struct sbridge_dev {
 	int			seg;
 	u8			bus, mc;
 	u8			node_id, source_id;
-	struct pci_dev		**pdev;
 	enum domain		dom;
 	int			n_devs;
 	int			i_devs;
 	struct mem_ctl_info	*mci;
+	struct pci_dev		*pdev[] __counted_by(n_devs);
 };
 
 struct knl_pvt {
@@ -771,22 +770,14 @@ static struct sbridge_dev *alloc_sbridge_dev(int seg, u8 bus, enum domain dom,
 {
 	struct sbridge_dev *sbridge_dev;
 
-	sbridge_dev = kzalloc(sizeof(*sbridge_dev), GFP_KERNEL);
+	sbridge_dev = kzalloc_flex(*sbridge_dev, pdev, table->n_devs_per_imc);
 	if (!sbridge_dev)
 		return NULL;
 
-	sbridge_dev->pdev = kcalloc(table->n_devs_per_imc,
-				    sizeof(*sbridge_dev->pdev),
-				    GFP_KERNEL);
-	if (!sbridge_dev->pdev) {
-		kfree(sbridge_dev);
-		return NULL;
-	}
-
+	sbridge_dev->n_devs = table->n_devs_per_imc;
 	sbridge_dev->seg = seg;
 	sbridge_dev->bus = bus;
 	sbridge_dev->dom = dom;
-	sbridge_dev->n_devs = table->n_devs_per_imc;
 	list_add_tail(&sbridge_dev->list, &sbridge_edac_list);
 
 	return sbridge_dev;
@@ -795,7 +786,6 @@ static struct sbridge_dev *alloc_sbridge_dev(int seg, u8 bus, enum domain dom,
 static void free_sbridge_dev(struct sbridge_dev *sbridge_dev)
 {
 	list_del(&sbridge_dev->list);
-	kfree(sbridge_dev->pdev);
 	kfree(sbridge_dev);
 }
 
@@ -2025,7 +2015,7 @@ static bool sb_decode_ddr4(struct mem_ctl_info *mci, int ch, u8 rank,
 static bool sb_decode_ddr3(struct mem_ctl_info *mci, int ch, u8 rank,
 			   u64 rank_addr, char *msg)
 {
-	pr_warn_once("DDR3 row/column decode not support yet!\n");
+	pr_warn_once("DDR3 row/column decode is not supported yet!\n");
 	msg[0] = '\0';
 	return false;
 }

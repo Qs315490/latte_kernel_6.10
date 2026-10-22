@@ -3,12 +3,14 @@
  * Copyright © 2022 Intel Corporation
  */
 
-#include "i915_reg.h"
+#include <drm/drm_print.h>
+#include <drm/intel/vlv_iosf_sb_regs.h>
+
 #include "intel_display_core.h"
 #include "intel_display_power_map.h"
 #include "intel_display_power_well.h"
+#include "intel_display_regs.h"
 #include "intel_display_types.h"
-#include "vlv_sideband_reg.h"
 
 #define __LIST_INLINE_ELEMS(__elem_type, ...) \
 	((__elem_type[]) { __VA_ARGS__ })
@@ -110,7 +112,6 @@ static const struct i915_power_well_desc hsw_power_wells_main[] = {
 				.id = HSW_DISP_PW_GLOBAL),
 		),
 		.ops = &hsw_power_well_ops,
-		.has_vga = true,
 	},
 };
 
@@ -144,7 +145,6 @@ static const struct i915_power_well_desc bdw_power_wells_main[] = {
 				.id = HSW_DISP_PW_GLOBAL),
 		),
 		.ops = &hsw_power_well_ops,
-		.has_vga = true,
 		.irq_pipe_mask = BIT(PIPE_B) | BIT(PIPE_C),
 	},
 };
@@ -388,7 +388,6 @@ static const struct i915_power_well_desc skl_power_wells_main[] = {
 				.id = SKL_DISP_PW_2),
 		),
 		.ops = &hsw_power_well_ops,
-		.has_vga = true,
 		.irq_pipe_mask = BIT(PIPE_B) | BIT(PIPE_C),
 		.has_fuses = true,
 	}, {
@@ -467,7 +466,6 @@ static const struct i915_power_well_desc bxt_power_wells_main[] = {
 				.id = SKL_DISP_PW_2),
 		),
 		.ops = &hsw_power_well_ops,
-		.has_vga = true,
 		.irq_pipe_mask = BIT(PIPE_B) | BIT(PIPE_C),
 		.has_fuses = true,
 	}, {
@@ -570,7 +568,6 @@ static const struct i915_power_well_desc glk_power_wells_main[] = {
 				.id = SKL_DISP_PW_2),
 		),
 		.ops = &hsw_power_well_ops,
-		.has_vga = true,
 		.irq_pipe_mask = BIT(PIPE_B) | BIT(PIPE_C),
 		.has_fuses = true,
 	}, {
@@ -746,7 +743,6 @@ static const struct i915_power_well_desc icl_power_wells_main[] = {
 				.id = ICL_DISP_PW_3),
 		),
 		.ops = &hsw_power_well_ops,
-		.has_vga = true,
 		.irq_pipe_mask = BIT(PIPE_B),
 		.has_fuses = true,
 	}, {
@@ -912,7 +908,6 @@ static const struct i915_power_well_desc tgl_power_wells_main[] = {
 				.id = ICL_DISP_PW_3),
 		),
 		.ops = &hsw_power_well_ops,
-		.has_vga = true,
 		.irq_pipe_mask = BIT(PIPE_B),
 		.has_fuses = true,
 	}, {
@@ -1069,7 +1064,6 @@ static const struct i915_power_well_desc rkl_power_wells_main[] = {
 		),
 		.ops = &hsw_power_well_ops,
 		.irq_pipe_mask = BIT(PIPE_B),
-		.has_vga = true,
 		.has_fuses = true,
 	}, {
 		.instances = &I915_PW_INSTANCES(
@@ -1164,7 +1158,6 @@ static const struct i915_power_well_desc dg1_power_wells_main[] = {
 		),
 		.ops = &hsw_power_well_ops,
 		.irq_pipe_mask = BIT(PIPE_B),
-		.has_vga = true,
 		.has_fuses = true,
 	}, {
 		.instances = &I915_PW_INSTANCES(
@@ -1323,7 +1316,6 @@ static const struct i915_power_well_desc xelpd_power_wells_main[] = {
 				.id = SKL_DISP_PW_2),
 		),
 		.ops = &hsw_power_well_ops,
-		.has_vga = true,
 		.has_fuses = true,
 	}, {
 		.instances = &I915_PW_INSTANCES(
@@ -1480,7 +1472,6 @@ static const struct i915_power_well_desc xelpdp_power_wells_main[] = {
 				.id = SKL_DISP_PW_2),
 		),
 		.ops = &hsw_power_well_ops,
-		.has_vga = true,
 		.has_fuses = true,
 	}, {
 		.instances = &I915_PW_INSTANCES(
@@ -1514,7 +1505,11 @@ static const struct i915_power_well_desc xelpdp_power_wells_main[] = {
 		.ops = &hsw_power_well_ops,
 		.irq_pipe_mask = BIT(PIPE_D),
 		.has_fuses = true,
-	}, {
+	},
+};
+
+static const struct i915_power_well_desc xelpdp_power_wells_aux[] = {
+	{
 		.instances = &I915_PW_INSTANCES(
 			I915_PW("AUX_A", &icl_pwdoms_aux_a, .xelpdp.aux_ch = AUX_CH_A),
 			I915_PW("AUX_B", &icl_pwdoms_aux_b, .xelpdp.aux_ch = AUX_CH_B),
@@ -1532,6 +1527,7 @@ static const struct i915_power_well_desc_list xelpdp_power_wells[] = {
 	I915_PW_DESCRIPTORS(icl_power_wells_pw_1),
 	I915_PW_DESCRIPTORS(xelpd_power_wells_dc_off),
 	I915_PW_DESCRIPTORS(xelpdp_power_wells_main),
+	I915_PW_DESCRIPTORS(xelpdp_power_wells_aux),
 };
 
 I915_DECL_PW_DOMAINS(xe2lpd_pwdoms_pica_tc,
@@ -1582,6 +1578,7 @@ static const struct i915_power_well_desc_list xe2lpd_power_wells[] = {
 	I915_PW_DESCRIPTORS(xe2lpd_power_wells_dcoff),
 	I915_PW_DESCRIPTORS(xelpdp_power_wells_main),
 	I915_PW_DESCRIPTORS(xe2lpd_power_wells_pica),
+	I915_PW_DESCRIPTORS(xelpdp_power_wells_aux),
 };
 
 /*
@@ -1641,7 +1638,6 @@ static const struct i915_power_well_desc xe3lpd_power_wells_main[] = {
 				.id = SKL_DISP_PW_2),
 		),
 		.ops = &hsw_power_well_ops,
-		.has_vga = true,
 		.has_fuses = true,
 	}, {
 		.instances = &I915_PW_INSTANCES(
@@ -1675,16 +1671,6 @@ static const struct i915_power_well_desc xe3lpd_power_wells_main[] = {
 		.ops = &hsw_power_well_ops,
 		.irq_pipe_mask = BIT(PIPE_D),
 		.has_fuses = true,
-	}, {
-		.instances = &I915_PW_INSTANCES(
-			I915_PW("AUX_A", &icl_pwdoms_aux_a, .xelpdp.aux_ch = AUX_CH_A),
-			I915_PW("AUX_B", &icl_pwdoms_aux_b, .xelpdp.aux_ch = AUX_CH_B),
-			I915_PW("AUX_TC1", &xelpdp_pwdoms_aux_tc1, .xelpdp.aux_ch = AUX_CH_USBC1),
-			I915_PW("AUX_TC2", &xelpdp_pwdoms_aux_tc2, .xelpdp.aux_ch = AUX_CH_USBC2),
-			I915_PW("AUX_TC3", &xelpdp_pwdoms_aux_tc3, .xelpdp.aux_ch = AUX_CH_USBC3),
-			I915_PW("AUX_TC4", &xelpdp_pwdoms_aux_tc4, .xelpdp.aux_ch = AUX_CH_USBC4),
-		),
-		.ops = &xelpdp_aux_power_well_ops,
 	},
 };
 
@@ -1694,6 +1680,7 @@ I915_DECL_PW_DOMAINS(xe3lpd_pwdoms_dc_off,
 	XE3LPD_PW_C_POWER_DOMAINS,
 	XE3LPD_PW_D_POWER_DOMAINS,
 	POWER_DOMAIN_AUDIO_MMIO,
+	POWER_DOMAIN_AUDIO_PLAYBACK,
 	POWER_DOMAIN_INIT);
 
 static const struct i915_power_well_desc xe3lpd_power_wells_dcoff[] = {
@@ -1712,6 +1699,64 @@ static const struct i915_power_well_desc_list xe3lpd_power_wells[] = {
 	I915_PW_DESCRIPTORS(xe3lpd_power_wells_dcoff),
 	I915_PW_DESCRIPTORS(xe3lpd_power_wells_main),
 	I915_PW_DESCRIPTORS(xe2lpd_power_wells_pica),
+	I915_PW_DESCRIPTORS(xelpdp_power_wells_aux),
+};
+
+static const struct i915_power_well_desc wcl_power_wells_main[] = {
+	{
+		.instances = &I915_PW_INSTANCES(
+			I915_PW("PW_2", &xe3lpd_pwdoms_pw_2,
+				.hsw.idx = ICL_PW_CTL_IDX_PW_2,
+				.id = SKL_DISP_PW_2),
+		),
+		.ops = &hsw_power_well_ops,
+		.has_fuses = true,
+	}, {
+		.instances = &I915_PW_INSTANCES(
+			I915_PW("PW_A", &xelpd_pwdoms_pw_a,
+				.hsw.idx = XELPD_PW_CTL_IDX_PW_A),
+		),
+		.ops = &hsw_power_well_ops,
+		.irq_pipe_mask = BIT(PIPE_A),
+		.has_fuses = true,
+	}, {
+		.instances = &I915_PW_INSTANCES(
+			I915_PW("PW_B", &xe3lpd_pwdoms_pw_b,
+				.hsw.idx = XELPD_PW_CTL_IDX_PW_B),
+		),
+		.ops = &hsw_power_well_ops,
+		.irq_pipe_mask = BIT(PIPE_B),
+		.has_fuses = true,
+	}, {
+		.instances = &I915_PW_INSTANCES(
+			I915_PW("PW_C", &xe3lpd_pwdoms_pw_c,
+				.hsw.idx = XELPD_PW_CTL_IDX_PW_C),
+		),
+		.ops = &hsw_power_well_ops,
+		.irq_pipe_mask = BIT(PIPE_C),
+		.has_fuses = true,
+	},
+};
+
+static const struct i915_power_well_desc wcl_power_wells_aux[] = {
+	{
+		.instances = &I915_PW_INSTANCES(
+			I915_PW("AUX_A", &icl_pwdoms_aux_a, .xelpdp.aux_ch = AUX_CH_A),
+			I915_PW("AUX_B", &icl_pwdoms_aux_b, .xelpdp.aux_ch = AUX_CH_B),
+			I915_PW("AUX_TC1", &xelpdp_pwdoms_aux_tc1, .xelpdp.aux_ch = AUX_CH_USBC1),
+			I915_PW("AUX_TC2", &xelpdp_pwdoms_aux_tc2, .xelpdp.aux_ch = AUX_CH_USBC2),
+		),
+		.ops = &xelpdp_aux_power_well_ops,
+	},
+};
+
+static const struct i915_power_well_desc_list wcl_power_wells[] = {
+	I915_PW_DESCRIPTORS(i9xx_power_wells_always_on),
+	I915_PW_DESCRIPTORS(icl_power_wells_pw_1),
+	I915_PW_DESCRIPTORS(xe3lpd_power_wells_dcoff),
+	I915_PW_DESCRIPTORS(wcl_power_wells_main),
+	I915_PW_DESCRIPTORS(xe2lpd_power_wells_pica),
+	I915_PW_DESCRIPTORS(wcl_power_wells_aux),
 };
 
 static void init_power_well_domains(const struct i915_power_well_instance *inst,
@@ -1765,9 +1810,8 @@ __set_power_wells(struct i915_power_domains *power_domains,
 
 	power_domains->power_well_count = power_well_count;
 	power_domains->power_wells =
-				kcalloc(power_well_count,
-					sizeof(*power_domains->power_wells),
-					GFP_KERNEL);
+				kzalloc_objs(*power_domains->power_wells,
+					     power_well_count);
 	if (!power_domains->power_wells)
 		return -ENOMEM;
 
@@ -1821,7 +1865,9 @@ int intel_display_power_map_init(struct i915_power_domains *power_domains)
 		return 0;
 	}
 
-	if (DISPLAY_VER(display) >= 30)
+	if (DISPLAY_VERx100(display) == 3002)
+		return set_power_wells(power_domains, wcl_power_wells);
+	else if (DISPLAY_VER(display) >= 30)
 		return set_power_wells(power_domains, xe3lpd_power_wells);
 	else if (DISPLAY_VER(display) >= 20)
 		return set_power_wells(power_domains, xe2lpd_power_wells);

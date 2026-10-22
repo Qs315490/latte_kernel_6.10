@@ -197,7 +197,7 @@ static void focaltech_process_rel_packet(struct psmouse *psmouse,
 {
 	struct focaltech_data *priv = psmouse->private;
 	struct focaltech_hw_state *state = &priv->state;
-	int finger1, finger2;
+	unsigned int finger1, finger2;
 
 	state->pressed = packet[0] >> 7;
 	finger1 = ((packet[0] >> 4) & 0x7) - 1;
@@ -408,7 +408,7 @@ int focaltech_init(struct psmouse *psmouse)
 	struct focaltech_data *priv;
 	int error;
 
-	psmouse->private = priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	psmouse->private = priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 

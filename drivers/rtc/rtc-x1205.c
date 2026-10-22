@@ -663,13 +663,13 @@ static void x1205_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id x1205_id[] = {
-	{ "x1205" },
+	{ .name = "x1205" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, x1205_id);
 
 static const struct of_device_id x1205_dt_ids[] = {
-	{ .compatible = "xircom,x1205", },
+	{ .compatible = "xicor,x1205", },
 	{},
 };
 MODULE_DEVICE_TABLE(of, x1205_dt_ids);

@@ -28,7 +28,7 @@ static struct regmap *regmap;
  * taking cpus down to avoid racing regmap or spi mutex lock when poweroff
  * system through PMIC.
  */
-static void sc27xx_poweroff_shutdown(void)
+static void sc27xx_poweroff_shutdown(void *data)
 {
 #ifdef CONFIG_HOTPLUG_CPU
 	int cpu;
@@ -40,8 +40,12 @@ static void sc27xx_poweroff_shutdown(void)
 #endif
 }
 
-static struct syscore_ops poweroff_syscore_ops = {
+static const struct syscore_ops poweroff_syscore_ops = {
 	.shutdown = sc27xx_poweroff_shutdown,
+};
+
+static struct syscore poweroff_syscore = {
+	.ops = &poweroff_syscore_ops,
 };
 
 static void sc27xx_poweroff_do_poweroff(void)
@@ -62,15 +66,22 @@ static int sc27xx_poweroff_probe(struct platform_device *pdev)
 		return -ENODEV;
 
 	pm_power_off = sc27xx_poweroff_do_poweroff;
-	register_syscore_ops(&poweroff_syscore_ops);
+	register_syscore(&poweroff_syscore);
 	return 0;
 }
+
+static const struct platform_device_id sc27xx_poweroff_id_table[] = {
+	{ "sc2731-poweroff" },
+	{ }
+};
+MODULE_DEVICE_TABLE(platform, sc27xx_poweroff_id_table);
 
 static struct platform_driver sc27xx_poweroff_driver = {
 	.probe = sc27xx_poweroff_probe,
 	.driver = {
 		.name = "sc27xx-poweroff",
 	},
+	.id_table = sc27xx_poweroff_id_table,
 };
 module_platform_driver(sc27xx_poweroff_driver);
 

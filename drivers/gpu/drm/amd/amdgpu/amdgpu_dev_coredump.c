@@ -22,8 +22,9 @@
  *
  */
 
-#include <generated/utsrelease.h>
 #include <linux/devcoredump.h>
+#include <linux/utsname.h>
+#include <drm/drm_exec.h>
 #include "amdgpu_dev_coredump.h"
 #include "atom.h"
 
@@ -32,7 +33,15 @@ void amdgpu_coredump(struct amdgpu_device *adev, bool skip_vram_check,
 		     bool vram_lost, struct amdgpu_job *job)
 {
 }
+void amdgpu_coredump_init(struct amdgpu_device *adev)
+{
+}
+void amdgpu_coredump_fini(struct amdgpu_device *adev)
+{
+}
 #else
+
+#define AMDGPU_CORE_DUMP_SIZE_MAX (256 * 1024 * 1024)
 
 const char *hw_ip_names[MAX_HWIP] = {
 	[GC_HWIP]		= "GC",
@@ -187,43 +196,177 @@ static void amdgpu_devcoredump_fw_info(struct amdgpu_device *adev,
 	drm_printf(p, "VPE feature version: %u, fw version: 0x%08x\n",
 		   adev->vpe.feature_version, adev->vpe.fw_version);
 
-	drm_printf(p, "\nVBIOS Information\n");
-	drm_printf(p, "vbios name       : %s\n", ctx->name);
-	drm_printf(p, "vbios pn         : %s\n", ctx->vbios_pn);
-	drm_printf(p, "vbios version    : %d\n", ctx->version);
-	drm_printf(p, "vbios ver_str    : %s\n", ctx->vbios_ver_str);
-	drm_printf(p, "vbios date       : %s\n", ctx->date);
+	if (adev->bios) {
+		drm_printf(p, "\nVBIOS Information\n");
+		drm_printf(p, "vbios name       : %s\n", ctx->name);
+		drm_printf(p, "vbios pn         : %s\n", ctx->vbios_pn);
+		drm_printf(p, "vbios version    : %d\n", ctx->version);
+		drm_printf(p, "vbios ver_str    : %s\n", ctx->vbios_ver_str);
+		drm_printf(p, "vbios date       : %s\n", ctx->date);
+	}else {
+		drm_printf(p, "\nVBIOS Information: NA\n");
+	}
+}
+
+static void
+amdgpu_devcoredump_print_ibs(struct drm_printer *p,
+			     struct amdgpu_coredump_info *coredump,
+			     bool sizing_pass)
+{
+	struct amdgpu_device *adev = coredump->adev;
+	struct amdgpu_bo_va_mapping *mapping;
+	struct amdgpu_bo *abo;
+	struct drm_exec exec;
+	struct amdgpu_vm *vm;
+	u32 *ib_content;
+	u64 va_start, offset;
+	u8 *kptr;
+	u32 off;
+	int r;
+
+	/*
+	 * On the sizing pass there is no VM to look up and no BO to lock; the
+	 * size estimate doesn't depend on whether the IB BOs are reachable.
+	 * Just emit the per-IB headers (the content is not written anywhere).
+	 */
+	if (sizing_pass) {
+		for (int i = 0; i < coredump->num_ibs; i++) {
+			drm_printf(p, "\nIB #%d 0x%llx %d dw\n", i,
+				   coredump->ibs[i].gpu_addr,
+				   coredump->ibs[i].ib_size_dw);
+
+			for (int j = 0; j < coredump->ibs[i].ib_size_dw; j++)
+				drm_printf(p, "0xffffffff\n");
+		}
+		return;
+	}
+
+	/*
+	 * Lock the VM root PD and every IB BO together in a single drm_exec
+	 * ticket. Reserving the IB BOs one by one while the root PD is held
+	 * would be a recursive reservation_ww_class_mutex acquire without a
+	 * ww_acquire_ctx, which trips lockdep and self-deadlocks for IB BOs
+	 * that share their dma_resv with the root PD (always-valid BOs).
+	 */
+	drm_exec_init(&exec, DRM_EXEC_IGNORE_DUPLICATES, 1 + coredump->num_ibs);
+	drm_exec_until_all_locked(&exec) {
+		vm = amdgpu_vm_lock_by_pasid(adev, coredump->pasid, &exec);
+		if (!vm)
+			goto unlock;
+
+		for (int i = 0; i < coredump->num_ibs; i++) {
+			u64 pfn = (coredump->ibs[i].gpu_addr &
+				   AMDGPU_GMC_HOLE_MASK) / AMDGPU_GPU_PAGE_SIZE;
+
+			mapping = amdgpu_vm_bo_lookup_mapping(vm, pfn);
+			if (!mapping)
+				continue;
+
+			abo = mapping->bo_va->base.bo;
+			r = drm_exec_lock_obj(&exec, &abo->tbo.base);
+			drm_exec_retry_on_contention(&exec);
+			if (r)
+				goto unlock;
+		}
+	}
+
+	for (int i = 0; i < coredump->num_ibs; i++) {
+		bool emit_content = false;
+
+		ib_content = kvmalloc_array(coredump->ibs[i].ib_size_dw, 4,
+					    GFP_KERNEL);
+		if (!ib_content)
+			continue;
+
+		va_start = coredump->ibs[i].gpu_addr & AMDGPU_GMC_HOLE_MASK;
+		mapping = amdgpu_vm_bo_lookup_mapping(vm,
+						      va_start / AMDGPU_GPU_PAGE_SIZE);
+		if (!mapping)
+			goto output_ib_content;
+
+		abo = mapping->bo_va->base.bo;
+		offset = va_start - mapping->start * AMDGPU_GPU_PAGE_SIZE;
+
+		if (abo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) {
+			struct amdgpu_res_cursor cursor;
+
+			off = 0;
+
+			if (abo->tbo.resource->mem_type != TTM_PL_VRAM)
+				goto output_ib_content;
+
+			amdgpu_res_first(abo->tbo.resource, offset,
+					 coredump->ibs[i].ib_size_dw * 4, &cursor);
+			while (cursor.remaining) {
+				amdgpu_device_mm_access(adev, cursor.start / 4,
+							&ib_content[off], cursor.size / 4,
+							false);
+				off += cursor.size;
+				amdgpu_res_next(&cursor, cursor.size);
+			}
+			emit_content = true;
+		} else {
+			r = ttm_bo_kmap(&abo->tbo, 0, PFN_UP(abo->tbo.base.size),
+					&abo->kmap);
+			if (r)
+				goto output_ib_content;
+
+			kptr = amdgpu_bo_kptr(abo);
+			kptr += offset;
+			memcpy(ib_content, kptr, coredump->ibs[i].ib_size_dw * 4);
+
+			amdgpu_bo_kunmap(abo);
+			emit_content = true;
+		}
+
+output_ib_content:
+		drm_printf(p, "\nIB #%d 0x%llx %d dw\n", i,
+			   coredump->ibs[i].gpu_addr, coredump->ibs[i].ib_size_dw);
+		if (emit_content) {
+			for (int j = 0; j < coredump->ibs[i].ib_size_dw; j++)
+				drm_printf(p, "0x%08x\n", ib_content[j]);
+		}
+		kvfree(ib_content);
+	}
+
+unlock:
+	drm_exec_fini(&exec);
 }
 
 static ssize_t
-amdgpu_devcoredump_read(char *buffer, loff_t offset, size_t count,
-			void *data, size_t datalen)
+amdgpu_devcoredump_format(char *buffer, size_t count, struct amdgpu_coredump_info *coredump)
 {
 	struct drm_printer p;
-	struct amdgpu_coredump_info *coredump = data;
 	struct drm_print_iterator iter;
 	struct amdgpu_vm_fault_info *fault_info;
 	struct amdgpu_ip_block *ip_block;
-	int ver;
+	struct amdgpu_ring *ring;
+	int ver, i, j;
+	u32 ring_idx;
+	bool sizing_pass;
 
+	sizing_pass = buffer == NULL;
 	iter.data = buffer;
+	iter.start = 0;
 	iter.offset = 0;
-	iter.start = offset;
 	iter.remain = count;
 
 	p = drm_coredump_printer(&iter);
 
 	drm_printf(&p, "**** AMDGPU Device Coredump ****\n");
 	drm_printf(&p, "version: " AMDGPU_COREDUMP_VERSION "\n");
-	drm_printf(&p, "kernel: " UTS_RELEASE "\n");
+	drm_printf(&p, "kernel: %s\n", init_utsname()->release);
 	drm_printf(&p, "module: " KBUILD_MODNAME "\n");
-	drm_printf(&p, "time: %lld.%09ld\n", coredump->reset_time.tv_sec,
-		   coredump->reset_time.tv_nsec);
+	drm_printf(&p, "time: %ptSp\n", &coredump->reset_time);
+	drm_printf(&p, "pasid: %u\n", coredump->pasid);
+	drm_printf(&p, "vmid: %u\n", coredump->vmid);
 
-	if (coredump->reset_task_info.pid)
-		drm_printf(&p, "process_name: %s PID: %d\n",
+	if (coredump->reset_task_info.task.pid)
+		drm_printf(&p, "process_name: %s TGID: %d thread: %s PID: %d\n",
 			   coredump->reset_task_info.process_name,
-			   coredump->reset_task_info.pid);
+			   coredump->reset_task_info.tgid,
+			   coredump->reset_task_info.task.comm,
+			   coredump->reset_task_info.task.pid);
 
 	/* SOC Information */
 	drm_printf(&p, "\nSOC Information\n");
@@ -262,6 +405,8 @@ amdgpu_devcoredump_read(char *buffer, loff_t offset, size_t count,
 		}
 	}
 
+	amdgpu_discovery_dump(coredump->adev, &p);
+
 	/* IP firmware information */
 	drm_printf(&p, "\nIP Firmwares\n");
 	amdgpu_devcoredump_fw_info(coredump->adev, &p);
@@ -293,23 +438,30 @@ amdgpu_devcoredump_read(char *buffer, loff_t offset, size_t count,
 
 	/* Add ring buffer information */
 	drm_printf(&p, "Ring buffer information\n");
-	for (int i = 0; i < coredump->adev->num_rings; i++) {
-		int j = 0;
-		struct amdgpu_ring *ring = coredump->adev->rings[i];
+	if (coredump->num_rings) {
+		for (i = 0; i < coredump->num_rings; i++) {
+			ring_idx = coredump->rings[i].ring_index;
+			ring = coredump->adev->rings[ring_idx];
 
-		drm_printf(&p, "ring name: %s\n", ring->name);
-		drm_printf(&p, "Rptr: 0x%llx Wptr: 0x%llx RB mask: %x\n",
-			   amdgpu_ring_get_rptr(ring),
-			   amdgpu_ring_get_wptr(ring),
-			   ring->buf_mask);
-		drm_printf(&p, "Ring size in dwords: %d\n",
-			   ring->ring_size / 4);
-		drm_printf(&p, "Ring contents\n");
-		drm_printf(&p, "Offset \t Value\n");
+			drm_printf(&p, "ring name: %s\n", ring->name);
+			drm_printf(&p, "Rptr: 0x%llx Wptr: 0x%llx RB mask: %x\n",
+				   coredump->rings[i].rptr,
+				   coredump->rings[i].wptr,
+				   ring->buf_mask);
+			drm_printf(&p, "Ring size in dwords: %d\n",
+				ring->ring_size / 4);
 
-		while (j < ring->ring_size) {
-			drm_printf(&p, "0x%x \t 0x%x\n", j, ring->ring[j / 4]);
-			j += 4;
+			if (!coredump->rings[i].ring_dw) {
+				drm_printf(&p, "Ring contents unavailable\n");
+				continue;
+			}
+
+			drm_printf(&p, "Ring contents\n");
+			drm_printf(&p, "Offset \t Value\n");
+
+			for (j = 0; j < ring->ring_size; j += 4)
+				drm_printf(&p, "0x%x \t 0x%x\n", j,
+					   coredump->rings[i].ring_dw[j / 4]);
 		}
 	}
 
@@ -318,12 +470,76 @@ amdgpu_devcoredump_read(char *buffer, loff_t offset, size_t count,
 	else if (coredump->reset_vram_lost)
 		drm_printf(&p, "VRAM is lost due to GPU reset!\n");
 
+	if (coredump->num_ibs)
+		amdgpu_devcoredump_print_ibs(&p, coredump, sizing_pass);
+
 	return count - iter.remain;
+}
+
+static ssize_t
+amdgpu_devcoredump_read(char *buffer, loff_t offset, size_t count,
+			void *data, size_t datalen)
+{
+	struct amdgpu_coredump_info *coredump = data;
+	ssize_t byte_copied;
+
+	if (!coredump)
+		return -ENODEV;
+
+	if (!coredump->formatted)
+		return -ENODEV;
+
+	if (offset >= coredump->formatted_size)
+		return 0;
+
+	byte_copied = count < coredump->formatted_size - offset ? count :
+		coredump->formatted_size - offset;
+	memcpy(buffer, coredump->formatted + offset, byte_copied);
+
+	return byte_copied;
 }
 
 static void amdgpu_devcoredump_free(void *data)
 {
-	kfree(data);
+	struct amdgpu_coredump_info *coredump = data;
+	u32 i;
+
+	kvfree(coredump->formatted);
+	for (i = 0; i < coredump->num_rings; i++)
+		kvfree(coredump->rings[i].ring_dw);
+	kvfree(coredump->rings);
+	kvfree(data);
+}
+
+static void amdgpu_devcoredump_deferred_work(struct work_struct *work)
+{
+	struct amdgpu_device *adev = container_of(work, typeof(*adev), coredump_work);
+	struct amdgpu_coredump_info *coredump = adev->coredump;
+
+	if (!coredump)
+		goto end;
+
+	/* Do a one-time preparation of the coredump output because
+	 * repeatingly calling drm_coredump_printer is very slow.
+	 */
+	coredump->formatted_size = amdgpu_devcoredump_format(
+		NULL, AMDGPU_CORE_DUMP_SIZE_MAX, coredump);
+	coredump->formatted = kvzalloc(coredump->formatted_size, GFP_KERNEL);
+	if (!coredump->formatted) {
+		amdgpu_devcoredump_free(coredump);
+		goto end;
+	}
+
+	amdgpu_devcoredump_format(coredump->formatted, coredump->formatted_size, coredump);
+
+	/* If there's an existing coredump for this device, the free function will be
+	 * called immediately so coredump might be invalid after the call to dev_coredumpm.
+	 */
+	dev_coredumpm(coredump->adev->dev, THIS_MODULE, coredump, 0, GFP_NOWAIT,
+		      amdgpu_devcoredump_read, amdgpu_devcoredump_free);
+
+end:
+	adev->coredump = NULL;
 }
 
 void amdgpu_coredump(struct amdgpu_device *adev, bool skip_vram_check,
@@ -331,14 +547,22 @@ void amdgpu_coredump(struct amdgpu_device *adev, bool skip_vram_check,
 {
 	struct drm_device *dev = adev_to_drm(adev);
 	struct amdgpu_coredump_info *coredump;
+	size_t size = sizeof(*coredump);
 	struct drm_sched_job *s_job;
+	u64 ring_count;
+	struct amdgpu_ring *ring;
+	int i, idx;
 
-	coredump = kzalloc(sizeof(*coredump), GFP_NOWAIT);
-
-	if (!coredump) {
-		DRM_ERROR("%s: failed to allocate memory for coredump\n", __func__);
+	/* No need to generate a new coredump if there's one in progress already. */
+	if (work_busy(&adev->coredump_work))
 		return;
-	}
+
+	if (job && job->pasid)
+		size += sizeof(struct amdgpu_coredump_ib_info) * job->num_ibs;
+
+	coredump = kvzalloc(size, GFP_NOWAIT);
+	if (!coredump)
+		return;
 
 	coredump->skip_vram_check = skip_vram_check;
 	coredump->reset_vram_lost = vram_lost;
@@ -351,6 +575,13 @@ void amdgpu_coredump(struct amdgpu_device *adev, bool skip_vram_check,
 			coredump->reset_task_info = *ti;
 			amdgpu_vm_put_task_info(ti);
 		}
+		coredump->pasid = job->pasid;
+		coredump->vmid = job->vmid;
+		coredump->num_ibs = job->num_ibs;
+		for (i = 0; i < job->num_ibs; ++i) {
+			coredump->ibs[i].gpu_addr = job->ibs[i].gpu_addr;
+			coredump->ibs[i].ib_size_dw = job->ibs[i].length_dw;
+		}
 	}
 
 	if (job) {
@@ -358,11 +589,70 @@ void amdgpu_coredump(struct amdgpu_device *adev, bool skip_vram_check,
 		coredump->ring = to_amdgpu_ring(s_job->sched);
 	}
 
+	/* Dump ring content if memory allocation succeeds. */
+	ring_count = 0;
+	for (i = 0; i < adev->num_rings; i++) {
+		ring = adev->rings[i];
+
+		/* Only dump rings with unsignalled fences. */
+		if (atomic_read(&ring->fence_drv.last_seq) == ring->fence_drv.sync_seq &&
+		    coredump->ring != ring)
+			continue;
+
+		ring_count++;
+	}
+	if (ring_count)
+		coredump->rings = kvcalloc(ring_count,
+					   sizeof(struct amdgpu_coredump_ring),
+					   GFP_NOWAIT);
+	if (coredump->rings) {
+		for (i = 0, idx = 0; i < adev->num_rings && idx < ring_count; i++) {
+			struct amdgpu_coredump_ring *cdump_ring;
+
+			ring = adev->rings[i];
+
+			if (atomic_read(&ring->fence_drv.last_seq) == ring->fence_drv.sync_seq &&
+			    coredump->ring != ring)
+				continue;
+
+			cdump_ring = &coredump->rings[idx];
+
+			cdump_ring->ring_dw = kvzalloc(ring->ring_size, GFP_NOWAIT);
+			if (cdump_ring->ring_dw)
+				memcpy(cdump_ring->ring_dw, ring->ring, ring->ring_size);
+
+			cdump_ring->ring_index = ring->idx;
+			cdump_ring->rptr = amdgpu_ring_get_rptr(ring);
+			cdump_ring->wptr = amdgpu_ring_get_wptr(ring);
+			idx++;
+		}
+		coredump->num_rings = idx;
+	}
+
 	coredump->adev = adev;
 
 	ktime_get_ts64(&coredump->reset_time);
 
-	dev_coredumpm(dev->dev, THIS_MODULE, coredump, 0, GFP_NOWAIT,
-		      amdgpu_devcoredump_read, amdgpu_devcoredump_free);
+	/* Update the current coredump pointer (no lock needed, this function can only be called
+	 * from a single thread)
+	 */
+	adev->coredump = coredump;
+	/* Kick off coredump formatting to a worker thread. */
+	queue_work(system_dfl_wq, &adev->coredump_work);
+
+	drm_info(dev, "AMDGPU device coredump file has been created\n");
+	drm_info(dev, "Check your /sys/class/drm/card%d/device/devcoredump/data\n",
+		 dev->primary->index);
+}
+
+void amdgpu_coredump_init(struct amdgpu_device *adev)
+{
+	INIT_WORK(&adev->coredump_work, amdgpu_devcoredump_deferred_work);
+}
+
+void amdgpu_coredump_fini(struct amdgpu_device *adev)
+{
+	/* Finish deferred coredump formatting before HW/IP teardown. */
+	flush_work(&adev->coredump_work);
 }
 #endif

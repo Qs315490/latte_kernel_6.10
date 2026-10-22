@@ -301,7 +301,7 @@ top:
 
 static void v_timer(struct timer_list *t)
 {
-	struct vudc *udc = from_timer(udc, t, tr_timer.timer);
+	struct vudc *udc = timer_container_of(udc, t, tr_timer.timer);
 	struct transfer_timer *timer = &udc->tr_timer;
 	struct urbp *urb_p, *tmp;
 	unsigned long flags;
@@ -490,7 +490,8 @@ void v_stop_timer(struct vudc *udc)
 {
 	struct transfer_timer *t = &udc->tr_timer;
 
-	/* timer itself will take care of stopping */
+	/* Delete the timer synchronously before teardown frees udc. */
 	dev_dbg(&udc->pdev->dev, "timer stop");
+	timer_delete_sync(&t->timer);
 	t->state = VUDC_TR_STOPPED;
 }

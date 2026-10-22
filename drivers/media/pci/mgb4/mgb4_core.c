@@ -84,7 +84,8 @@ static int temp_read(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 		     int channel, long *val)
 {
 	struct mgb4_dev *mgbdev = dev_get_drvdata(dev);
-	u32 val10, raw;
+	u32 raw;
+	int val10;
 
 	if (type != hwmon_temp || attr != hwmon_temp_input)
 		return -EOPNOTSUPP;
@@ -381,6 +382,18 @@ static int get_serial_number(struct mgb4_dev *mgbdev)
 	return 0;
 }
 
+static const char *module_type_str(struct mgb4_dev *mgbdev)
+{
+	if (MGB4_IS_FPDL3(mgbdev))
+		return "FPDL3";
+	else if (MGB4_IS_GMSL3(mgbdev))
+		return "GMSL3";
+	else if (MGB4_IS_GMSL1(mgbdev))
+		return "GMSL1";
+	else
+		return "UNKNOWN";
+}
+
 static int get_module_version(struct mgb4_dev *mgbdev)
 {
 	struct device *dev = &mgbdev->pdev->dev;
@@ -402,18 +415,21 @@ static int get_module_version(struct mgb4_dev *mgbdev)
 	}
 
 	mgbdev->module_version = ~((u32)version) & 0xff;
-	if (!(MGB4_IS_FPDL3(mgbdev) || MGB4_IS_GMSL(mgbdev))) {
+	if (!(MGB4_IS_FPDL3(mgbdev) ||
+	      MGB4_IS_GMSL3(mgbdev) ||
+	      MGB4_IS_GMSL1(mgbdev))) {
 		dev_err(dev, "unknown module type\n");
 		return -EINVAL;
 	}
-	fw_version = mgb4_read_reg(&mgbdev->video, 0xC4);
-	if (fw_version >> 24 != mgbdev->module_version >> 4) {
+	fw_version = mgb4_read_reg(&mgbdev->video, 0xC4) >> 24;
+	if ((MGB4_IS_FPDL3(mgbdev) && fw_version != 1) ||
+	    (MGB4_IS_GMSL3(mgbdev) && fw_version != 2) ||
+	    (MGB4_IS_GMSL1(mgbdev) && fw_version != 3)) {
 		dev_err(dev, "module/firmware type mismatch\n");
 		return -EINVAL;
 	}
 
-	dev_info(dev, "%s module detected\n",
-		 MGB4_IS_FPDL3(mgbdev) ? "FPDL3" : "GMSL");
+	dev_info(dev, "%s module detected\n", module_type_str(mgbdev));
 
 	return 0;
 }
@@ -507,7 +523,7 @@ static int mgb4_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	};
 	int irqs = pci_msix_vec_count(pdev);
 
-	mgbdev = kzalloc(sizeof(*mgbdev), GFP_KERNEL);
+	mgbdev = kzalloc_obj(*mgbdev);
 	if (!mgbdev)
 		return -ENOMEM;
 
@@ -599,14 +615,18 @@ static int mgb4_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	rv = get_module_version(mgbdev);
 	if (rv < 0)
 		goto exit;
+	/* Propagate the module type(version) to the FPGA */
+	mgb4_write_reg(&mgbdev->video, 0xD4, mgbdev->module_version);
 
 	/* Video input v4l2 devices */
 	for (i = 0; i < MGB4_VIN_DEVICES; i++)
 		mgbdev->vin[i] = mgb4_vin_create(mgbdev, i);
 
 	/* Video output v4l2 devices */
-	for (i = 0; i < MGB4_VOUT_DEVICES; i++)
-		mgbdev->vout[i] = mgb4_vout_create(mgbdev, i);
+	if (MGB4_HAS_VOUT(mgbdev)) {
+		for (i = 0; i < MGB4_VOUT_DEVICES; i++)
+			mgbdev->vout[i] = mgb4_vout_create(mgbdev, i);
+	}
 
 	/* Triggers */
 	mgbdev->indio_dev = mgb4_trigger_create(mgbdev);

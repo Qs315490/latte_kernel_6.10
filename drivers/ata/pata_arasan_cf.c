@@ -380,7 +380,7 @@ static inline int wait4buf(struct arasan_cf_dev *acdev)
 	if (!wait_for_completion_timeout(&acdev->cf_completion, TIMEOUT)) {
 		u32 rw = acdev->qc->tf.flags & ATA_TFLAG_WRITE;
 
-		dev_err(acdev->host->dev, "%s TimeOut", rw ? "write" : "read");
+		dev_err(acdev->host->dev, "%s TimeOut\n", rw ? "write" : "read");
 		return -ETIMEDOUT;
 	}
 
@@ -474,7 +474,7 @@ static int sg_xfer(struct arasan_cf_dev *acdev, struct scatterlist *sg)
 			dma_len = min(xfer_cnt, FIFO_SIZE);
 			ret = dma_xfer(acdev, src, dest, dma_len);
 			if (ret) {
-				dev_err(acdev->host->dev, "dma failed");
+				dev_err(acdev->host->dev, "dma failed\n");
 				goto fail;
 			}
 
@@ -658,6 +658,7 @@ static void arasan_cf_freeze(struct ata_port *ap)
 }
 
 static void arasan_cf_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	struct arasan_cf_dev *acdev = ap->host->private_data;
 
@@ -803,16 +804,6 @@ static int arasan_cf_probe(struct platform_device *pdev)
 	irq_handler_t irq_handler = NULL;
 	int ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		return -EINVAL;
-
-	if (!devm_request_mem_region(&pdev->dev, res->start, resource_size(res),
-				DRIVER_NAME)) {
-		dev_warn(&pdev->dev, "Failed to get memory region resource\n");
-		return -ENOENT;
-	}
-
 	acdev = devm_kzalloc(&pdev->dev, sizeof(*acdev), GFP_KERNEL);
 	if (!acdev)
 		return -ENOMEM;
@@ -827,22 +818,20 @@ static int arasan_cf_probe(struct platform_device *pdev)
 	 * support only PIO
 	 */
 	ret = platform_get_irq(pdev, 0);
+	if (ret == -EPROBE_DEFER)
+		return ret;
 	if (ret > 0) {
 		acdev->irq = ret;
 		irq_handler = arasan_cf_interrupt;
-	} else	if (ret == -EPROBE_DEFER) {
-		return ret;
 	} else	{
 		quirk |= CF_BROKEN_MWDMA | CF_BROKEN_UDMA;
 	}
 
+	acdev->vbase = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	if (IS_ERR(acdev->vbase))
+		return PTR_ERR(acdev->vbase);
+
 	acdev->pbase = res->start;
-	acdev->vbase = devm_ioremap(&pdev->dev, res->start,
-			resource_size(res));
-	if (!acdev->vbase) {
-		dev_warn(&pdev->dev, "ioremap fail\n");
-		return -ENOMEM;
-	}
 
 	acdev->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(acdev->clk)) {

@@ -150,7 +150,8 @@ static void carl9170_cmd_callback(struct ar9170 *ar, u32 len, void *buffer)
 	spin_lock(&ar->cmd_lock);
 	if (ar->readbuf) {
 		if (len >= 4)
-			memcpy(ar->readbuf, buffer + 4, len - 4);
+			memcpy(ar->readbuf, buffer + 4,
+			       min_t(u32, len - 4, ar->readlen));
 
 		ar->readbuf = NULL;
 	}
@@ -555,7 +556,7 @@ static void carl9170_ps_beacon(struct ar9170 *ar, void *data, unsigned int len)
 	/* Check whenever the PHY can be turned off again. */
 
 	/* 1. What about buffered unicast traffic for our AID? */
-	cam = ieee80211_check_tim(tim_ie, tim_len, ar->common.curaid);
+	cam = ieee80211_check_tim(tim_ie, tim_len, ar->common.curaid, false);
 
 	/* 2. Maybe the AP wants to send multicast/broadcast data? */
 	cam |= !!(tim_ie->bitmap_ctrl & 0x01);
@@ -917,7 +918,9 @@ static void carl9170_rx_stream(struct ar9170 *ar, void *buf, unsigned int len)
 				}
 			}
 
-			skb_put_data(ar->rx_failover, tbuf, tlen);
+			skb_put_data(ar->rx_failover, tbuf,
+				     min_t(unsigned int, tlen,
+					   ar->rx_failover_missing));
 			ar->rx_failover_missing -= tlen;
 
 			if (ar->rx_failover_missing <= 0) {

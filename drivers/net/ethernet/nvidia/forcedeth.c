@@ -1891,7 +1891,7 @@ packet_dropped:
 /* If rx bufs are exhausted called after 50ms to attempt to refresh */
 static void nv_do_rx_refill(struct timer_list *t)
 {
-	struct fe_priv *np = from_timer(np, t, oom_kick);
+	struct fe_priv *np = timer_container_of(np, t, oom_kick);
 
 	/* Just reschedule NAPI rx processing */
 	napi_schedule(&np->napi);
@@ -4140,7 +4140,7 @@ static void nv_free_irq(struct net_device *dev)
 
 static void nv_do_nic_poll(struct timer_list *t)
 {
-	struct fe_priv *np = from_timer(np, t, nic_poll);
+	struct fe_priv *np = timer_container_of(np, t, nic_poll);
 	struct net_device *dev = np->dev;
 	u8 __iomem *base = get_hwbase(dev);
 	u32 mask = 0;
@@ -4259,7 +4259,7 @@ static void nv_do_stats_poll(struct timer_list *t)
 	__acquires(&netdev_priv(dev)->hwstats_lock)
 	__releases(&netdev_priv(dev)->hwstats_lock)
 {
-	struct fe_priv *np = from_timer(np, t, stats_poll);
+	struct fe_priv *np = timer_container_of(np, t, stats_poll);
 	struct net_device *dev = np->dev;
 
 	/* If lock is currently taken, the stats are being refreshed
@@ -5623,9 +5623,9 @@ static int nv_close(struct net_device *dev)
 	napi_disable(&np->napi);
 	synchronize_irq(np->pci_dev->irq);
 
-	del_timer_sync(&np->oom_kick);
-	del_timer_sync(&np->nic_poll);
-	del_timer_sync(&np->stats_poll);
+	timer_delete_sync(&np->oom_kick);
+	timer_delete_sync(&np->nic_poll);
+	timer_delete_sync(&np->stats_poll);
 
 	netif_stop_queue(dev);
 	spin_lock_irq(&np->lock);
@@ -5854,8 +5854,8 @@ static int nv_probe(struct pci_dev *pci_dev, const struct pci_device_id *id)
 			goto out_unmap;
 		np->tx_ring.ex = &np->rx_ring.ex[np->rx_ring_size];
 	}
-	np->rx_skb = kcalloc(np->rx_ring_size, sizeof(struct nv_skb_map), GFP_KERNEL);
-	np->tx_skb = kcalloc(np->tx_ring_size, sizeof(struct nv_skb_map), GFP_KERNEL);
+	np->rx_skb = kzalloc_objs(struct nv_skb_map, np->rx_ring_size);
+	np->tx_skb = kzalloc_objs(struct nv_skb_map, np->tx_ring_size);
 	if (!np->rx_skb || !np->tx_skb)
 		goto out_freering;
 
@@ -6187,9 +6187,9 @@ static void nv_remove(struct pci_dev *pci_dev)
 	struct net_device *dev = pci_get_drvdata(pci_dev);
 	struct fe_priv *np = netdev_priv(dev);
 
-	free_percpu(np->txrx_stats);
-
 	unregister_netdev(dev);
+
+	free_percpu(np->txrx_stats);
 
 	nv_restore_mac_addr(pci_dev);
 

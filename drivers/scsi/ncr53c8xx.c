@@ -1776,7 +1776,7 @@ struct ncb {
 **	return from the subroutine.
 */
 
-#ifdef CONFIG_NCR53C8XX_PREFETCH
+#ifdef NCR53C8XX_PREFETCH
 #define PREFETCH_FLUSH_CNT	2
 #define PREFETCH_FLUSH		SCR_CALL, PADDRH (wait_dma),
 #else
@@ -7852,7 +7852,7 @@ static int ncr53c8xx_sdev_configure(struct scsi_device *device,
 	return 0;
 }
 
-static int ncr53c8xx_queue_command_lck(struct scsi_cmnd *cmd)
+static enum scsi_qc_status ncr53c8xx_queue_command_lck(struct scsi_cmnd *cmd)
 {
      struct ncr_cmd_priv *cmd_priv = scsi_cmd_priv(cmd);
      void (*done)(struct scsi_cmnd *) = scsi_done;
@@ -7923,7 +7923,7 @@ irqreturn_t ncr53c8xx_intr(int irq, void *dev_id)
 
 static void ncr53c8xx_timeout(struct timer_list *t)
 {
-	struct ncb *np = from_timer(np, t, timer);
+	struct ncb *np = timer_container_of(np, t, timer);
 	unsigned long flags;
 	struct scsi_cmnd *done_list;
 

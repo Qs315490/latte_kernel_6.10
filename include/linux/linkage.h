@@ -39,6 +39,10 @@
 #define __page_aligned_data	__section(".data..page_aligned") __aligned(PAGE_SIZE)
 #define __page_aligned_bss	__section(".bss..page_aligned") __aligned(PAGE_SIZE)
 
+#ifndef __bss_pgtbl
+#define __bss_pgtbl		__page_aligned_bss
+#endif
+
 /*
  * For assembly routines.
  *
@@ -134,10 +138,6 @@
 	.size name, .-name
 #endif
 
-/* If symbol 'name' is treated as a subroutine (gets called, and returns)
- * then please use ENDPROC to mark 'name' as STT_FUNC for the benefit of
- * static analysis tools such as stack depth analyzer.
- */
 #ifndef ENDPROC
 /* deprecated, use SYM_FUNC_END */
 #define ENDPROC(name) \

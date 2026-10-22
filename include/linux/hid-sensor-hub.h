@@ -17,7 +17,7 @@
  * @attrib_id:		Attribute id for this attribute.
  * @report_id:		Report id in which this information resides.
  * @index:		Field index in the report.
- * @units:		Measurment unit for this attribute.
+ * @units:		Measurement unit for this attribute.
  * @unit_expo:		Exponent used in the data.
  * @size:		Size in bytes for data size.
  * @logical_minimum:	Logical minimum value for this attribute.
@@ -39,10 +39,12 @@ struct hid_sensor_hub_attribute_info {
  * struct sensor_hub_pending - Synchronous read pending information
  * @status:		Pending status true/false.
  * @ready:		Completion synchronization data.
- * @usage_id:		Usage id for physical device, E.g. Gyro usage id.
- * @attr_usage_id:	Usage Id of a field, E.g. X-AXIS for a gyro.
+ * @usage_id:		Usage id for physical device, e.g. gyro usage id.
+ * @attr_usage_id:	Usage Id of a field, e.g. X-axis for a gyro.
  * @raw_size:		Response size for a read request.
  * @raw_data:		Place holder for received response.
+ * @index:		Current write index into raw_data for multi-byte reads.
+ * @max_raw_size:	Total buffer size for multi-byte reads; 0 for single-value reads.
  */
 struct sensor_hub_pending {
 	bool status;
@@ -51,6 +53,8 @@ struct sensor_hub_pending {
 	u32 attr_usage_id;
 	int raw_size;
 	u8  *raw_data;
+	u32 index;
+	u32 max_raw_size;
 };
 
 /**
@@ -104,10 +108,10 @@ struct hid_sensor_hub_callbacks {
 int sensor_hub_device_open(struct hid_sensor_hub_device *hsdev);
 
 /**
-* sensor_hub_device_clode() - Close hub device
+* sensor_hub_device_close() - Close hub device
 * @hsdev:	Hub device instance.
 *
-* Used to clode hid device for sensor hub.
+* Used to close hid device for sensor hub.
 */
 void sensor_hub_device_close(struct hid_sensor_hub_device *hsdev);
 
@@ -128,12 +132,13 @@ int sensor_hub_register_callback(struct hid_sensor_hub_device *hsdev,
 			struct hid_sensor_hub_callbacks *usage_callback);
 
 /**
-* sensor_hub_remove_callback() - Remove client callbacks
+* sensor_hub_remove_callback() - Remove client callback
 * @hsdev:	Hub device instance.
-* @usage_id:	Usage id of the client (E.g. 0x200076 for Gyro).
+* @usage_id:	Usage id of the client (e.g. 0x200076 for gyro).
 *
-* If there is a callback registred, this call will remove that
-* callbacks, so that it will stop data and event notifications.
+* Removes a previously registered callback for the given usage_id
+* and hsdev. Once removed, the client will no longer receive data or
+* event notifications.
 */
 int sensor_hub_remove_callback(struct hid_sensor_hub_device *hsdev,
 			u32 usage_id);
@@ -181,6 +186,27 @@ int sensor_hub_input_attr_get_raw_value(struct hid_sensor_hub_device *hsdev,
 					enum sensor_hub_read_flags flag,
 					bool is_signed
 );
+
+/**
+ * sensor_hub_input_attr_read_values() - Synchronous multi-byte read request
+ * @hsdev:		Hub device instance.
+ * @usage_id:		Attribute usage id of parent physical device as per spec
+ * @attr_usage_id:	Attribute usage id as per spec
+ * @report_id:		Report id to look for
+ * @flag:		Synchronous or asynchronous read
+ * @buffer_size:	Size of the buffer in bytes
+ * @buffer:		Buffer to store the read data
+ *
+ * Issues a synchronous or asynchronous read request for an input attribute,
+ * accumulating data into the provided buffer until it is full.
+ * Return: 0 on success, -ETIMEDOUT if the device did not respond, or a
+ * negative error code.
+ */
+int sensor_hub_input_attr_read_values(struct hid_sensor_hub_device *hsdev,
+				      u32 usage_id, u32 attr_usage_id,
+				      u32 report_id,
+				      enum sensor_hub_read_flags flag,
+				      u32 buffer_size, u8 *buffer);
 
 /**
 * sensor_hub_set_feature() - Feature set request

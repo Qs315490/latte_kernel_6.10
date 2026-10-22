@@ -13,6 +13,7 @@
 .*
 *.a
 *.asn1.[ch]
+*.bc
 *.bin
 *.bz2
 *.c.[012]*.*
@@ -40,12 +41,15 @@
 *.o
 *.o.*
 *.patch
+*.pyc
+*.rlib
 *.rmeta
 *.rpm
 *.rsi
 *.s
 *.so
 *.so.dbg
+*.spdx.json
 *.su
 *.symtypes
 *.tab.[ch]
@@ -54,6 +58,7 @@
 *.zst
 Module.symvers
 dtbs-list
+builtin.order
 modules.order
 
 #
@@ -65,6 +70,8 @@ modules.order
 /vmlinux.32
 /vmlinux.map
 /vmlinux.symvers
+/vmlinux.thinlto-index
+/vmlinux.unstripped
 /vmlinux-gdb.py
 /vmlinuz
 /System.map
@@ -112,6 +119,7 @@ modules.order
 !.gitignore
 !.kunitconfig
 !.mailmap
+!.pylintrc
 !.rustfmt.toml
 
 #
@@ -173,10 +181,16 @@ x509.genkey
 *.kdev4
 
 # Clang's compilation database file
-/compile_commands.json
+compile_commands.json
 
 # Documentation toolchain
 sphinx_*/
 
 # Rust analyzer configuration
 /rust-project.json
+
+# rustc error message long types
+*.long-type-*.txt
+
+# bc language scripts (not LLVM bitcode)
+!kernel/time/timeconst.bc

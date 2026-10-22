@@ -176,9 +176,10 @@ static bool recalc_sigpending_tsk(struct task_struct *t)
 
 void recalc_sigpending(void)
 {
-	if (!recalc_sigpending_tsk(current) && !freezing(current))
-		clear_thread_flag(TIF_SIGPENDING);
-
+	if (!recalc_sigpending_tsk(current) && !freezing(current)) {
+		if (unlikely(test_thread_flag(TIF_SIGPENDING)))
+			clear_thread_flag(TIF_SIGPENDING);
+	}
 }
 EXPORT_SYMBOL(recalc_sigpending);
 
@@ -999,9 +1000,7 @@ static void complete_signal(int sig, struct task_struct *p, enum pid_type type)
 	 * Found a killable thread.  If the signal will be fatal,
 	 * then start taking the whole group down immediately.
 	 */
-	if (sig_fatal(p, sig) &&
-	    (signal->core_state || !(signal->flags & SIGNAL_GROUP_EXIT)) &&
-	    !sigismember(&t->real_blocked, sig) &&
+	if (sig_fatal(p, sig) && !sigismember(&t->real_blocked, sig) &&
 	    (sig == SIGKILL || !p->ptrace)) {
 		/*
 		 * This signal will be fatal to the whole group.
@@ -1339,6 +1338,7 @@ int zap_other_threads(struct task_struct *p)
 	int count = 0;
 
 	p->signal->group_stop_count = 0;
+	task_clear_jobctl_pending(p, JOBCTL_PENDING_MASK);
 
 	for_other_threads(p, t) {
 		task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
@@ -1354,16 +1354,24 @@ int zap_other_threads(struct task_struct *p)
 	return count;
 }
 
-struct sighand_struct *__lock_task_sighand(struct task_struct *tsk,
-					   unsigned long *flags)
+struct sighand_struct *lock_task_sighand(struct task_struct *tsk,
+					 unsigned long *flags)
 {
 	struct sighand_struct *sighand;
 
 	rcu_read_lock();
 	for (;;) {
 		sighand = rcu_dereference(tsk->sighand);
-		if (unlikely(sighand == NULL))
+		if (unlikely(sighand == NULL)) {
+			/*
+			 * Pairs with the smp_store_release() in
+			 * __exit_signal().  It ensures that all state
+			 * modifications to the task preceeding the store are
+			 * visible to the callers of lock_task_sighand().
+			 */
+			smp_acquire__after_ctrl_dep();
 			break;
+		}
 
 		/*
 		 * This sighand can be already freed and even reused, but
@@ -2092,7 +2100,7 @@ static inline void posixtimer_sig_ignore(struct task_struct *tsk, struct sigqueu
 	 * from a non-periodic timer, then just drop the reference
 	 * count. Otherwise queue it on the ignored list.
 	 */
-	if (tmr->it_signal && tmr->it_sig_periodic)
+	if (posixtimer_valid(tmr) && tmr->it_sig_periodic)
 		hlist_add_head(&tmr->ignored_list, &tsk->signal->ignored_posix_timers);
 	else
 		posixtimer_putref(tmr);
@@ -2172,19 +2180,16 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
 	bool autoreap = false;
 	u64 utime, stime;
 
-	WARN_ON_ONCE(sig == -1);
+	if (WARN_ON_ONCE(!valid_signal(sig)))
+		return false;
 
 	/* do_notify_parent_cldstop should have been called instead.  */
 	WARN_ON_ONCE(task_is_stopped_or_traced(tsk));
 
-	WARN_ON_ONCE(!tsk->ptrace &&
-	       (tsk->group_leader != tsk || !thread_group_empty(tsk)));
-	/*
-	 * tsk is a group leader and has no threads, wake up the
-	 * non-PIDFD_THREAD waiters.
-	 */
-	if (thread_group_empty(tsk))
-		do_notify_pidfd(tsk);
+	WARN_ON_ONCE(!tsk->ptrace && !thread_group_empty(tsk));
+
+	/* ptraced, or group-leader without sub-threads */
+	do_notify_pidfd(tsk);
 
 	if (sig != SIGCHLD) {
 		/*
@@ -2253,11 +2258,15 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
 		if (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN)
 			sig = 0;
 	}
+	if (!tsk->ptrace && tsk->signal->autoreap) {
+		autoreap = true;
+		sig = 0;
+	}
 	/*
 	 * Send with __send_signal as si_pid and si_uid are in the
 	 * parent's namespaces.
 	 */
-	if (valid_signal(sig) && sig)
+	if (sig)
 		__send_signal_locked(sig, &info, tsk->parent, PIDTYPE_TGID, false);
 	__wake_up_parent(tsk, tsk->parent);
 	spin_unlock_irqrestore(&psig->siglock, flags);
@@ -2816,8 +2825,9 @@ bool get_signal(struct ksignal *ksig)
 
 	/*
 	 * Do this once, we can't return to user-mode if freezing() == T.
-	 * do_signal_stop() and ptrace_stop() do freezable_schedule() and
-	 * thus do not need another check after return.
+	 * do_signal_stop() and ptrace_stop() set TASK_STOPPED/TASK_TRACED
+	 * and the freezer handles those states via TASK_FROZEN, thus they
+	 * do not need another check after return.
 	 */
 	try_to_freeze();
 
@@ -3018,7 +3028,7 @@ relock:
 			 * first and our do_group_exit call below will use
 			 * that value and ignore the one we pass it.
 			 */
-			do_coredump(&ksig->info);
+			vfs_coredump(&ksig->info);
 		}
 
 		/*
@@ -3127,7 +3137,6 @@ void exit_signals(struct task_struct *tsk)
 	cgroup_threadgroup_change_begin(tsk);
 
 	if (thread_group_empty(tsk) || (tsk->signal->flags & SIGNAL_GROUP_EXIT)) {
-		sched_mm_cid_exit_signals(tsk);
 		tsk->flags |= PF_EXITING;
 		cgroup_threadgroup_change_end(tsk);
 		return;
@@ -3138,7 +3147,6 @@ void exit_signals(struct task_struct *tsk)
 	 * From now this task is not visible for group-wide signals,
 	 * see wants_signal(), do_signal_stop().
 	 */
-	sched_mm_cid_exit_signals(tsk);
 	tsk->flags |= PF_EXITING;
 
 	cgroup_threadgroup_change_end(tsk);
@@ -4009,56 +4017,12 @@ static struct pid *pidfd_to_pid(const struct file *file)
 	(PIDFD_SIGNAL_THREAD | PIDFD_SIGNAL_THREAD_GROUP | \
 	 PIDFD_SIGNAL_PROCESS_GROUP)
 
-/**
- * sys_pidfd_send_signal - Signal a process through a pidfd
- * @pidfd:  file descriptor of the process
- * @sig:    signal to send
- * @info:   signal info
- * @flags:  future flags
- *
- * Send the signal to the thread group or to the individual thread depending
- * on PIDFD_THREAD.
- * In the future extension to @flags may be used to override the default scope
- * of @pidfd.
- *
- * Return: 0 on success, negative errno on failure
- */
-SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
-		siginfo_t __user *, info, unsigned int, flags)
+static int do_pidfd_send_signal(struct pid *pid, int sig, enum pid_type type,
+				siginfo_t __user *info, unsigned int flags)
 {
-	int ret;
-	struct pid *pid;
 	kernel_siginfo_t kinfo;
-	enum pid_type type;
-
-	/* Enforce flags be set to 0 until we add an extension. */
-	if (flags & ~PIDFD_SEND_SIGNAL_FLAGS)
-		return -EINVAL;
-
-	/* Ensure that only a single signal scope determining flag is set. */
-	if (hweight32(flags & PIDFD_SEND_SIGNAL_FLAGS) > 1)
-		return -EINVAL;
-
-	CLASS(fd, f)(pidfd);
-	if (fd_empty(f))
-		return -EBADF;
-
-	/* Is this a pidfd? */
-	pid = pidfd_to_pid(fd_file(f));
-	if (IS_ERR(pid))
-		return PTR_ERR(pid);
-
-	if (!access_pidfd_pidns(pid))
-		return -EINVAL;
 
 	switch (flags) {
-	case 0:
-		/* Infer scope from the type of pidfd. */
-		if (fd_file(f)->f_flags & PIDFD_THREAD)
-			type = PIDTYPE_PID;
-		else
-			type = PIDTYPE_TGID;
-		break;
 	case PIDFD_SIGNAL_THREAD:
 		type = PIDTYPE_PID;
 		break;
@@ -4071,6 +4035,8 @@ SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
 	}
 
 	if (info) {
+		int ret;
+
 		ret = copy_siginfo_from_user_any(&kinfo, info);
 		if (unlikely(ret))
 			return ret;
@@ -4088,8 +4054,75 @@ SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
 
 	if (type == PIDTYPE_PGID)
 		return kill_pgrp_info(sig, &kinfo, pid);
-	else
-		return kill_pid_info_type(sig, &kinfo, pid, type);
+
+	return kill_pid_info_type(sig, &kinfo, pid, type);
+}
+
+/**
+ * sys_pidfd_send_signal - Signal a process through a pidfd
+ * @pidfd:  file descriptor of the process
+ * @sig:    signal to send
+ * @info:   signal info
+ * @flags:  future flags
+ *
+ * Send the signal to the thread group or to the individual thread depending
+ * on PIDFD_THREAD.
+ * In the future extension to @flags may be used to override the default scope
+ * of @pidfd.
+ *
+ * Return: 0 on success, negative errno on failure
+ */
+SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
+		siginfo_t __user *, info, unsigned int, flags)
+{
+	struct pid *pid;
+	enum pid_type type;
+	int ret;
+
+	/* Enforce flags be set to 0 until we add an extension. */
+	if (flags & ~PIDFD_SEND_SIGNAL_FLAGS)
+		return -EINVAL;
+
+	/* Ensure that only a single signal scope determining flag is set. */
+	if (hweight32(flags & PIDFD_SEND_SIGNAL_FLAGS) > 1)
+		return -EINVAL;
+
+	switch (pidfd) {
+	case PIDFD_SELF_THREAD:
+		pid = get_task_pid(current, PIDTYPE_PID);
+		type = PIDTYPE_PID;
+		break;
+	case PIDFD_SELF_THREAD_GROUP:
+		pid = get_task_pid(current, PIDTYPE_TGID);
+		type = PIDTYPE_TGID;
+		break;
+	default: {
+		CLASS(fd, f)(pidfd);
+		if (fd_empty(f))
+			return -EBADF;
+
+		/* Is this a pidfd? */
+		pid = pidfd_to_pid(fd_file(f));
+		if (IS_ERR(pid))
+			return PTR_ERR(pid);
+
+		if (!access_pidfd_pidns(pid))
+			return -EINVAL;
+
+		/* Infer scope from the type of pidfd. */
+		if (fd_file(f)->f_flags & PIDFD_THREAD)
+			type = PIDTYPE_PID;
+		else
+			type = PIDTYPE_TGID;
+
+		return do_pidfd_send_signal(pid, sig, type, info, flags);
+	}
+	}
+
+	ret = do_pidfd_send_signal(pid, sig, type, info, flags);
+	put_pid(pid);
+
+	return ret;
 }
 
 static int
@@ -4962,9 +4995,20 @@ static const struct ctl_table signal_debug_table[] = {
 #endif
 };
 
+static const struct ctl_table signal_table[] = {
+	{
+		.procname	= "print-fatal-signals",
+		.data		= &print_fatal_signals,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+};
+
 static int __init init_signal_sysctls(void)
 {
 	register_sysctl_init("debug", signal_debug_table);
+	register_sysctl_init("kernel", signal_table);
 	return 0;
 }
 early_initcall(init_signal_sysctls);

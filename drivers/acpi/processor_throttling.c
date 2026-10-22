@@ -18,9 +18,12 @@
 #include <linux/sched.h>
 #include <linux/cpufreq.h>
 #include <linux/acpi.h>
+#include <linux/uaccess.h>
 #include <acpi/processor.h>
 #include <asm/io.h>
-#include <linux/uaccess.h>
+#ifdef CONFIG_X86
+#include <asm/msr.h>
+#endif
 
 /* ignore_tpc:
  *  0 -> acpi processor driver doesn't ignore _TPC values
@@ -232,7 +235,7 @@ static int acpi_processor_throttling_notifier(unsigned long event, void *data)
 		if (pr->throttling_platform_limit > target_state)
 			target_state = pr->throttling_platform_limit;
 		if (target_state >= p_throttling->state_count) {
-			pr_warn("Exceed the limit of T-state \n");
+			pr_warn("Exceed the limit of T-state\n");
 			target_state = p_throttling->state_count - 1;
 		}
 		p_tstate->target_state = target_state;
@@ -509,9 +512,7 @@ static int acpi_processor_get_throttling_states(struct acpi_processor *pr)
 
 	pr->throttling.state_count = tss->package.count;
 	pr->throttling.states_tss =
-	    kmalloc_array(tss->package.count,
-			  sizeof(struct acpi_processor_tx_tss),
-			  GFP_KERNEL);
+	    kmalloc_objs(struct acpi_processor_tx_tss, tss->package.count);
 	if (!pr->throttling.states_tss) {
 		result = -ENOMEM;
 		goto end;

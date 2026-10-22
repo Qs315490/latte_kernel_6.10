@@ -29,6 +29,7 @@ static struct facility_def facility_defs[] = {
 		.bits = (int[]){
 			0,  /* N3 instructions */
 			1,  /* z/Arch mode installed */
+			3,  /* dat-enhancement 1 */
 			18, /* long displacement facility */
 			21, /* extended-immediate facility */
 			25, /* store clock fast */
@@ -53,6 +54,9 @@ static struct facility_def facility_defs[] = {
 #endif
 #ifdef CONFIG_HAVE_MARCH_Z15_FEATURES
 			61, /* miscellaneous-instruction-extension 3 */
+#endif
+#ifdef CONFIG_HAVE_MARCH_Z17_FEATURES
+			84, /* miscellaneous-instruction-extension 4 */
 #endif
 			-1 /* END */
 		}

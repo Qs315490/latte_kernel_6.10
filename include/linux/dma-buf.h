@@ -22,6 +22,7 @@
 #include <linux/fs.h>
 #include <linux/dma-fence.h>
 #include <linux/wait.h>
+#include <linux/pci-p2pdma.h>
 
 struct device;
 struct dma_buf;
@@ -34,15 +35,6 @@ struct dma_buf_attachment;
  * @vunmap: [optional] unmaps a vmap from the buffer
  */
 struct dma_buf_ops {
-	/**
-	  * @cache_sgt_mapping:
-	  *
-	  * If true the framework will cache the first mapping made for each
-	  * attachment. This avoids creating mappings for attachments multiple
-	  * times.
-	  */
-	bool cache_sgt_mapping;
-
 	/**
 	 * @attach:
 	 *
@@ -330,13 +322,13 @@ struct dma_buf {
 	 * @vmapping_counter:
 	 *
 	 * Used internally to refcnt the vmaps returned by dma_buf_vmap().
-	 * Protected by @lock.
+	 * Protected by @resv.
 	 */
 	unsigned vmapping_counter;
 
 	/**
 	 * @vmap_ptr:
-	 * The current vmap ptr if @vmapping_counter > 0. Protected by @lock.
+	 * The current vmap ptr if @vmapping_counter > 0. Protected by @resv.
 	 */
 	struct iosys_map vmap_ptr;
 
@@ -370,10 +362,8 @@ struct dma_buf {
 	 */
 	struct module *owner;
 
-#if IS_ENABLED(CONFIG_DEBUG_FS)
 	/** @list_node: node for dma_buf accounting and debugging. */
 	struct list_head list_node;
-#endif
 
 	/** @priv: exporter specific private data for this buffer object. */
 	void *priv;
@@ -417,7 +407,7 @@ struct dma_buf {
 	 *   through the device.
 	 *
 	 * - Dynamic importers should set fences for any access that they can't
-	 *   disable immediately from their &dma_buf_attach_ops.move_notify
+	 *   disable immediately from their &dma_buf_attach_ops.invalidate_mappings
 	 *   callback.
 	 *
 	 * IMPORTANT:
@@ -439,18 +429,6 @@ struct dma_buf {
 
 		__poll_t active;
 	} cb_in, cb_out;
-#ifdef CONFIG_DMABUF_SYSFS_STATS
-	/**
-	 * @sysfs_entry:
-	 *
-	 * For exposing information about this buffer in sysfs. See also
-	 * `DMA-BUF statistics`_ for the uapi this enables.
-	 */
-	struct dma_buf_sysfs_entry {
-		struct kobject kobj;
-		struct dma_buf *dmabuf;
-	} *sysfs_entry;
-#endif
 };
 
 /**
@@ -468,7 +446,7 @@ struct dma_buf_attach_ops {
 	bool allow_peer2peer;
 
 	/**
-	 * @move_notify: [optional] notification that the DMA-buf is moving
+	 * @invalidate_mappings: [optional] notification that the DMA-buf is moving
 	 *
 	 * If this callback is provided the framework can avoid pinning the
 	 * backing store while mappings exists.
@@ -478,14 +456,10 @@ struct dma_buf_attach_ops {
 	 * called with this lock held as well. This makes sure that no mapping
 	 * is created concurrently with an ongoing move operation.
 	 *
-	 * Mappings stay valid and are not directly affected by this callback.
-	 * But the DMA-buf can now be in a different physical location, so all
-	 * mappings should be destroyed and re-created as soon as possible.
-	 *
-	 * New mappings can be created after this callback returns, and will
-	 * point to the new location of the DMA-buf.
+	 * See the kdoc for dma_buf_invalidate_mappings() for details on the
+	 * required behavior.
 	 */
-	void (*move_notify)(struct dma_buf_attachment *attach);
+	void (*invalidate_mappings)(struct dma_buf_attachment *attach);
 };
 
 /**
@@ -493,8 +467,6 @@ struct dma_buf_attach_ops {
  * @dmabuf: buffer for this attachment.
  * @dev: device attached to the buffer.
  * @node: list of dma_buf_attachment, protected by dma_resv lock of the dmabuf.
- * @sgt: cached mapping.
- * @dir: direction of cached mapping.
  * @peer2peer: true if the importer can handle peer resources without pages.
  * @priv: exporter specific attachment data.
  * @importer_ops: importer operations for this attachment, if provided
@@ -514,8 +486,6 @@ struct dma_buf_attachment {
 	struct dma_buf *dmabuf;
 	struct device *dev;
 	struct list_head node;
-	struct sg_table *sgt;
-	enum dma_data_direction dir;
 	bool peer2peer;
 	const struct dma_buf_attach_ops *importer_ops;
 	void *importer_priv;
@@ -583,20 +553,6 @@ static inline bool dma_buf_is_dynamic(struct dma_buf *dmabuf)
 	return !!dmabuf->ops->pin;
 }
 
-/**
- * dma_buf_attachment_is_dynamic - check if a DMA-buf attachment uses dynamic
- * mappings
- * @attach: the DMA-buf attachment to check
- *
- * Returns true if a DMA-buf importer wants to call the map/unmap functions with
- * the dma_resv lock held.
- */
-static inline bool
-dma_buf_attachment_is_dynamic(struct dma_buf_attachment *attach)
-{
-	return !!attach->importer_ops;
-}
-
 struct dma_buf_attachment *dma_buf_attach(struct dma_buf *dmabuf,
 					  struct device *dev);
 struct dma_buf_attachment *
@@ -618,7 +574,8 @@ struct sg_table *dma_buf_map_attachment(struct dma_buf_attachment *,
 					enum dma_data_direction);
 void dma_buf_unmap_attachment(struct dma_buf_attachment *, struct sg_table *,
 				enum dma_data_direction);
-void dma_buf_move_notify(struct dma_buf *dma_buf);
+void dma_buf_invalidate_mappings(struct dma_buf *dma_buf);
+bool dma_buf_attach_revocable(struct dma_buf_attachment *attach);
 int dma_buf_begin_cpu_access(struct dma_buf *dma_buf,
 			     enum dma_data_direction dir);
 int dma_buf_end_cpu_access(struct dma_buf *dma_buf,
@@ -636,4 +593,6 @@ int dma_buf_vmap(struct dma_buf *dmabuf, struct iosys_map *map);
 void dma_buf_vunmap(struct dma_buf *dmabuf, struct iosys_map *map);
 int dma_buf_vmap_unlocked(struct dma_buf *dmabuf, struct iosys_map *map);
 void dma_buf_vunmap_unlocked(struct dma_buf *dmabuf, struct iosys_map *map);
+struct dma_buf *dma_buf_iter_begin(void);
+struct dma_buf *dma_buf_iter_next(struct dma_buf *dmbuf);
 #endif /* __DMA_BUF_H__ */

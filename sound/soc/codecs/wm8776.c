@@ -9,7 +9,6 @@
  * TODO: Input ALC/limiter support
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -182,9 +181,9 @@ static int wm8776_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	iface = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		master = 0;
 		break;
 	default:
@@ -334,6 +333,7 @@ static int wm8776_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	struct wm8776_priv *wm8776 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	switch (level) {
 	case SND_SOC_BIAS_ON:
@@ -341,7 +341,7 @@ static int wm8776_set_bias_level(struct snd_soc_component *component,
 	case SND_SOC_BIAS_PREPARE:
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			regcache_sync(wm8776->regmap);
 
 			/* Disable the global powerdown; DAPM does the rest */
@@ -512,8 +512,8 @@ static int wm8776_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8776_i2c_id[] = {
-	{ "wm8775", WM8775 },
-	{ "wm8776", WM8776 },
+	{ .name = "wm8775", .driver_data = WM8775 },
+	{ .name = "wm8776", .driver_data = WM8776 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8776_i2c_id);

@@ -557,7 +557,7 @@ static const struct amdgpu_ring_funcs jpeg_v1_0_decode_ring_vm_funcs = {
 	.nop = PACKET0(0x81ff, 0),
 	.support_64bit_ptrs = false,
 	.no_user_fence = true,
-	.extra_dw = 64,
+	.extra_bytes = 256,
 	.get_rptr = jpeg_v1_0_decode_ring_get_rptr,
 	.get_wptr = jpeg_v1_0_decode_ring_get_wptr,
 	.set_wptr = jpeg_v1_0_decode_ring_set_wptr,
@@ -604,15 +604,15 @@ static void jpeg_v1_0_set_irq_funcs(struct amdgpu_device *adev)
 static void jpeg_v1_0_ring_begin_use(struct amdgpu_ring *ring)
 {
 	struct	amdgpu_device *adev = ring->adev;
-	bool	set_clocks = !cancel_delayed_work_sync(&adev->vcn.idle_work);
+	bool	set_clocks = !cancel_delayed_work_sync(&adev->vcn.inst[0].idle_work);
 	int		cnt = 0;
 
-	mutex_lock(&adev->vcn.vcn1_jpeg1_workaround);
+	mutex_lock(&adev->vcn.inst[0].vcn1_jpeg1_workaround);
 
 	if (amdgpu_fence_wait_empty(&adev->vcn.inst->ring_dec))
 		DRM_ERROR("JPEG dec: vcn dec ring may not be empty\n");
 
-	for (cnt = 0; cnt < adev->vcn.num_enc_rings; cnt++) {
+	for (cnt = 0; cnt < adev->vcn.inst[0].num_enc_rings; cnt++) {
 		if (amdgpu_fence_wait_empty(&adev->vcn.inst->ring_enc[cnt]))
 			DRM_ERROR("JPEG dec: vcn enc ring[%d] may not be empty\n", cnt);
 	}

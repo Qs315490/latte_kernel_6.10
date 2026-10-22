@@ -9,7 +9,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/iio/events.h>
@@ -361,19 +360,13 @@ static int us5182d_shutdown_en(struct us5182d_data *data, u8 state)
 
 static int us5182d_set_power_state(struct us5182d_data *data, bool on)
 {
-	int ret;
-
 	if (data->power_mode == US5182D_ONESHOT)
 		return 0;
 
-	if (on) {
-		ret = pm_runtime_resume_and_get(&data->client->dev);
-	} else {
-		pm_runtime_mark_last_busy(&data->client->dev);
-		ret = pm_runtime_put_autosuspend(&data->client->dev);
-	}
+	if (on)
+		return pm_runtime_resume_and_get(&data->client->dev);
 
-	return ret;
+	return pm_runtime_put_autosuspend(&data->client->dev);
 }
 
 static int us5182d_read_value(struct us5182d_data *data,
@@ -949,21 +942,21 @@ static const struct dev_pm_ops us5182d_pm_ops = {
 
 static const struct acpi_device_id us5182d_acpi_match[] = {
 	{ "USD5182", 0 },
-	{}
+	{ }
 };
 
 MODULE_DEVICE_TABLE(acpi, us5182d_acpi_match);
 
 static const struct i2c_device_id us5182d_id[] = {
-	{ "usd5182" },
-	{}
+	{ .name = "usd5182" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, us5182d_id);
 
 static const struct of_device_id us5182d_of_match[] = {
 	{ .compatible = "upisemi,usd5182" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, us5182d_of_match);
 

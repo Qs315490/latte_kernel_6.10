@@ -21,7 +21,6 @@
 #include <linux/of_irq.h>
 #include <linux/delay.h>
 #include "rsnd.h"
-#define RSND_SSI_NAME_SIZE 16
 
 /*
  * SSICR
@@ -680,31 +679,30 @@ static void __rsnd_ssi_interrupt(struct rsnd_mod *mod,
 	bool elapsed = false;
 	bool stop = false;
 
-	spin_lock(&priv->lock);
+	scoped_guard(spinlock, &priv->lock) {
 
-	/* ignore all cases if not working */
-	if (!rsnd_io_is_working(io))
-		goto rsnd_ssi_interrupt_out;
+		/* ignore all cases if not working */
+		if (!rsnd_io_is_working(io))
+			break;
 
-	status = rsnd_ssi_status_get(mod);
+		status = rsnd_ssi_status_get(mod);
 
-	/* PIO only */
-	if (!is_dma && (status & DIRQ))
-		elapsed = rsnd_ssi_pio_interrupt(mod, io);
+		/* PIO only */
+		if (!is_dma && (status & DIRQ))
+			elapsed = rsnd_ssi_pio_interrupt(mod, io);
 
-	/* DMA only */
-	if (is_dma && (status & (UIRQ | OIRQ))) {
-		rsnd_print_irq_status(dev, "%s err status : 0x%08x\n",
-				      rsnd_mod_name(mod), status);
+		/* DMA only */
+		if (is_dma && (status & (UIRQ | OIRQ))) {
+			rsnd_print_irq_status(dev, "%s err status : 0x%08x\n",
+					      rsnd_mod_name(mod), status);
 
-		stop = true;
+			stop = true;
+		}
+
+		stop |= rsnd_ssiu_busif_err_status_clear(mod);
+
+		rsnd_ssi_status_clear(mod);
 	}
-
-	stop |= rsnd_ssiu_busif_err_status_clear(mod);
-
-	rsnd_ssi_status_clear(mod);
-rsnd_ssi_interrupt_out:
-	spin_unlock(&priv->lock);
 
 	if (elapsed)
 		snd_pcm_period_elapsed(io->substream);
@@ -1011,11 +1009,11 @@ static struct dma_chan *rsnd_ssi_dma_req(struct rsnd_dai_stream *io,
 	char *name;
 
 	/*
-	 * It should use "rcar_sound,ssiu" on DT.
-	 * But, we need to keep compatibility for old version.
+	 * It should use "rcar_sound,ssiu" (R-Car) or "ssiu" (RZ/G3E) on DT.
+	 * We need to keep compatibility for old version.
 	 *
-	 * If it has "rcar_sound.ssiu", it will be used.
-	 * If not, "rcar_sound.ssi" will be used.
+	 * If it has "rcar_sound.ssiu" or "ssiu", it will be used.
+	 * If not, "rcar_sound.ssi" or "ssi" will be used.
 	 * see
 	 *	rsnd_ssiu_dma_req()
 	 *	rsnd_dma_of_path()
@@ -1115,7 +1113,6 @@ void rsnd_parse_connect_ssi(struct rsnd_dai *rdai,
 	struct rsnd_priv *priv = rsnd_rdai_to_priv(rdai);
 	struct device *dev = rsnd_priv_to_dev(priv);
 	struct device_node *node;
-	struct device_node *np;
 	int i;
 
 	node = rsnd_ssi_of_node(priv);
@@ -1123,14 +1120,12 @@ void rsnd_parse_connect_ssi(struct rsnd_dai *rdai,
 		return;
 
 	i = 0;
-	for_each_child_of_node(node, np) {
+	for_each_child_of_node_scoped(node, np) {
 		struct rsnd_mod *mod;
 
 		i = rsnd_node_fixed_index(dev, np, SSI_NAME, i);
-		if (i < 0) {
-			of_node_put(np);
+		if (i < 0)
 			break;
-		}
 
 		mod = rsnd_ssi_mod_get(priv, i);
 
@@ -1162,13 +1157,12 @@ int __rsnd_ssi_is_pin_sharing(struct rsnd_mod *mod)
 
 int rsnd_ssi_probe(struct rsnd_priv *priv)
 {
+	struct reset_control *rstc;
 	struct device_node *node;
-	struct device_node *np;
 	struct device *dev = rsnd_priv_to_dev(priv);
 	struct rsnd_mod_ops *ops;
 	struct clk *clk;
 	struct rsnd_ssi *ssi;
-	char name[RSND_SSI_NAME_SIZE];
 	int i, nr, ret;
 
 	node = rsnd_ssi_of_node(priv);
@@ -1191,26 +1185,32 @@ int rsnd_ssi_probe(struct rsnd_priv *priv)
 	priv->ssi_nr	= nr;
 
 	i = 0;
-	for_each_child_of_node(node, np) {
+	for_each_child_of_node_scoped(node, np) {
 		if (!of_device_is_available(np))
 			goto skip;
 
 		i = rsnd_node_fixed_index(dev, np, SSI_NAME, i);
 		if (i < 0) {
 			ret = -EINVAL;
-			of_node_put(np);
 			goto rsnd_ssi_probe_done;
 		}
 
 		ssi = rsnd_ssi_get(priv, i);
 
-		snprintf(name, RSND_SSI_NAME_SIZE, "%s.%d",
-			 SSI_NAME, i);
-
-		clk = devm_clk_get(dev, name);
+		clk = rsnd_devm_clk_get_indexed(dev, SSI_NAME, i);
 		if (IS_ERR(clk)) {
 			ret = PTR_ERR(clk);
-			of_node_put(np);
+			goto rsnd_ssi_probe_done;
+		}
+
+		/*
+		 * RZ/G3E uses per-SSI reset controllers.
+		 * R-Car platforms typically don't have SSI reset controls.
+		 */
+		rstc = rsnd_devm_reset_control_get_optional_indexed(dev,
+								    SSI_NAME, i);
+		if (IS_ERR(rstc)) {
+			ret = PTR_ERR(rstc);
 			goto rsnd_ssi_probe_done;
 		}
 
@@ -1223,7 +1223,6 @@ int rsnd_ssi_probe(struct rsnd_priv *priv)
 		ssi->irq = irq_of_parse_and_map(np, 0);
 		if (!ssi->irq) {
 			ret = -EINVAL;
-			of_node_put(np);
 			goto rsnd_ssi_probe_done;
 		}
 
@@ -1233,11 +1232,10 @@ int rsnd_ssi_probe(struct rsnd_priv *priv)
 			ops = &rsnd_ssi_dma_ops;
 
 		ret = rsnd_mod_init(priv, rsnd_mod_get(ssi), ops, clk,
-				    RSND_MOD_SSI, i);
-		if (ret) {
-			of_node_put(np);
+				    rstc, RSND_MOD_SSI, i);
+		if (ret)
 			goto rsnd_ssi_probe_done;
-		}
+
 skip:
 		i++;
 	}
@@ -1258,4 +1256,24 @@ void rsnd_ssi_remove(struct rsnd_priv *priv)
 	for_each_rsnd_ssi(ssi, priv, i) {
 		rsnd_mod_quit(rsnd_mod_get(ssi));
 	}
+}
+
+void rsnd_ssi_suspend(struct rsnd_priv *priv)
+{
+	struct rsnd_ssi *ssi;
+	int i;
+
+	for_each_rsnd_ssi(ssi, priv, i)
+		rsnd_suspend_clk_reset(rsnd_mod_get(ssi)->clk,
+				       rsnd_mod_get(ssi)->rstc);
+}
+
+void rsnd_ssi_resume(struct rsnd_priv *priv)
+{
+	struct rsnd_ssi *ssi;
+	int i;
+
+	for_each_rsnd_ssi(ssi, priv, i)
+		rsnd_resume_clk_reset(rsnd_mod_get(ssi)->clk,
+				      rsnd_mod_get(ssi)->rstc);
 }

@@ -491,11 +491,11 @@ static void pcnet32_realloc_tx_ring(struct net_device *dev,
 	if (!new_tx_ring)
 		return;
 
-	new_dma_addr_list = kcalloc(entries, sizeof(dma_addr_t), GFP_ATOMIC);
+	new_dma_addr_list = kzalloc_objs(dma_addr_t, entries, GFP_ATOMIC);
 	if (!new_dma_addr_list)
 		goto free_new_tx_ring;
 
-	new_skb_list = kcalloc(entries, sizeof(struct sk_buff *), GFP_ATOMIC);
+	new_skb_list = kzalloc_objs(struct sk_buff *, entries, GFP_ATOMIC);
 	if (!new_skb_list)
 		goto free_new_lists;
 
@@ -550,11 +550,11 @@ static void pcnet32_realloc_rx_ring(struct net_device *dev,
 	if (!new_rx_ring)
 		return;
 
-	new_dma_addr_list = kcalloc(entries, sizeof(dma_addr_t), GFP_ATOMIC);
+	new_dma_addr_list = kzalloc_objs(dma_addr_t, entries, GFP_ATOMIC);
 	if (!new_dma_addr_list)
 		goto free_new_rx_ring;
 
-	new_skb_list = kcalloc(entries, sizeof(struct sk_buff *), GFP_ATOMIC);
+	new_skb_list = kzalloc_objs(struct sk_buff *, entries, GFP_ATOMIC);
 	if (!new_skb_list)
 		goto free_new_lists;
 
@@ -1407,8 +1407,10 @@ static int pcnet32_poll(struct napi_struct *napi, int budget)
 		pcnet32_restart(dev, CSR0_START);
 		netif_wake_queue(dev);
 	}
+	spin_unlock_irqrestore(&lp->lock, flags);
 
 	if (work_done < budget && napi_complete_done(napi, work_done)) {
+		spin_lock_irqsave(&lp->lock, flags);
 		/* clear interrupt masks */
 		val = lp->a->read_csr(ioaddr, CSR3);
 		val &= 0x00ff;
@@ -1416,9 +1418,9 @@ static int pcnet32_poll(struct napi_struct *napi, int budget)
 
 		/* Set interrupt enable. */
 		lp->a->write_csr(ioaddr, CSR0, CSR0_INTEN);
+		spin_unlock_irqrestore(&lp->lock, flags);
 	}
 
-	spin_unlock_irqrestore(&lp->lock, flags);
 	return work_done;
 }
 
@@ -2035,23 +2037,19 @@ static int pcnet32_alloc_ring(struct net_device *dev, const char *name)
 		return -ENOMEM;
 	}
 
-	lp->tx_dma_addr = kcalloc(lp->tx_ring_size, sizeof(dma_addr_t),
-				  GFP_KERNEL);
+	lp->tx_dma_addr = kzalloc_objs(dma_addr_t, lp->tx_ring_size);
 	if (!lp->tx_dma_addr)
 		return -ENOMEM;
 
-	lp->rx_dma_addr = kcalloc(lp->rx_ring_size, sizeof(dma_addr_t),
-				  GFP_KERNEL);
+	lp->rx_dma_addr = kzalloc_objs(dma_addr_t, lp->rx_ring_size);
 	if (!lp->rx_dma_addr)
 		return -ENOMEM;
 
-	lp->tx_skbuff = kcalloc(lp->tx_ring_size, sizeof(struct sk_buff *),
-				GFP_KERNEL);
+	lp->tx_skbuff = kzalloc_objs(struct sk_buff *, lp->tx_ring_size);
 	if (!lp->tx_skbuff)
 		return -ENOMEM;
 
-	lp->rx_skbuff = kcalloc(lp->rx_ring_size, sizeof(struct sk_buff *),
-				GFP_KERNEL);
+	lp->rx_skbuff = kzalloc_objs(struct sk_buff *, lp->rx_ring_size);
 	if (!lp->rx_skbuff)
 		return -ENOMEM;
 
@@ -2630,7 +2628,7 @@ static int pcnet32_close(struct net_device *dev)
 	struct pcnet32_private *lp = netdev_priv(dev);
 	unsigned long flags;
 
-	del_timer_sync(&lp->watchdog_timer);
+	timer_delete_sync(&lp->watchdog_timer);
 
 	netif_stop_queue(dev);
 	napi_disable(&lp->napi);
@@ -2905,7 +2903,7 @@ static void pcnet32_check_media(struct net_device *dev, int verbose)
 
 static void pcnet32_watchdog(struct timer_list *t)
 {
-	struct pcnet32_private *lp = from_timer(lp, t, watchdog_timer);
+	struct pcnet32_private *lp = timer_container_of(lp, t, watchdog_timer);
 	struct net_device *dev = lp->dev;
 	unsigned long flags;
 

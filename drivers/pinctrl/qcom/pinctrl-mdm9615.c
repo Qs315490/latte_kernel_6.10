@@ -313,7 +313,7 @@ static const char * const cdc_mclk_groups[] = {
 };
 
 static const struct pinfunction mdm9615_functions[] = {
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(gsbi2_i2c),
 	MSM_PIN_FUNCTION(gsbi3),
 	MSM_PIN_FUNCTION(gsbi4),
@@ -439,6 +439,7 @@ static const struct of_device_id mdm9615_pinctrl_of_match[] = {
 	{ .compatible = "qcom,mdm9615-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, mdm9615_pinctrl_of_match);
 
 static struct platform_driver mdm9615_pinctrl_driver = {
 	.driver = {
@@ -446,7 +447,6 @@ static struct platform_driver mdm9615_pinctrl_driver = {
 		.of_match_table = mdm9615_pinctrl_of_match,
 	},
 	.probe = mdm9615_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init mdm9615_pinctrl_init(void)
@@ -464,4 +464,3 @@ module_exit(mdm9615_pinctrl_exit);
 MODULE_AUTHOR("Neil Armstrong <narmstrong@baylibre.com>");
 MODULE_DESCRIPTION("Qualcomm MDM9615 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, mdm9615_pinctrl_of_match);

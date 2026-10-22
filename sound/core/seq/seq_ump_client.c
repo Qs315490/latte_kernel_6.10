@@ -37,6 +37,7 @@ struct seq_ump_client {
 	struct snd_ump_endpoint *ump;	/* assigned endpoint */
 	int seq_client;			/* sequencer client id */
 	int opened[2];			/* current opens for each direction */
+	rwlock_t output_lock;		/* protects out_rfile output access */
 	struct snd_rawmidi_file out_rfile; /* rawmidi for output */
 	struct seq_ump_input_buffer input; /* input parser context */
 	void *ump_info[SNDRV_UMP_MAX_BLOCKS + 1]; /* shadow of seq client ump_info */
@@ -88,6 +89,7 @@ static int seq_ump_process_event(struct snd_seq_event *ev, int direct,
 	unsigned char type;
 	int len;
 
+	guard(read_lock_irqsave)(&client->output_lock);
 	substream = client->out_rfile.output;
 	if (!substream)
 		return -ENODEV;
@@ -106,6 +108,7 @@ static int seq_ump_process_event(struct snd_seq_event *ev, int direct,
 static int seq_ump_client_open(struct seq_ump_client *client, int dir)
 {
 	struct snd_ump_endpoint *ump = client->ump;
+	struct snd_rawmidi_file rfile = {};
 	int err;
 
 	guard(mutex)(&ump->open_mutex);
@@ -113,9 +116,11 @@ static int seq_ump_client_open(struct seq_ump_client *client, int dir)
 		err = snd_rawmidi_kernel_open(&ump->core, 0,
 					      SNDRV_RAWMIDI_LFLG_OUTPUT |
 					      SNDRV_RAWMIDI_LFLG_APPEND,
-					      &client->out_rfile);
+					      &rfile);
 		if (err < 0)
 			return err;
+		scoped_guard(write_lock_irqsave, &client->output_lock)
+			client->out_rfile = rfile;
 	}
 	client->opened[dir]++;
 	return 0;
@@ -125,11 +130,19 @@ static int seq_ump_client_open(struct seq_ump_client *client, int dir)
 static int seq_ump_client_close(struct seq_ump_client *client, int dir)
 {
 	struct snd_ump_endpoint *ump = client->ump;
+	struct snd_rawmidi_file rfile = {};
 
 	guard(mutex)(&ump->open_mutex);
-	if (!--client->opened[dir])
-		if (dir == STR_OUT)
-			snd_rawmidi_kernel_release(&client->out_rfile);
+	if (!--client->opened[dir]) {
+		if (dir == STR_OUT) {
+			scoped_guard(write_lock_irqsave, &client->output_lock) {
+				rfile = client->out_rfile;
+				client->out_rfile = (struct snd_rawmidi_file){};
+			}
+			if (rfile.rmidi)
+				snd_rawmidi_kernel_release(&rfile);
+		}
+	}
 	return 0;
 }
 
@@ -214,13 +227,13 @@ static bool skip_group(struct seq_ump_client *client, struct snd_ump_group *grou
 static int seq_ump_group_init(struct seq_ump_client *client, int group_index)
 {
 	struct snd_ump_group *group = &client->ump->groups[group_index];
-	struct snd_seq_port_info *port __free(kfree) = NULL;
 	struct snd_seq_port_callback pcallbacks;
 
 	if (skip_group(client, group))
 		return 0;
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	struct snd_seq_port_info *port __free(kfree) =
+		kzalloc_obj(*port);
 	if (!port)
 		return -ENOMEM;
 
@@ -243,12 +256,12 @@ static int seq_ump_group_init(struct seq_ump_client *client, int group_index)
 /* update the sequencer ports; called from notify_fb_change callback */
 static void update_port_infos(struct seq_ump_client *client)
 {
-	struct snd_seq_port_info *old __free(kfree) = NULL;
-	struct snd_seq_port_info *new __free(kfree) = NULL;
 	int i, err;
 
-	old = kzalloc(sizeof(*old), GFP_KERNEL);
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	struct snd_seq_port_info *old __free(kfree) =
+		kzalloc_obj(*old);
+	struct snd_seq_port_info *new __free(kfree) =
+		kzalloc_obj(*new);
 	if (!old || !new)
 		return;
 
@@ -278,12 +291,12 @@ static void update_port_infos(struct seq_ump_client *client)
 /* create a UMP Endpoint port */
 static int create_ump_endpoint_port(struct seq_ump_client *client)
 {
-	struct snd_seq_port_info *port __free(kfree) = NULL;
 	struct snd_seq_port_callback pcallbacks;
 	unsigned int rawmidi_info = client->ump->core.info_flags;
 	int err;
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	struct snd_seq_port_info *port __free(kfree) =
+		kzalloc_obj(*port);
 	if (!port)
 		return -ENOMEM;
 
@@ -310,7 +323,7 @@ static int create_ump_endpoint_port(struct seq_ump_client *client)
 		SNDRV_SEQ_PORT_TYPE_HARDWARE |
 		SNDRV_SEQ_PORT_TYPE_PORT;
 	port->midi_channels = 16;
-	strcpy(port->name, "MIDI 2.0");
+	strscpy(port->name, "MIDI 2.0");
 	memset(&pcallbacks, 0, sizeof(pcallbacks));
 	pcallbacks.owner = THIS_MODULE;
 	pcallbacks.private_data = client;
@@ -369,7 +382,7 @@ static void setup_client_group_filter(struct seq_ump_client *client)
 	cptr = snd_seq_kernel_client_get(client->seq_client);
 	if (!cptr)
 		return;
-	filter = ~(1U << 0); /* always allow groupless messages */
+	filter = SND_SEQ_GROUP_FILTER_GROUPS; /* always allow groupless messages */
 	for (p = 0; p < SNDRV_UMP_MAX_GROUPS; p++) {
 		if (client->ump->groups[p].active)
 			filter &= ~(1U << (p + 1));
@@ -452,9 +465,8 @@ static const struct snd_seq_ump_ops seq_ump_ops = {
 };
 
 /* create a sequencer client and ports for the given UMP endpoint */
-static int snd_seq_ump_probe(struct device *_dev)
+static int snd_seq_ump_probe(struct snd_seq_device *dev)
 {
-	struct snd_seq_device *dev = to_seq_dev(_dev);
 	struct snd_ump_endpoint *ump = dev->private_data;
 	struct snd_card *card = dev->card;
 	struct seq_ump_client *client;
@@ -462,12 +474,13 @@ static int snd_seq_ump_probe(struct device *_dev)
 	struct snd_seq_client *cptr;
 	int p, err;
 
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
+	client = kzalloc_obj(*client);
 	if (!client)
 		return -ENOMEM;
 
 	INIT_WORK(&client->group_notify_work, handle_group_notify);
 	client->ump = ump;
+	rwlock_init(&client->output_lock);
 
 	client->seq_client =
 		snd_seq_create_kernel_client(card, ump->core.device,
@@ -513,21 +526,19 @@ static int snd_seq_ump_probe(struct device *_dev)
 }
 
 /* remove a sequencer client */
-static int snd_seq_ump_remove(struct device *_dev)
+static void snd_seq_ump_remove(struct snd_seq_device *dev)
 {
-	struct snd_seq_device *dev = to_seq_dev(_dev);
 	struct snd_ump_endpoint *ump = dev->private_data;
 
 	if (ump->seq_client)
 		seq_ump_client_free(ump->seq_client);
-	return 0;
 }
 
 static struct snd_seq_driver seq_ump_driver = {
+	.probe = snd_seq_ump_probe,
+	.remove = snd_seq_ump_remove,
 	.driver = {
 		.name = KBUILD_MODNAME,
-		.probe = snd_seq_ump_probe,
-		.remove = snd_seq_ump_remove,
 	},
 	.id = SNDRV_SEQ_DEV_ID_UMP,
 	.argsize = 0,

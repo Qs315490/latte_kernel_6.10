@@ -20,15 +20,14 @@
 #include <linux/dma-map-ops.h>
 #include <linux/crash_dump.h>
 #include <linux/hugetlb.h>
-#ifdef CONFIG_RELOCATABLE
-#include <linux/elf.h>
-#endif
 #include <linux/kfence.h>
 #include <linux/execmem.h>
 
+#include <asm/alternative.h>
 #include <asm/fixmap.h>
 #include <asm/io.h>
 #include <asm/kasan.h>
+#include <asm/module.h>
 #include <asm/numa.h>
 #include <asm/pgtable.h>
 #include <asm/sections.h>
@@ -38,24 +37,23 @@
 
 #include "../kernel/head.h"
 
-u64 new_vmalloc[NR_CPUS / sizeof(u64) + 1];
+#if defined(CONFIG_64BIT) && defined(CONFIG_MMU)
+DECLARE_BITMAP(new_valid_map_cpus, NR_CPUS);
+#endif
 
 struct kernel_mapping kernel_map __ro_after_init;
 EXPORT_SYMBOL(kernel_map);
-#ifdef CONFIG_XIP_KERNEL
-#define kernel_map	(*(struct kernel_mapping *)XIP_FIXUP(&kernel_map))
-#endif
 
 #ifdef CONFIG_64BIT
-u64 satp_mode __ro_after_init = !IS_ENABLED(CONFIG_XIP_KERNEL) ? SATP_MODE_57 : SATP_MODE_39;
+u64 satp_mode __ro_after_init = SATP_MODE_57;
 #else
 u64 satp_mode __ro_after_init = SATP_MODE_32;
 #endif
 EXPORT_SYMBOL(satp_mode);
 
 #ifdef CONFIG_64BIT
-bool pgtable_l4_enabled __ro_after_init = !IS_ENABLED(CONFIG_XIP_KERNEL);
-bool pgtable_l5_enabled __ro_after_init = !IS_ENABLED(CONFIG_XIP_KERNEL);
+bool pgtable_l4_enabled __ro_after_init = true;
+bool pgtable_l5_enabled __ro_after_init = true;
 EXPORT_SYMBOL(pgtable_l4_enabled);
 EXPORT_SYMBOL(pgtable_l5_enabled);
 #endif
@@ -64,15 +62,13 @@ phys_addr_t phys_ram_base __ro_after_init;
 EXPORT_SYMBOL(phys_ram_base);
 
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
-#define VMEMMAP_ADDR_ALIGN	(1ULL << SECTION_SIZE_BITS)
+#define VMEMMAP_ADDR_ALIGN	max(1ULL << SECTION_SIZE_BITS, \
+				    PFN_PHYS(MAX_FOLIO_VMEMMAP_ALIGN / \
+					     sizeof(struct page)))
 
 unsigned long vmemmap_start_pfn __ro_after_init;
 EXPORT_SYMBOL(vmemmap_start_pfn);
 #endif
-
-unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)]
-							__page_aligned_bss;
-EXPORT_SYMBOL(empty_zero_page);
 
 extern char _start[];
 void *_dtb_early_va __initdata;
@@ -80,16 +76,12 @@ uintptr_t _dtb_early_pa __initdata;
 
 phys_addr_t dma32_phys_limit __initdata;
 
-static void __init zone_sizes_init(void)
+void __init arch_zone_limits_init(unsigned long *max_zone_pfns)
 {
-	unsigned long max_zone_pfns[MAX_NR_ZONES] = { 0, };
-
 #ifdef CONFIG_ZONE_DMA32
 	max_zone_pfns[ZONE_DMA32] = PFN_DOWN(dma32_phys_limit);
 #endif
 	max_zone_pfns[ZONE_NORMAL] = max_low_pfn;
-
-	free_area_init(max_zone_pfns);
 }
 
 #if defined(CONFIG_MMU) && defined(CONFIG_DEBUG_VM)
@@ -171,9 +163,11 @@ static void __init print_vm_layout(void)
 static void print_vm_layout(void) { }
 #endif /* CONFIG_DEBUG_VM */
 
-void __init mem_init(void)
+void __init arch_mm_preinit(void)
 {
-	bool swiotlb = max_pfn > PFN_DOWN(dma32_phys_limit);
+	bool swiotlb = max_pfn > PFN_DOWN(dma32_phys_limit) &&
+		       memblock_start_of_DRAM() < dma32_phys_limit;
+	unsigned int swiotlb_flags = SWIOTLB_VERBOSE;
 #ifdef CONFIG_FLATMEM
 	BUG_ON(!mem_map);
 #endif /* CONFIG_FLATMEM */
@@ -181,27 +175,28 @@ void __init mem_init(void)
 	if (IS_ENABLED(CONFIG_DMA_BOUNCE_UNALIGNED_KMALLOC) && !swiotlb &&
 	    dma_cache_alignment != 1) {
 		/*
-		 * If no bouncing needed for ZONE_DMA, allocate 1MB swiotlb
-		 * buffer per 1GB of RAM for kmalloc() bouncing on
-		 * non-coherent platforms.
+		 * No 32-bit DMA bouncing needed (either all DRAM is within
+		 * the 32-bit limit, or it all starts above it), but
+		 * kmalloc() buffers whose sizes are not cache-line-aligned
+		 * still require bouncing for non-coherent DMA.  Use
+		 * SWIOTLB_ANY so that the buffer can be allocated from high
+		 * memory when DRAM starts above dma32_phys_limit.  Allocate
+		 * ~1 MB per 1 GB of RAM.
 		 */
 		unsigned long size =
 			DIV_ROUND_UP(memblock_phys_mem_size(), 1024);
 		swiotlb_adjust_size(min(swiotlb_size_or_default(), size));
 		swiotlb = true;
+		swiotlb_flags |= SWIOTLB_ANY;
 	}
 
-	swiotlb_init(swiotlb, SWIOTLB_VERBOSE);
-	memblock_free_all();
+	swiotlb_init(swiotlb, swiotlb_flags);
 
 	print_vm_layout();
 }
 
 /* Limit the memory size via mem. */
 static phys_addr_t memory_limit;
-#ifdef CONFIG_XIP_KERNEL
-#define memory_limit	(*(phys_addr_t *)XIP_FIXUP(&memory_limit))
-#endif /* CONFIG_XIP_KERNEL */
 
 static int __init early_mem(char *p)
 {
@@ -225,10 +220,7 @@ static void __init setup_bootmem(void)
 	phys_addr_t max_mapped_addr;
 	phys_addr_t phys_ram_end, vmlinux_start;
 
-	if (IS_ENABLED(CONFIG_XIP_KERNEL))
-		vmlinux_start = __pa_symbol(&_sdata);
-	else
-		vmlinux_start = __pa_symbol(&_start);
+	vmlinux_start = __pa_symbol(&_start);
 
 	memblock_enforce_memory_limit(memory_limit);
 
@@ -248,12 +240,10 @@ static void __init setup_bootmem(void)
 	 * Make sure we align the start of the memory on a PMD boundary so that
 	 * at worst, we map the linear mapping with PMD mappings.
 	 */
-	if (!IS_ENABLED(CONFIG_XIP_KERNEL)) {
-		phys_ram_base = memblock_start_of_DRAM() & PMD_MASK;
+	phys_ram_base = memblock_start_of_DRAM() & PMD_MASK;
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
-		vmemmap_start_pfn = round_down(phys_ram_base, VMEMMAP_ADDR_ALIGN) >> PAGE_SHIFT;
+	vmemmap_start_pfn = round_down(phys_ram_base, VMEMMAP_ADDR_ALIGN) >> PAGE_SHIFT;
 #endif
-	}
 
 	/*
 	 * In 64-bit, any use of __va/__pa before this point is wrong as we
@@ -295,10 +285,8 @@ static void __init setup_bootmem(void)
 	phys_ram_end = memblock_end_of_DRAM();
 	min_low_pfn = PFN_UP(phys_ram_base);
 	max_low_pfn = max_pfn = PFN_DOWN(phys_ram_end);
-	high_memory = (void *)(__va(PFN_PHYS(max_low_pfn)));
 
 	dma32_phys_limit = min(4UL * SZ_1G, (unsigned long)PFN_PHYS(max_low_pfn));
-	set_max_mapnr(max_low_pfn - ARCH_PFN_OFFSET);
 
 	reserve_initrd_mem();
 
@@ -319,9 +307,45 @@ static void __init setup_bootmem(void)
 		memblock_reserve(dtb_early_pa, fdt_totalsize(dtb_early_va));
 
 	dma_contiguous_reserve(dma32_phys_limit);
-	if (IS_ENABLED(CONFIG_64BIT))
-		hugetlb_cma_reserve(PUD_SHIFT - PAGE_SHIFT);
 }
+
+#ifdef CONFIG_RELOCATABLE
+extern unsigned long __rela_dyn_start, __rela_dyn_end;
+
+static void __init relocate_kernel(void)
+{
+	Elf_Rela *rela = (Elf_Rela *)&__rela_dyn_start;
+	/*
+	 * This holds the offset between the linked virtual address and the
+	 * relocated virtual address.
+	 */
+	uintptr_t reloc_offset = kernel_map.virt_addr - KERNEL_LINK_ADDR;
+	/*
+	 * This holds the offset between kernel linked virtual address and
+	 * physical address.
+	 */
+	uintptr_t va_kernel_link_pa_offset = KERNEL_LINK_ADDR - kernel_map.phys_addr;
+
+	for ( ; rela < (Elf_Rela *)&__rela_dyn_end; rela++) {
+		Elf_Addr addr = (rela->r_offset - va_kernel_link_pa_offset);
+		Elf_Addr relocated_addr = rela->r_addend;
+
+		if (rela->r_info != R_RISCV_RELATIVE)
+			continue;
+
+		/*
+		 * Make sure to not relocate vdso symbols like rt_sigreturn
+		 * which are linked from the address 0 in vmlinux since
+		 * vdso symbol addresses are actually used as an offset from
+		 * mm->context.vdso in VDSO_OFFSET macro.
+		 */
+		if (relocated_addr >= KERNEL_LINK_ADDR)
+			relocated_addr += reloc_offset;
+
+		*(Elf_Addr *)addr = relocated_addr;
+	}
+}
+#endif /* CONFIG_RELOCATABLE */
 
 #ifdef CONFIG_MMU
 struct pt_alloc_ops pt_ops __meminitdata;
@@ -332,17 +356,10 @@ static pte_t fixmap_pte[PTRS_PER_PTE] __page_aligned_bss;
 
 pgd_t early_pg_dir[PTRS_PER_PGD] __initdata __aligned(PAGE_SIZE);
 
-#ifdef CONFIG_XIP_KERNEL
-#define pt_ops			(*(struct pt_alloc_ops *)XIP_FIXUP(&pt_ops))
-#define trampoline_pg_dir      ((pgd_t *)XIP_FIXUP(trampoline_pg_dir))
-#define fixmap_pte             ((pte_t *)XIP_FIXUP(fixmap_pte))
-#define early_pg_dir           ((pgd_t *)XIP_FIXUP(early_pg_dir))
-#endif /* CONFIG_XIP_KERNEL */
-
 static const pgprot_t protection_map[16] = {
 	[VM_NONE]					= PAGE_NONE,
 	[VM_READ]					= PAGE_READ,
-	[VM_WRITE]					= PAGE_COPY,
+	[VM_WRITE]					= PAGE_SHADOWSTACK,
 	[VM_WRITE | VM_READ]				= PAGE_COPY,
 	[VM_EXEC]					= PAGE_EXEC,
 	[VM_EXEC | VM_READ]				= PAGE_READ_EXEC,
@@ -407,9 +424,14 @@ static inline phys_addr_t __init alloc_pte_fixmap(uintptr_t va)
 
 static phys_addr_t __meminit alloc_pte_late(uintptr_t va)
 {
-	struct ptdesc *ptdesc = pagetable_alloc(GFP_KERNEL & ~__GFP_HIGHMEM, 0);
+	struct ptdesc *ptdesc = pagetable_alloc(GFP_KERNEL, 0);
 
-	BUG_ON(!ptdesc || !pagetable_pte_ctor(ptdesc));
+	/*
+	 * We do not know which mm the PTE page is associated to at this point.
+	 * Passing NULL to the ctor is the safe option, though it may result
+	 * in unnecessary work (e.g. initialising the ptlock for init_mm).
+	 */
+	BUG_ON(!ptdesc || !pagetable_pte_ctor(NULL, ptdesc));
 	return __pa((pte_t *)ptdesc_address(ptdesc));
 }
 
@@ -430,31 +452,13 @@ static pmd_t trampoline_pmd[PTRS_PER_PMD] __page_aligned_bss;
 static pmd_t fixmap_pmd[PTRS_PER_PMD] __page_aligned_bss;
 static pmd_t early_pmd[PTRS_PER_PMD] __initdata __aligned(PAGE_SIZE);
 
-#ifdef CONFIG_XIP_KERNEL
-#define trampoline_pmd ((pmd_t *)XIP_FIXUP(trampoline_pmd))
-#define fixmap_pmd     ((pmd_t *)XIP_FIXUP(fixmap_pmd))
-#define early_pmd      ((pmd_t *)XIP_FIXUP(early_pmd))
-#endif /* CONFIG_XIP_KERNEL */
-
 static p4d_t trampoline_p4d[PTRS_PER_P4D] __page_aligned_bss;
 static p4d_t fixmap_p4d[PTRS_PER_P4D] __page_aligned_bss;
 static p4d_t early_p4d[PTRS_PER_P4D] __initdata __aligned(PAGE_SIZE);
 
-#ifdef CONFIG_XIP_KERNEL
-#define trampoline_p4d ((p4d_t *)XIP_FIXUP(trampoline_p4d))
-#define fixmap_p4d     ((p4d_t *)XIP_FIXUP(fixmap_p4d))
-#define early_p4d      ((p4d_t *)XIP_FIXUP(early_p4d))
-#endif /* CONFIG_XIP_KERNEL */
-
 static pud_t trampoline_pud[PTRS_PER_PUD] __page_aligned_bss;
 static pud_t fixmap_pud[PTRS_PER_PUD] __page_aligned_bss;
 static pud_t early_pud[PTRS_PER_PUD] __initdata __aligned(PAGE_SIZE);
-
-#ifdef CONFIG_XIP_KERNEL
-#define trampoline_pud ((pud_t *)XIP_FIXUP(trampoline_pud))
-#define fixmap_pud     ((pud_t *)XIP_FIXUP(fixmap_pud))
-#define early_pud      ((pud_t *)XIP_FIXUP(early_pud))
-#endif /* CONFIG_XIP_KERNEL */
 
 static pmd_t *__init get_pmd_virt_early(phys_addr_t pa)
 {
@@ -487,9 +491,10 @@ static phys_addr_t __init alloc_pmd_fixmap(uintptr_t va)
 
 static phys_addr_t __meminit alloc_pmd_late(uintptr_t va)
 {
-	struct ptdesc *ptdesc = pagetable_alloc(GFP_KERNEL & ~__GFP_HIGHMEM, 0);
+	struct ptdesc *ptdesc = pagetable_alloc(GFP_KERNEL, 0);
 
-	BUG_ON(!ptdesc || !pagetable_pmd_ctor(ptdesc));
+	/* See comment in alloc_pte_late() regarding NULL passed the ctor */
+	BUG_ON(!ptdesc || !pagetable_pmd_ctor(NULL, ptdesc));
 	return __pa((pmd_t *)ptdesc_address(ptdesc));
 }
 
@@ -551,11 +556,11 @@ static phys_addr_t __init alloc_pud_fixmap(uintptr_t va)
 
 static phys_addr_t __meminit alloc_pud_late(uintptr_t va)
 {
-	unsigned long vaddr;
+	struct ptdesc *ptdesc = pagetable_alloc(GFP_KERNEL, 0);
 
-	vaddr = __get_free_page(GFP_KERNEL);
-	BUG_ON(!vaddr);
-	return __pa(vaddr);
+	BUG_ON(!ptdesc);
+	pagetable_pud_ctor(ptdesc);
+	return __pa((pud_t *)ptdesc_address(ptdesc));
 }
 
 static p4d_t *__init get_p4d_virt_early(phys_addr_t pa)
@@ -589,11 +594,11 @@ static phys_addr_t __init alloc_p4d_fixmap(uintptr_t va)
 
 static phys_addr_t __meminit alloc_p4d_late(uintptr_t va)
 {
-	unsigned long vaddr;
+	struct ptdesc *ptdesc = pagetable_alloc(GFP_KERNEL, 0);
 
-	vaddr = __get_free_page(GFP_KERNEL);
-	BUG_ON(!vaddr);
-	return __pa(vaddr);
+	BUG_ON(!ptdesc);
+	pagetable_p4d_ctor(ptdesc);
+	return __pa((p4d_t *)ptdesc_address(ptdesc));
 }
 
 static void __meminit create_pud_mapping(pud_t *pudp, uintptr_t va, phys_addr_t pa, phys_addr_t sz,
@@ -725,21 +730,6 @@ static uintptr_t __meminit best_map_size(phys_addr_t pa, uintptr_t va, phys_addr
 	return PAGE_SIZE;
 }
 
-#ifdef CONFIG_XIP_KERNEL
-#define phys_ram_base  (*(phys_addr_t *)XIP_FIXUP(&phys_ram_base))
-extern char _xiprom[], _exiprom[], __data_loc;
-
-/* called from head.S with MMU off */
-asmlinkage void __init __copy_data(void)
-{
-	void *from = (void *)(&__data_loc);
-	void *to = (void *)CONFIG_PHYS_RAM_BASE;
-	size_t sz = (size_t)((uintptr_t)(&_end) - (uintptr_t)(&_sdata));
-
-	memcpy(to, from, sz);
-}
-#endif
-
 #ifdef CONFIG_STRICT_KERNEL_RWX
 static __meminit pgprot_t pgprot_from_va(uintptr_t va)
 {
@@ -775,8 +765,9 @@ static __meminit pgprot_t pgprot_from_va(uintptr_t va)
 }
 #endif /* CONFIG_STRICT_KERNEL_RWX */
 
-#if defined(CONFIG_64BIT) && !defined(CONFIG_XIP_KERNEL)
+#if defined(CONFIG_64BIT)
 u64 __pi_set_satp_mode_from_cmdline(uintptr_t dtb_pa);
+u64 __pi_set_satp_mode_from_fdt(uintptr_t dtb_pa);
 
 static void __init disable_pgtable_l5(void)
 {
@@ -811,21 +802,48 @@ static void __init set_mmap_rnd_bits_max(void)
 	mmap_rnd_bits_max = MMAP_VA_BITS - PAGE_SHIFT - 3;
 }
 
+static bool __init is_vaddr_valid(unsigned long va)
+{
+	unsigned long up = 0;
+
+	switch (satp_mode) {
+	case SATP_MODE_39:
+		up = 1UL << 38;
+		break;
+	case SATP_MODE_48:
+		up = 1UL << 47;
+		break;
+	case SATP_MODE_57:
+		up = 1UL << 56;
+		break;
+	default:
+		return false;
+	}
+
+	return (va < up) || (va >= (ULONG_MAX - up + 1));
+}
+
 /*
  * There is a simple way to determine if 4-level is supported by the
  * underlying hardware: establish 1:1 mapping in 4-level page table mode
  * then read SATP to see if the configuration was taken into account
  * meaning sv48 is supported.
+ * The maximum SATP mode is limited by both the command line and the "mmu-type"
+ * property in the device tree, since some platforms may hang if an unsupported
+ * SATP mode is attempted.
  */
 static __init void set_satp_mode(uintptr_t dtb_pa)
 {
 	u64 identity_satp, hw_satp;
 	uintptr_t set_satp_mode_pmd = ((unsigned long)set_satp_mode) & PMD_MASK;
-	u64 satp_mode_cmdline = __pi_set_satp_mode_from_cmdline(dtb_pa);
+	u64 satp_mode_limit = min_not_zero(__pi_set_satp_mode_from_cmdline(dtb_pa),
+					   __pi_set_satp_mode_from_fdt(dtb_pa));
 
-	if (satp_mode_cmdline == SATP_MODE_57) {
+	kernel_map.page_offset = PAGE_OFFSET_L5;
+
+	if (satp_mode_limit == SATP_MODE_48) {
 		disable_pgtable_l5();
-	} else if (satp_mode_cmdline == SATP_MODE_48) {
+	} else if (satp_mode_limit == SATP_MODE_39) {
 		disable_pgtable_l5();
 		disable_pgtable_l4();
 		return;
@@ -846,6 +864,9 @@ static __init void set_satp_mode(uintptr_t dtb_pa)
 			   set_satp_mode_pmd + PMD_SIZE,
 			   PMD_SIZE, PAGE_KERNEL_EXEC);
 retry:
+	if (!is_vaddr_valid(set_satp_mode_pmd))
+		goto out;
+
 	create_pgd_mapping(early_pg_dir,
 			   set_satp_mode_pmd,
 			   pgtable_l5_enabled ?
@@ -868,6 +889,7 @@ retry:
 		disable_pgtable_l4();
 	}
 
+out:
 	memset(early_pg_dir, 0, PAGE_SIZE);
 	memset(early_p4d, 0, PAGE_SIZE);
 	memset(early_pud, 0, PAGE_SIZE);
@@ -893,66 +915,6 @@ retry:
 #error "setup_vm() is called from head.S before relocate so it should not use absolute addressing."
 #endif
 
-#ifdef CONFIG_RELOCATABLE
-extern unsigned long __rela_dyn_start, __rela_dyn_end;
-
-static void __init relocate_kernel(void)
-{
-	Elf64_Rela *rela = (Elf64_Rela *)&__rela_dyn_start;
-	/*
-	 * This holds the offset between the linked virtual address and the
-	 * relocated virtual address.
-	 */
-	uintptr_t reloc_offset = kernel_map.virt_addr - KERNEL_LINK_ADDR;
-	/*
-	 * This holds the offset between kernel linked virtual address and
-	 * physical address.
-	 */
-	uintptr_t va_kernel_link_pa_offset = KERNEL_LINK_ADDR - kernel_map.phys_addr;
-
-	for ( ; rela < (Elf64_Rela *)&__rela_dyn_end; rela++) {
-		Elf64_Addr addr = (rela->r_offset - va_kernel_link_pa_offset);
-		Elf64_Addr relocated_addr = rela->r_addend;
-
-		if (rela->r_info != R_RISCV_RELATIVE)
-			continue;
-
-		/*
-		 * Make sure to not relocate vdso symbols like rt_sigreturn
-		 * which are linked from the address 0 in vmlinux since
-		 * vdso symbol addresses are actually used as an offset from
-		 * mm->context.vdso in VDSO_OFFSET macro.
-		 */
-		if (relocated_addr >= KERNEL_LINK_ADDR)
-			relocated_addr += reloc_offset;
-
-		*(Elf64_Addr *)addr = relocated_addr;
-	}
-}
-#endif /* CONFIG_RELOCATABLE */
-
-#ifdef CONFIG_XIP_KERNEL
-static void __init create_kernel_page_table(pgd_t *pgdir,
-					    __always_unused bool early)
-{
-	uintptr_t va, start_va, end_va;
-
-	/* Map the flash resident part */
-	end_va = kernel_map.virt_addr + kernel_map.xiprom_sz;
-	for (va = kernel_map.virt_addr; va < end_va; va += PMD_SIZE)
-		create_pgd_mapping(pgdir, va,
-				   kernel_map.xiprom + (va - kernel_map.virt_addr),
-				   PMD_SIZE, PAGE_KERNEL_EXEC);
-
-	/* Map the data in RAM */
-	start_va = kernel_map.virt_addr + (uintptr_t)&_sdata - (uintptr_t)&_start;
-	end_va = kernel_map.virt_addr + kernel_map.size;
-	for (va = start_va; va < end_va; va += PMD_SIZE)
-		create_pgd_mapping(pgdir, va,
-				   kernel_map.phys_addr + (va - start_va),
-				   PMD_SIZE, PAGE_KERNEL);
-}
-#else
 static void __init create_kernel_page_table(pgd_t *pgdir, bool early)
 {
 	uintptr_t va, end_va;
@@ -965,7 +927,6 @@ static void __init create_kernel_page_table(pgd_t *pgdir, bool early)
 				   early ?
 					PAGE_KERNEL_EXEC : pgprot_from_va(va));
 }
-#endif
 
 /*
  * Setup a 4MB mapping that encompasses the device tree: for 64-bit kernel,
@@ -1075,11 +1036,6 @@ static int __init print_nokaslr(char *p)
 	return 0;
 }
 early_param("nokaslr", print_nokaslr);
-
-unsigned long kaslr_offset(void)
-{
-	return kernel_map.virt_offset;
-}
 #endif
 
 asmlinkage void __init setup_vm(uintptr_t dtb_pa)
@@ -1107,33 +1063,11 @@ asmlinkage void __init setup_vm(uintptr_t dtb_pa)
 
 	kernel_map.virt_addr = KERNEL_LINK_ADDR + kernel_map.virt_offset;
 
-#ifdef CONFIG_XIP_KERNEL
-#ifdef CONFIG_64BIT
-	kernel_map.page_offset = PAGE_OFFSET_L3;
-#else
-	kernel_map.page_offset = _AC(CONFIG_PAGE_OFFSET, UL);
-#endif
-	kernel_map.xiprom = (uintptr_t)CONFIG_XIP_PHYS_ADDR;
-	kernel_map.xiprom_sz = (uintptr_t)(&_exiprom) - (uintptr_t)(&_xiprom);
-
-	phys_ram_base = CONFIG_PHYS_RAM_BASE;
-#ifdef CONFIG_SPARSEMEM_VMEMMAP
-	vmemmap_start_pfn = round_down(phys_ram_base, VMEMMAP_ADDR_ALIGN) >> PAGE_SHIFT;
-#endif
-	kernel_map.phys_addr = (uintptr_t)CONFIG_PHYS_RAM_BASE;
-	kernel_map.size = (uintptr_t)(&_end) - (uintptr_t)(&_start);
-
-	kernel_map.va_kernel_xip_text_pa_offset = kernel_map.virt_addr - kernel_map.xiprom;
-	kernel_map.va_kernel_xip_data_pa_offset = kernel_map.virt_addr - kernel_map.phys_addr
-						+ (uintptr_t)&_sdata - (uintptr_t)&_start;
-#else
-	kernel_map.page_offset = _AC(CONFIG_PAGE_OFFSET, UL);
 	kernel_map.phys_addr = (uintptr_t)(&_start);
 	kernel_map.size = (uintptr_t)(&_end) - kernel_map.phys_addr;
 	kernel_map.va_kernel_pa_offset = kernel_map.virt_addr - kernel_map.phys_addr;
-#endif
 
-#if defined(CONFIG_64BIT) && !defined(CONFIG_XIP_KERNEL)
+#if defined(CONFIG_64BIT)
 	set_satp_mode(dtb_pa);
 	set_mmap_rnd_bits_max();
 #endif
@@ -1174,7 +1108,8 @@ asmlinkage void __init setup_vm(uintptr_t dtb_pa)
 	 * makes the kernel cross over a PUD_SIZE boundary, raise a bug
 	 * since a part of the kernel would not get mapped.
 	 */
-	BUG_ON(PUD_SIZE - (kernel_map.virt_addr & (PUD_SIZE - 1)) < kernel_map.size);
+	if (IS_ENABLED(CONFIG_64BIT))
+		BUG_ON(PUD_SIZE - (kernel_map.virt_addr & (PUD_SIZE - 1)) < kernel_map.size);
 	relocate_kernel();
 #endif
 
@@ -1205,13 +1140,8 @@ asmlinkage void __init setup_vm(uintptr_t dtb_pa)
 	if (pgtable_l4_enabled)
 		create_pud_mapping(trampoline_pud, kernel_map.virt_addr,
 				   (uintptr_t)trampoline_pmd, PUD_SIZE, PAGE_TABLE);
-#ifdef CONFIG_XIP_KERNEL
-	create_pmd_mapping(trampoline_pmd, kernel_map.virt_addr,
-			   kernel_map.xiprom, PMD_SIZE, PAGE_KERNEL_EXEC);
-#else
 	create_pmd_mapping(trampoline_pmd, kernel_map.virt_addr,
 			   kernel_map.phys_addr, PMD_SIZE, PAGE_KERNEL_EXEC);
-#endif
 #else
 	/* Setup trampoline PGD */
 	create_pgd_mapping(trampoline_pg_dir, kernel_map.virt_addr,
@@ -1378,6 +1308,12 @@ asmlinkage void __init setup_vm(uintptr_t dtb_pa)
 {
 	dtb_early_va = (void *)dtb_pa;
 	dtb_early_pa = dtb_pa;
+
+#ifdef CONFIG_RELOCATABLE
+	kernel_map.virt_addr = (uintptr_t)_start;
+	kernel_map.phys_addr = (uintptr_t)_start;
+	relocate_kernel();
+#endif
 }
 
 static inline void setup_vm_final(void)
@@ -1396,21 +1332,19 @@ static void __init arch_reserve_crashkernel(void)
 {
 	unsigned long long low_size = 0;
 	unsigned long long crash_base, crash_size;
-	char *cmdline = boot_command_line;
 	bool high = false;
 	int ret;
 
 	if (!IS_ENABLED(CONFIG_CRASH_RESERVE))
 		return;
 
-	ret = parse_crashkernel(cmdline, memblock_phys_mem_size(),
+	ret = parse_crashkernel(boot_command_line, memblock_phys_mem_size(),
 				&crash_size, &crash_base,
-				&low_size, &high);
+				&low_size, NULL, &high);
 	if (ret)
 		return;
 
-	reserve_crashkernel_generic(cmdline, crash_size, crash_base,
-				    low_size, high);
+	reserve_crashkernel_generic(crash_size, crash_base, low_size, high);
 }
 
 void __init paging_init(void)
@@ -1426,33 +1360,20 @@ void __init misc_mem_init(void)
 {
 	early_memtest(min_low_pfn << PAGE_SHIFT, max_low_pfn << PAGE_SHIFT);
 	arch_numa_init();
-	sparse_init();
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
 	/* The entire VMEMMAP region has been populated. Flush TLB for this region */
 	local_flush_tlb_kernel_range(VMEMMAP_START, VMEMMAP_END);
 #endif
-	zone_sizes_init();
 	arch_reserve_crashkernel();
 	memblock_dump_all();
 }
 
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
-void __meminit vmemmap_set_pmd(pmd_t *pmd, void *p, int node,
-			       unsigned long addr, unsigned long next)
-{
-	pmd_set_huge(pmd, virt_to_phys(p), PAGE_KERNEL);
-}
-
-int __meminit vmemmap_check_pmd(pmd_t *pmdp, int node,
-				unsigned long addr, unsigned long next)
-{
-	vmemmap_verify((pte_t *)pmdp, node, addr, next);
-	return 1;
-}
-
 int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node,
 			       struct vmem_altmap *altmap)
 {
+	WARN_ON((start < VMEMMAP_START) || (end > VMEMMAP_END));
+
 	/*
 	 * Note that SPARSEMEM_VMEMMAP is only selected for rv64 and that we
 	 * can't use hugepage mappings for 2-level page table because in case of
@@ -1622,7 +1543,7 @@ static void __meminit free_pud_table(pud_t *pud_start, p4d_t *p4d)
 	if (PageReserved(page))
 		free_reserved_page(page);
 	else
-		free_pages((unsigned long)page_address(page), 0);
+		__free_pages(page, 0);
 	p4d_clear(p4d);
 }
 
@@ -1644,7 +1565,7 @@ static void __meminit free_vmemmap_storage(struct page *page, size_t size,
 		return;
 	}
 
-	free_pages((unsigned long)page_address(page), order);
+	__free_pages(page, order);
 }
 
 static void __meminit remove_pte_mapping(pte_t *pte_base, unsigned long addr, unsigned long end,
@@ -1705,7 +1626,7 @@ static void __meminit remove_pud_mapping(pud_t *pud_base, unsigned long addr, un
 
 	for (; addr < end; addr = next) {
 		next = pud_addr_end(addr, end);
-		pudp = pud_base + pud_index(addr);
+		pudp = pgtable_l4_enabled ? pud_base + pud_index(addr) : pud_base;
 		pud = pudp_get(pudp);
 		if (!pud_present(pud))
 			continue;
@@ -1736,7 +1657,7 @@ static void __meminit remove_p4d_mapping(p4d_t *p4d_base, unsigned long addr, un
 
 	for (; addr < end; addr = next) {
 		next = p4d_addr_end(addr, end);
-		p4dp = p4d_base + p4d_index(addr);
+		p4dp = pgtable_l5_enabled ? p4d_base + p4d_index(addr) : p4d_base;
 		p4d = p4dp_get(p4dp);
 		if (!p4d_present(p4d))
 			continue;
@@ -1818,9 +1739,10 @@ int __ref arch_add_memory(int nid, u64 start, u64 size, struct mhp_params *param
 	return ret;
 }
 
-void __ref arch_remove_memory(u64 start, u64 size, struct vmem_altmap *altmap)
+void __ref arch_remove_memory(u64 start, u64 size, struct vmem_altmap *altmap,
+			      struct dev_pagemap *pgmap)
 {
-	__remove_pages(start >> PAGE_SHIFT, size >> PAGE_SHIFT, altmap);
+	__remove_pages(start >> PAGE_SHIFT, size >> PAGE_SHIFT, altmap, pgmap);
 	remove_linear_mapping(start, size);
 	flush_tlb_all();
 }

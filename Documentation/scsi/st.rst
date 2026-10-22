@@ -93,7 +93,7 @@ optionally written. In both cases end of data is signified by
 returning zero bytes for two consecutive reads.
 
 Writing filemarks without the immediate bit set in the SCSI command block acts
-as a synchronization point, i.e., all remaining data form the drive buffers is
+as a synchronization point, i.e., all remaining data from the drive buffers is
 written to tape before the command returns. This makes sure that write errors
 are caught at that point, but this takes time. In some applications, several
 consecutive files must be written fast. The MTWEOFI operation can be used to
@@ -156,6 +156,11 @@ Each directory also contains the entry 'options' which shows the currently
 enabled driver and mode options. The value in the file is a bit mask where the
 bit definitions are the same as those used with MTSETDRVBUFFER in setting the
 options.
+
+Each directory contains the entry 'position_lost_in_reset'. If this value is
+one, reading and writing to the device is blocked after device reset. Most
+devices rewind the tape after reset and the writes/read don't access the
+tape position the user expects.
 
 A link named 'tape' is made from the SCSI device directory to the class
 directory corresponding to the mode 0 auto-rewind device (e.g., st0).

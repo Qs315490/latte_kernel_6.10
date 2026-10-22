@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-
 /*
  * Irqdomain for Linux to run as the root partition on Microsoft Hypervisor.
  *
@@ -10,10 +9,12 @@
 
 #include <linux/pci.h>
 #include <linux/irq.h>
+#include <linux/export.h>
+#include <linux/irqchip/irq-msi-lib.h>
 #include <asm/mshyperv.h>
 
-static int hv_map_interrupt(union hv_device_id device_id, bool level,
-		int cpu, int vector, struct hv_interrupt_entry *entry)
+static int hv_map_interrupt(union hv_device_id hv_devid, bool level,
+		int cpu, int vector, struct hv_interrupt_entry *ret_entry)
 {
 	struct hv_input_map_device_interrupt *input;
 	struct hv_output_map_device_interrupt *output;
@@ -30,7 +31,7 @@ static int hv_map_interrupt(union hv_device_id device_id, bool level,
 	intr_desc = &input->interrupt_descriptor;
 	memset(input, 0, sizeof(*input));
 	input->partition_id = hv_current_partition_id;
-	input->device_id = device_id.as_uint64;
+	input->device_id = hv_devid.as_uint64;
 	intr_desc->interrupt_type = HV_X64_INTERRUPT_TYPE_FIXED;
 	intr_desc->vector_count = 1;
 	intr_desc->target.vector = vector;
@@ -42,11 +43,11 @@ static int hv_map_interrupt(union hv_device_id device_id, bool level,
 
 	intr_desc->target.vp_set.valid_bank_mask = 0;
 	intr_desc->target.vp_set.format = HV_GENERIC_SET_SPARSE_4K;
-	nr_bank = cpumask_to_vpset(&(intr_desc->target.vp_set), cpumask_of(cpu));
+	nr_bank = cpumask_to_vpset(&intr_desc->target.vp_set, cpumask_of(cpu));
 	if (nr_bank < 0) {
 		local_irq_restore(flags);
 		pr_err("%s: unable to generate VP set\n", __func__);
-		return EINVAL;
+		return -EINVAL;
 	}
 	intr_desc->target.flags = HV_DEVICE_INTERRUPT_TARGET_PROCESSOR_SET;
 
@@ -59,36 +60,37 @@ static int hv_map_interrupt(union hv_device_id device_id, bool level,
 
 	status = hv_do_rep_hypercall(HVCALL_MAP_DEVICE_INTERRUPT, 0, var_size,
 			input, output);
-	*entry = output->interrupt_entry;
+	*ret_entry = output->interrupt_entry;
 
 	local_irq_restore(flags);
 
 	if (!hv_result_success(status))
-		pr_err("%s: hypercall failed, status %lld\n", __func__, status);
+		hv_status_err(status, "\n");
 
-	return hv_result(status);
+	return hv_result_to_errno(status);
 }
 
-static int hv_unmap_interrupt(u64 id, struct hv_interrupt_entry *old_entry)
+static int hv_unmap_interrupt(u64 id, struct hv_interrupt_entry *irq_entry)
 {
 	unsigned long flags;
 	struct hv_input_unmap_device_interrupt *input;
-	struct hv_interrupt_entry *intr_entry;
 	u64 status;
 
 	local_irq_save(flags);
 	input = *this_cpu_ptr(hyperv_pcpu_input_arg);
 
 	memset(input, 0, sizeof(*input));
-	intr_entry = &input->interrupt_entry;
 	input->partition_id = hv_current_partition_id;
 	input->device_id = id;
-	*intr_entry = *old_entry;
+	input->interrupt_entry = *irq_entry;
 
 	status = hv_do_hypercall(HVCALL_UNMAP_DEVICE_INTERRUPT, input, NULL);
 	local_irq_restore(flags);
 
-	return hv_result(status);
+	if (!hv_result_success(status))
+		hv_status_err(status, "\n");
+
+	return hv_result_to_errno(status);
 }
 
 #ifdef CONFIG_PCI_MSI
@@ -110,74 +112,100 @@ static int get_rid_cb(struct pci_dev *pdev, u16 alias, void *data)
 	return 0;
 }
 
-static union hv_device_id hv_build_pci_dev_id(struct pci_dev *dev)
+static union hv_device_id hv_build_devid_type_pci(struct pci_dev *pdev)
 {
-	union hv_device_id dev_id;
+	int pos;
+	union hv_device_id hv_devid;
 	struct rid_data data = {
 		.bridge = NULL,
-		.rid = PCI_DEVID(dev->bus->number, dev->devfn)
+		.rid = PCI_DEVID(pdev->bus->number, pdev->devfn)
 	};
 
-	pci_for_each_dma_alias(dev, get_rid_cb, &data);
+	pci_for_each_dma_alias(pdev, get_rid_cb, &data);
 
-	dev_id.as_uint64 = 0;
-	dev_id.device_type = HV_DEVICE_TYPE_PCI;
-	dev_id.pci.segment = pci_domain_nr(dev->bus);
+	hv_devid.as_uint64 = 0;
+	hv_devid.device_type = HV_DEVICE_TYPE_PCI;
+	hv_devid.pci.segment = pci_domain_nr(pdev->bus);
 
-	dev_id.pci.bdf.bus = PCI_BUS_NUM(data.rid);
-	dev_id.pci.bdf.device = PCI_SLOT(data.rid);
-	dev_id.pci.bdf.function = PCI_FUNC(data.rid);
-	dev_id.pci.source_shadow = HV_SOURCE_SHADOW_NONE;
+	hv_devid.pci.bdf.bus = PCI_BUS_NUM(data.rid);
+	hv_devid.pci.bdf.device = PCI_SLOT(data.rid);
+	hv_devid.pci.bdf.function = PCI_FUNC(data.rid);
+	hv_devid.pci.source_shadow = HV_SOURCE_SHADOW_NONE;
 
-	if (data.bridge) {
-		int pos;
+	if (data.bridge == NULL)
+		goto out;
 
-		/*
-		 * Microsoft Hypervisor requires a bus range when the bridge is
-		 * running in PCI-X mode.
-		 *
-		 * To distinguish conventional vs PCI-X bridge, we can check
-		 * the bridge's PCI-X Secondary Status Register, Secondary Bus
-		 * Mode and Frequency bits. See PCI Express to PCI/PCI-X Bridge
-		 * Specification Revision 1.0 5.2.2.1.3.
-		 *
-		 * Value zero means it is in conventional mode, otherwise it is
-		 * in PCI-X mode.
-		 */
+	/*
+	 * Microsoft Hypervisor requires a bus range when the bridge is
+	 * running in PCI-X mode.
+	 *
+	 * To distinguish conventional vs PCI-X bridge, we can check
+	 * the bridge's PCI-X Secondary Status Register, Secondary Bus
+	 * Mode and Frequency bits. See PCI Express to PCI/PCI-X Bridge
+	 * Specification Revision 1.0 5.2.2.1.3.
+	 *
+	 * Value zero means it is in conventional mode, otherwise it is
+	 * in PCI-X mode.
+	 */
 
-		pos = pci_find_capability(data.bridge, PCI_CAP_ID_PCIX);
-		if (pos) {
-			u16 status;
+	pos = pci_find_capability(data.bridge, PCI_CAP_ID_PCIX);
+	if (pos) {
+		u16 status;
 
-			pci_read_config_word(data.bridge, pos +
-					PCI_X_BRIDGE_SSTATUS, &status);
+		pci_read_config_word(data.bridge, pos + PCI_X_BRIDGE_SSTATUS,
+				     &status);
 
-			if (status & PCI_X_SSTATUS_FREQ) {
-				/* Non-zero, PCI-X mode */
-				u8 sec_bus, sub_bus;
+		if (status & PCI_X_SSTATUS_FREQ) {
+			/* Non-zero, PCI-X mode */
+			u8 sec_bus, sub_bus;
 
-				dev_id.pci.source_shadow = HV_SOURCE_SHADOW_BRIDGE_BUS_RANGE;
+			hv_devid.pci.source_shadow =
+					     HV_SOURCE_SHADOW_BRIDGE_BUS_RANGE;
 
-				pci_read_config_byte(data.bridge, PCI_SECONDARY_BUS, &sec_bus);
-				dev_id.pci.shadow_bus_range.secondary_bus = sec_bus;
-				pci_read_config_byte(data.bridge, PCI_SUBORDINATE_BUS, &sub_bus);
-				dev_id.pci.shadow_bus_range.subordinate_bus = sub_bus;
-			}
+			pci_read_config_byte(data.bridge, PCI_SECONDARY_BUS,
+					     &sec_bus);
+			hv_devid.pci.shadow_bus_range.secondary_bus = sec_bus;
+			pci_read_config_byte(data.bridge, PCI_SUBORDINATE_BUS,
+					     &sub_bus);
+			hv_devid.pci.shadow_bus_range.subordinate_bus = sub_bus;
 		}
 	}
 
-	return dev_id;
+out:
+	return hv_devid;
 }
 
-static int hv_map_msi_interrupt(struct pci_dev *dev, int cpu, int vector,
-				struct hv_interrupt_entry *entry)
+/*
+ * hv_map_msi_interrupt() - Map the MSI IRQ in the hypervisor.
+ * @data:      Describes the IRQ
+ * @out_entry: Hypervisor (MSI) interrupt entry (can be NULL)
+ *
+ * Map the IRQ in the hypervisor by issuing a MAP_DEVICE_INTERRUPT hypercall.
+ *
+ * Return: 0 on success, -errno on failure
+ */
+int hv_map_msi_interrupt(struct irq_data *data,
+			 struct hv_interrupt_entry *out_entry)
 {
-	union hv_device_id device_id = hv_build_pci_dev_id(dev);
+	struct irq_cfg *cfg = irqd_cfg(data);
+	struct hv_interrupt_entry dummy;
+	union hv_device_id hv_devid;
+	struct msi_desc *msidesc;
+	struct pci_dev *pdev;
+	int cpu;
 
-	return hv_map_interrupt(device_id, false, cpu, vector, entry);
+	msidesc = irq_data_get_msi_desc(data);
+	pdev = msi_desc_to_pci_dev(msidesc);
+	hv_devid = hv_build_devid_type_pci(pdev);
+	cpu = cpumask_first(irq_data_get_effective_affinity_mask(data));
+
+	return hv_map_interrupt(hv_devid, false, cpu, cfg->vector,
+				out_entry ? out_entry : &dummy);
 }
+EXPORT_SYMBOL_GPL(hv_map_msi_interrupt);
 
-static inline void entry_to_msi_msg(struct hv_interrupt_entry *entry, struct msi_msg *msg)
+static void entry_to_msi_msg(struct hv_interrupt_entry *entry,
+			     struct msi_msg *msg)
 {
 	/* High address is always 0 */
 	msg->address_hi = 0;
@@ -185,27 +213,24 @@ static inline void entry_to_msi_msg(struct hv_interrupt_entry *entry, struct msi
 	msg->data = entry->msi_entry.data.as_uint32;
 }
 
-static int hv_unmap_msi_interrupt(struct pci_dev *dev, struct hv_interrupt_entry *old_entry);
+static int hv_unmap_msi_interrupt(struct pci_dev *pdev,
+				  struct hv_interrupt_entry *irq_entry);
+
 static void hv_irq_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 {
-	struct msi_desc *msidesc;
-	struct pci_dev *dev;
-	struct hv_interrupt_entry out_entry, *stored_entry;
+	struct hv_interrupt_entry *stored_entry;
 	struct irq_cfg *cfg = irqd_cfg(data);
-	const cpumask_t *affinity;
-	int cpu;
-	u64 status;
+	struct msi_desc *msidesc;
+	struct pci_dev *pdev;
+	int ret;
 
 	msidesc = irq_data_get_msi_desc(data);
-	dev = msi_desc_to_pci_dev(msidesc);
+	pdev = msi_desc_to_pci_dev(msidesc);
 
 	if (!cfg) {
 		pr_debug("%s: cfg is NULL", __func__);
 		return;
 	}
-
-	affinity = irq_data_get_effective_affinity_mask(data);
-	cpu = cpumask_first_and(affinity, cpu_online_mask);
 
 	if (data->chip_data) {
 		/*
@@ -219,77 +244,55 @@ static void hv_irq_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 		stored_entry = data->chip_data;
 		data->chip_data = NULL;
 
-		status = hv_unmap_msi_interrupt(dev, stored_entry);
+		ret = hv_unmap_msi_interrupt(pdev, stored_entry);
 
 		kfree(stored_entry);
 
-		if (status != HV_STATUS_SUCCESS) {
-			pr_debug("%s: failed to unmap, status %lld", __func__, status);
+		if (ret)
 			return;
-		}
 	}
 
-	stored_entry = kzalloc(sizeof(*stored_entry), GFP_ATOMIC);
-	if (!stored_entry) {
-		pr_debug("%s: failed to allocate chip data\n", __func__);
+	stored_entry = kzalloc_obj(*stored_entry, GFP_ATOMIC);
+	if (!stored_entry)
 		return;
-	}
 
-	status = hv_map_msi_interrupt(dev, cpu, cfg->vector, &out_entry);
-	if (status != HV_STATUS_SUCCESS) {
+	ret = hv_map_msi_interrupt(data, stored_entry);
+	if (ret) {
 		kfree(stored_entry);
 		return;
 	}
 
-	*stored_entry = out_entry;
 	data->chip_data = stored_entry;
-	entry_to_msi_msg(&out_entry, msg);
-
-	return;
+	entry_to_msi_msg(data->chip_data, msg);
 }
 
-static int hv_unmap_msi_interrupt(struct pci_dev *dev, struct hv_interrupt_entry *old_entry)
+static int hv_unmap_msi_interrupt(struct pci_dev *pdev,
+				  struct hv_interrupt_entry *irq_entry)
 {
-	return hv_unmap_interrupt(hv_build_pci_dev_id(dev).as_uint64, old_entry);
+	union hv_device_id hv_devid;
+
+	hv_devid = hv_build_devid_type_pci(pdev);
+	return hv_unmap_interrupt(hv_devid.as_uint64, irq_entry);
 }
 
-static void hv_teardown_msi_irq(struct pci_dev *dev, struct irq_data *irqd)
+/* NB: during map, hv_interrupt_entry is saved via data->chip_data */
+static void hv_teardown_msi_irq(struct pci_dev *pdev, struct irq_data *irqd)
 {
-	struct hv_interrupt_entry old_entry;
+	struct hv_interrupt_entry irq_entry;
 	struct msi_msg msg;
-	u64 status;
 
 	if (!irqd->chip_data) {
 		pr_debug("%s: no chip data\n!", __func__);
 		return;
 	}
 
-	old_entry = *(struct hv_interrupt_entry *)irqd->chip_data;
-	entry_to_msi_msg(&old_entry, &msg);
+	irq_entry = *(struct hv_interrupt_entry *)irqd->chip_data;
+	entry_to_msi_msg(&irq_entry, &msg);
 
 	kfree(irqd->chip_data);
 	irqd->chip_data = NULL;
 
-	status = hv_unmap_msi_interrupt(dev, &old_entry);
-
-	if (status != HV_STATUS_SUCCESS)
-		pr_err("%s: hypercall failed, status %lld\n", __func__, status);
-}
-
-static void hv_msi_free_irq(struct irq_domain *domain,
-			    struct msi_domain_info *info, unsigned int virq)
-{
-	struct irq_data *irqd = irq_get_irq_data(virq);
-	struct msi_desc *desc;
-
-	if (!irqd)
-		return;
-
-	desc = irq_data_get_msi_desc(irqd);
-	if (!desc || !desc->irq || WARN_ON_ONCE(!dev_is_pci(desc->dev)))
-		return;
-
-	hv_teardown_msi_irq(to_pci_dev(desc->dev), irqd);
+	(void)hv_unmap_msi_interrupt(pdev, &irq_entry);
 }
 
 /*
@@ -298,37 +301,98 @@ static void hv_msi_free_irq(struct irq_domain *domain,
  */
 static struct irq_chip hv_pci_msi_controller = {
 	.name			= "HV-PCI-MSI",
-	.irq_unmask		= pci_msi_unmask_irq,
-	.irq_mask		= pci_msi_mask_irq,
 	.irq_ack		= irq_chip_ack_parent,
-	.irq_retrigger		= irq_chip_retrigger_hierarchy,
 	.irq_compose_msi_msg	= hv_irq_compose_msi_msg,
-	.irq_set_affinity	= msi_domain_set_affinity,
-	.flags			= IRQCHIP_SKIP_SET_WAKE | IRQCHIP_MOVE_DEFERRED,
+	.irq_set_affinity	= irq_chip_set_affinity_parent,
 };
 
-static struct msi_domain_ops pci_msi_domain_ops = {
-	.msi_free		= hv_msi_free_irq,
-	.msi_prepare		= pci_msi_prepare,
+static bool hv_init_dev_msi_info(struct device *dev, struct irq_domain *domain,
+				 struct irq_domain *real_parent,
+				 struct msi_domain_info *info)
+{
+	struct irq_chip *chip = info->chip;
+
+	if (!msi_lib_init_dev_msi_info(dev, domain, real_parent, info))
+		return false;
+
+	chip->flags |= IRQCHIP_SKIP_SET_WAKE | IRQCHIP_MOVE_DEFERRED;
+
+	info->ops->msi_prepare = pci_msi_prepare;
+
+	return true;
+}
+
+#define HV_MSI_FLAGS_SUPPORTED	(MSI_GENERIC_FLAGS_MASK | MSI_FLAG_PCI_MSIX)
+#define HV_MSI_FLAGS_REQUIRED	(MSI_FLAG_USE_DEF_DOM_OPS |	\
+				 MSI_FLAG_USE_DEF_CHIP_OPS)
+
+static struct msi_parent_ops hv_msi_parent_ops = {
+	.supported_flags	= HV_MSI_FLAGS_SUPPORTED,
+	.required_flags		= HV_MSI_FLAGS_REQUIRED,
+	.bus_select_token	= DOMAIN_BUS_NEXUS,
+	.bus_select_mask	= MATCH_PCI_MSI,
+	.chip_flags		= MSI_CHIP_FLAG_SET_ACK,
+	.prefix			= "HV-",
+	.init_dev_msi_info	= hv_init_dev_msi_info,
 };
 
-static struct msi_domain_info hv_pci_msi_domain_info = {
-	.flags		= MSI_FLAG_USE_DEF_DOM_OPS | MSI_FLAG_USE_DEF_CHIP_OPS |
-			  MSI_FLAG_PCI_MSIX,
-	.ops		= &pci_msi_domain_ops,
-	.chip		= &hv_pci_msi_controller,
-	.handler	= handle_edge_irq,
-	.handler_name	= "edge",
+/* Allocate nr_irqs IRQs for the given irq domain */
+static int hv_msi_domain_alloc(struct irq_domain *d, unsigned int virq,
+			       unsigned int nr_irqs, void *arg)
+{
+	/*
+	 * TODO: The allocation bits of hv_irq_compose_msi_msg(), i.e.
+	 *	 everything except entry_to_msi_msg() should be in here.
+	 */
+	int ret;
+
+	ret = irq_domain_alloc_irqs_parent(d, virq, nr_irqs, arg);
+	if (ret)
+		return ret;
+
+	for (int i = 0; i < nr_irqs; ++i) {
+		irq_domain_set_info(d, virq + i, 0, &hv_pci_msi_controller,
+				    NULL, handle_edge_irq, NULL, "edge");
+	}
+
+	return 0;
+}
+
+static void hv_msi_domain_free(struct irq_domain *d, unsigned int virq,
+			       unsigned int nr_irqs)
+{
+	for (int i = 0; i < nr_irqs; ++i) {
+		struct irq_data *irqd = irq_domain_get_irq_data(d, virq);
+		struct msi_desc *desc;
+
+		desc = irq_data_get_msi_desc(irqd);
+		if (!desc || !desc->irq || WARN_ON_ONCE(!dev_is_pci(desc->dev)))
+			continue;
+
+		hv_teardown_msi_irq(to_pci_dev(desc->dev), irqd);
+	}
+
+	irq_domain_free_irqs_top(d, virq, nr_irqs);
+}
+
+static const struct irq_domain_ops hv_msi_domain_ops = {
+	.select	= msi_lib_irq_domain_select,
+	.alloc	= hv_msi_domain_alloc,
+	.free	= hv_msi_domain_free,
 };
 
 struct irq_domain * __init hv_create_pci_msi_domain(void)
 {
 	struct irq_domain *d = NULL;
-	struct fwnode_handle *fn;
 
-	fn = irq_domain_alloc_named_fwnode("HV-PCI-MSI");
-	if (fn)
-		d = pci_msi_create_irq_domain(fn, &hv_pci_msi_domain_info, x86_vector_domain);
+	struct irq_domain_info info = {
+		.fwnode		= irq_domain_alloc_named_fwnode("HV-PCI-MSI"),
+		.ops		= &hv_msi_domain_ops,
+		.parent		= x86_vector_domain,
+	};
+
+	if (info.fwnode)
+		d = msi_create_parent_irq_domain(&info, &hv_msi_parent_ops);
 
 	/* No point in going further if we can't get an irq domain */
 	BUG_ON(!d);
@@ -340,25 +404,25 @@ struct irq_domain * __init hv_create_pci_msi_domain(void)
 
 int hv_unmap_ioapic_interrupt(int ioapic_id, struct hv_interrupt_entry *entry)
 {
-	union hv_device_id device_id;
+	union hv_device_id hv_devid;
 
-	device_id.as_uint64 = 0;
-	device_id.device_type = HV_DEVICE_TYPE_IOAPIC;
-	device_id.ioapic.ioapic_id = (u8)ioapic_id;
+	hv_devid.as_uint64 = 0;
+	hv_devid.device_type = HV_DEVICE_TYPE_IOAPIC;
+	hv_devid.ioapic.ioapic_id = (u8)ioapic_id;
 
-	return hv_unmap_interrupt(device_id.as_uint64, entry);
+	return hv_unmap_interrupt(hv_devid.as_uint64, entry);
 }
 EXPORT_SYMBOL_GPL(hv_unmap_ioapic_interrupt);
 
 int hv_map_ioapic_interrupt(int ioapic_id, bool level, int cpu, int vector,
 		struct hv_interrupt_entry *entry)
 {
-	union hv_device_id device_id;
+	union hv_device_id hv_devid;
 
-	device_id.as_uint64 = 0;
-	device_id.device_type = HV_DEVICE_TYPE_IOAPIC;
-	device_id.ioapic.ioapic_id = (u8)ioapic_id;
+	hv_devid.as_uint64 = 0;
+	hv_devid.device_type = HV_DEVICE_TYPE_IOAPIC;
+	hv_devid.ioapic.ioapic_id = (u8)ioapic_id;
 
-	return hv_map_interrupt(device_id, level, cpu, vector, entry);
+	return hv_map_interrupt(hv_devid, level, cpu, vector, entry);
 }
 EXPORT_SYMBOL_GPL(hv_map_ioapic_interrupt);

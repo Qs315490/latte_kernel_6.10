@@ -2,7 +2,6 @@
 /* SC16IS7xx SPI interface driver */
 
 #include <linux/dev_printk.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
@@ -75,7 +74,7 @@ MODULE_DEVICE_TABLE(spi, sc16is7xx_spi_id_table);
 
 static struct spi_driver sc16is7xx_spi_driver = {
 	.driver = {
-		.name		= SC16IS7XX_NAME,
+		.name		= KBUILD_MODNAME,
 		.of_match_table	= sc16is7xx_dt_ids,
 	},
 	.probe		= sc16is7xx_spi_probe,
@@ -86,5 +85,5 @@ static struct spi_driver sc16is7xx_spi_driver = {
 module_spi_driver(sc16is7xx_spi_driver);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("SC16IS7xx SPI interface driver");
+MODULE_DESCRIPTION(KBUILD_MODNAME " interface driver");
 MODULE_IMPORT_NS("SERIAL_NXP_SC16IS7XX");

@@ -20,10 +20,10 @@
 #include <linux/mutex.h>
 #include <linux/linux_logo.h>
 #include <linux/syscore_ops.h>
+#include <linux/sysfs.h>
 #include <asm/spu.h>
 #include <asm/spu_priv1.h>
 #include <asm/spu_csa.h>
-#include <asm/xmon.h>
 #include <asm/kexec.h>
 
 const struct spu_management_ops *spu_management_ops;
@@ -465,7 +465,7 @@ void spu_init_channels(struct spu *spu)
 }
 EXPORT_SYMBOL_GPL(spu_init_channels);
 
-static struct bus_type spu_subsys = {
+static const struct bus_type spu_subsys = {
 	.name = "spu",
 	.dev_name = "spu",
 };
@@ -559,7 +559,7 @@ static int __init create_spu(void *data)
 	unsigned long flags;
 
 	ret = -ENOMEM;
-	spu = kzalloc(sizeof (*spu), GFP_KERNEL);
+	spu = kzalloc_obj(*spu);
 	if (!spu)
 		goto out;
 
@@ -639,8 +639,8 @@ static ssize_t spu_stat_show(struct device *dev,
 {
 	struct spu *spu = container_of(dev, struct spu, dev);
 
-	return sprintf(buf, "%s %llu %llu %llu %llu "
-		      "%llu %llu %llu %llu %llu %llu %llu %llu\n",
+	return sysfs_emit(buf,
+		"%s %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu\n",
 		spu_state_names[spu->stats.util_state],
 		spu_acct_time(spu, SPU_UTIL_USER),
 		spu_acct_time(spu, SPU_UTIL_SYSTEM),
@@ -727,7 +727,7 @@ static inline void crash_register_spus(struct list_head *list)
 }
 #endif
 
-static void spu_shutdown(void)
+static void spu_shutdown(void *data)
 {
 	struct spu *spu;
 
@@ -739,8 +739,12 @@ static void spu_shutdown(void)
 	mutex_unlock(&spu_full_list_mutex);
 }
 
-static struct syscore_ops spu_syscore_ops = {
+static const struct syscore_ops spu_syscore_ops = {
 	.shutdown = spu_shutdown,
+};
+
+static struct syscore spu_syscore = {
+	.ops = &spu_syscore_ops,
 };
 
 static int __init init_spu_base(void)
@@ -772,11 +776,10 @@ static int __init init_spu_base(void)
 		fb_append_extra_logo(&logo_spe_clut224, ret);
 
 	mutex_lock(&spu_full_list_mutex);
-	xmon_register_spus(&spu_full_list);
 	crash_register_spus(&spu_full_list);
 	mutex_unlock(&spu_full_list_mutex);
 	spu_add_dev_attr(&dev_attr_stat);
-	register_syscore_ops(&spu_syscore_ops);
+	register_syscore(&spu_syscore);
 
 	spu_init_affinity();
 

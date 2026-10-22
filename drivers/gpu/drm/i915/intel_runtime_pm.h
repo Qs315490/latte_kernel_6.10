@@ -14,6 +14,7 @@
 struct device;
 struct drm_i915_private;
 struct drm_printer;
+struct intel_display_rpm_interface;
 
 /*
  * This struct helps tracking the state needed for runtime PM, which puts the
@@ -31,7 +32,7 @@ struct drm_printer;
  * it can be changed with the standard runtime PM files from sysfs.
  *
  * The irqs_disabled variable becomes true exactly after we disable the IRQs and
- * goes back to false exactly before we reenable the IRQs. We use this variable
+ * goes back to false exactly before we re-enable the IRQs. We use this variable
  * to check if someone is trying to enable/disable IRQs while they're supposed
  * to be disabled. This shouldn't happen and we'll print some error messages in
  * case it happens.
@@ -225,5 +226,7 @@ static inline void print_intel_runtime_pm_wakeref(struct intel_runtime_pm *rpm,
 {
 }
 #endif
+
+extern const struct intel_display_rpm_interface i915_display_rpm_interface;
 
 #endif /* __INTEL_RUNTIME_PM_H__ */

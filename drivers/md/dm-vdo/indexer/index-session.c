@@ -100,7 +100,6 @@ static int get_index_session(struct uds_index_session *index_session)
 
 int uds_launch_request(struct uds_request *request)
 {
-	size_t internal_size;
 	int result;
 
 	if (request->callback == NULL) {
@@ -121,10 +120,7 @@ int uds_launch_request(struct uds_request *request)
 	}
 
 	/* Reset all internal fields before processing. */
-	internal_size =
-		sizeof(struct uds_request) - offsetof(struct uds_request, zone_number);
-	// FIXME should be using struct_group for this instead
-	memset((char *) request + sizeof(*request) - internal_size, 0, internal_size);
+	memset(&request->internal, 0, sizeof(request->internal));
 
 	result = get_index_session(request->session);
 	if (result != UDS_SUCCESS)
@@ -221,7 +217,7 @@ static int __must_check make_empty_index_session(struct uds_index_session **inde
 	int result;
 	struct uds_index_session *session;
 
-	result = vdo_allocate(1, struct uds_index_session, __func__, &session);
+	result = vdo_allocate(1, __func__, &session);
 	if (result != VDO_SUCCESS)
 		return result;
 

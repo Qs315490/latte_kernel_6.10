@@ -55,7 +55,7 @@
 #include "dce/dce_clock_source.h"
 #include "dce/dce_audio.h"
 #include "dce/dce_hwseq.h"
-#include "virtual/virtual_stream_encoder.h"
+#include "dio/virtual/virtual_stream_encoder.h"
 #include "dce110/dce110_resource.h"
 #include "dml/display_mode_vba.h"
 #include "dcn20/dcn20_dccg.h"
@@ -82,10 +82,11 @@
 #include "dce/dce_dmcu.h"
 #include "dce/dce_aux.h"
 #include "dce/dce_i2c.h"
+#include "dio/dcn10/dcn10_dio.h"
 #include "vm_helper.h"
 
 #include "link_enc_cfg.h"
-#include "link.h"
+#include "link_service.h"
 
 #define DC_LOGGER_INIT(logger)
 
@@ -550,6 +551,33 @@ static const struct dcn_hubbub_mask hubbub_mask = {
 		HUBBUB_MASK_SH_LIST_DCN20(_MASK)
 };
 
+static const struct dcn_dio_registers dio_regs = {
+		DIO_REG_LIST_DCN10()
+};
+
+#define DIO_MASK_SH_LIST(mask_sh)\
+		HWS_SF(, DIO_MEM_PWR_CTRL, I2C_LIGHT_SLEEP_FORCE, mask_sh)
+
+static const struct dcn_dio_shift dio_shift = {
+		DIO_MASK_SH_LIST(__SHIFT)
+};
+
+static const struct dcn_dio_mask dio_mask = {
+		DIO_MASK_SH_LIST(_MASK)
+};
+
+static struct dio *dcn20_dio_create(struct dc_context *ctx)
+{
+	struct dcn10_dio *dio10 = kzalloc_obj(struct dcn10_dio);
+
+	if (!dio10)
+		return NULL;
+
+	dcn10_dio_construct(dio10, ctx, &dio_regs, &dio_shift, &dio_mask);
+
+	return &dio10->base;
+}
+
 #define vmid_regs(id)\
 [id] = {\
 		DCN20_VMID_REG_LIST(id)\
@@ -718,8 +746,11 @@ static const struct dc_debug_options debug_defaults_drv = {
 		.scl_reset_length10 = true,
 		.sanity_checks = false,
 		.underflow_assert_delay_us = 0xFFFFFFFF,
-		.enable_legacy_fast_update = true,
 		.using_dml2 = false,
+};
+
+static const struct dc_check_config config_defaults = {
+		.enable_legacy_fast_update = true,
 };
 
 void dcn20_dpp_destroy(struct dpp **dpp)
@@ -733,7 +764,7 @@ struct dpp *dcn20_dpp_create(
 	uint32_t inst)
 {
 	struct dcn20_dpp *dpp =
-		kzalloc(sizeof(struct dcn20_dpp), GFP_ATOMIC);
+		kzalloc_obj(struct dcn20_dpp);
 
 	if (!dpp)
 		return NULL;
@@ -751,7 +782,7 @@ struct input_pixel_processor *dcn20_ipp_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn10_ipp *ipp =
-		kzalloc(sizeof(struct dcn10_ipp), GFP_ATOMIC);
+		kzalloc_obj(struct dcn10_ipp);
 
 	if (!ipp) {
 		BREAK_TO_DEBUGGER();
@@ -768,7 +799,7 @@ struct output_pixel_processor *dcn20_opp_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn20_opp *opp =
-		kzalloc(sizeof(struct dcn20_opp), GFP_ATOMIC);
+		kzalloc_obj(struct dcn20_opp);
 
 	if (!opp) {
 		BREAK_TO_DEBUGGER();
@@ -785,7 +816,7 @@ struct dce_aux *dcn20_aux_engine_create(
 	uint32_t inst)
 {
 	struct aux_engine_dce110 *aux_engine =
-		kzalloc(sizeof(struct aux_engine_dce110), GFP_ATOMIC);
+		kzalloc_obj(struct aux_engine_dce110);
 
 	if (!aux_engine)
 		return NULL;
@@ -823,7 +854,7 @@ struct dce_i2c_hw *dcn20_i2c_hw_create(
 	uint32_t inst)
 {
 	struct dce_i2c_hw *dce_i2c_hw =
-		kzalloc(sizeof(struct dce_i2c_hw), GFP_ATOMIC);
+		kzalloc_obj(struct dce_i2c_hw);
 
 	if (!dce_i2c_hw)
 		return NULL;
@@ -835,8 +866,7 @@ struct dce_i2c_hw *dcn20_i2c_hw_create(
 }
 struct mpc *dcn20_mpc_create(struct dc_context *ctx)
 {
-	struct dcn20_mpc *mpc20 = kzalloc(sizeof(struct dcn20_mpc),
-					  GFP_ATOMIC);
+	struct dcn20_mpc *mpc20 = kzalloc_obj(struct dcn20_mpc);
 
 	if (!mpc20)
 		return NULL;
@@ -853,8 +883,7 @@ struct mpc *dcn20_mpc_create(struct dc_context *ctx)
 struct hubbub *dcn20_hubbub_create(struct dc_context *ctx)
 {
 	int i;
-	struct dcn20_hubbub *hubbub = kzalloc(sizeof(struct dcn20_hubbub),
-					  GFP_ATOMIC);
+	struct dcn20_hubbub *hubbub = kzalloc_obj(struct dcn20_hubbub);
 
 	if (!hubbub)
 		return NULL;
@@ -882,7 +911,7 @@ struct timing_generator *dcn20_timing_generator_create(
 		uint32_t instance)
 {
 	struct optc *tgn10 =
-		kzalloc(sizeof(struct optc), GFP_ATOMIC);
+		kzalloc_obj(struct optc);
 
 	if (!tgn10)
 		return NULL;
@@ -915,8 +944,9 @@ struct link_encoder *dcn20_link_encoder_create(
 	struct dc_context *ctx,
 	const struct encoder_init_data *enc_init_data)
 {
+	(void)ctx;
 	struct dcn20_link_encoder *enc20 =
-		kzalloc(sizeof(struct dcn20_link_encoder), GFP_KERNEL);
+		kzalloc_obj(struct dcn20_link_encoder);
 	int link_regs_id;
 
 	if (!enc20 || enc_init_data->hpd_source >= ARRAY_SIZE(link_enc_hpd_regs))
@@ -940,7 +970,7 @@ struct link_encoder *dcn20_link_encoder_create(
 static struct panel_cntl *dcn20_panel_cntl_create(const struct panel_cntl_init_data *init_data)
 {
 	struct dce_panel_cntl *panel_cntl =
-		kzalloc(sizeof(struct dce_panel_cntl), GFP_KERNEL);
+		kzalloc_obj(struct dce_panel_cntl);
 
 	if (!panel_cntl)
 		return NULL;
@@ -962,7 +992,7 @@ static struct clock_source *dcn20_clock_source_create(
 	bool dp_clk_src)
 {
 	struct dce110_clk_src *clk_src =
-		kzalloc(sizeof(struct dce110_clk_src), GFP_ATOMIC);
+		kzalloc_obj(struct dce110_clk_src);
 
 	if (!clk_src)
 		return NULL;
@@ -998,7 +1028,7 @@ struct stream_encoder *dcn20_stream_encoder_create(
 	struct dc_context *ctx)
 {
 	struct dcn10_stream_encoder *enc1 =
-		kzalloc(sizeof(struct dcn10_stream_encoder), GFP_KERNEL);
+		kzalloc_obj(struct dcn10_stream_encoder);
 
 	if (!enc1)
 		return NULL;
@@ -1030,7 +1060,7 @@ static const struct dce_hwseq_mask hwseq_mask = {
 struct dce_hwseq *dcn20_hwseq_create(
 	struct dc_context *ctx)
 {
-	struct dce_hwseq *hws = kzalloc(sizeof(struct dce_hwseq), GFP_KERNEL);
+	struct dce_hwseq *hws = kzalloc_obj(struct dce_hwseq);
 
 	if (hws) {
 		hws->ctx = ctx;
@@ -1061,7 +1091,7 @@ struct display_stream_compressor *dcn20_dsc_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn20_dsc *dsc =
-		kzalloc(sizeof(struct dcn20_dsc), GFP_ATOMIC);
+		kzalloc_obj(struct dcn20_dsc);
 
 	if (!dsc) {
 		BREAK_TO_DEBUGGER();
@@ -1090,7 +1120,7 @@ static void dcn20_resource_destruct(struct dcn20_resource_pool *pool)
 		}
 	}
 
-	for (i = 0; i < pool->base.res_cap->num_dsc; i++) {
+	for (i = 0; i < (unsigned int)pool->base.res_cap->num_dsc; i++) {
 		if (pool->base.dscs[i] != NULL)
 			dcn20_dsc_destroy(&pool->base.dscs[i]);
 	}
@@ -1103,6 +1133,12 @@ static void dcn20_resource_destruct(struct dcn20_resource_pool *pool)
 		kfree(pool->base.hubbub);
 		pool->base.hubbub = NULL;
 	}
+
+	if (pool->base.dio != NULL) {
+		kfree(TO_DCN10_DIO(pool->base.dio));
+		pool->base.dio = NULL;
+	}
+
 	for (i = 0; i < pool->base.pipe_count; i++) {
 		if (pool->base.dpps[i] != NULL)
 			dcn20_dpp_destroy(&pool->base.dpps[i]);
@@ -1120,7 +1156,7 @@ static void dcn20_resource_destruct(struct dcn20_resource_pool *pool)
 		}
 	}
 
-	for (i = 0; i < pool->base.res_cap->num_ddc; i++) {
+	for (i = 0; i < (unsigned int)pool->base.res_cap->num_ddc; i++) {
 		if (pool->base.engines[i] != NULL)
 			dce110_engine_destroy(&pool->base.engines[i]);
 		if (pool->base.hw_i2cs[i] != NULL) {
@@ -1133,19 +1169,19 @@ static void dcn20_resource_destruct(struct dcn20_resource_pool *pool)
 		}
 	}
 
-	for (i = 0; i < pool->base.res_cap->num_opp; i++) {
+	for (i = 0; i < (unsigned int)pool->base.res_cap->num_opp; i++) {
 		if (pool->base.opps[i] != NULL)
 			pool->base.opps[i]->funcs->opp_destroy(&pool->base.opps[i]);
 	}
 
-	for (i = 0; i < pool->base.res_cap->num_timing_generator; i++) {
+	for (i = 0; i < (unsigned int)pool->base.res_cap->num_timing_generator; i++) {
 		if (pool->base.timing_generators[i] != NULL)	{
 			kfree(DCN10TG_FROM_TG(pool->base.timing_generators[i]));
 			pool->base.timing_generators[i] = NULL;
 		}
 	}
 
-	for (i = 0; i < pool->base.res_cap->num_dwb; i++) {
+	for (i = 0; i < (unsigned int)pool->base.res_cap->num_dwb; i++) {
 		if (pool->base.dwbc[i] != NULL) {
 			kfree(TO_DCN20_DWBC(pool->base.dwbc[i]));
 			pool->base.dwbc[i] = NULL;
@@ -1198,7 +1234,7 @@ struct hubp *dcn20_hubp_create(
 	uint32_t inst)
 {
 	struct dcn20_hubp *hubp2 =
-		kzalloc(sizeof(struct dcn20_hubp), GFP_ATOMIC);
+		kzalloc_obj(struct dcn20_hubp);
 
 	if (!hubp2)
 		return NULL;
@@ -1220,7 +1256,7 @@ static void get_pixel_clock_parameters(
 	struct pipe_ctx *odm_pipe;
 	int opp_cnt = 1;
 	struct dc_link *link = stream->link;
-	struct link_encoder *link_enc = NULL;
+	struct link_encoder *link_enc = pipe_ctx->link_res.dio_link_enc;
 	struct dc *dc = pipe_ctx->stream->ctx->dc;
 	struct dce_hwseq *hws = dc->hwseq;
 
@@ -1229,7 +1265,8 @@ static void get_pixel_clock_parameters(
 
 	pixel_clk_params->requested_pix_clk_100hz = stream->timing.pix_clk_100hz;
 
-	link_enc = link_enc_cfg_get_link_enc(link);
+	if (!dc->config.unify_link_enc_assignment)
+		link_enc = link_enc_cfg_get_link_enc(link);
 	if (link_enc)
 		pixel_clk_params->encoder_object_id = link_enc->id;
 
@@ -1308,6 +1345,7 @@ static enum dc_status build_pipe_hw_param(struct pipe_ctx *pipe_ctx)
 
 enum dc_status dcn20_build_mapped_resource(const struct dc *dc, struct dc_state *context, struct dc_stream_state *stream)
 {
+	(void)dc;
 	enum dc_status status = DC_OK;
 	struct pipe_ctx *pipe_ctx = resource_get_otg_master_for_stream(&context->res_ctx, stream);
 
@@ -1377,7 +1415,7 @@ enum dc_status dcn20_add_dsc_to_stream_resource(struct dc *dc,
 		struct dc_stream_state *dc_stream)
 {
 	enum dc_status result = DC_OK;
-	int i;
+	unsigned int i;
 
 	/* Get a DSC if required and available */
 	for (i = 0; i < dc->res_pool->pipe_count; i++) {
@@ -1485,13 +1523,13 @@ bool dcn20_split_stream_for_odm(
 
 	*next_odm_pipe = *prev_odm_pipe;
 
-	next_odm_pipe->pipe_idx = pipe_idx;
+	next_odm_pipe->pipe_idx = (uint8_t)pipe_idx;
 	next_odm_pipe->plane_res.mi = pool->mis[next_odm_pipe->pipe_idx];
 	next_odm_pipe->plane_res.hubp = pool->hubps[next_odm_pipe->pipe_idx];
 	next_odm_pipe->plane_res.ipp = pool->ipps[next_odm_pipe->pipe_idx];
 	next_odm_pipe->plane_res.xfm = pool->transforms[next_odm_pipe->pipe_idx];
 	next_odm_pipe->plane_res.dpp = pool->dpps[next_odm_pipe->pipe_idx];
-	next_odm_pipe->plane_res.mpcc_inst = pool->dpps[next_odm_pipe->pipe_idx]->inst;
+	next_odm_pipe->plane_res.mpcc_inst = (uint8_t)pool->dpps[next_odm_pipe->pipe_idx]->inst;
 	next_odm_pipe->stream_res.dsc = NULL;
 	if (prev_odm_pipe->next_odm_pipe && prev_odm_pipe->next_odm_pipe != next_odm_pipe) {
 		next_odm_pipe->next_odm_pipe = prev_odm_pipe->next_odm_pipe;
@@ -1535,19 +1573,20 @@ void dcn20_split_stream_for_mpc(
 		struct pipe_ctx *primary_pipe,
 		struct pipe_ctx *secondary_pipe)
 {
+	(void)res_ctx;
 	int pipe_idx = secondary_pipe->pipe_idx;
 	struct pipe_ctx *sec_bot_pipe = secondary_pipe->bottom_pipe;
 
 	*secondary_pipe = *primary_pipe;
 	secondary_pipe->bottom_pipe = sec_bot_pipe;
 
-	secondary_pipe->pipe_idx = pipe_idx;
+	secondary_pipe->pipe_idx = (uint8_t)pipe_idx;
 	secondary_pipe->plane_res.mi = pool->mis[secondary_pipe->pipe_idx];
 	secondary_pipe->plane_res.hubp = pool->hubps[secondary_pipe->pipe_idx];
 	secondary_pipe->plane_res.ipp = pool->ipps[secondary_pipe->pipe_idx];
 	secondary_pipe->plane_res.xfm = pool->transforms[secondary_pipe->pipe_idx];
 	secondary_pipe->plane_res.dpp = pool->dpps[secondary_pipe->pipe_idx];
-	secondary_pipe->plane_res.mpcc_inst = pool->dpps[secondary_pipe->pipe_idx]->inst;
+	secondary_pipe->plane_res.mpcc_inst = (uint8_t)pool->dpps[secondary_pipe->pipe_idx]->inst;
 	secondary_pipe->stream_res.dsc = NULL;
 	if (primary_pipe->bottom_pipe && primary_pipe->bottom_pipe != secondary_pipe) {
 		ASSERT(!secondary_pipe->bottom_pipe);
@@ -1597,7 +1636,8 @@ void dcn20_set_mcif_arb_params(
 {
 	enum mmhubbub_wbif_mode wbif_mode;
 	struct mcif_arb_params *wb_arb_params;
-	int i, j, dwb_pipe;
+	int j, dwb_pipe;
+	unsigned int i;
 
 	/* Writeback MCIF_WB arbitration parameters */
 	dwb_pipe = 0;
@@ -1641,7 +1681,7 @@ void dcn20_set_mcif_arb_params(
 
 bool dcn20_validate_dsc(struct dc *dc, struct dc_state *new_ctx)
 {
-	int i;
+	unsigned int i;
 
 	/* Validate DSC config, dsc count validation is already done */
 	for (i = 0; i < dc->res_pool->pipe_count; i++) {
@@ -1658,8 +1698,8 @@ bool dcn20_validate_dsc(struct dc *dc, struct dc_state *new_ctx)
 		if (pipe_ctx->top_pipe || pipe_ctx->prev_odm_pipe || !stream || !stream->timing.flags.DSC)
 			continue;
 
-		dsc_cfg.pic_width = (stream->timing.h_addressable + stream->timing.h_border_left
-				+ stream->timing.h_border_right) / opp_cnt;
+		dsc_cfg.pic_width = (stream->timing.h_addressable + pipe_ctx->dsc_padding_params.dsc_hactive_padding
+				+ stream->timing.h_border_left + stream->timing.h_border_right) / opp_cnt;
 		dsc_cfg.pic_height = stream->timing.v_addressable + stream->timing.v_border_top
 				+ stream->timing.v_border_bottom;
 		dsc_cfg.pixel_encoding = stream->timing.pixel_encoding;
@@ -1667,6 +1707,7 @@ bool dcn20_validate_dsc(struct dc *dc, struct dc_state *new_ctx)
 		dsc_cfg.is_odm = pipe_ctx->next_odm_pipe ? true : false;
 		dsc_cfg.dc_dsc_cfg = stream->timing.dsc_cfg;
 		dsc_cfg.dc_dsc_cfg.num_slices_h /= opp_cnt;
+		dsc_cfg.dsc_padding = 0;
 
 		if (!pipe_ctx->stream_res.dsc->funcs->dsc_validate_stream(pipe_ctx->stream_res.dsc, &dsc_cfg))
 			return false;
@@ -1679,6 +1720,7 @@ struct pipe_ctx *dcn20_find_secondary_pipe(struct dc *dc,
 		const struct resource_pool *pool,
 		const struct pipe_ctx *primary_pipe)
 {
+	(void)pool;
 	struct pipe_ctx *secondary_pipe = NULL;
 
 	if (dc && primary_pipe) {
@@ -1695,7 +1737,7 @@ struct pipe_ctx *dcn20_find_secondary_pipe(struct dc *dc,
 			preferred_pipe_idx = dc->current_state->res_ctx.pipe_ctx[primary_pipe->pipe_idx].next_odm_pipe->pipe_idx;
 			if (res_ctx->pipe_ctx[preferred_pipe_idx].stream == NULL) {
 				secondary_pipe = &res_ctx->pipe_ctx[preferred_pipe_idx];
-				secondary_pipe->pipe_idx = preferred_pipe_idx;
+				secondary_pipe->pipe_idx = (uint8_t)preferred_pipe_idx;
 			}
 		}
 		if (secondary_pipe == NULL &&
@@ -1703,7 +1745,7 @@ struct pipe_ctx *dcn20_find_secondary_pipe(struct dc *dc,
 			preferred_pipe_idx = dc->current_state->res_ctx.pipe_ctx[primary_pipe->pipe_idx].bottom_pipe->pipe_idx;
 			if (res_ctx->pipe_ctx[preferred_pipe_idx].stream == NULL) {
 				secondary_pipe = &res_ctx->pipe_ctx[preferred_pipe_idx];
-				secondary_pipe->pipe_idx = preferred_pipe_idx;
+				secondary_pipe->pipe_idx = (uint8_t)preferred_pipe_idx;
 			}
 		}
 
@@ -1721,7 +1763,7 @@ struct pipe_ctx *dcn20_find_secondary_pipe(struct dc *dc,
 
 					if (res_ctx->pipe_ctx[preferred_pipe_idx].stream == NULL) {
 						secondary_pipe = &res_ctx->pipe_ctx[preferred_pipe_idx];
-						secondary_pipe->pipe_idx = preferred_pipe_idx;
+						secondary_pipe->pipe_idx = (uint8_t)preferred_pipe_idx;
 						break;
 					}
 				}
@@ -1742,7 +1784,7 @@ struct pipe_ctx *dcn20_find_secondary_pipe(struct dc *dc,
 
 				if (res_ctx->pipe_ctx[preferred_pipe_idx].stream == NULL) {
 					secondary_pipe = &res_ctx->pipe_ctx[preferred_pipe_idx];
-					secondary_pipe->pipe_idx = preferred_pipe_idx;
+					secondary_pipe->pipe_idx = (uint8_t)preferred_pipe_idx;
 					break;
 				}
 			}
@@ -1756,7 +1798,7 @@ void dcn20_merge_pipes_for_validate(
 		struct dc *dc,
 		struct dc_state *context)
 {
-	int i;
+	unsigned int i;
 
 	/* merge previously split odm pipes since mode support needs to make the decision */
 	for (i = 0; i < dc->res_pool->pipe_count; i++) {
@@ -1811,6 +1853,11 @@ void dcn20_merge_pipes_for_validate(
 	}
 }
 
+static bool is_dual_plane(enum surface_pixel_format format)
+{
+	return format >= SURFACE_PIXEL_FORMAT_VIDEO_BEGIN || format == SURFACE_PIXEL_FORMAT_GRPH_RGBE_ALPHA;
+}
+
 int dcn20_validate_apply_pipe_split_flags(
 		struct dc *dc,
 		struct dc_state *context,
@@ -1818,7 +1865,8 @@ int dcn20_validate_apply_pipe_split_flags(
 		int *split,
 		bool *merge)
 {
-	int i, pipe_idx, vlevel_split;
+	unsigned int i;
+	int pipe_idx, vlevel_split;
 	int plane_count = 0;
 	bool force_split = false;
 	bool avoid_split = dc->debug.pipe_split_policy == MPC_SPLIT_AVOID;
@@ -1851,7 +1899,7 @@ int dcn20_validate_apply_pipe_split_flags(
 				(!pipe->top_pipe || pipe->top_pipe->plane_state != pipe->plane_state))
 			++plane_count;
 	}
-	if (plane_count > dc->res_pool->pipe_count / 2)
+	if ((unsigned int)plane_count > dc->res_pool->pipe_count / 2)
 		avoid_split = true;
 
 	/* W/A: Mode timing with borders may not work well with pipe split, avoid for this corner case */
@@ -1877,12 +1925,12 @@ int dcn20_validate_apply_pipe_split_flags(
 			if (!context->res_ctx.pipe_ctx[i].stream)
 				continue;
 
-			for (vlevel_split = vlevel; vlevel <= context->bw_ctx.dml.soc.num_states; vlevel++)
+			for (vlevel_split = vlevel; (unsigned int)vlevel <= context->bw_ctx.dml.soc.num_states; vlevel++)
 				if (v->NoOfDPP[vlevel][0][pipe_idx] == 1 &&
 						v->ModeSupport[vlevel][0])
 					break;
 			/* Impossible to not split this pipe */
-			if (vlevel > context->bw_ctx.dml.soc.num_states)
+			if ((unsigned int)vlevel > context->bw_ctx.dml.soc.num_states)
 				vlevel = vlevel_split;
 			else
 				max_mpc_comb = 0;
@@ -1895,8 +1943,15 @@ int dcn20_validate_apply_pipe_split_flags(
 	for (i = 0, pipe_idx = 0; i < dc->res_pool->pipe_count; i++) {
 		struct pipe_ctx *pipe = &context->res_ctx.pipe_ctx[i];
 		int pipe_plane = v->pipe_plane[pipe_idx];
-		bool split4mpc = context->stream_count == 1 && plane_count == 1
-				&& dc->config.enable_4to1MPC && dc->res_pool->pipe_count >= 4;
+		bool split4mpc = false;
+
+		if (context->stream_count == 1 && plane_count == 1
+		    && dc->config.allow_4to1MPC && dc->res_pool->pipe_count >= 4
+		    && !dc->debug.disable_z9_mpc
+		    && pipe->plane_state && is_dual_plane(pipe->plane_state->format)
+		    && pipe->plane_state->src_rect.width <= 1920
+		    && pipe->plane_state->src_rect.height <= 1080)
+				split4mpc = true;
 
 		if (!context->res_ctx.pipe_ctx[i].stream)
 			continue;
@@ -2006,12 +2061,13 @@ bool dcn20_fast_validate_bw(
 		int *pipe_cnt_out,
 		int *pipe_split_from,
 		int *vlevel_out,
-		bool fast_validate)
+		enum dc_validate_mode validate_mode)
 {
 	bool out = false;
 	int split[MAX_PIPES] = { 0 };
 	bool merge[MAX_PIPES] = { false };
-	int pipe_cnt, i, pipe_idx, vlevel;
+	int pipe_cnt, pipe_idx, vlevel;
+	unsigned int i;
 
 	ASSERT(pipes);
 	if (!pipes)
@@ -2019,9 +2075,7 @@ bool dcn20_fast_validate_bw(
 
 	dcn20_merge_pipes_for_validate(dc, context);
 
-	DC_FP_START();
-	pipe_cnt = dc->res_pool->funcs->populate_dml_pipes(dc, context, pipes, fast_validate);
-	DC_FP_END();
+	pipe_cnt = dc->res_pool->funcs->populate_dml_pipes(dc, context, pipes, validate_mode);
 
 	*pipe_cnt_out = pipe_cnt;
 
@@ -2032,7 +2086,7 @@ bool dcn20_fast_validate_bw(
 
 	vlevel = dml_get_voltage_level(&context->bw_ctx.dml, pipes, pipe_cnt);
 
-	if (vlevel > context->bw_ctx.dml.soc.num_states)
+	if ((unsigned int)vlevel > context->bw_ctx.dml.soc.num_states)
 		goto validate_fail;
 
 	vlevel = dcn20_validate_apply_pipe_split_flags(dc, context, vlevel, split, merge);
@@ -2123,22 +2177,23 @@ validate_out:
 	return out;
 }
 
-bool dcn20_validate_bandwidth(struct dc *dc, struct dc_state *context,
-		bool fast_validate)
+enum dc_status dcn20_validate_bandwidth(struct dc *dc, struct dc_state *context,
+		enum dc_validate_mode validate_mode)
 {
 	bool voltage_supported;
 	display_e2e_pipe_params_st *pipes;
 
-	pipes = kcalloc(dc->res_pool->pipe_count, sizeof(display_e2e_pipe_params_st), GFP_KERNEL);
+	pipes = kzalloc_objs(display_e2e_pipe_params_st,
+			     dc->res_pool->pipe_count);
 	if (!pipes)
-		return false;
+		return DC_FAIL_BANDWIDTH_VALIDATE;
 
 	DC_FP_START();
-	voltage_supported = dcn20_validate_bandwidth_fp(dc, context, fast_validate, pipes);
+	voltage_supported = dcn20_validate_bandwidth_fp(dc, context, validate_mode, pipes);
 	DC_FP_END();
 
 	kfree(pipes);
-	return voltage_supported;
+	return voltage_supported ? DC_OK : DC_FAIL_BANDWIDTH_VALIDATE;
 }
 
 struct pipe_ctx *dcn20_acquire_free_pipe_for_layer(
@@ -2147,6 +2202,7 @@ struct pipe_ctx *dcn20_acquire_free_pipe_for_layer(
 		const struct resource_pool *pool,
 		const struct pipe_ctx *opp_head)
 {
+	(void)cur_ctx;
 	struct resource_context *res_ctx = &new_ctx->res_ctx;
 	struct pipe_ctx *otg_master = resource_get_otg_master_for_stream(res_ctx, opp_head->stream);
 	struct pipe_ctx *sec_dpp_pipe = resource_find_free_secondary_pipe_legacy(res_ctx, pool, otg_master);
@@ -2163,7 +2219,7 @@ struct pipe_ctx *dcn20_acquire_free_pipe_for_layer(
 	sec_dpp_pipe->plane_res.hubp = pool->hubps[sec_dpp_pipe->pipe_idx];
 	sec_dpp_pipe->plane_res.ipp = pool->ipps[sec_dpp_pipe->pipe_idx];
 	sec_dpp_pipe->plane_res.dpp = pool->dpps[sec_dpp_pipe->pipe_idx];
-	sec_dpp_pipe->plane_res.mpcc_inst = pool->dpps[sec_dpp_pipe->pipe_idx]->inst;
+	sec_dpp_pipe->plane_res.mpcc_inst = (uint8_t)pool->dpps[sec_dpp_pipe->pipe_idx]->inst;
 
 	return sec_dpp_pipe;
 }
@@ -2230,17 +2286,17 @@ static const struct resource_funcs dcn20_res_pool_funcs = {
 	.set_mcif_arb_params = dcn20_set_mcif_arb_params,
 	.populate_dml_pipes = dcn20_populate_dml_pipes_from_context,
 	.find_first_free_match_stream_enc_for_link = dcn10_find_first_free_match_stream_enc_for_link,
-	.get_vstartup_for_pipe = dcn10_get_vstartup_for_pipe
+	.get_vstartup_for_pipe = dcn10_get_vstartup_for_pipe,
+	.get_default_tiling_info = dcn10_get_default_tiling_info
 };
 
 bool dcn20_dwbc_create(struct dc_context *ctx, struct resource_pool *pool)
 {
-	int i;
+	unsigned int i;
 	uint32_t pipe_count = pool->res_cap->num_dwb;
 
 	for (i = 0; i < pipe_count; i++) {
-		struct dcn20_dwbc *dwbc20 = kzalloc(sizeof(struct dcn20_dwbc),
-						    GFP_KERNEL);
+		struct dcn20_dwbc *dwbc20 = kzalloc_obj(struct dcn20_dwbc);
 
 		if (!dwbc20) {
 			dm_error("DC: failed to create dwbc20!\n");
@@ -2258,14 +2314,13 @@ bool dcn20_dwbc_create(struct dc_context *ctx, struct resource_pool *pool)
 
 bool dcn20_mmhubbub_create(struct dc_context *ctx, struct resource_pool *pool)
 {
-	int i;
+	unsigned int i;
 	uint32_t pipe_count = pool->res_cap->num_dwb;
 
 	ASSERT(pipe_count > 0);
 
 	for (i = 0; i < pipe_count; i++) {
-		struct dcn20_mmhubbub *mcif_wb20 = kzalloc(sizeof(struct dcn20_mmhubbub),
-						    GFP_KERNEL);
+		struct dcn20_mmhubbub *mcif_wb20 = kzalloc_obj(struct dcn20_mmhubbub);
 
 		if (!mcif_wb20) {
 			dm_error("DC: failed to create mcif_wb20!\n");
@@ -2285,7 +2340,7 @@ bool dcn20_mmhubbub_create(struct dc_context *ctx, struct resource_pool *pool)
 
 static struct pp_smu_funcs *dcn20_pp_smu_create(struct dc_context *ctx)
 {
-	struct pp_smu_funcs *pp_smu = kzalloc(sizeof(*pp_smu), GFP_ATOMIC);
+	struct pp_smu_funcs *pp_smu = kzalloc_obj(*pp_smu);
 
 	if (!pp_smu)
 		return pp_smu;
@@ -2330,6 +2385,7 @@ static struct _vcs_dpi_ip_params_st *get_asic_rev_ip_params(
 
 static enum dml_project get_dml_project_version(uint32_t hw_internal_rev)
 {
+	(void)hw_internal_rev;
 	return DML_PROJECT_NAVI10v2;
 }
 
@@ -2340,8 +2396,6 @@ static bool init_soc_bounding_box(struct dc *dc,
 			get_asic_rev_soc_bb(dc->ctx->asic_id.hw_internal_rev);
 	struct _vcs_dpi_ip_params_st *loaded_ip =
 			get_asic_rev_ip_params(dc->ctx->asic_id.hw_internal_rev);
-
-	DC_LOGGER_INIT(dc->ctx->logger);
 
 	if (pool->base.pp_smu) {
 		struct pp_smu_nv_clock_table max_clocks = {0};
@@ -2418,7 +2472,7 @@ static bool dcn20_resource_construct(
 	/*************************************************
 	 *  Resource + asic cap harcoding                *
 	 *************************************************/
-	pool->base.underlay_pipe_index = NO_UNDERLAY_PIPE;
+	pool->base.underlay_pipe_index = (unsigned int)NO_UNDERLAY_PIPE;
 
 	dc->caps.max_downscale_ratio = 200;
 	dc->caps.i2c_speed_in_khz = 100;
@@ -2471,6 +2525,7 @@ static bool dcn20_resource_construct(
 	dc->caps.color.mpc.ocsc = 1;
 
 	dc->caps.dp_hdmi21_pcon_support = true;
+	dc->check_config = config_defaults;
 
 	if (dc->ctx->dce_environment == DCE_ENV_PRODUCTION_DRV)
 		dc->debug = debug_defaults_drv;
@@ -2517,7 +2572,7 @@ static bool dcn20_resource_construct(
 				CLOCK_SOURCE_ID_DP_DTO,
 				&clk_src_regs[0], true);
 
-	for (i = 0; i < pool->base.clk_src_count; i++) {
+	for (i = 0; (unsigned int)i < pool->base.clk_src_count; i++) {
 		if (pool->base.clock_sources[i] == NULL) {
 			dm_error("DC: failed to create clock sources!\n");
 			BREAK_TO_DEBUGGER();
@@ -2565,12 +2620,12 @@ static bool dcn20_resource_construct(
 
 	if (!dc->debug.disable_pplib_wm_range) {
 		struct pp_smu_wm_range_sets ranges = {0};
-		int i = 0;
+		int j = 0;
 
 		ranges.num_reader_wm_sets = 0;
 
 		if (loaded_bb->num_states == 1) {
-			ranges.reader_wm_sets[0].wm_inst = i;
+			ranges.reader_wm_sets[0].wm_inst = (uint8_t)j;
 			ranges.reader_wm_sets[0].min_drain_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MIN;
 			ranges.reader_wm_sets[0].max_drain_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MAX;
 			ranges.reader_wm_sets[0].min_fill_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MIN;
@@ -2578,15 +2633,14 @@ static bool dcn20_resource_construct(
 
 			ranges.num_reader_wm_sets = 1;
 		} else if (loaded_bb->num_states > 1) {
-			for (i = 0; i < 4 && i < loaded_bb->num_states; i++) {
-				ranges.reader_wm_sets[i].wm_inst = i;
-				ranges.reader_wm_sets[i].min_drain_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MIN;
-				ranges.reader_wm_sets[i].max_drain_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MAX;
+			for (j = 0; j < 4 && (unsigned int)j < loaded_bb->num_states; j++) {
+				ranges.reader_wm_sets[j].wm_inst = (uint8_t)j;
+				ranges.reader_wm_sets[j].min_drain_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MIN;
+				ranges.reader_wm_sets[j].max_drain_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MAX;
 				DC_FP_START();
-				dcn20_fpu_set_wm_ranges(i, &ranges, loaded_bb);
+				dcn20_fpu_set_wm_ranges(j, &ranges, loaded_bb);
 				DC_FP_END();
-
-				ranges.num_reader_wm_sets = i + 1;
+				ranges.num_reader_wm_sets = j + 1;
 			}
 
 			ranges.reader_wm_sets[0].min_fill_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MIN;
@@ -2612,7 +2666,7 @@ static bool dcn20_resource_construct(
 		goto create_fail;
 
 	/* mem input -> ipp -> dpp -> opp -> TG */
-	for (i = 0; i < pool->base.pipe_count; i++) {
+	for (i = 0; (unsigned int)i < pool->base.pipe_count; i++) {
 		pool->base.hubps[i] = dcn20_hubp_create(ctx, i);
 		if (pool->base.hubps[i] == NULL) {
 			BREAK_TO_DEBUGGER();
@@ -2691,6 +2745,14 @@ static bool dcn20_resource_construct(
 		goto create_fail;
 	}
 
+	/* DIO */
+	pool->base.dio = dcn20_dio_create(ctx);
+	if (pool->base.dio == NULL) {
+		BREAK_TO_DEBUGGER();
+		dm_error("DC: failed to create dio!\n");
+		goto create_fail;
+	}
+
 	for (i = 0; i < pool->base.res_cap->num_dsc; i++) {
 		pool->base.dscs[i] = dcn20_dsc_create(ctx, i);
 		if (pool->base.dscs[i] == NULL) {
@@ -2732,8 +2794,10 @@ static bool dcn20_resource_construct(
 
 	dc->caps.max_planes =  pool->base.pipe_count;
 
-	for (i = 0; i < dc->caps.max_planes; ++i)
+	for (i = 0; (unsigned int)i < dc->caps.max_planes; ++i)
 		dc->caps.planes[i] = plane_cap;
+
+	dc->caps.max_odm_combine_factor = 2;
 
 	dc->cap_funcs = cap_funcs;
 
@@ -2762,12 +2826,12 @@ struct resource_pool *dcn20_create_resource_pool(
 		struct dc *dc)
 {
 	struct dcn20_resource_pool *pool =
-		kzalloc(sizeof(struct dcn20_resource_pool), GFP_ATOMIC);
+		kzalloc_obj(struct dcn20_resource_pool);
 
 	if (!pool)
 		return NULL;
 
-	if (dcn20_resource_construct(init_data->num_virtual_links, dc, pool))
+	if (dcn20_resource_construct((uint8_t)init_data->num_virtual_links, dc, pool))
 		return &pool->base;
 
 	BREAK_TO_DEBUGGER();

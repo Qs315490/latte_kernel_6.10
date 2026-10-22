@@ -1,5 +1,5 @@
 /*
- * Copyright 2023 Advanced Micro Devices, Inc.
+ * Copyright 2023-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -63,7 +63,7 @@
 	uint32_t MPC_MCM_SECOND_GAMUT_REMAP_C31_C32_B[MAX_MPCC]; \
 	uint32_t MPC_MCM_SECOND_GAMUT_REMAP_C33_C34_B[MAX_MPCC]; \
 	uint32_t MPCC_MCM_3DLUT_FAST_LOAD_SELECT[MAX_MPCC]; \
-	uint32_t MPCC_MCM_3DLUT_FAST_LOAD_STATUS[MAX_MPCC]
+	uint32_t MPCC_MCM_3DLUT_FAST_LOAD_STATUS[MAX_MPCC];
 
 #define MPC_COMMON_MASK_SH_LIST_DCN4_01(mask_sh) \
 	MPC_COMMON_MASK_SH_LIST_DCN32(mask_sh), \
@@ -183,7 +183,8 @@ struct dcn401_mpc_mask {
 };
 
 struct dcn401_mpc_registers {
-	MPC_REG_VARIABLE_LIST_DCN4_01;
+	MPC_REG_VARIABLE_LIST_DCN4_01
+	uint32_t MPCC_CONTROL2[MAX_MPCC];
 };
 
 struct dcn401_mpc {
@@ -221,11 +222,6 @@ void mpc401_program_lut_read_write_control(
 		bool lut_bank_a,
 		int mpcc_id);
 
-void mpc401_program_3dlut_size(
-		struct mpc *mpc,
-		bool is_17x17x17,
-		int mpcc_id);
-
 void mpc401_set_gamut_remap(
 	struct mpc *mpc,
 	int mpcc_id,
@@ -235,5 +231,35 @@ void mpc401_get_gamut_remap(
 	struct mpc *mpc,
 	int mpcc_id,
 	struct mpc_grph_gamut_adjustment *adjust);
+
+void mpc401_update_3dlut_fast_load_select(
+	struct mpc *mpc,
+	int mpcc_id,
+	int hubp_idx);
+
+void mpc_program_gamut_remap(
+	struct mpc *mpc,
+	unsigned int mpcc_id,
+	const uint16_t *regval,
+	enum mpcc_gamut_remap_id gamut_remap_block_id,
+	enum mpcc_gamut_remap_mode_select mode_select);
+
+void mpc_read_gamut_remap(struct mpc *mpc,
+	int mpcc_id,
+	uint16_t *regval,
+	enum mpcc_gamut_remap_id gamut_remap_block_id,
+	uint32_t *mode_select);
+
+void mpc401_get_3dlut_fast_load_status(
+	struct mpc *mpc,
+	int mpcc_id,
+	uint32_t *done,
+	uint32_t *soft_underflow,
+	uint32_t *hard_underflow);
+
+void mpc401_update_3dlut_fast_load_select(
+	struct mpc *mpc,
+	int mpcc_id,
+	int hubp_idx);
 
 #endif

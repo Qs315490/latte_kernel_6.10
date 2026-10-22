@@ -23,7 +23,7 @@ easier.
 
 Some subsystems and maintainer trees have additional information about
 their workflow and expectations, see
-:ref:`Documentation/process/maintainer-handbooks.rst <maintainer_handbooks_main>`.
+Documentation/process/maintainer-handbooks.rst.
 
 Obtain a current source tree
 ----------------------------
@@ -343,7 +343,7 @@ https://en.wikipedia.org/wiki/Posting_style#Interleaved_style
 As is frequently quoted on the mailing list::
 
   A: http://en.wikipedia.org/wiki/Top_post
-  Q: Were do I find info about this thing called top-posting?
+  Q: Where do I find info about this thing called top-posting?
   A: Because it messes up the order in which people normally read text.
   Q: Why is top-posting such a bad thing?
   A: Top-posting.
@@ -495,10 +495,10 @@ list archives.  A "# Suffix" may also be used in this case to clarify.
 
 If a person has had the opportunity to comment on a patch, but has not
 provided such comments, you may optionally add a ``Cc:`` tag to the patch.
-This is the only tag which might be added without an explicit action by the
-person it names - but it should indicate that this person was copied on the
-patch.  This tag documents that potentially interested parties
-have been included in the discussion.
+This tag documents that potentially interested parties have been included in
+the discussion. Note, this is one of only three tags you might be able to use
+without explicit permission of the person named (see 'Tagging people requires
+permission' below for details).
 
 Co-developed-by: states that the patch was co-created by multiple developers;
 it is used to give attribution to co-authors (in addition to the author
@@ -544,9 +544,9 @@ hopefully inspires them to help us again in the future. The tag is intended for
 bugs; please do not use it to credit feature requests. The tag should be
 followed by a Closes: tag pointing to the report, unless the report is not
 available on the web. The Link: tag can be used instead of Closes: if the patch
-fixes a part of the issue(s) being reported. Please note that if the bug was
-reported in private, then ask for permission first before using the Reported-by
-tag.
+fixes a part of the issue(s) being reported. Note, the Reported-by tag is one
+of only three tags you might be able to use without explicit permission of the
+person named (see 'Tagging people requires permission' below for details).
 
 A Tested-by: tag indicates that the patch has been successfully tested (in
 some environment) by the person named.  This tag informs maintainers that
@@ -581,29 +581,30 @@ By offering my Reviewed-by: tag, I state that:
 
 A Reviewed-by tag is a statement of opinion that the patch is an
 appropriate modification of the kernel without any remaining serious
-technical issues.  Any interested reviewer (who has done the work) can
-offer a Reviewed-by tag for a patch.  This tag serves to give credit to
-reviewers and to inform maintainers of the degree of review which has been
-done on the patch.  Reviewed-by: tags, when supplied by reviewers known to
-understand the subject area and to perform thorough reviews, will normally
-increase the likelihood of your patch getting into the kernel.
+technical issues.  Any interested reviewer (who has done the work and is a
+person with known identity) can offer a Reviewed-by tag for a patch.  This tag
+serves to give credit to reviewers and to inform maintainers of the degree of
+review which has been done on the patch.  Reviewed-by: tags, when supplied by
+reviewers known to understand the subject area and to perform thorough reviews,
+will normally increase the likelihood of your patch getting into the kernel.
 
 Both Tested-by and Reviewed-by tags, once received on mailing list from tester
 or reviewer, should be added by author to the applicable patches when sending
 next versions.  However if the patch has changed substantially in following
 version, these tags might not be applicable anymore and thus should be removed.
-Usually removal of someone's Tested-by or Reviewed-by tags should be mentioned
-in the patch changelog (after the '---' separator).
+Usually removal of someone's Acked-by, Tested-by or Reviewed-by tags should be
+mentioned in the patch changelog with an explanation (after the '---'
+separator).
 
 A Suggested-by: tag indicates that the patch idea is suggested by the person
-named and ensures credit to the person for the idea. Please note that this
-tag should not be added without the reporter's permission, especially if the
-idea was not posted in a public forum. That said, if we diligently credit our
-idea reporters, they will, hopefully, be inspired to help us again in the
-future.
+named and ensures credit to the person for the idea: if we diligently credit
+our idea reporters, they will, hopefully, be inspired to help us again in the
+future. Note, this is one of only three tags you might be able to use without
+explicit permission of the person named (see 'Tagging people requires
+permission' below for details).
 
-A Fixes: tag indicates that the patch fixes an issue in a previous commit. It
-is used to make it easy to determine where a bug originated, which can help
+A Fixes: tag indicates that the patch fixes a bug in a previous commit. It
+is used to make it easy to determine where an issue originated, which can help
 review a bug fix. This tag also assists the stable kernel team in determining
 which stable kernel versions should receive your fix. This is the preferred
 method for indicating a bug fixed by the patch. See :ref:`describe_changes`
@@ -617,6 +618,31 @@ Documentation/process/stable-kernel-rules.rst.
 Finally, while providing tags is welcome and typically very appreciated, please
 note that signers (i.e. submitters and maintainers) may use their discretion in
 applying offered tags.
+
+.. _tagging_people:
+
+Tagging people requires permission
+----------------------------------
+
+Be careful in the addition of the aforementioned tags to your patches, as all
+except for Cc:, Reported-by:, and Suggested-by: need explicit permission of the
+person named. For those three implicit permission is sufficient if the person
+contributed to the Linux kernel using that name and email address according
+to the lore archives or the commit history -- and in case of Reported-by:
+and Suggested-by: did the reporting or suggestion in public. Note,
+bugzilla.kernel.org is a public place in this sense, but email addresses
+used there are private; so do not expose them in tags, unless the person
+used them in earlier contributions.
+
+Using Assisted-by:
+------------------
+
+If you used any sort of advanced coding tool in the creation of your patch,
+you need to acknowledge that use by adding an Assisted-by tag.  Failure to
+do so may impede the acceptance of your work.  Please see
+Documentation/process/coding-assistants.rst for details regarding the
+acknowledgment of coding assistants.
+
 
 .. _the_canonical_patch_format:
 
@@ -717,6 +743,12 @@ patch in the permanent changelog.  If the ``from`` line is missing,
 then the ``From:`` line from the email header will be used to determine
 the patch author in the changelog.
 
+The author may indicate their affiliation or the sponsor of the work
+by adding the name of an organization to the ``from`` and ``SoB`` lines,
+e.g.:
+
+	From: Patch Author (Company) <author@example.com>
+
 Explanation Body
 ^^^^^^^^^^^^^^^^
 
@@ -783,7 +815,8 @@ not part of the changelog which gets committed to the git tree. It is
 additional information for the reviewers. If it's placed above the
 commit tags, it needs manual interaction to remove it. If it is below
 the separator line, it gets automatically stripped off when applying the
-patch::
+patch.  If available, adding links to previous versions of the patch (e.g.,
+lore.kernel.org archive link) is recommended to help reviewers::
 
   <commit message>
   ...
@@ -791,6 +824,9 @@ patch::
   ---
   V2 -> V3: Removed redundant helper function
   V1 -> V2: Cleaned up coding style and addressed review comments
+
+  v2: https://lore.kernel.org/bar
+  v1: https://lore.kernel.org/foo
 
   path/to/file | 5+++--
   ...

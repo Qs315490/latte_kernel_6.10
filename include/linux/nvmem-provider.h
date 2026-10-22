@@ -103,7 +103,7 @@ struct nvmem_cell_info {
  *
  * Note: A default "nvmem<id>" name will be assigned to the device if
  * no name is specified in its configuration. In such case "<id>" is
- * generated with ida_simple_get() and provided id field is ignored.
+ * generated with ida_alloc() and provided id field is ignored.
  *
  * Note: Specifying name and setting id to -1 implies a unique device
  * whose name is provided as-is (kept unaltered).
@@ -135,25 +135,6 @@ struct nvmem_config {
 	/* To be only used by old driver/misc/eeprom drivers */
 	bool			compat;
 	struct device		*base_dev;
-};
-
-/**
- * struct nvmem_cell_table - NVMEM cell definitions for given provider
- *
- * @nvmem_name:		Provider name.
- * @cells:		Array of cell definitions.
- * @ncells:		Number of cell definitions in the array.
- * @node:		List node.
- *
- * This structure together with related helper functions is provided for users
- * that don't can't access the nvmem provided structure but wish to register
- * cell definitions for it e.g. board files registering an EEPROM device.
- */
-struct nvmem_cell_table {
-	const char		*nvmem_name;
-	const struct nvmem_cell_info	*cells;
-	size_t			ncells;
-	struct list_head	node;
 };
 
 /**
@@ -190,9 +171,6 @@ void nvmem_unregister(struct nvmem_device *nvmem);
 struct nvmem_device *devm_nvmem_register(struct device *dev,
 					 const struct nvmem_config *cfg);
 
-void nvmem_add_cell_table(struct nvmem_cell_table *table);
-void nvmem_del_cell_table(struct nvmem_cell_table *table);
-
 int nvmem_add_one_cell(struct nvmem_device *nvmem,
 		       const struct nvmem_cell_info *info);
 
@@ -223,8 +201,6 @@ devm_nvmem_register(struct device *dev, const struct nvmem_config *c)
 	return nvmem_register(c);
 }
 
-static inline void nvmem_add_cell_table(struct nvmem_cell_table *table) {}
-static inline void nvmem_del_cell_table(struct nvmem_cell_table *table) {}
 static inline int nvmem_add_one_cell(struct nvmem_device *nvmem,
 				     const struct nvmem_cell_info *info)
 {
@@ -237,6 +213,12 @@ static inline int nvmem_layout_register(struct nvmem_layout *layout)
 }
 
 static inline void nvmem_layout_unregister(struct nvmem_layout *layout) {}
+
+static inline int nvmem_add_cells_from_dt(struct nvmem_device *nvmem,
+					  struct device_node *np)
+{
+	return -EOPNOTSUPP;
+}
 
 #endif /* CONFIG_NVMEM */
 

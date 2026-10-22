@@ -2,6 +2,7 @@
 # Makefile for cpupower
 #
 # Copyright (C) 2005,2006 Dominik Brodowski <linux@dominikbrodowski.net>
+# Copyright (C) 2025      Francesco Poli <invernomuto@paranoici.org>
 #
 # Based largely on the Makefile for udev by:
 #
@@ -36,9 +37,7 @@ NLS ?=		true
 # cpufreq-bench benchmarking tool
 CPUFREQ_BENCH ?= true
 
-# Do not build libraries, but build the code in statically
-# Libraries are still built, otherwise the Makefile code would
-# be rather ugly.
+# Build the code, including libraries, statically.
 export STATIC ?= false
 
 # Prefix to the directories we're installing to
@@ -52,8 +51,11 @@ DESTDIR ?=
 # and _should_ modify the PACKAGE_BUGREPORT definition
 
 VERSION:=			$(shell ./utils/version-gen.sh)
-LIB_MAJ=			0.0.1
-LIB_MIN=			1
+LIB_FIX=			1
+LIB_MIN=			0
+LIB_MAJ=			1
+LIB_VER=			$(LIB_MAJ).$(LIB_MIN).$(LIB_FIX)
+
 
 PACKAGE =			cpupower
 PACKAGE_BUGREPORT =		linux-pm@vger.kernel.org
@@ -68,6 +70,8 @@ bindir ?=	/usr/bin
 sbindir ?=	/usr/sbin
 mandir ?=	/usr/man
 libdir ?=	/usr/lib
+libexecdir ?=	/usr/libexec
+unitdir ?=	/usr/lib/systemd/system
 includedir ?=	/usr/include
 localedir ?=	/usr/share/locale
 docdir ?=       /usr/share/doc/packages/cpupower
@@ -80,6 +84,7 @@ CP = cp -fpR
 INSTALL = /usr/bin/install -c
 INSTALL_PROGRAM = ${INSTALL}
 INSTALL_DATA  = ${INSTALL} -m 644
+SETPERM_DATA  = chmod 644
 #bash completion scripts get sourced and so they should be rw only.
 INSTALL_SCRIPT = ${INSTALL} -m 644
 
@@ -200,14 +205,25 @@ $(OUTPUT)lib/%.o: $(LIB_SRC) $(LIB_HEADERS)
 	$(ECHO) "  CC      " $@
 	$(QUIET) $(CC) $(CFLAGS) -fPIC -o $@ -c lib/$*.c
 
-$(OUTPUT)libcpupower.so.$(LIB_MAJ): $(LIB_OBJS)
+ifeq ($(strip $(STATIC)),true)
+LIBCPUPOWER := libcpupower.a
+else
+LIBCPUPOWER := libcpupower.so.$(LIB_VER)
+endif
+
+$(OUTPUT)$(LIBCPUPOWER): $(LIB_OBJS)
+ifeq ($(strip $(STATIC)),true)
+	$(ECHO) "  AR      " $@
+	$(QUIET) $(AR) rcs $@ $(LIB_OBJS)
+else
 	$(ECHO) "  LD      " $@
 	$(QUIET) $(CC) -shared $(CFLAGS) $(LDFLAGS) -o $@ \
-		-Wl,-soname,libcpupower.so.$(LIB_MIN) $(LIB_OBJS)
+		-Wl,-soname,libcpupower.so.$(LIB_MAJ) $(LIB_OBJS)
 	@ln -sf $(@F) $(OUTPUT)libcpupower.so
-	@ln -sf $(@F) $(OUTPUT)libcpupower.so.$(LIB_MIN)
+	@ln -sf $(@F) $(OUTPUT)libcpupower.so.$(LIB_MAJ)
+endif
 
-libcpupower: $(OUTPUT)libcpupower.so.$(LIB_MAJ)
+libcpupower: $(OUTPUT)$(LIBCPUPOWER)
 
 # Let all .o files depend on its .c file and all headers
 # Might be worth to put this into utils/Makefile at some point of time
@@ -217,7 +233,7 @@ $(OUTPUT)%.o: %.c
 	$(ECHO) "  CC      " $@
 	$(QUIET) $(CC) $(CFLAGS) -I./lib -I ./utils -o $@ -c $*.c
 
-$(OUTPUT)cpupower: $(UTIL_OBJS) $(OUTPUT)libcpupower.so.$(LIB_MAJ)
+$(OUTPUT)cpupower: $(UTIL_OBJS) $(OUTPUT)$(LIBCPUPOWER)
 	$(ECHO) "  CC      " $@
 ifeq ($(strip $(STATIC)),true)
 	$(QUIET) $(CC) $(CFLAGS) $(LDFLAGS) $(UTIL_OBJS) -lrt -lpci -L$(OUTPUT) -o $@
@@ -262,7 +278,7 @@ update-po: $(OUTPUT)po/$(PACKAGE).pot
 	done;
 endif
 
-compile-bench: $(OUTPUT)libcpupower.so.$(LIB_MAJ)
+compile-bench: $(OUTPUT)$(LIBCPUPOWER)
 	@V=$(V) confdir=$(confdir) $(MAKE) -C bench O=$(OUTPUT)
 
 # we compile into subdirectories. if the target directory is not the
@@ -280,6 +296,7 @@ clean:
 	-find $(OUTPUT) \( -not -type d \) -and \( -name '*~' -o -name '*.[oas]' \) -type f -print \
 	 | xargs rm -f
 	-rm -f $(OUTPUT)cpupower
+	-rm -f $(OUTPUT)libcpupower.a
 	-rm -f $(OUTPUT)libcpupower.so*
 	-rm -rf $(OUTPUT)po/*.gmo
 	-rm -rf $(OUTPUT)po/*.pot
@@ -288,17 +305,35 @@ clean:
 
 install-lib: libcpupower
 	$(INSTALL) -d $(DESTDIR)${libdir}
+ifeq ($(strip $(STATIC)),true)
+	$(CP) $(OUTPUT)libcpupower.a $(DESTDIR)${libdir}/
+else
 	$(CP) $(OUTPUT)libcpupower.so* $(DESTDIR)${libdir}/
+endif
 	$(INSTALL) -d $(DESTDIR)${includedir}
 	$(INSTALL_DATA) lib/cpufreq.h $(DESTDIR)${includedir}/cpufreq.h
 	$(INSTALL_DATA) lib/cpuidle.h $(DESTDIR)${includedir}/cpuidle.h
 	$(INSTALL_DATA) lib/powercap.h $(DESTDIR)${includedir}/powercap.h
 
-install-tools: $(OUTPUT)cpupower
+# SYSTEMD=false disables installation of the systemd unit file
+SYSTEMD ?=	true
+
+install-systemd:
+	$(INSTALL) -d $(DESTDIR)${unitdir}
+	sed 's|___CDIR___|${confdir}|; s|___LDIR___|${libexecdir}|' cpupower.service.in > '$(DESTDIR)${unitdir}/cpupower.service'
+	$(SETPERM_DATA) '$(DESTDIR)${unitdir}/cpupower.service'
+
+INSTALL_SYSTEMD := $(if $(filter true,$(strip $(SYSTEMD))),install-systemd)
+
+install-tools: $(OUTPUT)cpupower $(INSTALL_SYSTEMD)
 	$(INSTALL) -d $(DESTDIR)${bindir}
 	$(INSTALL_PROGRAM) $(OUTPUT)cpupower $(DESTDIR)${bindir}
 	$(INSTALL) -d $(DESTDIR)${bash_completion_dir}
 	$(INSTALL_SCRIPT) cpupower-completion.sh '$(DESTDIR)${bash_completion_dir}/cpupower'
+	$(INSTALL) -d $(DESTDIR)${confdir}
+	$(INSTALL_DATA) cpupower-service.conf '$(DESTDIR)${confdir}'
+	$(INSTALL) -d $(DESTDIR)${libexecdir}
+	$(INSTALL_PROGRAM) cpupower.sh '$(DESTDIR)${libexecdir}/cpupower'
 
 install-man:
 	$(INSTALL_DATA) -D man/cpupower.1 $(DESTDIR)${mandir}/man1/cpupower.1
@@ -322,17 +357,16 @@ install-bench: compile-bench
 	@#DESTDIR must be set from outside to survive
 	@sbindir=$(sbindir) bindir=$(bindir) docdir=$(docdir) confdir=$(confdir) $(MAKE) -C bench O=$(OUTPUT) install
 
-ifeq ($(strip $(STATIC)),true)
-install: all install-tools install-man $(INSTALL_NLS) $(INSTALL_BENCH)
-else
 install: all install-lib install-tools install-man $(INSTALL_NLS) $(INSTALL_BENCH)
-endif
 
 uninstall:
 	- rm -f $(DESTDIR)${libdir}/libcpupower.*
 	- rm -f $(DESTDIR)${includedir}/cpufreq.h
 	- rm -f $(DESTDIR)${includedir}/cpuidle.h
 	- rm -f $(DESTDIR)${bindir}/utils/cpupower
+	- rm -f $(DESTDIR)${confdir}cpupower-service.conf
+	- rm -f $(DESTDIR)${libexecdir}/cpupower
+	- rm -f $(DESTDIR)${unitdir}/cpupower.service
 	- rm -f $(DESTDIR)${mandir}/man1/cpupower.1
 	- rm -f $(DESTDIR)${mandir}/man1/cpupower-frequency-set.1
 	- rm -f $(DESTDIR)${mandir}/man1/cpupower-frequency-info.1
@@ -379,4 +413,4 @@ help:
 	@echo  '  uninstall	  - Remove previously installed files from the dir defined by "DESTDIR"'
 	@echo  '                    cmdline or Makefile config block option (default: "")'
 
-.PHONY: all utils libcpupower update-po create-gmo install-lib install-tools install-man install-gmo install uninstall clean help
+.PHONY: all utils libcpupower update-po create-gmo install-lib install-systemd install-tools install-man install-gmo install uninstall clean help

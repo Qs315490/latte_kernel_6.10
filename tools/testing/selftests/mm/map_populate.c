@@ -16,7 +16,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include "../kselftest.h"
+#include "kselftest.h"
+
+#include "vm_util.h"
 
 #define MMAP_SZ		4096
 
@@ -87,6 +89,9 @@ int main(int argc, char **argv)
 	BUG_ON(!ftmp, "tmpfile()");
 
 	ret = ftruncate(fileno(ftmp), MMAP_SZ);
+	if (ret < 0 && errno == ENOENT) {
+		skip_test_dodgy_fs("ftruncate()");
+	}
 	BUG_ON(ret, "ftruncate()");
 
 	smap = mmap(0, MMAP_SZ, PROT_READ | PROT_WRITE,

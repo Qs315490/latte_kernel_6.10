@@ -10,7 +10,6 @@
 
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/intel_soc_pmic.h>
@@ -113,7 +112,6 @@ static const struct regmap_config crystal_cove_regmap_config = {
 	.val_bits = 8,
 
 	.max_register = CRYSTAL_COVE_MAX_REGISTER,
-	.cache_type = REGCACHE_NONE,
 };
 
 static const struct regmap_irq crystal_cove_irqs[] = {

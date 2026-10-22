@@ -27,12 +27,6 @@ module_param(pb_side_load, bool, 0444);
 MODULE_PARM_DESC(pb_side_load, "Sideload policy binaries debug policy failures");
 #endif
 
-static const uuid_t amd_pmf_ta_uuid[] = { UUID_INIT(0xd9b39bf2, 0x66bd, 0x4154, 0xaf, 0xb8, 0x8a,
-						    0xcc, 0x2b, 0x2b, 0x60, 0xd6),
-					  UUID_INIT(0x6fd93b77, 0x3fb8, 0x524d, 0xb1, 0x2d, 0xc5,
-						    0x29, 0xb1, 0x3d, 0x85, 0x43),
-					};
-
 static const char *amd_pmf_uevent_as_str(unsigned int state)
 {
 	switch (state) {
@@ -73,17 +67,56 @@ static void amd_pmf_update_uevents(struct amd_pmf_dev *dev, u16 event)
 	input_sync(dev->pmf_idev);
 }
 
+static int amd_pmf_get_bios_output_idx(u32 action_idx)
+{
+	switch (action_idx) {
+	case PMF_POLICY_BIOS_OUTPUT_1:
+		return 0;
+	case PMF_POLICY_BIOS_OUTPUT_2:
+		return 1;
+	case PMF_POLICY_BIOS_OUTPUT_3:
+		return 2;
+	case PMF_POLICY_BIOS_OUTPUT_4:
+		return 3;
+	case PMF_POLICY_BIOS_OUTPUT_5:
+		return 4;
+	case PMF_POLICY_BIOS_OUTPUT_6:
+		return 5;
+	case PMF_POLICY_BIOS_OUTPUT_7:
+		return 6;
+	case PMF_POLICY_BIOS_OUTPUT_8:
+		return 7;
+	case PMF_POLICY_BIOS_OUTPUT_9:
+		return 8;
+	case PMF_POLICY_BIOS_OUTPUT_10:
+		return 9;
+	default:
+		return -EINVAL;
+	}
+}
+
+static void amd_pmf_update_bios_output(struct amd_pmf_dev *pdev, struct ta_pmf_action *action)
+{
+	u32 bios_idx;
+
+	bios_idx = amd_pmf_get_bios_output_idx(action->action_index);
+
+	amd_pmf_smartpc_apply_bios_output(pdev, action->value, BIT(bios_idx), bios_idx);
+}
+
 static void amd_pmf_apply_policies(struct amd_pmf_dev *dev, struct ta_pmf_enact_result *out)
 {
+	struct ta_pmf_action *action;
 	u32 val;
 	int idx;
 
 	for (idx = 0; idx < out->actions_count; idx++) {
-		val = out->actions_list[idx].value;
-		switch (out->actions_list[idx].action_index) {
+		action = &out->actions_list[idx];
+		val = action->value;
+		switch (action->action_index) {
 		case PMF_POLICY_SPL:
 			if (dev->prev_data->spl != val) {
-				amd_pmf_send_cmd(dev, SET_SPL, false, val, NULL);
+				amd_pmf_send_cmd(dev, SET_SPL, SET_CMD, val, NULL);
 				dev_dbg(dev->dev, "update SPL: %u\n", val);
 				dev->prev_data->spl = val;
 			}
@@ -91,7 +124,7 @@ static void amd_pmf_apply_policies(struct amd_pmf_dev *dev, struct ta_pmf_enact_
 
 		case PMF_POLICY_SPPT:
 			if (dev->prev_data->sppt != val) {
-				amd_pmf_send_cmd(dev, SET_SPPT, false, val, NULL);
+				amd_pmf_send_cmd(dev, SET_SPPT, SET_CMD, val, NULL);
 				dev_dbg(dev->dev, "update SPPT: %u\n", val);
 				dev->prev_data->sppt = val;
 			}
@@ -99,7 +132,7 @@ static void amd_pmf_apply_policies(struct amd_pmf_dev *dev, struct ta_pmf_enact_
 
 		case PMF_POLICY_FPPT:
 			if (dev->prev_data->fppt != val) {
-				amd_pmf_send_cmd(dev, SET_FPPT, false, val, NULL);
+				amd_pmf_send_cmd(dev, SET_FPPT, SET_CMD, val, NULL);
 				dev_dbg(dev->dev, "update FPPT: %u\n", val);
 				dev->prev_data->fppt = val;
 			}
@@ -107,7 +140,7 @@ static void amd_pmf_apply_policies(struct amd_pmf_dev *dev, struct ta_pmf_enact_
 
 		case PMF_POLICY_SPPT_APU_ONLY:
 			if (dev->prev_data->sppt_apuonly != val) {
-				amd_pmf_send_cmd(dev, SET_SPPT_APU_ONLY, false, val, NULL);
+				amd_pmf_send_cmd(dev, SET_SPPT_APU_ONLY, SET_CMD, val, NULL);
 				dev_dbg(dev->dev, "update SPPT_APU_ONLY: %u\n", val);
 				dev->prev_data->sppt_apuonly = val;
 			}
@@ -115,7 +148,7 @@ static void amd_pmf_apply_policies(struct amd_pmf_dev *dev, struct ta_pmf_enact_
 
 		case PMF_POLICY_STT_MIN:
 			if (dev->prev_data->stt_minlimit != val) {
-				amd_pmf_send_cmd(dev, SET_STT_MIN_LIMIT, false, val, NULL);
+				amd_pmf_send_cmd(dev, SET_STT_MIN_LIMIT, SET_CMD, val, NULL);
 				dev_dbg(dev->dev, "update STT_MIN: %u\n", val);
 				dev->prev_data->stt_minlimit = val;
 			}
@@ -123,7 +156,8 @@ static void amd_pmf_apply_policies(struct amd_pmf_dev *dev, struct ta_pmf_enact_
 
 		case PMF_POLICY_STT_SKINTEMP_APU:
 			if (dev->prev_data->stt_skintemp_apu != val) {
-				amd_pmf_send_cmd(dev, SET_STT_LIMIT_APU, false, val, NULL);
+				amd_pmf_send_cmd(dev, SET_STT_LIMIT_APU, SET_CMD,
+						 fixp_q88_fromint(val), NULL);
 				dev_dbg(dev->dev, "update STT_SKINTEMP_APU: %u\n", val);
 				dev->prev_data->stt_skintemp_apu = val;
 			}
@@ -131,7 +165,8 @@ static void amd_pmf_apply_policies(struct amd_pmf_dev *dev, struct ta_pmf_enact_
 
 		case PMF_POLICY_STT_SKINTEMP_HS2:
 			if (dev->prev_data->stt_skintemp_hs2 != val) {
-				amd_pmf_send_cmd(dev, SET_STT_LIMIT_HS2, false, val, NULL);
+				amd_pmf_send_cmd(dev, SET_STT_LIMIT_HS2, SET_CMD,
+						 fixp_q88_fromint(val), NULL);
 				dev_dbg(dev->dev, "update STT_SKINTEMP_HS2: %u\n", val);
 				dev->prev_data->stt_skintemp_hs2 = val;
 			}
@@ -139,9 +174,25 @@ static void amd_pmf_apply_policies(struct amd_pmf_dev *dev, struct ta_pmf_enact_
 
 		case PMF_POLICY_P3T:
 			if (dev->prev_data->p3t_limit != val) {
-				amd_pmf_send_cmd(dev, SET_P3T, false, val, NULL);
+				amd_pmf_send_cmd(dev, SET_P3T, SET_CMD, val, NULL);
 				dev_dbg(dev->dev, "update P3T: %u\n", val);
 				dev->prev_data->p3t_limit = val;
+			}
+			break;
+
+		case PMF_POLICY_PMF_PPT:
+			if (dev->prev_data->pmf_ppt != val) {
+				amd_pmf_send_cmd(dev, SET_PMF_PPT, SET_CMD, val, NULL);
+				dev_dbg(dev->dev, "update PMF PPT: %u\n", val);
+				dev->prev_data->pmf_ppt = val;
+			}
+			break;
+
+		case PMF_POLICY_PMF_PPT_APU_ONLY:
+			if (dev->prev_data->pmf_ppt_apu_only != val) {
+				amd_pmf_send_cmd(dev, SET_PMF_PPT_APU_ONLY, SET_CMD, val, NULL);
+				dev_dbg(dev->dev, "update PMF PPT APU ONLY: %u\n", val);
+				dev->prev_data->pmf_ppt_apu_only = val;
 			}
 			break;
 
@@ -165,49 +216,22 @@ static void amd_pmf_apply_policies(struct amd_pmf_dev *dev, struct ta_pmf_enact_
 			break;
 
 		case PMF_POLICY_BIOS_OUTPUT_1:
-			amd_pmf_smartpc_apply_bios_output(dev, val, BIT(0), 0);
-			break;
-
 		case PMF_POLICY_BIOS_OUTPUT_2:
-			amd_pmf_smartpc_apply_bios_output(dev, val, BIT(1), 1);
-			break;
-
 		case PMF_POLICY_BIOS_OUTPUT_3:
-			amd_pmf_smartpc_apply_bios_output(dev, val, BIT(2), 2);
-			break;
-
 		case PMF_POLICY_BIOS_OUTPUT_4:
-			amd_pmf_smartpc_apply_bios_output(dev, val, BIT(3), 3);
-			break;
-
 		case PMF_POLICY_BIOS_OUTPUT_5:
-			amd_pmf_smartpc_apply_bios_output(dev, val, BIT(4), 4);
-			break;
-
 		case PMF_POLICY_BIOS_OUTPUT_6:
-			amd_pmf_smartpc_apply_bios_output(dev, val, BIT(5), 5);
-			break;
-
 		case PMF_POLICY_BIOS_OUTPUT_7:
-			amd_pmf_smartpc_apply_bios_output(dev, val, BIT(6), 6);
-			break;
-
 		case PMF_POLICY_BIOS_OUTPUT_8:
-			amd_pmf_smartpc_apply_bios_output(dev, val, BIT(7), 7);
-			break;
-
 		case PMF_POLICY_BIOS_OUTPUT_9:
-			amd_pmf_smartpc_apply_bios_output(dev, val, BIT(8), 8);
-			break;
-
 		case PMF_POLICY_BIOS_OUTPUT_10:
-			amd_pmf_smartpc_apply_bios_output(dev, val, BIT(9), 9);
+			amd_pmf_update_bios_output(dev, action);
 			break;
 		}
 	}
 }
 
-static int amd_pmf_invoke_cmd_enact(struct amd_pmf_dev *dev)
+int amd_pmf_invoke_cmd_enact(struct amd_pmf_dev *dev)
 {
 	struct ta_pmf_shared_memory *ta_sm = NULL;
 	struct ta_pmf_enact_result *out = NULL;
@@ -294,7 +318,7 @@ static void amd_pmf_invoke_cmd(struct work_struct *work)
 	schedule_delayed_work(&dev->pb_work, msecs_to_jiffies(pb_actions_ms));
 }
 
-static int amd_pmf_start_policy_engine(struct amd_pmf_dev *dev)
+int amd_pmf_start_policy_engine(struct amd_pmf_dev *dev)
 {
 	struct cookie_header *header;
 	int res;
@@ -332,6 +356,11 @@ static int amd_pmf_start_policy_engine(struct amd_pmf_dev *dev)
 	return 0;
 }
 
+static inline bool amd_pmf_pb_valid(struct amd_pmf_dev *dev)
+{
+	return memchr_inv(dev->policy_buf, 0xff, dev->policy_sz);
+}
+
 #ifdef CONFIG_AMD_PMF_DEBUG
 static void amd_pmf_hex_dump_pb(struct amd_pmf_dev *dev)
 {
@@ -351,13 +380,21 @@ static ssize_t amd_pmf_get_pb_data(struct file *filp, const char __user *buf,
 		return -EINVAL;
 
 	/* re-alloc to the new buffer length of the policy binary */
-	new_policy_buf = memdup_user(buf, length);
-	if (IS_ERR(new_policy_buf))
-		return PTR_ERR(new_policy_buf);
+	new_policy_buf = devm_kzalloc(dev->dev, length, GFP_KERNEL);
+	if (!new_policy_buf)
+		return -ENOMEM;
 
-	kfree(dev->policy_buf);
+	if (copy_from_user(new_policy_buf, buf, length)) {
+		devm_kfree(dev->dev, new_policy_buf);
+		return -EFAULT;
+	}
+
+	devm_kfree(dev->dev, dev->policy_buf);
 	dev->policy_buf = new_policy_buf;
 	dev->policy_sz = length;
+
+	if (!amd_pmf_pb_valid(dev))
+		return -EINVAL;
 
 	amd_pmf_hex_dump_pb(dev);
 	ret = amd_pmf_start_policy_engine(dev);
@@ -405,12 +442,12 @@ static int amd_pmf_ta_open_session(struct tee_context *ctx, u32 *id, const uuid_
 	rc = tee_client_open_session(ctx, &sess_arg, NULL);
 	if (rc < 0 || sess_arg.ret != 0) {
 		pr_err("Failed to open TEE session err:%#x, rc:%d\n", sess_arg.ret, rc);
-		return rc;
+		return rc ?: -EINVAL;
 	}
 
 	*id = sess_arg.session;
 
-	return rc;
+	return 0;
 }
 
 static int amd_pmf_register_input_device(struct amd_pmf_dev *dev)
@@ -437,7 +474,7 @@ static int amd_pmf_register_input_device(struct amd_pmf_dev *dev)
 	return 0;
 }
 
-static int amd_pmf_tee_init(struct amd_pmf_dev *dev, const uuid_t *uuid)
+int amd_pmf_tee_init(struct amd_pmf_dev *dev, const uuid_t *uuid)
 {
 	u32 size;
 	int ret;
@@ -445,7 +482,9 @@ static int amd_pmf_tee_init(struct amd_pmf_dev *dev, const uuid_t *uuid)
 	dev->tee_ctx = tee_client_open_context(NULL, amd_pmf_amdtee_ta_match, NULL, NULL);
 	if (IS_ERR(dev->tee_ctx)) {
 		dev_err(dev->dev, "Failed to open TEE context\n");
-		return PTR_ERR(dev->tee_ctx);
+		ret = PTR_ERR(dev->tee_ctx);
+		dev->tee_ctx = NULL;
+		return ret;
 	}
 
 	ret = amd_pmf_ta_open_session(dev->tee_ctx, &dev->session_id, uuid);
@@ -483,11 +522,14 @@ out_ctx:
 	return ret;
 }
 
-static void amd_pmf_tee_deinit(struct amd_pmf_dev *dev)
+void amd_pmf_tee_deinit(struct amd_pmf_dev *dev)
 {
+	if (!dev->tee_ctx)
+		return;
 	tee_shm_free(dev->fw_shm_pool);
 	tee_client_close_session(dev->tee_ctx, dev->session_id);
 	tee_client_close_context(dev->tee_ctx);
+	dev->tee_ctx = NULL;
 }
 
 int amd_pmf_init_smart_pc(struct amd_pmf_dev *dev)
@@ -510,58 +552,49 @@ int amd_pmf_init_smart_pc(struct amd_pmf_dev *dev)
 
 	ret = amd_pmf_set_dram_addr(dev, true);
 	if (ret)
-		goto err_cancel_work;
+		return ret;
 
 	dev->policy_base = devm_ioremap_resource(dev->dev, dev->res);
-	if (IS_ERR(dev->policy_base)) {
-		ret = PTR_ERR(dev->policy_base);
-		goto err_free_dram_buf;
-	}
+	if (IS_ERR(dev->policy_base))
+		return PTR_ERR(dev->policy_base);
 
-	dev->policy_buf = kzalloc(dev->policy_sz, GFP_KERNEL);
-	if (!dev->policy_buf) {
-		ret = -ENOMEM;
-		goto err_free_dram_buf;
-	}
+	dev->policy_buf = devm_kzalloc(dev->dev, dev->policy_sz, GFP_KERNEL);
+	if (!dev->policy_buf)
+		return -ENOMEM;
 
 	memcpy_fromio(dev->policy_buf, dev->policy_base, dev->policy_sz);
 
+	if (!amd_pmf_pb_valid(dev)) {
+		dev_info(dev->dev, "No Smart PC policy present\n");
+		return -EINVAL;
+	}
+
 	amd_pmf_hex_dump_pb(dev);
 
-	dev->prev_data = kzalloc(sizeof(*dev->prev_data), GFP_KERNEL);
-	if (!dev->prev_data) {
-		ret = -ENOMEM;
-		goto err_free_policy;
-	}
+	dev->prev_data = devm_kzalloc(dev->dev, sizeof(*dev->prev_data), GFP_KERNEL);
+	if (!dev->prev_data)
+		return -ENOMEM;
 
 	for (i = 0; i < ARRAY_SIZE(amd_pmf_ta_uuid); i++) {
 		ret = amd_pmf_tee_init(dev, &amd_pmf_ta_uuid[i]);
 		if (ret)
-			goto err_free_prev_data;
+			return ret;
 
 		ret = amd_pmf_start_policy_engine(dev);
-		switch (ret) {
-		case TA_PMF_TYPE_SUCCESS:
-			status = true;
+		dev_dbg(dev->dev, "start policy engine ret: %d\n", ret);
+		status = ret == TA_PMF_TYPE_SUCCESS;
+		if (status) {
+			dev->cb_flag = true;
+			dev->cbi_buf.head = 0;
+			dev->cbi_buf.tail = 0;
 			break;
-		case TA_ERROR_CRYPTO_INVALID_PARAM:
-		case TA_ERROR_CRYPTO_BIN_TOO_LARGE:
-			amd_pmf_tee_deinit(dev);
-			status = false;
-			break;
-		default:
-			ret = -EINVAL;
-			amd_pmf_tee_deinit(dev);
-			goto err_free_prev_data;
 		}
-
-		if (status)
-			break;
+		amd_pmf_tee_deinit(dev);
 	}
 
 	if (!status && !pb_side_load) {
 		ret = -EINVAL;
-		goto err_free_prev_data;
+		goto err;
 	}
 
 	if (pb_side_load)
@@ -569,22 +602,12 @@ int amd_pmf_init_smart_pc(struct amd_pmf_dev *dev)
 
 	ret = amd_pmf_register_input_device(dev);
 	if (ret)
-		goto err_pmf_remove_pb;
+		goto err;
 
 	return 0;
 
-err_pmf_remove_pb:
-	if (pb_side_load && dev->esbin)
-		amd_pmf_remove_pb(dev);
-	amd_pmf_tee_deinit(dev);
-err_free_prev_data:
-	kfree(dev->prev_data);
-err_free_policy:
-	kfree(dev->policy_buf);
-err_free_dram_buf:
-	kfree(dev->buf);
-err_cancel_work:
-	cancel_delayed_work_sync(&dev->pb_work);
+err:
+	amd_pmf_deinit_smart_pc(dev);
 
 	return ret;
 }
@@ -598,11 +621,5 @@ void amd_pmf_deinit_smart_pc(struct amd_pmf_dev *dev)
 		amd_pmf_remove_pb(dev);
 
 	cancel_delayed_work_sync(&dev->pb_work);
-	kfree(dev->prev_data);
-	dev->prev_data = NULL;
-	kfree(dev->policy_buf);
-	dev->policy_buf = NULL;
-	kfree(dev->buf);
-	dev->buf = NULL;
 	amd_pmf_tee_deinit(dev);
 }

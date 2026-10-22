@@ -11,7 +11,6 @@
 #include <crypto/akcipher.h>
 #include <crypto/acompress.h>
 #include <crypto/rng.h>
-#include <crypto/drbg.h>
 #include <crypto/kpp.h>
 #include <crypto/internal/simd.h>
 #include <crypto/chacha.h>
@@ -50,7 +49,7 @@ struct skcipher_def {
 /* Perform cipher operations with the chacha lib */
 static int test_lib_chacha(u8 *revert, u8 *cipher, u8 *plain)
 {
-	u32 chacha_state[CHACHA_STATE_WORDS];
+	struct chacha_state chacha_state;
 	u8 iv[16], key[32];
 	u64 start, end;
 
@@ -66,10 +65,10 @@ static int test_lib_chacha(u8 *revert, u8 *cipher, u8 *plain)
 	}
 
 	/* Encrypt */
-	chacha_init_arch(chacha_state, (u32*)key, iv);
+	chacha_init(&chacha_state, (u32 *)key, iv);
 
 	start = ktime_get_ns();
-	chacha_crypt_arch(chacha_state, cipher, plain, data_size, 20);
+	chacha_crypt_arch(&chacha_state, cipher, plain, data_size, 20);
 	end = ktime_get_ns();
 
 
@@ -81,10 +80,10 @@ static int test_lib_chacha(u8 *revert, u8 *cipher, u8 *plain)
 	pr_info("lib encryption took: %lld nsec", end - start);
 
 	/* Decrypt */
-	chacha_init_arch(chacha_state, (u32 *)key, iv);
+	chacha_init(&chacha_state, (u32 *)key, iv);
 
 	start = ktime_get_ns();
-	chacha_crypt_arch(chacha_state, revert, cipher, data_size, 20);
+	chacha_crypt_arch(&chacha_state, revert, cipher, data_size, 20);
 	end = ktime_get_ns();
 
 	if (debug)

@@ -394,27 +394,21 @@ static int gmc_v7_0_mc_init(struct amdgpu_device *adev)
 	adev->gmc.visible_vram_size = adev->gmc.aper_size;
 
 	/* set the gart size */
-	if (amdgpu_gart_size == -1) {
-		switch (adev->asic_type) {
-		case CHIP_TOPAZ:     /* no MM engines */
-		default:
-			adev->gmc.gart_size = 256ULL << 20;
-			break;
+	switch (adev->asic_type) {
 #ifdef CONFIG_DRM_AMDGPU_CIK
-		case CHIP_BONAIRE: /* UVD, VCE do not support GPUVM */
-		case CHIP_HAWAII:  /* UVD, VCE do not support GPUVM */
-		case CHIP_KAVERI:  /* UVD, VCE do not support GPUVM */
-		case CHIP_KABINI:  /* UVD, VCE do not support GPUVM */
-		case CHIP_MULLINS: /* UVD, VCE do not support GPUVM */
-			adev->gmc.gart_size = 1024ULL << 20;
-			break;
+	case CHIP_BONAIRE: /* UVD, VCE do not support GPUVM */
+	case CHIP_HAWAII:  /* UVD, VCE do not support GPUVM */
+	case CHIP_KAVERI:  /* UVD, VCE do not support GPUVM */
+	case CHIP_KABINI:  /* UVD, VCE do not support GPUVM */
+	case CHIP_MULLINS: /* UVD, VCE do not support GPUVM */
+		amdgpu_gmc_set_gart_size(adev, SZ_1G);
+		break;
 #endif
-		}
-	} else {
-		adev->gmc.gart_size = (u64)amdgpu_gart_size << 20;
+	case CHIP_TOPAZ:     /* no MM engines */
+	default:
+		amdgpu_gmc_set_gart_size(adev, SZ_256M);
+		break;
 	}
-
-	adev->gmc.gart_size += adev->pm.smu_prv_buffer_size;
 	gmc_v7_0_vram_gtt_location(adev, &adev->gmc);
 
 	return 0;
@@ -504,7 +498,9 @@ static void gmc_v7_0_get_vm_pde(struct amdgpu_device *adev, int level,
 }
 
 static void gmc_v7_0_get_vm_pte(struct amdgpu_device *adev,
-				struct amdgpu_bo_va_mapping *mapping,
+				struct amdgpu_vm *vm,
+				struct amdgpu_bo *bo,
+				uint32_t vm_flags,
 				uint64_t *flags)
 {
 	*flags &= ~AMDGPU_PTE_EXECUTABLE;
@@ -703,7 +699,7 @@ static int gmc_v7_0_gart_enable(struct amdgpu_device *adev)
 	}
 
 	gmc_v7_0_flush_gpu_tlb(adev, 0, 0, 0);
-	DRM_INFO("PCIE GART of %uM enabled (table at 0x%016llX).\n",
+	drm_info(adev_to_drm(adev), "PCIE GART of %uM enabled (table at 0x%016llX).\n",
 		 (unsigned int)(adev->gmc.gart_size >> 20),
 		 (unsigned long long)table_addr);
 	return 0;
@@ -1014,6 +1010,7 @@ static int gmc_v7_0_sw_init(struct amdgpu_ip_block *ip_block)
 	 * internal address space.
 	 */
 	adev->gmc.mc_mask = 0xffffffffffULL; /* 40 bit MC */
+	adev->gmc.pte_addr_mask = 0x000000FFFFFFF000ULL; /* 40 bit PA */
 
 	r = dma_set_mask_and_coherent(adev->dev, DMA_BIT_MASK(40));
 	if (r) {
@@ -1031,8 +1028,6 @@ static int gmc_v7_0_sw_init(struct amdgpu_ip_block *ip_block)
 	r = gmc_v7_0_mc_init(adev);
 	if (r)
 		return r;
-
-	amdgpu_gmc_get_vbios_allocations(adev);
 
 	/* Memory manager */
 	r = amdgpu_bo_init(adev);
@@ -1062,11 +1057,10 @@ static int gmc_v7_0_sw_init(struct amdgpu_ip_block *ip_block)
 		adev->vm_manager.vram_base_offset = 0;
 	}
 
-	adev->gmc.vm_fault_info = kmalloc(sizeof(struct kfd_vm_fault_info),
-					GFP_KERNEL);
+	adev->gmc.vm_fault_info = kmalloc_obj(struct kfd_vm_fault_info);
 	if (!adev->gmc.vm_fault_info)
 		return -ENOMEM;
-	atomic_set(&adev->gmc.vm_fault_info_updated, 0);
+	atomic_set_release(&adev->gmc.vm_fault_info_updated, 0);
 
 	return 0;
 }
@@ -1142,9 +1136,9 @@ static int gmc_v7_0_resume(struct amdgpu_ip_block *ip_block)
 	return 0;
 }
 
-static bool gmc_v7_0_is_idle(void *handle)
+static bool gmc_v7_0_is_idle(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 	u32 tmp = RREG32(mmSRBM_STATUS);
 
 	if (tmp & (SRBM_STATUS__MCB_BUSY_MASK | SRBM_STATUS__MCB_NON_DISPLAY_BUSY_MASK |
@@ -1157,17 +1151,10 @@ static bool gmc_v7_0_is_idle(void *handle)
 static int gmc_v7_0_wait_for_idle(struct amdgpu_ip_block *ip_block)
 {
 	unsigned int i;
-	u32 tmp;
 	struct amdgpu_device *adev = ip_block->adev;
 
 	for (i = 0; i < adev->usec_timeout; i++) {
-		/* read MC_STATUS */
-		tmp = RREG32(mmSRBM_STATUS) & (SRBM_STATUS__MCB_BUSY_MASK |
-					       SRBM_STATUS__MCB_NON_DISPLAY_BUSY_MASK |
-					       SRBM_STATUS__MCC_BUSY_MASK |
-					       SRBM_STATUS__MCD_BUSY_MASK |
-					       SRBM_STATUS__VMC_BUSY_MASK);
-		if (!tmp)
+		if (gmc_v7_0_is_idle(ip_block))
 			return 0;
 		udelay(1);
 	}
@@ -1266,6 +1253,12 @@ static int gmc_v7_0_process_interrupt(struct amdgpu_device *adev,
 {
 	u32 addr, status, mc_client, vmid;
 
+	/* Delegate to the soft IRQ handler ring */
+	if (adev->irq.ih_soft.enabled && entry->ih != &adev->irq.ih_soft) {
+		amdgpu_irq_delegate(adev, entry, 4);
+		return 1;
+	}
+
 	addr = RREG32(mmVM_CONTEXT1_PROTECTION_FAULT_ADDR);
 	status = RREG32(mmVM_CONTEXT1_PROTECTION_FAULT_STATUS);
 	mc_client = RREG32(mmVM_CONTEXT1_PROTECTION_FAULT_MCCLIENT);
@@ -1295,7 +1288,7 @@ static int gmc_v7_0_process_interrupt(struct amdgpu_device *adev,
 	vmid = REG_GET_FIELD(status, VM_CONTEXT1_PROTECTION_FAULT_STATUS,
 			     VMID);
 	if (amdgpu_amdkfd_is_kfd_vmid(adev, vmid)
-		&& !atomic_read(&adev->gmc.vm_fault_info_updated)) {
+		&& !atomic_read_acquire(&adev->gmc.vm_fault_info_updated)) {
 		struct kfd_vm_fault_info *info = adev->gmc.vm_fault_info;
 		u32 protections = REG_GET_FIELD(status,
 					VM_CONTEXT1_PROTECTION_FAULT_STATUS,
@@ -1311,8 +1304,7 @@ static int gmc_v7_0_process_interrupt(struct amdgpu_device *adev,
 		info->prot_read = protections & 0x8 ? true : false;
 		info->prot_write = protections & 0x10 ? true : false;
 		info->prot_exec = protections & 0x20 ? true : false;
-		mb();
-		atomic_set(&adev->gmc.vm_fault_info_updated, 1);
+		atomic_set_release(&adev->gmc.vm_fault_info_updated, 1);
 	}
 
 	return 0;

@@ -745,7 +745,7 @@ static int dmfe_stop(struct net_device *dev)
 	netif_stop_queue(dev);
 
 	/* deleted timer */
-	del_timer_sync(&db->timer);
+	timer_delete_sync(&db->timer);
 
 	/* Reset & stop DM910X board */
 	dw32(DCR0, DM910X_RESET);
@@ -1115,7 +1115,7 @@ static const struct ethtool_ops netdev_ethtool_ops = {
 
 static void dmfe_timer(struct timer_list *t)
 {
-	struct dmfe_board_info *db = from_timer(db, t, timer);
+	struct dmfe_board_info *db = timer_container_of(db, t, timer);
 	struct net_device *dev = pci_get_drvdata(db->pdev);
 	void __iomem *ioaddr = db->ioaddr;
 	u32 tmp_cr8;
@@ -2076,11 +2076,11 @@ static void dmfe_HPNA_remote_cmd_chk(struct dmfe_board_info * db)
 
 
 static const struct pci_device_id dmfe_pci_tbl[] = {
-	{ 0x1282, 0x9132, PCI_ANY_ID, PCI_ANY_ID, 0, 0, PCI_DM9132_ID },
-	{ 0x1282, 0x9102, PCI_ANY_ID, PCI_ANY_ID, 0, 0, PCI_DM9102_ID },
-	{ 0x1282, 0x9100, PCI_ANY_ID, PCI_ANY_ID, 0, 0, PCI_DM9100_ID },
-	{ 0x1282, 0x9009, PCI_ANY_ID, PCI_ANY_ID, 0, 0, PCI_DM9009_ID },
-	{ 0, }
+	{ PCI_DEVICE(0x1282, 0x9132), .driver_data = PCI_DM9132_ID },
+	{ PCI_DEVICE(0x1282, 0x9102), .driver_data = PCI_DM9102_ID },
+	{ PCI_DEVICE(0x1282, 0x9100), .driver_data = PCI_DM9100_ID },
+	{ PCI_DEVICE(0x1282, 0x9009), .driver_data = PCI_DM9009_ID },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, dmfe_pci_tbl);
 
@@ -2101,7 +2101,7 @@ static int __maybe_unused dmfe_suspend(struct device *dev_d)
 	dw32(DCR7, 0);
 	dw32(DCR5, dr32(DCR5));
 
-	/* Fre RX buffers */
+	/* Free RX buffers */
 	dmfe_free_rxbuffer(db);
 
 	/* Enable WOL */

@@ -428,8 +428,7 @@ static int opt4001_probe(struct i2c_client *client)
 					opt4001_chip_off_action,
 					chip);
 	if (ret < 0)
-		return dev_err_probe(&client->dev, ret,
-				     "Failed to setup power off action\n");
+		return ret;
 
 	return devm_iio_device_register(&client->dev, indio_dev);
 }
@@ -439,8 +438,8 @@ static int opt4001_probe(struct i2c_client *client)
  * opt4001 packaging
  */
 static const struct i2c_device_id opt4001_id[] = {
-	{ "opt4001-sot-5x3", (kernel_ulong_t)&opt4001_sot_5x3_info },
-	{ "opt4001-picostar", (kernel_ulong_t)&opt4001_picostar_info },
+	{ .name = "opt4001-sot-5x3", .driver_data = (kernel_ulong_t)&opt4001_sot_5x3_info },
+	{ .name = "opt4001-picostar", .driver_data = (kernel_ulong_t)&opt4001_picostar_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, opt4001_id);
@@ -448,7 +447,7 @@ MODULE_DEVICE_TABLE(i2c, opt4001_id);
 static const struct of_device_id opt4001_of_match[] = {
 	{ .compatible = "ti,opt4001-sot-5x3", .data = &opt4001_sot_5x3_info},
 	{ .compatible = "ti,opt4001-picostar", .data = &opt4001_picostar_info},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, opt4001_of_match);
 

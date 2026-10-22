@@ -477,7 +477,7 @@ static int imx_mmdc_perf_init(struct platform_device *pdev, void __iomem *mmdc_b
 	char *name;
 	int ret;
 
-	pmu_mmdc = kzalloc(sizeof(*pmu_mmdc), GFP_KERNEL);
+	pmu_mmdc = kzalloc_obj(*pmu_mmdc);
 	if (!pmu_mmdc) {
 		pr_err("failed to allocate PMU device!\n");
 		return -ENOMEM;
@@ -509,9 +509,8 @@ static int imx_mmdc_perf_init(struct platform_device *pdev, void __iomem *mmdc_b
 	pmu_mmdc->mmdc_ipg_clk = mmdc_ipg_clk;
 	pmu_mmdc->devtype_data = device_get_match_data(&pdev->dev);
 
-	hrtimer_init(&pmu_mmdc->hrtimer, CLOCK_MONOTONIC,
-			HRTIMER_MODE_REL);
-	pmu_mmdc->hrtimer.function = mmdc_pmu_timer_handler;
+	hrtimer_setup(&pmu_mmdc->hrtimer, mmdc_pmu_timer_handler, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL);
 
 	cpumask_set_cpu(raw_smp_processor_id(), &pmu_mmdc->cpu);
 

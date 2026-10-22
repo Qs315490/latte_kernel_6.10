@@ -22,7 +22,6 @@
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/gcd.h>
 
 #include <linux/spi/spi.h>
@@ -134,6 +133,7 @@ struct omap2_mcspi {
 	size_t			max_xfer_len;
 	u32			ref_clk_hz;
 	bool			use_multi_mode;
+	bool			last_msg_kept_cs;
 };
 
 struct omap2_mcspi_cs {
@@ -271,7 +271,6 @@ static void omap2_mcspi_set_cs(struct spi_device *spi, bool enable)
 
 		mcspi_write_chconf0(spi, l);
 
-		pm_runtime_mark_last_busy(mcspi->dev);
 		pm_runtime_put_autosuspend(mcspi->dev);
 	}
 }
@@ -942,10 +941,16 @@ static int omap2_mcspi_setup_transfer(struct spi_device *spi,
 
 	l = mcspi_cached_chconf0(spi);
 
-	/* standard 4-wire host mode:  SCK, MOSI/out, MISO/in, nCS
-	 * REVISIT: this controller could support SPI_3WIRE mode.
-	 */
-	if (mcspi->pin_dir == MCSPI_PINDIR_D0_IN_D1_OUT) {
+	if (spi->mode & SPI_3WIRE) {
+		if (t && !t->tx_buf) {
+			l &= ~OMAP2_MCSPI_CHCONF_IS;
+			l |= OMAP2_MCSPI_CHCONF_DPE0;
+		} else if (t && !t->rx_buf) {
+			l |= OMAP2_MCSPI_CHCONF_IS;
+			l &= ~OMAP2_MCSPI_CHCONF_DPE0;
+		}
+		l |= OMAP2_MCSPI_CHCONF_DPE1;
+	} else if (mcspi->pin_dir == MCSPI_PINDIR_D0_IN_D1_OUT) {
 		l &= ~OMAP2_MCSPI_CHCONF_IS;
 		l &= ~OMAP2_MCSPI_CHCONF_DPE1;
 		l |= OMAP2_MCSPI_CHCONF_DPE0;
@@ -988,6 +993,7 @@ static int omap2_mcspi_setup_transfer(struct spi_device *spi,
 	else
 		l &= ~OMAP2_MCSPI_CHCONF_PHA;
 
+	mcspi_write_chconf0(spi, l | OMAP2_MCSPI_CHCONF_FORCE);
 	mcspi_write_chconf0(spi, l);
 
 	cs->mode = spi->mode;
@@ -1075,7 +1081,7 @@ static int omap2_mcspi_setup(struct spi_device *spi)
 	struct omap2_mcspi_cs	*cs = spi->controller_state;
 
 	if (!cs) {
-		cs = kzalloc(sizeof(*cs), GFP_KERNEL);
+		cs = kzalloc_obj(*cs);
 		if (!cs)
 			return -ENOMEM;
 		cs->base = mcspi->base + spi_get_chipselect(spi, 0) * 0x14;
@@ -1101,7 +1107,6 @@ static int omap2_mcspi_setup(struct spi_device *spi)
 	if (ret && initial_setup)
 		omap2_mcspi_cleanup(spi);
 
-	pm_runtime_mark_last_busy(mcspi->dev);
 	pm_runtime_put_autosuspend(mcspi->dev);
 
 	return ret;
@@ -1178,6 +1183,7 @@ static int omap2_mcspi_transfer_one(struct spi_controller *ctlr,
 		omap2_mcspi_set_cs(spi, spi->mode & SPI_CS_HIGH);
 
 	if (par_override ||
+	    (spi->mode & SPI_3WIRE) ||
 	    (t->speed_hz != spi->max_speed_hz) ||
 	    (t->bits_per_word != spi->bits_per_word)) {
 		par_override = 1;
@@ -1269,6 +1275,10 @@ static int omap2_mcspi_prepare_message(struct spi_controller *ctlr,
 	 * multi-mode is applicable.
 	 */
 	mcspi->use_multi_mode = true;
+
+	if (mcspi->last_msg_kept_cs)
+		mcspi->use_multi_mode = false;
+
 	list_for_each_entry(tr, &msg->transfers, transfer_list) {
 		if (!tr->bits_per_word)
 			bits_per_word = msg->spi->bits_per_word;
@@ -1287,18 +1297,19 @@ static int omap2_mcspi_prepare_message(struct spi_controller *ctlr,
 			mcspi->use_multi_mode = false;
 		}
 
-		/* Check if transfer asks to change the CS status after the transfer */
-		if (!tr->cs_change)
-			mcspi->use_multi_mode = false;
-
-		/*
-		 * If at least one message is not compatible, switch back to single mode
-		 *
-		 * The bits_per_word of certain transfer can be different, but it will have no
-		 * impact on the signal itself.
-		 */
-		if (!mcspi->use_multi_mode)
-			break;
+		if (list_is_last(&tr->transfer_list, &msg->transfers)) {
+			/* Check if transfer asks to keep the CS status after the whole message */
+			if (tr->cs_change) {
+				mcspi->use_multi_mode = false;
+				mcspi->last_msg_kept_cs = true;
+			} else {
+				mcspi->last_msg_kept_cs = false;
+			}
+		} else {
+			/* Check if transfer asks to change the CS status after the transfer */
+			if (!tr->cs_change)
+				mcspi->use_multi_mode = false;
+		}
 	}
 
 	omap2_mcspi_set_mode(ctlr);
@@ -1373,7 +1384,6 @@ static int omap2_mcspi_controller_setup(struct omap2_mcspi *mcspi)
 	ctx->wakeupenable = OMAP2_MCSPI_WAKEUPENABLE_WKEN;
 
 	omap2_mcspi_set_mode(ctlr);
-	pm_runtime_mark_last_busy(mcspi->dev);
 	pm_runtime_put_autosuspend(mcspi->dev);
 	return 0;
 }
@@ -1470,17 +1480,16 @@ static int omap2_mcspi_probe(struct platform_device *pdev)
 	int			status = 0, i;
 	u32			regs_offset = 0;
 	struct device_node	*node = pdev->dev.of_node;
-	const struct of_device_id *match;
 
 	if (of_property_read_bool(node, "spi-slave"))
-		ctlr = spi_alloc_target(&pdev->dev, sizeof(*mcspi));
+		ctlr = devm_spi_alloc_target(&pdev->dev, sizeof(*mcspi));
 	else
-		ctlr = spi_alloc_host(&pdev->dev, sizeof(*mcspi));
+		ctlr = devm_spi_alloc_host(&pdev->dev, sizeof(*mcspi));
 	if (!ctlr)
 		return -ENOMEM;
 
 	/* the spi->mode bits understood by this driver: */
-	ctlr->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH;
+	ctlr->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_3WIRE;
 	ctlr->bits_per_word_mask = SPI_BPW_RANGE_MASK(4, 32);
 	ctlr->setup = omap2_mcspi_setup;
 	ctlr->auto_runtime_pm = true;
@@ -1498,10 +1507,9 @@ static int omap2_mcspi_probe(struct platform_device *pdev)
 	mcspi = spi_controller_get_devdata(ctlr);
 	mcspi->ctlr = ctlr;
 
-	match = of_match_device(omap_mcspi_of_match, &pdev->dev);
-	if (match) {
+	pdata = of_device_get_match_data(&pdev->dev);
+	if (pdata) {
 		u32 num_cs = 1; /* default number of chipselect */
-		pdata = match->data;
 
 		of_property_read_u32(node, "ti,spi-num-cs", &num_cs);
 		ctlr->num_chipselect = num_cs;
@@ -1519,10 +1527,9 @@ static int omap2_mcspi_probe(struct platform_device *pdev)
 	}
 
 	mcspi->base = devm_platform_get_and_ioremap_resource(pdev, 0, &r);
-	if (IS_ERR(mcspi->base)) {
-		status = PTR_ERR(mcspi->base);
-		goto free_ctlr;
-	}
+	if (IS_ERR(mcspi->base))
+		return PTR_ERR(mcspi->base);
+
 	mcspi->phys = r->start + regs_offset;
 	mcspi->base += regs_offset;
 
@@ -1533,10 +1540,8 @@ static int omap2_mcspi_probe(struct platform_device *pdev)
 	mcspi->dma_channels = devm_kcalloc(&pdev->dev, ctlr->num_chipselect,
 					   sizeof(struct omap2_mcspi_dma),
 					   GFP_KERNEL);
-	if (mcspi->dma_channels == NULL) {
-		status = -ENOMEM;
-		goto free_ctlr;
-	}
+	if (mcspi->dma_channels == NULL)
+		return -ENOMEM;
 
 	for (i = 0; i < ctlr->num_chipselect; i++) {
 		sprintf(mcspi->dma_channels[i].dma_rx_ch_name, "rx%d", i);
@@ -1545,26 +1550,27 @@ static int omap2_mcspi_probe(struct platform_device *pdev)
 		status = omap2_mcspi_request_dma(mcspi,
 						 &mcspi->dma_channels[i]);
 		if (status == -EPROBE_DEFER)
-			goto free_ctlr;
+			goto err_release_dma;
 	}
 
 	status = platform_get_irq(pdev, 0);
 	if (status < 0)
-		goto free_ctlr;
+		goto err_release_dma;
+
 	init_completion(&mcspi->txdone);
 	status = devm_request_irq(&pdev->dev, status,
 				  omap2_mcspi_irq_handler, 0, pdev->name,
 				  mcspi);
 	if (status) {
 		dev_err(&pdev->dev, "Cannot request IRQ");
-		goto free_ctlr;
+		goto err_release_dma;
 	}
 
 	mcspi->ref_clk = devm_clk_get_optional_enabled(&pdev->dev, NULL);
 	if (IS_ERR(mcspi->ref_clk)) {
 		status = PTR_ERR(mcspi->ref_clk);
 		dev_err_probe(&pdev->dev, status, "Failed to get ref_clk");
-		goto free_ctlr;
+		goto err_release_dma;
 	}
 	if (mcspi->ref_clk)
 		mcspi->ref_clk_hz = clk_get_rate(mcspi->ref_clk);
@@ -1579,21 +1585,21 @@ static int omap2_mcspi_probe(struct platform_device *pdev)
 
 	status = omap2_mcspi_controller_setup(mcspi);
 	if (status < 0)
-		goto disable_pm;
+		goto err_disable_rpm;
 
-	status = devm_spi_register_controller(&pdev->dev, ctlr);
+	status = spi_register_controller(ctlr);
 	if (status < 0)
-		goto disable_pm;
+		goto err_disable_rpm;
 
-	return status;
+	return 0;
 
-disable_pm:
+err_disable_rpm:
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-free_ctlr:
+err_release_dma:
 	omap2_mcspi_release_dma(ctlr);
-	spi_controller_put(ctlr);
+
 	return status;
 }
 
@@ -1601,6 +1607,8 @@ static void omap2_mcspi_remove(struct platform_device *pdev)
 {
 	struct spi_controller *ctlr = platform_get_drvdata(pdev);
 	struct omap2_mcspi *mcspi = spi_controller_get_devdata(ctlr);
+
+	spi_unregister_controller(ctlr);
 
 	omap2_mcspi_release_dma(ctlr);
 

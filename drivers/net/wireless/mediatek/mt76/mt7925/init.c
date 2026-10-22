@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2023 MediaTek Inc. */
 
 #include <linux/etherdevice.h>
@@ -7,6 +7,7 @@
 #include <linux/thermal.h>
 #include <linux/firmware.h>
 #include "mt7925.h"
+#include "regd.h"
 #include "mac.h"
 #include "mcu.h"
 
@@ -52,60 +53,12 @@ static int mt7925_thermal_init(struct mt792x_phy *phy)
 
 	name = devm_kasprintf(&wiphy->dev, GFP_KERNEL, "mt7925_%s",
 			      wiphy_name(wiphy));
+	if (!name)
+		return -ENOMEM;
 
 	hwmon = devm_hwmon_device_register_with_groups(&wiphy->dev, name, phy,
 						       mt7925_hwmon_groups);
 	return PTR_ERR_OR_ZERO(hwmon);
-}
-
-void mt7925_regd_update(struct mt792x_dev *dev)
-{
-	struct mt76_dev *mdev = &dev->mt76;
-	struct ieee80211_hw *hw = mdev->hw;
-
-	if (!dev->regd_change)
-		return;
-
-	mt7925_mcu_set_clc(dev, mdev->alpha2, dev->country_ie_env);
-	mt7925_mcu_set_channel_domain(hw->priv);
-	mt7925_set_tx_sar_pwr(hw, NULL);
-	dev->regd_change = false;
-}
-EXPORT_SYMBOL_GPL(mt7925_regd_update);
-
-static void
-mt7925_regd_notifier(struct wiphy *wiphy,
-		     struct regulatory_request *req)
-{
-	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
-	struct mt792x_dev *dev = mt792x_hw_dev(hw);
-	struct mt76_dev *mdev = &dev->mt76;
-	struct mt76_connac_pm *pm = &dev->pm;
-
-	/* allow world regdom at the first boot only */
-	if (!memcmp(req->alpha2, "00", 2) &&
-	    mdev->alpha2[0] && mdev->alpha2[1])
-		return;
-
-	/* do not need to update the same country twice */
-	if (!memcmp(req->alpha2, mdev->alpha2, 2) &&
-	    dev->country_ie_env == req->country_ie_env)
-		return;
-
-	memcpy(mdev->alpha2, req->alpha2, 2);
-	mdev->region = req->dfs_region;
-	dev->country_ie_env = req->country_ie_env;
-	dev->regd_change = true;
-
-	if (pm->suspended)
-		return;
-
-	dev->regd_in_progress = true;
-	mt792x_mutex_acquire(dev);
-	mt7925_regd_update(dev);
-	mt792x_mutex_release(dev);
-	dev->regd_in_progress = false;
-	wake_up(&dev->wait);
 }
 
 static void mt7925_mac_init_basic_rates(struct mt792x_dev *dev)
@@ -152,7 +105,9 @@ static int __mt7925_init_hardware(struct mt792x_dev *dev)
 	if (ret)
 		goto out;
 
-	mt76_eeprom_override(&dev->mphy);
+	ret = mt76_eeprom_override(&dev->mphy);
+	if (ret)
+		goto out;
 
 	ret = mt7925_mcu_set_eeprom(dev);
 	if (ret)
@@ -161,6 +116,15 @@ static int __mt7925_init_hardware(struct mt792x_dev *dev)
 	ret = mt7925_mac_init(dev);
 	if (ret)
 		goto out;
+
+	if (is_mt7927(&dev->mt76)) {
+		ret = mt7925_mcu_set_dbdc(&dev->mphy, true);
+		if (ret) {
+			dev_warn(dev->mt76.dev,
+				 "MT7927 DBDC enable failed: %d\n", ret);
+			ret = 0;
+		}
+	}
 
 out:
 	return ret;
@@ -227,6 +191,12 @@ static void mt7925_init_work(struct work_struct *work)
 		return;
 	}
 
+	ret = mt7925_mcu_set_thermal_protect(dev);
+	if (ret) {
+		dev_err(dev->mt76.dev, "thermal protection enable failed\n");
+		return;
+	}
+
 	/* we support chip reset now */
 	dev->hw_init_done = true;
 
@@ -244,6 +214,7 @@ int mt7925_register_device(struct mt792x_dev *dev)
 	dev->mt76.tx_worker.fn = mt792x_tx_worker;
 
 	INIT_DELAYED_WORK(&dev->pm.ps_work, mt792x_pm_power_save_work);
+	INIT_DELAYED_WORK(&dev->mlo_pm_work, mt7925_mlo_pm_work);
 	INIT_WORK(&dev->pm.wake_work, mt792x_pm_wake_work);
 	spin_lock_init(&dev->pm.wake.lock);
 	mutex_init(&dev->pm.mutex);
@@ -270,7 +241,8 @@ int mt7925_register_device(struct mt792x_dev *dev)
 	dev->pm.idle_timeout = MT792x_PM_TIMEOUT;
 	dev->pm.stats.last_wake_event = jiffies;
 	dev->pm.stats.last_doze_event = jiffies;
-	if (!mt76_is_usb(&dev->mt76)) {
+	/* MT7927: runtime PM crashes BT firmware on the shared CONNINFRA domain */
+	if (!mt76_is_usb(&dev->mt76) && !is_mt7927(&dev->mt76)) {
 		dev->pm.enable_user = true;
 		dev->pm.enable = true;
 		dev->pm.ds_enable_user = true;
@@ -314,7 +286,7 @@ int mt7925_register_device(struct mt792x_dev *dev)
 	dev->mphy.hw->wiphy->available_antennas_rx = dev->mphy.chainmask;
 	dev->mphy.hw->wiphy->available_antennas_tx = dev->mphy.chainmask;
 
-	queue_work(system_wq, &dev->init_work);
+	queue_work(system_percpu_wq, &dev->init_work);
 
 	return 0;
 }

@@ -6,10 +6,12 @@
 #include <linux/workqueue.h>
 #include <linux/delay.h>
 #include <linux/cpuhotplug.h>
+#include <linux/kvm_types.h>
 #include <asm/cpu_device_id.h>
 #include <asm/cmdline.h>
 #include <asm/traps.h>
 #include <asm/cpu.h>
+#include <asm/msr.h>
 
 enum split_lock_detect_state {
 	sld_off = 0,
@@ -95,15 +97,15 @@ static bool split_lock_verify_msr(bool on)
 {
 	u64 ctrl, tmp;
 
-	if (rdmsrl_safe(MSR_TEST_CTRL, &ctrl))
+	if (rdmsrq_safe(MSR_TEST_CTRL, &ctrl))
 		return false;
 	if (on)
 		ctrl |= MSR_TEST_CTRL_SPLIT_LOCK_DETECT;
 	else
 		ctrl &= ~MSR_TEST_CTRL_SPLIT_LOCK_DETECT;
-	if (wrmsrl_safe(MSR_TEST_CTRL, ctrl))
+	if (wrmsrq_safe(MSR_TEST_CTRL, ctrl))
 		return false;
-	rdmsrl(MSR_TEST_CTRL, tmp);
+	rdmsrq(MSR_TEST_CTRL, tmp);
 	return ctrl == tmp;
 }
 
@@ -130,6 +132,12 @@ static void __init sld_state_setup(void)
 	sld_state = state;
 }
 
+static __init int setup_split_lock_detect(char *arg)
+{
+	return 1;
+}
+__setup("split_lock_detect=", setup_split_lock_detect);
+
 static void __init __split_lock_setup(void)
 {
 	if (!split_lock_verify_msr(false)) {
@@ -137,7 +145,7 @@ static void __init __split_lock_setup(void)
 		return;
 	}
 
-	rdmsrl(MSR_TEST_CTRL, msr_test_ctrl_cache);
+	rdmsrq(MSR_TEST_CTRL, msr_test_ctrl_cache);
 
 	if (!split_lock_verify_msr(true)) {
 		pr_info("MSR access failed: Disabled\n");
@@ -145,7 +153,7 @@ static void __init __split_lock_setup(void)
 	}
 
 	/* Restore the MSR to its cached value. */
-	wrmsrl(MSR_TEST_CTRL, msr_test_ctrl_cache);
+	wrmsrq(MSR_TEST_CTRL, msr_test_ctrl_cache);
 
 	setup_force_cpu_cap(X86_FEATURE_SPLIT_LOCK_DETECT);
 }
@@ -162,7 +170,7 @@ static void sld_update_msr(bool on)
 	if (on)
 		test_ctrl_val |= MSR_TEST_CTRL_SPLIT_LOCK_DETECT;
 
-	wrmsrl(MSR_TEST_CTRL, test_ctrl_val);
+	wrmsrq(MSR_TEST_CTRL, test_ctrl_val);
 }
 
 void split_lock_init(void)
@@ -192,7 +200,33 @@ static void __split_lock_reenable(struct work_struct *work)
 {
 	sld_update_msr(true);
 }
-static DECLARE_DELAYED_WORK(sl_reenable, __split_lock_reenable);
+/*
+ * In order for each CPU to schedule its delayed work independently of the
+ * others, delayed work struct must be per-CPU. This is not required when
+ * sysctl_sld_mitigate is enabled because of the semaphore that limits
+ * the number of simultaneously scheduled delayed works to 1.
+ */
+static DEFINE_PER_CPU(struct delayed_work, sl_reenable);
+
+/*
+ * Per-CPU delayed_work can't be statically initialized properly because
+ * the struct address is unknown. Thus per-CPU delayed_work structures
+ * have to be initialized during kernel initialization and after calling
+ * setup_per_cpu_areas().
+ */
+static int __init setup_split_lock_delayed_work(void)
+{
+	unsigned int cpu;
+
+	for_each_possible_cpu(cpu) {
+		struct delayed_work *work = per_cpu_ptr(&sl_reenable, cpu);
+
+		INIT_DELAYED_WORK(work, __split_lock_reenable);
+	}
+
+	return 0;
+}
+pure_initcall(setup_split_lock_delayed_work);
 
 /*
  * If a CPU goes offline with pending delayed work to re-enable split lock
@@ -215,13 +249,14 @@ static void split_lock_warn(unsigned long ip)
 {
 	struct delayed_work *work;
 	int cpu;
+	unsigned int saved_sld_mitigate = READ_ONCE(sysctl_sld_mitigate);
 
 	if (!current->reported_split_lock)
 		pr_warn_ratelimited("#AC: %s/%d took a split_lock trap at address: 0x%lx\n",
 				    current->comm, current->pid, ip);
 	current->reported_split_lock = 1;
 
-	if (sysctl_sld_mitigate) {
+	if (saved_sld_mitigate) {
 		/*
 		 * misery factor #1:
 		 * sleep 10ms before trying to execute split lock.
@@ -234,12 +269,10 @@ static void split_lock_warn(unsigned long ip)
 		 */
 		if (down_interruptible(&buslock_sem) == -EINTR)
 			return;
-		work = &sl_reenable_unlock;
-	} else {
-		work = &sl_reenable;
 	}
 
 	cpu = get_cpu();
+	work = saved_sld_mitigate ? &sl_reenable_unlock : per_cpu_ptr(&sl_reenable, cpu);
 	schedule_delayed_work_on(cpu, work, 2);
 
 	/* Disable split lock detection on this CPU to make progress */
@@ -263,7 +296,7 @@ bool handle_guest_split_lock(unsigned long ip)
 	force_sig_fault(SIGBUS, BUS_ADRALN, NULL);
 	return false;
 }
-EXPORT_SYMBOL_GPL(handle_guest_split_lock);
+EXPORT_SYMBOL_FOR_KVM(handle_guest_split_lock);
 
 void bus_lock_init(void)
 {
@@ -272,7 +305,7 @@ void bus_lock_init(void)
 	if (!boot_cpu_has(X86_FEATURE_BUS_LOCK_DETECT))
 		return;
 
-	rdmsrl(MSR_IA32_DEBUGCTLMSR, val);
+	rdmsrq(MSR_IA32_DEBUGCTLMSR, val);
 
 	if ((boot_cpu_has(X86_FEATURE_SPLIT_LOCK_DETECT) &&
 	    (sld_state == sld_warn || sld_state == sld_fatal)) ||
@@ -286,7 +319,7 @@ void bus_lock_init(void)
 		val |= DEBUGCTLMSR_BUS_LOCK_DETECT;
 	}
 
-	wrmsrl(MSR_IA32_DEBUGCTLMSR, val);
+	wrmsrq(MSR_IA32_DEBUGCTLMSR, val);
 }
 
 bool handle_user_split_lock(struct pt_regs *regs, long error_code)
@@ -350,7 +383,7 @@ static void __init split_lock_setup(struct cpuinfo_x86 *c)
 	 * MSR_IA32_CORE_CAPS_SPLIT_LOCK_DETECT is.  All CPUs that set
 	 * it have split lock detection.
 	 */
-	rdmsrl(MSR_IA32_CORE_CAPS, ia32_core_caps);
+	rdmsrq(MSR_IA32_CORE_CAPS, ia32_core_caps);
 	if (ia32_core_caps & MSR_IA32_CORE_CAPS_SPLIT_LOCK_DETECT)
 		goto supported;
 
@@ -364,37 +397,35 @@ supported:
 
 static void sld_state_show(void)
 {
-	if (!boot_cpu_has(X86_FEATURE_BUS_LOCK_DETECT) &&
-	    !boot_cpu_has(X86_FEATURE_SPLIT_LOCK_DETECT))
+	const char *action = "warning";
+
+	if ((!boot_cpu_has(X86_FEATURE_BUS_LOCK_DETECT) &&
+	     !boot_cpu_has(X86_FEATURE_SPLIT_LOCK_DETECT)) ||
+	    (sld_state == sld_off))
 		return;
 
-	switch (sld_state) {
-	case sld_off:
-		pr_info("disabled\n");
-		break;
-	case sld_warn:
-		if (boot_cpu_has(X86_FEATURE_SPLIT_LOCK_DETECT)) {
-			pr_info("#AC: crashing the kernel on kernel split_locks and warning on user-space split_locks\n");
-			if (cpuhp_setup_state(CPUHP_AP_ONLINE_DYN,
-					      "x86/splitlock", NULL, splitlock_cpu_offline) < 0)
-				pr_warn("No splitlock CPU offline handler\n");
-		} else if (boot_cpu_has(X86_FEATURE_BUS_LOCK_DETECT)) {
-			pr_info("#DB: warning on user-space bus_locks\n");
-		}
-		break;
-	case sld_fatal:
-		if (boot_cpu_has(X86_FEATURE_SPLIT_LOCK_DETECT)) {
-			pr_info("#AC: crashing the kernel on kernel split_locks and sending SIGBUS on user-space split_locks\n");
-		} else if (boot_cpu_has(X86_FEATURE_BUS_LOCK_DETECT)) {
-			pr_info("#DB: sending SIGBUS on user-space bus_locks%s\n",
-				boot_cpu_has(X86_FEATURE_SPLIT_LOCK_DETECT) ?
-				" from non-WB" : "");
-		}
-		break;
-	case sld_ratelimit:
+	if (sld_state == sld_ratelimit) {
 		if (boot_cpu_has(X86_FEATURE_BUS_LOCK_DETECT))
 			pr_info("#DB: setting system wide bus lock rate limit to %u/sec\n", bld_ratelimit.burst);
-		break;
+		return;
+	} else if (sld_state == sld_fatal) {
+		action = "sending SIGBUS";
+	}
+
+	if (boot_cpu_has(X86_FEATURE_SPLIT_LOCK_DETECT)) {
+		pr_info("#AC: crashing the kernel on kernel split_locks and %s on user-space split_locks\n", action);
+
+		/*
+		 * This is handling the case where a CPU goes offline at the
+		 * moment where split lock detection is disabled in the warn
+		 * setting, see split_lock_warn(). It doesn't have any effect
+		 * in the fatal case.
+		 */
+		if (cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "x86/splitlock", NULL, splitlock_cpu_offline) < 0)
+			pr_warn("No splitlock CPU offline handler\n");
+
+	} else if (boot_cpu_has(X86_FEATURE_BUS_LOCK_DETECT)) {
+		pr_info("#DB: %s on user-space bus_locks\n", action);
 	}
 }
 

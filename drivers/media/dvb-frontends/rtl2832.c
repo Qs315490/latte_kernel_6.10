@@ -1043,7 +1043,7 @@ static int rtl2832_probe(struct i2c_client *client)
 	dev_dbg(&client->dev, "\n");
 
 	/* allocate memory for the internal state */
-	dev = kzalloc(sizeof(struct rtl2832_dev), GFP_KERNEL);
+	dev = kzalloc_obj(struct rtl2832_dev);
 	if (dev == NULL) {
 		ret = -ENOMEM;
 		goto err;
@@ -1115,9 +1115,9 @@ static void rtl2832_remove(struct i2c_client *client)
 
 	dev_dbg(&client->dev, "\n");
 
-	cancel_delayed_work_sync(&dev->i2c_gate_work);
-
 	i2c_mux_del_adapters(dev->muxc);
+
+	cancel_delayed_work_sync(&dev->i2c_gate_work);
 
 	regmap_exit(dev->regmap);
 
@@ -1125,8 +1125,8 @@ static void rtl2832_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id rtl2832_id_table[] = {
-	{ "rtl2832" },
-	{}
+	{ .name = "rtl2832" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rtl2832_id_table);
 

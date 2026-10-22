@@ -6,23 +6,56 @@
 // and thus add a dependency on `include/config/RUSTC_VERSION_TEXT`, which is
 // touched by Kconfig when the version string from the compiler changes.
 
-#[macro_use]
-mod quote;
+// Stable since Rust 1.87.0.
+#![feature(extract_if)]
+//
+// Stable since Rust 1.88.0 under a different name, `proc_macro_span_file`,
+// which was added in Rust 1.88.0. This is why `cfg_attr` is used here, i.e.
+// to avoid depending on the full `proc_macro_span` on Rust >= 1.88.0.
+#![cfg_attr(not(CONFIG_RUSTC_HAS_SPAN_FILE), feature(proc_macro_span))]
+
 mod concat_idents;
+mod export;
+mod fmt;
+mod for_lt;
 mod helpers;
+mod kunit;
 mod module;
 mod paste;
-mod pin_data;
-mod pinned_drop;
 mod vtable;
-mod zeroable;
 
 use proc_macro::TokenStream;
+
+use syn::parse_macro_input;
 
 /// Declares a kernel module.
 ///
 /// The `type` argument should be a type which implements the [`Module`]
 /// trait. Also accepts various forms of kernel metadata.
+///
+/// The `params` field describe module parameters. Each entry has the form
+///
+/// ```ignore
+/// parameter_name: type {
+///     default: default_value,
+///     description: "Description",
+/// }
+/// ```
+///
+/// `type` may be one of
+///
+/// - [`i8`]
+/// - [`u8`]
+/// - [`i8`]
+/// - [`u8`]
+/// - [`i16`]
+/// - [`u16`]
+/// - [`i32`]
+/// - [`u32`]
+/// - [`i64`]
+/// - [`u64`]
+/// - [`isize`]
+/// - [`usize`]
 ///
 /// C header: [`include/linux/moduleparam.h`](srctree/include/linux/moduleparam.h)
 ///
@@ -30,16 +63,22 @@ use proc_macro::TokenStream;
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use kernel::prelude::*;
 ///
 /// module!{
 ///     type: MyModule,
 ///     name: "my_kernel_module",
-///     author: "Rust for Linux Contributors",
+///     authors: ["Rust for Linux Contributors"],
 ///     description: "My very own kernel module!",
 ///     license: "GPL",
 ///     alias: ["alternate_module_name"],
+///     params: {
+///         my_parameter: i64 {
+///             default: 1,
+///             description: "This parameter has a default of 1",
+///         },
+///     },
 /// }
 ///
 /// struct MyModule(i32);
@@ -48,6 +87,7 @@ use proc_macro::TokenStream;
 ///     fn init(_module: &'static ThisModule) -> Result<Self> {
 ///         let foo: i32 = 42;
 ///         pr_info!("I contain:  {}\n", foo);
+///         pr_info!("i32 param is:  {}\n", module_parameters::my_parameter.read());
 ///         Ok(Self(foo))
 ///     }
 /// }
@@ -69,7 +109,7 @@ use proc_macro::TokenStream;
 /// module!{
 ///     type: MyDeviceDriverModule,
 ///     name: "my_device_driver_module",
-///     author: "Rust for Linux Contributors",
+///     authors: ["Rust for Linux Contributors"],
 ///     description: "My device driver requires firmware",
 ///     license: "GPL",
 ///     firmware: ["my_device_firmware1.bin", "my_device_firmware2.bin"],
@@ -88,15 +128,17 @@ use proc_macro::TokenStream;
 /// # Supported argument types
 ///   - `type`: type which implements the [`Module`] trait (required).
 ///   - `name`: ASCII string literal of the name of the kernel module (required).
-///   - `author`: string literal of the author of the kernel module.
+///   - `authors`: array of ASCII string literals of the authors of the kernel module.
 ///   - `description`: string literal of the description of the kernel module.
 ///   - `license`: ASCII string literal of the license of the kernel module (required).
 ///   - `alias`: array of ASCII string literals of the alias names of the kernel module.
 ///   - `firmware`: array of ASCII string literals of the firmware files of
 ///     the kernel module.
 #[proc_macro]
-pub fn module(ts: TokenStream) -> TokenStream {
-    module::module(ts)
+pub fn module(input: TokenStream) -> TokenStream {
+    module::module(parse_macro_input!(input))
+        .unwrap_or_else(|e| e.into_compile_error())
+        .into()
 }
 
 /// Declares or implements a vtable trait.
@@ -118,7 +160,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
 /// case the default implementation will never be executed. The reason for this
 /// is that the functions will be called through function pointers installed in
 /// C side vtables. When an optional method is not implemented on a `#[vtable]`
-/// trait, a NULL entry is installed in the vtable. Thus the default
+/// trait, a `NULL` entry is installed in the vtable. Thus the default
 /// implementation is never called. Since these traits are not designed to be
 /// used on the Rust side, it should not be possible to call the default
 /// implementation. This is done to ensure that we call the vtable methods
@@ -170,8 +212,53 @@ pub fn module(ts: TokenStream) -> TokenStream {
 ///
 /// [`kernel::error::VTABLE_DEFAULT_ERROR`]: ../kernel/error/constant.VTABLE_DEFAULT_ERROR.html
 #[proc_macro_attribute]
-pub fn vtable(attr: TokenStream, ts: TokenStream) -> TokenStream {
-    vtable::vtable(attr, ts)
+pub fn vtable(attr: TokenStream, input: TokenStream) -> TokenStream {
+    parse_macro_input!(attr as syn::parse::Nothing);
+    vtable::vtable(parse_macro_input!(input))
+        .unwrap_or_else(|e| e.into_compile_error())
+        .into()
+}
+
+/// Export a function so that C code can call it via a header file.
+///
+/// Functions exported using this macro can be called from C code using the declaration in the
+/// appropriate header file. It should only be used in cases where C calls the function through a
+/// header file; cases where C calls into Rust via a function pointer in a vtable (such as
+/// `file_operations`) should not use this macro.
+///
+/// This macro has the following effect:
+///
+/// * Disables name mangling for this function.
+/// * Verifies at compile-time that the function signature matches the declaration in the header
+///   file.
+///
+/// You must declare the signature of the Rust function in a header file that is included by
+/// `rust/bindings/bindings_helper.h`.
+///
+/// This macro is *not* the same as the C macros `EXPORT_SYMBOL_*`. All Rust symbols are currently
+/// automatically exported with `EXPORT_SYMBOL_GPL`.
+#[proc_macro_attribute]
+pub fn export(attr: TokenStream, input: TokenStream) -> TokenStream {
+    parse_macro_input!(attr as syn::parse::Nothing);
+    export::export(parse_macro_input!(input)).into()
+}
+
+/// Like [`core::format_args!`], but automatically wraps arguments in [`kernel::fmt::Adapter`].
+///
+/// This macro allows generating `fmt::Arguments` while ensuring that each argument is wrapped with
+/// `::kernel::fmt::Adapter`, which customizes formatting behavior for kernel logging.
+///
+/// Named arguments used in the format string (e.g. `{foo}`) are detected and resolved from local
+/// bindings. All positional and named arguments are automatically wrapped.
+///
+/// This macro is an implementation detail of other kernel logging macros like [`pr_info!`] and
+/// should not typically be used directly.
+///
+/// [`kernel::fmt::Adapter`]: ../kernel/fmt/struct.Adapter.html
+/// [`pr_info!`]: ../kernel/macro.pr_info.html
+#[proc_macro]
+pub fn fmt(input: TokenStream) -> TokenStream {
+    fmt::fmt(input.into()).into()
 }
 
 /// Concatenate two identifiers.
@@ -228,108 +315,8 @@ pub fn vtable(attr: TokenStream, ts: TokenStream) -> TokenStream {
 /// assert_eq!(BR_OK, binder_driver_return_protocol_BR_OK);
 /// ```
 #[proc_macro]
-pub fn concat_idents(ts: TokenStream) -> TokenStream {
-    concat_idents::concat_idents(ts)
-}
-
-/// Used to specify the pinning information of the fields of a struct.
-///
-/// This is somewhat similar in purpose as
-/// [pin-project-lite](https://crates.io/crates/pin-project-lite).
-/// Place this macro on a struct definition and then `#[pin]` in front of the attributes of each
-/// field you want to structurally pin.
-///
-/// This macro enables the use of the [`pin_init!`] macro. When pin-initializing a `struct`,
-/// then `#[pin]` directs the type of initializer that is required.
-///
-/// If your `struct` implements `Drop`, then you need to add `PinnedDrop` as arguments to this
-/// macro, and change your `Drop` implementation to `PinnedDrop` annotated with
-/// `#[`[`macro@pinned_drop`]`]`, since dropping pinned values requires extra care.
-///
-/// # Examples
-///
-/// ```
-/// # #![feature(lint_reasons)]
-/// # use kernel::prelude::*;
-/// # use std::{sync::Mutex, process::Command};
-/// # use kernel::macros::pin_data;
-/// #[pin_data]
-/// struct DriverData {
-///     #[pin]
-///     queue: Mutex<KVec<Command>>,
-///     buf: KBox<[u8; 1024 * 1024]>,
-/// }
-/// ```
-///
-/// ```
-/// # #![feature(lint_reasons)]
-/// # use kernel::prelude::*;
-/// # use std::{sync::Mutex, process::Command};
-/// # use core::pin::Pin;
-/// # pub struct Info;
-/// # mod bindings {
-/// #     pub unsafe fn destroy_info(_ptr: *mut super::Info) {}
-/// # }
-/// use kernel::macros::{pin_data, pinned_drop};
-///
-/// #[pin_data(PinnedDrop)]
-/// struct DriverData {
-///     #[pin]
-///     queue: Mutex<KVec<Command>>,
-///     buf: KBox<[u8; 1024 * 1024]>,
-///     raw_info: *mut Info,
-/// }
-///
-/// #[pinned_drop]
-/// impl PinnedDrop for DriverData {
-///     fn drop(self: Pin<&mut Self>) {
-///         unsafe { bindings::destroy_info(self.raw_info) };
-///     }
-/// }
-/// # fn main() {}
-/// ```
-///
-/// [`pin_init!`]: ../kernel/macro.pin_init.html
-//  ^ cannot use direct link, since `kernel` is not a dependency of `macros`.
-#[proc_macro_attribute]
-pub fn pin_data(inner: TokenStream, item: TokenStream) -> TokenStream {
-    pin_data::pin_data(inner, item)
-}
-
-/// Used to implement `PinnedDrop` safely.
-///
-/// Only works on structs that are annotated via `#[`[`macro@pin_data`]`]`.
-///
-/// # Examples
-///
-/// ```
-/// # #![feature(lint_reasons)]
-/// # use kernel::prelude::*;
-/// # use macros::{pin_data, pinned_drop};
-/// # use std::{sync::Mutex, process::Command};
-/// # use core::pin::Pin;
-/// # mod bindings {
-/// #     pub struct Info;
-/// #     pub unsafe fn destroy_info(_ptr: *mut Info) {}
-/// # }
-/// #[pin_data(PinnedDrop)]
-/// struct DriverData {
-///     #[pin]
-///     queue: Mutex<KVec<Command>>,
-///     buf: KBox<[u8; 1024 * 1024]>,
-///     raw_info: *mut bindings::Info,
-/// }
-///
-/// #[pinned_drop]
-/// impl PinnedDrop for DriverData {
-///     fn drop(self: Pin<&mut Self>) {
-///         unsafe { bindings::destroy_info(self.raw_info) };
-///     }
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn pinned_drop(args: TokenStream, input: TokenStream) -> TokenStream {
-    pinned_drop::pinned_drop(args, input)
+pub fn concat_idents(input: TokenStream) -> TokenStream {
+    concat_idents::concat_idents(parse_macro_input!(input)).into()
 }
 
 /// Paste identifiers together.
@@ -341,7 +328,7 @@ pub fn pinned_drop(args: TokenStream, input: TokenStream) -> TokenStream {
 /// literals (lifetimes and documentation strings are not supported). There is a difference in
 /// supported modifiers as well.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// # const binder_driver_return_protocol_BR_OK: u32 = 0;
@@ -361,7 +348,7 @@ pub fn pinned_drop(args: TokenStream, input: TokenStream) -> TokenStream {
 /// # const binder_driver_return_protocol_BR_FAILED_REPLY: u32 = 14;
 /// macro_rules! pub_no_prefix {
 ///     ($prefix:ident, $($newname:ident),+) => {
-///         kernel::macros::paste! {
+///         ::kernel::macros::paste! {
 ///             $(pub(crate) const $newname: u32 = [<$prefix $newname>];)+
 ///         }
 ///     };
@@ -418,7 +405,7 @@ pub fn pinned_drop(args: TokenStream, input: TokenStream) -> TokenStream {
 /// # const binder_driver_return_protocol_BR_FAILED_REPLY: u32 = 14;
 /// macro_rules! pub_no_prefix {
 ///     ($prefix:ident, $($newname:ident),+) => {
-///         kernel::macros::paste! {
+///         ::kernel::macros::paste! {
 ///             $(pub(crate) const fn [<$newname:lower:span>]() -> u32 { [<$prefix $newname:span>] })+
 ///         }
 ///     };
@@ -453,7 +440,7 @@ pub fn pinned_drop(args: TokenStream, input: TokenStream) -> TokenStream {
 /// ```
 /// macro_rules! create_numbered_fn {
 ///     ($name:literal, $val:literal) => {
-///         kernel::macros::paste! {
+///         ::kernel::macros::paste! {
 ///             fn [<some_ $name _fn $val>]() -> u32 { $val }
 ///         }
 ///     };
@@ -467,28 +454,51 @@ pub fn pinned_drop(args: TokenStream, input: TokenStream) -> TokenStream {
 /// [`paste`]: https://docs.rs/paste/
 #[proc_macro]
 pub fn paste(input: TokenStream) -> TokenStream {
-    let mut tokens = input.into_iter().collect();
+    let mut tokens = proc_macro2::TokenStream::from(input).into_iter().collect();
     paste::expand(&mut tokens);
-    tokens.into_iter().collect()
+    tokens
+        .into_iter()
+        .collect::<proc_macro2::TokenStream>()
+        .into()
 }
 
-/// Derives the [`Zeroable`] trait for the given struct.
+/// Registers a KUnit test suite and its test cases using a user-space like syntax.
 ///
-/// This can only be used for structs where every field implements the [`Zeroable`] trait.
+/// This macro should be used on modules. If `CONFIG_KUNIT` (in `.config`) is `n`, the target module
+/// is ignored.
 ///
 /// # Examples
 ///
-/// ```
-/// use kernel::macros::Zeroable;
+/// ```ignore
+/// # use kernel::prelude::*;
+/// #[kunit_tests(kunit_test_suit_name)]
+/// mod tests {
+///     #[test]
+///     fn foo() {
+///         assert_eq!(1, 1);
+///     }
 ///
-/// #[derive(Zeroable)]
-/// pub struct DriverData {
-///     id: i64,
-///     buf_ptr: *mut u8,
-///     len: usize,
+///     #[test]
+///     fn bar() {
+///         assert_eq!(2, 2);
+///     }
 /// }
 /// ```
-#[proc_macro_derive(Zeroable)]
-pub fn derive_zeroable(input: TokenStream) -> TokenStream {
-    zeroable::derive(input)
+#[proc_macro_attribute]
+pub fn kunit_tests(attr: TokenStream, input: TokenStream) -> TokenStream {
+    kunit::kunit_tests(parse_macro_input!(attr), parse_macro_input!(input))
+        .unwrap_or_else(|e| e.into_compile_error())
+        .into()
+}
+
+/// Obtain a type that implements [`ForLt`] for the given higher-ranked type.
+///
+/// Please refer to the documentation of the [`ForLt`] trait.
+///
+/// [`ForLt`]: trait.ForLt.html
+#[proc_macro]
+// The macro shares the name with the trait.
+#[allow(non_snake_case)]
+pub fn ForLt(input: TokenStream) -> TokenStream {
+    for_lt::for_lt(parse_macro_input!(input)).into()
 }

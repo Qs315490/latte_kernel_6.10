@@ -343,7 +343,7 @@ static void vc4_crtc_pixelvalve_reset(struct drm_crtc *crtc)
 }
 
 static void vc4_crtc_config_pv(struct drm_crtc *crtc, struct drm_encoder *encoder,
-			       struct drm_atomic_state *state)
+			       struct drm_atomic_commit *state)
 {
 	struct drm_device *dev = crtc->dev;
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
@@ -497,7 +497,7 @@ static void require_hvs_enabled(struct drm_device *dev)
 
 static int vc4_crtc_disable(struct drm_crtc *crtc,
 			    struct drm_encoder *encoder,
-			    struct drm_atomic_state *state,
+			    struct drm_atomic_commit *state,
 			    unsigned int channel)
 {
 	struct vc4_encoder *vc4_encoder = to_vc4_encoder(encoder);
@@ -622,7 +622,7 @@ void vc4_crtc_send_vblank(struct drm_crtc *crtc)
 }
 
 static void vc4_crtc_atomic_disable(struct drm_crtc *crtc,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *old_state = drm_atomic_get_old_crtc_state(state,
 									 crtc);
@@ -648,7 +648,7 @@ static void vc4_crtc_atomic_disable(struct drm_crtc *crtc,
 }
 
 static void vc4_crtc_atomic_enable(struct drm_crtc *crtc,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *new_state = drm_atomic_get_new_crtc_state(state,
 									 crtc);
@@ -740,7 +740,7 @@ void vc4_crtc_get_margins(struct drm_crtc_state *state,
 }
 
 int vc4_crtc_atomic_check(struct drm_crtc *crtc,
-			  struct drm_atomic_state *state)
+			  struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
 									  crtc);
@@ -884,11 +884,7 @@ struct vc4_async_flip_state {
 	struct drm_framebuffer *fb;
 	struct drm_framebuffer *old_fb;
 	struct drm_pending_vblank_event *event;
-
-	union {
-		struct dma_fence_cb fence;
-		struct vc4_seqno_cb seqno;
-	} cb;
+	struct dma_fence_cb cb;
 };
 
 /* Called when the V3D execution for the BO being flipped to is done, so that
@@ -919,10 +915,11 @@ vc4_async_page_flip_complete(struct vc4_async_flip_state *flip_state)
 	kfree(flip_state);
 }
 
-static void vc4_async_page_flip_seqno_complete(struct vc4_seqno_cb *cb)
+static void vc4_async_page_flip_complete_with_cleanup(struct dma_fence *fence,
+						      struct dma_fence_cb *cb)
 {
 	struct vc4_async_flip_state *flip_state =
-		container_of(cb, struct vc4_async_flip_state, cb.seqno);
+		container_of(cb, struct vc4_async_flip_state, cb);
 	struct vc4_bo *bo = NULL;
 
 	if (flip_state->old_fb) {
@@ -932,6 +929,7 @@ static void vc4_async_page_flip_seqno_complete(struct vc4_seqno_cb *cb)
 	}
 
 	vc4_async_page_flip_complete(flip_state);
+	dma_fence_put(fence);
 
 	/*
 	 * Decrement the BO usecnt in order to keep the inc/dec
@@ -950,7 +948,7 @@ static void vc4_async_page_flip_fence_complete(struct dma_fence *fence,
 					       struct dma_fence_cb *cb)
 {
 	struct vc4_async_flip_state *flip_state =
-		container_of(cb, struct vc4_async_flip_state, cb.fence);
+		container_of(cb, struct vc4_async_flip_state, cb);
 
 	vc4_async_page_flip_complete(flip_state);
 	dma_fence_put(fence);
@@ -961,16 +959,15 @@ static int vc4_async_set_fence_cb(struct drm_device *dev,
 {
 	struct drm_framebuffer *fb = flip_state->fb;
 	struct drm_gem_dma_object *dma_bo = drm_fb_dma_get_gem_obj(fb, 0);
+	dma_fence_func_t async_page_flip_complete_function;
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	struct dma_fence *fence;
 	int ret;
 
-	if (vc4->gen == VC4_GEN_4) {
-		struct vc4_bo *bo = to_vc4_bo(&dma_bo->base);
-
-		return vc4_queue_seqno_cb(dev, &flip_state->cb.seqno, bo->seqno,
-					  vc4_async_page_flip_seqno_complete);
-	}
+	if (vc4->gen == VC4_GEN_4)
+		async_page_flip_complete_function = vc4_async_page_flip_complete_with_cleanup;
+	else
+		async_page_flip_complete_function = vc4_async_page_flip_fence_complete;
 
 	ret = dma_resv_get_singleton(dma_bo->base.resv, DMA_RESV_USAGE_READ, &fence);
 	if (ret)
@@ -978,14 +975,14 @@ static int vc4_async_set_fence_cb(struct drm_device *dev,
 
 	/* If there's no fence, complete the page flip immediately */
 	if (!fence) {
-		vc4_async_page_flip_fence_complete(fence, &flip_state->cb.fence);
+		async_page_flip_complete_function(fence, &flip_state->cb);
 		return 0;
 	}
 
 	/* If the fence has already been completed, complete the page flip */
-	if (dma_fence_add_callback(fence, &flip_state->cb.fence,
-				   vc4_async_page_flip_fence_complete))
-		vc4_async_page_flip_fence_complete(fence, &flip_state->cb.fence);
+	if (dma_fence_add_callback(fence, &flip_state->cb,
+				   async_page_flip_complete_function))
+		async_page_flip_complete_function(fence, &flip_state->cb);
 
 	return 0;
 }
@@ -1000,7 +997,7 @@ vc4_async_page_flip_common(struct drm_crtc *crtc,
 	struct drm_plane *plane = crtc->primary;
 	struct vc4_async_flip_state *flip_state;
 
-	flip_state = kzalloc(sizeof(*flip_state), GFP_KERNEL);
+	flip_state = kzalloc_obj(*flip_state);
 	if (!flip_state)
 		return -ENOMEM;
 
@@ -1108,7 +1105,7 @@ struct drm_crtc_state *vc4_crtc_duplicate_state(struct drm_crtc *crtc)
 {
 	struct vc4_crtc_state *vc4_state, *old_vc4_state;
 
-	vc4_state = kzalloc(sizeof(*vc4_state), GFP_KERNEL);
+	vc4_state = kzalloc_obj(*vc4_state);
 	if (!vc4_state)
 		return NULL;
 
@@ -1145,7 +1142,7 @@ void vc4_crtc_reset(struct drm_crtc *crtc)
 	if (crtc->state)
 		vc4_crtc_destroy_state(crtc, crtc->state);
 
-	vc4_crtc_state = kzalloc(sizeof(*vc4_crtc_state), GFP_KERNEL);
+	vc4_crtc_state = kzalloc_obj(*vc4_crtc_state);
 	if (!vc4_crtc_state) {
 		crtc->state = NULL;
 		return;

@@ -263,11 +263,11 @@ static void max16601_remove(void *_data)
 }
 
 static const struct i2c_device_id max16601_id[] = {
-	{"max16508", max16508},
-	{"max16600", max16600},
-	{"max16601", max16601},
-	{"max16602", max16602},
-	{}
+	{ .name = "max16508", .driver_data = max16508 },
+	{ .name = "max16600", .driver_data = max16600 },
+	{ .name = "max16601", .driver_data = max16601 },
+	{ .name = "max16602", .driver_data = max16602 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max16601_id);
 
@@ -318,7 +318,7 @@ static int max16601_probe(struct i2c_client *client)
 	if (chip_id < 0)
 		return chip_id;
 
-	id = i2c_match_id(max16601_id, client);
+	id = i2c_client_get_device_id(client);
 	if (chip_id != id->driver_data)
 		dev_warn(&client->dev,
 			 "Device mismatch: Configured %s (%d), detected %d\n",

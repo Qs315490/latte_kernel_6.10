@@ -27,8 +27,8 @@ static int maxqlen = SNDRV_SEQ_OSS_MAX_QLEN;
 module_param(maxqlen, int, 0444);
 MODULE_PARM_DESC(maxqlen, "maximum queue length");
 
-static int system_client = -1; /* ALSA sequencer client number */
-static int system_port = -1;
+static int system_client __ro_after_init = -1; /* ALSA sequencer client number */
+static int system_port __ro_after_init = -1;
 
 static int num_clients;
 static struct seq_oss_devinfo *client_table[SNDRV_SEQ_OSS_MAX_CLIENTS];
@@ -63,10 +63,10 @@ int __init
 snd_seq_oss_create_client(void)
 {
 	int rc;
-	struct snd_seq_port_info *port __free(kfree) = NULL;
 	struct snd_seq_port_callback port_callback;
+	struct snd_seq_port_info *port __free(kfree) =
+		kzalloc_obj(*port);
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
 	if (!port)
 		return -ENOMEM;
 
@@ -79,7 +79,7 @@ snd_seq_oss_create_client(void)
 	system_client = rc;
 
 	/* create announcement receiver port */
-	strcpy(port->name, "Receiver");
+	strscpy(port->name, "Receiver");
 	port->addr.client = system_client;
 	port->capability = SNDRV_SEQ_PORT_CAP_WRITE; /* receive only */
 	port->type = 0;
@@ -168,7 +168,7 @@ snd_seq_oss_open(struct file *file, int level)
 	int i, rc;
 	struct seq_oss_devinfo *dp;
 
-	dp = kzalloc(sizeof(*dp), GFP_KERNEL);
+	dp = kzalloc_obj(*dp);
 	if (!dp)
 		return -ENOMEM;
 
@@ -347,7 +347,7 @@ alloc_seq_queue(struct seq_oss_devinfo *dp)
 	memset(&qinfo, 0, sizeof(qinfo));
 	qinfo.owner = system_client;
 	qinfo.locked = 1;
-	strcpy(qinfo.name, "OSS Sequencer Emulation");
+	strscpy(qinfo.name, "OSS Sequencer Emulation");
 	rc = call_ctl(SNDRV_SEQ_IOCTL_CREATE_QUEUE, &qinfo);
 	if (rc < 0)
 		return rc;

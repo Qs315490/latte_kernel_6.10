@@ -37,6 +37,7 @@
 #include "waitid.h"
 #include "futex.h"
 #include "truncate.h"
+#include "zcrx.h"
 
 static int io_no_issue(struct io_kiocb *req, unsigned int issue_flags)
 {
@@ -66,7 +67,6 @@ const struct io_issue_def io_issue_defs[] = {
 		.audit_skip		= 1,
 		.ioprio			= 1,
 		.iopoll			= 1,
-		.iopoll_queue		= 1,
 		.vectored		= 1,
 		.async_size		= sizeof(struct io_async_rw),
 		.prep			= io_prep_readv,
@@ -81,7 +81,6 @@ const struct io_issue_def io_issue_defs[] = {
 		.audit_skip		= 1,
 		.ioprio			= 1,
 		.iopoll			= 1,
-		.iopoll_queue		= 1,
 		.vectored		= 1,
 		.async_size		= sizeof(struct io_async_rw),
 		.prep			= io_prep_writev,
@@ -101,10 +100,9 @@ const struct io_issue_def io_issue_defs[] = {
 		.audit_skip		= 1,
 		.ioprio			= 1,
 		.iopoll			= 1,
-		.iopoll_queue		= 1,
 		.async_size		= sizeof(struct io_async_rw),
 		.prep			= io_prep_read_fixed,
-		.issue			= io_read,
+		.issue			= io_read_fixed,
 	},
 	[IORING_OP_WRITE_FIXED] = {
 		.needs_file		= 1,
@@ -115,10 +113,9 @@ const struct io_issue_def io_issue_defs[] = {
 		.audit_skip		= 1,
 		.ioprio			= 1,
 		.iopoll			= 1,
-		.iopoll_queue		= 1,
 		.async_size		= sizeof(struct io_async_rw),
 		.prep			= io_prep_write_fixed,
-		.issue			= io_write,
+		.issue			= io_write_fixed,
 	},
 	[IORING_OP_POLL_ADD] = {
 		.needs_file		= 1,
@@ -206,21 +203,26 @@ const struct io_issue_def io_issue_defs[] = {
 		.unbound_nonreg_file	= 1,
 		.pollout		= 1,
 #if defined(CONFIG_NET)
-		.async_size		= sizeof(struct io_async_msghdr),
+		.filter_pdu_size	= sizeof_field(struct io_uring_bpf_ctx, connect),
+		.async_size		= sizeof(struct sockaddr_storage),
 		.prep			= io_connect_prep,
 		.issue			= io_connect,
+		.filter_populate	= io_connect_bpf_populate,
 #else
 		.prep			= io_eopnotsupp_prep,
 #endif
 	},
 	[IORING_OP_FALLOCATE] = {
 		.needs_file		= 1,
+		.hash_reg_file          = 1,
 		.prep			= io_fallocate_prep,
 		.issue			= io_fallocate,
 	},
 	[IORING_OP_OPENAT] = {
+		.filter_pdu_size	= sizeof_field(struct io_uring_bpf_ctx, open),
 		.prep			= io_openat_prep,
 		.issue			= io_openat,
+		.filter_populate	= io_openat_bpf_populate,
 	},
 	[IORING_OP_CLOSE] = {
 		.prep			= io_close_prep,
@@ -246,7 +248,6 @@ const struct io_issue_def io_issue_defs[] = {
 		.audit_skip		= 1,
 		.ioprio			= 1,
 		.iopoll			= 1,
-		.iopoll_queue		= 1,
 		.async_size		= sizeof(struct io_async_rw),
 		.prep			= io_prep_read,
 		.issue			= io_read,
@@ -260,7 +261,6 @@ const struct io_issue_def io_issue_defs[] = {
 		.audit_skip		= 1,
 		.ioprio			= 1,
 		.iopoll			= 1,
-		.iopoll_queue		= 1,
 		.async_size		= sizeof(struct io_async_rw),
 		.prep			= io_prep_write,
 		.issue			= io_write,
@@ -307,8 +307,10 @@ const struct io_issue_def io_issue_defs[] = {
 #endif
 	},
 	[IORING_OP_OPENAT2] = {
+		.filter_pdu_size	= sizeof_field(struct io_uring_bpf_ctx, open),
 		.prep			= io_openat2_prep,
 		.issue			= io_openat2,
+		.filter_populate	= io_openat_bpf_populate,
 	},
 	[IORING_OP_EPOLL_CTL] = {
 		.unbound_nonreg_file	= 1,
@@ -332,13 +334,13 @@ const struct io_issue_def io_issue_defs[] = {
 		.audit_skip		= 1,
 		.iopoll			= 1,
 		.prep			= io_provide_buffers_prep,
-		.issue			= io_provide_buffers,
+		.issue			= io_manage_buffers_legacy,
 	},
 	[IORING_OP_REMOVE_BUFFERS] = {
 		.audit_skip		= 1,
 		.iopoll			= 1,
 		.prep			= io_remove_buffers_prep,
-		.issue			= io_remove_buffers,
+		.issue			= io_manage_buffers_legacy,
 	},
 	[IORING_OP_TEE] = {
 		.needs_file		= 1,
@@ -404,18 +406,20 @@ const struct io_issue_def io_issue_defs[] = {
 	[IORING_OP_SOCKET] = {
 		.audit_skip		= 1,
 #if defined(CONFIG_NET)
+		.filter_pdu_size	= sizeof_field(struct io_uring_bpf_ctx, socket),
 		.prep			= io_socket_prep,
 		.issue			= io_socket,
+		.filter_populate	= io_socket_bpf_populate,
 #else
 		.prep			= io_eopnotsupp_prep,
 #endif
 	},
 	[IORING_OP_URING_CMD] = {
+		.buffer_select		= 1,
 		.needs_file		= 1,
 		.plug			= 1,
 		.iopoll			= 1,
-		.iopoll_queue		= 1,
-		.async_size		= sizeof(struct io_uring_cmd_data),
+		.async_size		= sizeof(struct io_async_cmd),
 		.prep			= io_uring_cmd_prep,
 		.issue			= io_uring_cmd,
 	},
@@ -428,7 +432,7 @@ const struct io_issue_def io_issue_defs[] = {
 #if defined(CONFIG_NET)
 		.async_size		= sizeof(struct io_async_msghdr),
 		.prep			= io_send_zc_prep,
-		.issue			= io_send_zc,
+		.issue			= io_sendmsg_zc,
 #else
 		.prep			= io_eopnotsupp_prep,
 #endif
@@ -501,7 +505,7 @@ const struct io_issue_def io_issue_defs[] = {
 		.needs_file		= 1,
 		.prep			= io_bind_prep,
 		.issue			= io_bind,
-		.async_size		= sizeof(struct io_async_msghdr),
+		.async_size		= sizeof(struct sockaddr_storage),
 #else
 		.prep			= io_eopnotsupp_prep,
 #endif
@@ -511,10 +515,81 @@ const struct io_issue_def io_issue_defs[] = {
 		.needs_file		= 1,
 		.prep			= io_listen_prep,
 		.issue			= io_listen,
-		.async_size		= sizeof(struct io_async_msghdr),
 #else
 		.prep			= io_eopnotsupp_prep,
 #endif
+	},
+	[IORING_OP_RECV_ZC] = {
+		.audit_skip		= 1,
+		.needs_file		= 1,
+		.unbound_nonreg_file	= 1,
+		.pollin			= 1,
+		.ioprio			= 1,
+#if defined(CONFIG_NET)
+		.prep			= io_recvzc_prep,
+		.issue			= io_recvzc,
+#else
+		.prep			= io_eopnotsupp_prep,
+#endif
+	},
+	[IORING_OP_EPOLL_WAIT] = {
+		.needs_file		= 1,
+		.audit_skip		= 1,
+		.pollin			= 1,
+#if defined(CONFIG_EPOLL)
+		.prep			= io_epoll_wait_prep,
+		.issue			= io_epoll_wait,
+#else
+		.prep			= io_eopnotsupp_prep,
+#endif
+	},
+	[IORING_OP_READV_FIXED] = {
+		.needs_file		= 1,
+		.unbound_nonreg_file	= 1,
+		.pollin			= 1,
+		.plug			= 1,
+		.audit_skip		= 1,
+		.ioprio			= 1,
+		.iopoll			= 1,
+		.vectored		= 1,
+		.async_size		= sizeof(struct io_async_rw),
+		.prep			= io_prep_readv_fixed,
+		.issue			= io_read,
+	},
+	[IORING_OP_WRITEV_FIXED] = {
+		.needs_file		= 1,
+		.hash_reg_file		= 1,
+		.unbound_nonreg_file	= 1,
+		.pollout		= 1,
+		.plug			= 1,
+		.audit_skip		= 1,
+		.ioprio			= 1,
+		.iopoll			= 1,
+		.vectored		= 1,
+		.async_size		= sizeof(struct io_async_rw),
+		.prep			= io_prep_writev_fixed,
+		.issue			= io_write,
+	},
+	[IORING_OP_PIPE] = {
+		.prep			= io_pipe_prep,
+		.issue			= io_pipe,
+	},
+	[IORING_OP_NOP128] = {
+		.audit_skip		= 1,
+		.iopoll			= 1,
+		.is_128			= 1,
+		.prep			= io_nop_prep,
+		.issue			= io_nop,
+	},
+	[IORING_OP_URING_CMD128] = {
+		.buffer_select		= 1,
+		.needs_file		= 1,
+		.plug			= 1,
+		.iopoll			= 1,
+		.is_128			= 1,
+		.async_size		= sizeof(struct io_async_cmd),
+		.prep			= io_uring_cmd_prep,
+		.issue			= io_uring_cmd,
 	},
 };
 
@@ -702,6 +777,8 @@ const struct io_cold_def io_cold_defs[] = {
 	},
 	[IORING_OP_URING_CMD] = {
 		.name			= "URING_CMD",
+		.sqe_copy		= io_uring_cmd_sqe_copy,
+		.cleanup		= io_uring_cmd_cleanup,
 	},
 	[IORING_OP_SEND_ZC] = {
 		.name			= "SEND_ZC",
@@ -744,6 +821,33 @@ const struct io_cold_def io_cold_defs[] = {
 	},
 	[IORING_OP_LISTEN] = {
 		.name			= "LISTEN",
+	},
+	[IORING_OP_RECV_ZC] = {
+		.name			= "RECV_ZC",
+	},
+	[IORING_OP_EPOLL_WAIT] = {
+		.name			= "EPOLL_WAIT",
+	},
+	[IORING_OP_READV_FIXED] = {
+		.name			= "READV_FIXED",
+		.cleanup		= io_readv_writev_cleanup,
+		.fail			= io_rw_fail,
+	},
+	[IORING_OP_WRITEV_FIXED] = {
+		.name			= "WRITEV_FIXED",
+		.cleanup		= io_readv_writev_cleanup,
+		.fail			= io_rw_fail,
+	},
+	[IORING_OP_PIPE] = {
+		.name			= "PIPE",
+	},
+	[IORING_OP_NOP128] = {
+		.name			= "NOP128",
+	},
+	[IORING_OP_URING_CMD128] = {
+		.name			= "URING_CMD128",
+		.sqe_copy		= io_uring_cmd_sqe_copy,
+		.cleanup		= io_uring_cmd_cleanup,
 	},
 };
 

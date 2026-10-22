@@ -22,6 +22,7 @@ MODULE_LICENSE("GPL");
 #define OUI_PRESONUS		0x000a92
 #define OUI_HARMAN		0x000fd7
 #define OUI_AVID		0x00a07e
+#define OUI_TEAC		0x00022e
 
 #define DICE_CATEGORY_ID	0x04
 #define WEISS_CATEGORY_ID	0x00
@@ -102,9 +103,9 @@ static void dice_card_strings(struct snd_dice *dice)
 	unsigned int i;
 	int err;
 
-	strcpy(card->driver, "DICE");
+	strscpy(card->driver, "DICE");
 
-	strcpy(card->shortname, "DICE");
+	strscpy(card->shortname, "DICE");
 	BUILD_BUG_ON(NICK_NAME_SIZE < sizeof(card->shortname));
 	err = snd_dice_transaction_read_global(dice, GLOBAL_NICK_NAME,
 					       card->shortname,
@@ -117,16 +118,16 @@ static void dice_card_strings(struct snd_dice *dice)
 		card->shortname[sizeof(card->shortname) - 1] = '\0';
 	}
 
-	strcpy(vendor, "?");
+	strscpy(vendor, "?");
 	fw_csr_string(dev->config_rom + 5, CSR_VENDOR, vendor, sizeof(vendor));
-	strcpy(model, "?");
+	strscpy(model, "?");
 	fw_csr_string(dice->unit->directory, CSR_MODEL, model, sizeof(model));
-	snprintf(card->longname, sizeof(card->longname),
+	scnprintf(card->longname, sizeof(card->longname),
 		 "%s %s (serial %u) at %s, S%d",
 		 vendor, model, dev->config_rom[4] & 0x3fffff,
 		 dev_name(&dice->unit->device), 100 << dev->max_speed);
 
-	strcpy(card->mixername, "DICE");
+	strscpy(card->mixername, "DICE");
 }
 
 static void dice_card_free(struct snd_card *card)
@@ -147,7 +148,7 @@ static int dice_probe(struct fw_unit *unit, const struct ieee1394_device_id *ent
 	snd_dice_detect_formats_t detect_formats;
 	int err;
 
-	if (!entry->driver_data && entry->vendor_id != OUI_SSL) {
+	if (!entry->driver_data_ptr && entry->vendor_id != OUI_SSL) {
 		err = check_dice_category(unit);
 		if (err < 0)
 			return -ENODEV;
@@ -163,10 +164,10 @@ static int dice_probe(struct fw_unit *unit, const struct ieee1394_device_id *ent
 	dev_set_drvdata(&unit->device, dice);
 	dice->card = card;
 
-	if (!entry->driver_data)
+	if (!entry->driver_data_ptr)
 		detect_formats = snd_dice_stream_detect_current_formats;
 	else
-		detect_formats = (snd_dice_detect_formats_t)entry->driver_data;
+		detect_formats = entry->driver_data_ptr;
 
 	// Below models are compliant to IEC 61883-1/6 and have no quirk at high sampling transfer
 	// frequency.
@@ -238,9 +239,8 @@ static void dice_bus_reset(struct fw_unit *unit)
 	/* The handler address register becomes initialized. */
 	snd_dice_transaction_reinit(dice);
 
-	mutex_lock(&dice->mutex);
+	guard(mutex)(&dice->mutex);
 	snd_dice_stream_update_duplex(dice);
-	mutex_unlock(&dice->mutex);
 }
 
 #define DICE_INTERFACE	0x000001
@@ -255,7 +255,7 @@ static void dice_bus_reset(struct fw_unit *unit)
 		.model_id	= (model), \
 		.specifier_id	= (vendor), \
 		.version	= DICE_INTERFACE, \
-		.driver_data = (kernel_ulong_t)(data), \
+		.driver_data_ptr = (data), \
 	}
 
 static const struct ieee1394_device_id dice_id_table[] = {
@@ -267,7 +267,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_MAUDIO,
 		.model_id	= 0x000010,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_extension_formats,
+		.driver_data_ptr = snd_dice_detect_extension_formats,
 	},
 	/* M-Audio Profire 610 has a different value in version field. */
 	{
@@ -275,7 +275,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_MAUDIO,
 		.model_id	= 0x000011,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_extension_formats,
+		.driver_data_ptr = snd_dice_detect_extension_formats,
 	},
 	/* TC Electronic Konnekt 24D. */
 	{
@@ -283,7 +283,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_TCELECTRONIC,
 		.model_id	= 0x000020,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_tcelectronic_formats,
+		.driver_data_ptr = snd_dice_detect_tcelectronic_formats,
 	},
 	/* TC Electronic Konnekt 8. */
 	{
@@ -291,7 +291,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_TCELECTRONIC,
 		.model_id	= 0x000021,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_tcelectronic_formats,
+		.driver_data_ptr = snd_dice_detect_tcelectronic_formats,
 	},
 	/* TC Electronic Studio Konnekt 48. */
 	{
@@ -299,7 +299,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_TCELECTRONIC,
 		.model_id	= 0x000022,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_tcelectronic_formats,
+		.driver_data_ptr = snd_dice_detect_tcelectronic_formats,
 	},
 	/* TC Electronic Konnekt Live. */
 	{
@@ -307,7 +307,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_TCELECTRONIC,
 		.model_id	= 0x000023,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_tcelectronic_formats,
+		.driver_data_ptr = snd_dice_detect_tcelectronic_formats,
 	},
 	/* TC Electronic Desktop Konnekt 6. */
 	{
@@ -315,7 +315,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_TCELECTRONIC,
 		.model_id	= 0x000024,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_tcelectronic_formats,
+		.driver_data_ptr = snd_dice_detect_tcelectronic_formats,
 	},
 	/* TC Electronic Impact Twin. */
 	{
@@ -323,7 +323,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_TCELECTRONIC,
 		.model_id	= 0x000027,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_tcelectronic_formats,
+		.driver_data_ptr = snd_dice_detect_tcelectronic_formats,
 	},
 	/* TC Electronic Digital Konnekt x32. */
 	{
@@ -331,7 +331,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_TCELECTRONIC,
 		.model_id	= 0x000030,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_tcelectronic_formats,
+		.driver_data_ptr = snd_dice_detect_tcelectronic_formats,
 	},
 	/* Alesis iO14/iO26. */
 	{
@@ -339,7 +339,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_ALESIS,
 		.model_id	= MODEL_ALESIS_IO_BOTH,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_alesis_formats,
+		.driver_data_ptr = snd_dice_detect_alesis_formats,
 	},
 	// Alesis MasterControl.
 	{
@@ -347,7 +347,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_ALESIS,
 		.model_id	= 0x000002,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_alesis_mastercontrol_formats,
+		.driver_data_ptr = snd_dice_detect_alesis_mastercontrol_formats,
 	},
 	/* Mytek Stereo 192 DSD-DAC. */
 	{
@@ -355,7 +355,7 @@ static const struct ieee1394_device_id dice_id_table[] = {
 				  IEEE1394_MATCH_MODEL_ID,
 		.vendor_id	= OUI_MYTEK,
 		.model_id	= 0x000002,
-		.driver_data = (kernel_ulong_t)snd_dice_detect_mytek_formats,
+		.driver_data_ptr = snd_dice_detect_mytek_formats,
 	},
 	// Solid State Logic, Duende Classic and Mini.
 	// NOTE: each field of GUID in config ROM is not compliant to standard
@@ -458,6 +458,18 @@ static const struct ieee1394_device_id dice_id_table[] = {
 	{
 		.match_flags = IEEE1394_MATCH_VERSION,
 		.version     = DICE_INTERFACE,
+	},
+	// Tascam IF-FW/DM MkII for DM-3200 and DM-4800.
+	{
+		.match_flags	= IEEE1394_MATCH_VENDOR_ID |
+				  IEEE1394_MATCH_MODEL_ID |
+				  IEEE1394_MATCH_SPECIFIER_ID |
+				  IEEE1394_MATCH_VERSION,
+		.vendor_id	= OUI_TEAC,
+		.model_id	= OUI_TEAC,
+		.specifier_id	= OUI_TEAC,
+		.version	= 0x800006,
+		.driver_data_ptr = snd_dice_detect_teac_formats,
 	},
 	{ }
 };

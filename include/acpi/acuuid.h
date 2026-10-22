@@ -3,7 +3,7 @@
  *
  * Name: acuuid.h - ACPI-related UUID/GUID definitions
  *
- * Copyright (C) 2000 - 2023, Intel Corp.
+ * Copyright (C) 2000 - 2026, Intel Corp.
  *
  *****************************************************************************/
 
@@ -37,6 +37,11 @@
 #define UUID_DEVICE_LABELING            "e5c937d0-3553-4d7a-9117-ea4d19c3434d"
 #define UUID_PHYSICAL_PRESENCE          "3dddfaa6-361b-4eb4-a424-8d10089d1653"
 
+/* TPM */
+#define UUID_HARDWARE_INFORMATION       "cf8e16a5-c1e8-4e25-b712-4f54a96702c8"
+#define UUID_START_METHOD               "6bbf6cab-5463-4714-b7cd-f0203c0368d4"
+#define UUID_MEMORY_CLEAR               "376054ed-cc13-4675-901c-4756d7f2d45d"
+
 /* NVDIMM - NFIT table */
 
 #define UUID_NFIT_DIMM                  "4309ac30-0d11-11e4-9191-0800200c9a66"
@@ -58,6 +63,11 @@
 #define UUID_CACHE_PROPERTIES           "6DC63E77-257E-4E78-A973-A21F2796898D"
 #define UUID_PHYSICAL_PROPERTY          "DDE4D59A-AA42-4349-B407-EA40F57D9FB7"
 
+/* Modern Standby */
+#define UUID_LPS0_MICROSOFT             "11E00D56-CE64-47CE-837B-1F898F9AA461"
+#define UUID_LPS0_INTEL                 "C4EB40A0-6CD2-11E2-BCFD-0800200C9A66"
+#define UUID_LPS0_AMD                   "E3F32452-FEBC-43CE-9039-932122D37721"
+
 /* Miscellaneous */
 
 #define UUID_PLATFORM_CAPABILITIES      "0811b06e-4a27-44f9-8d60-3cbbc22e7b48"
@@ -71,4 +81,5 @@
 #define UUID_USB4_CAPABILITIES          "23a0d13a-26ab-486c-9c5f-0ffa525a575a"
 #define UUID_1ST_FUNCTION_ID            "893f00a6-660c-494e-bcfd-3043f4fb67c0"
 #define UUID_2ND_FUNCTION_ID            "107ededd-d381-4fd7-8da9-08e9a6c79644"
+#define UUID_FAN_TRIP_POINTS            "a7611840-99fe-41ae-a488-35c75926c8eb"
 #endif				/* __ACUUID_H__ */

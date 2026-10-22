@@ -14,7 +14,8 @@
 #include <linux/stat.h>
 
 #include "statmount.h"
-#include "../../kselftest.h"
+#include "../utils.h"
+#include "kselftest.h"
 
 #define NSID_PASS 0
 #define NSID_FAIL 1
@@ -31,31 +32,6 @@ static void handle_result(int ret, const char *testname)
 		ksft_exit_fail_msg("%s\n", testname);
 	else
 		ksft_test_result_skip("%s\n", testname);
-}
-
-static inline int wait_for_pid(pid_t pid)
-{
-	int status, ret;
-
-again:
-	ret = waitpid(pid, &status, 0);
-	if (ret == -1) {
-		if (errno == EINTR)
-			goto again;
-
-		ksft_print_msg("waitpid returned -1, errno=%d\n", errno);
-		return -1;
-	}
-
-	if (!WIFEXITED(status)) {
-		ksft_print_msg(
-		       "waitpid !WIFEXITED, WIFSIGNALED=%d, WTERMSIG=%d\n",
-		       WIFSIGNALED(status), WTERMSIG(status));
-		return -1;
-	}
-
-	ret = WEXITSTATUS(status);
-	return ret;
 }
 
 static int get_mnt_ns_id(const char *mnt_ns, uint64_t *mnt_ns_id)
@@ -78,87 +54,10 @@ static int get_mnt_ns_id(const char *mnt_ns, uint64_t *mnt_ns_id)
 	return NSID_PASS;
 }
 
-static int get_mnt_id(const char *path, uint64_t *mnt_id)
-{
-	struct statx sx;
-	int ret;
-
-	ret = statx(AT_FDCWD, path, 0, STATX_MNT_ID_UNIQUE, &sx);
-	if (ret == -1) {
-		ksft_print_msg("retrieving unique mount ID for %s: %s\n", path,
-			       strerror(errno));
-		return NSID_ERROR;
-	}
-
-	if (!(sx.stx_mask & STATX_MNT_ID_UNIQUE)) {
-		ksft_print_msg("no unique mount ID available for %s\n", path);
-		return NSID_ERROR;
-	}
-
-	*mnt_id = sx.stx_mnt_id;
-	return NSID_PASS;
-}
-
-static int write_file(const char *path, const char *val)
-{
-	int fd = open(path, O_WRONLY);
-	size_t len = strlen(val);
-	int ret;
-
-	if (fd == -1) {
-		ksft_print_msg("opening %s for write: %s\n", path, strerror(errno));
-		return NSID_ERROR;
-	}
-
-	ret = write(fd, val, len);
-	if (ret == -1) {
-		ksft_print_msg("writing to %s: %s\n", path, strerror(errno));
-		return NSID_ERROR;
-	}
-	if (ret != len) {
-		ksft_print_msg("short write to %s\n", path);
-		return NSID_ERROR;
-	}
-
-	ret = close(fd);
-	if (ret == -1) {
-		ksft_print_msg("closing %s\n", path);
-		return NSID_ERROR;
-	}
-
-	return NSID_PASS;
-}
-
 static int setup_namespace(void)
 {
-	int ret;
-	char buf[32];
-	uid_t uid = getuid();
-	gid_t gid = getgid();
-
-	ret = unshare(CLONE_NEWNS|CLONE_NEWUSER|CLONE_NEWPID);
-	if (ret == -1)
-		ksft_exit_fail_msg("unsharing mountns and userns: %s\n",
-				   strerror(errno));
-
-	sprintf(buf, "0 %d 1", uid);
-	ret = write_file("/proc/self/uid_map", buf);
-	if (ret != NSID_PASS)
-		return ret;
-	ret = write_file("/proc/self/setgroups", "deny");
-	if (ret != NSID_PASS)
-		return ret;
-	sprintf(buf, "0 %d 1", gid);
-	ret = write_file("/proc/self/gid_map", buf);
-	if (ret != NSID_PASS)
-		return ret;
-
-	ret = mount("", "/", NULL, MS_REC|MS_PRIVATE, NULL);
-	if (ret == -1) {
-		ksft_print_msg("making mount tree private: %s\n",
-			       strerror(errno));
+	if (setup_userns() != 0)
 		return NSID_ERROR;
-	}
 
 	return NSID_PASS;
 }
@@ -174,11 +73,11 @@ static int _test_statmount_mnt_ns_id(void)
 	if (ret != NSID_PASS)
 		return ret;
 
-	ret = get_mnt_id("/", &root_id);
-	if (ret != NSID_PASS)
-		return ret;
+	root_id = get_unique_mnt_id("/");
+	if (!root_id)
+		return NSID_ERROR;
 
-	ret = statmount(root_id, 0, STATMOUNT_MNT_NS_ID, &sm, sizeof(sm), 0);
+	ret = statmount(root_id, 0, 0, STATMOUNT_MNT_NS_ID, &sm, sizeof(sm), 0);
 	if (ret == -1) {
 		ksft_print_msg("statmount mnt ns id: %s\n", strerror(errno));
 		return NSID_ERROR;
@@ -204,6 +103,98 @@ static int _test_statmount_mnt_ns_id(void)
 	return NSID_PASS;
 }
 
+static int _test_statmount_mnt_ns_id_by_fd(void)
+{
+	struct statmount sm;
+	uint64_t mnt_ns_id;
+	int ret, fd, mounted = 1, status = NSID_ERROR;
+	char mnt[] = "/statmount.fd.XXXXXX";
+
+	ret = get_mnt_ns_id("/proc/self/ns/mnt", &mnt_ns_id);
+	if (ret != NSID_PASS)
+		return ret;
+
+	if (!mkdtemp(mnt)) {
+		ksft_print_msg("statmount by fd mnt ns id mkdtemp: %s\n", strerror(errno));
+		return NSID_ERROR;
+	}
+
+	if (mount(mnt, mnt, NULL, MS_BIND, 0)) {
+		ksft_print_msg("statmount by fd mnt ns id mount: %s\n", strerror(errno));
+		status = NSID_ERROR;
+		goto err;
+	}
+
+	fd = open(mnt, O_PATH);
+	if (fd < 0) {
+		ksft_print_msg("statmount by fd mnt ns id open: %s\n", strerror(errno));
+		goto err;
+	}
+
+	ret = statmount(0, 0, fd, STATMOUNT_MNT_NS_ID, &sm, sizeof(sm), STATMOUNT_BY_FD);
+	if (ret == -1) {
+		ksft_print_msg("statmount mnt ns id statmount: %s\n", strerror(errno));
+		status = NSID_ERROR;
+		goto out;
+	}
+
+	if (sm.size != sizeof(sm)) {
+		ksft_print_msg("unexpected size: %u != %u\n", sm.size,
+			       (uint32_t)sizeof(sm));
+		status = NSID_FAIL;
+		goto out;
+	}
+	if (sm.mask != STATMOUNT_MNT_NS_ID) {
+		ksft_print_msg("statmount mnt ns id unavailable\n");
+		status = NSID_SKIP;
+		goto out;
+	}
+
+	if (sm.mnt_ns_id != mnt_ns_id) {
+		ksft_print_msg("unexpected mnt ns ID: 0x%llx != 0x%llx\n",
+			       (unsigned long long)sm.mnt_ns_id,
+			       (unsigned long long)mnt_ns_id);
+		status = NSID_FAIL;
+		goto out;
+	}
+
+	mounted = 0;
+	if (umount2(mnt, MNT_DETACH)) {
+		ksft_print_msg("statmount by fd mnt ns id umount2: %s\n", strerror(errno));
+		goto out;
+	}
+
+	ret = statmount(0, 0, fd, STATMOUNT_MNT_NS_ID, &sm, sizeof(sm), STATMOUNT_BY_FD);
+	if (ret == -1) {
+		ksft_print_msg("statmount mnt ns id statmount: %s\n", strerror(errno));
+		status = NSID_ERROR;
+		goto out;
+	}
+
+	if (sm.size != sizeof(sm)) {
+		ksft_print_msg("unexpected size: %u != %u\n", sm.size,
+			       (uint32_t)sizeof(sm));
+		status = NSID_FAIL;
+		goto out;
+	}
+
+	if (sm.mask == STATMOUNT_MNT_NS_ID) {
+		ksft_print_msg("unexpected STATMOUNT_MNT_NS_ID in mask\n");
+		status = NSID_FAIL;
+		goto out;
+	}
+
+	status = NSID_PASS;
+out:
+	close(fd);
+	if (mounted)
+		umount2(mnt, MNT_DETACH);
+err:
+	rmdir(mnt);
+	return status;
+}
+
+
 static void test_statmount_mnt_ns_id(void)
 {
 	pid_t pid;
@@ -224,6 +215,9 @@ static void test_statmount_mnt_ns_id(void)
 	if (ret != NSID_PASS)
 		exit(ret);
 	ret = _test_statmount_mnt_ns_id();
+	if (ret != NSID_PASS)
+		exit(ret);
+	ret = _test_statmount_mnt_ns_id_by_fd();
 	exit(ret);
 }
 
@@ -255,7 +249,7 @@ static int validate_external_listmount(pid_t pid, uint64_t child_nr_mounts)
 	for (int i = 0; i < nr_mounts; i++) {
 		struct statmount sm;
 
-		ret = statmount(list[i], mnt_ns_id, STATMOUNT_MNT_NS_ID, &sm,
+		ret = statmount(list[i], mnt_ns_id, 0, STATMOUNT_MNT_NS_ID, &sm,
 				sizeof(sm), 0);
 		if (ret < 0) {
 			ksft_print_msg("statmount mnt ns id: %s\n", strerror(errno));
@@ -351,7 +345,7 @@ int main(void)
 	int ret;
 
 	ksft_print_header();
-	ret = statmount(0, 0, 0, NULL, 0, 0);
+	ret = statmount(0, 0, 0, 0, NULL, 0, 0);
 	assert(ret == -1);
 	if (errno == ENOSYS)
 		ksft_exit_skip("statmount() syscall not supported\n");

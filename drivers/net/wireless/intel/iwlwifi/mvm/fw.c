@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2012-2014, 2018-2025 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2026 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -29,8 +29,8 @@
 #define MVM_UCODE_CALIB_TIMEOUT	(2 * HZ)
 
 struct iwl_mvm_alive_data {
+	__le32 sku_id[3];
 	bool valid;
-	u32 scd_base_addr;
 };
 
 static int iwl_send_tx_ant_cfg(struct iwl_mvm *mvm, u8 valid_tx_ant)
@@ -57,13 +57,13 @@ static int iwl_send_rss_cfg_cmd(struct iwl_mvm *mvm)
 			     BIT(IWL_RSS_HASH_TYPE_IPV6_PAYLOAD),
 	};
 
-	if (mvm->trans->num_rx_queues == 1)
+	if (mvm->trans->info.num_rxqs == 1)
 		return 0;
 
 	/* Do not direct RSS traffic to Q 0 which is our fallback queue */
 	for (i = 0; i < ARRAY_SIZE(cmd.indirection_table); i++)
 		cmd.indirection_table[i] =
-			1 + (i % (mvm->trans->num_rx_queues - 1));
+			1 + (i % (mvm->trans->info.num_rxqs - 1));
 	netdev_rss_key_fill(cmd.secret_key, sizeof(cmd.secret_key));
 
 	return iwl_mvm_send_cmd_pdu(mvm, RSS_CONFIG_CMD, 0, sizeof(cmd), &cmd);
@@ -114,13 +114,29 @@ static bool iwl_alive_fn(struct iwl_notif_wait_data *notif_wait,
 	u32 i;
 
 
-	if (version == 6) {
-		struct iwl_alive_ntf_v6 *palive;
+	if (version >= 6) {
+		struct iwl_alive_ntf_v7 *palive;
 
 		if (pkt_len < sizeof(*palive))
 			return false;
 
 		palive = (void *)pkt->data;
+
+		umac = &palive->umac_data;
+		lmac1 = &palive->lmac_data[0];
+		lmac2 = &palive->lmac_data[1];
+		status = le16_to_cpu(palive->status);
+
+		BUILD_BUG_ON(sizeof(palive->sku_id.data) !=
+			     sizeof(alive_data->sku_id));
+		memcpy(alive_data->sku_id, palive->sku_id.data,
+		       sizeof(palive->sku_id.data));
+
+		IWL_DEBUG_FW(mvm, "Got sku_id: 0x0%x 0x0%x 0x0%x\n",
+			     le32_to_cpu(alive_data->sku_id[0]),
+			     le32_to_cpu(alive_data->sku_id[1]),
+			     le32_to_cpu(alive_data->sku_id[2]));
+
 		mvm->trans->dbg.imr_data.imr_enable =
 			le32_to_cpu(palive->imr.enabled);
 		mvm->trans->dbg.imr_data.imr_size =
@@ -157,39 +173,17 @@ static bool iwl_alive_fn(struct iwl_notif_wait_data *notif_wait,
 				}
 			}
 		}
-	}
 
-	if (version >= 5) {
-		struct iwl_alive_ntf_v5 *palive;
+		if (version >= 8) {
+			const struct iwl_alive_ntf *palive_v8 =
+				(void *)pkt->data;
 
-		if (pkt_len < sizeof(*palive))
-			return false;
+			if (pkt_len < sizeof(*palive_v8))
+				return false;
 
-		palive = (void *)pkt->data;
-		umac = &palive->umac_data;
-		lmac1 = &palive->lmac_data[0];
-		lmac2 = &palive->lmac_data[1];
-		status = le16_to_cpu(palive->status);
-
-		mvm->trans->sku_id[0] = le32_to_cpu(palive->sku_id.data[0]);
-		mvm->trans->sku_id[1] = le32_to_cpu(palive->sku_id.data[1]);
-		mvm->trans->sku_id[2] = le32_to_cpu(palive->sku_id.data[2]);
-
-		IWL_DEBUG_FW(mvm, "Got sku_id: 0x0%x 0x0%x 0x0%x\n",
-			     mvm->trans->sku_id[0],
-			     mvm->trans->sku_id[1],
-			     mvm->trans->sku_id[2]);
-	} else if (iwl_rx_packet_payload_len(pkt) == sizeof(struct iwl_alive_ntf_v4)) {
-		struct iwl_alive_ntf_v4 *palive;
-
-		if (pkt_len < sizeof(*palive))
-			return false;
-
-		palive = (void *)pkt->data;
-		umac = &palive->umac_data;
-		lmac1 = &palive->lmac_data[0];
-		lmac2 = &palive->lmac_data[1];
-		status = le16_to_cpu(palive->status);
+			IWL_DEBUG_FW(mvm, "platform id: 0x%llx\n",
+				     palive_v8->platform_id);
+		}
 	} else if (iwl_rx_packet_payload_len(pkt) ==
 		   sizeof(struct iwl_alive_ntf_v3)) {
 		struct iwl_alive_ntf_v3 *palive3;
@@ -220,20 +214,10 @@ static bool iwl_alive_fn(struct iwl_notif_wait_data *notif_wait,
 							~FW_ADDR_CACHE_CONTROL;
 
 	if (umac_error_table) {
-		if (umac_error_table >=
-		    mvm->trans->cfg->min_umac_error_event_table) {
-			iwl_fw_umac_set_alive_err_table(mvm->trans,
-							umac_error_table);
-		} else {
-			IWL_ERR(mvm,
-				"Not valid error log pointer 0x%08X for %s uCode\n",
-				umac_error_table,
-				(mvm->fwrt.cur_fw_img == IWL_UCODE_INIT) ?
-				"Init" : "RT");
-		}
+		iwl_fw_umac_set_alive_err_table(mvm->trans,
+						umac_error_table);
 	}
 
-	alive_data->scd_base_addr = le32_to_cpu(lmac1->dbg_ptrs.scd_base_ptr);
 	alive_data->valid = status == IWL_ALIVE_STATUS_OK;
 
 	IWL_DEBUG_FW(mvm,
@@ -282,7 +266,7 @@ static void iwl_mvm_print_pd_notification(struct iwl_mvm *mvm)
 	IWL_ERR(mvm, #reg_name ": 0x%x\n", iwl_read_umac_prph(trans, reg_name))
 
 	struct iwl_trans *trans = mvm->trans;
-	enum iwl_device_family device_family = trans->trans_cfg->device_family;
+	enum iwl_device_family device_family = trans->mac_cfg->device_family;
 
 	if (device_family < IWL_DEVICE_FAMILY_8000)
 		return;
@@ -304,7 +288,6 @@ static int iwl_mvm_load_ucode_wait_alive(struct iwl_mvm *mvm,
 {
 	struct iwl_notification_wait alive_wait;
 	struct iwl_mvm_alive_data alive_data = {};
-	const struct fw_img *fw;
 	int ret;
 	enum iwl_ucode_type old_type = mvm->fwrt.cur_fw_img;
 	static const u16 alive_cmd[] = { UCODE_ALIVE_NTFY };
@@ -317,11 +300,7 @@ static int iwl_mvm_load_ucode_wait_alive(struct iwl_mvm *mvm,
 	    iwl_fw_dbg_conf_usniffer(mvm->fw, FW_DBG_START_FROM_ALIVE) &&
 	    !(fw_has_capa(&mvm->fw->ucode_capa,
 			  IWL_UCODE_TLV_CAPA_USNIFFER_UNIFIED)))
-		fw = iwl_get_ucode_image(mvm->fw, IWL_UCODE_REGULAR_USNIFFER);
-	else
-		fw = iwl_get_ucode_image(mvm->fw, ucode_type);
-	if (WARN_ON(!fw))
-		return -EINVAL;
+		ucode_type = IWL_UCODE_REGULAR_USNIFFER;
 	iwl_fw_set_current_image(&mvm->fwrt, ucode_type);
 	clear_bit(IWL_MVM_STATUS_FIRMWARE_RUNNING, &mvm->status);
 
@@ -334,7 +313,8 @@ static int iwl_mvm_load_ucode_wait_alive(struct iwl_mvm *mvm,
 	 * For the unified firmware case, the ucode_type is not
 	 * INIT, but we still need to run it.
 	 */
-	ret = iwl_trans_start_fw(mvm->trans, fw, run_in_rfkill);
+	ret = iwl_trans_start_fw(mvm->trans, mvm->fw, ucode_type,
+				 run_in_rfkill);
 	if (ret) {
 		iwl_fw_set_current_image(&mvm->fwrt, old_type);
 		iwl_remove_notification(&mvm->notif_wait, &alive_wait);
@@ -348,7 +328,7 @@ static int iwl_mvm_load_ucode_wait_alive(struct iwl_mvm *mvm,
 	ret = iwl_wait_notification(&mvm->notif_wait, &alive_wait,
 				    MVM_UCODE_ALIVE_TIMEOUT);
 
-	if (mvm->trans->trans_cfg->device_family ==
+	if (mvm->trans->mac_cfg->device_family ==
 	    IWL_DEVICE_FAMILY_AX210) {
 		/* print these registers regardless of alive fail/success */
 		IWL_INFO(mvm, "WFPM_UMAC_PD_NOTIFICATION: 0x%x\n",
@@ -365,14 +345,14 @@ static int iwl_mvm_load_ucode_wait_alive(struct iwl_mvm *mvm,
 		struct iwl_trans *trans = mvm->trans;
 
 		/* SecBoot info */
-		if (trans->trans_cfg->device_family >=
+		if (trans->mac_cfg->device_family >=
 					IWL_DEVICE_FAMILY_22000) {
 			IWL_ERR(mvm,
 				"SecBoot CPU1 Status: 0x%x, CPU2 Status: 0x%x\n",
 				iwl_read_umac_prph(trans, UMAG_SB_CPU_1_STATUS),
 				iwl_read_umac_prph(trans,
 						   UMAG_SB_CPU_2_STATUS));
-		} else if (trans->trans_cfg->device_family >=
+		} else if (trans->mac_cfg->device_family >=
 			   IWL_DEVICE_FAMILY_8000) {
 			IWL_ERR(mvm,
 				"SecBoot CPU1 Status: 0x%x, CPU2 Status: 0x%x\n",
@@ -383,7 +363,7 @@ static int iwl_mvm_load_ucode_wait_alive(struct iwl_mvm *mvm,
 		iwl_mvm_print_pd_notification(mvm);
 
 		/* LMAC/UMAC PC info */
-		if (trans->trans_cfg->device_family >=
+		if (trans->mac_cfg->device_family >=
 					IWL_DEVICE_FAMILY_22000) {
 			pc_data = trans->dbg.pc_data;
 			for (count = 0; count < trans->dbg.num_pc;
@@ -391,7 +371,7 @@ static int iwl_mvm_load_ucode_wait_alive(struct iwl_mvm *mvm,
 				IWL_ERR(mvm, "%s: 0x%x\n",
 					pc_data->pc_name,
 					pc_data->pc_address);
-		} else if (trans->trans_cfg->device_family >=
+		} else if (trans->mac_cfg->device_family >=
 					IWL_DEVICE_FAMILY_9000) {
 			IWL_ERR(mvm, "UMAC PC: 0x%x\n",
 				iwl_read_umac_prph(trans,
@@ -422,10 +402,10 @@ static int iwl_mvm_load_ucode_wait_alive(struct iwl_mvm *mvm,
 	/* if reached this point, Alive notification was received */
 	iwl_mei_alive_notif(true);
 
-	iwl_trans_fw_alive(mvm->trans, alive_data.scd_base_addr);
+	iwl_trans_fw_alive(mvm->trans);
 
 	ret = iwl_pnvm_load(mvm->trans, &mvm->notif_wait,
-			    &mvm->fw->ucode_capa);
+			    mvm->fw, alive_data.sku_id);
 	if (ret) {
 		IWL_ERR(mvm, "Timeout waiting for PNVM load!\n");
 		iwl_fw_set_current_image(&mvm->fwrt, old_type);
@@ -473,29 +453,30 @@ static void iwl_mvm_phy_filter_init(struct iwl_mvm *mvm,
 				    struct iwl_phy_specific_cfg *phy_filters)
 {
 #ifdef CONFIG_ACPI
-	*phy_filters = mvm->phy_filters;
+	*phy_filters = mvm->fwrt.phy_filters;
 #endif /* CONFIG_ACPI */
 }
 
 static void iwl_mvm_uats_init(struct iwl_mvm *mvm)
 {
-	u8 cmd_ver;
-	int ret;
-	struct iwl_host_cmd cmd = {
-		.id = WIDE_ID(REGULATORY_AND_NVM_GROUP,
-			      MCC_ALLOWED_AP_TYPE_CMD),
-		.flags = 0,
-		.data[0] = &mvm->fwrt.uats_table,
-		.len[0] =  sizeof(mvm->fwrt.uats_table),
+	struct iwl_mcc_allowed_ap_type_cmd_v1 *cmd __free(kfree) = NULL;
+	int cmd_id = WIDE_ID(REGULATORY_AND_NVM_GROUP,
+			     MCC_ALLOWED_AP_TYPE_CMD);
+	struct iwl_host_cmd hcmd = {
+		.id = cmd_id,
+		.len[0] = sizeof(*cmd),
 		.dataflags[0] = IWL_HCMD_DFL_NOCOPY,
 	};
+	u8 cmd_ver;
+	int ret;
 
-	if (mvm->trans->trans_cfg->device_family < IWL_DEVICE_FAMILY_AX210) {
+	if (mvm->trans->mac_cfg->device_family < IWL_DEVICE_FAMILY_AX210 ||
+	    !mvm->trans->cfg->uhb_supported) {
 		IWL_DEBUG_RADIO(mvm, "UATS feature is not supported\n");
 		return;
 	}
 
-	cmd_ver = iwl_fw_lookup_cmd_ver(mvm->fw, cmd.id,
+	cmd_ver = iwl_fw_lookup_cmd_ver(mvm->fw, cmd_id,
 					IWL_FW_CMD_VER_UNKNOWN);
 	if (cmd_ver != 1) {
 		IWL_DEBUG_RADIO(mvm,
@@ -504,13 +485,30 @@ static void iwl_mvm_uats_init(struct iwl_mvm *mvm)
 		return;
 	}
 
-	ret = iwl_uefi_get_uats_table(mvm->trans, &mvm->fwrt);
-	if (ret < 0) {
-		IWL_DEBUG_FW(mvm, "failed to read UATS table (%d)\n", ret);
-		return;
-	}
+	iwl_uefi_get_uats_table(mvm->trans, &mvm->fwrt);
 
-	ret = iwl_mvm_send_cmd(mvm, &cmd);
+	if (!mvm->fwrt.ap_type_cmd_valid)
+		return;
+
+	/* Since we free the command immediately after iwl_mvm_send_cmd, we
+	 * must send this command in SYNC mode.
+	 */
+	lockdep_assert_held(&mvm->mutex);
+
+	cmd = kzalloc_obj(*cmd);
+	if (!cmd)
+		return;
+
+	BUILD_BUG_ON(sizeof(mvm->fwrt.ap_type_cmd.mcc_to_ap_type_map) !=
+		     sizeof(cmd->mcc_to_ap_type_map));
+
+	memcpy(cmd->mcc_to_ap_type_map,
+	       mvm->fwrt.ap_type_cmd.mcc_to_ap_type_map,
+	       sizeof(mvm->fwrt.ap_type_cmd.mcc_to_ap_type_map));
+
+	hcmd.data[0] = cmd;
+
+	ret = iwl_mvm_send_cmd(mvm, &hcmd);
 	if (ret < 0)
 		IWL_ERR(mvm, "failed to send MCC_ALLOWED_AP_TYPE_CMD (%d)\n",
 			ret);
@@ -578,7 +576,7 @@ static int iwl_send_phy_cfg_cmd(struct iwl_mvm *mvm)
 
 	/* set flags extra PHY configuration flags from the device's cfg */
 	phy_cfg_cmd.phy_cfg |=
-		cpu_to_le32(mvm->trans->trans_cfg->extra_phy_cfg_flags);
+		cpu_to_le32(mvm->trans->mac_cfg->extra_phy_cfg_flags);
 
 	phy_cfg_cmd.calib_control.event_trigger =
 		mvm->fw->default_calib[ucode_type].event_trigger;
@@ -617,7 +615,7 @@ static int iwl_run_unified_mvm_ucode(struct iwl_mvm *mvm)
 
 	mvm->rfkill_safe_init_done = false;
 
-	if (mvm->trans->trans_cfg->device_family == IWL_DEVICE_FAMILY_AX210) {
+	if (mvm->trans->mac_cfg->device_family == IWL_DEVICE_FAMILY_AX210) {
 		sb_cfg = iwl_read_umac_prph(mvm->trans, SB_MODIFY_CFG_FLAG);
 		/* if needed, we'll reset this on our way out later */
 		mvm->fw_product_reset = sb_cfg == SB_CFG_RESIDES_IN_ROM;
@@ -650,11 +648,6 @@ static int iwl_run_unified_mvm_ucode(struct iwl_mvm *mvm)
 	}
 	iwl_dbg_tlv_time_point(&mvm->fwrt, IWL_FW_INI_TIME_POINT_AFTER_ALIVE,
 			       NULL);
-
-	if (mvm->trans->trans_cfg->device_family >= IWL_DEVICE_FAMILY_BZ)
-		mvm->trans->step_urm = !!(iwl_read_umac_prph(mvm->trans,
-							     CNVI_PMU_STEP_FLOW) &
-						CNVI_PMU_STEP_FLOW_FORCE_URM);
 
 	/* Send init config command to mark that we are sending NVM access
 	 * commands
@@ -756,7 +749,7 @@ int iwl_run_init_mvm_ucode(struct iwl_mvm *mvm)
 		goto remove_notif;
 	}
 
-	if (mvm->trans->trans_cfg->device_family < IWL_DEVICE_FAMILY_8000) {
+	if (mvm->trans->mac_cfg->device_family < IWL_DEVICE_FAMILY_8000) {
 		ret = iwl_mvm_send_bt_init_conf(mvm);
 		if (ret)
 			goto remove_notif;
@@ -854,7 +847,7 @@ static int iwl_mvm_config_ltr(struct iwl_mvm *mvm)
 		.flags = cpu_to_le32(LTR_CFG_FLAG_FEATURE_ENABLE),
 	};
 
-	if (!mvm->trans->ltr_enabled)
+	if (!iwl_trans_is_ltr_enabled(mvm->trans))
 		return 0;
 
 	return iwl_mvm_send_cmd_pdu(mvm, LTR_CONFIG, 0,
@@ -887,17 +880,11 @@ int iwl_mvm_sar_select_profile(struct iwl_mvm *mvm, int prof_a, int prof_b)
 		len = sizeof(cmd_v9_v10.v9);
 		n_subbands = IWL_NUM_SUB_BANDS_V1;
 		per_chain = &cmd_v9_v10.v9.per_chain[0][0];
-	} else if (cmd_ver >= 7) {
-		len = sizeof(cmd.v7);
+	} else if (cmd_ver == 8) {
+		len = sizeof(cmd.v8);
 		n_subbands = IWL_NUM_SUB_BANDS_V2;
-		per_chain = cmd.v7.per_chain[0][0];
-		cmd.v7.flags = cpu_to_le32(mvm->fwrt.reduced_power_flags);
-		if (cmd_ver == 8)
-			len = sizeof(cmd.v8);
-	} else if (cmd_ver == 6) {
-		len = sizeof(cmd.v6);
-		n_subbands = IWL_NUM_SUB_BANDS_V2;
-		per_chain = cmd.v6.per_chain[0][0];
+		per_chain = cmd.v8.per_chain[0][0];
+		cmd.v8.flags = cpu_to_le32(mvm->fwrt.reduced_power_flags);
 	} else if (fw_has_api(&mvm->fw->ucode_capa,
 			      IWL_UCODE_TLV_API_REDUCE_TX_POWER)) {
 		len = sizeof(cmd.v5);
@@ -938,7 +925,7 @@ int iwl_mvm_sar_select_profile(struct iwl_mvm *mvm, int prof_a, int prof_b)
 
 int iwl_mvm_get_sar_geo_profile(struct iwl_mvm *mvm)
 {
-	union iwl_geo_tx_power_profiles_cmd geo_tx_cmd;
+	union iwl_geo_tx_power_profiles_cmd geo_tx_cmd = {};
 	struct iwl_geo_tx_power_profiles_resp *resp;
 	u16 len;
 	int ret;
@@ -977,12 +964,22 @@ int iwl_mvm_get_sar_geo_profile(struct iwl_mvm *mvm)
 		return ret;
 	}
 
+	if (IWL_FW_CHECK(mvm,
+			 iwl_rx_packet_payload_len(cmd.resp_pkt) !=
+			 sizeof(*resp),
+			 "Wrong size for iwl_geo_tx_power_profiles_resp: %d\n",
+			 iwl_rx_packet_payload_len(cmd.resp_pkt))) {
+		ret = -EIO;
+		goto out;
+	}
+
 	resp = (void *)cmd.resp_pkt->data;
 	ret = le32_to_cpu(resp->profile_idx);
 
 	if (WARN_ON(ret > BIOS_GEO_MAX_PROFILE_NUM))
 		ret = -EIO;
 
+out:
 	iwl_free_resp(&cmd);
 	return ret;
 }
@@ -990,7 +987,7 @@ int iwl_mvm_get_sar_geo_profile(struct iwl_mvm *mvm)
 static int iwl_mvm_sar_geo_init(struct iwl_mvm *mvm)
 {
 	u32 cmd_id = WIDE_ID(PHY_OPS_GROUP, PER_CHAIN_LIMIT_OFFSET_CMD);
-	union iwl_geo_tx_power_profiles_cmd cmd;
+	union iwl_geo_tx_power_profiles_cmd cmd = {};
 	u16 len;
 	u32 n_bands;
 	u32 n_profiles;
@@ -1064,12 +1061,139 @@ static int iwl_mvm_sar_geo_init(struct iwl_mvm *mvm)
 	return iwl_mvm_send_cmd_pdu(mvm, cmd_id, 0, len, &cmd);
 }
 
+static bool iwl_mvm_ppag_value_valid(struct iwl_fw_runtime *fwrt, int chain,
+				     int subband)
+{
+	s8 ppag_val = fwrt->ppag_chains[chain].subbands[subband];
+
+	if ((subband == 0 &&
+	     (ppag_val > IWL_PPAG_MAX_LB || ppag_val < IWL_PPAG_MIN_LB)) ||
+	    (subband != 0 &&
+	     (ppag_val > IWL_PPAG_MAX_HB || ppag_val < IWL_PPAG_MIN_HB))) {
+		IWL_DEBUG_RADIO(fwrt, "Invalid PPAG value: %d\n", ppag_val);
+		return false;
+	}
+	return true;
+}
+
+static int iwl_mvm_fill_ppag_table(struct iwl_fw_runtime *fwrt,
+				   union iwl_ppag_table_cmd *cmd,
+				   int *cmd_size)
+{
+	u8 cmd_ver;
+	int i, j, num_sub_bands;
+	s8 *gain;
+	bool send_ppag_always;
+
+	/* many firmware images for JF lie about this */
+	if (CSR_HW_RFID_TYPE(fwrt->trans->info.hw_rf_id) ==
+	    CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_JF))
+		return -EOPNOTSUPP;
+
+	if (!fw_has_capa(&fwrt->fw->ucode_capa, IWL_UCODE_TLV_CAPA_SET_PPAG)) {
+		IWL_DEBUG_RADIO(fwrt,
+				"PPAG capability not supported by FW, command not sent.\n");
+		return -EINVAL;
+	}
+
+	cmd_ver = iwl_fw_lookup_cmd_ver(fwrt->fw,
+					WIDE_ID(PHY_OPS_GROUP,
+						PER_PLATFORM_ANT_GAIN_CMD), 1);
+	/*
+	 * Starting from ver 4, driver needs to send the PPAG CMD regardless
+	 * if PPAG is enabled/disabled or valid/invalid.
+	 */
+	send_ppag_always = cmd_ver > 3;
+
+	/* Don't send PPAG if it is disabled */
+	if (!send_ppag_always && !fwrt->ppag_flags) {
+		IWL_DEBUG_RADIO(fwrt, "PPAG not enabled, command not sent.\n");
+		return -EINVAL;
+	}
+
+	IWL_DEBUG_RADIO(fwrt, "PPAG cmd ver is %d\n", cmd_ver);
+	if (cmd_ver == 1) {
+		num_sub_bands = IWL_NUM_SUB_BANDS_V1;
+		gain = cmd->v1.gain[0];
+		*cmd_size = sizeof(cmd->v1);
+		cmd->v1.flags =
+			cpu_to_le32(fwrt->ppag_flags & IWL_PPAG_CMD_V1_MASK);
+		if (fwrt->ppag_bios_rev >= 1) {
+			/* in this case FW supports revision 0 */
+			IWL_DEBUG_RADIO(fwrt,
+					"PPAG table rev is %d, send truncated table\n",
+					fwrt->ppag_bios_rev);
+		}
+	} else if (cmd_ver == 5) {
+		num_sub_bands = IWL_NUM_SUB_BANDS_V2;
+		gain = cmd->v5.gain[0];
+		*cmd_size = sizeof(cmd->v5);
+		cmd->v5.flags =
+			cpu_to_le32(fwrt->ppag_flags & IWL_PPAG_CMD_V5_MASK);
+		if (fwrt->ppag_bios_rev == 0) {
+			/* in this case FW supports revisions 1,2 or 3 */
+			IWL_DEBUG_RADIO(fwrt,
+					"PPAG table rev is 0, send padded table\n");
+		}
+	} else if (cmd_ver == 7) {
+		num_sub_bands = IWL_NUM_SUB_BANDS_V2;
+		gain = cmd->v7.gain[0];
+		*cmd_size = sizeof(cmd->v7);
+		cmd->v7.ppag_config_info.hdr.table_source =
+			fwrt->ppag_bios_source;
+		cmd->v7.ppag_config_info.hdr.table_revision =
+			fwrt->ppag_bios_rev;
+		cmd->v7.ppag_config_info.value = cpu_to_le32(fwrt->ppag_flags);
+	} else {
+		IWL_DEBUG_RADIO(fwrt, "Unsupported PPAG command version\n");
+		return -EINVAL;
+	}
+
+	/* ppag mode */
+	IWL_DEBUG_RADIO(fwrt,
+			"PPAG MODE bits were read from bios: %d\n",
+			fwrt->ppag_flags);
+
+	if (cmd_ver == 1 &&
+	    !fw_has_capa(&fwrt->fw->ucode_capa,
+			 IWL_UCODE_TLV_CAPA_PPAG_CHINA_BIOS_SUPPORT)) {
+		cmd->v1.flags &= cpu_to_le32(IWL_PPAG_ETSI_MASK);
+		IWL_DEBUG_RADIO(fwrt, "masking ppag China bit\n");
+	} else {
+		IWL_DEBUG_RADIO(fwrt, "isn't masking ppag China bit\n");
+	}
+
+	/* The 'flags' field is the same in v1 and v5 so we can just
+	 * use v1 to access it.
+	 */
+	IWL_DEBUG_RADIO(fwrt,
+			"PPAG MODE bits going to be sent: %d\n",
+			(cmd_ver < 7) ? le32_to_cpu(cmd->v1.flags) :
+					le32_to_cpu(cmd->v7.ppag_config_info.value));
+
+	for (i = 0; i < IWL_NUM_CHAIN_LIMITS; i++) {
+		for (j = 0; j < num_sub_bands; j++) {
+			if (!send_ppag_always &&
+			    !iwl_mvm_ppag_value_valid(fwrt, i, j))
+				return -EINVAL;
+
+			gain[i * num_sub_bands + j] =
+				fwrt->ppag_chains[i].subbands[j];
+			IWL_DEBUG_RADIO(fwrt,
+					"PPAG table: chain[%d] band[%d]: gain = %d\n",
+					i, j, gain[i * num_sub_bands + j]);
+		}
+	}
+
+	return 0;
+}
+
 int iwl_mvm_ppag_send_cmd(struct iwl_mvm *mvm)
 {
 	union iwl_ppag_table_cmd cmd;
 	int ret, cmd_size;
 
-	ret = iwl_fill_ppag_table(&mvm->fwrt, &cmd, &cmd_size);
+	ret = iwl_mvm_fill_ppag_table(&mvm->fwrt, &cmd, &cmd_size);
 	/* Not supporting PPAG table is a valid scenario */
 	if (ret < 0)
 		return 0;
@@ -1092,22 +1216,6 @@ static int iwl_mvm_ppag_init(struct iwl_mvm *mvm)
 		return 0;
 
 	return iwl_mvm_ppag_send_cmd(mvm);
-}
-
-static bool
-iwl_mvm_add_to_tas_block_list(u16 *list, u8 *size, u16 mcc)
-{
-	/* Verify that there is room for another country */
-	if (*size >= IWL_WTAS_BLACK_LIST_MAX)
-		return false;
-
-	for (u8 i = 0; i < *size; i++) {
-		if (list[i] == mcc)
-			return true;
-	}
-
-	list[*size++] = mcc;
-	return true;
 }
 
 static void iwl_mvm_tas_init(struct iwl_mvm *mvm)
@@ -1150,10 +1258,10 @@ static void iwl_mvm_tas_init(struct iwl_mvm *mvm)
 		IWL_DEBUG_RADIO(mvm,
 				"System vendor '%s' is not in the approved list, disabling TAS in US and Canada.\n",
 				dmi_get_system_info(DMI_SYS_VENDOR) ?: "<unknown>");
-		if ((!iwl_mvm_add_to_tas_block_list(data.block_list_array,
+		if ((!iwl_add_mcc_to_tas_block_list(data.block_list_array,
 						    &data.block_list_size,
 						    IWL_MCC_US)) ||
-		    (!iwl_mvm_add_to_tas_block_list(data.block_list_array,
+		    (!iwl_add_mcc_to_tas_block_list(data.block_list_array,
 						    &data.block_list_size,
 						    IWL_MCC_CANADA))) {
 			IWL_DEBUG_RADIO(mvm,
@@ -1183,8 +1291,9 @@ static void iwl_mvm_tas_init(struct iwl_mvm *mvm)
 		for (u16 i = 0; i < data.block_list_size; i++)
 			cmd_v5.block_list_array[i] =
 				cpu_to_le16(data.block_list_array[i]);
-		cmd_v5.tas_config_info.table_source = data.table_source;
-		cmd_v5.tas_config_info.table_revision = data.table_revision;
+		cmd_v5.tas_config_info.hdr.table_source = data.table_source;
+		cmd_v5.tas_config_info.hdr.table_revision =
+			data.table_revision;
 		cmd_v5.tas_config_info.value = cpu_to_le32(data.tas_selection);
 	} else if (fw_ver == 4) {
 		cmd_size = sizeof(cmd_v2_v4.common) + sizeof(cmd_v2_v4.v4);
@@ -1213,36 +1322,199 @@ static void iwl_mvm_tas_init(struct iwl_mvm *mvm)
 		IWL_DEBUG_RADIO(mvm, "failed to send TAS_CONFIG (%d)\n", ret);
 }
 
-static bool iwl_mvm_eval_dsm_rfi(struct iwl_mvm *mvm)
+static __le32 iwl_mvm_get_lari_config_bitmap(struct iwl_fw_runtime *fwrt)
 {
-	u32 value = 0;
-	/* default behaviour is disabled */
-	bool bios_enable_rfi = false;
-	int ret = iwl_bios_get_dsm(&mvm->fwrt, DSM_FUNC_RFI_CONFIG, &value);
+	int ret;
+	u32 val;
+	__le32 config_bitmap = 0;
 
+	switch (CSR_HW_RFID_TYPE(fwrt->trans->info.hw_rf_id)) {
+	case IWL_CFG_RF_TYPE_HR1:
+	case IWL_CFG_RF_TYPE_HR2:
+	case IWL_CFG_RF_TYPE_JF1:
+	case IWL_CFG_RF_TYPE_JF2:
+		ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_ENABLE_INDONESIA_5G2,
+				       &val);
 
-	if (ret < 0) {
-		IWL_DEBUG_RADIO(mvm, "Failed to get DSM RFI, ret=%d\n", ret);
-		return bios_enable_rfi;
+		if (!ret && val == DSM_VALUE_INDONESIA_ENABLE)
+			config_bitmap |=
+			    cpu_to_le32(LARI_CONFIG_ENABLE_5G2_IN_INDONESIA_MSK);
+		break;
+	default:
+		break;
 	}
 
-	value &= DSM_VALUE_RFI_DISABLE;
-	/* RFI BIOS CONFIG value can be 0 or 3 only.
-	 * i.e 0 means DDR and DLVR enabled. 3 means DDR and DLVR disabled.
-	 * 1 and 2 are invalid BIOS configurations, So, it's not possible to
-	 * disable ddr/dlvr separately.
-	 */
-	if (!value) {
-		IWL_DEBUG_RADIO(mvm, "DSM RFI is evaluated to enable\n");
-		bios_enable_rfi = true;
-	} else if (value == DSM_VALUE_RFI_DISABLE) {
-		IWL_DEBUG_RADIO(mvm, "DSM RFI is evaluated to disable\n");
+	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_DISABLE_SRD, &val);
+	if (!ret) {
+		if (val == DSM_VALUE_SRD_PASSIVE)
+			config_bitmap |=
+				cpu_to_le32(LARI_CONFIG_CHANGE_ETSI_TO_PASSIVE_MSK);
+		else if (val == DSM_VALUE_SRD_DISABLE)
+			config_bitmap |=
+				cpu_to_le32(LARI_CONFIG_CHANGE_ETSI_TO_DISABLED_MSK);
+	}
+
+	if (fw_has_capa(&fwrt->fw->ucode_capa,
+			IWL_UCODE_TLV_CAPA_CHINA_22_REG_SUPPORT)) {
+		ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_REGULATORY_CONFIG,
+				       &val);
+		/*
+		 * China 2022 enable if the BIOS object does not exist or
+		 * if it is enabled in BIOS.
+		 */
+		if (ret < 0 || val & DSM_MASK_CHINA_22_REG)
+			config_bitmap |=
+				cpu_to_le32(LARI_CONFIG_ENABLE_CHINA_22_REG_SUPPORT_MSK);
+	}
+
+	return config_bitmap;
+}
+
+static size_t iwl_mvm_get_lari_config_cmd_size(u8 cmd_ver)
+{
+	size_t cmd_size;
+
+	switch (cmd_ver) {
+	case 12:
+		cmd_size = offsetof(struct iwl_lari_config_change_cmd,
+				    oem_11bn_allow_bitmap);
+		break;
+	case 8:
+		cmd_size = sizeof(struct iwl_lari_config_change_cmd_v8);
+		break;
+	case 6:
+		cmd_size = sizeof(struct iwl_lari_config_change_cmd_v6);
+		break;
+	default:
+		cmd_size = sizeof(struct iwl_lari_config_change_cmd_v1);
+		break;
+	}
+	return cmd_size;
+}
+
+static int iwl_mvm_fill_lari_config(struct iwl_fw_runtime *fwrt,
+				    struct iwl_lari_config_change_cmd *cmd,
+				    size_t *cmd_size)
+{
+	int ret;
+	u32 value;
+	bool has_raw_dsm_capa = fw_has_capa(&fwrt->fw->ucode_capa,
+					    IWL_UCODE_TLV_CAPA_FW_ACCEPTS_RAW_DSM_TABLE);
+	u8 cmd_ver = iwl_fw_lookup_cmd_ver(fwrt->fw,
+					   WIDE_ID(REGULATORY_AND_NVM_GROUP,
+						   LARI_CONFIG_CHANGE), 1);
+
+	memset(cmd, 0, sizeof(*cmd));
+	*cmd_size = iwl_mvm_get_lari_config_cmd_size(cmd_ver);
+
+	cmd->config_bitmap = iwl_mvm_get_lari_config_bitmap(fwrt);
+
+	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_11AX_ENABLEMENT, &value);
+	if (!ret) {
+		if (!has_raw_dsm_capa)
+			value &= DSM_11AX_ALLOW_BITMAP;
+		cmd->oem_11ax_allow_bitmap = cpu_to_le32(value);
+	}
+
+	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_ENABLE_UNII4_CHAN, &value);
+	if (!ret) {
+		if (!has_raw_dsm_capa)
+			value &= DSM_UNII4_ALLOW_BITMAP;
+
+		/* Since version 12, bits 4 and 5 are supported
+		 * regardless of this capability, By pass this masking
+		 * if firmware has capability of accepting raw DSM table.
+		 */
+		if (!has_raw_dsm_capa && cmd_ver < 12 &&
+		    !fw_has_capa(&fwrt->fw->ucode_capa,
+				 IWL_UCODE_TLV_CAPA_BIOS_OVERRIDE_5G9_FOR_CA))
+			value &= ~(DSM_VALUE_UNII4_CANADA_OVERRIDE_MSK |
+				   DSM_VALUE_UNII4_CANADA_EN_MSK);
+
+		cmd->oem_unii4_allow_bitmap = cpu_to_le32(value);
+	}
+
+	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_ACTIVATE_CHANNEL, &value);
+	if (!ret) {
+		if (!has_raw_dsm_capa)
+			value &= CHAN_STATE_ACTIVE_BITMAP_CMD_V12;
+
+		if (!has_raw_dsm_capa && cmd_ver < 8)
+			value &= ~ACTIVATE_5G2_IN_WW_MASK;
+
+		/* Since version 12, bits 5 and 6 are supported
+		 * regardless of this capability, By pass this masking
+		 * if firmware has capability of accepting raw DSM table.
+		 */
+		if (!has_raw_dsm_capa && cmd_ver < 12 &&
+		    !fw_has_capa(&fwrt->fw->ucode_capa,
+				 IWL_UCODE_TLV_CAPA_BIOS_OVERRIDE_UNII4_US_CA))
+			value &= CHAN_STATE_ACTIVE_BITMAP_CMD_V8;
+
+		cmd->chan_state_active_bitmap = cpu_to_le32(value);
+	}
+
+	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_ENABLE_6E, &value);
+	if (!ret)
+		cmd->oem_uhb_allow_bitmap = cpu_to_le32(value);
+
+	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_FORCE_DISABLE_CHANNELS, &value);
+	if (!ret) {
+		if (!has_raw_dsm_capa)
+			value &= DSM_FORCE_DISABLE_CHANNELS_ALLOWED_BITMAP;
+		cmd->force_disable_channels_bitmap = cpu_to_le32(value);
+	}
+
+	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_ENERGY_DETECTION_THRESHOLD,
+			       &value);
+	if (!ret) {
+		if (!has_raw_dsm_capa)
+			value &= DSM_EDT_ALLOWED_BITMAP;
+		cmd->edt_bitmap = cpu_to_le32(value);
+	}
+
+	ret = iwl_bios_get_wbem(fwrt, &value);
+	if (!ret)
+		cmd->oem_320mhz_allow_bitmap = cpu_to_le32(value);
+
+	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_ENABLE_11BE, &value);
+	if (!ret)
+		cmd->oem_11be_allow_bitmap = cpu_to_le32(value);
+
+	if (cmd->config_bitmap ||
+	    cmd->oem_uhb_allow_bitmap ||
+	    cmd->oem_11ax_allow_bitmap ||
+	    cmd->oem_unii4_allow_bitmap ||
+	    cmd->chan_state_active_bitmap ||
+	    cmd->force_disable_channels_bitmap ||
+	    cmd->edt_bitmap ||
+	    cmd->oem_320mhz_allow_bitmap ||
+	    cmd->oem_11be_allow_bitmap) {
+		IWL_DEBUG_RADIO(fwrt,
+				"sending LARI_CONFIG_CHANGE, config_bitmap=0x%x, oem_11ax_allow_bitmap=0x%x\n",
+				le32_to_cpu(cmd->config_bitmap),
+				le32_to_cpu(cmd->oem_11ax_allow_bitmap));
+		IWL_DEBUG_RADIO(fwrt,
+				"sending LARI_CONFIG_CHANGE, oem_unii4_allow_bitmap=0x%x, chan_state_active_bitmap=0x%x, cmd_ver=%d\n",
+				le32_to_cpu(cmd->oem_unii4_allow_bitmap),
+				le32_to_cpu(cmd->chan_state_active_bitmap),
+				cmd_ver);
+		IWL_DEBUG_RADIO(fwrt,
+				"sending LARI_CONFIG_CHANGE, oem_uhb_allow_bitmap=0x%x, force_disable_channels_bitmap=0x%x\n",
+				le32_to_cpu(cmd->oem_uhb_allow_bitmap),
+				le32_to_cpu(cmd->force_disable_channels_bitmap));
+		IWL_DEBUG_RADIO(fwrt,
+				"sending LARI_CONFIG_CHANGE, edt_bitmap=0x%x, oem_320mhz_allow_bitmap=0x%x\n",
+				le32_to_cpu(cmd->edt_bitmap),
+				le32_to_cpu(cmd->oem_320mhz_allow_bitmap));
+		IWL_DEBUG_RADIO(fwrt,
+				"sending LARI_CONFIG_CHANGE, oem_11be_allow_bitmap=0x%x\n",
+				le32_to_cpu(cmd->oem_11be_allow_bitmap));
 	} else {
-		IWL_DEBUG_RADIO(mvm,
-				"DSM RFI got invalid value, value=%d\n", value);
+		return 1;
 	}
 
-	return bios_enable_rfi;
+	return 0;
 }
 
 static void iwl_mvm_lari_cfg(struct iwl_mvm *mvm)
@@ -1251,7 +1523,7 @@ static void iwl_mvm_lari_cfg(struct iwl_mvm *mvm)
 	size_t cmd_size;
 	int ret;
 
-	ret = iwl_fill_lari_config(&mvm->fwrt, &cmd, &cmd_size);
+	ret = iwl_mvm_fill_lari_config(&mvm->fwrt, &cmd, &cmd_size);
 	if (!ret) {
 		ret = iwl_mvm_send_cmd_pdu(mvm,
 					   WIDE_ID(REGULATORY_AND_NVM_GROUP,
@@ -1318,7 +1590,7 @@ void iwl_mvm_get_bios_tables(struct iwl_mvm *mvm)
 		}
 	}
 
-	iwl_acpi_get_phy_filters(&mvm->fwrt, &mvm->phy_filters);
+	iwl_acpi_get_phy_filters(&mvm->fwrt);
 
 	if (iwl_bios_get_eckv(&mvm->fwrt, &mvm->ext_clock_valid))
 		IWL_DEBUG_RADIO(mvm, "ECKV table doesn't exist in BIOS\n");
@@ -1509,9 +1781,6 @@ int iwl_mvm_up(struct iwl_mvm *mvm)
 		RCU_INIT_POINTER(mvm->fw_id_to_link_sta[i], NULL);
 	}
 
-	for (i = 0; i < IWL_FW_MAX_LINK_ID + 1; i++)
-		RCU_INIT_POINTER(mvm->link_id_to_link_conf[i], NULL);
-
 	mvm->tdls_cs.peer.sta_id = IWL_INVALID_STA;
 
 	/* reset quota debouncing buffer - 0xff will yield invalid data */
@@ -1631,7 +1900,7 @@ int iwl_mvm_up(struct iwl_mvm *mvm)
 	iwl_mvm_uats_init(mvm);
 
 	if (iwl_rfi_supported(mvm)) {
-		if (iwl_mvm_eval_dsm_rfi(mvm))
+		if (iwl_rfi_is_enabled_in_bios(&mvm->fwrt))
 			iwl_rfi_send_config_cmd(mvm, NULL);
 	}
 

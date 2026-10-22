@@ -234,11 +234,17 @@ static int ibmvnic_set_queue_affinity(struct ibmvnic_sub_crq_queue *queue,
 		(*stragglers)--;
 	}
 	/* atomic write is safer than writing bit by bit directly */
-	for (i = 0; i < stride; i++) {
-		cpumask_set_cpu(*cpu, mask);
-		*cpu = cpumask_next_wrap(*cpu, cpu_online_mask,
-					 nr_cpu_ids, false);
+	for_each_online_cpu_wrap(i, *cpu) {
+		if (!stride--) {
+			/* For the next queue we start from the first
+			 * unused CPU in this queue
+			 */
+			*cpu = i;
+			break;
+		}
+		cpumask_set_cpu(i, mask);
 	}
+
 	/* set queue affinity mask */
 	cpumask_copy(queue->affinity_mask, mask);
 	rc = irq_set_affinity_and_hint(queue->irq, queue->affinity_mask);
@@ -256,7 +262,7 @@ static void ibmvnic_set_affinity(struct ibmvnic_adapter *adapter)
 	int num_rxqs = adapter->num_active_rx_scrqs, i_rxqs = 0;
 	int num_txqs = adapter->num_active_tx_scrqs, i_txqs = 0;
 	int total_queues, stride, stragglers, i;
-	unsigned int num_cpu, cpu;
+	unsigned int num_cpu, cpu = 0;
 	bool is_rx_queue;
 	int rc = 0;
 
@@ -274,8 +280,6 @@ static void ibmvnic_set_affinity(struct ibmvnic_adapter *adapter)
 	stride = max_t(int, num_cpu / total_queues, 1);
 	/* number of leftover cpu's */
 	stragglers = num_cpu >= total_queues ? num_cpu % total_queues : 0;
-	/* next available cpu to assign irq to */
-	cpu = cpumask_next(-1, cpu_online_mask);
 
 	for (i = 0; i < total_queues; i++) {
 		is_rx_queue = false;
@@ -752,6 +756,17 @@ static void deactivate_rx_pools(struct ibmvnic_adapter *adapter)
 		adapter->rx_pool[i].active = 0;
 }
 
+static void ibmvnic_set_safe_max_ind_descs(struct ibmvnic_adapter *adapter)
+{
+	if (adapter->cur_max_ind_descs > IBMVNIC_SAFE_IND_DESC) {
+		netdev_info(adapter->netdev,
+			    "set max ind descs from %u to safe limit %u\n",
+			    adapter->cur_max_ind_descs,
+			    IBMVNIC_SAFE_IND_DESC);
+		adapter->cur_max_ind_descs = IBMVNIC_SAFE_IND_DESC;
+	}
+}
+
 static void replenish_rx_pool(struct ibmvnic_adapter *adapter,
 			      struct ibmvnic_rx_pool *pool)
 {
@@ -839,7 +854,7 @@ static void replenish_rx_pool(struct ibmvnic_adapter *adapter,
 		sub_crq->rx_add.len = cpu_to_be32(pool->buff_size << shift);
 
 		/* if send_subcrq_indirect queue is full, flush to VIOS */
-		if (ind_bufp->index == IBMVNIC_MAX_IND_DESCS ||
+		if (ind_bufp->index == adapter->cur_max_ind_descs ||
 		    i == count - 1) {
 			lpar_rc =
 				send_subcrq_indirect(adapter, handle,
@@ -858,6 +873,14 @@ static void replenish_rx_pool(struct ibmvnic_adapter *adapter,
 failure:
 	if (lpar_rc != H_PARAMETER && lpar_rc != H_CLOSED)
 		dev_err_ratelimited(dev, "rx: replenish packet buffer failed\n");
+
+	/* Detect platform limit H_PARAMETER */
+	if (lpar_rc == H_PARAMETER)
+		ibmvnic_set_safe_max_ind_descs(adapter);
+
+	/* For all error case, temporarily drop only this batch
+	 * Rely on TCP/IP retransmissions to retry and recover
+	 */
 	for (i = ind_bufp->index - 1; i >= 0; --i) {
 		struct ibmvnic_rx_buff *rx_buff;
 
@@ -909,16 +932,14 @@ static void release_stats_buffers(struct ibmvnic_adapter *adapter)
 static int init_stats_buffers(struct ibmvnic_adapter *adapter)
 {
 	adapter->tx_stats_buffers =
-				kcalloc(IBMVNIC_MAX_QUEUES,
-					sizeof(struct ibmvnic_tx_queue_stats),
-					GFP_KERNEL);
+				kzalloc_objs(struct ibmvnic_tx_queue_stats,
+					     IBMVNIC_MAX_QUEUES);
 	if (!adapter->tx_stats_buffers)
 		return -ENOMEM;
 
 	adapter->rx_stats_buffers =
-				kcalloc(IBMVNIC_MAX_QUEUES,
-					sizeof(struct ibmvnic_rx_queue_stats),
-					GFP_KERNEL);
+				kzalloc_objs(struct ibmvnic_rx_queue_stats,
+					     IBMVNIC_MAX_QUEUES);
 	if (!adapter->rx_stats_buffers)
 		return -ENOMEM;
 
@@ -1073,9 +1094,7 @@ static int init_rx_pools(struct net_device *netdev)
 	/* Allocate/populate the pools. */
 	release_rx_pools(adapter);
 
-	adapter->rx_pool = kcalloc(num_pools,
-				   sizeof(struct ibmvnic_rx_pool),
-				   GFP_KERNEL);
+	adapter->rx_pool = kzalloc_objs(struct ibmvnic_rx_pool, num_pools);
 	if (!adapter->rx_pool) {
 		dev_err(dev, "Failed to allocate rx pools\n");
 		return -ENOMEM;
@@ -1097,17 +1116,15 @@ static int init_rx_pools(struct net_device *netdev)
 		rx_pool->index = i;
 		rx_pool->buff_size = ALIGN(buff_size, L1_CACHE_BYTES);
 
-		rx_pool->free_map = kcalloc(rx_pool->size, sizeof(int),
-					    GFP_KERNEL);
+		rx_pool->free_map = kzalloc_objs(int, rx_pool->size);
 		if (!rx_pool->free_map) {
 			dev_err(dev, "Couldn't alloc free_map %d\n", i);
 			rc = -ENOMEM;
 			goto out_release;
 		}
 
-		rx_pool->rx_buff = kcalloc(rx_pool->size,
-					   sizeof(struct ibmvnic_rx_buff),
-					   GFP_KERNEL);
+		rx_pool->rx_buff = kzalloc_objs(struct ibmvnic_rx_buff,
+						rx_pool->size);
 		if (!rx_pool->rx_buff) {
 			dev_err(dev, "Couldn't alloc rx buffers\n");
 			rc = -ENOMEM;
@@ -1220,13 +1237,11 @@ static int init_one_tx_pool(struct net_device *netdev,
 {
 	int i;
 
-	tx_pool->tx_buff = kcalloc(pool_size,
-				   sizeof(struct ibmvnic_tx_buff),
-				   GFP_KERNEL);
+	tx_pool->tx_buff = kzalloc_objs(struct ibmvnic_tx_buff, pool_size);
 	if (!tx_pool->tx_buff)
 		return -ENOMEM;
 
-	tx_pool->free_map = kcalloc(pool_size, sizeof(int), GFP_KERNEL);
+	tx_pool->free_map = kzalloc_objs(int, pool_size);
 	if (!tx_pool->free_map) {
 		kfree(tx_pool->tx_buff);
 		tx_pool->tx_buff = NULL;
@@ -1318,13 +1333,11 @@ static int init_tx_pools(struct net_device *netdev)
 	pool_size = adapter->req_tx_entries_per_subcrq;
 	num_pools = adapter->num_active_tx_scrqs;
 
-	adapter->tx_pool = kcalloc(num_pools,
-				   sizeof(struct ibmvnic_tx_pool), GFP_KERNEL);
+	adapter->tx_pool = kzalloc_objs(struct ibmvnic_tx_pool, num_pools);
 	if (!adapter->tx_pool)
 		return -ENOMEM;
 
-	adapter->tso_pool = kcalloc(num_pools,
-				    sizeof(struct ibmvnic_tx_pool), GFP_KERNEL);
+	adapter->tso_pool = kzalloc_objs(struct ibmvnic_tx_pool, num_pools);
 	/* To simplify release_tx_pools() ensure that ->tx_pool and
 	 * ->tso_pool are either both NULL or both non-NULL.
 	 */
@@ -1448,8 +1461,7 @@ static int init_napi(struct ibmvnic_adapter *adapter)
 {
 	int i;
 
-	adapter->napi = kcalloc(adapter->req_rx_queues,
-				sizeof(struct napi_struct), GFP_KERNEL);
+	adapter->napi = kzalloc_objs(struct napi_struct, adapter->req_rx_queues);
 	if (!adapter->napi)
 		return -ENOMEM;
 
@@ -1836,7 +1848,7 @@ static int init_resources(struct ibmvnic_adapter *adapter)
 	if (rc)
 		return rc;
 
-	adapter->vpd = kzalloc(sizeof(*adapter->vpd), GFP_KERNEL);
+	adapter->vpd = kzalloc_obj(*adapter->vpd);
 	if (!adapter->vpd)
 		return -ENOMEM;
 
@@ -2308,8 +2320,6 @@ static void ibmvnic_tx_scrq_clean_buffer(struct ibmvnic_adapter *adapter,
 					  tx_pool->num_buffers - 1 :
 					  tx_pool->consumer_index - 1;
 		tx_buff = &tx_pool->tx_buff[index];
-		adapter->netdev->stats.tx_packets--;
-		adapter->netdev->stats.tx_bytes -= tx_buff->skb->len;
 		adapter->tx_stats_buffers[queue_num].batched_packets--;
 		adapter->tx_stats_buffers[queue_num].bytes -=
 						tx_buff->skb->len;
@@ -2379,16 +2389,28 @@ static int ibmvnic_tx_scrq_flush(struct ibmvnic_adapter *adapter,
 		rc = send_subcrq_direct(adapter, handle,
 					(u64 *)ind_bufp->indir_arr);
 
-	if (rc)
+	if (rc) {
+		dev_err_ratelimited(&adapter->vdev->dev,
+				    "tx_flush failed, rc=%u (%llu entries dma=%pad handle=%llx)\n",
+				    rc, entries, &dma_addr, handle);
+		/* Detect platform limit H_PARAMETER */
+		if (rc == H_PARAMETER)
+			ibmvnic_set_safe_max_ind_descs(adapter);
+
+		/* For all error case, temporarily drop only this batch
+		 * Rely on TCP/IP retransmissions to retry and recover
+		 */
 		ibmvnic_tx_scrq_clean_buffer(adapter, tx_scrq);
-	else
+	} else {
 		ind_bufp->index = 0;
+	}
 	return rc;
 }
 
 static netdev_tx_t ibmvnic_xmit(struct sk_buff *skb, struct net_device *netdev)
 {
 	struct ibmvnic_adapter *adapter = netdev_priv(netdev);
+	u32 cur_max_ind_descs = adapter->cur_max_ind_descs;
 	int queue_num = skb_get_queue_mapping(skb);
 	u8 *hdrs = (u8 *)&adapter->tx_rx_desc_req;
 	struct device *dev = &adapter->vdev->dev;
@@ -2588,7 +2610,7 @@ static netdev_tx_t ibmvnic_xmit(struct sk_buff *skb, struct net_device *netdev)
 	tx_crq.v1.n_crq_elem = num_entries;
 	tx_buff->num_entries = num_entries;
 	/* flush buffer if current entry can not fit */
-	if (num_entries + ind_bufp->index > IBMVNIC_MAX_IND_DESCS) {
+	if (num_entries + ind_bufp->index > cur_max_ind_descs) {
 		lpar_rc = ibmvnic_tx_scrq_flush(adapter, tx_scrq, true);
 		if (lpar_rc != H_SUCCESS)
 			goto tx_flush_err;
@@ -2601,7 +2623,7 @@ static netdev_tx_t ibmvnic_xmit(struct sk_buff *skb, struct net_device *netdev)
 	ind_bufp->index += num_entries;
 	if (__netdev_tx_sent_queue(txq, skb->len,
 				   netdev_xmit_more() &&
-				   ind_bufp->index < IBMVNIC_MAX_IND_DESCS)) {
+				   ind_bufp->index < cur_max_ind_descs)) {
 		lpar_rc = ibmvnic_tx_scrq_flush(adapter, tx_scrq, true);
 		if (lpar_rc != H_SUCCESS)
 			goto tx_err;
@@ -2643,9 +2665,6 @@ tx_err:
 	}
 out:
 	rcu_read_unlock();
-	netdev->stats.tx_dropped += tx_dropped;
-	netdev->stats.tx_bytes += tx_bytes;
-	netdev->stats.tx_packets += tx_bpackets + tx_dpackets;
 	adapter->tx_send_failed += tx_send_failed;
 	adapter->tx_map_failed += tx_map_failed;
 	adapter->tx_stats_buffers[queue_num].batched_packets += tx_bpackets;
@@ -3420,7 +3439,7 @@ static int ibmvnic_reset(struct ibmvnic_adapter *adapter,
 		}
 	}
 
-	rwi = kzalloc(sizeof(*rwi), GFP_ATOMIC);
+	rwi = kzalloc_obj(*rwi, GFP_ATOMIC);
 	if (!rwi) {
 		ret = ENOMEM;
 		goto err;
@@ -3446,6 +3465,25 @@ err:
 		ibmvnic_close(netdev);
 
 	return -ret;
+}
+
+static void ibmvnic_get_stats64(struct net_device *netdev,
+				struct rtnl_link_stats64 *stats)
+{
+	struct ibmvnic_adapter *adapter = netdev_priv(netdev);
+	int i;
+
+	for (i = 0; i < adapter->req_rx_queues; i++) {
+		stats->rx_packets += adapter->rx_stats_buffers[i].packets;
+		stats->rx_bytes   += adapter->rx_stats_buffers[i].bytes;
+	}
+
+	for (i = 0; i < adapter->req_tx_queues; i++) {
+		stats->tx_packets += adapter->tx_stats_buffers[i].batched_packets;
+		stats->tx_packets += adapter->tx_stats_buffers[i].direct_packets;
+		stats->tx_bytes   += adapter->tx_stats_buffers[i].bytes;
+		stats->tx_dropped += adapter->tx_stats_buffers[i].dropped_packets;
+	}
 }
 
 static void ibmvnic_tx_timeout(struct net_device *dev, unsigned int txqueue)
@@ -3563,8 +3601,6 @@ restart_poll:
 
 		length = skb->len;
 		napi_gro_receive(napi, skb); /* send it up */
-		netdev->stats.rx_packets++;
-		netdev->stats.rx_bytes += length;
 		adapter->rx_stats_buffers[scrq_num].packets++;
 		adapter->rx_stats_buffers[scrq_num].bytes += length;
 		frames_processed++;
@@ -3674,6 +3710,7 @@ static const struct net_device_ops ibmvnic_netdev_ops = {
 	.ndo_set_rx_mode	= ibmvnic_set_multi,
 	.ndo_set_mac_address	= ibmvnic_set_mac,
 	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_get_stats64	= ibmvnic_get_stats64,
 	.ndo_tx_timeout		= ibmvnic_tx_timeout,
 	.ndo_change_mtu		= ibmvnic_change_mtu,
 	.ndo_features_check     = ibmvnic_features_check,
@@ -3989,7 +4026,7 @@ static void release_sub_crq_queue(struct ibmvnic_adapter *adapter,
 	}
 
 	dma_free_coherent(dev,
-			  IBMVNIC_IND_ARR_SZ,
+			  IBMVNIC_IND_MAX_ARR_SZ,
 			  scrq->ind_buf.indir_arr,
 			  scrq->ind_buf.indir_dma);
 
@@ -4007,7 +4044,7 @@ static struct ibmvnic_sub_crq_queue *init_sub_crq_queue(struct ibmvnic_adapter
 	struct ibmvnic_sub_crq_queue *scrq;
 	int rc;
 
-	scrq = kzalloc(sizeof(*scrq), GFP_KERNEL);
+	scrq = kzalloc_obj(*scrq);
 	if (!scrq)
 		return NULL;
 
@@ -4046,7 +4083,7 @@ static struct ibmvnic_sub_crq_queue *init_sub_crq_queue(struct ibmvnic_adapter
 
 	scrq->ind_buf.indir_arr =
 		dma_alloc_coherent(dev,
-				   IBMVNIC_IND_ARR_SZ,
+				   IBMVNIC_IND_MAX_ARR_SZ,
 				   &scrq->ind_buf.indir_dma,
 				   GFP_KERNEL);
 
@@ -4399,7 +4436,7 @@ static int init_sub_crqs(struct ibmvnic_adapter *adapter)
 
 	total_queues = adapter->req_tx_queues + adapter->req_rx_queues;
 
-	allqueues = kcalloc(total_queues, sizeof(*allqueues), GFP_KERNEL);
+	allqueues = kzalloc_objs(*allqueues, total_queues);
 	if (!allqueues)
 		return -ENOMEM;
 
@@ -4438,8 +4475,8 @@ static int init_sub_crqs(struct ibmvnic_adapter *adapter)
 		}
 	}
 
-	adapter->tx_scrq = kcalloc(adapter->req_tx_queues,
-				   sizeof(*adapter->tx_scrq), GFP_KERNEL);
+	adapter->tx_scrq = kzalloc_objs(*adapter->tx_scrq,
+					adapter->req_tx_queues);
 	if (!adapter->tx_scrq)
 		goto tx_failed;
 
@@ -4449,8 +4486,8 @@ static int init_sub_crqs(struct ibmvnic_adapter *adapter)
 		adapter->num_active_tx_scrqs++;
 	}
 
-	adapter->rx_scrq = kcalloc(adapter->req_rx_queues,
-				   sizeof(*adapter->rx_scrq), GFP_KERNEL);
+	adapter->rx_scrq = kzalloc_objs(*adapter->rx_scrq,
+					adapter->req_rx_queues);
 	if (!adapter->rx_scrq)
 		goto rx_failed;
 
@@ -4829,6 +4866,18 @@ static void vnic_add_client_data(struct ibmvnic_adapter *adapter,
 	strscpy(vlcd->name, adapter->netdev->name, len);
 }
 
+static void ibmvnic_print_hex_dump(struct net_device *dev, void *buf,
+				   size_t len)
+{
+	unsigned char hex_str[16 * 3];
+
+	for (size_t i = 0; i < len; i += 16) {
+		hex_dump_to_buffer((unsigned char *)buf + i, len - i, 16, 8,
+				   hex_str, sizeof(hex_str), false);
+		netdev_dbg(dev, "%s\n", hex_str);
+	}
+}
+
 static int send_login(struct ibmvnic_adapter *adapter)
 {
 	struct ibmvnic_login_rsp_buffer *login_rsp_buffer;
@@ -4939,10 +4988,8 @@ static int send_login(struct ibmvnic_adapter *adapter)
 	vnic_add_client_data(adapter, vlcd);
 
 	netdev_dbg(adapter->netdev, "Login Buffer:\n");
-	for (i = 0; i < (adapter->login_buf_sz - 1) / 8 + 1; i++) {
-		netdev_dbg(adapter->netdev, "%016lx\n",
-			   ((unsigned long *)(adapter->login_buf))[i]);
-	}
+	ibmvnic_print_hex_dump(adapter->netdev, adapter->login_buf,
+			       adapter->login_buf_sz);
 
 	memset(&crq, 0, sizeof(crq));
 	crq.login.first = IBMVNIC_CRQ_CMD;
@@ -5319,15 +5366,13 @@ static void handle_query_ip_offload_rsp(struct ibmvnic_adapter *adapter)
 {
 	struct device *dev = &adapter->vdev->dev;
 	struct ibmvnic_query_ip_offload_buffer *buf = &adapter->ip_offload_buf;
-	int i;
 
 	dma_unmap_single(dev, adapter->ip_offload_tok,
 			 sizeof(adapter->ip_offload_buf), DMA_FROM_DEVICE);
 
 	netdev_dbg(adapter->netdev, "Query IP Offload Buffer:\n");
-	for (i = 0; i < (sizeof(adapter->ip_offload_buf) - 1) / 8 + 1; i++)
-		netdev_dbg(adapter->netdev, "%016lx\n",
-			   ((unsigned long *)(buf))[i]);
+	ibmvnic_print_hex_dump(adapter->netdev, buf,
+			       sizeof(adapter->ip_offload_buf));
 
 	netdev_dbg(adapter->netdev, "ipv4_chksum = %d\n", buf->ipv4_chksum);
 	netdev_dbg(adapter->netdev, "ipv6_chksum = %d\n", buf->ipv6_chksum);
@@ -5558,10 +5603,8 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 	netdev->mtu = adapter->req_mtu - ETH_HLEN;
 
 	netdev_dbg(adapter->netdev, "Login Response Buffer:\n");
-	for (i = 0; i < (adapter->login_rsp_buf_sz - 1) / 8 + 1; i++) {
-		netdev_dbg(adapter->netdev, "%016lx\n",
-			   ((unsigned long *)(adapter->login_rsp_buf))[i]);
-	}
+	ibmvnic_print_hex_dump(netdev, adapter->login_rsp_buf,
+			       adapter->login_rsp_buf_sz);
 
 	/* Sanity checks */
 	if (login->num_txcomp_subcrqs != login_rsp->num_txsubm_subcrqs ||
@@ -6346,6 +6389,19 @@ static int ibmvnic_reset_init(struct ibmvnic_adapter *adapter, bool reset)
 			rc = reset_sub_crq_queues(adapter);
 		}
 	} else {
+		if (adapter->reset_reason == VNIC_RESET_MOBILITY) {
+			/* After an LPM, reset the max number of indirect
+			 * subcrq descriptors per H_SEND_SUB_CRQ_INDIRECT
+			 * hcall to the default max (e.g POWER8 -> POWER10)
+			 *
+			 * If the new destination platform does not support
+			 * the higher limit max (e.g. POWER10-> POWER8 LPM)
+			 * H_PARAMETER will trigger automatic fallback to the
+			 * safe minimum limit.
+			 */
+			adapter->cur_max_ind_descs = IBMVNIC_MAX_IND_DESCS;
+		}
+
 		rc = init_sub_crqs(adapter);
 	}
 
@@ -6497,6 +6553,7 @@ static int ibmvnic_probe(struct vio_dev *dev, const struct vio_device_id *id)
 
 	adapter->wait_for_reset = false;
 	adapter->last_reset_time = jiffies;
+	adapter->cur_max_ind_descs = IBMVNIC_MAX_IND_DESCS;
 
 	rc = register_netdev(netdev);
 	if (rc) {

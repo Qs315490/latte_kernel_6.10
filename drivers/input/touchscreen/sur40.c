@@ -538,15 +538,15 @@ static void sur40_process_video(struct sur40_state *sur40)
 		return;
 
 	/* get a new buffer from the list */
-	spin_lock(&sur40->qlock);
-	if (list_empty(&sur40->buf_list)) {
-		dev_dbg(sur40->dev, "buffer queue empty\n");
-		spin_unlock(&sur40->qlock);
-		return;
+	scoped_guard(spinlock, &sur40->qlock) {
+		if (list_empty(&sur40->buf_list)) {
+			dev_dbg(sur40->dev, "buffer queue empty\n");
+			return;
+		}
+		new_buf = list_first_entry(&sur40->buf_list,
+					   struct sur40_buffer, list);
+		list_del(&new_buf->list);
 	}
-	new_buf = list_entry(sur40->buf_list.next, struct sur40_buffer, list);
-	list_del(&new_buf->list);
-	spin_unlock(&sur40->qlock);
 
 	dev_dbg(sur40->dev, "buffer acquired\n");
 
@@ -672,7 +672,7 @@ static int sur40_probe(struct usb_interface *interface,
 		return -ENODEV;
 
 	/* Allocate memory for our device state and initialize it. */
-	sur40 = kzalloc(sizeof(*sur40), GFP_KERNEL);
+	sur40 = kzalloc_obj(*sur40);
 	if (!sur40)
 		return -ENOMEM;
 
@@ -725,21 +725,13 @@ static int sur40_probe(struct usb_interface *interface,
 		goto err_free_input;
 	}
 
-	/* register the polled input device */
-	error = input_register_device(input);
-	if (error) {
-		dev_err(&interface->dev,
-			"Unable to register polled input device.");
-		goto err_free_buffer;
-	}
-
 	/* register the video master device */
 	snprintf(sur40->v4l2.name, sizeof(sur40->v4l2.name), "%s", DRIVER_LONG);
 	error = v4l2_device_register(sur40->dev, &sur40->v4l2);
 	if (error) {
 		dev_err(&interface->dev,
 			"Unable to register video master device.");
-		goto err_unreg_v4l2;
+		goto err_free_buffer;
 	}
 
 	/* initialize the lock and subdevice */
@@ -795,6 +787,14 @@ static int sur40_probe(struct usb_interface *interface,
 	if (error) {
 		dev_err(&interface->dev,
 			"Unable to register video subdevice.");
+		goto err_free_ctrl;
+	}
+
+	/* register the polled input device */
+	error = input_register_device(input);
+	if (error) {
+		dev_err(&interface->dev,
+			"Unable to register polled input device.");
 		goto err_unreg_video;
 	}
 
@@ -806,6 +806,8 @@ static int sur40_probe(struct usb_interface *interface,
 
 err_unreg_video:
 	video_unregister_device(&sur40->vdev);
+err_free_ctrl:
+	v4l2_ctrl_handler_free(&sur40->hdl);
 err_unreg_v4l2:
 	v4l2_device_unregister(&sur40->v4l2);
 err_free_buffer:
@@ -823,11 +825,12 @@ static void sur40_disconnect(struct usb_interface *interface)
 {
 	struct sur40_state *sur40 = usb_get_intfdata(interface);
 
+	input_unregister_device(sur40->input);
+
 	v4l2_ctrl_handler_free(&sur40->hdl);
 	video_unregister_device(&sur40->vdev);
 	v4l2_device_unregister(&sur40->v4l2);
 
-	input_unregister_device(sur40->input);
 	kfree(sur40->bulk_in_buffer);
 	kfree(sur40);
 
@@ -888,9 +891,8 @@ static void sur40_buffer_queue(struct vb2_buffer *vb)
 	struct sur40_state *sur40 = vb2_get_drv_priv(vb->vb2_queue);
 	struct sur40_buffer *buf = (struct sur40_buffer *)vb;
 
-	spin_lock(&sur40->qlock);
+	guard(spinlock)(&sur40->qlock);
 	list_add_tail(&buf->list, &sur40->buf_list);
-	spin_unlock(&sur40->qlock);
 }
 
 static void return_all_buffers(struct sur40_state *sur40,
@@ -898,12 +900,12 @@ static void return_all_buffers(struct sur40_state *sur40,
 {
 	struct sur40_buffer *buf, *node;
 
-	spin_lock(&sur40->qlock);
+	guard(spinlock)(&sur40->qlock);
+
 	list_for_each_entry_safe(buf, node, &sur40->buf_list, list) {
 		vb2_buffer_done(&buf->vb.vb2_buf, state);
 		list_del(&buf->list);
 	}
-	spin_unlock(&sur40->qlock);
 }
 
 /*
@@ -1108,8 +1110,6 @@ static const struct vb2_ops sur40_queue_ops = {
 	.buf_queue		= sur40_buffer_queue,
 	.start_streaming	= sur40_start_streaming,
 	.stop_streaming		= sur40_stop_streaming,
-	.wait_prepare		= vb2_ops_wait_prepare,
-	.wait_finish		= vb2_ops_wait_finish,
 };
 
 static const struct vb2_queue sur40_queue = {

@@ -21,12 +21,12 @@ static const struct fm10k_info *fm10k_info_tbl[] = {
  *   Class, Class Mask, private data (not used) }
  */
 static const struct pci_device_id fm10k_pci_tbl[] = {
-	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_PF), fm10k_device_pf },
-	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_SDI_FM10420_QDA2), fm10k_device_pf },
-	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_SDI_FM10420_DA2), fm10k_device_pf },
-	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_VF), fm10k_device_vf },
+	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_PF), .driver_data = fm10k_device_pf },
+	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_SDI_FM10420_QDA2), .driver_data = fm10k_device_pf },
+	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_SDI_FM10420_DA2), .driver_data = fm10k_device_pf },
+	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_VF), .driver_data = fm10k_device_vf },
 	/* required last entry */
-	{ 0, }
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, fm10k_pci_tbl);
 
@@ -199,8 +199,8 @@ static void fm10k_start_service_event(struct fm10k_intfc *interface)
  **/
 static void fm10k_service_timer(struct timer_list *t)
 {
-	struct fm10k_intfc *interface = from_timer(interface, t,
-						   service_timer);
+	struct fm10k_intfc *interface = timer_container_of(interface, t,
+							   service_timer);
 
 	/* Reset the timer */
 	mod_timer(&interface->service_timer, (HZ * 2) + jiffies);
@@ -2245,7 +2245,7 @@ static void fm10k_remove(struct pci_dev *pdev)
 	struct fm10k_intfc *interface = pci_get_drvdata(pdev);
 	struct net_device *netdev = interface->netdev;
 
-	del_timer_sync(&interface->service_timer);
+	timer_delete_sync(&interface->service_timer);
 
 	fm10k_stop_service_event(interface);
 	fm10k_stop_macvlan_task(interface);
@@ -2423,12 +2423,6 @@ static pci_ers_result_t fm10k_io_slot_reset(struct pci_dev *pdev)
 	} else {
 		pci_set_master(pdev);
 		pci_restore_state(pdev);
-
-		/* After second error pci->state_saved is false, this
-		 * resets it so EEH doesn't break.
-		 */
-		pci_save_state(pdev);
-
 		pci_wake_from_d3(pdev, false);
 
 		result = PCI_ERS_RESULT_RECOVERED;

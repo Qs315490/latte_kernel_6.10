@@ -238,7 +238,7 @@ static ssize_t manage_show(struct kobject *kobj,
 	struct manage_flash_t *const args_buf = &manage_flash_data;
 	int rc;
 
-	rc = sprintf(buf, "%d\n", args_buf->status);
+	rc = sysfs_emit(buf, "%d\n", args_buf->status);
 	/* Set status to default*/
 	args_buf->status = FLASH_NO_OP;
 	return rc;
@@ -321,7 +321,7 @@ static ssize_t update_show(struct kobject *kobj,
 			   struct kobj_attribute *attr, char *buf)
 {
 	struct update_flash_t *const args_buf = &update_flash_data;
-	return sprintf(buf, "%d\n", args_buf->status);
+	return sysfs_emit(buf, "%d\n", args_buf->status);
 }
 
 /*
@@ -432,7 +432,7 @@ static int alloc_image_buf(char *buffer, size_t count)
  * and pre-allocate required memory.
  */
 static ssize_t image_data_write(struct file *filp, struct kobject *kobj,
-				struct bin_attribute *bin_attr,
+				const struct bin_attribute *bin_attr,
 				char *buffer, loff_t pos, size_t count)
 {
 	int rc;

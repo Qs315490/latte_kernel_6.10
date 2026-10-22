@@ -13,7 +13,6 @@
 #include <linux/cleanup.h>
 #include <linux/init.h>
 #include <linux/math64.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/printk.h>
 #include <linux/property.h>
@@ -273,7 +272,7 @@ static const struct hsc_range_config hsc_range_config[HSC_VARIANTS_MAX] = {
  * @data: structure containing instantiated sensor data
  * Return: true only if both status bits are zero
  *
- * the two MSB from the first transfered byte contain a status code
+ * The two MSB from the first transferred byte contain a status code
  *   00 - normal operation, valid data
  *   01 - device in factory programming mode
  *   10 - stale data
@@ -314,8 +313,8 @@ static irqreturn_t hsc_trigger_handler(int irq, void *private)
 	memcpy(&data->scan.chan[0], &data->buffer[0], 2);
 	memcpy(&data->scan.chan[1], &data->buffer[2], 2);
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &data->scan, sizeof(data->scan),
+				    iio_get_time_ns(indio_dev));
 
 error:
 	iio_trigger_notify_done(indio_dev->trig);

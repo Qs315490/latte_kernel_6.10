@@ -143,6 +143,10 @@ int atomctrl_initialize_mc_reg_table(
 	vram_info = (ATOM_VRAM_INFO_HEADER_V2_1 *)
 		smu_atom_get_data_table(hwmgr->adev,
 				GetIndexIntoMasterTable(DATA, VRAM_Info), &size, &frev, &crev);
+	if (!vram_info) {
+		pr_err("Could not retrieve the VramInfo table!");
+		return -EINVAL;
+	}
 
 	if (module_index >= vram_info->ucNumOfVRAMModule) {
 		pr_err("Invalid VramInfo table.");
@@ -180,6 +184,10 @@ int atomctrl_initialize_mc_reg_table_v2_2(
 	vram_info = (ATOM_VRAM_INFO_HEADER_V2_2 *)
 		smu_atom_get_data_table(hwmgr->adev,
 				GetIndexIntoMasterTable(DATA, VRAM_Info), &size, &frev, &crev);
+	if (!vram_info) {
+		pr_err("Could not retrieve the VramInfo table!");
+		return -EINVAL;
+	}
 
 	if (module_index >= vram_info->ucNumOfVRAMModule) {
 		pr_err("Invalid VramInfo table.");
@@ -555,8 +563,8 @@ bool atomctrl_is_voltage_controlled_by_gpio_v3(
 	PP_ASSERT_WITH_CODE((NULL != voltage_info),
 			"Could not find Voltage Table in BIOS.", return false;);
 
-	ret = (NULL != atomctrl_lookup_voltage_type_v3
-			(voltage_info, voltage_type, voltage_mode)) ? true : false;
+	ret = atomctrl_lookup_voltage_type_v3
+			(voltage_info, voltage_type, voltage_mode) != NULL;
 
 	return ret;
 }

@@ -22,15 +22,6 @@
  *   - Olivier Vandorpe, for providing the usbb2k-api.
  *   - Martin Diehl, for spotting my memory allocation bug.
  *
- * History:
- *   20050527 henk	First version, functional keyboard. Keyboard events
- *			will pop-up on the ../input/eventX bus.
- *   20050531 henk	Added led, LCD, dialtone and sysfs interface.
- *   20050610 henk	Cleanups, make it ready for public consumption.
- *   20050630 henk	Cleanups, fixes in response to comments.
- *   20050701 henk	sysfs write serialisation, fix potential unload races
- *   20050801 henk	Added ringtone, restructure USB
- *   20050816 henk	Merge 2.6.13-rc6
  */
 
 #include <linux/kernel.h>
@@ -831,7 +822,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	if (!usb_endpoint_is_int_in(endpoint))
 		return -ENODEV;
 
-	yld = kzalloc(sizeof(*yld), GFP_KERNEL);
+	yld = kzalloc_obj(*yld);
 	if (!yld)
 		return -ENOMEM;
 
@@ -854,7 +845,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	if (!yld->ctl_data)
 		return usb_cleanup(yld, -ENOMEM);
 
-	yld->ctl_req = kmalloc(sizeof(*(yld->ctl_req)), GFP_KERNEL);
+	yld->ctl_req = kmalloc_obj(*(yld->ctl_req));
 	if (yld->ctl_req == NULL)
 		return usb_cleanup(yld, -ENOMEM);
 

@@ -6,7 +6,6 @@
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -567,7 +566,7 @@ int qcom_pmic_typec_pdphy_probe(struct platform_device *pdev,
 	if (!res->nr_irqs || res->nr_irqs > PMIC_PDPHY_MAX_IRQS)
 		return -EINVAL;
 
-	irq_data = devm_kzalloc(dev, sizeof(*irq_data) * res->nr_irqs,
+	irq_data = devm_kcalloc(dev, res->nr_irqs, sizeof(*irq_data),
 				GFP_KERNEL);
 	if (!irq_data)
 		return -ENOMEM;

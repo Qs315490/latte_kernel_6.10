@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -214,7 +214,7 @@ xfs_rtbuf_get(
 	if (xfs_has_rtgroups(mp)) {
 		struct xfs_rtbuf_blkinfo	*hdr = bp->b_addr;
 
-		if (hdr->rt_owner != cpu_to_be64(ip->i_ino)) {
+		if (hdr->rt_owner != cpu_to_be64(I_INO(ip))) {
 			xfs_buf_mark_corrupt(bp);
 			xfs_trans_brelse(args->tp, bp);
 			xfs_rtginode_mark_sick(args->rtg, type);
@@ -1067,7 +1067,7 @@ xfs_rtfree_extent(
 	ASSERT(rbmip->i_itemp != NULL);
 	xfs_assert_ilocked(rbmip, XFS_ILOCK_EXCL);
 
-	if (XFS_TEST_ERROR(false, mp, XFS_ERRTAG_FREE_EXTENT))
+	if (XFS_TEST_ERROR(mp, XFS_ERRTAG_FREE_EXTENT))
 		return -EIO;
 
 	error = xfs_rtcheck_alloc_range(&args, start, len);
@@ -1123,6 +1123,7 @@ xfs_rtfree_blocks(
 	xfs_extlen_t		mod;
 	int			error;
 
+	ASSERT(!xfs_has_zoned(mp));
 	ASSERT(rtlen <= XFS_MAX_BMBT_EXTLEN);
 
 	mod = xfs_blen_to_rtxoff(mp, rtlen);
@@ -1173,6 +1174,9 @@ xfs_rtalloc_query_range(
 		return 0;
 
 	end = min(end, rtg->rtg_extents - 1);
+
+	if (xfs_has_zoned(mp))
+		return -EINVAL;
 
 	/* Iterate the bitmap, looking for discrepancies. */
 	while (start <= end) {
@@ -1268,6 +1272,8 @@ xfs_rtbitmap_blockcount_len(
 	struct xfs_mount	*mp,
 	xfs_rtbxlen_t		rtextents)
 {
+	if (xfs_has_zoned(mp))
+		return 0;
 	return howmany_64(rtextents, xfs_rtbitmap_rtx_per_rbmblock(mp));
 }
 
@@ -1307,6 +1313,11 @@ xfs_rtsummary_blockcount(
 {
 	xfs_rtbxlen_t		rextents = xfs_rtbitmap_bitcount(mp);
 	unsigned long long	rsumwords;
+
+	if (xfs_has_zoned(mp)) {
+		*rsumlevels = 0;
+		return 0;
+	}
 
 	*rsumlevels = xfs_compute_rextslog(rextents) + 1;
 	rsumwords = xfs_rtbitmap_blockcount_len(mp, rextents) * (*rsumlevels);
@@ -1398,7 +1409,7 @@ xfs_rtfile_initialize_block(
 			hdr->rt_magic = cpu_to_be32(XFS_RTBITMAP_MAGIC);
 		else
 			hdr->rt_magic = cpu_to_be32(XFS_RTSUMMARY_MAGIC);
-		hdr->rt_owner = cpu_to_be64(ip->i_ino);
+		hdr->rt_owner = cpu_to_be64(I_INO(ip));
 		hdr->rt_blkno = cpu_to_be64(XFS_FSB_TO_DADDR(mp, fsbno));
 		hdr->rt_lsn = 0;
 		uuid_copy(&hdr->rt_uuid, &mp->m_sb.sb_meta_uuid);

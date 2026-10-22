@@ -315,12 +315,14 @@ static int pxa_gpio_get(struct gpio_chip *chip, unsigned offset)
 	return !!(gplr & GPIO_bit(offset));
 }
 
-static void pxa_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+static int pxa_gpio_set(struct gpio_chip *chip, unsigned int offset, int value)
 {
 	void __iomem *base = gpio_bank_base(chip, offset);
 
 	writel_relaxed(GPIO_bit(offset),
 		       base + (value ? GPSR_OFFSET : GPCR_OFFSET));
+
+	return 0;
 }
 
 #ifdef CONFIG_OF_GPIO
@@ -636,9 +638,8 @@ static int pxa_gpio_probe(struct platform_device *pdev)
 	if (!pxa_last_gpio)
 		return -EINVAL;
 
-	pchip->irqdomain = irq_domain_add_legacy(pdev->dev.of_node,
-						 pxa_last_gpio + 1, irq_base,
-						 0, &pxa_irq_domain_ops, pchip);
+	pchip->irqdomain = irq_domain_create_legacy(dev_fwnode(&pdev->dev), pxa_last_gpio + 1,
+						    irq_base, 0, &pxa_irq_domain_ops, pchip);
 	if (!pchip->irqdomain)
 		return -ENOMEM;
 
@@ -707,15 +708,15 @@ static int pxa_gpio_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id gpio_id_table[] = {
-	{ "pxa25x-gpio",	(unsigned long)&pxa25x_id },
-	{ "pxa26x-gpio",	(unsigned long)&pxa26x_id },
-	{ "pxa27x-gpio",	(unsigned long)&pxa27x_id },
-	{ "pxa3xx-gpio",	(unsigned long)&pxa3xx_id },
-	{ "pxa93x-gpio",	(unsigned long)&pxa93x_id },
-	{ "mmp-gpio",		(unsigned long)&mmp_id },
-	{ "mmp2-gpio",		(unsigned long)&mmp2_id },
-	{ "pxa1928-gpio",	(unsigned long)&pxa1928_id },
-	{ },
+	{ .name = "pxa25x-gpio",	.driver_data = (unsigned long)&pxa25x_id },
+	{ .name = "pxa26x-gpio",	.driver_data = (unsigned long)&pxa26x_id },
+	{ .name = "pxa27x-gpio",	.driver_data = (unsigned long)&pxa27x_id },
+	{ .name = "pxa3xx-gpio",	.driver_data = (unsigned long)&pxa3xx_id },
+	{ .name = "pxa93x-gpio",	.driver_data = (unsigned long)&pxa93x_id },
+	{ .name = "mmp-gpio",		.driver_data = (unsigned long)&mmp_id },
+	{ .name = "mmp2-gpio",		.driver_data = (unsigned long)&mmp2_id },
+	{ .name = "pxa1928-gpio",	.driver_data = (unsigned long)&pxa1928_id },
+	{ }
 };
 
 static struct platform_driver pxa_gpio_driver = {
@@ -746,7 +747,7 @@ static int __init pxa_gpio_dt_init(void)
 device_initcall(pxa_gpio_dt_init);
 
 #ifdef CONFIG_PM
-static int pxa_gpio_suspend(void)
+static int pxa_gpio_suspend(void *data)
 {
 	struct pxa_gpio_chip *pchip = pxa_gpio_chip;
 	struct pxa_gpio_bank *c;
@@ -767,7 +768,7 @@ static int pxa_gpio_suspend(void)
 	return 0;
 }
 
-static void pxa_gpio_resume(void)
+static void pxa_gpio_resume(void *data)
 {
 	struct pxa_gpio_chip *pchip = pxa_gpio_chip;
 	struct pxa_gpio_bank *c;
@@ -791,14 +792,18 @@ static void pxa_gpio_resume(void)
 #define pxa_gpio_resume		NULL
 #endif
 
-static struct syscore_ops pxa_gpio_syscore_ops = {
+static const struct syscore_ops pxa_gpio_syscore_ops = {
 	.suspend	= pxa_gpio_suspend,
 	.resume		= pxa_gpio_resume,
 };
 
+static struct syscore pxa_gpio_syscore = {
+	.ops = &pxa_gpio_syscore_ops,
+};
+
 static int __init pxa_gpio_sysinit(void)
 {
-	register_syscore_ops(&pxa_gpio_syscore_ops);
+	register_syscore(&pxa_gpio_syscore);
 	return 0;
 }
 postcore_initcall(pxa_gpio_sysinit);

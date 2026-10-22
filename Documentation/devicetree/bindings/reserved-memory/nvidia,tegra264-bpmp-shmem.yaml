@@ -7,7 +7,8 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: Tegra CPU-NS - BPMP IPC reserved memory
 
 maintainers:
-  - Peter De Schrijver <pdeschrijver@nvidia.com>
+  - Thierry Reding <thierry.reding@kernel.org>
+  - Jonathan Hunter <jonathanh@nvidia.com>
 
 description: |
   Define a memory region used for communication between CPU-NS and BPMP.
@@ -36,12 +37,13 @@ required:
 examples:
   - |
     reserved-memory {
-       #address-cells = <2>;
-       #size-cells = <2>;
-       dram_cpu_bpmp_mail: shmem@f1be0000 {
-           compatible = "nvidia,tegra264-bpmp-shmem";
-           reg = <0x0 0xf1be0000 0x0 0x2000>;
-           no-map;
-       };
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        shmem@f1be0000 {
+            compatible = "nvidia,tegra264-bpmp-shmem";
+            reg = <0x0 0xf1be0000 0x0 0x2000>;
+            no-map;
+        };
     };
 ...

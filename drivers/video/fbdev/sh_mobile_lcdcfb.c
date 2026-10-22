@@ -15,7 +15,6 @@
 #include <linux/ctype.h>
 #include <linux/dma-mapping.h>
 #include <linux/delay.h>
-#include <linux/fbcon.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/ioctl.h>
@@ -1338,16 +1337,22 @@ overlay_rop3_store(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
-static const struct device_attribute overlay_sysfs_attrs[] = {
-	__ATTR(ovl_alpha, S_IRUGO|S_IWUSR,
-	       overlay_alpha_show, overlay_alpha_store),
-	__ATTR(ovl_mode, S_IRUGO|S_IWUSR,
-	       overlay_mode_show, overlay_mode_store),
-	__ATTR(ovl_position, S_IRUGO|S_IWUSR,
-	       overlay_position_show, overlay_position_store),
-	__ATTR(ovl_rop3, S_IRUGO|S_IWUSR,
-	       overlay_rop3_show, overlay_rop3_store),
+static DEVICE_ATTR_RW(overlay_alpha);
+static DEVICE_ATTR_RW(overlay_mode);
+static DEVICE_ATTR_RW(overlay_position);
+static DEVICE_ATTR_RW(overlay_rop3);
+
+static struct attribute *overlay_sysfs_attrs[] __maybe_unused = {
+	&dev_attr_overlay_alpha.attr,
+	&dev_attr_overlay_mode.attr,
+	&dev_attr_overlay_position.attr,
+	&dev_attr_overlay_rop3.attr,
+	NULL,
 };
+
+#ifdef CONFIG_FB_DEVICE
+ATTRIBUTE_GROUPS(overlay_sysfs);
+#endif
 
 static const struct fb_fix_screeninfo sh_mobile_lcdc_overlay_fix  = {
 	.id =		"SH Mobile LCDC",
@@ -1516,7 +1521,6 @@ sh_mobile_lcdc_overlay_fb_register(struct sh_mobile_lcdc_overlay *ovl)
 {
 	struct sh_mobile_lcdc_priv *lcdc = ovl->channel->lcdc;
 	struct fb_info *info = ovl->info;
-	unsigned int i;
 	int ret;
 
 	if (info == NULL)
@@ -1529,12 +1533,6 @@ sh_mobile_lcdc_overlay_fb_register(struct sh_mobile_lcdc_overlay *ovl)
 	dev_info(lcdc->dev, "registered %s/overlay %u as %dx%d %dbpp.\n",
 		 dev_name(lcdc->dev), ovl->index, info->var.xres,
 		 info->var.yres, info->var.bits_per_pixel);
-
-	for (i = 0; i < ARRAY_SIZE(overlay_sysfs_attrs); ++i) {
-		ret = device_create_file(info->dev, &overlay_sysfs_attrs[i]);
-		if (ret < 0)
-			return ret;
-	}
 
 	return 0;
 }
@@ -1769,11 +1767,9 @@ static void sh_mobile_fb_reconfig(struct fb_info *info)
 	var.height = ch->display.height;
 	var.activate = FB_ACTIVATE_NOW;
 
-	if (fb_set_var(info, &var) < 0)
+	if (fb_set_var_from_user(info, &var) < 0)
 		/* Couldn't reconfigure, hopefully, can continue as before */
 		return;
-
-	fbcon_update_vcs(info, true);
 }
 
 /*
@@ -2513,7 +2509,7 @@ static int sh_mobile_lcdc_probe(struct platform_device *pdev)
 		return -ENOENT;
 	}
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -2641,6 +2637,7 @@ err1:
 static struct platform_driver sh_mobile_lcdc_driver = {
 	.driver		= {
 		.name		= "sh_mobile_lcdc_fb",
+		.dev_groups	= overlay_sysfs_groups,
 		.pm		= &sh_mobile_lcdc_dev_pm_ops,
 	},
 	.probe		= sh_mobile_lcdc_probe,

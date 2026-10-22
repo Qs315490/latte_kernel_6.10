@@ -129,6 +129,9 @@
 #include <linux/fadvise.h>
 #include <linux/sched/mm.h>
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/readahead.h>
+
 #include "internal.h"
 
 /*
@@ -143,6 +146,17 @@ file_ra_state_init(struct file_ra_state *ra, struct address_space *mapping)
 }
 EXPORT_SYMBOL_GPL(file_ra_state_init);
 
+/**
+ * read_pages() - Start IO for a contiguous range of allocated folios in the
+ *                page cache.
+ * @rac: Readahead control.
+ *
+ * When read_pages() returns, it is guaranteed that all of the folios will have
+ * been processed or removed so that ``readahead_count(rac) == 0``. However,
+ * that does not imply that ``readahead_index(rac)`` will be updated to point
+ * to the end of the originally requested range because, for example, the
+ * filesystem may expand the range upwards.
+ */
 static void read_pages(struct readahead_control *rac)
 {
 	const struct address_space_operations *aops = rac->mapping->a_ops;
@@ -183,7 +197,7 @@ static struct folio *ractl_alloc_folio(struct readahead_control *ractl,
 {
 	struct folio *folio;
 
-	folio = filemap_alloc_folio(gfp_mask, order);
+	folio = filemap_alloc_folio(gfp_mask, order, NULL);
 	if (folio && ractl->dropbehind)
 		__folio_set_dropbehind(folio);
 
@@ -201,8 +215,9 @@ static struct folio *ractl_alloc_folio(struct readahead_control *ractl,
  * not the function you want to call.  Use page_cache_async_readahead()
  * or page_cache_sync_readahead() instead.
  *
- * Context: File is referenced by caller.  Mutexes may be held by caller.
- * May sleep, but will not reenter filesystem to reclaim memory.
+ * Context: File is referenced by caller, and ractl->mapping->invalidate_lock
+ * must be held by the caller at least in shared mode.  Mutexes may be held by
+ * caller.  May sleep, but will not reenter filesystem to reclaim memory.
  */
 void page_cache_ra_unbounded(struct readahead_control *ractl,
 		unsigned long nr_to_read, unsigned long lookahead_size)
@@ -225,7 +240,10 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 	 */
 	unsigned int nofs = memalloc_nofs_save();
 
-	filemap_invalidate_lock_shared(mapping);
+	lockdep_assert_held(&mapping->invalidate_lock);
+
+	trace_page_cache_ra_unbounded(mapping->host, index, nr_to_read,
+				      lookahead_size);
 	index = mapping_align_index(mapping, index);
 
 	/*
@@ -263,7 +281,7 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 			 */
 			read_pages(ractl);
 			ractl->_index += min_nrpages;
-			i = ractl->_index + ractl->_nr_pages - index;
+			i = ractl->_index - index;
 			continue;
 		}
 
@@ -279,7 +297,7 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 				break;
 			read_pages(ractl);
 			ractl->_index += min_nrpages;
-			i = ractl->_index + ractl->_nr_pages - index;
+			i = ractl->_index - index;
 			continue;
 		}
 		if (i == mark)
@@ -295,7 +313,6 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 	 * will then handle the error.
 	 */
 	read_pages(ractl);
-	filemap_invalidate_unlock_shared(mapping);
 	memalloc_nofs_restore(nofs);
 }
 EXPORT_SYMBOL_GPL(page_cache_ra_unbounded);
@@ -309,9 +326,9 @@ EXPORT_SYMBOL_GPL(page_cache_ra_unbounded);
 static void do_page_cache_ra(struct readahead_control *ractl,
 		unsigned long nr_to_read, unsigned long lookahead_size)
 {
-	struct inode *inode = ractl->mapping->host;
+	struct address_space *mapping = ractl->mapping;
 	unsigned long index = readahead_index(ractl);
-	loff_t isize = i_size_read(inode);
+	loff_t isize = i_size_read(mapping->host);
 	pgoff_t end_index;	/* The last page we want to read */
 
 	if (isize == 0)
@@ -321,10 +338,15 @@ static void do_page_cache_ra(struct readahead_control *ractl,
 	if (index > end_index)
 		return;
 	/* Don't read past the page containing the last byte of the file */
-	if (nr_to_read > end_index - index)
+	if (nr_to_read > end_index - index) {
 		nr_to_read = end_index - index + 1;
+		/* We've reached the end, so don't set a readahead marker. */
+		lookahead_size = 0;
+	}
 
+	filemap_invalidate_lock_shared(mapping);
 	page_cache_ra_unbounded(ractl, nr_to_read, lookahead_size);
+	filemap_invalidate_unlock_shared(mapping);
 }
 
 /*
@@ -431,7 +453,7 @@ static unsigned long get_next_ra_size(struct file_ra_state *ra,
  * based on I/O request size and the max_readahead.
  *
  * The code ramps up the readahead size aggressively at first, but slow down as
- * it approaches max_readhead.
+ * it approaches max_readahead.
  */
 
 static inline int ra_alloc_folio(struct readahead_control *ractl, pgoff_t index,
@@ -457,34 +479,38 @@ static inline int ra_alloc_folio(struct readahead_control *ractl, pgoff_t index,
 }
 
 void page_cache_ra_order(struct readahead_control *ractl,
-		struct file_ra_state *ra, unsigned int new_order)
+		struct file_ra_state *ra)
 {
 	struct address_space *mapping = ractl->mapping;
 	pgoff_t start = readahead_index(ractl);
 	pgoff_t index = start;
 	unsigned int min_order = mapping_min_folio_order(mapping);
 	pgoff_t limit = (i_size_read(mapping->host) - 1) >> PAGE_SHIFT;
-	pgoff_t mark = index + ra->size - ra->async_size;
+	pgoff_t mark;
 	unsigned int nofs;
 	int err = 0;
 	gfp_t gfp = readahead_gfp_mask(mapping);
-	unsigned int min_ra_size = max(4, mapping_min_folio_nrpages(mapping));
+	unsigned int new_order = ra->order;
 
-	/*
-	 * Fallback when size < min_nrpages as each folio should be
-	 * at least min_nrpages anyway.
-	 */
-	if (!mapping_large_folio_support(mapping) || ra->size < min_ra_size)
+	trace_page_cache_ra_order(mapping->host, start, ra);
+	if (!mapping_large_folio_support(mapping)) {
+		ra->order = 0;
 		goto fallback;
+	}
 
-	limit = min(limit, index + ra->size - 1);
-
-	if (new_order < mapping_max_folio_order(mapping))
-		new_order += 2;
+	if (limit > index + ra->size - 1) {
+		limit = index + ra->size - 1;
+		mark = index + ra->size - ra->async_size;
+	} else {
+		/* We've reached the end, so don't set a readahead marker. */
+		mark = ULONG_MAX;
+	}
 
 	new_order = min(mapping_max_folio_order(mapping), new_order);
 	new_order = min_t(unsigned int, new_order, ilog2(ra->size));
 	new_order = max(new_order, min_order);
+
+	ra->order = new_order;
 
 	/* See comment in page_cache_ra_unbounded() */
 	nofs = memalloc_nofs_save();
@@ -557,6 +583,7 @@ void page_cache_sync_ra(struct readahead_control *ractl,
 	unsigned long max_pages, contig_count;
 	pgoff_t prev_index, miss;
 
+	trace_page_cache_sync_ra(ractl->mapping->host, index, ra, req_count);
 	/*
 	 * Even if readahead is disabled, issue this request as readahead
 	 * as we'll need it to satisfy the requested range. The forced
@@ -617,8 +644,9 @@ void page_cache_sync_ra(struct readahead_control *ractl,
 	ra->size = min(contig_count + req_count, max_pages);
 	ra->async_size = 1;
 readit:
+	ra->order = 0;
 	ractl->_index = ra->start;
-	page_cache_ra_order(ractl, ra, 0);
+	page_cache_ra_order(ractl, ra);
 }
 EXPORT_SYMBOL_GPL(page_cache_sync_ra);
 
@@ -628,8 +656,7 @@ void page_cache_async_ra(struct readahead_control *ractl,
 	unsigned long max_pages;
 	struct file_ra_state *ra = ractl->ra;
 	pgoff_t index = readahead_index(ractl);
-	pgoff_t expected, start;
-	unsigned int order = folio_order(folio);
+	pgoff_t expected, start, end, aligned_end, align;
 
 	/* no readahead */
 	if (!ra->ra_pages)
@@ -641,6 +668,7 @@ void page_cache_async_ra(struct readahead_control *ractl,
 	if (folio_test_writeback(folio))
 		return;
 
+	trace_page_cache_async_ra(ractl->mapping->host, index, ra, req_count);
 	folio_clear_readahead(folio);
 
 	if (blk_cgroup_congested())
@@ -652,7 +680,7 @@ void page_cache_async_ra(struct readahead_control *ractl,
 	 * Ramp up sizes, and push forward the readahead window.
 	 */
 	expected = round_down(ra->start + ra->size - ra->async_size,
-			1UL << order);
+			folio_nr_pages(folio));
 	if (index == expected) {
 		ra->start += ra->size;
 		/*
@@ -660,7 +688,6 @@ void page_cache_async_ra(struct readahead_control *ractl,
 		 * the readahead window.
 		 */
 		ra->size = max(ra->size, get_next_ra_size(ra, max_pages));
-		ra->async_size = ra->size;
 		goto readit;
 	}
 
@@ -681,18 +708,30 @@ void page_cache_async_ra(struct readahead_control *ractl,
 	ra->size = start - index;	/* old async_size */
 	ra->size += req_count;
 	ra->size = get_next_ra_size(ra, max_pages);
-	ra->async_size = ra->size;
 readit:
+	ra->order += 2;
+	align = 1UL << min(ra->order, ffs(max_pages) - 1);
+	end = ra->start + ra->size;
+	aligned_end = round_down(end, align);
+	if (aligned_end > ra->start)
+		ra->size -= end - aligned_end;
+	ra->async_size = ra->size;
 	ractl->_index = ra->start;
-	page_cache_ra_order(ractl, ra, order);
+	page_cache_ra_order(ractl, ra);
 }
 EXPORT_SYMBOL_GPL(page_cache_async_ra);
 
 ssize_t ksys_readahead(int fd, loff_t offset, size_t count)
 {
-	CLASS(fd, f)(fd);
+	struct file *file;
+	const struct inode *inode;
 
-	if (fd_empty(f) || !(fd_file(f)->f_mode & FMODE_READ))
+	CLASS(fd, f)(fd);
+	if (fd_empty(f))
+		return -EBADF;
+
+	file = fd_file(f);
+	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
 
 	/*
@@ -700,9 +739,15 @@ ssize_t ksys_readahead(int fd, loff_t offset, size_t count)
 	 * that can execute readahead. If readahead is not possible
 	 * on this file, then we must return -EINVAL.
 	 */
-	if (!fd_file(f)->f_mapping || !fd_file(f)->f_mapping->a_ops ||
-	    (!S_ISREG(file_inode(fd_file(f))->i_mode) &&
-	    !S_ISBLK(file_inode(fd_file(f))->i_mode)))
+	if (!file->f_mapping)
+		return -EINVAL;
+	if (!file->f_mapping->a_ops)
+		return -EINVAL;
+
+	inode = file_inode(file);
+	if (!S_ISREG(inode->i_mode) && !S_ISBLK(inode->i_mode))
+		return -EINVAL;
+	if (IS_ANON_FILE(inode))
 		return -EINVAL;
 
 	return vfs_fadvise(fd_file(f), offset, count, POSIX_FADV_WILLNEED);

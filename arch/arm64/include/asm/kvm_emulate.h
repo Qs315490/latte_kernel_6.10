@@ -45,16 +45,41 @@ bool kvm_condition_valid32(const struct kvm_vcpu *vcpu);
 void kvm_skip_instr32(struct kvm_vcpu *vcpu);
 
 void kvm_inject_undefined(struct kvm_vcpu *vcpu);
-void kvm_inject_vabt(struct kvm_vcpu *vcpu);
-void kvm_inject_dabt(struct kvm_vcpu *vcpu, unsigned long addr);
-void kvm_inject_pabt(struct kvm_vcpu *vcpu, unsigned long addr);
+void kvm_inject_sync(struct kvm_vcpu *vcpu, u64 esr);
+int kvm_inject_serror_esr(struct kvm_vcpu *vcpu, u64 esr);
+int kvm_inject_sea(struct kvm_vcpu *vcpu, bool iabt, u64 addr);
+int kvm_inject_dabt_excl_atomic(struct kvm_vcpu *vcpu, u64 addr);
 void kvm_inject_size_fault(struct kvm_vcpu *vcpu);
+
+static inline int kvm_inject_sea_dabt(struct kvm_vcpu *vcpu, u64 addr)
+{
+	return kvm_inject_sea(vcpu, false, addr);
+}
+
+static inline int kvm_inject_sea_iabt(struct kvm_vcpu *vcpu, u64 addr)
+{
+	return kvm_inject_sea(vcpu, true, addr);
+}
+
+static inline int kvm_inject_serror(struct kvm_vcpu *vcpu)
+{
+	/*
+	 * ESR_ELx.ISV (later renamed to IDS) indicates whether or not
+	 * ESR_ELx.ISS contains IMPLEMENTATION DEFINED syndrome information.
+	 *
+	 * Set the bit when injecting an SError w/o an ESR to indicate ISS
+	 * does not follow the architected format.
+	 */
+	return kvm_inject_serror_esr(vcpu, ESR_ELx_ISV);
+}
 
 void kvm_vcpu_wfi(struct kvm_vcpu *vcpu);
 
 void kvm_emulate_nested_eret(struct kvm_vcpu *vcpu);
 int kvm_inject_nested_sync(struct kvm_vcpu *vcpu, u64 esr_el2);
 int kvm_inject_nested_irq(struct kvm_vcpu *vcpu);
+int kvm_inject_nested_sea(struct kvm_vcpu *vcpu, bool iabt, u64 addr);
+int kvm_inject_nested_serror(struct kvm_vcpu *vcpu, u64 esr);
 
 static inline void kvm_inject_nested_sve_trap(struct kvm_vcpu *vcpu)
 {
@@ -94,22 +119,6 @@ static inline void vcpu_reset_hcr(struct kvm_vcpu *vcpu)
 static inline unsigned long *vcpu_hcr(struct kvm_vcpu *vcpu)
 {
 	return (unsigned long *)&vcpu->arch.hcr_el2;
-}
-
-static inline void vcpu_clear_wfx_traps(struct kvm_vcpu *vcpu)
-{
-	vcpu->arch.hcr_el2 &= ~HCR_TWE;
-	if (atomic_read(&vcpu->arch.vgic_cpu.vgic_v3.its_vpe.vlpi_count) ||
-	    vcpu->kvm->arch.vgic.nassgireq)
-		vcpu->arch.hcr_el2 &= ~HCR_TWI;
-	else
-		vcpu->arch.hcr_el2 |= HCR_TWI;
-}
-
-static inline void vcpu_set_wfx_traps(struct kvm_vcpu *vcpu)
-{
-	vcpu->arch.hcr_el2 |= HCR_TWE;
-	vcpu->arch.hcr_el2 |= HCR_TWI;
 }
 
 static inline unsigned long vcpu_get_vsesr(struct kvm_vcpu *vcpu)
@@ -195,6 +204,25 @@ static inline bool vcpu_el2_tge_is_set(const struct kvm_vcpu *vcpu)
 	return ctxt_sys_reg(&vcpu->arch.ctxt, HCR_EL2) & HCR_TGE;
 }
 
+static inline bool vcpu_el2_amo_is_set(const struct kvm_vcpu *vcpu)
+{
+	/*
+	 * DDI0487L.b Known Issue D22105
+	 *
+	 * When executing at EL2 and HCR_EL2.{E2H,TGE} = {1, 0} it is
+	 * IMPLEMENTATION DEFINED whether the effective value of HCR_EL2.AMO
+	 * is the value programmed or 1.
+	 *
+	 * Make the implementation choice of treating the effective value as 1 as
+	 * we cannot subsequently catch changes to TGE or AMO that would
+	 * otherwise lead to the SError becoming deliverable.
+	 */
+	if (vcpu_is_el2(vcpu) && vcpu_el2_e2h_is_set(vcpu) && !vcpu_el2_tge_is_set(vcpu))
+		return true;
+
+	return ctxt_sys_reg(&vcpu->arch.ctxt, HCR_EL2) & HCR_AMO;
+}
+
 static inline bool is_hyp_ctxt(const struct kvm_vcpu *vcpu)
 {
 	bool e2h, tge;
@@ -222,6 +250,20 @@ static inline bool is_hyp_ctxt(const struct kvm_vcpu *vcpu)
 static inline bool vcpu_is_host_el0(const struct kvm_vcpu *vcpu)
 {
 	return is_hyp_ctxt(vcpu) && !vcpu_is_el2(vcpu);
+}
+
+static inline bool is_nested_ctxt(struct kvm_vcpu *vcpu)
+{
+	return vcpu_has_nv(vcpu) && !is_hyp_ctxt(vcpu);
+}
+
+static inline bool vserror_state_is_nested(struct kvm_vcpu *vcpu)
+{
+	if (!is_nested_ctxt(vcpu))
+		return false;
+
+	return vcpu_el2_amo_is_set(vcpu) ||
+	       (__vcpu_sys_reg(vcpu, HCRX_EL2) & HCRX_EL2_TMEA);
 }
 
 /*
@@ -275,6 +317,19 @@ static __always_inline u64 kvm_vcpu_get_esr(const struct kvm_vcpu *vcpu)
 	return vcpu->arch.fault.esr_el2;
 }
 
+static inline bool guest_hyp_wfx_traps_enabled(const struct kvm_vcpu *vcpu)
+{
+	u64 esr = kvm_vcpu_get_esr(vcpu);
+	bool is_wfe = !!(esr & ESR_ELx_WFx_ISS_WFE);
+	u64 hcr_el2 = __vcpu_sys_reg(vcpu, HCR_EL2);
+
+	if (!vcpu_has_nv(vcpu) || vcpu_is_el2(vcpu))
+		return false;
+
+	return ((is_wfe && (hcr_el2 & HCR_TWE)) ||
+		(!is_wfe && (hcr_el2 & HCR_TWI)));
+}
+
 static __always_inline int kvm_vcpu_get_condition(const struct kvm_vcpu *vcpu)
 {
 	u64 esr = kvm_vcpu_get_esr(vcpu);
@@ -292,7 +347,12 @@ static __always_inline unsigned long kvm_vcpu_get_hfar(const struct kvm_vcpu *vc
 
 static __always_inline phys_addr_t kvm_vcpu_get_fault_ipa(const struct kvm_vcpu *vcpu)
 {
-	return ((phys_addr_t)vcpu->arch.fault.hpfar_el2 & HPFAR_MASK) << 8;
+	u64 hpfar = vcpu->arch.fault.hpfar_el2;
+
+	if (unlikely(!(hpfar & HPFAR_EL2_NS)))
+		return INVALID_GPA;
+
+	return FIELD_GET(HPFAR_EL2_FIPA, hpfar) << 12;
 }
 
 static inline u64 kvm_vcpu_get_disr(const struct kvm_vcpu *vcpu)
@@ -451,21 +511,29 @@ static inline void kvm_vcpu_set_be(struct kvm_vcpu *vcpu)
 	if (vcpu_mode_is_32bit(vcpu)) {
 		*vcpu_cpsr(vcpu) |= PSR_AA32_E_BIT;
 	} else {
-		u64 sctlr = vcpu_read_sys_reg(vcpu, SCTLR_EL1);
+		enum vcpu_sysreg r;
+		u64 sctlr;
+
+		r = vcpu_has_nv(vcpu) ? SCTLR_EL2 : SCTLR_EL1;
+
+		sctlr = vcpu_read_sys_reg(vcpu, r);
 		sctlr |= SCTLR_ELx_EE;
-		vcpu_write_sys_reg(vcpu, sctlr, SCTLR_EL1);
+		vcpu_write_sys_reg(vcpu, sctlr, r);
 	}
 }
 
 static inline bool kvm_vcpu_is_be(struct kvm_vcpu *vcpu)
 {
+	enum vcpu_sysreg r;
+	u64 bit;
+
 	if (vcpu_mode_is_32bit(vcpu))
 		return !!(*vcpu_cpsr(vcpu) & PSR_AA32_E_BIT);
 
-	if (vcpu_mode_priv(vcpu))
-		return !!(vcpu_read_sys_reg(vcpu, SCTLR_EL1) & SCTLR_ELx_EE);
-	else
-		return !!(vcpu_read_sys_reg(vcpu, SCTLR_EL1) & SCTLR_EL1_E0E);
+	r = is_hyp_ctxt(vcpu) ? SCTLR_EL2 : SCTLR_EL1;
+	bit = vcpu_mode_priv(vcpu) ? SCTLR_ELx_EE : SCTLR_EL1_E0E;
+
+	return vcpu_read_sys_reg(vcpu, r) & bit;
 }
 
 static inline unsigned long vcpu_data_guest_to_host(struct kvm_vcpu *vcpu,
@@ -543,68 +611,6 @@ static __always_inline void kvm_incr_pc(struct kvm_vcpu *vcpu)
 		vcpu_set_flag((v), e);					\
 	} while (0)
 
-#define __build_check_all_or_none(r, bits)				\
-	BUILD_BUG_ON(((r) & (bits)) && ((r) & (bits)) != (bits))
-
-#define __cpacr_to_cptr_clr(clr, set)					\
-	({								\
-		u64 cptr = 0;						\
-									\
-		if ((set) & CPACR_EL1_FPEN)				\
-			cptr |= CPTR_EL2_TFP;				\
-		if ((set) & CPACR_EL1_ZEN)				\
-			cptr |= CPTR_EL2_TZ;				\
-		if ((set) & CPACR_EL1_SMEN)				\
-			cptr |= CPTR_EL2_TSM;				\
-		if ((clr) & CPACR_EL1_TTA)				\
-			cptr |= CPTR_EL2_TTA;				\
-		if ((clr) & CPTR_EL2_TAM)				\
-			cptr |= CPTR_EL2_TAM;				\
-		if ((clr) & CPTR_EL2_TCPAC)				\
-			cptr |= CPTR_EL2_TCPAC;				\
-									\
-		cptr;							\
-	})
-
-#define __cpacr_to_cptr_set(clr, set)					\
-	({								\
-		u64 cptr = 0;						\
-									\
-		if ((clr) & CPACR_EL1_FPEN)				\
-			cptr |= CPTR_EL2_TFP;				\
-		if ((clr) & CPACR_EL1_ZEN)				\
-			cptr |= CPTR_EL2_TZ;				\
-		if ((clr) & CPACR_EL1_SMEN)				\
-			cptr |= CPTR_EL2_TSM;				\
-		if ((set) & CPACR_EL1_TTA)				\
-			cptr |= CPTR_EL2_TTA;				\
-		if ((set) & CPTR_EL2_TAM)				\
-			cptr |= CPTR_EL2_TAM;				\
-		if ((set) & CPTR_EL2_TCPAC)				\
-			cptr |= CPTR_EL2_TCPAC;				\
-									\
-		cptr;							\
-	})
-
-#define cpacr_clear_set(clr, set)					\
-	do {								\
-		BUILD_BUG_ON((set) & CPTR_VHE_EL2_RES0);		\
-		BUILD_BUG_ON((clr) & CPACR_EL1_E0POE);			\
-		__build_check_all_or_none((clr), CPACR_EL1_FPEN);	\
-		__build_check_all_or_none((set), CPACR_EL1_FPEN);	\
-		__build_check_all_or_none((clr), CPACR_EL1_ZEN);	\
-		__build_check_all_or_none((set), CPACR_EL1_ZEN);	\
-		__build_check_all_or_none((clr), CPACR_EL1_SMEN);	\
-		__build_check_all_or_none((set), CPACR_EL1_SMEN);	\
-									\
-		if (has_vhe() || has_hvhe())				\
-			sysreg_clear_set(cpacr_el1, clr, set);		\
-		else							\
-			sysreg_clear_set(cptr_el2,			\
-					 __cpacr_to_cptr_clr(clr, set),	\
-					 __cpacr_to_cptr_set(clr, set));\
-	} while (0)
-
 /*
  * Returns a 'sanitised' view of CPTR_EL2, translating from nVHE to the VHE
  * format if E2H isn't set.
@@ -648,5 +654,38 @@ static inline bool guest_hyp_fpsimd_traps_enabled(const struct kvm_vcpu *vcpu)
 static inline bool guest_hyp_sve_traps_enabled(const struct kvm_vcpu *vcpu)
 {
 	return __guest_hyp_cptr_xen_trap_enabled(vcpu, ZEN);
+}
+
+static inline void vcpu_set_hcrx(struct kvm_vcpu *vcpu)
+{
+	struct kvm *kvm = vcpu->kvm;
+
+	if (cpus_have_final_cap(ARM64_HAS_HCX)) {
+		/*
+		 * In general, all HCRX_EL2 bits are gated by a feature.
+		 * The only reason we can set SMPME without checking any
+		 * feature is that its effects are not directly observable
+		 * from the guest.
+		 */
+		vcpu->arch.hcrx_el2 = HCRX_EL2_SMPME;
+
+		if (kvm_has_feat(kvm, ID_AA64ISAR2_EL1, MOPS, IMP))
+			vcpu->arch.hcrx_el2 |= (HCRX_EL2_MSCEn | HCRX_EL2_MCE2);
+
+		if (kvm_has_tcr2(kvm))
+			vcpu->arch.hcrx_el2 |= HCRX_EL2_TCR2En;
+
+		if (kvm_has_fpmr(kvm))
+			vcpu->arch.hcrx_el2 |= HCRX_EL2_EnFPM;
+
+		if (kvm_has_sctlr2(kvm))
+			vcpu->arch.hcrx_el2 |= HCRX_EL2_SCTLR2En;
+
+		if (kvm_has_feat(kvm, ID_AA64ISAR1_EL1, LS64, LS64))
+			vcpu->arch.hcrx_el2 |= HCRX_EL2_EnALS;
+
+		if (kvm_has_feat(kvm, ID_AA64ISAR1_EL1, LS64, LS64_V))
+			vcpu->arch.hcrx_el2 |= HCRX_EL2_EnASR;
+	}
 }
 #endif /* __ARM64_KVM_EMULATE_H__ */

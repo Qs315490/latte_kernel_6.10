@@ -17,7 +17,7 @@
 	 * The contents of the node are defined below, in order to
 	 * save one indentation level
 	 */
-	CP11X_NAME: CP11X_NAME { };
+	CP11X_NAME: CP11X_NODE_NAME(bus) { };
 
 	/*
 	 * CPs only have one sensor in the thermal IC.
@@ -51,7 +51,7 @@
 	interrupt-parent = <&CP11X_LABEL(icu_nsr)>;
 	ranges;
 
-	config-space@CP11X_BASE {
+	bus@CP11X_BASE {
 		#address-cells = <1>;
 		#size-cells = <1>;
 		compatible = "simple-bus";
@@ -202,6 +202,7 @@
 			CP11X_LABEL(icu_nsr): interrupt-controller@10 {
 				compatible = "marvell,cp110-icu-nsr";
 				reg = <0x10 0x20>;
+				#address-cells = <0>;
 				#interrupt-cells = <2>;
 				interrupt-controller;
 				msi-parent = <&gicp>;
@@ -511,7 +512,8 @@
 		};
 
 		CP11X_LABEL(crypto): crypto@800000 {
-			compatible = "inside-secure,safexcel-eip197b";
+			compatible = "marvell,armada-cp110-crypto",
+				     "inside-secure,safexcel-eip197b";
 			reg = <0x800000 0x200000>;
 			interrupts = <88 IRQ_TYPE_LEVEL_HIGH>,
 				<89 IRQ_TYPE_LEVEL_HIGH>,

@@ -35,8 +35,7 @@ static bool sd_zbc_is_gap_zone(const u8 buf[64])
  * @buf: SCSI zone descriptor.
  * @idx: Index of the zone relative to the first zone reported by the current
  *	sd_zbc_report_zones() call.
- * @cb: Callback function pointer.
- * @data: Second argument passed to @cb.
+ * @args: report zones arguments (callback, etc)
  *
  * Return: Value returned by @cb.
  *
@@ -44,12 +43,11 @@ static bool sd_zbc_is_gap_zone(const u8 buf[64])
  * call @cb(blk_zone, @data).
  */
 static int sd_zbc_parse_report(struct scsi_disk *sdkp, const u8 buf[64],
-			       unsigned int idx, report_zones_cb cb, void *data)
+			unsigned int idx, struct blk_report_zones_args *args)
 {
 	struct scsi_device *sdp = sdkp->device;
 	struct blk_zone zone = { 0 };
 	sector_t start_lba, gran;
-	int ret;
 
 	if (WARN_ON_ONCE(sd_zbc_is_gap_zone(buf)))
 		return -EINVAL;
@@ -87,11 +85,7 @@ static int sd_zbc_parse_report(struct scsi_disk *sdkp, const u8 buf[64],
 	else
 		zone.wp = logical_to_sectors(sdp, get_unaligned_be64(&buf[24]));
 
-	ret = cb(&zone, idx, data);
-	if (ret)
-		return ret;
-
-	return 0;
+	return disk_report_zone(sdkp->disk, &zone, idx, args);
 }
 
 /**
@@ -169,6 +163,7 @@ static void *sd_zbc_alloc_report_buffer(struct scsi_disk *sdkp,
 					unsigned int nr_zones, size_t *buflen)
 {
 	struct request_queue *q = sdkp->disk->queue;
+	unsigned int max_segments;
 	size_t bufsize;
 	void *buf;
 
@@ -180,12 +175,15 @@ static void *sd_zbc_alloc_report_buffer(struct scsi_disk *sdkp,
 	 * Furthermore, since the report zone command cannot be split, make
 	 * sure that the allocated buffer can always be mapped by limiting the
 	 * number of pages allocated to the HBA max segments limit.
+	 * Since max segments can be larger than the max inline bio vectors,
+	 * further limit the allocated buffer to BIO_MAX_INLINE_VECS.
 	 */
 	nr_zones = min(nr_zones, sdkp->zone_info.nr_zones);
 	bufsize = roundup((nr_zones + 1) * 64, SECTOR_SIZE);
 	bufsize = min_t(size_t, bufsize,
 			queue_max_hw_sectors(q) << SECTOR_SHIFT);
-	bufsize = min_t(size_t, bufsize, queue_max_segments(q) << PAGE_SHIFT);
+	max_segments = min(BIO_MAX_INLINE_VECS, queue_max_segments(q));
+	bufsize = min_t(size_t, bufsize, max_segments << PAGE_SHIFT);
 
 	while (bufsize >= SECTOR_SIZE) {
 		buf = kvzalloc(bufsize, GFP_KERNEL | __GFP_NORETRY);
@@ -213,14 +211,14 @@ static inline sector_t sd_zbc_zone_sectors(struct scsi_disk *sdkp)
  * @disk: Disk to report zones for.
  * @sector: Start sector.
  * @nr_zones: Maximum number of zones to report.
- * @cb: Callback function called to report zone information.
- * @data: Second argument passed to @cb.
+ * @args: Callback arguments.
  *
  * Called by the block layer to iterate over zone information. See also the
  * disk->fops->report_zones() calls in block/blk-zoned.c.
  */
 int sd_zbc_report_zones(struct gendisk *disk, sector_t sector,
-			unsigned int nr_zones, report_zones_cb cb, void *data)
+			unsigned int nr_zones,
+			struct blk_report_zones_args *args)
 {
 	struct scsi_disk *sdkp = scsi_disk(disk);
 	sector_t lba = sectors_to_logical(sdkp->device, sector);
@@ -279,7 +277,7 @@ int sd_zbc_report_zones(struct gendisk *disk, sector_t sector,
 			}
 
 			ret = sd_zbc_parse_report(sdkp, buf + offset, zone_idx,
-						  cb, data);
+						  args);
 			if (ret)
 				goto out;
 

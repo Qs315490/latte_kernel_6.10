@@ -8,7 +8,6 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of_irq.h>
 #include <linux/platform_device.h>
 
@@ -121,7 +120,7 @@ static void gptu_disable(struct clk *clk)
 static inline void clkdev_add_gptu(struct device *dev, const char *con,
 							unsigned int timer)
 {
-	struct clk *clk = kzalloc(sizeof(struct clk), GFP_KERNEL);
+	struct clk *clk = kzalloc_obj(struct clk);
 
 	if (!clk)
 		return;
@@ -194,7 +193,7 @@ static struct platform_driver dma_driver = {
 	},
 };
 
-int __init gptu_init(void)
+static int __init gptu_init(void)
 {
 	int ret = platform_driver_register(&dma_driver);
 

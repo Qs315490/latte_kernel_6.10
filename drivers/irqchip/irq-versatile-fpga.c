@@ -89,7 +89,7 @@ static void fpga_irq_handle(struct irq_desc *desc)
 
 	status = readl(f->base + IRQ_STATUS);
 	if (status == 0) {
-		do_bad_IRQ(desc);
+		handle_bad_irq(desc);
 		goto out;
 	}
 
@@ -176,8 +176,8 @@ static void __init fpga_irq_init(void __iomem *base, int parent_irq,
 						 f);
 	}
 
-	f->domain = irq_domain_add_linear(node, fls(valid),
-					  &fpga_irqdomain_ops, f);
+	f->domain = irq_domain_create_linear(of_fwnode_handle(node), fls(valid),
+					     &fpga_irqdomain_ops, f);
 
 	/* This will allocate all valid descriptors in the linear case */
 	for (i = 0; i < fls(valid); i++)

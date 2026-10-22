@@ -683,10 +683,7 @@ static struct crypto_alg anubis_alg = {
 
 static int __init anubis_mod_init(void)
 {
-	int ret = 0;
-
-	ret = crypto_register_alg(&anubis_alg);
-	return ret;
+	return crypto_register_alg(&anubis_alg);
 }
 
 static void __exit anubis_mod_fini(void)
@@ -694,7 +691,7 @@ static void __exit anubis_mod_fini(void)
 	crypto_unregister_alg(&anubis_alg);
 }
 
-subsys_initcall(anubis_mod_init);
+module_init(anubis_mod_init);
 module_exit(anubis_mod_fini);
 
 MODULE_LICENSE("GPL");

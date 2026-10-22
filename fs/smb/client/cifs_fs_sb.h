@@ -49,12 +49,14 @@
 
 struct cifs_sb_info {
 	struct rb_root tlink_tree;
+	struct list_head tcon_sb_link;
 	spinlock_t tlink_tree_lock;
 	struct tcon_link *master_tlink;
 	struct nls_table *local_nls;
 	struct smb3_fs_context *ctx;
 	atomic_t active;
-	unsigned int mnt_cifs_flags;
+	atomic_t mnt_cifs_flags;
+	atomic_t outstanding_rreq;	/* nr of rreqs not yet fully deinitialized */
 	struct delayed_work prune_tlinks;
 	struct rcu_head rcu;
 

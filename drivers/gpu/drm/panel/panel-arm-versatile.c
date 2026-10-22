@@ -30,7 +30,6 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mfd/syscon.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -306,9 +305,11 @@ static int versatile_panel_probe(struct platform_device *pdev)
 		return PTR_ERR(map);
 	}
 
-	vpanel = devm_kzalloc(dev, sizeof(*vpanel), GFP_KERNEL);
-	if (!vpanel)
-		return -ENOMEM;
+	vpanel = devm_drm_panel_alloc(dev, struct versatile_panel, panel,
+				      &versatile_panel_drm_funcs,
+				      DRM_MODE_CONNECTOR_DPI);
+	if (IS_ERR(vpanel))
+		return PTR_ERR(vpanel);
 
 	ret = regmap_read(map, SYS_CLCD, &val);
 	if (ret) {
@@ -347,9 +348,6 @@ static int versatile_panel_probe(struct platform_device *pdev)
 		else
 			dev_info(dev, "panel mounted on IB2 daughterboard\n");
 	}
-
-	drm_panel_init(&vpanel->panel, dev, &versatile_panel_drm_funcs,
-		       DRM_MODE_CONNECTOR_DPI);
 
 	drm_panel_add(&vpanel->panel);
 

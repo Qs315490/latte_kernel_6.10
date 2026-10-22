@@ -282,8 +282,7 @@ out_no_setup:
 	}
 
 	vmw_bo_unpin_unlocked(&batch->otable_bo->tbo);
-	ttm_bo_put(&batch->otable_bo->tbo);
-	batch->otable_bo = NULL;
+	vmw_bo_unreference(&batch->otable_bo);
 	return ret;
 }
 
@@ -391,7 +390,7 @@ static unsigned long vmw_mob_calculate_pt_pages(unsigned long data_pages)
  */
 struct vmw_mob *vmw_mob_create(unsigned long data_pages)
 {
-	struct vmw_mob *mob = kzalloc(sizeof(*mob), GFP_KERNEL);
+	struct vmw_mob *mob = kzalloc_obj(*mob);
 
 	if (unlikely(!mob))
 		return NULL;

@@ -139,8 +139,8 @@ static int dw_spi_dma_init_mfld(struct device *dev, struct dw_spi *dws)
 	if (!dws->txchan)
 		goto free_rxchan;
 
-	dws->host->dma_rx = dws->rxchan;
-	dws->host->dma_tx = dws->txchan;
+	dws->ctlr->dma_rx = dws->rxchan;
+	dws->ctlr->dma_tx = dws->txchan;
 
 	init_completion(&dws->dma_completion);
 
@@ -183,8 +183,8 @@ static int dw_spi_dma_init_generic(struct device *dev, struct dw_spi *dws)
 		goto free_rxchan;
 	}
 
-	dws->host->dma_rx = dws->rxchan;
-	dws->host->dma_tx = dws->txchan;
+	dws->ctlr->dma_rx = dws->rxchan;
+	dws->ctlr->dma_tx = dws->txchan;
 
 	init_completion(&dws->dma_completion);
 
@@ -242,16 +242,17 @@ static enum dma_slave_buswidth dw_spi_dma_convert_width(u8 n_bytes)
 	}
 }
 
-static bool dw_spi_can_dma(struct spi_controller *host,
+static bool dw_spi_can_dma(struct spi_controller *ctlr,
 			   struct spi_device *spi, struct spi_transfer *xfer)
 {
-	struct dw_spi *dws = spi_controller_get_devdata(host);
+	struct dw_spi *dws = spi_controller_get_devdata(ctlr);
 	enum dma_slave_buswidth dma_bus_width;
+	u8 n_bytes = roundup_pow_of_two(BITS_TO_BYTES(xfer->bits_per_word));
 
 	if (xfer->len <= dws->fifo_len)
 		return false;
 
-	dma_bus_width = dw_spi_dma_convert_width(dws->n_bytes);
+	dma_bus_width = dw_spi_dma_convert_width(n_bytes);
 
 	return dws->dma_addr_widths & BIT(dma_bus_width);
 }
@@ -271,7 +272,7 @@ static int dw_spi_dma_wait(struct dw_spi *dws, unsigned int len, u32 speed)
 					 msecs_to_jiffies(ms));
 
 	if (ms == 0) {
-		dev_err(&dws->host->cur_msg->spi->dev,
+		dev_err(&dws->ctlr->dev,
 			"DMA transaction timed out\n");
 		return -ETIMEDOUT;
 	}
@@ -281,7 +282,8 @@ static int dw_spi_dma_wait(struct dw_spi *dws, unsigned int len, u32 speed)
 
 static inline bool dw_spi_dma_tx_busy(struct dw_spi *dws)
 {
-	return !(dw_readl(dws, DW_SPI_SR) & DW_SPI_SR_TF_EMPT);
+	return (dw_readl(dws, DW_SPI_SR) &
+		(DW_SPI_SR_BUSY | DW_SPI_SR_TF_EMPT)) != DW_SPI_SR_TF_EMPT;
 }
 
 static int dw_spi_dma_wait_tx_done(struct dw_spi *dws,
@@ -299,7 +301,7 @@ static int dw_spi_dma_wait_tx_done(struct dw_spi *dws,
 		spi_delay_exec(&delay, xfer);
 
 	if (retry < 0) {
-		dev_err(&dws->host->dev, "Tx hanged up\n");
+		dev_err(&dws->ctlr->dev, "Tx hanged up\n");
 		return -EIO;
 	}
 
@@ -400,7 +402,7 @@ static int dw_spi_dma_wait_rx_done(struct dw_spi *dws)
 		spi_delay_exec(&delay, NULL);
 
 	if (retry < 0) {
-		dev_err(&dws->host->dev, "Rx hanged up\n");
+		dev_err(&dws->ctlr->dev, "Rx hanged up\n");
 		return -EIO;
 	}
 
@@ -656,13 +658,13 @@ static int dw_spi_dma_transfer(struct dw_spi *dws, struct spi_transfer *xfer)
 	if (ret)
 		return ret;
 
-	if (dws->host->cur_msg->status == -EINPROGRESS) {
+	if (dws->ctlr->cur_msg->status == -EINPROGRESS) {
 		ret = dw_spi_dma_wait_tx_done(dws, xfer);
 		if (ret)
 			return ret;
 	}
 
-	if (xfer->rx_buf && dws->host->cur_msg->status == -EINPROGRESS)
+	if (xfer->rx_buf && dws->ctlr->cur_msg->status == -EINPROGRESS)
 		ret = dw_spi_dma_wait_rx_done(dws);
 
 	return ret;

@@ -522,10 +522,12 @@ static int airspy_start_streaming(struct vb2_queue *vq, unsigned int count)
 
 	dev_dbg(s->dev, "\n");
 
-	if (!s->udev)
-		return -ENODEV;
-
 	mutex_lock(&s->v4l2_lock);
+
+	if (!s->udev) {
+		ret = -ENODEV;
+		goto err_clear_bit;
+	}
 
 	s->sequence = 0;
 
@@ -968,7 +970,7 @@ static int airspy_probe(struct usb_interface *intf,
 	buf = NULL;
 	ret = -ENOMEM;
 
-	s = kzalloc(sizeof(struct airspy), GFP_KERNEL);
+	s = kzalloc_obj(struct airspy);
 	if (s == NULL) {
 		dev_err(&intf->dev, "Could not allocate memory for state\n");
 		return -ENOMEM;

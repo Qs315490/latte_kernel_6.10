@@ -29,9 +29,6 @@
 #include "core_types.h"
 #include "dcn20/dcn20_optc.h"
 
-void optc3_fpu_set_vrr_m_const(struct timing_generator *optc,
-		double vtotal_avg);
-
 void dcn30_fpu_populate_dml_writeback_from_context(
 		struct dc *dc, struct resource_context *res_ctx, display_e2e_pipe_params_st *pipes);
 
@@ -72,5 +69,27 @@ int dcn30_find_dummy_latency_index_for_fw_based_mclk_switch(struct dc *dc,
 void dcn3_fpu_build_wm_range_table(struct clk_mgr *base);
 
 void patch_dcn30_soc_bounding_box(struct dc *dc, struct _vcs_dpi_soc_bounding_box_st *dcn3_0_ip);
+
+void hpo_fpu_enc3_validate_hdmi_frl_output_link(struct hpo_frl_stream_encoder *enc,
+						struct dc_hdmi_frl_link_settings *frl_link_settings,
+						struct frl_cap_chk_params *frl_params,
+						const struct dc_crtc_timing *timing,
+						unsigned int dsc_max_rate);
+
+void hpo_fpu_enc3_validate_hdmi_frl_output_timing(const struct dc_crtc_timing *timing,
+						  const struct audio_check *audio,
+						  struct frl_cap_chk_params *frl_params);
+
+enum frl_cap_chk_result frl_fpu_cap_chk_common(struct hpo_frl_stream_encoder *enc,
+					       struct frl_cap_chk_intermediates *inter,
+					       struct frl_cap_chk_params *params);
+
+enum frl_cap_chk_result frl_fpu_cap_chk_uncompressed(struct hpo_frl_stream_encoder *enc,
+						     struct frl_cap_chk_params *params,
+						     struct frl_cap_chk_intermediates *inter);
+
+enum frl_cap_chk_result frl_fpu_cap_chk_compressed(struct hpo_frl_stream_encoder *enc,
+						   struct frl_cap_chk_params *params,
+						   struct frl_cap_chk_intermediates *inter);
 
 #endif /* __DCN30_FPU_H__*/

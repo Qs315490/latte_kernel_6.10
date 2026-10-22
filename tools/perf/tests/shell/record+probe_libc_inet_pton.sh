@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # probe libc's inet_pton & backtrace it with ping (exclusive)
 
 # Installs a probe on libc's inet_pton function, that will use uprobes,
@@ -18,12 +18,13 @@
 libc=$(grep -w libc /proc/self/maps | head -1 | sed -r 's/.*[[:space:]](\/.*)/\1/g')
 nm -Dg $libc 2>/dev/null | grep -F -q inet_pton || exit 254
 
-event_pattern='probe_libc:inet_pton(\_[[:digit:]]+)?'
+event_pattern='probe_libc:inet_pton(_[[:digit:]]+)?'
 
 add_libc_inet_pton_event() {
 
-	event_name=$(perf probe -f -x $libc -a inet_pton 2>&1 | tail -n +2 | head -n -5 | \
-			grep -P -o "$event_pattern(?=[[:space:]]\(on inet_pton in $libc\))")
+	event_name=$(perf probe -f -x $libc -a inet_pton 2>&1 | \
+			awk -v ep="$event_pattern" -v l="$libc" '$0 ~ ep && $0 ~ \
+			("\\(on inet_pton in " l "\\)") {print $1}' | head -n 1)
 
 	if [ $? -ne 0 ] || [ -z "$event_name" ] ; then
 		printf "FAIL: could not add event\n"
@@ -39,12 +40,12 @@ trace_libc_inet_pton_backtrace() {
 	echo ".*inet_pton\+0x[[:xdigit:]]+[[:space:]]\($libc|inlined\)$" >> $expected
 	case "$(uname -m)" in
 	s390x)
-		eventattr='call-graph=dwarf,max-stack=4'
+		eventattr='call-graph=dwarf,max-stack=8'
 		echo "((__GI_)?getaddrinfo|text_to_binary_address)\+0x[[:xdigit:]]+[[:space:]]\($libc|inlined\)$" >> $expected
 		echo "(gaih_inet|main)\+0x[[:xdigit:]]+[[:space:]]\(inlined|.*/bin/ping.*\)$" >> $expected
 		;;
 	*)
-		eventattr='max-stack=4'
+		eventattr='call-graph=dwarf,max-stack=8'
 		echo ".*(\+0x[[:xdigit:]]+|\[unknown\])[[:space:]]\(.*/bin/ping.*\)$" >> $expected
 		;;
 	esac
@@ -105,6 +106,7 @@ delete_libc_inet_pton_event() {
 
 # Check for IPv6 interface existence
 ip a sh lo | grep -F -q inet6 || exit 2
+[ "$(id -u)" = 0 ] || exit 2
 
 skip_if_no_perf_probe && \
 add_libc_inet_pton_event && \

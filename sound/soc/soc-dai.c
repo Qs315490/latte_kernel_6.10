@@ -14,22 +14,8 @@
 static inline int _soc_dai_ret(const struct snd_soc_dai *dai,
 			       const char *func, int ret)
 {
-	/* Positive, Zero values are not errors */
-	if (ret >= 0)
-		return ret;
-
-	/* Negative values might be errors */
-	switch (ret) {
-	case -EPROBE_DEFER:
-	case -ENOTSUPP:
-		break;
-	default:
-		dev_err(dai->dev,
-			"ASoC: error at %s on %s: %d\n",
-			func, dai->name, ret);
-	}
-
-	return ret;
+	return snd_soc_ret(dai->dev, ret,
+			   "at %s() on %s\n", func, dai->name);
 }
 
 /*
@@ -130,71 +116,207 @@ int snd_soc_dai_set_bclk_ratio(struct snd_soc_dai *dai, unsigned int ratio)
 	    dai->driver->ops->set_bclk_ratio)
 		ret = dai->driver->ops->set_bclk_ratio(dai, ratio);
 
+	if (!ret)
+		dai->bclk_ratio = ratio;
+
 	return soc_dai_ret(dai, ret);
 }
 EXPORT_SYMBOL_GPL(snd_soc_dai_set_bclk_ratio);
 
-int snd_soc_dai_get_fmt_max_priority(const struct snd_soc_pcm_runtime *rtd)
+/**
+ * snd_soc_dai_set_bclk_clk - set the BCLK clock for shared clock detection
+ * @dai: DAI
+ * @bclk: BCLK clock pointer (or NULL to clear)
+ *
+ * When multiple DAIs share the same physical BCLK (detected via
+ * clk_is_match()), the ASoC core will automatically constrain their
+ * hw_params so that the resulting BCLK rates are compatible.
+ */
+void snd_soc_dai_set_bclk_clk(struct snd_soc_dai *dai, struct clk *bclk)
 {
-	struct snd_soc_dai *dai;
-	int i, max = 0;
+	dai->bclk = bclk;
+}
+EXPORT_SYMBOL_GPL(snd_soc_dai_set_bclk_clk);
 
-	/*
-	 * return max num if *ALL* DAIs have .auto_selectable_formats
-	 */
-	for_each_rtd_dais(rtd, i, dai) {
-		if (dai->driver->ops &&
-		    dai->driver->ops->num_auto_selectable_formats)
-			max = max(max, dai->driver->ops->num_auto_selectable_formats);
-		else
-			return 0;
-	}
+static int soc_dai_fmt_match_cnt(u64 fmt)
+{
+	int cnt = 0;
 
-	return max;
+	if (fmt & SND_SOC_POSSIBLE_DAIFMT_FORMAT_MASK)
+		cnt++;
+	if (fmt & SND_SOC_POSSIBLE_DAIFMT_CLOCK_MASK)
+		cnt++;
+	if (fmt & SND_SOC_POSSIBLE_DAIFMT_INV_MASK)
+		cnt++;
+
+	return cnt;
 }
 
-/**
- * snd_soc_dai_get_fmt - get supported audio format.
- * @dai: DAI
- * @priority: priority level of supported audio format.
- *
- * This should return only formats implemented with high
- * quality by the DAI so that the core can configure a
- * format which will work well with other devices.
- * For example devices which don't support both edges of the
- * LRCLK signal in I2S style formats should only list DSP
- * modes.  This will mean that sometimes fewer formats
- * are reported here than are supported by set_fmt().
- */
-u64 snd_soc_dai_get_fmt(const struct snd_soc_dai *dai, int priority)
+static void soc_dai_auto_select_format(u64 fmt, const struct snd_soc_pcm_runtime *rtd,
+				      int idx, u64 *best_fmt)
 {
-	const struct snd_soc_dai_ops *ops = dai->driver->ops;
-	u64 fmt = 0;
-	int i, max = 0, until = priority;
+	struct snd_soc_dai *dai;
+	const struct snd_soc_dai_ops *ops;
+	int max_idx = rtd->dai_link->num_cpus + rtd->dai_link->num_codecs;
+	u64 available_fmt;
 
 	/*
-	 * Collect auto_selectable_formats until priority
+	 * NOTE
+	 * It doesn't support Multi CPU/Codec for now
+	 */
+	if (rtd->dai_link->num_cpus	!= 1 ||
+	    rtd->dai_link->num_codecs	!= 1)
+		return;
+
+	if (idx >= max_idx)
+		return;
+
+	dai = rtd->dais[idx];
+	ops = dai->driver->ops;
+
+	/* zero chance of auto select format */
+	if (!ops || !ops->num_auto_selectable_formats)
+		return;
+
+	/*
+	 ****************************
+	 *            NOTE
+	 ****************************
+	 * Using .auto_selectable_formats is not mandatory,
+	 * It try to find best formats as much as possible, but automatically selecting the
+	 * perfect format is impossible. So you can select full or missing format manually
+	 * from Sound Card.
 	 *
 	 * ex)
-	 *	auto_selectable_formats[] = { A, B, C };
-	 *	(A, B, C = SND_SOC_POSSIBLE_DAIFMT_xxx)
+	 * CPU					Codec
+	 * (A)[0] I2S/LEFT_J : IB_NF/IB_IF	(X)[0] I2S/DSP_A: NB_NF : GATED
+	 * (B)[1] DSP_A/DSP_B: NB_NF/IB_NF	(Y)[1] LEFT_J:    NB_NF : GATED
+	 * (C)[2] ...
 	 *
-	 * priority = 1 :	A
-	 * priority = 2 :	A | B
-	 * priority = 3 :	A | B | C
-	 * priority = 4 :	A | B | C
+	 * 1. (A) -> (X) : I2S		:update best format
+	 * 2. (A) -> (Y) : LEFT_J
+	 * 3. (B) -> (X) : DSP_A/NB_NF	:update best format
+	 * 4. (B) -> (Y) : NB_NF
+	 * 5. (C) -> (X) ...
+	 * 6. (C) -> (Y) ...
 	 * ...
+	 *
+	 * In above case GATED will not be selected
 	 */
-	if (ops)
-		max = ops->num_auto_selectable_formats;
 
-	if (max < until)
-		until = max;
+	/* find best formats */
+	for (int i = 0; i < ops->num_auto_selectable_formats; i++) {
+		available_fmt = fmt & ops->auto_selectable_formats[i];
 
-	for (i = 0; i < until; i++)
-		fmt |= ops->auto_selectable_formats[i];
+		/* In case of last DAI */
+		if (idx + 1 >= max_idx) {
+			int cnt1 = soc_dai_fmt_match_cnt(*best_fmt);
+			int cnt2 = soc_dai_fmt_match_cnt(available_fmt);
 
-	return fmt;
+			if (cnt1 < cnt2)
+				*best_fmt = available_fmt;
+		}
+		/* parse with next DAI */
+		else {
+			soc_dai_auto_select_format(available_fmt, rtd, idx + 1, best_fmt);
+		}
+	}
+}
+
+static unsigned int soc_dai_convert_possiblefmt_to_daifmt(u64 possible_fmt, unsigned int configured_fmt)
+{
+	unsigned int fmt = 0;
+	unsigned int mask = 0;
+
+	/*
+	 * convert POSSIBLE_DAIFMT to DAIFMT
+	 *
+	 * Some basic/default settings on each is defined as 0.
+	 * see
+	 *	SND_SOC_DAIFMT_NB_NF
+	 *	SND_SOC_DAIFMT_GATED
+	 *
+	 * SND_SOC_DAIFMT_xxx_MASK can't notice it if Sound Card specify
+	 * these value, and will be overwrite to auto selected value.
+	 *
+	 * To avoid such issue, loop from 63 to 0 here.
+	 * Small number of SND_SOC_POSSIBLE_xxx will be Hi priority.
+	 * Basic/Default settings of each part and above are defined
+	 * as Hi priority (= small number) of SND_SOC_POSSIBLE_xxx.
+	 */
+	for (int i = 63; i >= 0; i--) {
+		u64 pos = 1ULL << i;
+
+		switch (possible_fmt & pos) {
+		/*
+		 * for format
+		 */
+		case SND_SOC_POSSIBLE_DAIFMT_I2S:
+		case SND_SOC_POSSIBLE_DAIFMT_RIGHT_J:
+		case SND_SOC_POSSIBLE_DAIFMT_LEFT_J:
+		case SND_SOC_POSSIBLE_DAIFMT_DSP_A:
+		case SND_SOC_POSSIBLE_DAIFMT_DSP_B:
+		case SND_SOC_POSSIBLE_DAIFMT_AC97:
+		case SND_SOC_POSSIBLE_DAIFMT_PDM:
+			fmt = (fmt & ~SND_SOC_DAIFMT_FORMAT_MASK) | i;
+			break;
+		/*
+		 * for clock
+		 */
+		case SND_SOC_POSSIBLE_DAIFMT_CONT:
+			fmt = (fmt & ~SND_SOC_DAIFMT_CLOCK_MASK) | SND_SOC_DAIFMT_CONT;
+			break;
+		case SND_SOC_POSSIBLE_DAIFMT_GATED:
+			fmt = (fmt & ~SND_SOC_DAIFMT_CLOCK_MASK) | SND_SOC_DAIFMT_GATED;
+			break;
+		/*
+		 * for clock invert
+		 */
+		case SND_SOC_POSSIBLE_DAIFMT_NB_NF:
+			fmt = (fmt & ~SND_SOC_DAIFMT_INV_MASK) | SND_SOC_DAIFMT_NB_NF;
+			break;
+		case SND_SOC_POSSIBLE_DAIFMT_NB_IF:
+			fmt = (fmt & ~SND_SOC_DAIFMT_INV_MASK) | SND_SOC_DAIFMT_NB_IF;
+			break;
+		case SND_SOC_POSSIBLE_DAIFMT_IB_NF:
+			fmt = (fmt & ~SND_SOC_DAIFMT_INV_MASK) | SND_SOC_DAIFMT_IB_NF;
+			break;
+		case SND_SOC_POSSIBLE_DAIFMT_IB_IF:
+			fmt = (fmt & ~SND_SOC_DAIFMT_INV_MASK) | SND_SOC_DAIFMT_IB_IF;
+			break;
+		}
+	}
+
+	/*
+	 * Some driver might have very complex limitation.
+	 * In such case, user want to auto-select non-limitation part,
+	 * and want to manually specify complex part.
+	 *
+	 * Or for example, if both CPU and Codec can be clock provider,
+	 * but because of its quality, user want to specify it manually.
+	 *
+	 * Ignore already configured format if exist
+	 */
+	if (!(configured_fmt & SND_SOC_DAIFMT_FORMAT_MASK))
+		mask |= SND_SOC_DAIFMT_FORMAT_MASK;
+	if (!(configured_fmt & SND_SOC_DAIFMT_CLOCK_MASK))
+		mask |= SND_SOC_DAIFMT_CLOCK_MASK;
+	if (!(configured_fmt & SND_SOC_DAIFMT_INV_MASK))
+		mask |= SND_SOC_DAIFMT_INV_MASK;
+	if (!(configured_fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK))
+		mask |= SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK;
+
+	return configured_fmt | (fmt & mask);
+}
+
+unsigned int snd_soc_dai_auto_select_format(const struct snd_soc_pcm_runtime *rtd)
+{
+	struct snd_soc_dai_link *dai_link = rtd->dai_link;
+	u64 possible_fmt = 0;
+
+	soc_dai_auto_select_format(~0, rtd, 0, &possible_fmt);
+
+	return soc_dai_convert_possiblefmt_to_daifmt(possible_fmt, dai_link->dai_fmt);
 }
 
 /**
@@ -273,12 +395,15 @@ int snd_soc_dai_set_tdm_slot(struct snd_soc_dai *dai,
 		&rx_mask,
 	};
 
-	if (dai->driver->ops &&
-	    dai->driver->ops->xlate_tdm_slot_mask)
-		dai->driver->ops->xlate_tdm_slot_mask(slots,
-						      &tx_mask, &rx_mask);
-	else
-		snd_soc_xlate_tdm_slot_mask(slots, &tx_mask, &rx_mask);
+	if (slots) {
+		if (dai->driver->ops &&
+		    dai->driver->ops->xlate_tdm_slot_mask)
+			ret = dai->driver->ops->xlate_tdm_slot_mask(slots, &tx_mask, &rx_mask);
+		else
+			ret = snd_soc_xlate_tdm_slot_mask(slots, &tx_mask, &rx_mask);
+		if (ret)
+			goto err;
+	}
 
 	for_each_pcm_streams(stream)
 		snd_soc_dai_tdm_mask_set(dai, stream, *tdm_mask[stream]);
@@ -287,9 +412,50 @@ int snd_soc_dai_set_tdm_slot(struct snd_soc_dai *dai,
 	    dai->driver->ops->set_tdm_slot)
 		ret = dai->driver->ops->set_tdm_slot(dai, tx_mask, rx_mask,
 						      slots, slot_width);
+err:
 	return soc_dai_ret(dai, ret);
 }
 EXPORT_SYMBOL_GPL(snd_soc_dai_set_tdm_slot);
+
+/**
+ * snd_soc_dai_set_tdm_idle() - Configure a DAI's TDM idle mode
+ * @dai: The DAI to configure
+ * @tx_mask: bitmask representing idle TX slots.
+ * @rx_mask: bitmask representing idle RX slots.
+ * @tx_mode: idle mode to set for TX slots.
+ * @rx_mode: idle mode to set for RX slots.
+ *
+ * This function configures the DAI to handle idle TDM slots in the
+ * specified manner. @tx_mode and @rx_mode can be one of
+ * SND_SOC_DAI_TDM_IDLE_NONE, SND_SOC_DAI_TDM_IDLE_ZERO,
+ * SND_SOC_DAI_TDM_IDLE_PULLDOWN, or SND_SOC_DAI_TDM_IDLE_HIZ.
+ * SND_SOC_TDM_IDLE_NONE represents the DAI's default/unset idle slot
+ * handling state and could be any of the other modes depending on the
+ * hardware behind the DAI. It is therefore undefined behaviour when set
+ * explicitly.
+ *
+ * Mode and mask can be set independently for both the TX and RX direction.
+ * Some hardware may ignore both TX and RX masks depending on its
+ * capabilities.
+ */
+int snd_soc_dai_set_tdm_idle(struct snd_soc_dai *dai,
+			     unsigned int tx_mask, unsigned int rx_mask,
+			     int tx_mode, int rx_mode)
+{
+	int ret = -EOPNOTSUPP;
+
+	/* You can't write to the RX line */
+	if (rx_mode == SND_SOC_DAI_TDM_IDLE_ZERO)
+		return soc_dai_ret(dai, -EINVAL);
+
+	if (dai->driver->ops &&
+	    dai->driver->ops->set_tdm_idle)
+		ret = dai->driver->ops->set_tdm_idle(dai, tx_mask, rx_mask,
+						     tx_mode, rx_mode);
+
+	return soc_dai_ret(dai, ret);
+}
+EXPORT_SYMBOL_GPL(snd_soc_dai_set_tdm_idle);
 
 /**
  * snd_soc_dai_set_channel_map - configure DAI audio channel map
@@ -375,6 +541,14 @@ int snd_soc_dai_prepare(struct snd_soc_dai *dai,
 	return soc_dai_ret(dai, ret);
 }
 EXPORT_SYMBOL_GPL(snd_soc_dai_prepare);
+
+int snd_soc_dai_mute_is_ctrled_at_trigger(struct snd_soc_dai *dai)
+{
+	if (dai->driver->ops)
+		return dai->driver->ops->mute_unmute_on_trigger;
+
+	return 0;
+}
 
 /**
  * snd_soc_dai_digital_mute - configure DAI system or master clock.
@@ -632,7 +806,7 @@ int snd_soc_pcm_dai_trigger(struct snd_pcm_substream *substream,
 			if (ret < 0)
 				break;
 
-			if (dai->driver->ops && dai->driver->ops->mute_unmute_on_trigger)
+			if (snd_soc_dai_mute_is_ctrled_at_trigger(dai))
 				snd_soc_dai_digital_mute(dai, 0, substream->stream);
 
 			soc_dai_mark_push(dai, substream, trigger);
@@ -645,7 +819,7 @@ int snd_soc_pcm_dai_trigger(struct snd_pcm_substream *substream,
 			if (rollback && !soc_dai_mark_match(dai, substream, trigger))
 				continue;
 
-			if (dai->driver->ops && dai->driver->ops->mute_unmute_on_trigger)
+			if (snd_soc_dai_mute_is_ctrled_at_trigger(dai))
 				snd_soc_dai_digital_mute(dai, 1, substream->stream);
 
 			r = soc_dai_trigger(dai, substream, cmd);
@@ -776,7 +950,7 @@ EXPORT_SYMBOL_GPL(snd_soc_dai_compr_ack);
 
 int snd_soc_dai_compr_pointer(struct snd_soc_dai *dai,
 			      struct snd_compr_stream *cstream,
-			      struct snd_compr_tstamp *tstamp)
+			      struct snd_compr_tstamp64 *tstamp)
 {
 	int ret = 0;
 

@@ -22,10 +22,6 @@
 	status = "okay";
 };
 
-&amix {
-	status = "okay";
-};
-
 &asrc0 {
 	status = "okay";
 };
@@ -104,9 +100,15 @@
 	status = "okay";
 };
 
-/* TODO: Apalis PCIE1 */
+/* Apalis PCIE1 */
+&pciea {
+	status = "okay";
+};
 
-/* TODO: Apalis BKL1_PWM */
+/* Apalis BKL1_PWM */
+&pwm_lvds1 {
+	status = "okay";
+};
 
 /* Apalis DAP1 */
 &sai1 {
@@ -121,7 +123,10 @@
 	status = "okay";
 };
 
-/* TODO: Apalis SATA1 */
+/* Apalis SATA1 */
+&sata {
+	status = "okay";
+};
 
 /* Apalis SPDIF1 */
 &spdif0 {

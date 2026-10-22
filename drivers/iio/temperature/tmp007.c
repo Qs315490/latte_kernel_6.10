@@ -20,7 +20,6 @@
 #include <linux/module.h>
 #include <linux/pm.h>
 #include <linux/bitops.h>
-#include <linux/mod_devicetable.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
 
@@ -558,12 +557,12 @@ static DEFINE_SIMPLE_DEV_PM_OPS(tmp007_pm_ops, tmp007_suspend, tmp007_resume);
 
 static const struct of_device_id tmp007_of_match[] = {
 	{ .compatible = "ti,tmp007", },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, tmp007_of_match);
 
 static const struct i2c_device_id tmp007_id[] = {
-	{ "tmp007" },
+	{ .name = "tmp007" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tmp007_id);

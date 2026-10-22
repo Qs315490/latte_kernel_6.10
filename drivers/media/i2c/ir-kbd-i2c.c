@@ -321,9 +321,9 @@ static int get_key_avermedia_cardbus(struct IR_i2c *ir, enum rc_proto *protocol,
 
 static int ir_key_poll(struct IR_i2c *ir)
 {
-	enum rc_proto protocol;
-	u32 scancode;
-	u8 toggle;
+	enum rc_proto protocol = 0;
+	u32 scancode = 0;
+	u8 toggle = 0;
 	int rc;
 
 	dev_dbg(&ir->rc->dev, "%s\n", __func__);
@@ -355,6 +355,7 @@ static void ir_work(struct work_struct *work)
 		mutex_unlock(&ir->lock);
 		if (rc == -ENODEV) {
 			rc_unregister_device(ir->rc);
+			rc_free_device(ir->rc);
 			ir->rc = NULL;
 			return;
 		}
@@ -972,14 +973,15 @@ static void ir_remove(struct i2c_client *client)
 	i2c_unregister_device(ir->tx_c);
 
 	rc_unregister_device(ir->rc);
+	rc_free_device(ir->rc);
 }
 
 static const struct i2c_device_id ir_kbd_id[] = {
 	/* Generic entry for any IR receiver */
-	{ "ir_video", 0 },
+	{ .name = "ir_video", .driver_data = 0 },
 	/* IR device specific entries should be added here */
-	{ "ir_z8f0811_haup", FLAG_TX },
-	{ "ir_z8f0811_hdpvr", FLAG_TX | FLAG_HDPVR },
+	{ .name = "ir_z8f0811_haup", .driver_data = FLAG_TX },
+	{ .name = "ir_z8f0811_hdpvr", .driver_data = FLAG_TX | FLAG_HDPVR },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ir_kbd_id);

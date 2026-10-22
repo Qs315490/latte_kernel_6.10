@@ -28,12 +28,13 @@
 int kvm_fd;
 u64 supported_vmsa_features;
 bool have_sev_es;
+bool have_snp;
 
 static int __sev_ioctl(int vm_fd, int cmd_id, void *data)
 {
 	struct kvm_sev_cmd cmd = {
 		.id = cmd_id,
-		.data = (uint64_t)data,
+		.data = (u64)data,
 		.sev_fd = open_sev_dev_path_or_exit(),
 	};
 	int ret;
@@ -83,6 +84,9 @@ void test_vm_types(void)
 	if (have_sev_es)
 		test_init2(KVM_X86_SEV_ES_VM, &(struct kvm_sev_init){});
 
+	if (have_snp)
+		test_init2(KVM_X86_SNP_VM, &(struct kvm_sev_init){});
+
 	test_init2_invalid(0, &(struct kvm_sev_init){},
 			   "VM type is KVM_X86_DEFAULT_VM");
 	if (kvm_check_cap(KVM_CAP_VM_TYPES) & BIT(KVM_X86_SW_PROTECTED_VM))
@@ -90,7 +94,7 @@ void test_vm_types(void)
 				   "VM type is KVM_X86_SW_PROTECTED_VM");
 }
 
-void test_flags(uint32_t vm_type)
+void test_flags(u32 vm_type)
 {
 	int i;
 
@@ -100,7 +104,7 @@ void test_flags(uint32_t vm_type)
 			"invalid flag");
 }
 
-void test_features(uint32_t vm_type, uint64_t supported_features)
+void test_features(u32 vm_type, u64 supported_features)
 {
 	int i;
 
@@ -126,27 +130,40 @@ int main(int argc, char *argv[])
 			    KVM_X86_SEV_VMSA_FEATURES,
 			    &supported_vmsa_features);
 
-	have_sev = kvm_cpu_has(X86_FEATURE_SEV);
-	TEST_ASSERT(have_sev == !!(kvm_check_cap(KVM_CAP_VM_TYPES) & BIT(KVM_X86_SEV_VM)),
-		    "sev: KVM_CAP_VM_TYPES (%x) does not match cpuid (checking %x)",
-		    kvm_check_cap(KVM_CAP_VM_TYPES), 1 << KVM_X86_SEV_VM);
+	/*
+	 * Whether a VM type is available depends on KVM, not just CPUID: e.g.
+	 * when all SEV ASIDs are assigned to SEV-SNP, KVM does not offer the
+	 * SEV VM type even though X86_FEATURE_SEV is set.  Derive availability
+	 * from KVM_CAP_VM_TYPES and only assert the one-way implication that a
+	 * type offered by KVM must also be reported in CPUID.
+	 */
+	have_sev = kvm_check_cap(KVM_CAP_VM_TYPES) & BIT(KVM_X86_SEV_VM);
+	TEST_ASSERT(!have_sev || kvm_cpu_has(X86_FEATURE_SEV),
+		    "sev: SEV_VM supported without SEV in CPUID");
 
-	TEST_REQUIRE(kvm_check_cap(KVM_CAP_VM_TYPES) & BIT(KVM_X86_SEV_VM));
-	have_sev_es = kvm_cpu_has(X86_FEATURE_SEV_ES);
+	TEST_REQUIRE(have_sev);
+	have_sev_es = kvm_check_cap(KVM_CAP_VM_TYPES) & BIT(KVM_X86_SEV_ES_VM);
 
-	TEST_ASSERT(have_sev_es == !!(kvm_check_cap(KVM_CAP_VM_TYPES) & BIT(KVM_X86_SEV_ES_VM)),
-		    "sev-es: KVM_CAP_VM_TYPES (%x) does not match cpuid (checking %x)",
-		    kvm_check_cap(KVM_CAP_VM_TYPES), 1 << KVM_X86_SEV_ES_VM);
+	TEST_ASSERT(!have_sev_es || kvm_cpu_has(X86_FEATURE_SEV_ES),
+		    "sev-es: SEV_ES_VM supported without SEV_ES in CPUID");
+
+	have_snp = kvm_check_cap(KVM_CAP_VM_TYPES) & BIT(KVM_X86_SNP_VM);
+	TEST_ASSERT(!have_snp || kvm_cpu_has(X86_FEATURE_SEV_SNP),
+		    "sev-snp: SNP_VM supported without SEV_SNP in CPUID");
 
 	test_vm_types();
 
 	test_flags(KVM_X86_SEV_VM);
 	if (have_sev_es)
 		test_flags(KVM_X86_SEV_ES_VM);
+	if (have_snp)
+		test_flags(KVM_X86_SNP_VM);
 
 	test_features(KVM_X86_SEV_VM, 0);
 	if (have_sev_es)
 		test_features(KVM_X86_SEV_ES_VM, supported_vmsa_features);
+	if (have_snp)
+		test_features(KVM_X86_SNP_VM, supported_vmsa_features);
 
 	return 0;
 }

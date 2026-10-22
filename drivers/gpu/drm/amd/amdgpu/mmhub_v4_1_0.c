@@ -37,39 +37,31 @@
 static const char *mmhub_client_ids_v4_1_0[][2] = {
 	[0][0] = "VMC",
 	[4][0] = "DCEDMC",
-	[5][0] = "DCEVGA",
 	[6][0] = "MP0",
 	[7][0] = "MP1",
 	[8][0] = "MPIO",
-	[16][0] = "HDP",
-	[17][0] = "LSDMA",
-	[18][0] = "JPEG",
-	[19][0] = "VCNU0",
-	[21][0] = "VSCH",
-	[22][0] = "VCNU1",
-	[23][0] = "VCN1",
-	[32+20][0] = "VCN0",
-	[2][1] = "DBGUNBIO",
+	[16][0] = "LSDMA",
+	[17][0] = "JPEG",
+	[19][0] = "VCNU",
+	[22][0] = "VSCH",
+	[23][0] = "HDP",
+	[32+23][0] = "VCNRD",
 	[3][1] = "DCEDWB",
 	[4][1] = "DCEDMC",
-	[5][1] = "DCEVGA",
 	[6][1] = "MP0",
 	[7][1] = "MP1",
 	[8][1] = "MPIO",
 	[10][1] = "DBGU0",
 	[11][1] = "DBGU1",
-	[12][1] = "DBGU2",
-	[13][1] = "DBGU3",
+	[12][1] = "DBGUNBIO",
 	[14][1] = "XDP",
 	[15][1] = "OSSSYS",
-	[16][1] = "HDP",
-	[17][1] = "LSDMA",
-	[18][1] = "JPEG",
-	[19][1] = "VCNU0",
-	[20][1] = "VCN0",
-	[21][1] = "VSCH",
-	[22][1] = "VCNU1",
-	[23][1] = "VCN1",
+	[16][1] = "LSDMA",
+	[17][1] = "JPEG",
+	[18][1] = "VCNWR",
+	[19][1] = "VCNU",
+	[22][1] = "VSCH",
+	[23][1] = "HDP",
 };
 
 static uint32_t mmhub_v4_1_0_get_invalidate_req(unsigned int vmid,
@@ -98,7 +90,7 @@ mmhub_v4_1_0_print_l2_protection_fault_status(struct amdgpu_device *adev,
 					      uint32_t status)
 {
 	uint32_t cid, rw;
-	const char *mmhub_cid = NULL;
+	const char *mmhub_cid;
 
 	cid = REG_GET_FIELD(status,
 			    MMVM_L2_PROTECTION_FAULT_STATUS_LO32, CID);
@@ -108,14 +100,7 @@ mmhub_v4_1_0_print_l2_protection_fault_status(struct amdgpu_device *adev,
 	dev_err(adev->dev,
 		"MMVM_L2_PROTECTION_FAULT_STATUS_LO32:0x%08X\n",
 		status);
-	switch (amdgpu_ip_version(adev, MMHUB_HWIP, 0)) {
-	case IP_VERSION(4, 1, 0):
-		mmhub_cid = mmhub_client_ids_v4_1_0[cid][rw];
-		break;
-	default:
-		mmhub_cid = NULL;
-		break;
-	}
+	mmhub_cid = amdgpu_mmhub_client_name(&adev->mmhub, cid, rw);
 	dev_err(adev->dev, "\t Faulty UTCL2 client ID: %s (0x%x)\n",
 		mmhub_cid ? mmhub_cid : "unknown", cid);
 	dev_err(adev->dev, "\t MORE_FAULTS: 0x%lx\n",
@@ -349,7 +334,7 @@ static void mmhub_v4_1_0_setup_vmid_config(struct amdgpu_device *adev)
 		/* Send no-retry XNACK on fault to suppress VM fault storm. */
 		tmp = REG_SET_FIELD(tmp, MMVM_CONTEXT1_CNTL,
 				    RETRY_PERMISSION_OR_INVALID_PAGE_FAULT,
-				    !amdgpu_noretry);
+				    !adev->gmc.noretry);
 		WREG32_SOC15_OFFSET(MMHUB, 0, regMMVM_CONTEXT1_CNTL,
 				    i * hub->ctx_distance, tmp);
 		WREG32_SOC15_OFFSET(MMHUB, 0, regMMVM_CONTEXT1_PAGE_TABLE_START_ADDR_LO32,
@@ -522,6 +507,10 @@ static void mmhub_v4_1_0_init(struct amdgpu_device *adev)
 		SOC15_REG_OFFSET(MMHUB, 0, regMMVM_CONTEXTS_DISABLE);
 
 	hub->vmhub_funcs = &mmhub_v4_1_0_vmhub_funcs;
+
+	amdgpu_mmhub_init_client_info(&adev->mmhub,
+				     mmhub_client_ids_v4_1_0,
+				     ARRAY_SIZE(mmhub_client_ids_v4_1_0));
 }
 
 static u64 mmhub_v4_1_0_get_fb_location(struct amdgpu_device *adev)

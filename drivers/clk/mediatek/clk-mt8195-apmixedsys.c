@@ -10,7 +10,6 @@
 #include "clk-pllfh.h"
 
 #include <dt-bindings/clock/mt8195-clk.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 static const struct mtk_gate_regs apmixed_cg_regs = {
@@ -181,7 +180,7 @@ static int clk_mt8195_apmixed_probe(struct platform_device *pdev)
 
 	fhctl_parse_dt(fhctl_node, pllfhs, ARRAY_SIZE(pllfhs));
 
-	r = mtk_clk_register_pllfhs(node, plls, ARRAY_SIZE(plls),
+	r = mtk_clk_register_pllfhs(&pdev->dev, plls, ARRAY_SIZE(plls),
 				    pllfhs, ARRAY_SIZE(pllfhs), clk_data);
 	if (r)
 		goto free_apmixed_data;

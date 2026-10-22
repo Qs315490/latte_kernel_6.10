@@ -28,7 +28,6 @@
 #include <linux/module.h>
 #include <linux/i2c.h>
 #include <linux/err.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 
 #include <linux/iio/iio.h>
@@ -276,7 +275,7 @@ static const struct i2c_device_id mcp4531_id[] = {
 	MCP4531_ID_TABLE("mcp4662-103", MCP466x_103),
 	MCP4531_ID_TABLE("mcp4662-503", MCP466x_503),
 	MCP4531_ID_TABLE("mcp4662-104", MCP466x_104),
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mcp4531_id);
 
@@ -350,7 +349,7 @@ static const struct of_device_id mcp4531_of_match[] = {
 	MCP4531_COMPATIBLE("microchip,mcp4662-103", MCP466x_103),
 	MCP4531_COMPATIBLE("microchip,mcp4662-503", MCP466x_503),
 	MCP4531_COMPATIBLE("microchip,mcp4662-104", MCP466x_104),
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(of, mcp4531_of_match);
 

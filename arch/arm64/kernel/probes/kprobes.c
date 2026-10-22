@@ -10,6 +10,7 @@
 
 #define pr_fmt(fmt) "kprobes: " fmt
 
+#include <linux/execmem.h>
 #include <linux/extable.h>
 #include <linux/kasan.h>
 #include <linux/kernel.h>
@@ -40,6 +41,20 @@ DEFINE_PER_CPU(struct kprobe_ctlblk, kprobe_ctlblk);
 
 static void __kprobes
 post_kprobe_handler(struct kprobe *, struct kprobe_ctlblk *, struct pt_regs *);
+
+void *alloc_insn_page(void)
+{
+	void *addr;
+
+	addr = execmem_alloc(EXECMEM_KPROBES, PAGE_SIZE);
+	if (!addr)
+		return NULL;
+	if (set_memory_rox((unsigned long)addr, 1)) {
+		execmem_free(addr);
+		return NULL;
+	}
+	return addr;
+}
 
 static void __kprobes arch_prepare_ss_slot(struct kprobe *p)
 {
@@ -159,12 +174,27 @@ static void __kprobes save_previous_kprobe(struct kprobe_ctlblk *kcb)
 {
 	kcb->prev_kprobe.kp = kprobe_running();
 	kcb->prev_kprobe.status = kcb->kprobe_status;
+
+	/*
+	 * Save the outer kprobe's original DAIF flags before the nested
+	 * kprobe calls kprobes_save_local_irqflag() and overwrites
+	 * kcb->saved_irqflag. Without this, the outer kprobe will restore
+	 * the wrong DAIF state and leave interrupts permanently masked.
+	 */
+	kcb->prev_kprobe.saved_irqflag = kcb->saved_irqflag;
 }
 
 static void __kprobes restore_previous_kprobe(struct kprobe_ctlblk *kcb)
 {
 	__this_cpu_write(current_kprobe, kcb->prev_kprobe.kp);
 	kcb->kprobe_status = kcb->prev_kprobe.status;
+
+	/*
+	 * Restore the outer kprobe's saved_irqflag so that when its
+	 * single-step completes, kprobes_restore_local_irqflag() uses
+	 * the correct original DAIF value.
+	 */
+	kcb->saved_irqflag = kcb->prev_kprobe.saved_irqflag;
 }
 
 static void __kprobes set_current_kprobe(struct kprobe *p)
@@ -225,10 +255,16 @@ static int __kprobes reenter_kprobe(struct kprobe *p,
 	switch (kcb->kprobe_status) {
 	case KPROBE_HIT_SSDONE:
 	case KPROBE_HIT_ACTIVE:
+	case KPROBE_HIT_SS:
+		/*
+		 * A probe can be hit while another kprobe is preparing or
+		 * executing its XOL single-step instruction. This is still a
+		 * recoverable one-level reentry, so handle it in the same way as
+		 * reentry from KPROBE_HIT_ACTIVE or KPROBE_HIT_SSDONE.
+		 */
 		kprobes_inc_nmissed_count(p);
 		setup_singlestep(p, regs, kcb, 1);
 		break;
-	case KPROBE_HIT_SS:
 	case KPROBE_REENTER:
 		pr_warn("Failed to recover from reentered kprobes.\n");
 		dump_kprobe(p);
@@ -267,9 +303,31 @@ int __kprobes kprobe_fault_handler(struct pt_regs *regs, unsigned int fsr)
 	struct kprobe *cur = kprobe_running();
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
 
+	/*
+	 * Simulated kprobes execute in the debug trap context and have no
+	 * XOL slot. Any page fault taken while a simulated kprobe is in
+	 * progress cannot have been caused by kprobe single-stepping and
+	 * must be left alone for the normal page fault handler, including
+	 * fixup_exception.
+	 */
+	if (cur && !cur->ainsn.xol_insn)
+		return 0;
+
 	switch (kcb->kprobe_status) {
 	case KPROBE_HIT_SS:
 	case KPROBE_REENTER:
+		/*
+		 * A page fault taken while in KPROBE_HIT_SS or
+		 * KPROBE_REENTER state is only attributable to kprobe
+		 * single-stepping if the faulting PC points to the
+		 * current kprobe's XOL instruction. If the fault occurred
+		 * elsewhere (e.g. in perf or tracing code invoked from the
+		 * debug exception path), leave it for the normal page fault
+		 * handler to process.
+		 */
+		if (instruction_pointer(regs) != (unsigned long)cur->ainsn.xol_insn)
+			break;
+
 		/*
 		 * We are here because the instruction being single
 		 * stepped caused a page fault. We reset the current
@@ -292,8 +350,8 @@ int __kprobes kprobe_fault_handler(struct pt_regs *regs, unsigned int fsr)
 	return 0;
 }
 
-static int __kprobes
-kprobe_breakpoint_handler(struct pt_regs *regs, unsigned long esr)
+int __kprobes
+kprobe_brk_handler(struct pt_regs *regs, unsigned long esr)
 {
 	struct kprobe *p, *cur_kprobe;
 	struct kprobe_ctlblk *kcb;
@@ -336,13 +394,8 @@ kprobe_breakpoint_handler(struct pt_regs *regs, unsigned long esr)
 	return DBG_HOOK_HANDLED;
 }
 
-static struct break_hook kprobes_break_hook = {
-	.imm = KPROBES_BRK_IMM,
-	.fn = kprobe_breakpoint_handler,
-};
-
-static int __kprobes
-kprobe_breakpoint_ss_handler(struct pt_regs *regs, unsigned long esr)
+int __kprobes
+kprobe_ss_brk_handler(struct pt_regs *regs, unsigned long esr)
 {
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
 	unsigned long addr = instruction_pointer(regs);
@@ -360,13 +413,8 @@ kprobe_breakpoint_ss_handler(struct pt_regs *regs, unsigned long esr)
 	return DBG_HOOK_ERROR;
 }
 
-static struct break_hook kprobes_break_ss_hook = {
-	.imm = KPROBES_BRK_SS_IMM,
-	.fn = kprobe_breakpoint_ss_handler,
-};
-
-static int __kprobes
-kretprobe_breakpoint_handler(struct pt_regs *regs, unsigned long esr)
+int __kprobes
+kretprobe_brk_handler(struct pt_regs *regs, unsigned long esr)
 {
 	if (regs->pc != (unsigned long)__kretprobe_trampoline)
 		return DBG_HOOK_ERROR;
@@ -374,11 +422,6 @@ kretprobe_breakpoint_handler(struct pt_regs *regs, unsigned long esr)
 	regs->pc = kretprobe_trampoline_handler(regs, (void *)regs->regs[29]);
 	return DBG_HOOK_HANDLED;
 }
-
-static struct break_hook kretprobes_break_hook = {
-	.imm = KRETPROBES_BRK_IMM,
-	.fn = kretprobe_breakpoint_handler,
-};
 
 /*
  * Provide a blacklist of symbols identifying ranges which cannot be kprobed.
@@ -422,9 +465,5 @@ int __kprobes arch_trampoline_kprobe(struct kprobe *p)
 
 int __init arch_init_kprobes(void)
 {
-	register_kernel_break_hook(&kprobes_break_hook);
-	register_kernel_break_hook(&kprobes_break_ss_hook);
-	register_kernel_break_hook(&kretprobes_break_hook);
-
 	return 0;
 }

@@ -5,7 +5,6 @@
 #include <objtool/check.h>
 #include <objtool/orc.h>
 #include <objtool/warn.h>
-#include <objtool/endianness.h>
 
 int init_orc_entry(struct orc_entry *orc, struct cfi_state *cfi, struct instruction *insn)
 {
@@ -40,24 +39,27 @@ int init_orc_entry(struct orc_entry *orc, struct cfi_state *cfi, struct instruct
 		orc->type = ORC_TYPE_REGS_PARTIAL;
 		break;
 	default:
-		WARN_INSN(insn, "unknown unwind hint type %d", cfi->type);
+		ERROR_INSN(insn, "unknown unwind hint type %d", cfi->type);
 		return -1;
 	}
 
 	orc->signal = cfi->signal;
 
 	switch (cfi->cfa.base) {
+	case CFI_AX:
+		orc->sp_reg = ORC_REG_AX;
+		break;
+	case CFI_DX:
+		orc->sp_reg = ORC_REG_DX;
+		break;
 	case CFI_SP:
 		orc->sp_reg = ORC_REG_SP;
-		break;
-	case CFI_SP_INDIRECT:
-		orc->sp_reg = ORC_REG_SP_INDIRECT;
 		break;
 	case CFI_BP:
 		orc->sp_reg = ORC_REG_BP;
 		break;
-	case CFI_BP_INDIRECT:
-		orc->sp_reg = ORC_REG_BP_INDIRECT;
+	case CFI_DI:
+		orc->sp_reg = ORC_REG_DI;
 		break;
 	case CFI_R10:
 		orc->sp_reg = ORC_REG_R10;
@@ -65,14 +67,14 @@ int init_orc_entry(struct orc_entry *orc, struct cfi_state *cfi, struct instruct
 	case CFI_R13:
 		orc->sp_reg = ORC_REG_R13;
 		break;
-	case CFI_DI:
-		orc->sp_reg = ORC_REG_DI;
+	case CFI_SP_INDIRECT:
+		orc->sp_reg = ORC_REG_SP_INDIRECT;
 		break;
-	case CFI_DX:
-		orc->sp_reg = ORC_REG_DX;
+	case CFI_BP_INDIRECT:
+		orc->sp_reg = ORC_REG_BP_INDIRECT;
 		break;
 	default:
-		WARN_INSN(insn, "unknown CFA base reg %d", cfi->cfa.base);
+		ERROR_INSN(insn, "unknown CFA base reg %d", cfi->cfa.base);
 		return -1;
 	}
 
@@ -87,7 +89,7 @@ int init_orc_entry(struct orc_entry *orc, struct cfi_state *cfi, struct instruct
 		orc->bp_reg = ORC_REG_BP;
 		break;
 	default:
-		WARN_INSN(insn, "unknown BP base reg %d", bp->base);
+		ERROR_INSN(insn, "unknown BP base reg %d", bp->base);
 		return -1;
 	}
 
@@ -123,22 +125,24 @@ static const char *reg_name(unsigned int reg)
 	switch (reg) {
 	case ORC_REG_PREV_SP:
 		return "prevsp";
+	case ORC_REG_AX:
+		return "ax";
 	case ORC_REG_DX:
 		return "dx";
-	case ORC_REG_DI:
-		return "di";
 	case ORC_REG_BP:
 		return "bp";
 	case ORC_REG_SP:
 		return "sp";
+	case ORC_REG_DI:
+		return "di";
 	case ORC_REG_R10:
 		return "r10";
 	case ORC_REG_R13:
 		return "r13";
-	case ORC_REG_BP_INDIRECT:
-		return "bp(ind)";
 	case ORC_REG_SP_INDIRECT:
 		return "sp(ind)";
+	case ORC_REG_BP_INDIRECT:
+		return "bp(ind)";
 	default:
 		return "?";
 	}

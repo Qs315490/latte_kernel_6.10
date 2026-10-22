@@ -129,7 +129,7 @@ int snd_device_alloc(struct device **dev_p, struct snd_card *card)
 	struct device *dev;
 
 	*dev_p = NULL;
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return -ENOMEM;
 	device_initialize(dev);
@@ -181,7 +181,7 @@ int snd_card_new(struct device *parent, int idx, const char *xid,
 
 	if (extra_size < 0)
 		extra_size = 0;
-	card = kzalloc(sizeof(*card) + extra_size, GFP_KERNEL);
+	card = kzalloc_flex(*card, private_data_area, extra_size);
 	if (!card)
 		return -ENOMEM;
 
@@ -232,7 +232,8 @@ int snd_devm_card_new(struct device *parent, int idx, const char *xid,
 	int err;
 
 	*card_ret = NULL;
-	card = devres_alloc(__snd_card_release, sizeof(*card) + extra_size,
+	card = devres_alloc(__snd_card_release,
+			    struct_size(card, private_data_area, extra_size),
 			    GFP_KERNEL);
 	if (!card)
 		return -ENOMEM;
@@ -280,7 +281,7 @@ static int snd_card_init(struct snd_card *card, struct device *parent,
 	int err;
 
 	if (extra_size > 0)
-		card->private_data = (char *)card + sizeof(struct snd_card);
+		card->private_data = card->private_data_area;
 	if (xid)
 		strscpy(card->id, xid, sizeof(card->id));
 	err = 0;
@@ -327,8 +328,7 @@ static int snd_card_init(struct snd_card *card, struct device *parent,
 	mutex_init(&card->memory_mutex);
 #ifdef CONFIG_PM
 	init_waitqueue_head(&card->power_sleep);
-	init_waitqueue_head(&card->power_ref_sleep);
-	atomic_set(&card->power_ref, 0);
+	snd_refcount_init(&card->power_ref);
 #endif
 	init_waitqueue_head(&card->remove_sleep);
 	card->sync_irq = -1;
@@ -362,6 +362,11 @@ static int snd_card_init(struct snd_card *card, struct device *parent,
 #ifdef CONFIG_SND_DEBUG
 	card->debugfs_root = debugfs_create_dir(dev_name(&card->card_dev),
 						sound_debugfs_root);
+#endif
+#ifdef CONFIG_SND_CTL_DEBUG
+	card->value_buf = kmalloc(sizeof(*card->value_buf), GFP_KERNEL);
+	if (!card->value_buf)
+		return -ENOMEM;
 #endif
 	return 0;
 
@@ -587,6 +592,9 @@ static int snd_card_do_free(struct snd_card *card)
 	snd_device_free_all(card);
 	if (card->private_free)
 		card->private_free(card);
+#ifdef CONFIG_SND_CTL_DEBUG
+	kfree(card->value_buf);
+#endif
 	if (snd_info_card_free(card) < 0) {
 		dev_warn(card->dev, "unable to free card info\n");
 		/* Not fatal error */
@@ -723,27 +731,25 @@ static void snd_card_set_id_no_lock(struct snd_card *card, const char *src,
 	 * ("card" conflicts with proc directories)
 	 */
 	if (!*id || !strncmp(id, "card", 4)) {
-		strcpy(id, "Default");
+		strscpy(card->id, "Default");
 		is_default = true;
 	}
 
 	len = strlen(id);
 	for (loops = 0; loops < SNDRV_CARDS; loops++) {
-		char *spos;
 		char sfxstr[5]; /* "_012" */
-		int sfxlen;
+		int sfxlen, slen;
 
 		if (card_id_ok(card, id))
 			return; /* OK */
 
 		/* Add _XYZ suffix */
-		sprintf(sfxstr, "_%X", loops + 1);
-		sfxlen = strlen(sfxstr);
+		sfxlen = scnprintf(sfxstr, sizeof(sfxstr), "_%X", loops + 1);
 		if (len + sfxlen >= sizeof(card->id))
-			spos = id + sizeof(card->id) - sfxlen - 1;
+			slen = sizeof(card->id) - sfxlen - 1;
 		else
-			spos = id + len;
-		strcpy(spos, sfxstr);
+			slen = len;
+		strscpy(id + slen, sfxstr, sizeof(card->id) - slen);
 	}
 	/* fallback to the default id */
 	if (!is_default) {
@@ -801,7 +807,7 @@ static ssize_t id_store(struct device *dev, struct device_attribute *attr,
 	guard(mutex)(&snd_card_mutex);
 	if (!card_id_ok(NULL, buf1))
 		return -EEXIST;
-	strcpy(card->id, buf1);
+	strscpy(card->id, buf1);
 	snd_info_card_id_change(card);
 
 	return count;
@@ -1062,7 +1068,7 @@ int snd_card_file_add(struct snd_card *card, struct file *file)
 {
 	struct snd_monitor_file *mfile;
 
-	mfile = kmalloc(sizeof(*mfile), GFP_KERNEL);
+	mfile = kmalloc_obj(*mfile);
 	if (mfile == NULL)
 		return -ENOMEM;
 	mfile->file = file;
@@ -1133,7 +1139,7 @@ EXPORT_SYMBOL(snd_card_file_remove);
  * typically around calling control ops.
  *
  * The caller needs to pull down the refcount via snd_power_unref() later
- * no matter whether the error is returned from this function or not.
+ * when this function returns 0.
  *
  * Return: Zero if successful, or a negative error code.
  */
@@ -1146,7 +1152,11 @@ int snd_power_ref_and_wait(struct snd_card *card)
 		       card->shutdown ||
 		       snd_power_get_state(card) == SNDRV_CTL_POWER_D0,
 		       snd_power_unref(card), snd_power_ref(card));
-	return card->shutdown ? -ENODEV : 0;
+	if (card->shutdown) {
+		snd_power_unref(card);
+		return  -ENODEV;
+	}
+	return 0;
 }
 EXPORT_SYMBOL_GPL(snd_power_ref_and_wait);
 
@@ -1163,7 +1173,8 @@ int snd_power_wait(struct snd_card *card)
 	int ret;
 
 	ret = snd_power_ref_and_wait(card);
-	snd_power_unref(card);
+	if (!ret)
+		snd_power_unref(card);
 	return ret;
 }
 EXPORT_SYMBOL(snd_power_wait);

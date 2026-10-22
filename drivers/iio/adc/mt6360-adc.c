@@ -5,7 +5,6 @@
 #include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/ktime.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
@@ -216,7 +215,7 @@ static const char *mt6360_channel_labels[MT6360_CHAN_MAX] = {
 static int mt6360_adc_read_label(struct iio_dev *iio_dev, const struct iio_chan_spec *chan,
 				 char *label)
 {
-	return snprintf(label, PAGE_SIZE, "%s\n", mt6360_channel_labels[chan->channel]);
+	return sysfs_emit(label, "%s\n", mt6360_channel_labels[chan->channel]);
 }
 
 static const struct iio_info mt6360_adc_iio_info = {
@@ -263,11 +262,10 @@ static irqreturn_t mt6360_adc_trigger_handler(int irq, void *p)
 	struct mt6360_adc_data *mad = iio_priv(indio_dev);
 	struct {
 		u16 values[MT6360_CHAN_MAX];
-		int64_t timestamp;
-	} data __aligned(8);
+		aligned_s64 timestamp;
+	} data = { };
 	int i = 0, bit, val, ret;
 
-	memset(&data, 0, sizeof(data));
 	iio_for_each_active_channel(indio_dev, bit) {
 		ret = mt6360_adc_read_channel(mad, bit, &val);
 		if (ret < 0) {

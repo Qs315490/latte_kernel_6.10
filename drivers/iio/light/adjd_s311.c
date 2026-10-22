@@ -54,10 +54,6 @@
 
 struct adjd_s311_data {
 	struct i2c_client *client;
-	struct {
-		s16 chans[4];
-		aligned_s64 ts;
-	} scan;
 };
 
 enum adjd_s311_channel_idx {
@@ -120,6 +116,10 @@ static irqreturn_t adjd_s311_trigger_handler(int irq, void *p)
 	struct adjd_s311_data *data = iio_priv(indio_dev);
 	s64 time_ns = iio_get_time_ns(indio_dev);
 	int i, j = 0;
+	struct {
+		s16 chans[4];
+		aligned_s64 ts;
+	} scan = { };
 
 	int ret = adjd_s311_req_data(indio_dev);
 	if (ret < 0)
@@ -131,10 +131,10 @@ static irqreturn_t adjd_s311_trigger_handler(int irq, void *p)
 		if (ret < 0)
 			goto done;
 
-		data->scan.chans[j++] = ret & ADJD_S311_DATA_MASK;
+		scan.chans[j++] = ret & ADJD_S311_DATA_MASK;
 	}
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan, time_ns);
+	iio_push_to_buffers_with_ts(indio_dev, &scan, sizeof(scan), time_ns);
 
 done:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -260,7 +260,7 @@ static int adjd_s311_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id adjd_s311_id[] = {
-	{ "adjd_s311" },
+	{ .name = "adjd_s311" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adjd_s311_id);

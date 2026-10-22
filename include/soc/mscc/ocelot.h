@@ -650,7 +650,7 @@ struct device_node;
 
 struct ocelot_ops {
 	struct net_device *(*port_to_netdev)(struct ocelot *ocelot, int port);
-	int (*netdev_to_port)(struct net_device *dev);
+	int (*netdev_to_port)(struct ocelot *ocelot, struct net_device *dev);
 	int (*reset)(struct ocelot *ocelot);
 	u16 (*wm_enc)(u16 value);
 	u16 (*wm_dec)(u16 value);
@@ -1073,8 +1073,11 @@ int ocelot_vlan_prepare(struct ocelot *ocelot, int port, u16 vid, bool pvid,
 int ocelot_vlan_add(struct ocelot *ocelot, int port, u16 vid, bool pvid,
 		    bool untagged);
 int ocelot_vlan_del(struct ocelot *ocelot, int port, u16 vid);
-int ocelot_hwstamp_get(struct ocelot *ocelot, int port, struct ifreq *ifr);
-int ocelot_hwstamp_set(struct ocelot *ocelot, int port, struct ifreq *ifr);
+void ocelot_hwstamp_get(struct ocelot *ocelot, int port,
+			struct kernel_hwtstamp_config *cfg);
+int ocelot_hwstamp_set(struct ocelot *ocelot, int port,
+		       struct kernel_hwtstamp_config *cfg,
+		       struct netlink_ext_ack *extack);
 int ocelot_port_txtstamp_request(struct ocelot *ocelot, int port,
 				 struct sk_buff *skb,
 				 struct sk_buff **clone);

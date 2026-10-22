@@ -3,7 +3,7 @@
  * Copyright (c) 2021-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -152,12 +152,10 @@ xrep_orphanage_create(
 	}
 
 	/* Try to find the orphanage directory. */
-	inode_lock_nested(root_inode, I_MUTEX_PARENT);
-	orphanage_dentry = lookup_one_len(ORPHANAGE, root_dentry,
-			strlen(ORPHANAGE));
+	orphanage_dentry = start_creating_noperm(root_dentry, &QSTR(ORPHANAGE));
 	if (IS_ERR(orphanage_dentry)) {
 		error = PTR_ERR(orphanage_dentry);
-		goto out_unlock_root;
+		goto out_dput_root;
 	}
 
 	/*
@@ -167,9 +165,10 @@ xrep_orphanage_create(
 	 * directory to control access to a file we put in here.
 	 */
 	if (d_really_is_negative(orphanage_dentry)) {
-		error = vfs_mkdir(&nop_mnt_idmap, root_inode, orphanage_dentry,
-				0750);
-		if (error)
+		orphanage_dentry = vfs_mkdir(&nop_mnt_idmap, root_inode,
+					     orphanage_dentry, 0750, NULL);
+		error = PTR_ERR(orphanage_dentry);
+		if (IS_ERR(orphanage_dentry))
 			goto out_dput_orphanage;
 	}
 
@@ -200,9 +199,7 @@ xrep_orphanage_create(
 	sc->orphanage_ilock_flags = 0;
 
 out_dput_orphanage:
-	dput(orphanage_dentry);
-out_unlock_root:
-	inode_unlock(VFS_I(sc->mp->m_rootip));
+	end_creating(orphanage_dentry);
 out_dput_root:
 	dput(root_dentry);
 out:
@@ -405,14 +402,14 @@ xrep_adoption_compute_name(
 	int			error = 0;
 
 	adopt->xname = xname;
-	xname->len = snprintf(namebuf, MAXNAMELEN, "%llu", sc->ip->i_ino);
+	xname->len = snprintf(namebuf, MAXNAMELEN, "%llu", I_INO(sc->ip));
 	xname->type = xfs_mode_to_ftype(VFS_I(sc->ip)->i_mode);
 
 	/* Make sure the filename is unique in the lost+found. */
 	error = xchk_dir_lookup(sc, sc->orphanage, xname, &ino);
 	while (error == 0 && incr < 10000) {
 		xname->len = snprintf(namebuf, MAXNAMELEN, "%llu.%u",
-				sc->ip->i_ino, ++incr);
+				I_INO(sc->ip), ++incr);
 		error = xchk_dir_lookup(sc, sc->orphanage, xname, &ino);
 	}
 	if (error == 0) {
@@ -444,7 +441,12 @@ xrep_adoption_check_dcache(
 	if (!d_orphanage)
 		return 0;
 
-	d_child = d_hash_and_lookup(d_orphanage, &qname);
+	d_child = try_lookup_noperm(&qname, d_orphanage);
+	if (IS_ERR(d_child)) {
+		dput(d_orphanage);
+		return PTR_ERR(d_child);
+	}
+
 	if (d_child) {
 		trace_xrep_adoption_check_child(sc->mp, d_child);
 
@@ -481,8 +483,8 @@ xrep_adoption_zap_dcache(
 	if (!d_orphanage)
 		return;
 
-	d_child = d_hash_and_lookup(d_orphanage, &qname);
-	while (d_child != NULL) {
+	d_child = try_lookup_noperm(&qname, d_orphanage);
+	while (!IS_ERR_OR_NULL(d_child)) {
 		trace_xrep_adoption_invalidate_child(sc->mp, d_child);
 
 		ASSERT(d_is_negative(d_child));
@@ -530,7 +532,7 @@ xrep_adoption_move(
 	int			error;
 
 	trace_xrep_adoption_reparent(sc->orphanage, adopt->xname,
-			sc->ip->i_ino);
+			I_INO(sc->ip));
 
 	error = xrep_adoption_check_dcache(adopt);
 	if (error)
@@ -551,7 +553,7 @@ xrep_adoption_move(
 
 	/* Create the new name in the orphanage. */
 	error = xfs_dir_createname(sc->tp, sc->orphanage, adopt->xname,
-			sc->ip->i_ino, adopt->orphanage_blkres);
+			I_INO(sc->ip), adopt->orphanage_blkres);
 	if (error)
 		return error;
 
@@ -574,7 +576,7 @@ xrep_adoption_move(
 	/* Replace the dotdot entry if the child is a subdirectory. */
 	if (isdir) {
 		error = xfs_dir_replace(sc->tp, sc->ip, &xfs_name_dotdot,
-				sc->orphanage->i_ino, adopt->child_blkres);
+				I_INO(sc->orphanage), adopt->child_blkres);
 		if (error)
 			return error;
 	}

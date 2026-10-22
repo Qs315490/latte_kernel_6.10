@@ -288,7 +288,7 @@ static struct nfs_netfs_io_data *nfs_netfs_alloc(struct netfs_io_subrequest *sre
 {
 	struct nfs_netfs_io_data *netfs;
 
-	netfs = kzalloc(sizeof(*netfs), GFP_KERNEL_ACCOUNT);
+	netfs = kzalloc_obj(*netfs, GFP_KERNEL_ACCOUNT);
 	if (!netfs)
 		return NULL;
 	netfs->sreq = sreq;
@@ -367,6 +367,7 @@ void nfs_netfs_read_completion(struct nfs_pgio_header *hdr)
 
 	sreq = netfs->sreq;
 	if (test_bit(NFS_IOHDR_EOF, &hdr->flags) &&
+	    sreq->rreq->origin != NETFS_UNBUFFERED_READ &&
 	    sreq->rreq->origin != NETFS_DIO_READ)
 		__set_bit(NETFS_SREQ_CLEAR_TAIL, &sreq->flags);
 

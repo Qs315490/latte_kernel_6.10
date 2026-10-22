@@ -5,7 +5,6 @@
 #include <linux/fsi.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 
 #include "fsi-master-i2cr.h"
@@ -261,7 +260,7 @@ static int i2cr_probe(struct i2c_client *client)
 	struct fsi_master_i2cr *i2cr;
 	int ret;
 
-	i2cr = kzalloc(sizeof(*i2cr), GFP_KERNEL);
+	i2cr = kzalloc_obj(*i2cr);
 	if (!i2cr)
 		return -ENOMEM;
 

@@ -22,11 +22,25 @@ properties:
   reg:
     maxItems: 1
 
-  qcom,ath11k-calibration-variant:
+  qcom,calibration-variant:
     $ref: /schemas/types.yaml#/definitions/string
     description: |
       string to uniquely identify variant of the calibration data for designs
       with colliding bus and device ids
+
+  qcom,ath11k-calibration-variant:
+    $ref: /schemas/types.yaml#/definitions/string
+    deprecated: true
+    description: |
+      string to uniquely identify variant of the calibration data for designs
+      with colliding bus and device ids
+
+  firmware-name:
+    maxItems: 1
+    deprecated: true
+    description:
+      If present, a board or platform specific string used to lookup
+      usecase-specific firmware files for the device.
 
   vddrfacmn-supply:
     description: VDD_RFA_CMN supply regulator handle
@@ -127,7 +141,7 @@ examples:
                 vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
                 vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
 
-                qcom,ath11k-calibration-variant = "LE_X13S";
+                qcom,calibration-variant = "LE_X13S";
             };
         };
     };

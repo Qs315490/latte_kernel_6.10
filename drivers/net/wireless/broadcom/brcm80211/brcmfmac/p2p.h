@@ -157,7 +157,8 @@ int brcmf_p2p_scan_prep(struct wiphy *wiphy,
 			struct brcmf_cfg80211_vif *vif);
 int brcmf_p2p_remain_on_channel(struct wiphy *wiphy, struct wireless_dev *wdev,
 				struct ieee80211_channel *channel,
-				unsigned int duration, u64 *cookie);
+				unsigned int duration, u64 *cookie,
+				const u8 *rx_addr);
 int brcmf_p2p_notify_listen_complete(struct brcmf_if *ifp,
 				     const struct brcmf_event_msg *e,
 				     void *data);
@@ -168,8 +169,7 @@ int brcmf_p2p_notify_action_frame_rx(struct brcmf_if *ifp,
 int brcmf_p2p_notify_action_tx_complete(struct brcmf_if *ifp,
 					const struct brcmf_event_msg *e,
 					void *data);
-bool brcmf_p2p_send_action_frame(struct brcmf_cfg80211_info *cfg,
-				 struct net_device *ndev,
+bool brcmf_p2p_send_action_frame(struct brcmf_if *ifp,
 				 struct brcmf_fil_af_params_le *af_params);
 bool brcmf_p2p_scan_finding_common_channel(struct brcmf_cfg80211_info *cfg,
 					   struct brcmf_bss_info_le *bi);

@@ -26,7 +26,7 @@
 #ifndef __DAL_DDC_SERVICE_H__
 #define __DAL_DDC_SERVICE_H__
 
-#include "link.h"
+#include "link_service.h"
 
 #define AUX_POWER_UP_WA_DELAY 500
 #define I2C_OVER_AUX_DEFER_WA_DELAY 70
@@ -94,6 +94,10 @@ void write_scdc_data(
 void read_scdc_data(
 		struct ddc_service *ddc_service);
 
+void write_idcc_data(struct ddc_service *ddc_service, enum hdmi_idcc_scope idcc_scope,
+		uint8_t *write_buf, uint8_t offset, uint8_t write_len);
+int read_idcc_data(struct ddc_service *ddc_service, enum hdmi_idcc_scope idcc_scope,
+		uint8_t *read_buf, uint8_t offset, uint8_t read_len);
 void set_dongle_type(struct ddc_service *ddc,
 		enum display_dongle_type dongle_type);
 

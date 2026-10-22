@@ -30,8 +30,7 @@
  *
  */
 
-#define KMSG_COMPONENT "IPVS"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "IPVS: " fmt
 
 #include <linux/ip.h>
 #include <linux/slab.h>
@@ -154,7 +153,7 @@ static int ip_vs_dh_init_svc(struct ip_vs_service *svc)
 	struct ip_vs_dh_state *s;
 
 	/* allocate the DH table for this service */
-	s = kzalloc(sizeof(struct ip_vs_dh_state), GFP_KERNEL);
+	s = kzalloc_obj(struct ip_vs_dh_state);
 	if (s == NULL)
 		return -ENOMEM;
 
@@ -220,8 +219,8 @@ ip_vs_dh_schedule(struct ip_vs_service *svc, const struct sk_buff *skb,
 
 	s = (struct ip_vs_dh_state *) svc->sched_data;
 	dest = ip_vs_dh_get(svc->af, s, &iph->daddr);
-	if (!dest
-	    || !(dest->flags & IP_VS_DEST_F_AVAILABLE)
+	if (!dest ||
+	    !(dest->cflags & IP_VS_DEST_CF_AVAILABLE)
 	    || atomic_read(&dest->weight) <= 0
 	    || is_overloaded(dest)) {
 		ip_vs_scheduler_err(svc, "no destination available");

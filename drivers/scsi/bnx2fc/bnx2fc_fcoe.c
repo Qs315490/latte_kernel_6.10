@@ -17,6 +17,7 @@
 #include "bnx2fc.h"
 
 #include <linux/ethtool.h>
+#include <net/netdev_lock.h>
 
 static struct list_head adapter_list;
 static struct list_head if_list;
@@ -815,7 +816,9 @@ static int bnx2fc_net_config(struct fc_lport *lport, struct net_device *netdev)
 	port->fcoe_pending_queue_active = 0;
 	timer_setup(&port->timer, fcoe_queue_timer, 0);
 
+	netdev_lock_ops(netdev);
 	fcoe_link_speed_update(lport);
+	netdev_unlock_ops(netdev);
 
 	if (!lport->vport) {
 		if (fcoe_get_wwn(netdev, &wwnn, NETDEV_FCOE_WWNN))
@@ -837,7 +840,7 @@ static int bnx2fc_net_config(struct fc_lport *lport, struct net_device *netdev)
 
 static void bnx2fc_destroy_timer(struct timer_list *t)
 {
-	struct bnx2fc_hba *hba = from_timer(hba, t, destroy_timer);
+	struct bnx2fc_hba *hba = timer_container_of(hba, t, destroy_timer);
 
 	printk(KERN_ERR PFX "ERROR:bnx2fc_destroy_timer - "
 	       "Destroy compl not received!!\n");
@@ -1356,7 +1359,7 @@ static struct bnx2fc_hba *bnx2fc_hba_create(struct cnic_dev *cnic)
 	struct fcoe_capabilities *fcoe_cap;
 	int rc;
 
-	hba = kzalloc(sizeof(*hba), GFP_KERNEL);
+	hba = kzalloc_obj(*hba);
 	if (!hba) {
 		printk(KERN_ERR PFX "Unable to allocate hba structure\n");
 		return NULL;
@@ -1381,8 +1384,7 @@ static struct bnx2fc_hba *bnx2fc_hba_create(struct cnic_dev *cnic)
 	hba->next_conn_id = 0;
 
 	hba->tgt_ofld_list =
-		kcalloc(BNX2FC_NUM_MAX_SESS, sizeof(struct bnx2fc_rport *),
-			GFP_KERNEL);
+		kzalloc_objs(struct bnx2fc_rport *, BNX2FC_NUM_MAX_SESS);
 	if (!hba->tgt_ofld_list) {
 		printk(KERN_ERR PFX "Unable to allocate tgt offload list\n");
 		goto tgtofld_err;
@@ -1492,7 +1494,7 @@ static struct fc_lport *bnx2fc_if_create(struct bnx2fc_interface *interface,
 	struct bnx2fc_hba	*hba = interface->hba;
 	int			rc = 0;
 
-	blport = kzalloc(sizeof(struct bnx2fc_lport), GFP_KERNEL);
+	blport = kzalloc_obj(struct bnx2fc_lport);
 	if (!blport) {
 		BNX2FC_HBA_DBG(ctlr->lp, "Unable to alloc blport\n");
 		return NULL;
@@ -1599,7 +1601,7 @@ static void bnx2fc_interface_cleanup(struct bnx2fc_interface *interface)
 	struct bnx2fc_hba *hba = interface->hba;
 
 	/* Stop the transmit retry timer */
-	del_timer_sync(&port->timer);
+	timer_delete_sync(&port->timer);
 
 	/* Free existing transmit skbs */
 	fcoe_clean_pending_queue(lport);
@@ -1938,7 +1940,7 @@ static void bnx2fc_fw_destroy(struct bnx2fc_hba *hba)
 			if (signal_pending(current))
 				flush_signals(current);
 
-			del_timer_sync(&hba->destroy_timer);
+			timer_delete_sync(&hba->destroy_timer);
 		}
 		bnx2fc_unbind_adapter_devices(hba);
 	}
@@ -2200,7 +2202,7 @@ static int __bnx2fc_enable(struct fcoe_ctlr *ctlr)
 	if (!hba->cnic->get_fc_npiv_tbl)
 		goto done;
 
-	npiv_tbl = kzalloc(sizeof(struct cnic_fc_npiv_tbl), GFP_KERNEL);
+	npiv_tbl = kzalloc_obj(struct cnic_fc_npiv_tbl);
 	if (!npiv_tbl)
 		goto done;
 
@@ -2695,7 +2697,7 @@ static int __init bnx2fc_mod_init(void)
 	if (rc)
 		goto detach_ft;
 
-	bnx2fc_wq = alloc_workqueue("bnx2fc", 0, 0);
+	bnx2fc_wq = alloc_workqueue("bnx2fc", WQ_PERCPU, 0);
 	if (!bnx2fc_wq) {
 		rc = -ENOMEM;
 		goto release_bt;

@@ -36,20 +36,16 @@ struct crypto_akcipher_sync_data {
 static int __maybe_unused crypto_akcipher_report(
 	struct sk_buff *skb, struct crypto_alg *alg)
 {
-	struct crypto_report_akcipher rakcipher;
-
-	memset(&rakcipher, 0, sizeof(rakcipher));
-
-	strscpy(rakcipher.type, "akcipher", sizeof(rakcipher.type));
+	struct crypto_report_akcipher rakcipher = {
+		.type = "akcipher",
+	};
 
 	return nla_put(skb, CRYPTOCFGA_REPORT_AKCIPHER,
 		       sizeof(rakcipher), &rakcipher);
 }
 
-static void crypto_akcipher_show(struct seq_file *m, struct crypto_alg *alg)
-	__maybe_unused;
-
-static void crypto_akcipher_show(struct seq_file *m, struct crypto_alg *alg)
+static void __maybe_unused crypto_akcipher_show(struct seq_file *m,
+						struct crypto_alg *alg)
 {
 	seq_puts(m, "type         : akcipher\n");
 }
@@ -97,6 +93,7 @@ static const struct crypto_type crypto_akcipher_type = {
 	.maskset = CRYPTO_ALG_TYPE_AHASH_MASK,
 	.type = CRYPTO_ALG_TYPE_AKCIPHER,
 	.tfmsize = offsetof(struct crypto_akcipher, base),
+	.algsize = offsetof(struct akcipher_alg, base),
 };
 
 int crypto_grab_akcipher(struct crypto_akcipher_spawn *spawn,

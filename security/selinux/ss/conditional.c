@@ -12,6 +12,7 @@
 
 #include "security.h"
 #include "conditional.h"
+#include "policydb.h"
 #include "services.h"
 
 /*
@@ -165,8 +166,8 @@ void cond_policydb_destroy(struct policydb *p)
 int cond_init_bool_indexes(struct policydb *p)
 {
 	kfree(p->bool_val_to_struct);
-	p->bool_val_to_struct = kmalloc_array(
-		p->p_bools.nprim, sizeof(*p->bool_val_to_struct), GFP_KERNEL);
+	p->bool_val_to_struct = kzalloc_objs(*p->bool_val_to_struct,
+					     p->p_bools.nprim);
 	if (!p->bool_val_to_struct)
 		return -ENOMEM;
 
@@ -199,22 +200,15 @@ int cond_index_bool(void *key, void *datum, void *datap)
 	return 0;
 }
 
-static int bool_isvalid(struct cond_bool_datum *b)
-{
-	if (!(b->state == 0 || b->state == 1))
-		return 0;
-	return 1;
-}
-
 int cond_read_bool(struct policydb *p, struct symtab *s, struct policy_file *fp)
 {
 	char *key = NULL;
 	struct cond_bool_datum *booldatum;
 	__le32 buf[3];
-	u32 len;
+	u32 len, val;
 	int rc;
 
-	booldatum = kzalloc(sizeof(*booldatum), GFP_KERNEL);
+	booldatum = kzalloc_obj(*booldatum);
 	if (!booldatum)
 		return -ENOMEM;
 
@@ -223,11 +217,12 @@ int cond_read_bool(struct policydb *p, struct symtab *s, struct policy_file *fp)
 		goto err;
 
 	booldatum->value = le32_to_cpu(buf[0]);
-	booldatum->state = le32_to_cpu(buf[1]);
+	val = le32_to_cpu(buf[1]);
 
 	rc = -EINVAL;
-	if (!bool_isvalid(booldatum))
+	if (!val_is_boolean(val))
 		goto err;
+	booldatum->state = (int)val;
 
 	len = le32_to_cpu(buf[2]);
 
@@ -241,6 +236,7 @@ int cond_read_bool(struct policydb *p, struct symtab *s, struct policy_file *fp)
 
 	return 0;
 err:
+	pr_err("SELinux: conditional: failed to read boolean\n");
 	cond_destroy_bool(key, booldatum, NULL);
 	return rc;
 }
@@ -334,7 +330,12 @@ static int cond_read_av_list(struct policydb *p, struct policy_file *fp,
 	if (len == 0)
 		return 0;
 
-	list->nodes = kcalloc(len, sizeof(*list->nodes), GFP_KERNEL);
+	/* avtab_read_item() reads at least 96 bytes for any valid entry */
+	rc = size_check(3 * sizeof(u32), len, fp);
+	if (rc)
+		return rc;
+
+	list->nodes = kzalloc_objs(*list->nodes, len);
 	if (!list->nodes)
 		return -ENOMEM;
 
@@ -362,7 +363,8 @@ static int expr_node_isvalid(struct policydb *p, struct cond_expr_node *expr)
 		return 0;
 	}
 
-	if (expr->boolean > p->p_bools.nprim) {
+	if (expr->expr_type == COND_BOOL &&
+	    (expr->boolean == 0 || expr->boolean > p->p_bools.nprim)) {
 		pr_err("SELinux: conditional expressions uses unknown bool.\n");
 		return 0;
 	}
@@ -383,7 +385,13 @@ static int cond_read_node(struct policydb *p, struct cond_node *node, struct pol
 
 	/* expr */
 	len = le32_to_cpu(buf[1]);
-	node->expr.nodes = kcalloc(len, sizeof(*node->expr.nodes), GFP_KERNEL);
+
+	/* we will read 64 bytes per node */
+	rc = size_check(2 * sizeof(u32), len, fp);
+	if (rc)
+		return rc;
+
+	node->expr.nodes = kzalloc_objs(*node->expr.nodes, len);
 	if (!node->expr.nodes)
 		return -ENOMEM;
 
@@ -421,7 +429,12 @@ int cond_read_list(struct policydb *p, struct policy_file *fp)
 
 	len = le32_to_cpu(buf[0]);
 
-	p->cond_list = kcalloc(len, sizeof(*p->cond_list), GFP_KERNEL);
+	/* cond_read_node() reads at least 128 bytes for any valid node */
+	rc = size_check(4 * sizeof(u32), len, fp);
+	if (rc)
+		return rc;
+
+	p->cond_list = kzalloc_objs(*p->cond_list, len);
 	if (!p->cond_list)
 		return -ENOMEM;
 
@@ -605,7 +618,7 @@ static int cond_dup_av_list(struct cond_av_list *new,
 
 	memset(new, 0, sizeof(*new));
 
-	new->nodes = kcalloc(orig->len, sizeof(*new->nodes), GFP_KERNEL);
+	new->nodes = kzalloc_objs(*new->nodes, orig->len);
 	if (!new->nodes)
 		return -ENOMEM;
 
@@ -631,8 +644,7 @@ static int duplicate_policydb_cond_list(struct policydb *newp,
 		return rc;
 
 	newp->cond_list_len = 0;
-	newp->cond_list = kcalloc(origp->cond_list_len,
-				  sizeof(*newp->cond_list), GFP_KERNEL);
+	newp->cond_list = kzalloc_objs(*newp->cond_list, origp->cond_list_len);
 	if (!newp->cond_list)
 		goto error;
 
@@ -710,9 +722,8 @@ static int duplicate_policydb_bools(struct policydb *newdb,
 	struct cond_bool_datum **cond_bool_array;
 	int rc;
 
-	cond_bool_array = kmalloc_array(orig->p_bools.nprim,
-					sizeof(*orig->bool_val_to_struct),
-					GFP_KERNEL);
+	cond_bool_array = kzalloc_objs(*orig->bool_val_to_struct,
+				       orig->p_bools.nprim);
 	if (!cond_bool_array)
 		return -ENOMEM;
 

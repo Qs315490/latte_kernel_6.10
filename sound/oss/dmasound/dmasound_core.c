@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/sound/oss/dmasound/dmasound_core.c
  *
@@ -20,10 +21,6 @@
  *
  *  /dev/sndstat is based on code by Hannu Savolainen, the author of the
  *  VoxWare family of drivers.
- *
- *  This file is subject to the terms and conditions of the GNU General Public
- *  License.  See the file COPYING in the main directory of this archive
- *  for more details.
  *
  *  History:
  *
@@ -577,11 +574,6 @@ static ssize_t sq_write(struct file *file, const char __user *src, size_t uLeft,
 		uWritten = 0 ;
 	}
 
-/* FIXME: I think that this may be the wrong behaviour when we get strapped
-	for time and the cpu is close to being (or actually) behind in sending data.
-	- because we've lost the time that the N samples, already in the buffer,
-	would have given us to get here with the next lot from the user.
-*/
 	/* The interrupt doesn't start to play the last, incomplete frame.
 	 * Thus we can append to it without disabling the interrupts! (Note
 	 * also that write_sq.rear isn't affected by the interrupt.)
@@ -600,6 +592,11 @@ static ssize_t sq_write(struct file *file, const char __user *src, size_t uLeft,
 	spin_lock_irqsave(&dmasound.lock, flags);
 	write_sq.syncing &= ~2 ; /* take out POST status */
 	spin_unlock_irqrestore(&dmasound.lock, flags);
+
+	/* Start any already-complete fragments before we spend
+	 * more time extending the incomplete tail fragment.
+	 */
+	sq_play();
 
 	if (write_sq.count > 0 &&
 	    (bLeft = write_sq.block_size-write_sq.rear_size) > 0) {

@@ -10,7 +10,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/perf_event.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -565,7 +564,7 @@ module_param_named(pmu_poll_period_us, arm_ccn_pmu_poll_period_us, uint,
 
 static ktime_t arm_ccn_pmu_timer_period(void)
 {
-	return ns_to_ktime((u64)arm_ccn_pmu_poll_period_us * 1000);
+	return us_to_ktime((u64)arm_ccn_pmu_poll_period_us);
 }
 
 
@@ -1273,9 +1272,8 @@ static int arm_ccn_pmu_init(struct arm_ccn *ccn)
 	/* No overflow interrupt? Have to use a timer instead. */
 	if (!ccn->irq) {
 		dev_info(ccn->dev, "No access to interrupts, using timer.\n");
-		hrtimer_init(&ccn->dt.hrtimer, CLOCK_MONOTONIC,
-				HRTIMER_MODE_REL);
-		ccn->dt.hrtimer.function = arm_ccn_pmu_timer_handler;
+		hrtimer_setup(&ccn->dt.hrtimer, arm_ccn_pmu_timer_handler, CLOCK_MONOTONIC,
+			      HRTIMER_MODE_REL);
 	}
 
 	/* Pick one CPU which we will use to collect data from CCN... */

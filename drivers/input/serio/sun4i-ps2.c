@@ -13,7 +13,6 @@
 #include <linux/slab.h>
 #include <linux/io.h>
 #include <linux/clk.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #define DRIVER_NAME		"sun4i-ps2"
@@ -209,8 +208,8 @@ static int sun4i_ps2_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	int error;
 
-	drvdata = kzalloc(sizeof(*drvdata), GFP_KERNEL);
-	serio = kzalloc(sizeof(*serio), GFP_KERNEL);
+	drvdata = kzalloc_obj(*drvdata);
+	serio = kzalloc_obj(*serio);
 	if (!drvdata || !serio) {
 		error = -ENOMEM;
 		goto err_free_mem;

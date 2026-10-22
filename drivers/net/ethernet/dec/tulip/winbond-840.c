@@ -210,9 +210,16 @@ enum chip_capability_flags {
 };
 
 static const struct pci_device_id w840_pci_tbl[] = {
-	{ 0x1050, 0x0840, PCI_ANY_ID, 0x8153,     0, 0, 0 },
-	{ 0x1050, 0x0840, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1 },
-	{ 0x11f6, 0x2011, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2 },
+	{
+		PCI_DEVICE_SUB(0x1050, 0x0840, PCI_ANY_ID, 0x8153),
+		.driver_data = 0,
+	}, {
+		PCI_DEVICE(0x1050, 0x0840),
+		.driver_data = 1,
+	}, {
+		PCI_DEVICE(0x11f6, 0x2011),
+		.driver_data = 2,
+	},
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, w840_pci_tbl);
@@ -375,7 +382,7 @@ static int w840_probe1(struct pci_dev *pdev, const struct pci_device_id *ent)
 		return -ENOMEM;
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
-	if (pci_request_regions(pdev, DRV_NAME))
+	if (pcim_request_all_regions(pdev, DRV_NAME))
 		goto err_out_netdev;
 
 	ioaddr = pci_iomap(pdev, TULIP_BAR, netdev_res_size);
@@ -763,7 +770,7 @@ static inline void update_csr6(struct net_device *dev, int new)
 
 static void netdev_timer(struct timer_list *t)
 {
-	struct netdev_private *np = from_timer(np, t, timer);
+	struct netdev_private *np = timer_container_of(np, t, timer);
 	struct net_device *dev = pci_get_drvdata(np->pci_dev);
 	void __iomem *ioaddr = np->base_addr;
 
@@ -1509,7 +1516,7 @@ static int netdev_close(struct net_device *dev)
 	}
 #endif /* __i386__ debugging only */
 
-	del_timer_sync(&np->timer);
+	timer_delete_sync(&np->timer);
 
 	free_rxtx_rings(np);
 	free_ringdesc(np);
@@ -1560,7 +1567,7 @@ static int __maybe_unused w840_suspend(struct device *dev_d)
 
 	rtnl_lock();
 	if (netif_running (dev)) {
-		del_timer_sync(&np->timer);
+		timer_delete_sync(&np->timer);
 
 		spin_lock_irq(&np->lock);
 		netif_device_detach(dev);

@@ -95,6 +95,7 @@ void dpp35_program_bias_and_scale_fcnv(
 static struct dpp_funcs dcn35_dpp_funcs = {
 	.dpp_program_gamcor_lut		= dpp3_program_gamcor_lut,
 	.dpp_read_state				= dpp30_read_state,
+	.dpp_read_reg_state			= dpp30_read_reg_state,
 	.dpp_reset					= dpp_reset,
 	.dpp_set_scaler				= dpp1_dscl_set_scaler_manual_scale,
 	.dpp_get_optimal_number_of_taps	= dpp3_get_optimal_number_of_taps,
@@ -138,7 +139,7 @@ bool dpp35_construct(
 	dpp->base.funcs = &dcn35_dpp_funcs;
 
 	// w/a for cursor memory stuck in LS by programming DISPCLK_R_GATE_DISABLE, limit w/a to some ASIC revs
-	if (dpp->base.ctx->asic_id.hw_internal_rev <= 0x10)
+	if (dpp->base.ctx->asic_id.hw_internal_rev < 0x40)
 		dpp->dispclk_r_gate_disable = true;
 	return ret;
 }

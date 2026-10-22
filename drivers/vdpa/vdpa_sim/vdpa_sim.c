@@ -34,7 +34,7 @@ MODULE_PARM_DESC(batch_mapping, "Batched mapping 1 -Enable; 0 - Disable");
 static int max_iotlb_entries = 2048;
 module_param(max_iotlb_entries, int, 0444);
 MODULE_PARM_DESC(max_iotlb_entries,
-		 "Maximum number of iotlb entries for each address space. 0 means unlimited. (default: 2048)");
+		 "Maximum number of iotlb entries for each address space. (default: 2048)");
 
 static bool use_va = true;
 module_param(use_va, bool, 0444);
@@ -201,6 +201,8 @@ struct vdpasim *vdpasim_create(struct vdpasim_dev_attr *dev_attr,
 
 	if (!dev_attr->alloc_size)
 		return ERR_PTR(-EINVAL);
+	if (max_iotlb_entries < 2)
+		return ERR_PTR(-EINVAL);
 
 	if (config->mask & BIT_ULL(VDPA_ATTR_DEV_FEATURES)) {
 		if (config->device_features &
@@ -215,7 +217,7 @@ struct vdpasim *vdpasim_create(struct vdpasim_dev_attr *dev_attr,
 	else
 		ops = &vdpasim_config_ops;
 
-	vdpa = __vdpa_alloc_device(NULL, ops,
+	vdpa = __vdpa_alloc_device(NULL, ops, NULL,
 				   dev_attr->ngroups, dev_attr->nas,
 				   dev_attr->alloc_size,
 				   dev_attr->name, use_va);
@@ -246,25 +248,25 @@ struct vdpasim *vdpasim_create(struct vdpasim_dev_attr *dev_attr,
 	if (!vdpasim->config)
 		goto err_iommu;
 
-	vdpasim->vqs = kcalloc(dev_attr->nvqs, sizeof(struct vdpasim_virtqueue),
-			       GFP_KERNEL);
+	vdpasim->vqs = kzalloc_objs(struct vdpasim_virtqueue, dev_attr->nvqs);
 	if (!vdpasim->vqs)
 		goto err_iommu;
 
-	vdpasim->iommu = kmalloc_array(vdpasim->dev_attr.nas,
-				       sizeof(*vdpasim->iommu), GFP_KERNEL);
+	vdpasim->iommu = kmalloc_objs(*vdpasim->iommu, vdpasim->dev_attr.nas);
 	if (!vdpasim->iommu)
 		goto err_iommu;
 
-	vdpasim->iommu_pt = kmalloc_array(vdpasim->dev_attr.nas,
-					  sizeof(*vdpasim->iommu_pt), GFP_KERNEL);
+	vdpasim->iommu_pt = kmalloc_objs(*vdpasim->iommu_pt,
+					 vdpasim->dev_attr.nas);
 	if (!vdpasim->iommu_pt)
 		goto err_iommu;
 
 	for (i = 0; i < vdpasim->dev_attr.nas; i++) {
 		vhost_iotlb_init(&vdpasim->iommu[i], max_iotlb_entries, 0);
-		vhost_iotlb_add_range(&vdpasim->iommu[i], 0, ULONG_MAX, 0,
-				      VHOST_MAP_RW);
+		ret = vhost_iotlb_add_range(&vdpasim->iommu[i], 0, ULONG_MAX,
+					    0, VHOST_MAP_RW);
+		if (ret)
+			goto err_iommu;
 		vdpasim->iommu_pt[i] = true;
 	}
 
@@ -272,7 +274,7 @@ struct vdpasim *vdpasim_create(struct vdpasim_dev_attr *dev_attr,
 		vringh_set_iotlb(&vdpasim->vqs[i].vring, &vdpasim->iommu[0],
 				 &vdpasim->iommu_lock);
 
-	vdpasim->vdpa.dma_dev = dev;
+	vdpasim->vdpa.vmap.dma_dev = dev;
 
 	return vdpasim;
 
@@ -605,12 +607,6 @@ static int vdpasim_set_group_asid(struct vdpa_device *vdpa, unsigned int group,
 	struct vdpasim *vdpasim = vdpa_to_sim(vdpa);
 	struct vhost_iotlb *iommu;
 	int i;
-
-	if (group > vdpasim->dev_attr.ngroups)
-		return -EINVAL;
-
-	if (asid >= vdpasim->dev_attr.nas)
-		return -EINVAL;
 
 	iommu = &vdpasim->iommu[asid];
 

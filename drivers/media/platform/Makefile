@@ -6,8 +6,10 @@
 # Place here, alphabetically sorted by directory
 # (e. g. LC_ALL=C sort Makefile)
 obj-y += allegro-dvt/
+obj-y += amd/
 obj-y += amlogic/
 obj-y += amphion/
+obj-y += arm/
 obj-y += aspeed/
 obj-y += atmel/
 obj-y += broadcom/
@@ -28,6 +30,7 @@ obj-y += rockchip/
 obj-y += samsung/
 obj-y += st/
 obj-y += sunxi/
+obj-y += synopsys/
 obj-y += ti/
 obj-y += verisilicon/
 obj-y += via/

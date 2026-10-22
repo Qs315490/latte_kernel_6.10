@@ -29,6 +29,7 @@ properties:
           - densitron,dmt028vghmcmi-1a
           - elida,kd50t048a
           - techstar,ts8550b
+          - winstar,wf40eswaa6mnn0
       - const: sitronix,st7701
 
   reg:
@@ -47,12 +48,6 @@ properties:
       Controller data/command selection (D/CX) in 4-line SPI mode.
       If not set, the controller is in 3-line SPI mode.
       Disallowed for DSI.
-
-  port: true
-  reset-gpios: true
-  rotation: true
-
-  backlight: true
 
 required:
   - compatible

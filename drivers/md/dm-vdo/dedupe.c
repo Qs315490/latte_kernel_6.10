@@ -226,7 +226,7 @@ struct hash_lock {
 	 * A list containing the data VIOs sharing this lock, all having the same record name and
 	 * data block contents, linked by their hash_lock_node fields.
 	 */
-	struct list_head duplicate_ring;
+	struct list_head duplicate_vios;
 
 	/* The number of data_vios sharing this lock instance */
 	data_vio_count_t reference_count;
@@ -296,7 +296,7 @@ struct hash_zones {
 	/* The number of zones */
 	zone_count_t zone_count;
 	/* The hash zones themselves */
-	struct hash_zone zones[];
+	struct hash_zone zones[] __counted_by(zone_count);
 };
 
 /* These are in milliseconds. */
@@ -343,7 +343,7 @@ static void return_hash_lock_to_pool(struct hash_zone *zone, struct hash_lock *l
 {
 	memset(lock, 0, sizeof(*lock));
 	INIT_LIST_HEAD(&lock->pool_node);
-	INIT_LIST_HEAD(&lock->duplicate_ring);
+	INIT_LIST_HEAD(&lock->duplicate_vios);
 	vdo_waitq_init(&lock->waiters);
 	list_add_tail(&lock->pool_node, &zone->lock_pool);
 }
@@ -441,7 +441,7 @@ static void set_hash_lock(struct data_vio *data_vio, struct hash_lock *new_lock)
 		VDO_ASSERT_LOG_ONLY(data_vio->hash_zone != NULL,
 				    "must have a hash zone when holding a hash lock");
 		VDO_ASSERT_LOG_ONLY(!list_empty(&data_vio->hash_lock_entry),
-				    "must be on a hash lock ring when holding a hash lock");
+				    "must be on a hash lock list when holding a hash lock");
 		VDO_ASSERT_LOG_ONLY(old_lock->reference_count > 0,
 				    "hash lock reference must be counted");
 
@@ -464,10 +464,10 @@ static void set_hash_lock(struct data_vio *data_vio, struct hash_lock *new_lock)
 
 	if (new_lock != NULL) {
 		/*
-		 * Keep all data_vios sharing the lock on a ring since they can complete in any
+		 * Keep all data_vios sharing the lock on a list since they can complete in any
 		 * order and we'll always need a pointer to one to compare data.
 		 */
-		list_move_tail(&data_vio->hash_lock_entry, &new_lock->duplicate_ring);
+		list_move_tail(&data_vio->hash_lock_entry, &new_lock->duplicate_vios);
 		new_lock->reference_count += 1;
 		if (new_lock->max_references < new_lock->reference_count)
 			new_lock->max_references = new_lock->reference_count;
@@ -917,6 +917,8 @@ static int __must_check acquire_lock(struct hash_zone *zone,
 
 /**
  * enter_forked_lock() - Bind the data_vio to a new hash lock.
+ * @waiter: The data_vio's waiter link.
+ * @context: The new hash lock.
  *
  * Implements waiter_callback_fn. Binds the data_vio that was waiting to a new hash lock and waits
  * on that lock.
@@ -971,7 +973,7 @@ static void fork_hash_lock(struct hash_lock *old_lock, struct data_vio *new_agen
  *                   path.
  * @lock: The hash lock.
  * @data_vio: The data_vio to deduplicate using the hash lock.
- * @has_claim: true if the data_vio already has claimed an increment from the duplicate lock.
+ * @has_claim: True if the data_vio already has claimed an increment from the duplicate lock.
  *
  * If no increments are available, this will roll over to a new hash lock and launch the data_vio
  * as the writing agent for that lock.
@@ -996,7 +998,7 @@ static void launch_dedupe(struct hash_lock *lock, struct data_vio *data_vio,
  *                    true copy of their data on disk.
  * @lock: The hash lock.
  * @agent: The data_vio acting as the agent for the lock.
- * @agent_is_done: true only if the agent has already written or deduplicated against its data.
+ * @agent_is_done: True only if the agent has already written or deduplicated against its data.
  *
  * If the agent itself needs to deduplicate, an increment for it must already have been claimed
  * from the duplicate lock, ensuring the hash lock will still have a data_vio holding it.
@@ -1789,10 +1791,10 @@ static bool is_hash_collision(struct hash_lock *lock, struct data_vio *candidate
 	struct hash_zone *zone;
 	bool collides;
 
-	if (list_empty(&lock->duplicate_ring))
+	if (list_empty(&lock->duplicate_vios))
 		return false;
 
-	lock_holder = list_first_entry(&lock->duplicate_ring, struct data_vio,
+	lock_holder = list_first_entry(&lock->duplicate_vios, struct data_vio,
 				       hash_lock_entry);
 	zone = candidate->hash_zone;
 	collides = !blocks_equal(lock_holder->vio.data, candidate->vio.data);
@@ -1815,7 +1817,7 @@ static inline int assert_hash_lock_preconditions(const struct data_vio *data_vio
 		return result;
 
 	result = VDO_ASSERT(list_empty(&data_vio->hash_lock_entry),
-			    "must not already be a member of a hash lock ring");
+			    "must not already be a member of a hash lock list");
 	if (result != VDO_SUCCESS)
 		return result;
 
@@ -1942,8 +1944,8 @@ void vdo_release_hash_lock(struct data_vio *data_vio)
 			    "returned hash lock must not be in use with state %s",
 			    get_hash_lock_state_name(lock->state));
 	VDO_ASSERT_LOG_ONLY(list_empty(&lock->pool_node),
-			    "hash lock returned to zone must not be in a pool ring");
-	VDO_ASSERT_LOG_ONLY(list_empty(&lock->duplicate_ring),
+			    "hash lock returned to zone must not be in a pool list");
+	VDO_ASSERT_LOG_ONLY(list_empty(&lock->duplicate_vios),
 			    "hash lock returned to zone must not reference DataVIOs");
 
 	return_hash_lock_to_pool(zone, lock);
@@ -2146,8 +2148,8 @@ static void start_expiration_timer(struct dedupe_context *context)
 /**
  * report_dedupe_timeouts() - Record and eventually report that some dedupe requests reached their
  *                            expiration time without getting answers, so we timed them out.
- * @zones: the hash zones.
- * @timeouts: the number of newly timed out requests.
+ * @zones: The hash zones.
+ * @timeouts: The number of newly timed out requests.
  */
 static void report_dedupe_timeouts(struct hash_zones *zones, unsigned int timeouts)
 {
@@ -2261,7 +2263,7 @@ static void check_for_drain_complete(struct hash_zone *zone)
 	if ((atomic_read(&zone->timer_state) == DEDUPE_QUERY_TIMER_IDLE) ||
 	    change_timer_state(zone, DEDUPE_QUERY_TIMER_RUNNING,
 			       DEDUPE_QUERY_TIMER_IDLE)) {
-		del_timer_sync(&zone->timer);
+		timer_delete_sync(&zone->timer);
 	} else {
 		/*
 		 * There is an in flight time-out, which must get processed before we can continue.
@@ -2337,7 +2339,7 @@ static void timeout_index_operations_callback(struct vdo_completion *completion)
 
 static void timeout_index_operations(struct timer_list *t)
 {
-	struct hash_zone *zone = from_timer(zone, t, timer);
+	struct hash_zone *zone = timer_container_of(zone, t, timer);
 
 	if (change_timer_state(zone, DEDUPE_QUERY_TIMER_RUNNING,
 			       DEDUPE_QUERY_TIMER_FIRED))
@@ -2362,8 +2364,7 @@ static int __must_check initialize_zone(struct vdo *vdo, struct hash_zones *zone
 	vdo_set_completion_callback(&zone->completion, timeout_index_operations_callback,
 				    zone->thread_id);
 	INIT_LIST_HEAD(&zone->lock_pool);
-	result = vdo_allocate(LOCK_POOL_CAPACITY, struct hash_lock, "hash_lock array",
-			      &zone->lock_array);
+	result = vdo_allocate(LOCK_POOL_CAPACITY, "hash_lock array", &zone->lock_array);
 	if (result != VDO_SUCCESS)
 		return result;
 
@@ -2416,8 +2417,7 @@ int vdo_make_hash_zones(struct vdo *vdo, struct hash_zones **zones_ptr)
 	if (zone_count == 0)
 		return VDO_SUCCESS;
 
-	result = vdo_allocate_extended(struct hash_zones, zone_count, struct hash_zone,
-				       __func__, &zones);
+	result = vdo_allocate_extended(zone_count, zones, __func__, &zones);
 	if (result != VDO_SUCCESS)
 		return result;
 
@@ -2509,6 +2509,8 @@ static void initiate_suspend_index(struct admin_state *state)
 
 /**
  * suspend_index() - Suspend the UDS index prior to draining hash zones.
+ * @context: Not used.
+ * @completion: The completion for the suspend operation.
  *
  * Implements vdo_action_preamble_fn
  */
@@ -2521,21 +2523,13 @@ static void suspend_index(void *context, struct vdo_completion *completion)
 			   initiate_suspend_index);
 }
 
-/**
- * initiate_drain() - Initiate a drain.
- *
- * Implements vdo_admin_initiator_fn.
- */
+/** Implements vdo_admin_initiator_fn. */
 static void initiate_drain(struct admin_state *state)
 {
 	check_for_drain_complete(container_of(state, struct hash_zone, state));
 }
 
-/**
- * drain_hash_zone() - Drain a hash zone.
- *
- * Implements vdo_zone_action_fn.
- */
+/** Implements vdo_zone_action_fn. */
 static void drain_hash_zone(void *context, zone_count_t zone_number,
 			    struct vdo_completion *parent)
 {
@@ -2572,6 +2566,8 @@ static void launch_dedupe_state_change(struct hash_zones *zones)
 
 /**
  * resume_index() - Resume the UDS index prior to resuming hash zones.
+ * @context: Not used.
+ * @parent: The completion for the resume operation.
  *
  * Implements vdo_action_preamble_fn
  */
@@ -2602,11 +2598,7 @@ static void resume_index(void *context, struct vdo_completion *parent)
 	vdo_finish_completion(parent);
 }
 
-/**
- * resume_hash_zone() - Resume a hash zone.
- *
- * Implements vdo_zone_action_fn.
- */
+/** Implements vdo_zone_action_fn. */
 static void resume_hash_zone(void *context, zone_count_t zone_number,
 			     struct vdo_completion *parent)
 {
@@ -2634,7 +2626,7 @@ void vdo_resume_hash_zones(struct hash_zones *zones, struct vdo_completion *pare
 /**
  * get_hash_zone_statistics() - Add the statistics for this hash zone to the tally for all zones.
  * @zone: The hash zone to query.
- * @tally: The tally
+ * @tally: The tally.
  */
 static void get_hash_zone_statistics(const struct hash_zone *zone,
 				     struct hash_lock_statistics *tally)
@@ -2680,8 +2672,8 @@ static void get_index_statistics(struct hash_zones *zones,
 
 /**
  * vdo_get_dedupe_statistics() - Tally the statistics from all the hash zones and the UDS index.
- * @zones: The hash zones to query
- * @stats: A structure to store the statistics
+ * @zones: The hash zones to query.
+ * @stats: A structure to store the statistics.
  *
  * Return: The sum of the hash lock statistics from all hash zones plus the statistics from the UDS
  *         index
@@ -2856,9 +2848,9 @@ void vdo_set_dedupe_index_min_timer_interval(unsigned int value)
 
 /**
  * acquire_context() - Acquire a dedupe context from a hash_zone if any are available.
- * @zone: the hash zone
+ * @zone: The hash zone.
  *
- * Return: A dedupe_context or NULL if none are available
+ * Return: A dedupe_context or NULL if none are available.
  */
 static struct dedupe_context * __must_check acquire_context(struct hash_zone *zone)
 {

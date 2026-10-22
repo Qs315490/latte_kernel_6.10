@@ -30,19 +30,23 @@ struct netns_sysctl_ipv6 {
 	int ip6_rt_min_advmss;
 	u32 multipath_hash_fields;
 	u8 multipath_hash_policy;
-	u8 bindv6only;
+
+	__cacheline_group_begin(sysctl_ipv6_flowlabel);
 	u8 flowlabel_consistency;
 	u8 auto_flowlabels;
-	int icmpv6_time;
+	u8 flowlabel_state_ranges;
+	__cacheline_group_end(sysctl_ipv6_flowlabel);
+
 	u8 icmpv6_echo_ignore_all;
 	u8 icmpv6_echo_ignore_multicast;
 	u8 icmpv6_echo_ignore_anycast;
+	int icmpv6_time;
 	DECLARE_BITMAP(icmpv6_ratemask, ICMPV6_MSG_MAX + 1);
 	unsigned long *icmpv6_ratemask_ptr;
 	u8 anycast_src_echo_reply;
+	u8 bindv6only;
 	u8 ip_nonlocal_bind;
 	u8 fwmark_reflect;
-	u8 flowlabel_state_ranges;
 	int idgen_retries;
 	int idgen_delay;
 	int flowlabel_reflect;
@@ -56,6 +60,7 @@ struct netns_sysctl_ipv6 {
 	u8 skip_notify_on_dev_down;
 	u8 fib_notify_on_flag_change;
 	u8 icmpv6_error_anycast_as_unicast;
+	u8 icmpv6_errors_extension_mask;
 };
 
 struct netns_ipv6 {
@@ -72,6 +77,7 @@ struct netns_ipv6 {
 	struct rt6_statistics   *rt6_stats;
 	struct timer_list       ip6_fib_timer;
 	struct hlist_head       *fib_table_hash;
+	spinlock_t		fib_table_hash_lock;
 	struct fib6_table       *fib6_main_tbl;
 	struct list_head	fib6_walkers;
 	rwlock_t		fib6_walker_lock;
@@ -106,13 +112,15 @@ struct netns_ipv6 {
 	struct list_head	mr6_tables;
 	struct fib_rules_ops	*mr6_rules_ops;
 #endif
+	struct fib_notifier_ops	*ip6mr_notifier_ops;
+	atomic_t		ipmr_seq;
+	struct mutex		mfc_mutex;
 #endif
 	atomic_t		dev_addr_genid;
 	atomic_t		fib6_sernum;
 	struct seg6_pernet_data *seg6_data;
 	struct fib_notifier_ops	*notifier_ops;
-	struct fib_notifier_ops	*ip6mr_notifier_ops;
-	unsigned int ipmr_seq; /* protected by rtnl_mutex */
+	int			flowlabel_count;
 	struct {
 		struct hlist_head head;
 		spinlock_t	lock;

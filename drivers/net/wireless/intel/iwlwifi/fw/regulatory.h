@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2023-2024 Intel Corporation
+ * Copyright (C) 2023-2025 Intel Corporation
  */
 
 #ifndef __fw_regulatory_h__
@@ -12,7 +12,6 @@
 #include "fw/api/phy.h"
 #include "fw/api/config.h"
 #include "fw/api/nvm-reg.h"
-#include "fw/img.h"
 #include "iwl-trans.h"
 
 #define BIOS_SAR_MAX_PROFILE_NUM	4
@@ -22,10 +21,11 @@
  */
 #define BIOS_SAR_MAX_CHAINS_PER_PROFILE 4
 #define BIOS_SAR_NUM_CHAINS             2
-#define BIOS_SAR_MAX_SUB_BANDS_NUM      11
+#define BIOS_SAR_MAX_SUB_BANDS_NUM      12
+#define BIOS_PPAG_MAX_SUB_BANDS_NUM     12
 
 #define BIOS_GEO_NUM_CHAINS		2
-#define BIOS_GEO_MAX_NUM_BANDS		3
+#define BIOS_GEO_MAX_NUM_BANDS		4
 #define BIOS_GEO_MAX_PROFILE_NUM	8
 #define BIOS_GEO_MIN_PROFILE_NUM	3
 
@@ -101,7 +101,7 @@ struct iwl_geo_profile {
 
 /* Same thing as with SAR, all revisions fit in revision 2 */
 struct iwl_ppag_chain {
-	s8 subbands[BIOS_SAR_MAX_SUB_BANDS_NUM];
+	s8 subbands[BIOS_PPAG_MAX_SUB_BANDS_NUM];
 };
 
 struct iwl_tas_data {
@@ -126,7 +126,9 @@ enum iwl_dsm_funcs {
 	DSM_FUNC_ENERGY_DETECTION_THRESHOLD = 10,
 	DSM_FUNC_RFI_CONFIG = 11,
 	DSM_FUNC_ENABLE_11BE = 12,
-	DSM_FUNC_NUM_FUNCS = 13,
+	DSM_FUNC_ENABLE_11BN = 13,
+	DSM_FUNC_ENABLE_UNII_9 = 14,
+	DSM_FUNC_NUM_FUNCS,
 };
 
 enum iwl_dsm_values_srd {
@@ -159,6 +161,10 @@ enum iwl_dsm_unii4_bitmap {
 				DSM_VALUE_UNII4_CANADA_OVERRIDE_MSK	|\
 				DSM_VALUE_UNII4_CANADA_EN_MSK)
 
+#define DSM_11AX_ALLOW_BITMAP				0xF
+#define DSM_EDT_ALLOWED_BITMAP				0x7ffff0
+#define DSM_FORCE_DISABLE_CHANNELS_ALLOWED_BITMAP	0x7FF
+
 enum iwl_dsm_values_rfi {
 	DSM_VALUE_RFI_DLVR_DISABLE	= BIT(0),
 	DSM_VALUE_RFI_DDR_DISABLE	= BIT(1),
@@ -167,11 +173,16 @@ enum iwl_dsm_values_rfi {
 #define DSM_VALUE_RFI_DISABLE	(DSM_VALUE_RFI_DLVR_DISABLE |\
 				 DSM_VALUE_RFI_DDR_DISABLE)
 
+bool iwl_rfi_is_enabled_in_bios(struct iwl_fw_runtime *fwrt);
+
 enum iwl_dsm_masks_reg {
 	DSM_MASK_CHINA_22_REG = BIT(2)
 };
 
 struct iwl_fw_runtime;
+
+/* Print the PPAG table as read from BIOS */
+void iwl_bios_print_ppag(struct iwl_fw_runtime *fwrt, int n_subbands);
 
 bool iwl_sar_geo_support(struct iwl_fw_runtime *fwrt);
 
@@ -183,13 +194,10 @@ int iwl_sar_fill_profile(struct iwl_fw_runtime *fwrt,
 			 __le16 *per_chain, u32 n_tables, u32 n_subbands,
 			 int prof_a, int prof_b);
 
-int iwl_fill_ppag_table(struct iwl_fw_runtime *fwrt,
-			union iwl_ppag_table_cmd *cmd,
-			int *cmd_size);
-
 bool iwl_is_ppag_approved(struct iwl_fw_runtime *fwrt);
 
 bool iwl_is_tas_approved(void);
+bool iwl_add_mcc_to_tas_block_list(u16 *list, u8 *size, u16 mcc);
 
 struct iwl_tas_selection_data
 iwl_parse_tas_selection(const u32 tas_selection, const u8 tbl_rev);
@@ -212,18 +220,18 @@ int iwl_bios_get_mcc(struct iwl_fw_runtime *fwrt, char *mcc);
 int iwl_bios_get_eckv(struct iwl_fw_runtime *fwrt, u32 *ext_clk);
 int iwl_bios_get_wbem(struct iwl_fw_runtime *fwrt, u32 *value);
 
-int iwl_fill_lari_config(struct iwl_fw_runtime *fwrt,
-			 struct iwl_lari_config_change_cmd *cmd,
-			 size_t *cmd_size);
-
 int iwl_bios_get_dsm(struct iwl_fw_runtime *fwrt, enum iwl_dsm_funcs func,
 		     u32 *value);
 
 static inline u32 iwl_bios_get_ppag_flags(const u32 ppag_modes,
-					  const u8 ppag_ver)
+					  const u8 ppag_bios_rev)
 {
-	return ppag_modes & (ppag_ver < 3 ? IWL_PPAG_ETSI_CHINA_MASK :
-					    IWL_PPAG_REV3_MASK);
+	/* For revision 4 and above driver is pipe */
+	if (ppag_bios_rev >= 4)
+		return ppag_modes;
+
+	return ppag_modes & (ppag_bios_rev < 3 ? IWL_PPAG_ETSI_CHINA_MASK :
+						 IWL_PPAG_REV3_MASK);
 }
 
 bool iwl_puncturing_is_allowed_in_bios(u32 puncturing, u16 mcc);
@@ -232,22 +240,25 @@ bool iwl_puncturing_is_allowed_in_bios(u32 puncturing, u16 mcc);
 #define IWL_DSBR_PERMANENT_URM_MASK	BIT(9)
 
 int iwl_bios_get_dsbr(struct iwl_fw_runtime *fwrt, u32 *value);
+int iwl_bios_get_phy_filters(struct iwl_fw_runtime *fwrt);
 
 static inline void iwl_bios_setup_step(struct iwl_trans *trans,
 				       struct iwl_fw_runtime *fwrt)
 {
 	u32 dsbr;
 
-	if (!trans->trans_cfg->integrated)
+	if (!trans->mac_cfg->integrated)
 		return;
 
-	if (trans->trans_cfg->device_family < IWL_DEVICE_FAMILY_BZ)
+	if (trans->mac_cfg->device_family < IWL_DEVICE_FAMILY_BZ)
 		return;
 
 	if (iwl_bios_get_dsbr(fwrt, &dsbr))
 		dsbr = 0;
 
-	trans->dsbr_urm_fw_dependent = !!(dsbr & IWL_DSBR_FW_MODIFIED_URM_MASK);
-	trans->dsbr_urm_permanent = !!(dsbr & IWL_DSBR_PERMANENT_URM_MASK);
+	trans->conf.dsbr_urm_fw_dependent =
+		!!(dsbr & IWL_DSBR_FW_MODIFIED_URM_MASK);
+	trans->conf.dsbr_urm_permanent =
+		!!(dsbr & IWL_DSBR_PERMANENT_URM_MASK);
 }
 #endif /* __fw_regulatory_h__ */

@@ -23,13 +23,16 @@
 
 #include <linux/random.h>
 
+#include "gt/intel_gt.h"
 #include "gt/intel_gt_pm.h"
+#include "gt/intel_gt_regs.h"
 #include "gt/uc/intel_gsc_fw.h"
 
 #include "i915_driver.h"
 #include "i915_drv.h"
+#include "i915_jiffies.h"
 #include "i915_selftest.h"
-
+#include "i915_wait_util.h"
 #include "igt_flush_test.h"
 
 struct i915_selftest i915_selftest __read_mostly = {
@@ -178,12 +181,55 @@ __wait_gsc_huc_load_completed(struct drm_i915_private *i915)
 		pr_warn(DRIVER_NAME "Timed out waiting for huc load via GSC!\n");
 }
 
+static struct mm_struct *get_selftest_mm(int u_pid_nr)
+{
+	struct task_struct *task = NULL;
+	struct mm_struct *mm = NULL;
+	struct pid *u_pid = NULL;
+
+	if (u_pid_nr < 1)
+		return NULL;
+
+	u_pid = find_get_pid(u_pid_nr);
+	if (!u_pid) {
+		pr_warn("Could not find PID: %d\n", u_pid_nr);
+		return NULL;
+	}
+
+	task = get_pid_task(u_pid, PIDTYPE_PID);
+	put_pid(u_pid);
+	if (!task) {
+		pr_warn("Could not find task for PID: %d\n", u_pid_nr);
+		return NULL;
+	}
+
+	if (task->flags & PF_KTHREAD) {
+		pr_warn("Task not in userspace: %d\n", u_pid_nr);
+		put_task_struct(task);
+		return NULL;
+	}
+
+	mm = get_task_mm(task);
+	put_task_struct(task);
+	if (!mm) {
+		pr_warn("Could not find address space of task with PID: %d\n", u_pid_nr);
+		return NULL;
+	}
+
+	return mm;
+}
+
 static int __run_selftests(const char *name,
 			   struct selftest *st,
 			   unsigned int count,
 			   void *data)
 {
+	struct mm_struct *mm = NULL;
+	int u_pid_nr = -1;
 	int err = 0;
+
+	if (i915_selftest.userspace_pid)
+		u_pid_nr = i915_selftest.userspace_pid;
 
 	while (!i915_selftest.random_seed)
 		i915_selftest.random_seed = get_random_u32();
@@ -198,14 +244,36 @@ static int __run_selftests(const char *name,
 	pr_info(DRIVER_NAME ": Performing %s selftests with st_random_seed=0x%x st_timeout=%u\n",
 		name, i915_selftest.random_seed, i915_selftest.timeout_ms);
 
+	/*
+	 * If we are running in a kthread on a multi NUMA system and the user passed
+	 * a valid PID of a userspace task, then we may borrow its address space
+	 * to prepare a safe environment for the mmap selftests.
+	 */
+	if (!current->mm && u_pid_nr > 0) {
+		mm = get_selftest_mm(u_pid_nr);
+		if (mm) {
+			kthread_use_mm(mm);
+			if (unlikely(!current->mm)) {
+				mmput(mm);
+				mm = NULL;
+				pr_warn("Could not set mm as current->mm\n");
+			}
+		}
+	}
+
 	/* Tests are listed in order in i915_*_selftests.h */
 	for (; count--; st++) {
 		if (!st->enabled)
 			continue;
 
 		cond_resched();
-		if (signal_pending(current))
+		if (signal_pending(current)) {
+			if (mm) {
+				kthread_unuse_mm(mm);
+				mmput_async(mm);
+			}
 			return -EINTR;
+		}
 
 		pr_info(DRIVER_NAME ": Running %s\n", st->name);
 		if (data)
@@ -222,6 +290,11 @@ static int __run_selftests(const char *name,
 		 "%s returned %d, conflicting with selftest's magic values!\n",
 		 st->name, err))
 		err = -1;
+
+	if (mm) {
+		kthread_unuse_mm(mm);
+		mmput_async(mm);
+	}
 
 	return err;
 }
@@ -253,10 +326,26 @@ int i915_mock_selftests(void)
 int i915_live_selftests(struct pci_dev *pdev)
 {
 	struct drm_i915_private *i915 = pdev_to_i915(pdev);
+	struct intel_uncore *uncore = &i915->uncore;
 	int err;
+	u32 pg_enable;
+	intel_wakeref_t wakeref;
 
 	if (!i915_selftest.live)
 		return 0;
+
+	/*
+	 * FIXME Disable render powergating, this is temporary wa and should be removed
+	 * after fixing real cause of forcewake timeouts.
+	 */
+	with_intel_runtime_pm(uncore->rpm, wakeref) {
+		if (IS_GFX_GT_IP_RANGE(to_gt(i915), IP_VER(12, 00), IP_VER(12, 74))) {
+			pg_enable = intel_uncore_read(uncore, GEN9_PG_ENABLE);
+			if (pg_enable & GEN9_RENDER_PG_ENABLE)
+				intel_uncore_write_fw(uncore, GEN9_PG_ENABLE,
+						      pg_enable & ~GEN9_RENDER_PG_ENABLE);
+		}
+	}
 
 	__wait_gsc_proxy_completed(i915);
 	__wait_gsc_huc_load_completed(i915);
@@ -488,6 +577,8 @@ void igt_hexdump(const void *buf, size_t len)
 module_param_named(st_random_seed, i915_selftest.random_seed, uint, 0400);
 module_param_named(st_timeout, i915_selftest.timeout_ms, uint, 0400);
 module_param_named(st_filter, i915_selftest.filter, charp, 0400);
+module_param_named(st_userspace_pid, i915_selftest.userspace_pid, uint, 0400);
+MODULE_PARM_DESC(st_userspace_pid, "For usage in tests that map userspace memory and require address space with controllable lifetime.");
 
 module_param_named_unsafe(mock_selftests, i915_selftest.mock, int, 0400);
 MODULE_PARM_DESC(mock_selftests, "Run selftests before loading, using mock hardware (0:disabled [default], 1:run tests then load driver, -1:run tests then leave dummy module)");

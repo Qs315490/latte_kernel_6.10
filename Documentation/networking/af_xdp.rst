@@ -43,12 +43,13 @@ UMEM also has two rings: the FILL ring and the COMPLETION ring. The
 FILL ring is used by the application to send down addr for the kernel
 to fill in with RX packet data. References to these frames will then
 appear in the RX ring once each packet has been received. The
-COMPLETION ring, on the other hand, contains frame addr that the
-kernel has transmitted completely and can now be used again by user
-space, for either TX or RX. Thus, the frame addrs appearing in the
-COMPLETION ring are addrs that were previously transmitted using the
-TX ring. In summary, the RX and FILL rings are used for the RX path
-and the TX and COMPLETION rings are used for the TX path.
+COMPLETION ring, on the other hand, contains frame addresses from Tx
+descriptors that the kernel has finished processing and that can now be
+used again by user space, for either Tx or Rx. This includes frames whose
+transmission has completed as well as frames referenced by invalid Tx
+descriptors rejected by the kernel. A completion therefore returns
+ownership of a frame to user space, but does not by itself guarantee that
+the packet was successfully transmitted.
 
 The socket is then finally bound with a bind() call to a device and a
 specific queue id on that device, and it is not until bind is
@@ -169,14 +170,15 @@ chunks mode, then the incoming addr will be left untouched.
 UMEM Completion Ring
 ~~~~~~~~~~~~~~~~~~~~
 
-The COMPLETION Ring is used transfer ownership of UMEM frames from
+The COMPLETION Ring is used to transfer ownership of UMEM frames from
 kernel-space to user-space. Just like the FILL ring, UMEM indices are
-used.
-
-Frames passed from the kernel to user-space are frames that has been
-sent (TX ring) and can be used by user-space again.
-
-The user application consumes UMEM addrs from this ring.
+used. Frames passed from the kernel to user-space are frames referenced
+by Tx descriptors that the kernel has finished processing and can be
+used by user-space again. This includes both frames whose transmission
+has completed and frames referenced by invalid Tx descriptors that were
+rejected and reclaimed by the kernel. A completion entry does not
+guarantee successful packet transmission. The user application consumes
+UMEM addrs from this ring.
 
 
 RX Ring
@@ -209,13 +211,10 @@ Libbpf
 
 Libbpf is a helper library for eBPF and XDP that makes using these
 technologies a lot simpler. It also contains specific helper functions
-in tools/lib/bpf/xsk.h for facilitating the use of AF_XDP. It
-contains two types of functions: those that can be used to make the
-setup of AF_XDP socket easier and ones that can be used in the data
-plane to access the rings safely and quickly. To see an example on how
-to use this API, please take a look at the sample application in
-samples/bpf/xdpsock_usr.c which uses libbpf for both setup and data
-plane operations.
+in tools/testing/selftests/bpf/xsk.h for facilitating the use of
+AF_XDP. It contains two types of functions: those that can be used to
+make the setup of AF_XDP socket easier and ones that can be used in the
+data plane to access the rings safely and quickly.
 
 We recommend that you use this library unless you have become a power
 user. It will make your program a lot simpler.
@@ -372,9 +371,8 @@ needs to explicitly notify the kernel to send any packets put on the
 TX ring. This can be accomplished either by a poll() call, as in the
 RX path, or by calling sendto().
 
-An example of how to use this flag can be found in
-samples/bpf/xdpsock_user.c. An example with the use of libbpf helpers
-would look like this for the TX path:
+An example with the use of libbpf helpers would look like this for the
+TX path:
 
 .. code-block:: c
 
@@ -442,6 +440,15 @@ is created by a privileged process and passed to a non-privileged one.
 Once the option is set, kernel will refuse attempts to bind that socket
 to a different interface.  Updating the value requires CAP_NET_RAW.
 
+XDP_MAX_TX_SKB_BUDGET setsockopt
+--------------------------------
+
+This setsockopt sets the maximum number of descriptors that can be handled
+and passed to the driver at one send syscall. It is applied in the copy
+mode to allow application to tune the per-socket maximum iteration for
+better throughput and less frequency of send syscall.
+Allowed range is [32, xs->tx->nentries].
+
 XDP_STATISTICS getsockopt
 -------------------------
 
@@ -499,21 +506,25 @@ will be treated as an invalid descriptor.
 These are the semantics for producing packets onto AF_XDP Tx ring
 consisting of multiple frames:
 
-* When an invalid descriptor is found, all the other
-  descriptors/frames of this packet are marked as invalid and not
-  completed. The next descriptor is treated as the start of a new
-  packet, even if this was not the intent (because we cannot guess
-  the intent). As before, if your program is producing invalid
-  descriptors you have a bug that must be fixed.
+* When an invalid descriptor is found, the complete packet is treated as
+  invalid. The kernel consumes descriptors through the descriptor marking
+  the end of the packet and returns all their frame addresses through the
+  COMPLETION ring. A standalone invalid descriptor is treated as a
+  one-descriptor invalid packet. The descriptor following the end of the
+  invalid packet is treated as the start of a new packet. As before, if
+  your program is producing invalid descriptors you have a bug that must
+  be fixed. Rejected descriptors are reported in the ``tx_invalid_descs``
+  statistic.
 
 * Zero length descriptors are treated as invalid descriptors.
 
 * For copy mode, the maximum supported number of frames in a packet is
-  equal to CONFIG_MAX_SKB_FRAGS + 1. If it is exceeded, all
-  descriptors accumulated so far are dropped and treated as
-  invalid. To produce an application that will work on any system
-  regardless of this config setting, limit the number of frags to 18,
-  as the minimum value of the config is 17.
+  equal to CONFIG_MAX_SKB_FRAGS + 1. If it is exceeded, all descriptors
+  through the end of the oversized packet are consumed, treated as invalid,
+  and their frame addresses are returned through the COMPLETION ring. To
+  produce an application that will work on any system regardless of this
+  config setting, limit the number of frags to 18, as the minimum value of
+  the config is 17.
 
 * For zero-copy mode, the limit is up to what the NIC HW
   supports. Usually at least five on the NICs we have checked. We
@@ -549,12 +560,12 @@ later in this document.
 Usage
 -----
 
-In order to use AF_XDP sockets two parts are needed. The
-user-space application and the XDP program. For a complete setup and
-usage example, please refer to the sample application. The user-space
-side is xdpsock_user.c and the XDP side is part of libbpf.
+In order to use AF_XDP sockets two parts are needed. The user-space
+application and the XDP program. For a complete setup and usage example,
+please refer to the xdp-project at
+https://github.com/xdp-project/bpf-examples/tree/main/AF_XDP-example.
 
-The XDP code sample included in tools/lib/bpf/xsk.c is the following:
+The XDP code sample is the following:
 
 .. code-block:: c
 
@@ -752,11 +763,12 @@ to facilitate extending a zero-copy driver with multi-buffer support.
 
 Sample application
 ==================
-
-There is a xdpsock benchmarking/test application included that
-demonstrates how to use AF_XDP sockets with private UMEMs. Say that
-you would like your UDP traffic from port 4242 to end up in queue 16,
-that we will enable AF_XDP on. Here, we use ethtool for this::
+There is a xdpsock benchmarking/test application that can be found at
+https://github.com/xdp-project/bpf-examples/tree/main/AF_XDP-example
+that demonstrates how to use AF_XDP sockets with private
+UMEMs. Say that you would like your UDP traffic from port 4242 to end
+up in queue 16, that we will enable AF_XDP on. Here, we use ethtool
+for this::
 
       ethtool -N p3p2 rx-flow-hash udp4 fn
       ethtool -N p3p2 flow-type udp4 src-port 4242 dst-port 4242 \
@@ -773,7 +785,7 @@ can be displayed with "-h", as usual.
 This sample application uses libbpf to make the setup and usage of
 AF_XDP simpler. If you want to know how the raw uapi of AF_XDP is
 really used to make something more advanced, take a look at the libbpf
-code in tools/lib/bpf/xsk.[ch].
+code in tools/testing/selftests/bpf/xsk.[ch].
 
 FAQ
 =======

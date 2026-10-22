@@ -18,16 +18,9 @@ host such documentation:
 
 .. toctree::
 
-    i915_gem_lmem.rst
-
-.. toctree::
-
-    i915_scheduler.rst
-
-.. toctree::
-
-    i915_small_bar.rst
-
-.. toctree::
-
-    i915_vm_bind.rst
+   gpusvm
+   i915_gem_lmem
+   i915_scheduler
+   i915_small_bar
+   i915_vm_bind
+   color_pipeline

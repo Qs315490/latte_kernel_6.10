@@ -33,7 +33,6 @@
 		.io_reg = REG_BASE + 0x4 + REG_SIZE * id,		\
 		.intr_cfg_reg = REG_BASE + 0x8 + REG_SIZE * id,		\
 		.intr_status_reg = REG_BASE + 0xc + REG_SIZE * id,	\
-		.intr_target_reg = REG_BASE + 0x8 + REG_SIZE * id,	\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
@@ -59,7 +58,6 @@
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -84,7 +82,6 @@
 		.io_reg = offset + 0x4,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
 		.drv_bit = 0,				\
@@ -732,7 +729,7 @@ static const struct pinfunction sdx65_functions[] = {
 	MSM_PIN_FUNCTION(gcc_gp2),
 	MSM_PIN_FUNCTION(gcc_gp3),
 	MSM_PIN_FUNCTION(gcc_plltest),
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(i2s_mclk),
 	MSM_PIN_FUNCTION(jitter_bist),
 	MSM_PIN_FUNCTION(ldo_en),
@@ -932,6 +929,7 @@ static const struct of_device_id sdx65_pinctrl_of_match[] = {
 	{ .compatible = "qcom,sdx65-tlmm", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, sdx65_pinctrl_of_match);
 
 static struct platform_driver sdx65_pinctrl_driver = {
 	.driver = {
@@ -939,7 +937,6 @@ static struct platform_driver sdx65_pinctrl_driver = {
 		.of_match_table = sdx65_pinctrl_of_match,
 	},
 	.probe = sdx65_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init sdx65_pinctrl_init(void)
@@ -956,4 +953,3 @@ module_exit(sdx65_pinctrl_exit);
 
 MODULE_DESCRIPTION("QTI sdx65 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, sdx65_pinctrl_of_match);

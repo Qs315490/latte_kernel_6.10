@@ -196,6 +196,7 @@
 		rng@b80 {
 			compatible = "brcm,iproc-rng200";
 			reg = <0xb80 0x28>;
+			interrupts = <GIC_SPI 85 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
 		leds: led-controller@800 {
@@ -236,6 +237,15 @@
 			compatible = "brcm,bcm6846-mdio";
 			reg = <0x02060 0x10>, <0x5a068 0x4>;
 			reg-names = "mdio", "mdio_indir_rw";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c0: i2c@2100 {
+			compatible = "brcm,brcmper-i2c";
+			reg = <0x2100 0x60>;
+			interrupts = <GIC_SPI 83 IRQ_TYPE_LEVEL_HIGH>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "disabled";

@@ -74,6 +74,8 @@
 #define ELF64_ST_VISIBILITY(o) ((o) & 0x03)
 #endif
 
+#define JUMPTABLES_SEC ".jumptables"
+
 #define BTF_INFO_ENC(kind, kind_flag, vlen) \
 	((!!(kind_flag) << 31) | ((kind) << 24) | ((vlen) & BTF_MAX_VLEN))
 #define BTF_TYPE_ENC(name, info, size_or_type) (name), (info), (size_or_type)
@@ -172,6 +174,16 @@ do {				\
 #define pr_info(fmt, ...)	__pr(LIBBPF_INFO, fmt, ##__VA_ARGS__)
 #define pr_debug(fmt, ...)	__pr(LIBBPF_DEBUG, fmt, ##__VA_ARGS__)
 
+/**
+ * @brief **libbpf_errstr()** returns string corresponding to numeric errno
+ * @param err negative numeric errno
+ * @return pointer to string representation of the errno, that is invalidated
+ * upon the next call.
+ */
+const char *libbpf_errstr(int err);
+
+#define errstr(err) libbpf_errstr(err)
+
 #ifndef __has_builtin
 #define __has_builtin(x) 0
 #endif
@@ -238,6 +250,7 @@ const struct btf_type *skip_mods_and_typedefs(const struct btf *btf, __u32 id, _
 const struct btf_header *btf_header(const struct btf *btf);
 void btf_set_base_btf(struct btf *btf, const struct btf *base_btf);
 int btf_relocate(struct btf *btf, const struct btf *base_btf, __u32 **id_map);
+bool btf_type_is_traceable_func(const struct btf *btf, const struct btf_type *t);
 
 static inline enum btf_func_linkage btf_func_linkage(const struct btf_type *t)
 {
@@ -380,6 +393,14 @@ enum kern_feature_id {
 	FEAT_ARG_CTX_TAG,
 	/* Kernel supports '?' at the front of datasec names */
 	FEAT_BTF_QMARK_DATASEC,
+	/* Kernel supports LDIMM64 imm offsets past 512 MiB. */
+	FEAT_LDIMM64_FULL_RANGE_OFF,
+	/* Kernel supports uprobe syscall */
+	FEAT_UPROBE_SYSCALL,
+	/* Kernel supports BTF layout information */
+	FEAT_BTF_LAYOUT,
+	/* Kernel supports BPF syscall common attributes */
+	FEAT_BPF_SYSCALL_COMMON_ATTRS,
 	__FEAT_CNT,
 };
 
@@ -396,6 +417,7 @@ struct kern_feature_cache {
 
 bool feat_supported(struct kern_feature_cache *cache, enum kern_feature_id feat_id);
 bool kernel_supports(const struct bpf_object *obj, enum kern_feature_id feat_id);
+void bpf_object_set_feat_cache(struct bpf_object *obj, struct kern_feature_cache *cache);
 
 int probe_kern_syscall_wrapper(int token_fd);
 int probe_memcg_account(int token_fd);
@@ -406,9 +428,14 @@ int parse_cpu_mask_file(const char *fcpu, bool **mask, int *mask_sz);
 int libbpf__load_raw_btf(const char *raw_types, size_t types_len,
 			 const char *str_sec, size_t str_len,
 			 int token_fd);
+int libbpf__load_raw_btf_hdr(const struct btf_header *hdr,
+			     const char *raw_types, const char *str_sec,
+			     const char *layout_sec, int token_fd);
+struct btf *bpf_object__sanitize_btf(struct bpf_object *obj, struct btf *orig_btf);
 int btf_load_into_kernel(struct btf *btf,
 			 char *log_buf, size_t log_sz, __u32 log_level,
 			 int token_fd);
+struct btf *btf_load_from_kernel(__u32 id, struct btf *base_btf, int token_fd);
 
 struct btf *btf_get_from_fd(int btf_fd, struct btf *base_btf);
 void btf_get_kernel_prefix_kind(enum bpf_attach_type attach_type,
@@ -666,6 +693,15 @@ static inline int sys_dup3(int oldfd, int newfd, int flags)
 	return syscall(__NR_dup3, oldfd, newfd, flags);
 }
 
+/* Some versions of Android don't provide memfd_create() in their libc
+ * implementation, so avoid complications and just go straight to Linux
+ * syscall.
+ */
+static inline int sys_memfd_create(const char *name, unsigned flags)
+{
+	return syscall(__NR_memfd_create, name, flags);
+}
+
 /* Point *fixed_fd* to the same file that *tmp_fd* points to.
  * Regardless of success, *tmp_fd* is closed.
  * Whatever *fixed_fd* pointed to is closed silently.
@@ -702,6 +738,11 @@ static inline bool is_pow_of_2(size_t x)
 	return x && (x & (x - 1)) == 0;
 }
 
+static inline __u32 ror32(__u32 v, int bits)
+{
+	return (v >> bits) | (v << (32 - bits));
+}
+
 #define PROG_LOAD_ATTEMPTS 5
 int sys_bpf_prog_load(union bpf_attr *attr, unsigned int size, int attempts);
 
@@ -726,4 +767,9 @@ int elf_resolve_pattern_offsets(const char *binary_path, const char *pattern,
 
 int probe_fd(int fd);
 
+#define SHA256_DIGEST_LENGTH 32
+#define SHA256_DWORD_SIZE SHA256_DIGEST_LENGTH / sizeof(__u64)
+
+void libbpf_sha256(const void *data, size_t len, __u8 out[SHA256_DIGEST_LENGTH]);
+int probe_sys_bpf_ext(void);
 #endif /* __LIBBPF_LIBBPF_INTERNAL_H */

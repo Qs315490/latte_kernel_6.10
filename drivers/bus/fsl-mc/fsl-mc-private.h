@@ -66,10 +66,6 @@ int dpmcp_close(struct fsl_mc_io *mc_io,
 		u32 cmd_flags,
 		u16 token);
 
-int dpmcp_reset(struct fsl_mc_io *mc_io,
-		u32 cmd_flags,
-		u16 token);
-
 /*
  * Data Path Resource Container (DPRC) API
  */
@@ -631,11 +627,7 @@ int dprc_scan_objects(struct fsl_mc_device *mc_bus_dev,
 
 int __init fsl_mc_allocator_driver_init(void);
 
-void fsl_mc_allocator_driver_exit(void);
-
 void fsl_mc_init_all_resource_pools(struct fsl_mc_device *mc_bus_dev);
-
-void fsl_mc_cleanup_all_resource_pools(struct fsl_mc_device *mc_bus_dev);
 
 int __must_check fsl_mc_resource_allocate(struct fsl_mc_bus *mc_bus,
 					  enum fsl_mc_pool_type pool_type,
@@ -649,7 +641,7 @@ int fsl_mc_msi_domain_alloc_irqs(struct device *dev,
 
 void fsl_mc_msi_domain_free_irqs(struct device *dev);
 
-struct irq_domain *fsl_mc_find_msi_domain(struct device *dev);
+struct irq_domain *fsl_mc_get_msi_parent(struct device *dev);
 
 int __must_check fsl_create_mc_io(struct device *dev,
 				  phys_addr_t mc_portal_phys_addr,

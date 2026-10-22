@@ -421,7 +421,7 @@ static int cpufreq_gx_cpu_init(struct cpufreq_policy *policy)
 		policy->min = maxfreq / max_duration;
 	else
 		policy->min = maxfreq / POLICY_MIN_DIV;
-	policy->max = maxfreq;
+
 	policy->cpuinfo.min_freq = maxfreq / max_duration;
 	policy->cpuinfo.max_freq = maxfreq;
 
@@ -458,7 +458,7 @@ static int __init cpufreq_gx_init(void)
 
 	pr_debug("geode suspend modulation available.\n");
 
-	params = kzalloc(sizeof(*params), GFP_KERNEL);
+	params = kzalloc_obj(*params);
 	if (params == NULL)
 		return -ENOMEM;
 

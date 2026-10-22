@@ -7,11 +7,11 @@
 #include <linux/base64.h>
 #include <linux/prandom.h>
 #include <linux/unaligned.h>
-#include <crypto/hash.h>
 #include <crypto/dh.h>
 #include "nvme.h"
 #include "fabrics.h"
 #include <linux/nvme-auth.h>
+#include <linux/nvme-keyring.h>
 
 #define CHAP_BUF_SIZE 4096
 static struct kmem_cache *nvme_chap_buf_cache;
@@ -21,7 +21,6 @@ struct nvme_dhchap_queue_context {
 	struct list_head entry;
 	struct work_struct auth_work;
 	struct nvme_ctrl *ctrl;
-	struct crypto_shash *shash_tfm;
 	struct crypto_kpp *dh_tfm;
 	struct nvme_dhchap_key *transformed_key;
 	void *buf;
@@ -30,14 +29,16 @@ struct nvme_dhchap_queue_context {
 	u32 s1;
 	u32 s2;
 	bool bi_directional;
+	bool authenticated;
 	u16 transaction;
 	u8 status;
 	u8 dhgroup_id;
 	u8 hash_id;
+	u8 sc_c;
 	size_t hash_len;
-	u8 c1[64];
-	u8 c2[64];
-	u8 response[64];
+	u8 c1[NVME_AUTH_MAX_DIGEST_SIZE];
+	u8 c2[NVME_AUTH_MAX_DIGEST_SIZE];
+	u8 response[NVME_AUTH_MAX_DIGEST_SIZE];
 	u8 *ctrl_key;
 	u8 *host_key;
 	u8 *sess_key;
@@ -122,6 +123,8 @@ static int nvme_auth_set_dhchap_negotiate_data(struct nvme_ctrl *ctrl,
 {
 	struct nvmf_auth_dhchap_negotiate_data *data = chap->buf;
 	size_t size = sizeof(*data) + sizeof(union nvmf_auth_protocol);
+	u8 dh_list_offset = NVME_AUTH_DHCHAP_MAX_DH_IDS;
+	u8 *idlist = data->auth_protocol[0].dhchap.idlist;
 
 	if (size > CHAP_BUF_SIZE) {
 		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;
@@ -131,20 +134,29 @@ static int nvme_auth_set_dhchap_negotiate_data(struct nvme_ctrl *ctrl,
 	data->auth_type = NVME_AUTH_COMMON_MESSAGES;
 	data->auth_id = NVME_AUTH_DHCHAP_MESSAGE_NEGOTIATE;
 	data->t_id = cpu_to_le16(chap->transaction);
-	data->sc_c = 0; /* No secure channel concatenation */
+	if (ctrl->opts->concat && chap->qid == 0) {
+		if (ctrl->opts->tls_key)
+			data->sc_c = NVME_AUTH_SECP_REPLACETLSPSK;
+		else
+			data->sc_c = NVME_AUTH_SECP_NEWTLSPSK;
+	} else
+		data->sc_c = NVME_AUTH_SECP_NOSC;
+	chap->sc_c = data->sc_c;
 	data->napd = 1;
 	data->auth_protocol[0].dhchap.authid = NVME_AUTH_DHCHAP_AUTH_ID;
 	data->auth_protocol[0].dhchap.halen = 3;
-	data->auth_protocol[0].dhchap.dhlen = 6;
-	data->auth_protocol[0].dhchap.idlist[0] = NVME_AUTH_HASH_SHA256;
-	data->auth_protocol[0].dhchap.idlist[1] = NVME_AUTH_HASH_SHA384;
-	data->auth_protocol[0].dhchap.idlist[2] = NVME_AUTH_HASH_SHA512;
-	data->auth_protocol[0].dhchap.idlist[30] = NVME_AUTH_DHGROUP_NULL;
-	data->auth_protocol[0].dhchap.idlist[31] = NVME_AUTH_DHGROUP_2048;
-	data->auth_protocol[0].dhchap.idlist[32] = NVME_AUTH_DHGROUP_3072;
-	data->auth_protocol[0].dhchap.idlist[33] = NVME_AUTH_DHGROUP_4096;
-	data->auth_protocol[0].dhchap.idlist[34] = NVME_AUTH_DHGROUP_6144;
-	data->auth_protocol[0].dhchap.idlist[35] = NVME_AUTH_DHGROUP_8192;
+	idlist[0] = NVME_AUTH_HASH_SHA256;
+	idlist[1] = NVME_AUTH_HASH_SHA384;
+	idlist[2] = NVME_AUTH_HASH_SHA512;
+	if (chap->sc_c == NVME_AUTH_SECP_NOSC)
+		idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_NULL;
+	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_2048;
+	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_3072;
+	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_4096;
+	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_6144;
+	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_8192;
+	data->auth_protocol[0].dhchap.dhlen =
+		dh_list_offset - NVME_AUTH_DHCHAP_MAX_DH_IDS;
 
 	return size;
 }
@@ -172,38 +184,17 @@ static int nvme_auth_process_dhchap_challenge(struct nvme_ctrl *ctrl,
 		return -EPROTO;
 	}
 
-	if (chap->hash_id == data->hashid && chap->shash_tfm &&
-	    !strcmp(crypto_shash_alg_name(chap->shash_tfm), hmac_name) &&
-	    crypto_shash_digestsize(chap->shash_tfm) == data->hl) {
+	if (chap->hash_id == data->hashid && chap->hash_len == data->hl) {
 		dev_dbg(ctrl->device,
 			"qid %d: reuse existing hash %s\n",
 			chap->qid, hmac_name);
 		goto select_kpp;
 	}
 
-	/* Reset if hash cannot be reused */
-	if (chap->shash_tfm) {
-		crypto_free_shash(chap->shash_tfm);
-		chap->hash_id = 0;
-		chap->hash_len = 0;
-	}
-	chap->shash_tfm = crypto_alloc_shash(hmac_name, 0,
-					     CRYPTO_ALG_ALLOCATES_MEMORY);
-	if (IS_ERR(chap->shash_tfm)) {
-		dev_warn(ctrl->device,
-			 "qid %d: failed to allocate hash %s, error %ld\n",
-			 chap->qid, hmac_name, PTR_ERR(chap->shash_tfm));
-		chap->shash_tfm = NULL;
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_FAILED;
-		return -ENOMEM;
-	}
-
-	if (crypto_shash_digestsize(chap->shash_tfm) != data->hl) {
+	if (nvme_auth_hmac_hash_len(data->hashid) != data->hl) {
 		dev_warn(ctrl->device,
 			 "qid %d: invalid hash length %d\n",
 			 chap->qid, data->hl);
-		crypto_free_shash(chap->shash_tfm);
-		chap->shash_tfm = NULL;
 		chap->status = NVME_AUTH_DHCHAP_FAILURE_HASH_UNUSABLE;
 		return -EPROTO;
 	}
@@ -311,8 +302,9 @@ static int nvme_auth_set_dhchap_reply_data(struct nvme_ctrl *ctrl,
 	data->hl = chap->hash_len;
 	data->dhvlen = cpu_to_le16(chap->host_key_len);
 	memcpy(data->rval, chap->response, chap->hash_len);
-	if (ctrl->ctrl_key) {
+	if (ctrl->ctrl_key)
 		chap->bi_directional = true;
+	if (ctrl->ctrl_key || ctrl->opts->concat) {
 		get_random_bytes(chap->c2, chap->hash_len);
 		data->cvalid = 1;
 		memcpy(data->rval + chap->hash_len, chap->c2,
@@ -322,7 +314,11 @@ static int nvme_auth_set_dhchap_reply_data(struct nvme_ctrl *ctrl,
 	} else {
 		memset(chap->c2, 0, chap->hash_len);
 	}
-	chap->s2 = nvme_auth_get_seqnum();
+	if (ctrl->opts->concat) {
+		chap->s2 = 0;
+		chap->bi_directional = false;
+	} else
+		chap->s2 = nvme_auth_get_seqnum();
 	data->seqnum = cpu_to_le32(chap->s2);
 	if (chap->host_key_len) {
 		dev_dbg(ctrl->device, "%s: qid %d host public key %*ph\n",
@@ -418,7 +414,7 @@ static int nvme_auth_set_dhchap_failure2_data(struct nvme_ctrl *ctrl,
 static int nvme_auth_dhchap_setup_host_response(struct nvme_ctrl *ctrl,
 		struct nvme_dhchap_queue_context *chap)
 {
-	SHASH_DESC_ON_STACK(shash, chap->shash_tfm);
+	struct nvme_auth_hmac_ctx hmac;
 	u8 buf[4], *challenge = chap->c1;
 	int ret;
 
@@ -438,13 +434,11 @@ static int nvme_auth_dhchap_setup_host_response(struct nvme_ctrl *ctrl,
 			__func__, chap->qid);
 	}
 
-	ret = crypto_shash_setkey(chap->shash_tfm,
-			chap->transformed_key->key, chap->transformed_key->len);
-	if (ret) {
-		dev_warn(ctrl->device, "qid %d: failed to set key, error %d\n",
-			 chap->qid, ret);
+	ret = nvme_auth_hmac_init(&hmac, chap->hash_id,
+				  chap->transformed_key->key,
+				  chap->transformed_key->len);
+	if (ret)
 		goto out;
-	}
 
 	if (chap->dh_tfm) {
 		challenge = kmalloc(chap->hash_len, GFP_KERNEL);
@@ -461,50 +455,36 @@ static int nvme_auth_dhchap_setup_host_response(struct nvme_ctrl *ctrl,
 			goto out;
 	}
 
-	shash->tfm = chap->shash_tfm;
-	ret = crypto_shash_init(shash);
-	if (ret)
-		goto out;
-	ret = crypto_shash_update(shash, challenge, chap->hash_len);
-	if (ret)
-		goto out;
+	nvme_auth_hmac_update(&hmac, challenge, chap->hash_len);
+
 	put_unaligned_le32(chap->s1, buf);
-	ret = crypto_shash_update(shash, buf, 4);
-	if (ret)
-		goto out;
+	nvme_auth_hmac_update(&hmac, buf, 4);
+
 	put_unaligned_le16(chap->transaction, buf);
-	ret = crypto_shash_update(shash, buf, 2);
-	if (ret)
-		goto out;
+	nvme_auth_hmac_update(&hmac, buf, 2);
+
+	*buf = chap->sc_c;
+	nvme_auth_hmac_update(&hmac, buf, 1);
+	nvme_auth_hmac_update(&hmac, "HostHost", 8);
+	nvme_auth_hmac_update(&hmac, ctrl->opts->host->nqn,
+			      strlen(ctrl->opts->host->nqn));
 	memset(buf, 0, sizeof(buf));
-	ret = crypto_shash_update(shash, buf, 1);
-	if (ret)
-		goto out;
-	ret = crypto_shash_update(shash, "HostHost", 8);
-	if (ret)
-		goto out;
-	ret = crypto_shash_update(shash, ctrl->opts->host->nqn,
-				  strlen(ctrl->opts->host->nqn));
-	if (ret)
-		goto out;
-	ret = crypto_shash_update(shash, buf, 1);
-	if (ret)
-		goto out;
-	ret = crypto_shash_update(shash, ctrl->opts->subsysnqn,
-			    strlen(ctrl->opts->subsysnqn));
-	if (ret)
-		goto out;
-	ret = crypto_shash_final(shash, chap->response);
+	nvme_auth_hmac_update(&hmac, buf, 1);
+	nvme_auth_hmac_update(&hmac, ctrl->opts->subsysnqn,
+			      strlen(ctrl->opts->subsysnqn));
+	nvme_auth_hmac_final(&hmac, chap->response);
+	ret = 0;
 out:
 	if (challenge != chap->c1)
 		kfree(challenge);
+	memzero_explicit(&hmac, sizeof(hmac));
 	return ret;
 }
 
 static int nvme_auth_dhchap_setup_ctrl_response(struct nvme_ctrl *ctrl,
 		struct nvme_dhchap_queue_context *chap)
 {
-	SHASH_DESC_ON_STACK(shash, chap->shash_tfm);
+	struct nvme_auth_hmac_ctx hmac;
 	struct nvme_dhchap_key *transformed_key;
 	u8 buf[4], *challenge = chap->c2;
 	int ret;
@@ -516,10 +496,10 @@ static int nvme_auth_dhchap_setup_ctrl_response(struct nvme_ctrl *ctrl,
 		return ret;
 	}
 
-	ret = crypto_shash_setkey(chap->shash_tfm,
-			transformed_key->key, transformed_key->len);
+	ret = nvme_auth_hmac_init(&hmac, chap->hash_id, transformed_key->key,
+				  transformed_key->len);
 	if (ret) {
-		dev_warn(ctrl->device, "qid %d: failed to set key, error %d\n",
+		dev_warn(ctrl->device, "qid %d: failed to init hmac, error %d\n",
 			 chap->qid, ret);
 		goto out;
 	}
@@ -546,43 +526,30 @@ static int nvme_auth_dhchap_setup_ctrl_response(struct nvme_ctrl *ctrl,
 		__func__, chap->qid, ctrl->opts->subsysnqn);
 	dev_dbg(ctrl->device, "%s: qid %d hostnqn %s\n",
 		__func__, chap->qid, ctrl->opts->host->nqn);
-	shash->tfm = chap->shash_tfm;
-	ret = crypto_shash_init(shash);
-	if (ret)
-		goto out;
-	ret = crypto_shash_update(shash, challenge, chap->hash_len);
-	if (ret)
-		goto out;
+
+	nvme_auth_hmac_update(&hmac, challenge, chap->hash_len);
+
 	put_unaligned_le32(chap->s2, buf);
-	ret = crypto_shash_update(shash, buf, 4);
-	if (ret)
-		goto out;
+	nvme_auth_hmac_update(&hmac, buf, 4);
+
 	put_unaligned_le16(chap->transaction, buf);
-	ret = crypto_shash_update(shash, buf, 2);
-	if (ret)
-		goto out;
+	nvme_auth_hmac_update(&hmac, buf, 2);
+
+	*buf = chap->sc_c;
+	nvme_auth_hmac_update(&hmac, buf, 1);
+	nvme_auth_hmac_update(&hmac, "Controller", 10);
+	nvme_auth_hmac_update(&hmac, ctrl->opts->subsysnqn,
+			      strlen(ctrl->opts->subsysnqn));
 	memset(buf, 0, 4);
-	ret = crypto_shash_update(shash, buf, 1);
-	if (ret)
-		goto out;
-	ret = crypto_shash_update(shash, "Controller", 10);
-	if (ret)
-		goto out;
-	ret = crypto_shash_update(shash, ctrl->opts->subsysnqn,
-				  strlen(ctrl->opts->subsysnqn));
-	if (ret)
-		goto out;
-	ret = crypto_shash_update(shash, buf, 1);
-	if (ret)
-		goto out;
-	ret = crypto_shash_update(shash, ctrl->opts->host->nqn,
-				  strlen(ctrl->opts->host->nqn));
-	if (ret)
-		goto out;
-	ret = crypto_shash_final(shash, chap->response);
+	nvme_auth_hmac_update(&hmac, buf, 1);
+	nvme_auth_hmac_update(&hmac, ctrl->opts->host->nqn,
+			      strlen(ctrl->opts->host->nqn));
+	nvme_auth_hmac_final(&hmac, chap->response);
+	ret = 0;
 out:
 	if (challenge != chap->c2)
 		kfree(challenge);
+	memzero_explicit(&hmac, sizeof(hmac));
 	nvme_auth_free_key(transformed_key);
 	return ret;
 }
@@ -621,7 +588,7 @@ static int nvme_auth_dhchap_exponential(struct nvme_ctrl *ctrl,
 	}
 
 gen_sesskey:
-	chap->sess_key_len = chap->host_key_len;
+	chap->sess_key_len = chap->hash_len;
 	chap->sess_key = kmalloc(chap->sess_key_len, GFP_KERNEL);
 	if (!chap->sess_key) {
 		chap->sess_key_len = 0;
@@ -629,16 +596,17 @@ gen_sesskey:
 		return -ENOMEM;
 	}
 
-	ret = nvme_auth_gen_shared_secret(chap->dh_tfm,
-					  chap->ctrl_key, chap->ctrl_key_len,
-					  chap->sess_key, chap->sess_key_len);
+	ret = nvme_auth_gen_session_key(chap->dh_tfm,
+					chap->ctrl_key, chap->ctrl_key_len,
+					chap->sess_key, chap->sess_key_len,
+					chap->hash_id);
 	if (ret) {
 		dev_dbg(ctrl->device,
-			"failed to generate shared secret, error %d\n", ret);
+			"failed to generate session key, error %d\n", ret);
 		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;
 		return ret;
 	}
-	dev_dbg(ctrl->device, "shared secret %*ph\n",
+	dev_dbg(ctrl->device, "session key %*ph\n",
 		(int)chap->sess_key_len, chap->sess_key);
 	return 0;
 }
@@ -671,10 +639,96 @@ static void nvme_auth_reset_dhchap(struct nvme_dhchap_queue_context *chap)
 static void nvme_auth_free_dhchap(struct nvme_dhchap_queue_context *chap)
 {
 	nvme_auth_reset_dhchap(chap);
-	if (chap->shash_tfm)
-		crypto_free_shash(chap->shash_tfm);
+	chap->authenticated = false;
 	if (chap->dh_tfm)
 		crypto_free_kpp(chap->dh_tfm);
+}
+
+void nvme_auth_revoke_tls_key(struct nvme_ctrl *ctrl)
+{
+	dev_dbg(ctrl->device, "Wipe generated TLS PSK %08x\n",
+		key_serial(ctrl->opts->tls_key));
+	key_revoke(ctrl->opts->tls_key);
+	key_put(ctrl->opts->tls_key);
+	ctrl->opts->tls_key = NULL;
+}
+EXPORT_SYMBOL_GPL(nvme_auth_revoke_tls_key);
+
+static int nvme_auth_secure_concat(struct nvme_ctrl *ctrl,
+				   struct nvme_dhchap_queue_context *chap)
+{
+	u8 *psk, *tls_psk;
+	char *digest;
+	struct key *tls_key;
+	size_t psk_len;
+	int ret = 0;
+
+	if (!chap->sess_key) {
+		dev_warn(ctrl->device,
+			 "%s: qid %d no session key negotiated\n",
+			 __func__, chap->qid);
+		return -ENOKEY;
+	}
+
+	if (chap->qid) {
+		dev_warn(ctrl->device,
+			 "qid %d: secure concatenation not supported on I/O queues\n",
+			 chap->qid);
+		return -EINVAL;
+	}
+	ret = nvme_auth_generate_psk(chap->hash_id, chap->sess_key,
+				     chap->sess_key_len,
+				     chap->c1, chap->c2,
+				     chap->hash_len, &psk, &psk_len);
+	if (ret) {
+		dev_warn(ctrl->device,
+			 "%s: qid %d failed to generate PSK, error %d\n",
+			 __func__, chap->qid, ret);
+		return ret;
+	}
+	dev_dbg(ctrl->device,
+		  "%s: generated psk %*ph\n", __func__, (int)psk_len, psk);
+
+	ret = nvme_auth_generate_digest(chap->hash_id, psk, psk_len,
+					ctrl->opts->subsysnqn,
+					ctrl->opts->host->nqn, &digest);
+	if (ret) {
+		dev_warn(ctrl->device,
+			 "%s: qid %d failed to generate digest, error %d\n",
+			 __func__, chap->qid, ret);
+		goto out_free_psk;
+	}
+	dev_dbg(ctrl->device, "%s: generated digest %s\n",
+		 __func__, digest);
+	ret = nvme_auth_derive_tls_psk(chap->hash_id, psk, psk_len,
+				       digest, &tls_psk);
+	if (ret) {
+		dev_warn(ctrl->device,
+			 "%s: qid %d failed to derive TLS psk, error %d\n",
+			 __func__, chap->qid, ret);
+		goto out_free_digest;
+	}
+
+	tls_key = nvme_tls_psk_refresh(ctrl->opts->keyring,
+				       ctrl->opts->host->nqn,
+				       ctrl->opts->subsysnqn, chap->hash_id,
+				       tls_psk, psk_len, digest);
+	if (IS_ERR(tls_key)) {
+		ret = PTR_ERR(tls_key);
+		dev_warn(ctrl->device,
+			 "%s: qid %d failed to insert generated key, error %d\n",
+			 __func__, chap->qid, ret);
+		tls_key = NULL;
+	}
+	kfree_sensitive(tls_psk);
+	if (ctrl->opts->tls_key)
+		nvme_auth_revoke_tls_key(ctrl);
+	ctrl->opts->tls_key = tls_key;
+out_free_digest:
+	kfree_sensitive(digest);
+out_free_psk:
+	kfree_sensitive(psk);
+	return ret;
 }
 
 static void nvme_queue_auth_work(struct work_struct *work)
@@ -833,6 +887,15 @@ static void nvme_queue_auth_work(struct work_struct *work)
 	}
 	if (!ret) {
 		chap->error = 0;
+		chap->authenticated = true;
+		if (ctrl->opts->concat &&
+		    (ret = nvme_auth_secure_concat(ctrl, chap))) {
+			dev_warn(ctrl->device,
+				 "%s: qid %d failed to enable secure concatenation\n",
+				 __func__, chap->qid);
+			chap->error = ret;
+			chap->authenticated = false;
+		}
 		return;
 	}
 
@@ -912,15 +975,23 @@ static void nvme_ctrl_auth_work(struct work_struct *work)
 			 "qid 0: authentication failed\n");
 		return;
 	}
+	/*
+	 * Only run authentication on the admin queue for secure concatenation.
+	 */
+	if (ctrl->opts->concat)
+		return;
 
 	for (q = 1; q < ctrl->queue_count; q++) {
-		ret = nvme_auth_negotiate(ctrl, q);
-		if (ret) {
-			dev_warn(ctrl->device,
-				 "qid %d: error %d setting up authentication\n",
-				 q, ret);
-			break;
-		}
+		struct nvme_dhchap_queue_context *chap =
+			&ctrl->dhchap_ctxs[q];
+		/*
+		 * Skip re-authentication if the queue had
+		 * not been authenticated initially.
+		 */
+		if (!chap->authenticated)
+			continue;
+		cancel_work_sync(&chap->auth_work);
+		queue_work(nvme_auth_wq, &chap->auth_work);
 	}
 
 	/*
@@ -928,7 +999,13 @@ static void nvme_ctrl_auth_work(struct work_struct *work)
 	 * the controller terminates the connection.
 	 */
 	for (q = 1; q < ctrl->queue_count; q++) {
-		ret = nvme_auth_wait(ctrl, q);
+		struct nvme_dhchap_queue_context *chap =
+			&ctrl->dhchap_ctxs[q];
+		if (!chap->authenticated)
+			continue;
+		flush_work(&chap->auth_work);
+		ret = chap->error;
+		nvme_auth_reset_dhchap(chap);
 		if (ret)
 			dev_warn(ctrl->device,
 				 "qid %d: authentication failed\n", q);
@@ -944,20 +1021,18 @@ int nvme_auth_init_ctrl(struct nvme_ctrl *ctrl)
 	INIT_WORK(&ctrl->dhchap_auth_work, nvme_ctrl_auth_work);
 	if (!ctrl->opts)
 		return 0;
-	ret = nvme_auth_generate_key(ctrl->opts->dhchap_secret,
-			&ctrl->host_key);
+	ret = nvme_auth_parse_key(ctrl->opts->dhchap_secret, &ctrl->host_key);
 	if (ret)
 		return ret;
-	ret = nvme_auth_generate_key(ctrl->opts->dhchap_ctrl_secret,
-			&ctrl->ctrl_key);
+	ret = nvme_auth_parse_key(ctrl->opts->dhchap_ctrl_secret,
+				  &ctrl->ctrl_key);
 	if (ret)
 		goto err_free_dhchap_secret;
 
 	if (!ctrl->opts->dhchap_secret && !ctrl->opts->dhchap_ctrl_secret)
 		return 0;
 
-	ctrl->dhchap_ctxs = kvcalloc(ctrl_max_dhchaps(ctrl),
-				sizeof(*chap), GFP_KERNEL);
+	ctrl->dhchap_ctxs = kvzalloc_objs(*chap, ctrl_max_dhchaps(ctrl));
 	if (!ctrl->dhchap_ctxs) {
 		ret = -ENOMEM;
 		goto err_free_dhchap_ctrl_secret;
@@ -967,6 +1042,7 @@ int nvme_auth_init_ctrl(struct nvme_ctrl *ctrl)
 		chap = &ctrl->dhchap_ctxs[i];
 		chap->qid = i;
 		chap->ctrl = ctrl;
+		chap->authenticated = false;
 		INIT_WORK(&chap->auth_work, nvme_queue_auth_work);
 	}
 
@@ -994,7 +1070,7 @@ void nvme_auth_free(struct nvme_ctrl *ctrl)
 	if (ctrl->dhchap_ctxs) {
 		for (i = 0; i < ctrl_max_dhchaps(ctrl); i++)
 			nvme_auth_free_dhchap(&ctrl->dhchap_ctxs[i]);
-		kfree(ctrl->dhchap_ctxs);
+		kvfree(ctrl->dhchap_ctxs);
 	}
 	if (ctrl->host_key) {
 		nvme_auth_free_key(ctrl->host_key);

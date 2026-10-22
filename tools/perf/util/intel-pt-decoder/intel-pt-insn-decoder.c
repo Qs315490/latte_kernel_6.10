@@ -32,7 +32,7 @@ static void intel_pt_insn_decoder(struct insn *insn,
 	intel_pt_insn->rel = 0;
 	intel_pt_insn->emulated_ptwrite = false;
 
-	if (insn_is_avx(insn)) {
+	if (insn_is_avx_or_xop(insn)) {
 		intel_pt_insn->op = INTEL_PT_OP_OTHER;
 		intel_pt_insn->branch = INTEL_PT_BR_NO_BRANCH;
 		intel_pt_insn->length = insn->length;
@@ -220,7 +220,6 @@ const char *dump_insn(struct perf_insn *x, uint64_t ip __maybe_unused,
 {
 	struct insn insn;
 	int n, i, ret;
-	int left;
 
 	ret = insn_decode(&insn, inbuf, inlen,
 			  x->is64bit ? INSN_MODE_64 : INSN_MODE_32);
@@ -229,13 +228,9 @@ const char *dump_insn(struct perf_insn *x, uint64_t ip __maybe_unused,
 		return "<bad>";
 	if (lenp)
 		*lenp = insn.length;
-	left = sizeof(x->out);
-	n = snprintf(x->out, left, "insn: ");
-	left -= n;
-	for (i = 0; i < insn.length; i++) {
-		n += snprintf(x->out + n, left, "%02x ", inbuf[i]);
-		left -= n;
-	}
+	n = scnprintf(x->out, sizeof(x->out), "insn: ");
+	for (i = 0; i < insn.length; i++)
+		n += scnprintf(x->out + n, sizeof(x->out) - n, "%02x ", inbuf[i]);
 	return x->out;
 }
 

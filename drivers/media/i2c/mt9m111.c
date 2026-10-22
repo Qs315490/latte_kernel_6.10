@@ -1279,14 +1279,15 @@ static int mt9m111_probe(struct i2c_client *client)
 			return ret;
 	}
 
-	mt9m111->clk = devm_clk_get(&client->dev, "mclk");
+	mt9m111->clk = devm_v4l2_sensor_clk_get(&client->dev, "mclk");
 	if (IS_ERR(mt9m111->clk))
-		return PTR_ERR(mt9m111->clk);
+		return dev_err_probe(&client->dev, PTR_ERR(mt9m111->clk),
+				     "failed to get mclk\n");
 
 	mt9m111->regulator = devm_regulator_get(&client->dev, "vdd");
 	if (IS_ERR(mt9m111->regulator)) {
-		dev_err(&client->dev, "regulator not found: %ld\n",
-			PTR_ERR(mt9m111->regulator));
+		dev_err(&client->dev, "regulator not found: %pe\n",
+			mt9m111->regulator);
 		return PTR_ERR(mt9m111->regulator);
 	}
 
@@ -1383,7 +1384,7 @@ static const struct of_device_id mt9m111_of_match[] = {
 MODULE_DEVICE_TABLE(of, mt9m111_of_match);
 
 static const struct i2c_device_id mt9m111_id[] = {
-	{ "mt9m111" },
+	{ .name = "mt9m111" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mt9m111_id);

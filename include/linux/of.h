@@ -16,7 +16,7 @@
 #include <linux/cleanup.h>
 #include <linux/errno.h>
 #include <linux/kobject.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/of.h>
 #include <linux/property.h>
 #include <linux/list.h>
 
@@ -67,7 +67,7 @@ struct device_node {
 #endif
 };
 
-#define MAX_PHANDLE_ARGS 16
+#define MAX_PHANDLE_ARGS NR_FWNODE_REFERENCE_ARGS
 struct of_phandle_args {
 	struct device_node *np;
 	int args_count;
@@ -301,6 +301,8 @@ extern struct device_node *of_get_compatible_child(const struct device_node *par
 					const char *compatible);
 extern struct device_node *of_get_child_by_name(const struct device_node *node,
 					const char *name);
+extern struct device_node *of_get_available_child_by_name(const struct device_node *node,
+							  const char *name);
 
 /* cache lookup */
 extern struct device_node *of_find_next_cache_node(const struct device_node *);
@@ -314,6 +316,12 @@ extern struct property *of_find_property(const struct device_node *np,
 extern bool of_property_read_bool(const struct device_node *np, const char *propname);
 extern int of_property_count_elems_of_size(const struct device_node *np,
 				const char *propname, int elem_size);
+extern int of_property_read_u8_index(const struct device_node *np,
+				       const char *propname,
+				       u32 index, u8 *out_value);
+extern int of_property_read_u16_index(const struct device_node *np,
+				       const char *propname,
+				       u32 index, u16 *out_value);
 extern int of_property_read_u32_index(const struct device_node *np,
 				       const char *propname,
 				       u32 index, u32 *out_value);
@@ -402,6 +410,8 @@ extern int of_alias_get_id(const struct device_node *np, const char *stem);
 extern int of_alias_get_highest_id(const char *stem);
 
 bool of_machine_compatible_match(const char *const *compats);
+const struct of_device_id *of_machine_get_match(const struct of_device_id *matches);
+const void *of_machine_get_match_data(const struct of_device_id *matches);
 
 /**
  * of_machine_is_compatible - Test root of device tree for a given compatible value
@@ -415,6 +425,9 @@ static inline bool of_machine_is_compatible(const char *compat)
 
 	return of_machine_compatible_match(compats);
 }
+
+int of_machine_read_compatible(const char **compatible, unsigned int index);
+int of_machine_read_model(const char **model);
 
 extern int of_add_property(struct device_node *np, struct property *prop);
 extern int of_remove_property(struct device_node *np, struct property *prop);
@@ -452,8 +465,17 @@ const char *of_prop_next_string(const struct property *prop, const char *cur);
 bool of_console_check(const struct device_node *dn, char *name, int index);
 
 int of_map_id(const struct device_node *np, u32 id,
-	       const char *map_name, const char *map_mask_name,
-	       struct device_node **target, u32 *id_out);
+	       const char *map_name, const char *cells_name,
+	       const char *map_mask_name,
+	       struct device_node * const *filter_np,
+	       struct of_phandle_args *arg);
+
+int of_map_iommu_id(const struct device_node *np, u32 id,
+		    struct of_phandle_args *arg);
+
+int of_map_msi_id(const struct device_node *np, u32 id,
+		  struct device_node * const *filter_np,
+		  struct of_phandle_args *arg);
 
 phys_addr_t of_dma_get_max_cpu_address(struct device_node *np);
 
@@ -545,6 +567,13 @@ static inline struct device_node *of_get_next_child(
 	return NULL;
 }
 
+static inline struct device_node *of_get_next_child_with_prefix(
+	const struct device_node *node, struct device_node *prev,
+	const char *prefix)
+{
+	return NULL;
+}
+
 static inline struct device_node *of_get_next_available_child(
 	const struct device_node *node, struct device_node *prev)
 {
@@ -572,6 +601,13 @@ static inline struct device_node *of_get_compatible_child(const struct device_no
 }
 
 static inline struct device_node *of_get_child_by_name(
+					const struct device_node *node,
+					const char *name)
+{
+	return NULL;
+}
+
+static inline struct device_node *of_get_available_child_by_name(
 					const struct device_node *node,
 					const char *name)
 {
@@ -623,6 +659,18 @@ static inline bool of_property_read_bool(const struct device_node *np,
 
 static inline int of_property_count_elems_of_size(const struct device_node *np,
 			const char *propname, int elem_size)
+{
+	return -ENOSYS;
+}
+
+static inline int of_property_read_u8_index(const struct device_node *np,
+			const char *propname, u32 index, u8 *out_value)
+{
+	return -ENOSYS;
+}
+
+static inline int of_property_read_u16_index(const struct device_node *np,
+			const char *propname, u32 index, u16 *out_value)
 {
 	return -ENOSYS;
 }
@@ -815,6 +863,17 @@ static inline int of_machine_is_compatible(const char *compat)
 	return 0;
 }
 
+static inline int of_machine_read_compatible(const char **compatible,
+					     unsigned int index)
+{
+	return -ENOSYS;
+}
+
+static inline int of_machine_read_model(const char **model)
+{
+	return -ENOSYS;
+}
+
 static inline int of_add_property(struct device_node *np, struct property *prop)
 {
 	return 0;
@@ -828,6 +887,17 @@ static inline int of_remove_property(struct device_node *np, struct property *pr
 static inline bool of_machine_compatible_match(const char *const *compats)
 {
 	return false;
+}
+
+static inline const struct of_device_id *of_machine_get_match(const struct of_device_id *matches)
+{
+	return NULL;
+}
+
+static inline const void *
+of_machine_get_match_data(const struct of_device_id *matches)
+{
+	return NULL;
 }
 
 static inline bool of_console_check(const struct device_node *dn, const char *name, int index)
@@ -881,8 +951,23 @@ static inline void of_property_clear_flag(struct property *p, unsigned long flag
 }
 
 static inline int of_map_id(const struct device_node *np, u32 id,
-			     const char *map_name, const char *map_mask_name,
-			     struct device_node **target, u32 *id_out)
+			     const char *map_name, const char *cells_name,
+			     const char *map_mask_name,
+			     struct device_node * const *filter_np,
+			     struct of_phandle_args *arg)
+{
+	return -EINVAL;
+}
+
+static inline int of_map_iommu_id(const struct device_node *np, u32 id,
+				  struct of_phandle_args *arg)
+{
+	return -EINVAL;
+}
+
+static inline int of_map_msi_id(const struct device_node *np, u32 id,
+				struct device_node * const *filter_np,
+				struct of_phandle_args *arg)
 {
 	return -EINVAL;
 }
@@ -908,12 +993,6 @@ static inline const void *of_device_get_match_data(const struct device *dev)
 #define of_node_cmp(s1, s2)		strcasecmp((s1), (s2))
 #endif
 
-static inline int of_prop_val_eq(const struct property *p1, const struct property *p2)
-{
-	return p1->length == p2->length &&
-	       !memcmp(p1->value, p2->value, (size_t)p1->length);
-}
-
 #define for_each_property_of_node(dn, pp) \
 	for (pp = dn->properties; pp != NULL; pp = pp->next)
 
@@ -934,6 +1013,11 @@ static inline int of_numa_init(void)
 	return -ENOSYS;
 }
 #endif
+
+static inline bool of_machine_device_match(const struct of_device_id *matches)
+{
+	return of_machine_get_match(matches) != NULL;
+}
 
 static inline struct device_node *of_find_matching_node(
 	struct device_node *from,
@@ -1115,7 +1199,7 @@ static inline bool of_phandle_args_equal(const struct of_phandle_args *a1,
  * Search for a property in a device node and count the number of u8 elements
  * in it.
  *
- * Return: The number of elements on sucess, -EINVAL if the property does
+ * Return: The number of elements on success, -EINVAL if the property does
  * not exist or its length does not match a multiple of u8 and -ENODATA if the
  * property does not have a value.
  */
@@ -1134,7 +1218,7 @@ static inline int of_property_count_u8_elems(const struct device_node *np,
  * Search for a property in a device node and count the number of u16 elements
  * in it.
  *
- * Return: The number of elements on sucess, -EINVAL if the property does
+ * Return: The number of elements on success, -EINVAL if the property does
  * not exist or its length does not match a multiple of u16 and -ENODATA if the
  * property does not have a value.
  */
@@ -1153,7 +1237,7 @@ static inline int of_property_count_u16_elems(const struct device_node *np,
  * Search for a property in a device node and count the number of u32 elements
  * in it.
  *
- * Return: The number of elements on sucess, -EINVAL if the property does
+ * Return: The number of elements on success, -EINVAL if the property does
  * not exist or its length does not match a multiple of u32 and -ENODATA if the
  * property does not have a value.
  */
@@ -1172,7 +1256,7 @@ static inline int of_property_count_u32_elems(const struct device_node *np,
  * Search for a property in a device node and count the number of u64 elements
  * in it.
  *
- * Return: The number of elements on sucess, -EINVAL if the property does
+ * Return: The number of elements on success, -EINVAL if the property does
  * not exist or its length does not match a multiple of u64 and -ENODATA if the
  * property does not have a value.
  */
@@ -1416,6 +1500,13 @@ static inline int of_property_read_s32(const struct device_node *np,
 	return of_property_read_u32(np, propname, (u32*) out_value);
 }
 
+static inline int of_property_read_s32_index(const struct device_node *np,
+					     const char *propname, u32 index,
+					     s32 *out_value)
+{
+	return of_property_read_u32_index(np, propname, index, (u32 *)out_value);
+}
+
 #define of_for_each_phandle(it, err, np, ln, cn, cc)			\
 	for (of_phandle_iterator_init((it), (np), (ln), (cn), (cc)),	\
 	     err = of_phandle_iterator_next(it);			\
@@ -1444,6 +1535,13 @@ static inline int of_property_read_s32(const struct device_node *np,
 #define for_each_compatible_node(dn, type, compatible) \
 	for (dn = of_find_compatible_node(NULL, type, compatible); dn; \
 	     dn = of_find_compatible_node(dn, type, compatible))
+
+#define for_each_compatible_node_scoped(dn, type, compatible) \
+	for (struct device_node *dn __free(device_node) =		\
+	     of_find_compatible_node(NULL, type, compatible);		\
+	     dn;							\
+	     dn = of_find_compatible_node(dn, type, compatible))
+
 #define for_each_matching_node(dn, matches) \
 	for (dn = of_find_matching_node(NULL, matches); dn; \
 	     dn = of_find_matching_node(dn, matches))

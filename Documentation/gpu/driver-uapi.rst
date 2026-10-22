@@ -2,6 +2,8 @@
 DRM Driver uAPI
 ===============
 
+.. contents::
+
 drm/i915 uAPI
 =============
 
@@ -27,3 +29,8 @@ drm/xe uAPI
 ===========
 
 .. kernel-doc:: include/uapi/drm/xe_drm.h
+
+drm/asahi uAPI
+================
+
+.. kernel-doc:: include/uapi/drm/asahi_drm.h

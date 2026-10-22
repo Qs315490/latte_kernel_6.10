@@ -15,32 +15,6 @@
 #include <asm/sysreg.h>
 
 /*
- * Called on entry to KVM_RUN unless this vcpu previously ran at least
- * once and the most recent prior KVM_RUN for this vcpu was called from
- * the same task as current (highly likely).
- *
- * This is guaranteed to execute before kvm_arch_vcpu_load_fp(vcpu),
- * such that on entering hyp the relevant parts of current are already
- * mapped.
- */
-int kvm_arch_vcpu_run_map_fp(struct kvm_vcpu *vcpu)
-{
-	struct user_fpsimd_state *fpsimd = &current->thread.uw.fpsimd_state;
-	int ret;
-
-	/* pKVM has its own tracking of the host fpsimd state. */
-	if (is_protected_kvm_enabled())
-		return 0;
-
-	/* Make sure the host task fpsimd state is visible to hyp: */
-	ret = kvm_share_hyp(fpsimd, fpsimd + 1);
-	if (ret)
-		return ret;
-
-	return 0;
-}
-
-/*
  * Prepare vcpu for saving the host's FPSIMD state and loading the guest's.
  * The actual loading is done by the FPSIMD access trap taken to hyp.
  *
@@ -53,6 +27,20 @@ void kvm_arch_vcpu_load_fp(struct kvm_vcpu *vcpu)
 
 	if (!system_supports_fpsimd())
 		return;
+
+	/*
+	 * Avoid needless save/restore of the guest's common
+	 * FPSIMD/SVE/SME regs during transitions between L1/L2.
+	 *
+	 * These transitions only happens in a non-preemptible context
+	 * where the host regs have already been saved and unbound. The
+	 * live registers are either free or owned by the guest.
+	 */
+	if (vcpu_get_flag(vcpu, IN_NESTED_ERET) ||
+	    vcpu_get_flag(vcpu, IN_NESTED_EXCEPTION)) {
+		WARN_ON_ONCE(host_owns_fp_regs());
+		return;
+	}
 
 	/*
 	 * Ensure that any host FPSIMD/SVE/SME state is saved and unbound such
@@ -103,8 +91,8 @@ void kvm_arch_vcpu_ctxsync_fp(struct kvm_vcpu *vcpu)
 		fp_state.sve_state = vcpu->arch.sve_state;
 		fp_state.sve_vl = vcpu->arch.sve_max_vl;
 		fp_state.sme_state = NULL;
-		fp_state.svcr = &__vcpu_sys_reg(vcpu, SVCR);
-		fp_state.fpmr = &__vcpu_sys_reg(vcpu, FPMR);
+		fp_state.svcr = __ctxt_sys_reg(&vcpu->arch.ctxt, SVCR);
+		fp_state.fpmr = __ctxt_sys_reg(&vcpu->arch.ctxt, FPMR);
 		fp_state.fp_type = &vcpu->arch.fp_type;
 
 		if (vcpu_has_sve(vcpu))
@@ -127,6 +115,18 @@ void kvm_arch_vcpu_ctxsync_fp(struct kvm_vcpu *vcpu)
 void kvm_arch_vcpu_put_fp(struct kvm_vcpu *vcpu)
 {
 	unsigned long flags;
+
+	/*
+	 * See comment in kvm_arch_vcpu_load_fp(). Note that we also rely on
+	 * the guest's max VL to have been set by fpsimd_lazy_switch_to_host()
+	 * so that any intervening kernel-mode SIMD (NEON or otherwise)
+	 * operation sees the full guest state that needs saving.
+	 */
+	if (vcpu_get_flag(vcpu, IN_NESTED_ERET) ||
+	    vcpu_get_flag(vcpu, IN_NESTED_EXCEPTION)) {
+		WARN_ON_ONCE(host_owns_fp_regs());
+		return;
+	}
 
 	local_irq_save(flags);
 

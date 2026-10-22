@@ -13,9 +13,11 @@
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/slab.h>
+#include <linux/sysfs.h>
 #include <linux/mm.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
+#include <linux/string_choices.h>
 #include <linux/dma-mapping.h>
 #include <linux/bitmap.h>
 #include <linux/iommu-helper.h>
@@ -140,7 +142,7 @@ late_initcall(fail_iommu_debugfs);
 static ssize_t fail_iommu_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", dev->archdata.fail_iommu);
+	return sysfs_emit(buf, "%d\n", dev->archdata.fail_iommu);
 }
 
 static ssize_t fail_iommu_store(struct device *dev,
@@ -769,8 +771,8 @@ struct iommu_table *iommu_init_table(struct iommu_table *tbl, int nid,
 	iommu_table_clear(tbl);
 
 	if (!welcomed) {
-		printk(KERN_INFO "IOMMU table initialized, virtual merging %s\n",
-		       novmerge ? "disabled" : "enabled");
+		pr_info("IOMMU table initialized, virtual merging %s\n",
+			str_disabled_enabled(novmerge));
 		welcomed = 1;
 	}
 
@@ -847,12 +849,12 @@ EXPORT_SYMBOL_GPL(iommu_tce_table_put);
 
 /* Creates TCEs for a user provided buffer.  The user buffer must be
  * contiguous real kernel storage (not vmalloc).  The address passed here
- * comprises a page address and offset into that page. The dma_addr_t
- * returned will point to the same byte within the page as was passed in.
+ * is physical address into that page. The dma_addr_t returned will point
+ * to the same byte within the page as was passed in.
  */
-dma_addr_t iommu_map_page(struct device *dev, struct iommu_table *tbl,
-			  struct page *page, unsigned long offset, size_t size,
-			  unsigned long mask, enum dma_data_direction direction,
+dma_addr_t iommu_map_phys(struct device *dev, struct iommu_table *tbl,
+			  phys_addr_t phys, size_t size, unsigned long mask,
+			  enum dma_data_direction direction,
 			  unsigned long attrs)
 {
 	dma_addr_t dma_handle = DMA_MAPPING_ERROR;
@@ -862,7 +864,7 @@ dma_addr_t iommu_map_page(struct device *dev, struct iommu_table *tbl,
 
 	BUG_ON(direction == DMA_NONE);
 
-	vaddr = page_address(page) + offset;
+	vaddr = phys_to_virt(phys);
 	uaddr = (unsigned long)vaddr;
 
 	if (tbl) {
@@ -889,7 +891,7 @@ dma_addr_t iommu_map_page(struct device *dev, struct iommu_table *tbl,
 	return dma_handle;
 }
 
-void iommu_unmap_page(struct iommu_table *tbl, dma_addr_t dma_handle,
+void iommu_unmap_phys(struct iommu_table *tbl, dma_addr_t dma_handle,
 		      size_t size, enum dma_data_direction direction,
 		      unsigned long attrs)
 {
@@ -1155,9 +1157,10 @@ EXPORT_SYMBOL_GPL(iommu_add_device);
  */
 static int
 spapr_tce_platform_iommu_attach_dev(struct iommu_domain *platform_domain,
-				    struct device *dev)
+				    struct device *dev,
+				    struct iommu_domain *old)
 {
-	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	struct iommu_domain *domain = iommu_driver_get_domain_for_dev(dev);
 	struct iommu_table_group *table_group;
 	struct iommu_group *grp;
 
@@ -1188,7 +1191,7 @@ static struct iommu_domain spapr_tce_platform_domain = {
 
 static int
 spapr_tce_blocked_iommu_attach_dev(struct iommu_domain *platform_domain,
-				     struct device *dev)
+				   struct device *dev, struct iommu_domain *old)
 {
 	struct iommu_group *grp = iommu_group_get(dev);
 	struct iommu_table_group *table_group;

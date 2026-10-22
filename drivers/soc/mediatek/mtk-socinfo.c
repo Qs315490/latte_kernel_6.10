@@ -50,35 +50,49 @@ static struct socinfo_data socinfo_data_table[] = {
 	MTK_SOCINFO_ENTRY("MT8186T", "MT8186TV/AZA", "Kompanio 528", 0x81862001, CELL_NOT_USED),
 	MTK_SOCINFO_ENTRY("MT8188", "MT8188GV/AZA", "Kompanio 838", 0x81880000, 0x00000010),
 	MTK_SOCINFO_ENTRY("MT8188", "MT8188GV/HZA", "Kompanio 838", 0x81880000, 0x00000011),
+	MTK_SOCINFO_ENTRY("MT8189", "MT8189GV/AZA", "Kompanio 540", 0x81890000, 0x00000020),
+	MTK_SOCINFO_ENTRY("MT8189", "MT8189HV/AZA", "Kompanio 540", 0x81890000, 0x00000021),
 	MTK_SOCINFO_ENTRY("MT8192", "MT8192V/AZA", "Kompanio 820", 0x00001100, 0x00040080),
 	MTK_SOCINFO_ENTRY("MT8192T", "MT8192V/ATZA", "Kompanio 828", 0x00000100, 0x000400C0),
 	MTK_SOCINFO_ENTRY("MT8195", "MT8195GV/EZA", "Kompanio 1200", 0x81950300, CELL_NOT_USED),
 	MTK_SOCINFO_ENTRY("MT8195", "MT8195GV/EHZA", "Kompanio 1200", 0x81950304, CELL_NOT_USED),
 	MTK_SOCINFO_ENTRY("MT8195", "MT8195TV/EZA", "Kompanio 1380", 0x81950400, CELL_NOT_USED),
 	MTK_SOCINFO_ENTRY("MT8195", "MT8195TV/EHZA", "Kompanio 1380", 0x81950404, CELL_NOT_USED),
+	MTK_SOCINFO_ENTRY("MT8370", "MT8370AV/AZA", "Genio 510", 0x83700000, 0x00000081),
+	MTK_SOCINFO_ENTRY("MT8371", "MT8371AV/AZA", "Genio 520", 0x83710000, 0x00000081),
+	MTK_SOCINFO_ENTRY("MT8390", "MT8390AV/AZA", "Genio 700", 0x83900000, 0x00000080),
+	MTK_SOCINFO_ENTRY("MT8391", "MT8391AV/AZA", "Genio 720", 0x83910000, 0x00000080),
 	MTK_SOCINFO_ENTRY("MT8395", "MT8395AV/ZA", "Genio 1200", 0x83950100, CELL_NOT_USED),
+	MTK_SOCINFO_ENTRY("MT8395", "MT8395AV/ZA", "Genio 1200", 0x83950800, CELL_NOT_USED),
 };
 
 static int mtk_socinfo_create_socinfo_node(struct mtk_socinfo *mtk_socinfop)
 {
 	struct soc_device_attribute *attrs;
-	static char machine[30] = {0};
+	struct socinfo_data *data = mtk_socinfop->socinfo_data;
 	static const char *soc_manufacturer = "MediaTek";
 
 	attrs = devm_kzalloc(mtk_socinfop->dev, sizeof(*attrs), GFP_KERNEL);
 	if (!attrs)
 		return -ENOMEM;
 
-	snprintf(machine, sizeof(machine), "%s (%s)", mtk_socinfop->socinfo_data->marketing_name,
-		mtk_socinfop->socinfo_data->soc_name);
-	attrs->family = soc_manufacturer;
-	attrs->machine = machine;
+	if (data->marketing_name != NULL && data->marketing_name[0] != '\0')
+		attrs->family = devm_kasprintf(mtk_socinfop->dev, GFP_KERNEL, "MediaTek %s",
+					       data->marketing_name);
+	else
+		attrs->family = soc_manufacturer;
+
+	attrs->soc_id = data->soc_name;
+	/*
+	 * The "machine" field will be populated automatically with the model
+	 * name from board DTS (if available).
+	 **/
 
 	mtk_socinfop->soc_dev = soc_device_register(attrs);
 	if (IS_ERR(mtk_socinfop->soc_dev))
 		return PTR_ERR(mtk_socinfop->soc_dev);
 
-	dev_info(mtk_socinfop->dev, "%s %s SoC detected.\n", soc_manufacturer, attrs->machine);
+	dev_info(mtk_socinfop->dev, "%s (%s) SoC detected.\n", attrs->family, attrs->soc_id);
 	return 0;
 }
 

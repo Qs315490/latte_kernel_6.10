@@ -7,21 +7,27 @@
 #include <assert.h>
 #include <linux/mman.h>
 #include <sys/mman.h>
-#include "../kselftest.h"
-#include "thp_settings.h"
+#include "kselftest.h"
+#include "hugepage_settings.h"
 #include "uffd-common.h"
 
 static int pagemap_fd;
-static size_t pagesize;
 static int nr_pagesizes = 1;
+static unsigned long pagesize;
 static int nr_thpsizes;
 static size_t thpsizes[20];
 static int nr_hugetlbsizes;
-static size_t hugetlbsizes[10];
+static unsigned long hugetlbsizes[10];
 
-static int sz2ord(size_t size)
+static void check_uffd_wp_feature_supported(void)
 {
-	return __builtin_ctzll(size / pagesize);
+	uint64_t features = 0;
+
+	if (uffd_get_features(&features))
+		ksft_exit_skip("failed to get available features (%d)\n", errno);
+
+	if (!(features & UFFD_FEATURE_PAGEFAULT_FLAG_WP))
+		ksft_exit_skip("uffd-wp feature not supported\n");
 }
 
 static int detect_thp_sizes(size_t sizes[], int max)
@@ -87,9 +93,9 @@ static void *alloc_one_folio(size_t size, bool private, bool hugetlb)
 		struct thp_settings settings = *thp_current_settings();
 
 		if (private)
-			settings.hugepages[sz2ord(size)].enabled = THP_ALWAYS;
+			settings.hugepages[sz2ord(size, pagesize)].enabled = THP_ALWAYS;
 		else
-			settings.shmem_hugepages[sz2ord(size)].enabled = SHMEM_ALWAYS;
+			settings.shmem_hugepages[sz2ord(size, pagesize)].enabled = SHMEM_ALWAYS;
 
 		thp_push_settings(&settings);
 
@@ -157,7 +163,8 @@ static bool range_is_swapped(void *addr, size_t size)
 	return true;
 }
 
-static void test_one_folio(size_t size, bool private, bool swapout, bool hugetlb)
+static void test_one_folio(uffd_global_test_opts_t *gopts, size_t size, bool private,
+			   bool swapout, bool hugetlb)
 {
 	struct uffdio_writeprotect wp_prms;
 	uint64_t features = 0;
@@ -181,18 +188,21 @@ static void test_one_folio(size_t size, bool private, bool swapout, bool hugetlb
 	}
 
 	/* Register range for uffd-wp. */
-	if (userfaultfd_open(&features)) {
-		ksft_test_result_fail("userfaultfd_open() failed\n");
+	if (userfaultfd_open(gopts, &features)) {
+		if (errno == ENOENT)
+			ksft_test_result_skip("userfaultfd not available\n");
+		else
+			ksft_test_result_fail("userfaultfd_open() failed\n");
 		goto out;
 	}
-	if (uffd_register(uffd, mem, size, false, true, false)) {
+	if (uffd_register(gopts->uffd, mem, size, false, true, false)) {
 		ksft_test_result_fail("uffd_register() failed\n");
 		goto out;
 	}
 	wp_prms.mode = UFFDIO_WRITEPROTECT_MODE_WP;
 	wp_prms.range.start = (uintptr_t)mem;
 	wp_prms.range.len = size;
-	if (ioctl(uffd, UFFDIO_WRITEPROTECT, &wp_prms)) {
+	if (ioctl(gopts->uffd, UFFDIO_WRITEPROTECT, &wp_prms)) {
 		ksft_test_result_fail("ioctl(UFFDIO_WRITEPROTECT) failed\n");
 		goto out;
 	}
@@ -239,14 +249,14 @@ static void test_one_folio(size_t size, bool private, bool swapout, bool hugetlb
 out:
 	if (mem)
 		munmap(mem, size);
-	if (uffd >= 0) {
-		close(uffd);
-		uffd = -1;
+	if (gopts->uffd >= 0) {
+		close(gopts->uffd);
+		gopts->uffd = -1;
 	}
 }
 
 struct testcase {
-	size_t *sizes;
+	unsigned long *sizes;
 	int *nr_sizes;
 	bool private;
 	bool swapout;
@@ -333,17 +343,20 @@ static const struct testcase testcases[] = {
 
 int main(int argc, char **argv)
 {
+	uffd_global_test_opts_t gopts = { 0 };
 	struct thp_settings settings;
 	int i, j, plan = 0;
 
+	hugepage_save_settings(true, true);
+
+	check_uffd_wp_feature_supported();
+
 	pagesize = getpagesize();
 	nr_thpsizes = detect_thp_sizes(thpsizes, ARRAY_SIZE(thpsizes));
-	nr_hugetlbsizes = detect_hugetlb_page_sizes(hugetlbsizes,
-						    ARRAY_SIZE(hugetlbsizes));
+	nr_hugetlbsizes = hugetlb_setup(1, hugetlbsizes, ARRAY_SIZE(hugetlbsizes));
 
-	/* If THP is supported, save THP settings and initially disable THP. */
+	/* If THP is supported, initially disable THP. */
 	if (nr_thpsizes) {
-		thp_save_settings();
 		thp_read_settings(&settings);
 		for (i = 0; i < NR_ORDERS; i++) {
 			settings.hugepages[i].enabled = THP_NEVER;
@@ -364,13 +377,9 @@ int main(int argc, char **argv)
 		const struct testcase *tc = &testcases[i];
 
 		for (j = 0; j < *tc->nr_sizes; j++)
-			test_one_folio(tc->sizes[j], tc->private, tc->swapout,
-				       tc->hugetlb);
+			test_one_folio(&gopts, tc->sizes[j], tc->private,
+				       tc->swapout, tc->hugetlb);
 	}
-
-	/* If THP is supported, restore original THP settings. */
-	if (nr_thpsizes)
-		thp_restore_settings();
 
 	i = ksft_get_fail_cnt();
 	if (i)

@@ -8,7 +8,7 @@
 #ifndef _BPF_JIT_H
 #define _BPF_JIT_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <asm/types.h>
 #include <asm/ppc-opcode.h>
@@ -24,6 +24,7 @@
 
 #define SZL			sizeof(unsigned long)
 #define BPF_INSN_SAFETY		64
+#define BPF_PPC_TAILCALL	8
 
 #define PLANT_INSTR(d, idx, instr)					      \
 	do { if (d) { (d)[idx] = instr; } idx++; } while (0)
@@ -51,8 +52,23 @@
 		EMIT(PPC_INST_BRANCH_COND | (((cond) & 0x3ff) << 16) | (offset & 0xfffc));					\
 	} while (0)
 
-/* Sign-extended 32-bit immediate load */
+/* When constant jump offset is known prior */
+#define PPC_BCC_CONST_SHORT(cond, offset)							\
+	do {											\
+		BUILD_BUG_ON(offset < -0x8000 || offset > 0x7fff || (offset & 0x3));		\
+		EMIT(PPC_INST_BRANCH_COND | (((cond) & 0x3ff) << 16) | (offset & 0xfffc));	\
+	} while (0)
+
+/*
+ * Sign-extended 32-bit immediate load
+ *
+ * If this is a dummy pass (!image), account for
+ * maximum possible instructions.
+ */
 #define PPC_LI32(d, i)		do {					      \
+	if (!image)							      \
+		ctx->idx += 2;						      \
+	else {								      \
 		if ((int)(uintptr_t)(i) >= -32768 &&			      \
 				(int)(uintptr_t)(i) < 32768)		      \
 			EMIT(PPC_RAW_LI(d, i));				      \
@@ -60,10 +76,16 @@
 			EMIT(PPC_RAW_LIS(d, IMM_H(i)));			      \
 			if (IMM_L(i))					      \
 				EMIT(PPC_RAW_ORI(d, d, IMM_L(i)));	      \
-		} } while(0)
+		}							      \
+	} } while (0)
 
 #ifdef CONFIG_PPC64
+
+/* If dummy pass (!image), account for maximum possible instructions */
 #define PPC_LI64(d, i)		do {					      \
+	if (!image)							      \
+		ctx->idx += 5;						      \
+	else {								      \
 		if ((long)(i) >= -2147483648 &&				      \
 				(long)(i) < 2147483648)			      \
 			PPC_LI32(d, i);					      \
@@ -84,7 +106,8 @@
 			if ((uintptr_t)(i) & 0x000000000000ffffULL)	      \
 				EMIT(PPC_RAW_ORI(d, d, (uintptr_t)(i) &       \
 							0xffff));             \
-		} } while (0)
+		}							      \
+	} } while (0)
 #define PPC_LI_ADDR	PPC_LI64
 
 #ifndef CONFIG_PPC_KERNEL_PCREL
@@ -147,10 +170,21 @@ struct codegen_context {
 	unsigned int seen;
 	unsigned int idx;
 	unsigned int stack_size;
-	int b2p[MAX_BPF_JIT_REG + 2];
+	int b2p[MAX_BPF_JIT_REG + 3];
 	unsigned int exentry_idx;
 	unsigned int alt_exit_addr;
+	u64 arena_vm_start;
+	u64 user_vm_start;
+	bool is_subprog;
+	bool exception_boundary;
+	bool exception_cb;
+	void __percpu *priv_sp;
+	unsigned int priv_stack_size;
 };
+
+/* Memory size & magic-value to detect private stack overflow/underflow */
+#define PRIV_STACK_GUARD_SZ    16
+#define PRIV_STACK_GUARD_VAL   0xEB9F12345678eb9fULL
 
 #define bpf_to_ppc(r)	(ctx->b2p[r])
 
@@ -184,11 +218,12 @@ void bpf_jit_build_epilogue(u32 *image, struct codegen_context *ctx);
 void bpf_jit_build_fentry_stubs(u32 *image, struct codegen_context *ctx);
 void bpf_jit_realloc_regs(struct codegen_context *ctx);
 int bpf_jit_emit_exit_insn(u32 *image, struct codegen_context *ctx, int tmp_reg, long exit_addr);
-
+void prepare_for_fsession_fentry(u32 *image, struct codegen_context *ctx, int cookie_cnt,
+								int cookie_off, int retval_off);
+void store_func_meta(u32 *image, struct codegen_context *ctx, u64 func_meta, int func_meta_off);
 int bpf_add_extable_entry(struct bpf_prog *fp, u32 *image, u32 *fimage, int pass,
 			  struct codegen_context *ctx, int insn_idx,
-			  int jmp_off, int dst_reg);
-
+			  int jmp_off, int dst_reg, u32 code);
 #endif
 
 #endif

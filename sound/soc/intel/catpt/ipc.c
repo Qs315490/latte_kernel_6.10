@@ -5,6 +5,7 @@
 // Author: Cezary Rojewski <cezary.rojewski@intel.com>
 //
 
+#include <linux/cleanup.h>
 #include <linux/irqreturn.h>
 #include "core.h"
 #include "messages.h"
@@ -84,7 +85,7 @@ static int catpt_wait_msg_completion(struct catpt_dev *cdev, int timeout)
 
 static int catpt_dsp_do_send_msg(struct catpt_dev *cdev,
 				 struct catpt_ipc_msg request,
-				 struct catpt_ipc_msg *reply, int timeout)
+				 struct catpt_ipc_msg *reply, int timeout, const char *name)
 {
 	struct catpt_ipc *ipc = &cdev->ipc;
 	unsigned long flags;
@@ -111,6 +112,8 @@ static int catpt_dsp_do_send_msg(struct catpt_dev *cdev,
 	}
 
 	ret = ipc->rx.rsp.status;
+	if (ret)
+		dev_err(cdev->dev, "%s (0x%08x) failed: %d\n", name, request.header, ret);
 	if (reply) {
 		reply->header = ipc->rx.header;
 
@@ -123,23 +126,18 @@ static int catpt_dsp_do_send_msg(struct catpt_dev *cdev,
 
 int catpt_dsp_send_msg_timeout(struct catpt_dev *cdev,
 			       struct catpt_ipc_msg request,
-			       struct catpt_ipc_msg *reply, int timeout)
+			       struct catpt_ipc_msg *reply, int timeout, const char *name)
 {
-	struct catpt_ipc *ipc = &cdev->ipc;
-	int ret;
+	guard(mutex)(&cdev->ipc.mutex);
 
-	mutex_lock(&ipc->mutex);
-	ret = catpt_dsp_do_send_msg(cdev, request, reply, timeout);
-	mutex_unlock(&ipc->mutex);
-
-	return ret;
+	return catpt_dsp_do_send_msg(cdev, request, reply, timeout, name);
 }
 
 int catpt_dsp_send_msg(struct catpt_dev *cdev, struct catpt_ipc_msg request,
-		       struct catpt_ipc_msg *reply)
+		       struct catpt_ipc_msg *reply, const char *name)
 {
 	return catpt_dsp_send_msg_timeout(cdev, request, reply,
-					  cdev->ipc.default_timeout);
+					  cdev->ipc.default_timeout, name);
 }
 
 static void
@@ -148,6 +146,8 @@ catpt_dsp_notify_stream(struct catpt_dev *cdev, union catpt_notify_msg msg)
 	struct catpt_stream_runtime *stream;
 	struct catpt_notify_position pos;
 	struct catpt_notify_glitch glitch;
+
+	guard(mutex)(&cdev->stream_mutex);
 
 	stream = catpt_stream_find(cdev, msg.stream_hw_id);
 	if (!stream) {
@@ -205,6 +205,7 @@ static void catpt_dsp_process_response(struct catpt_dev *cdev, u32 header)
 		memcpy_fromio(&config, cdev->lpe_ba + off, sizeof(config));
 		trace_catpt_ipc_payload((u8 *)&config, sizeof(config));
 
+		dev_dbg(cdev->dev, "FW READY 0x%08x\n", header);
 		catpt_ipc_arm(ipc, &config);
 		complete(&cdev->fw_ready);
 		return;
@@ -215,6 +216,13 @@ static void catpt_dsp_process_response(struct catpt_dev *cdev, u32 header)
 		dev_err(cdev->dev, "ADSP device coredump received\n");
 		ipc->ready = false;
 		catpt_coredump(cdev);
+
+		if (catpt_readl_dram(cdev, COREDUMP) == CATPT_COREDUMP_REQUEST) {
+			dev_dbg(cdev->dev, "releasing firmware from the coredump state\n");
+			catpt_writel_dram(cdev, COREDUMP, CATPT_COREDUMP_RELEASE);
+		}
+
+		complete(&cdev->fw_ready);
 		/* TODO: attempt recovery */
 		break;
 

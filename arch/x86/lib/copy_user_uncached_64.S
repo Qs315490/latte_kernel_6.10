@@ -5,6 +5,7 @@
 
 #include <linux/export.h>
 #include <linux/linkage.h>
+#include <linux/objtool.h>
 #include <asm/asm.h>
 
 /*
@@ -26,7 +27,8 @@
  * Output:
  * rax uncopied bytes or 0 if successful.
  */
-SYM_FUNC_START(__copy_user_nocache)
+SYM_FUNC_START(copy_to_nontemporal)
+	ANNOTATE_NOENDBR
 	/* If destination is not 7-byte aligned, we'll have to align it */
 	testb $7,%dil
 	jne .Lalign
@@ -238,5 +240,5 @@ _ASM_EXTABLE_UA(95b, .Ldone)
 _ASM_EXTABLE_UA(52b, .Ldone0)
 _ASM_EXTABLE_UA(53b, .Ldone0)
 
-SYM_FUNC_END(__copy_user_nocache)
-EXPORT_SYMBOL(__copy_user_nocache)
+SYM_FUNC_END(copy_to_nontemporal)
+EXPORT_SYMBOL(copy_to_nontemporal)

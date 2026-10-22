@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (C) 2022 MediaTek Inc.
  */
@@ -13,16 +13,22 @@
 #define fw_name(_dev, name, ...)	({			\
 	char *_fw;						\
 	switch (mt76_chip(&(_dev)->mt76)) {			\
-	case 0x7992:						\
+	case MT7992_DEVICE_ID:						\
 		switch ((_dev)->var.type) {			\
 		case MT7992_VAR_TYPE_23:			\
 			_fw = MT7992_##name##_23;		\
+			break;					\
+		case MT7992_VAR_TYPE_24:			\
+			_fw = MT7992_##name##_24;		\
 			break;					\
 		default:					\
 			_fw = MT7992_##name;			\
 		}						\
 		break;						\
-	case 0x7990:						\
+	case MT7990_DEVICE_ID:					\
+		_fw = MT7990_##name;				\
+		break;						\
+	case MT7996_DEVICE_ID:						\
 	default:						\
 		switch ((_dev)->var.type) {			\
 		case MT7996_VAR_TYPE_233:			\
@@ -118,13 +124,20 @@ mt7996_mcu_get_sta_nss(u16 mcs_map)
 }
 
 static void
-mt7996_mcu_set_sta_he_mcs(struct ieee80211_sta *sta, __le16 *he_mcs,
-			  u16 mcs_map)
+mt7996_mcu_set_sta_he_mcs(struct ieee80211_link_sta *link_sta,
+			  struct mt7996_vif_link *link,
+			  __le16 *he_mcs, u16 mcs_map)
 {
-	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
-	enum nl80211_band band = msta->vif->deflink.phy->mt76->chandef.chan->band;
-	const u16 *mask = msta->vif->deflink.bitrate_mask.control[band].he_mcs;
-	int nss, max_nss = sta->deflink.rx_nss > 3 ? 4 : sta->deflink.rx_nss;
+	struct mt76_phy *mphy = mt76_vif_link_phy(&link->mt76);
+	int nss, max_nss = link_sta->rx_nss > 3 ? 4 : link_sta->rx_nss;
+	enum nl80211_band band;
+	const u16 *mask;
+
+	if (!mphy)
+		return;
+
+	band = mphy->chandef.chan->band;
+	mask = link->bitrate_mask.control[band].he_mcs;
 
 	for (nss = 0; nss < max_nss; nss++) {
 		int mcs;
@@ -167,11 +180,11 @@ mt7996_mcu_set_sta_he_mcs(struct ieee80211_sta *sta, __le16 *he_mcs,
 }
 
 static void
-mt7996_mcu_set_sta_vht_mcs(struct ieee80211_sta *sta, __le16 *vht_mcs,
-			   const u16 *mask)
+mt7996_mcu_set_sta_vht_mcs(struct ieee80211_link_sta *link_sta,
+			   __le16 *vht_mcs, const u16 *mask)
 {
-	u16 mcs, mcs_map = le16_to_cpu(sta->deflink.vht_cap.vht_mcs.rx_mcs_map);
-	int nss, max_nss = sta->deflink.rx_nss > 3 ? 4 : sta->deflink.rx_nss;
+	u16 mcs, mcs_map = le16_to_cpu(link_sta->vht_cap.vht_mcs.rx_mcs_map);
+	int nss, max_nss = link_sta->rx_nss > 3 ? 4 : link_sta->rx_nss;
 
 	for (nss = 0; nss < max_nss; nss++, mcs_map >>= 2) {
 		switch (mcs_map & 0x3) {
@@ -193,19 +206,20 @@ mt7996_mcu_set_sta_vht_mcs(struct ieee80211_sta *sta, __le16 *vht_mcs,
 }
 
 static void
-mt7996_mcu_set_sta_ht_mcs(struct ieee80211_sta *sta, u8 *ht_mcs,
-			  const u8 *mask)
+mt7996_mcu_set_sta_ht_mcs(struct ieee80211_link_sta *link_sta,
+			  u8 *ht_mcs, const u8 *mask)
 {
-	int nss, max_nss = sta->deflink.rx_nss > 3 ? 4 : sta->deflink.rx_nss;
+	int nss, max_nss = link_sta->rx_nss > 3 ? 4 : link_sta->rx_nss;
 
 	for (nss = 0; nss < max_nss; nss++)
-		ht_mcs[nss] = sta->deflink.ht_cap.mcs.rx_mask[nss] & mask[nss];
+		ht_mcs[nss] = link_sta->ht_cap.mcs.rx_mask[nss] & mask[nss];
 }
 
 static int
 mt7996_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 			  struct sk_buff *skb, int seq)
 {
+	struct mt7996_dev *dev = container_of(mdev, struct mt7996_dev, mt76);
 	struct mt7996_mcu_rxd *rxd;
 	struct mt7996_mcu_uni_event *event;
 	int mcu_cmd = FIELD_GET(__MCU_CMD_FIELD_ID, cmd);
@@ -214,6 +228,14 @@ mt7996_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 	if (!skb) {
 		dev_err(mdev->dev, "Message %08x (seq %d) timeout\n",
 			cmd, seq);
+
+		if (!test_and_set_bit(MT76_MCU_RESET, &dev->mphy.state)) {
+			dev->recovery.restart = true;
+			wake_up(&dev->mt76.mcu.wait);
+			queue_work(dev->mt76.wq, &dev->reset_work);
+			wake_up(&dev->reset_wait);
+		}
+
 		return -ETIMEDOUT;
 	}
 
@@ -230,13 +252,38 @@ mt7996_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 		event = (struct mt7996_mcu_uni_event *)skb->data;
 		ret = le32_to_cpu(event->status);
 		/* skip invalid event */
-		if (mcu_cmd != event->cid)
+		if (mcu_cmd != le16_to_cpu(event->cid))
 			ret = -EAGAIN;
 	} else {
 		skb_pull(skb, sizeof(struct mt7996_mcu_rxd));
 	}
 
 	return ret;
+}
+
+static void
+mt7996_mcu_set_timeout(struct mt76_dev *mdev, int cmd)
+{
+	mdev->mcu.timeout = 5 * HZ;
+
+	if (!(cmd & __MCU_CMD_FIELD_UNI))
+		return;
+
+	switch (FIELD_GET(__MCU_CMD_FIELD_ID, cmd)) {
+	case MCU_UNI_CMD_THERMAL:
+	case MCU_UNI_CMD_TWT:
+	case MCU_UNI_CMD_GET_MIB_INFO:
+	case MCU_UNI_CMD_STA_REC_UPDATE:
+	case MCU_UNI_CMD_BSS_INFO_UPDATE:
+		mdev->mcu.timeout = 2 * HZ;
+		return;
+	case MCU_UNI_CMD_EFUSE_CTRL:
+	case MCU_UNI_CMD_EXT_EEPROM_CTRL:
+		mdev->mcu.timeout = 30 * HZ;
+		return;
+	default:
+		break;
+	}
 }
 
 static int
@@ -252,7 +299,7 @@ mt7996_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
 	u32 val;
 	u8 seq;
 
-	mdev->mcu.timeout = 20 * HZ;
+	mt7996_mcu_set_timeout(mdev, cmd);
 
 	seq = ++dev->mt76.mcu.msg_seq & 0xf;
 	if (!seq)
@@ -265,7 +312,7 @@ mt7996_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
 
 	txd_len = cmd & __MCU_CMD_FIELD_UNI ? sizeof(*uni_txd) : sizeof(*mcu_txd);
 	txd = (__le32 *)skb_push(skb, txd_len);
-	if (test_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state))
+	if (test_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state) && mt7996_has_wa(dev))
 		qid = MT_MCUQ_WA;
 	else
 		qid = MT_MCUQ_WM;
@@ -286,10 +333,12 @@ mt7996_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
 		uni_txd->pkt_type = MCU_PKT_ID;
 		uni_txd->seq = seq;
 
-		if (cmd & __MCU_CMD_FIELD_QUERY)
-			uni_txd->option = MCU_CMD_UNI_QUERY_ACK;
-		else
-			uni_txd->option = MCU_CMD_UNI_EXT_ACK;
+		uni_txd->option = MCU_CMD_UNI;
+		if (!(cmd & __MCU_CMD_FIELD_QUERY))
+			uni_txd->option |= MCU_CMD_SET;
+
+		if (wait_seq)
+			uni_txd->option |= MCU_CMD_ACK;
 
 		if ((cmd & __MCU_CMD_FIELD_WA) && (cmd & __MCU_CMD_FIELD_WM))
 			uni_txd->s2d_index = MCU_S2D_H2CN;
@@ -335,8 +384,12 @@ exit:
 int mt7996_mcu_wa_cmd(struct mt7996_dev *dev, int cmd, u32 a1, u32 a2, u32 a3)
 {
 	struct {
+		u8 _rsv[4];
+
+		__le16 tag;
+		__le16 len;
 		__le32 args[3];
-	} req = {
+	} __packed req = {
 		.args = {
 			cpu_to_le32(a1),
 			cpu_to_le32(a2),
@@ -344,16 +397,129 @@ int mt7996_mcu_wa_cmd(struct mt7996_dev *dev, int cmd, u32 a1, u32 a2, u32 a3)
 		},
 	};
 
-	return mt76_mcu_send_msg(&dev->mt76, cmd, &req, sizeof(req), false);
+	if (mt7996_has_wa(dev))
+		return mt76_mcu_send_msg(&dev->mt76, cmd, &req.args,
+					 sizeof(req.args), false);
+
+	req.tag = cpu_to_le16(cmd == MCU_WA_PARAM_CMD(QUERY) ? UNI_CMD_SDO_QUERY :
+							       UNI_CMD_SDO_SET);
+	req.len = cpu_to_le16(sizeof(req) - 4);
+
+	return mt76_mcu_send_msg(&dev->mt76, MCU_WA_UNI_CMD(SDO), &req,
+				 sizeof(req), false);
 }
+
+struct mt7996_mcu_countdown_data {
+	struct mt76_phy *mphy;
+	u8 omac_idx;
+};
 
 static void
 mt7996_mcu_csa_finish(void *priv, u8 *mac, struct ieee80211_vif *vif)
 {
-	if (!vif->bss_conf.csa_active || vif->type == NL80211_IFTYPE_STATION)
+	struct mt7996_mcu_countdown_data *cdata = (void *)priv;
+	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
+	struct ieee80211_bss_conf *link_conf = NULL;
+	unsigned long valid_links = vif->valid_links ?: BIT(0);
+	unsigned int link_id;
+
+	if (vif->type == NL80211_IFTYPE_STATION)
 		return;
 
-	ieee80211_csa_finish(vif, 0);
+	for_each_set_bit(link_id, &valid_links, IEEE80211_MLD_MAX_NUM_LINKS) {
+		struct mt76_vif_link *mlink =
+			rcu_dereference(mvif->mt76.link[link_id]);
+
+		if (mlink && mlink->band_idx == cdata->mphy->band_idx &&
+		    mlink->omac_idx == cdata->omac_idx) {
+			link_conf = rcu_dereference(vif->link_conf[link_id]);
+			break;
+		}
+	}
+
+	if (!link_conf || !link_conf->csa_active)
+		return;
+
+	ieee80211_csa_finish(vif, link_conf->link_id);
+}
+
+static void
+mt7996_mcu_cca_finish(void *priv, u8 *mac, struct ieee80211_vif *vif)
+{
+	struct mt7996_mcu_countdown_data *cdata = (void *)priv;
+	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
+	struct ieee80211_bss_conf *link_conf = NULL;
+	unsigned long valid_links = vif->valid_links ?: BIT(0);
+	unsigned int link_id;
+
+	if (vif->type == NL80211_IFTYPE_STATION)
+		return;
+
+	for_each_set_bit(link_id, &valid_links, IEEE80211_MLD_MAX_NUM_LINKS) {
+		struct mt76_vif_link *mlink =
+			rcu_dereference(mvif->mt76.link[link_id]);
+
+		if (mlink && mlink->band_idx == cdata->mphy->band_idx &&
+		    mlink->omac_idx == cdata->omac_idx) {
+			link_conf = rcu_dereference(vif->link_conf[link_id]);
+			break;
+		}
+	}
+
+	if (!link_conf || !link_conf->color_change_active)
+		return;
+
+	ieee80211_color_change_finish(vif, link_conf->link_id);
+}
+
+static void
+mt7996_mcu_ie_countdown(struct mt7996_dev *dev, struct sk_buff *skb)
+{
+#define UNI_EVENT_IE_COUNTDOWN_CSA 0
+#define UNI_EVENT_IE_COUNTDOWN_BCC 1
+	struct header {
+		u8 band;
+		u8 rsv[3];
+	};
+	struct mt7996_mcu_rxd *rxd = (struct mt7996_mcu_rxd *)skb->data;
+	const char *data = (char *)&rxd[1], *tail;
+	struct header *hdr = (struct header *)data;
+	struct tlv *tlv = (struct tlv *)(data + 4);
+	struct mt7996_mcu_countdown_notify *event;
+	struct mt7996_mcu_countdown_data cdata;
+
+	if (hdr->band >= ARRAY_SIZE(dev->mt76.phys))
+		return;
+
+	cdata.mphy = dev->mt76.phys[hdr->band];
+	if (!cdata.mphy)
+		return;
+
+	tail = skb->data + skb->len;
+	data += sizeof(*hdr);
+	while (data + sizeof(*tlv) < tail && le16_to_cpu(tlv->len)) {
+		event = (struct mt7996_mcu_countdown_notify *)tlv->data;
+
+		cdata.omac_idx = event->omac_idx;
+
+		switch (le16_to_cpu(tlv->tag)) {
+		case UNI_EVENT_IE_COUNTDOWN_CSA:
+			ieee80211_iterate_active_interfaces_atomic(mt76_hw(dev),
+					IEEE80211_IFACE_ITER_RESUME_ALL,
+					mt7996_mcu_csa_finish, &cdata);
+			break;
+		case UNI_EVENT_IE_COUNTDOWN_BCC:
+			ieee80211_iterate_active_interfaces_atomic(mt76_hw(dev),
+					IEEE80211_IFACE_ITER_RESUME_ALL,
+					mt7996_mcu_cca_finish, &cdata);
+			break;
+		default:
+			break;
+		}
+
+		data += le16_to_cpu(tlv->len);
+		tlv = (struct tlv *)data;
+	}
 }
 
 static void
@@ -364,27 +530,41 @@ mt7996_mcu_rx_radar_detected(struct mt7996_dev *dev, struct sk_buff *skb)
 
 	r = (struct mt7996_mcu_rdd_report *)skb->data;
 
-	if (r->band_idx >= ARRAY_SIZE(dev->mt76.phys))
-		return;
-
-	if (r->band_idx == MT_RX_SEL2 && !dev->rdd2_phy)
-		return;
-
-	if (r->band_idx == MT_RX_SEL2)
+	switch (r->rdd_idx) {
+	case MT_RDD_IDX_BAND2:
+		mphy = dev->mt76.phys[MT_BAND2];
+		break;
+	case MT_RDD_IDX_BAND1:
+		mphy = dev->mt76.phys[MT_BAND1];
+		break;
+	case MT_RDD_IDX_BACKGROUND:
+		if (!dev->rdd2_phy)
+			goto err;
 		mphy = dev->rdd2_phy->mt76;
-	else
-		mphy = dev->mt76.phys[r->band_idx];
+		break;
+	default:
+		goto err;
+	}
 
 	if (!mphy)
-		return;
+		goto err;
 
-	if (r->band_idx == MT_RX_SEL2)
+	if (r->rdd_idx == MT_RDD_IDX_BACKGROUND) {
 		cfg80211_background_radar_event(mphy->hw->wiphy,
 						&dev->rdd2_chandef,
 						GFP_ATOMIC);
-	else
+	} else {
+		struct mt7996_phy *phy = mphy->priv;
+
+		phy->rdd_tx_paused = true;
 		ieee80211_radar_detected(mphy->hw, NULL);
+	}
 	dev->hw_pattern++;
+
+	return;
+
+err:
+	dev_err(dev->mt76.dev, "Invalid RDD idx %d\n", r->rdd_idx);
 }
 
 static void
@@ -425,57 +605,6 @@ out:
 	}
 
 	wiphy_info(mt76_hw(dev)->wiphy, "%s: %.*s", type, len, data);
-}
-
-static void
-mt7996_mcu_cca_finish(void *priv, u8 *mac, struct ieee80211_vif *vif)
-{
-	if (!vif->bss_conf.color_change_active || vif->type == NL80211_IFTYPE_STATION)
-		return;
-
-	ieee80211_color_change_finish(vif, 0);
-}
-
-static void
-mt7996_mcu_ie_countdown(struct mt7996_dev *dev, struct sk_buff *skb)
-{
-#define UNI_EVENT_IE_COUNTDOWN_CSA 0
-#define UNI_EVENT_IE_COUNTDOWN_BCC 1
-	struct header {
-		u8 band;
-		u8 rsv[3];
-	};
-	struct mt76_phy *mphy = &dev->mt76.phy;
-	struct mt7996_mcu_rxd *rxd = (struct mt7996_mcu_rxd *)skb->data;
-	const char *data = (char *)&rxd[1], *tail;
-	struct header *hdr = (struct header *)data;
-	struct tlv *tlv = (struct tlv *)(data + 4);
-
-	if (hdr->band >= ARRAY_SIZE(dev->mt76.phys))
-		return;
-
-	if (hdr->band && dev->mt76.phys[hdr->band])
-		mphy = dev->mt76.phys[hdr->band];
-
-	tail = skb->data + skb->len;
-	data += sizeof(struct header);
-	while (data + sizeof(struct tlv) < tail && le16_to_cpu(tlv->len)) {
-		switch (le16_to_cpu(tlv->tag)) {
-		case UNI_EVENT_IE_COUNTDOWN_CSA:
-			ieee80211_iterate_active_interfaces_atomic(mphy->hw,
-					IEEE80211_IFACE_ITER_RESUME_ALL,
-					mt7996_mcu_csa_finish, mphy->hw);
-			break;
-		case UNI_EVENT_IE_COUNTDOWN_BCC:
-			ieee80211_iterate_active_interfaces_atomic(mphy->hw,
-					IEEE80211_IFACE_ITER_RESUME_ALL,
-					mt7996_mcu_cca_finish, mphy->hw);
-			break;
-		}
-
-		data += le16_to_cpu(tlv->len);
-		tlv = (struct tlv *)data;
-	}
 }
 
 static int
@@ -533,7 +662,7 @@ mt7996_mcu_rx_all_sta_info_event(struct mt7996_dev *dev, struct sk_buff *skb)
 		switch (le16_to_cpu(res->tag)) {
 		case UNI_ALL_STA_TXRX_RATE:
 			wlan_idx = le16_to_cpu(res->rate[i].wlan_idx);
-			wcid = rcu_dereference(dev->mt76.wcid[wlan_idx]);
+			wcid = mt76_wcid_ptr(dev, wlan_idx);
 
 			if (!wcid)
 				break;
@@ -543,7 +672,7 @@ mt7996_mcu_rx_all_sta_info_event(struct mt7996_dev *dev, struct sk_buff *skb)
 			break;
 		case UNI_ALL_STA_TXRX_ADM_STAT:
 			wlan_idx = le16_to_cpu(res->adm_stat[i].wlan_idx);
-			wcid = rcu_dereference(dev->mt76.wcid[wlan_idx]);
+			wcid = mt76_wcid_ptr(dev, wlan_idx);
 
 			if (!wcid)
 				break;
@@ -557,7 +686,7 @@ mt7996_mcu_rx_all_sta_info_event(struct mt7996_dev *dev, struct sk_buff *skb)
 			break;
 		case UNI_ALL_STA_TXRX_MSDU_COUNT:
 			wlan_idx = le16_to_cpu(res->msdu_cnt[i].wlan_idx);
-			wcid = rcu_dereference(dev->mt76.wcid[wlan_idx]);
+			wcid = mt76_wcid_ptr(dev, wlan_idx);
 
 			if (!wcid)
 				break;
@@ -638,7 +767,7 @@ mt7996_mcu_wed_rro_event(struct mt7996_dev *dev, struct sk_buff *skb)
 {
 	struct mt7996_mcu_wed_rro_event *event = (void *)skb->data;
 
-	if (!dev->has_rro)
+	if (!mt7996_has_hwrro(dev))
 		return;
 
 	skb_pull(skb, sizeof(struct mt7996_mcu_rxd) + 4);
@@ -654,10 +783,7 @@ mt7996_mcu_wed_rro_event(struct mt7996_dev *dev, struct sk_buff *skb)
 
 			e = (void *)skb->data;
 			idx = le16_to_cpu(e->wlan_id);
-			if (idx >= ARRAY_SIZE(dev->mt76.wcid))
-				break;
-
-			wcid = rcu_dereference(dev->mt76.wcid[idx]);
+			wcid = mt76_wcid_ptr(dev, idx);
 			if (!wcid || !wcid->sta)
 				break;
 
@@ -680,7 +806,7 @@ mt7996_mcu_wed_rro_event(struct mt7996_dev *dev, struct sk_buff *skb)
 			struct mt7996_wed_rro_session_id *session;
 
 			e = (void *)skb->data;
-			session = kzalloc(sizeof(*session), GFP_ATOMIC);
+			session = kzalloc_obj(*session, GFP_ATOMIC);
 			if (!session)
 				break;
 
@@ -809,6 +935,8 @@ mt7996_mcu_bss_he_tlv(struct sk_buff *skb, struct ieee80211_vif *vif,
 	struct tlv *tlv;
 
 	cap = mt76_connac_get_he_phy_cap(phy->mt76, vif);
+	if (!cap)
+		return;
 
 	tlv = mt7996_mcu_add_uni_tlv(skb, UNI_BSS_INFO_HE_BASIC, sizeof(*he));
 
@@ -880,17 +1008,28 @@ mt7996_mcu_bss_txcmd_tlv(struct sk_buff *skb, bool en)
 }
 
 static void
-mt7996_mcu_bss_mld_tlv(struct sk_buff *skb, struct mt76_vif_link *mlink)
+mt7996_mcu_bss_mld_tlv(struct sk_buff *skb,
+		       struct ieee80211_bss_conf *link_conf,
+		       struct mt7996_vif_link *link)
 {
+	struct ieee80211_vif *vif = link_conf->vif;
+	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
 	struct bss_mld_tlv *mld;
 	struct tlv *tlv;
 
 	tlv = mt7996_mcu_add_uni_tlv(skb, UNI_BSS_INFO_MLD, sizeof(*mld));
-
 	mld = (struct bss_mld_tlv *)tlv;
-	mld->group_mld_id = 0xff;
-	mld->own_mld_id = mlink->idx;
-	mld->remap_idx = 0xff;
+	mld->own_mld_id = link->mld_idx;
+	mld->link_id = link_conf->link_id;
+
+	if (ieee80211_vif_is_mld(vif)) {
+		mld->group_mld_id = mvif->mld_group_idx;
+		mld->remap_idx = mvif->mld_remap_idx;
+		memcpy(mld->mac_addr, vif->addr, ETH_ALEN);
+	} else {
+		mld->group_mld_id = 0xff;
+		mld->remap_idx = 0xff;
+	}
 }
 
 static void
@@ -980,7 +1119,6 @@ mt7996_mcu_bss_basic_tlv(struct sk_buff *skb,
 	struct mt76_connac_bss_basic_tlv *bss;
 	u32 type = CONNECTION_INFRA_AP;
 	u16 sta_wlan_idx = wlan_idx;
-	struct ieee80211_sta *sta;
 	struct tlv *tlv;
 	int idx;
 
@@ -991,14 +1129,18 @@ mt7996_mcu_bss_basic_tlv(struct sk_buff *skb,
 		break;
 	case NL80211_IFTYPE_STATION:
 		if (enable) {
-			rcu_read_lock();
-			sta = ieee80211_find_sta(vif, vif->bss_conf.bssid);
-			/* TODO: enable BSS_INFO_UAPSD & BSS_INFO_PM */
-			if (sta) {
-				struct mt76_wcid *wcid;
+			struct ieee80211_sta *sta;
 
-				wcid = (struct mt76_wcid *)sta->drv_priv;
-				sta_wlan_idx = wcid->idx;
+			rcu_read_lock();
+			sta = ieee80211_find_sta(vif, link_conf->bssid);
+			if (sta) {
+				struct mt7996_sta *msta = (void *)sta->drv_priv;
+				struct mt7996_sta_link *msta_link;
+				int link_id = link_conf->link_id;
+
+				msta_link = mt7996_sta_link(msta, link_id);
+				if (msta_link)
+					sta_wlan_idx = msta_link->wcid.idx;
 			}
 			rcu_read_unlock();
 		}
@@ -1015,8 +1157,6 @@ mt7996_mcu_bss_basic_tlv(struct sk_buff *skb,
 	tlv = mt7996_mcu_add_uni_tlv(skb, UNI_BSS_INFO_BASIC, sizeof(*bss));
 
 	bss = (struct mt76_connac_bss_basic_tlv *)tlv;
-	bss->bcn_interval = cpu_to_le16(link_conf->beacon_int);
-	bss->dtim_period = link_conf->dtim_period;
 	bss->bmc_tx_wlan_idx = cpu_to_le16(wlan_idx);
 	bss->sta_idx = cpu_to_le16(sta_wlan_idx);
 	bss->conn_type = cpu_to_le32(type);
@@ -1036,10 +1176,10 @@ mt7996_mcu_bss_basic_tlv(struct sk_buff *skb,
 
 	memcpy(bss->bssid, link_conf->bssid, ETH_ALEN);
 	bss->bcn_interval = cpu_to_le16(link_conf->beacon_int);
-	bss->dtim_period = vif->bss_conf.dtim_period;
+	bss->dtim_period = link_conf->dtim_period;
 	bss->phymode = mt76_connac_get_phy_mode(phy, vif,
 						chandef->chan->band, NULL);
-	bss->phymode_ext = mt76_connac_get_phy_mode_ext(phy, &vif->bss_conf,
+	bss->phymode_ext = mt76_connac_get_phy_mode_ext(phy, link_conf,
 							chandef->chan->band);
 
 	return 0;
@@ -1064,7 +1204,8 @@ __mt7996_mcu_alloc_bss_req(struct mt76_dev *dev, struct mt76_vif_link *mvif, int
 
 int mt7996_mcu_add_bss_info(struct mt7996_phy *phy, struct ieee80211_vif *vif,
 			    struct ieee80211_bss_conf *link_conf,
-			    struct mt76_vif_link *mlink, int enable)
+			    struct mt76_vif_link *mlink,
+			    struct mt7996_sta_link *msta_link, int enable)
 {
 	struct mt7996_dev *dev = phy->dev;
 	struct sk_buff *skb;
@@ -1081,13 +1222,15 @@ int mt7996_mcu_add_bss_info(struct mt7996_phy *phy, struct ieee80211_vif *vif,
 
 	/* bss_basic must be first */
 	mt7996_mcu_bss_basic_tlv(skb, vif, link_conf, mlink, phy->mt76,
-				 mlink->wcid->idx, enable);
+				 msta_link->wcid.idx, enable);
 	mt7996_mcu_bss_sec_tlv(skb, mlink);
 
 	if (vif->type == NL80211_IFTYPE_MONITOR)
 		goto out;
 
 	if (enable) {
+		struct mt7996_vif_link *link;
+
 		mt7996_mcu_bss_rfch_tlv(skb, phy);
 		mt7996_mcu_bss_bmc_tlv(skb, mlink, phy);
 		mt7996_mcu_bss_ra_tlv(skb, phy);
@@ -1098,7 +1241,8 @@ int mt7996_mcu_add_bss_info(struct mt7996_phy *phy, struct ieee80211_vif *vif,
 			mt7996_mcu_bss_he_tlv(skb, vif, link_conf, phy);
 
 		/* this tag is necessary no matter if the vif is MLD */
-		mt7996_mcu_bss_mld_tlv(skb, mlink);
+		link = container_of(mlink, struct mt7996_vif_link, mt76);
+		mt7996_mcu_bss_mld_tlv(skb, link_conf, link);
 	}
 
 	mt7996_mcu_bss_mbssid_tlv(skb, link_conf, enable);
@@ -1106,6 +1250,127 @@ int mt7996_mcu_add_bss_info(struct mt7996_phy *phy, struct ieee80211_vif *vif,
 out:
 	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
 				     MCU_WMWA_UNI_CMD(BSS_INFO_UPDATE), true);
+}
+
+int mt7996_mcu_update_bss_rfch(struct mt7996_phy *phy, struct mt7996_vif_link *link)
+{
+	struct mt7996_dev *dev = phy->dev;
+	struct sk_buff *skb;
+
+	skb = __mt7996_mcu_alloc_bss_req(&dev->mt76, &link->mt76,
+					 MT7996_BSS_UPDATE_MAX_SIZE);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	mt7996_mcu_bss_rfch_tlv(skb, phy);
+
+	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
+				     MCU_WMWA_UNI_CMD(BSS_INFO_UPDATE), true);
+}
+
+int mt7996_mcu_set_protection(struct mt7996_phy *phy, struct mt7996_vif_link *link,
+			      u8 ht_mode, bool use_cts_prot)
+{
+	struct mt7996_dev *dev = phy->dev;
+	struct bss_prot_tlv *prot;
+	struct sk_buff *skb;
+	struct tlv *tlv;
+	enum {
+		PROT_NONMEMBER	 = BIT(1),
+		PROT_20MHZ	 = BIT(2),
+		PROT_NONHT_MIXED = BIT(3),
+		PROT_LEGACY_ERP	 = BIT(5),
+		PROT_NONGF_STA	 = BIT(7),
+	};
+
+	/* The current firmware causes TX failure. Need further investigation */
+	if (is_mt7996(&dev->mt76))
+		return 0;
+
+	skb = __mt7996_mcu_alloc_bss_req(&dev->mt76, &link->mt76,
+					 MT7996_BSS_UPDATE_MAX_SIZE);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	tlv = mt7996_mcu_add_uni_tlv(skb, UNI_BSS_INFO_PROTECT_INFO,
+				     sizeof(*prot));
+	prot = (struct bss_prot_tlv *)tlv;
+
+	switch (ht_mode & IEEE80211_HT_OP_MODE_PROTECTION) {
+	case IEEE80211_HT_OP_MODE_PROTECTION_NONMEMBER:
+		prot->prot_mode = cpu_to_le32(PROT_NONMEMBER);
+		break;
+	case IEEE80211_HT_OP_MODE_PROTECTION_20MHZ:
+		prot->prot_mode = cpu_to_le32(PROT_20MHZ);
+		break;
+	case IEEE80211_HT_OP_MODE_PROTECTION_NONHT_MIXED:
+		prot->prot_mode = cpu_to_le32(PROT_NONHT_MIXED);
+		break;
+	}
+
+	if (ht_mode & IEEE80211_HT_OP_MODE_NON_GF_STA_PRSNT)
+		prot->prot_mode |= cpu_to_le32(PROT_NONGF_STA);
+
+	if (use_cts_prot)
+		prot->prot_mode |= cpu_to_le32(PROT_LEGACY_ERP);
+
+	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
+				     MCU_WM_UNI_CMD(BSS_INFO_UPDATE), true);
+}
+
+int mt7996_mcu_set_emlsr_mode(struct mt7996_dev *dev,
+			      struct ieee80211_vif *vif,
+			      struct ieee80211_sta *sta,
+			      struct ieee80211_eml_params *eml_params)
+{
+	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
+	struct mt7996_sta_link *msta_link;
+	struct sta_rec_eml_op *eml_op;
+	struct mt7996_vif_link *link;
+	struct sk_buff *skb;
+	struct tlv *tlv;
+
+	msta_link = mt76_dereference(msta->link[eml_params->link_id],
+				     &dev->mt76);
+	if (!msta_link)
+		return -EINVAL;
+
+	link = mt7996_vif_link(dev, vif, eml_params->link_id);
+	if (!link)
+		return -EINVAL;
+
+	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, &link->mt76,
+					      &msta_link->wcid,
+					      MT7996_STA_UPDATE_MAX_SIZE);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_EML_OP, sizeof(*eml_op));
+	eml_op = (struct sta_rec_eml_op *)tlv;
+	eml_op->link_bitmap = 0;
+
+	if (eml_params->control & IEEE80211_EML_CTRL_EMLSR_MODE) {
+		unsigned long link_bitmap = eml_params->link_bitmap;
+		unsigned int link_id;
+
+		for_each_set_bit(link_id, &link_bitmap,
+				 IEEE80211_MLD_MAX_NUM_LINKS) {
+			struct mt76_phy *mphy;
+
+			link = mt7996_vif_link(dev, vif, link_id);
+			if (!link)
+				continue;
+
+			mphy = mt76_vif_link_phy(&link->mt76);
+			if (!mphy)
+				continue;
+
+			eml_op->link_bitmap |= BIT(mphy->band_idx);
+		}
+	}
+
+	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
+				     MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
 }
 
 int mt7996_mcu_set_timing(struct mt7996_phy *phy, struct ieee80211_vif *vif,
@@ -1129,9 +1394,8 @@ int mt7996_mcu_set_timing(struct mt7996_phy *phy, struct ieee80211_vif *vif,
 static int
 mt7996_mcu_sta_ba(struct mt7996_dev *dev, struct mt76_vif_link *mvif,
 		  struct ieee80211_ampdu_params *params,
-		  bool enable, bool tx)
+		  struct mt76_wcid *wcid, bool enable, bool tx)
 {
-	struct mt76_wcid *wcid = (struct mt76_wcid *)params->sta->drv_priv;
 	struct sta_rec_ba_uni *ba;
 	struct sk_buff *skb;
 	struct tlv *tlv;
@@ -1150,7 +1414,7 @@ mt7996_mcu_sta_ba(struct mt7996_dev *dev, struct mt76_vif_link *mvif,
 	ba->ba_en = enable << params->tid;
 	ba->amsdu = params->amsdu;
 	ba->tid = params->tid;
-	ba->ba_rdd_rro = !tx && enable && dev->has_rro;
+	ba->ba_rdd_rro = !tx && enable && mt7996_has_hwrro(dev);
 
 	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
 				     MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
@@ -1159,37 +1423,81 @@ mt7996_mcu_sta_ba(struct mt7996_dev *dev, struct mt76_vif_link *mvif,
 /** starec & wtbl **/
 int mt7996_mcu_add_tx_ba(struct mt7996_dev *dev,
 			 struct ieee80211_ampdu_params *params,
-			 bool enable)
+			 struct ieee80211_vif *vif, bool enable)
 {
-	struct mt7996_sta *msta = (struct mt7996_sta *)params->sta->drv_priv;
-	struct mt7996_vif *mvif = msta->vif;
+	struct ieee80211_sta *sta = params->sta;
+	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
+	struct ieee80211_link_sta *link_sta;
+	unsigned int link_id;
+	int ret = 0;
 
-	if (enable && !params->amsdu)
-		msta->wcid.amsdu = false;
+	for_each_sta_active_link(vif, sta, link_sta, link_id) {
+		struct mt7996_sta_link *msta_link;
+		struct mt7996_vif_link *link;
 
-	return mt7996_mcu_sta_ba(dev, &mvif->deflink.mt76, params, enable, true);
+		msta_link = mt7996_sta_link_protected(dev, msta, link_id);
+		if (!msta_link)
+			continue;
+
+		link = mt7996_vif_link(dev, vif, link_id);
+		if (!link)
+			continue;
+
+		if (enable && !params->amsdu)
+			msta_link->wcid.amsdu = false;
+
+		ret = mt7996_mcu_sta_ba(dev, &link->mt76, params,
+					&msta_link->wcid, enable, true);
+		if (ret)
+			break;
+	}
+
+	return ret;
 }
 
 int mt7996_mcu_add_rx_ba(struct mt7996_dev *dev,
 			 struct ieee80211_ampdu_params *params,
-			 bool enable)
+			 struct ieee80211_vif *vif, bool enable)
 {
-	struct mt7996_sta *msta = (struct mt7996_sta *)params->sta->drv_priv;
-	struct mt7996_vif *mvif = msta->vif;
+	struct ieee80211_sta *sta = params->sta;
+	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
+	struct ieee80211_link_sta *link_sta;
+	unsigned int link_id;
+	int ret = 0;
 
-	return mt7996_mcu_sta_ba(dev, &mvif->deflink.mt76, params, enable, false);
+	for_each_sta_active_link(vif, sta, link_sta, link_id) {
+		struct mt7996_sta_link *msta_link;
+		struct mt7996_vif_link *link;
+
+		msta_link = mt7996_sta_link_protected(dev, msta, link_id);
+		if (!msta_link)
+			continue;
+
+		link = mt7996_vif_link(dev, vif, link_id);
+		if (!link)
+			continue;
+
+		ret = mt7996_mcu_sta_ba(dev, &link->mt76, params,
+					&msta_link->wcid, enable, false);
+		if (ret)
+			break;
+	}
+
+	return ret;
 }
 
 static void
-mt7996_mcu_sta_he_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
+mt7996_mcu_sta_he_tlv(struct sk_buff *skb,
+		      struct ieee80211_link_sta *link_sta,
+		      struct mt7996_vif_link *link)
 {
-	struct ieee80211_he_cap_elem *elem = &sta->deflink.he_cap.he_cap_elem;
+	struct ieee80211_he_cap_elem *elem = &link_sta->he_cap.he_cap_elem;
 	struct ieee80211_he_mcs_nss_supp mcs_map;
 	struct sta_rec_he_v2 *he;
 	struct tlv *tlv;
 	int i = 0;
 
-	if (!sta->deflink.he_cap.has_he)
+	if (!link_sta->he_cap.has_he)
 		return;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_HE_V2, sizeof(*he));
@@ -1201,21 +1509,21 @@ mt7996_mcu_sta_he_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
 		he->he_phy_cap[i] = elem->phy_cap_info[i];
 	}
 
-	mcs_map = sta->deflink.he_cap.he_mcs_nss_supp;
-	switch (sta->deflink.bandwidth) {
+	mcs_map = link_sta->he_cap.he_mcs_nss_supp;
+	switch (link_sta->bandwidth) {
 	case IEEE80211_STA_RX_BW_160:
 		if (elem->phy_cap_info[0] &
 		    IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G)
-			mt7996_mcu_set_sta_he_mcs(sta,
+			mt7996_mcu_set_sta_he_mcs(link_sta, link,
 						  &he->max_nss_mcs[CMD_HE_MCS_BW8080],
 						  le16_to_cpu(mcs_map.rx_mcs_80p80));
 
-		mt7996_mcu_set_sta_he_mcs(sta,
+		mt7996_mcu_set_sta_he_mcs(link_sta, link,
 					  &he->max_nss_mcs[CMD_HE_MCS_BW160],
 					  le16_to_cpu(mcs_map.rx_mcs_160));
 		fallthrough;
 	default:
-		mt7996_mcu_set_sta_he_mcs(sta,
+		mt7996_mcu_set_sta_he_mcs(link_sta, link,
 					  &he->max_nss_mcs[CMD_HE_MCS_BW80],
 					  le16_to_cpu(mcs_map.rx_mcs_80));
 		break;
@@ -1225,24 +1533,26 @@ mt7996_mcu_sta_he_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
 }
 
 static void
-mt7996_mcu_sta_he_6g_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
+mt7996_mcu_sta_he_6g_tlv(struct sk_buff *skb,
+			 struct ieee80211_link_sta *link_sta)
 {
 	struct sta_rec_he_6g_capa *he_6g;
 	struct tlv *tlv;
 
-	if (!sta->deflink.he_6ghz_capa.capa)
+	if (!link_sta->he_6ghz_capa.capa)
 		return;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_HE_6G, sizeof(*he_6g));
 
 	he_6g = (struct sta_rec_he_6g_capa *)tlv;
-	he_6g->capa = sta->deflink.he_6ghz_capa.capa;
+	he_6g->capa = link_sta->he_6ghz_capa.capa;
 }
 
 static void
-mt7996_mcu_sta_eht_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
+mt7996_mcu_sta_eht_tlv(struct sk_buff *skb,
+		       struct ieee80211_link_sta *link_sta)
 {
-	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
+	struct mt7996_sta *msta = (struct mt7996_sta *)link_sta->sta->drv_priv;
 	struct ieee80211_vif *vif = container_of((void *)msta->vif,
 						 struct ieee80211_vif, drv_priv);
 	struct ieee80211_eht_mcs_nss_supp *mcs_map;
@@ -1250,11 +1560,11 @@ mt7996_mcu_sta_eht_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
 	struct sta_rec_eht *eht;
 	struct tlv *tlv;
 
-	if (!sta->deflink.eht_cap.has_eht)
+	if (!link_sta->eht_cap.has_eht)
 		return;
 
-	mcs_map = &sta->deflink.eht_cap.eht_mcs_nss_supp;
-	elem = &sta->deflink.eht_cap.eht_cap_elem;
+	mcs_map = &link_sta->eht_cap.eht_mcs_nss_supp;
+	elem = &link_sta->eht_cap.eht_cap_elem;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_EHT, sizeof(*eht));
 
@@ -1265,7 +1575,7 @@ mt7996_mcu_sta_eht_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
 	eht->phy_cap_ext = cpu_to_le64(elem->phy_cap_info[8]);
 
 	if (vif->type != NL80211_IFTYPE_STATION &&
-	    (sta->deflink.he_cap.he_cap_elem.phy_cap_info[0] &
+	    (link_sta->he_cap.he_cap_elem.phy_cap_info[0] &
 	     (IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G |
 	      IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G |
 	      IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G |
@@ -1281,47 +1591,48 @@ mt7996_mcu_sta_eht_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
 }
 
 static void
-mt7996_mcu_sta_ht_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
+mt7996_mcu_sta_ht_tlv(struct sk_buff *skb, struct ieee80211_link_sta *link_sta)
 {
 	struct sta_rec_ht_uni *ht;
 	struct tlv *tlv;
 
-	if (!sta->deflink.ht_cap.ht_supported)
+	if (!link_sta->ht_cap.ht_supported)
 		return;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_HT, sizeof(*ht));
 
 	ht = (struct sta_rec_ht_uni *)tlv;
-	ht->ht_cap = cpu_to_le16(sta->deflink.ht_cap.cap);
-	ht->ampdu_param = u8_encode_bits(sta->deflink.ht_cap.ampdu_factor,
+	ht->ht_cap = cpu_to_le16(link_sta->ht_cap.cap);
+	ht->ampdu_param = u8_encode_bits(link_sta->ht_cap.ampdu_factor,
 					 IEEE80211_HT_AMPDU_PARM_FACTOR) |
-			  u8_encode_bits(sta->deflink.ht_cap.ampdu_density,
+			  u8_encode_bits(link_sta->ht_cap.ampdu_density,
 					 IEEE80211_HT_AMPDU_PARM_DENSITY);
 }
 
 static void
-mt7996_mcu_sta_vht_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
+mt7996_mcu_sta_vht_tlv(struct sk_buff *skb, struct ieee80211_link_sta *link_sta)
 {
 	struct sta_rec_vht *vht;
 	struct tlv *tlv;
 
 	/* For 6G band, this tlv is necessary to let hw work normally */
-	if (!sta->deflink.he_6ghz_capa.capa && !sta->deflink.vht_cap.vht_supported)
+	if (!link_sta->he_6ghz_capa.capa && !link_sta->vht_cap.vht_supported)
 		return;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_VHT, sizeof(*vht));
 
 	vht = (struct sta_rec_vht *)tlv;
-	vht->vht_cap = cpu_to_le32(sta->deflink.vht_cap.cap);
-	vht->vht_rx_mcs_map = sta->deflink.vht_cap.vht_mcs.rx_mcs_map;
-	vht->vht_tx_mcs_map = sta->deflink.vht_cap.vht_mcs.tx_mcs_map;
+	vht->vht_cap = cpu_to_le32(link_sta->vht_cap.cap);
+	vht->vht_rx_mcs_map = link_sta->vht_cap.vht_mcs.rx_mcs_map;
+	vht->vht_tx_mcs_map = link_sta->vht_cap.vht_mcs.tx_mcs_map;
 }
 
 static void
 mt7996_mcu_sta_amsdu_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
-			 struct ieee80211_vif *vif, struct ieee80211_sta *sta)
+			 struct ieee80211_vif *vif,
+			 struct ieee80211_link_sta *link_sta,
+			 struct mt7996_sta_link *msta_link)
 {
-	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
 	struct sta_rec_amsdu *amsdu;
 	struct tlv *tlv;
 
@@ -1330,16 +1641,16 @@ mt7996_mcu_sta_amsdu_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
 	    vif->type != NL80211_IFTYPE_AP)
 		return;
 
-	if (!sta->deflink.agg.max_amsdu_len)
+	if (!link_sta->agg.max_amsdu_len)
 		return;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_HW_AMSDU, sizeof(*amsdu));
 	amsdu = (struct sta_rec_amsdu *)tlv;
 	amsdu->max_amsdu_num = 8;
 	amsdu->amsdu_en = true;
-	msta->wcid.amsdu = true;
+	msta_link->wcid.amsdu = true;
 
-	switch (sta->deflink.agg.max_amsdu_len) {
+	switch (link_sta->agg.max_amsdu_len) {
 	case IEEE80211_MAX_MPDU_LEN_VHT_11454:
 		amsdu->max_mpdu_size =
 			IEEE80211_VHT_CAP_MAX_MPDU_LENGTH_11454;
@@ -1356,30 +1667,31 @@ mt7996_mcu_sta_amsdu_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
 
 static void
 mt7996_mcu_sta_muru_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
-			struct ieee80211_vif *vif, struct ieee80211_sta *sta)
+			struct ieee80211_bss_conf *link_conf,
+			struct ieee80211_link_sta *link_sta)
 {
-	struct ieee80211_he_cap_elem *elem = &sta->deflink.he_cap.he_cap_elem;
+	struct ieee80211_he_cap_elem *elem = &link_sta->he_cap.he_cap_elem;
 	struct sta_rec_muru *muru;
 	struct tlv *tlv;
 
-	if (vif->type != NL80211_IFTYPE_STATION &&
-	    vif->type != NL80211_IFTYPE_AP)
+	if (link_conf->vif->type != NL80211_IFTYPE_STATION &&
+	    link_conf->vif->type != NL80211_IFTYPE_AP)
 		return;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_MURU, sizeof(*muru));
 
 	muru = (struct sta_rec_muru *)tlv;
-	muru->cfg.mimo_dl_en = vif->bss_conf.eht_mu_beamformer ||
-			       vif->bss_conf.he_mu_beamformer ||
-			       vif->bss_conf.vht_mu_beamformer ||
-			       vif->bss_conf.vht_mu_beamformee;
+	muru->cfg.mimo_dl_en = link_conf->eht_mu_beamformer ||
+			       link_conf->he_mu_beamformer ||
+			       link_conf->vht_mu_beamformer ||
+			       link_conf->vht_mu_beamformee;
 	muru->cfg.ofdma_dl_en = true;
 
-	if (sta->deflink.vht_cap.vht_supported)
+	if (link_sta->vht_cap.vht_supported)
 		muru->mimo_dl.vht_mu_bfee =
-			!!(sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE);
+			!!(link_sta->vht_cap.cap & IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE);
 
-	if (!sta->deflink.he_cap.has_he)
+	if (!link_sta->he_cap.has_he)
 		return;
 
 	muru->mimo_dl.partial_bw_dl_mimo =
@@ -1410,49 +1722,50 @@ mt7996_mcu_sta_muru_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
 }
 
 static inline bool
-mt7996_is_ebf_supported(struct mt7996_phy *phy, struct ieee80211_vif *vif,
-			struct ieee80211_sta *sta, bool bfee)
+mt7996_is_ebf_supported(struct mt7996_phy *phy,
+			struct ieee80211_bss_conf *link_conf,
+			struct ieee80211_link_sta *link_sta, bool bfee)
 {
 	int sts = hweight16(phy->mt76->chainmask);
 
-	if (vif->type != NL80211_IFTYPE_STATION &&
-	    vif->type != NL80211_IFTYPE_AP)
+	if (link_conf->vif->type != NL80211_IFTYPE_STATION &&
+	    link_conf->vif->type != NL80211_IFTYPE_AP)
 		return false;
 
 	if (!bfee && sts < 2)
 		return false;
 
-	if (sta->deflink.eht_cap.has_eht) {
-		struct ieee80211_sta_eht_cap *pc = &sta->deflink.eht_cap;
+	if (link_sta->eht_cap.has_eht) {
+		struct ieee80211_sta_eht_cap *pc = &link_sta->eht_cap;
 		struct ieee80211_eht_cap_elem_fixed *pe = &pc->eht_cap_elem;
 
 		if (bfee)
-			return vif->bss_conf.eht_su_beamformee &&
+			return link_conf->eht_su_beamformee &&
 			       EHT_PHY(CAP0_SU_BEAMFORMER, pe->phy_cap_info[0]);
 		else
-			return vif->bss_conf.eht_su_beamformer &&
+			return link_conf->eht_su_beamformer &&
 			       EHT_PHY(CAP0_SU_BEAMFORMEE, pe->phy_cap_info[0]);
 	}
 
-	if (sta->deflink.he_cap.has_he) {
-		struct ieee80211_he_cap_elem *pe = &sta->deflink.he_cap.he_cap_elem;
+	if (link_sta->he_cap.has_he) {
+		struct ieee80211_he_cap_elem *pe = &link_sta->he_cap.he_cap_elem;
 
 		if (bfee)
-			return vif->bss_conf.he_su_beamformee &&
+			return link_conf->he_su_beamformee &&
 			       HE_PHY(CAP3_SU_BEAMFORMER, pe->phy_cap_info[3]);
 		else
-			return vif->bss_conf.he_su_beamformer &&
+			return link_conf->he_su_beamformer &&
 			       HE_PHY(CAP4_SU_BEAMFORMEE, pe->phy_cap_info[4]);
 	}
 
-	if (sta->deflink.vht_cap.vht_supported) {
-		u32 cap = sta->deflink.vht_cap.cap;
+	if (link_sta->vht_cap.vht_supported) {
+		u32 cap = link_sta->vht_cap.cap;
 
 		if (bfee)
-			return vif->bss_conf.vht_su_beamformee &&
+			return link_conf->vht_su_beamformee &&
 			       (cap & IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE);
 		else
-			return vif->bss_conf.vht_su_beamformer &&
+			return link_conf->vht_su_beamformer &&
 			       (cap & IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE);
 	}
 
@@ -1473,10 +1786,11 @@ mt7996_mcu_sta_sounding_rate(struct sta_rec_bf *bf, struct mt7996_phy *phy)
 }
 
 static void
-mt7996_mcu_sta_bfer_ht(struct ieee80211_sta *sta, struct mt7996_phy *phy,
-		       struct sta_rec_bf *bf, bool explicit)
+mt7996_mcu_sta_bfer_ht(struct ieee80211_link_sta *link_sta,
+		       struct mt7996_phy *phy, struct sta_rec_bf *bf,
+		       bool explicit)
 {
-	struct ieee80211_mcs_info *mcs = &sta->deflink.ht_cap.mcs;
+	struct ieee80211_mcs_info *mcs = &link_sta->ht_cap.mcs;
 	u8 n = 0;
 
 	bf->tx_mode = MT_PHY_TYPE_HT;
@@ -1499,10 +1813,11 @@ mt7996_mcu_sta_bfer_ht(struct ieee80211_sta *sta, struct mt7996_phy *phy,
 }
 
 static void
-mt7996_mcu_sta_bfer_vht(struct ieee80211_sta *sta, struct mt7996_phy *phy,
-			struct sta_rec_bf *bf, bool explicit)
+mt7996_mcu_sta_bfer_vht(struct ieee80211_link_sta *link_sta,
+			struct mt7996_phy *phy, struct sta_rec_bf *bf,
+			bool explicit)
 {
-	struct ieee80211_sta_vht_cap *pc = &sta->deflink.vht_cap;
+	struct ieee80211_sta_vht_cap *pc = &link_sta->vht_cap;
 	struct ieee80211_sta_vht_cap *vc = &phy->mt76->sband_5g.sband.vht_cap;
 	u16 mcs_map = le16_to_cpu(pc->vht_mcs.rx_mcs_map);
 	u8 nss_mcs = mt7996_mcu_get_sta_nss(mcs_map);
@@ -1523,36 +1838,37 @@ mt7996_mcu_sta_bfer_vht(struct ieee80211_sta *sta, struct mt7996_phy *phy,
 		bf->ncol = min_t(u8, nss_mcs, bf->nrow);
 		bf->ibf_ncol = min_t(u8, MT7996_IBF_MAX_NC, bf->ncol);
 
-		if (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_160)
+		if (link_sta->bandwidth == IEEE80211_STA_RX_BW_160)
 			bf->nrow = 1;
 	} else {
 		bf->nrow = tx_ant;
 		bf->ncol = min_t(u8, nss_mcs, bf->nrow);
 		bf->ibf_ncol = min_t(u8, MT7996_IBF_MAX_NC, nss_mcs);
 
-		if (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_160)
+		if (link_sta->bandwidth == IEEE80211_STA_RX_BW_160)
 			bf->ibf_nrow = 1;
 	}
 }
 
 static void
-mt7996_mcu_sta_bfer_he(struct ieee80211_sta *sta, struct ieee80211_vif *vif,
-		       struct mt7996_phy *phy, struct sta_rec_bf *bf,
-		       bool explicit)
+mt7996_mcu_sta_bfer_he(struct ieee80211_link_sta *link_sta,
+		       struct ieee80211_vif *vif, struct mt7996_phy *phy,
+		       struct sta_rec_bf *bf, bool explicit)
 {
-	struct ieee80211_sta_he_cap *pc = &sta->deflink.he_cap;
+	struct ieee80211_sta_he_cap *pc = &link_sta->he_cap;
 	struct ieee80211_he_cap_elem *pe = &pc->he_cap_elem;
-	const struct ieee80211_sta_he_cap *vc =
-		mt76_connac_get_he_phy_cap(phy->mt76, vif);
-	const struct ieee80211_he_cap_elem *ve = &vc->he_cap_elem;
 	u16 mcs_map = le16_to_cpu(pc->he_mcs_nss_supp.rx_mcs_80);
 	u8 nss_mcs = mt7996_mcu_get_sta_nss(mcs_map);
+	const struct ieee80211_he_cap_elem *ve;
+	const struct ieee80211_sta_he_cap *vc;
 	u8 snd_dim, sts;
 
+	vc = mt76_connac_get_he_phy_cap(phy->mt76, vif);
 	if (!vc)
 		return;
 
 	bf->tx_mode = MT_PHY_TYPE_HE_SU;
+	ve = &vc->he_cap_elem;
 
 	mt7996_mcu_sta_sounding_rate(bf, phy);
 
@@ -1569,7 +1885,7 @@ mt7996_mcu_sta_bfer_he(struct ieee80211_sta *sta, struct ieee80211_vif *vif,
 	bf->ibf_ncol = explicit ? min_t(u8, MT7996_IBF_MAX_NC, bf->ncol) :
 				  min_t(u8, MT7996_IBF_MAX_NC, nss_mcs);
 
-	if (sta->deflink.bandwidth != IEEE80211_STA_RX_BW_160)
+	if (link_sta->bandwidth != IEEE80211_STA_RX_BW_160)
 		return;
 
 	/* go over for 160MHz and 80p80 */
@@ -1601,21 +1917,25 @@ mt7996_mcu_sta_bfer_he(struct ieee80211_sta *sta, struct ieee80211_vif *vif,
 }
 
 static void
-mt7996_mcu_sta_bfer_eht(struct ieee80211_sta *sta, struct ieee80211_vif *vif,
-			struct mt7996_phy *phy, struct sta_rec_bf *bf,
-			bool explicit)
+mt7996_mcu_sta_bfer_eht(struct ieee80211_link_sta *link_sta,
+			struct ieee80211_vif *vif, struct mt7996_phy *phy,
+			struct sta_rec_bf *bf, bool explicit)
 {
-	struct ieee80211_sta_eht_cap *pc = &sta->deflink.eht_cap;
+	struct ieee80211_sta_eht_cap *pc = &link_sta->eht_cap;
 	struct ieee80211_eht_cap_elem_fixed *pe = &pc->eht_cap_elem;
 	struct ieee80211_eht_mcs_nss_supp *eht_nss = &pc->eht_mcs_nss_supp;
-	const struct ieee80211_sta_eht_cap *vc =
-		mt76_connac_get_eht_phy_cap(phy->mt76, vif);
-	const struct ieee80211_eht_cap_elem_fixed *ve = &vc->eht_cap_elem;
 	u8 nss_mcs = u8_get_bits(eht_nss->bw._80.rx_tx_mcs9_max_nss,
 				 IEEE80211_EHT_MCS_NSS_RX) - 1;
+	const struct ieee80211_eht_cap_elem_fixed *ve;
+	const struct ieee80211_sta_eht_cap *vc;
 	u8 snd_dim, sts;
 
+	vc = mt76_connac_get_eht_phy_cap(phy->mt76, vif);
+	if (!vc)
+		return;
+
 	bf->tx_mode = MT_PHY_TYPE_EHT_MU;
+	ve = &vc->eht_cap_elem;
 
 	mt7996_mcu_sta_sounding_rate(bf, phy);
 
@@ -1629,10 +1949,10 @@ mt7996_mcu_sta_bfer_eht(struct ieee80211_sta *sta, struct ieee80211_vif *vif,
 	bf->ibf_ncol = explicit ? min_t(u8, MT7996_IBF_MAX_NC, bf->ncol) :
 				  min_t(u8, MT7996_IBF_MAX_NC, nss_mcs);
 
-	if (sta->deflink.bandwidth < IEEE80211_STA_RX_BW_160)
+	if (link_sta->bandwidth < IEEE80211_STA_RX_BW_160)
 		return;
 
-	switch (sta->deflink.bandwidth) {
+	switch (link_sta->bandwidth) {
 	case IEEE80211_STA_RX_BW_160:
 		snd_dim = EHT_PHY(CAP2_SOUNDING_DIM_160MHZ_MASK, ve->phy_cap_info[2]);
 		sts = EHT_PHY(CAP1_BEAMFORMEE_SS_160MHZ_MASK, pe->phy_cap_info[1]);
@@ -1660,14 +1980,15 @@ mt7996_mcu_sta_bfer_eht(struct ieee80211_sta *sta, struct ieee80211_vif *vif,
 
 static void
 mt7996_mcu_sta_bfer_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
-			struct ieee80211_vif *vif, struct ieee80211_sta *sta)
+			struct ieee80211_bss_conf *link_conf,
+			struct ieee80211_link_sta *link_sta,
+			struct mt7996_vif_link *link)
 {
 #define EBF_MODE	BIT(0)
 #define IBF_MODE	BIT(1)
 #define BF_MAT_ORDER	4
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct mt7996_phy *phy = mvif->deflink.phy;
-	int tx_ant = hweight16(phy->mt76->chainmask) - 1;
+	struct mt7996_phy *phy = mt7996_vif_link_phy(link);
+	struct ieee80211_vif *vif = link_conf->vif;
 	struct sta_rec_bf *bf;
 	struct tlv *tlv;
 	static const u8 matrix[BF_MAT_ORDER][BF_MAT_ORDER] = {
@@ -1676,12 +1997,16 @@ mt7996_mcu_sta_bfer_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
 		{2, 4, 4, 0},	/* 3x1, 3x2, 3x3, 3x4 */
 		{3, 5, 6, 0}	/* 4x1, 4x2, 4x3, 4x4 */
 	};
+	int tx_ant;
 	bool ebf;
 
-	if (!(sta->deflink.ht_cap.ht_supported || sta->deflink.he_cap.has_he))
+	if (!phy)
 		return;
 
-	ebf = mt7996_is_ebf_supported(phy, vif, sta, false);
+	if (!(link_sta->ht_cap.ht_supported || link_sta->he_cap.has_he))
+		return;
+
+	ebf = mt7996_is_ebf_supported(phy, link_conf, link_sta, false);
 	if (!ebf && !dev->ibf)
 		return;
 
@@ -1692,28 +2017,30 @@ mt7996_mcu_sta_bfer_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
 	 * vht: support eBF and iBF
 	 * ht: iBF only, since mac80211 lacks of eBF support
 	 */
-	if (sta->deflink.eht_cap.has_eht)
-		mt7996_mcu_sta_bfer_eht(sta, vif, phy, bf, ebf);
-	else if (sta->deflink.he_cap.has_he)
-		mt7996_mcu_sta_bfer_he(sta, vif, phy, bf, ebf);
-	else if (sta->deflink.vht_cap.vht_supported)
-		mt7996_mcu_sta_bfer_vht(sta, phy, bf, ebf);
-	else if (sta->deflink.ht_cap.ht_supported)
-		mt7996_mcu_sta_bfer_ht(sta, phy, bf, ebf);
+	if (link_sta->eht_cap.has_eht)
+		mt7996_mcu_sta_bfer_eht(link_sta, vif, phy, bf, ebf);
+	else if (link_sta->he_cap.has_he)
+		mt7996_mcu_sta_bfer_he(link_sta, vif, phy, bf, ebf);
+	else if (link_sta->vht_cap.vht_supported)
+		mt7996_mcu_sta_bfer_vht(link_sta, phy, bf, ebf);
+	else if (link_sta->ht_cap.ht_supported)
+		mt7996_mcu_sta_bfer_ht(link_sta, phy, bf, ebf);
 	else
 		return;
 
 	bf->bf_cap = ebf ? EBF_MODE : (dev->ibf ? IBF_MODE : 0);
+	tx_ant = hweight16(phy->mt76->chainmask) - 1;
 	if (is_mt7992(&dev->mt76) && tx_ant == 4)
 		bf->bf_cap |= IBF_MODE;
-	bf->bw = sta->deflink.bandwidth;
-	bf->ibf_dbw = sta->deflink.bandwidth;
+
+	bf->bw = link_sta->bandwidth;
+	bf->ibf_dbw = link_sta->bandwidth;
 	bf->ibf_nrow = tx_ant;
 
-	if (sta->deflink.eht_cap.has_eht || sta->deflink.he_cap.has_he)
-		bf->ibf_timeout = is_mt7996(&dev->mt76) ? MT7996_IBF_TIMEOUT :
-							  MT7992_IBF_TIMEOUT;
-	else if (!ebf && sta->deflink.bandwidth <= IEEE80211_STA_RX_BW_40 && !bf->ncol)
+	if (link_sta->eht_cap.has_eht || link_sta->he_cap.has_he)
+		bf->ibf_timeout = is_mt7992(&dev->mt76) ? MT7992_IBF_TIMEOUT :
+							  MT7996_IBF_TIMEOUT;
+	else if (!ebf && link_sta->bandwidth <= IEEE80211_STA_RX_BW_40 && !bf->ncol)
 		bf->ibf_timeout = MT7996_IBF_TIMEOUT_LEGACY;
 	else
 		bf->ibf_timeout = MT7996_IBF_TIMEOUT;
@@ -1726,54 +2053,46 @@ mt7996_mcu_sta_bfer_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
 			bf->mem_20m = bf->nrow < BF_MAT_ORDER ?
 				      matrix[bf->nrow][bf->ncol] : 0;
 	}
-
-	switch (sta->deflink.bandwidth) {
-	case IEEE80211_STA_RX_BW_160:
-	case IEEE80211_STA_RX_BW_80:
-		bf->mem_total = bf->mem_20m * 2;
-		break;
-	case IEEE80211_STA_RX_BW_40:
-		bf->mem_total = bf->mem_20m;
-		break;
-	case IEEE80211_STA_RX_BW_20:
-	default:
-		break;
-	}
 }
 
 static void
 mt7996_mcu_sta_bfee_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
-			struct ieee80211_vif *vif, struct ieee80211_sta *sta)
+			struct ieee80211_bss_conf *link_conf,
+			struct ieee80211_link_sta *link_sta,
+			struct mt7996_vif_link *link)
 {
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct mt7996_phy *phy = mvif->deflink.phy;
-	int tx_ant = hweight8(phy->mt76->antenna_mask) - 1;
+	struct mt7996_phy *phy = mt7996_vif_link_phy(link);
 	struct sta_rec_bfee *bfee;
 	struct tlv *tlv;
 	u8 nrow = 0;
+	int tx_ant;
 
-	if (!(sta->deflink.vht_cap.vht_supported || sta->deflink.he_cap.has_he))
+	if (!phy)
 		return;
 
-	if (!mt7996_is_ebf_supported(phy, vif, sta, true))
+	if (!(link_sta->vht_cap.vht_supported || link_sta->he_cap.has_he))
+		return;
+
+	if (!mt7996_is_ebf_supported(phy, link_conf, link_sta, true))
 		return;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_BFEE, sizeof(*bfee));
 	bfee = (struct sta_rec_bfee *)tlv;
 
-	if (sta->deflink.he_cap.has_he) {
-		struct ieee80211_he_cap_elem *pe = &sta->deflink.he_cap.he_cap_elem;
+	if (link_sta->he_cap.has_he) {
+		struct ieee80211_he_cap_elem *pe = &link_sta->he_cap.he_cap_elem;
 
 		nrow = HE_PHY(CAP5_BEAMFORMEE_NUM_SND_DIM_UNDER_80MHZ_MASK,
 			      pe->phy_cap_info[5]);
-	} else if (sta->deflink.vht_cap.vht_supported) {
-		struct ieee80211_sta_vht_cap *pc = &sta->deflink.vht_cap;
+	} else if (link_sta->vht_cap.vht_supported) {
+		struct ieee80211_sta_vht_cap *pc = &link_sta->vht_cap;
 
 		nrow = FIELD_GET(IEEE80211_VHT_CAP_SOUNDING_DIMENSIONS_MASK,
 				 pc->cap);
 	}
 
 	/* reply with identity matrix to avoid 2x2 BF negative gain */
+	tx_ant = hweight8(phy->mt76->antenna_mask) - 1;
 	bfee->fb_identity_matrix = (nrow == 1 && tx_ant == 2);
 }
 
@@ -1831,6 +2150,11 @@ mt7996_mcu_sta_hdr_trans_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
 		hdr_trans->from_ds = true;
 		hdr_trans->mesh = true;
 	}
+
+	if (test_bit(MT_WCID_FLAG_TDLS_PEER, &wcid->flags)) {
+		hdr_trans->to_ds = false;
+		hdr_trans->from_ds = false;
+	}
 }
 
 static enum mcu_mmps_mode
@@ -1851,8 +2175,8 @@ mt7996_mcu_get_mmps_mode(enum ieee80211_smps_mode smps)
 int mt7996_mcu_set_fixed_rate_ctrl(struct mt7996_dev *dev,
 				   void *data, u16 version)
 {
+	struct uni_header hdr = {};
 	struct ra_fixed_rate *req;
-	struct uni_header hdr;
 	struct sk_buff *skb;
 	struct tlv *tlv;
 	int len;
@@ -1874,21 +2198,35 @@ int mt7996_mcu_set_fixed_rate_ctrl(struct mt7996_dev *dev,
 				     MCU_WM_UNI_CMD(RA), true);
 }
 
-int mt7996_mcu_set_fixed_field(struct mt7996_dev *dev, struct ieee80211_vif *vif,
-			       struct ieee80211_sta *sta, void *data, u32 field)
+int mt7996_mcu_set_fixed_field(struct mt7996_dev *dev, struct mt7996_sta *msta,
+			       void *data, u8 link_id, u32 field)
 {
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
-	struct sta_phy_uni *phy = data;
+	struct mt7996_vif *mvif = msta->vif;
+	struct mt7996_sta_link *msta_link;
 	struct sta_rec_ra_fixed_uni *ra;
+	struct sta_phy_uni *phy = data;
+	struct mt76_vif_link *mlink;
 	struct sk_buff *skb;
+	int err = -ENODEV;
 	struct tlv *tlv;
 
-	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, &mvif->deflink.mt76,
-					      &msta->wcid,
+	rcu_read_lock();
+
+	mlink = rcu_dereference(mvif->mt76.link[link_id]);
+	if (!mlink)
+		goto error_unlock;
+
+	msta_link = mt7996_sta_link(msta, link_id);
+	if (!msta_link)
+		goto error_unlock;
+
+	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, mlink,
+					      &msta_link->wcid,
 					      MT7996_STA_UPDATE_MAX_SIZE);
-	if (IS_ERR(skb))
-		return PTR_ERR(skb);
+	if (IS_ERR(skb)) {
+		err = PTR_ERR(skb);
+		goto error_unlock;
+	}
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_RA_UPDATE, sizeof(*ra));
 	ra = (struct sta_rec_ra_fixed_uni *)tlv;
@@ -1903,131 +2241,191 @@ int mt7996_mcu_set_fixed_field(struct mt7996_dev *dev, struct ieee80211_vif *vif
 		if (phy)
 			ra->phy = *phy;
 		break;
-	case RATE_PARAM_MMPS_UPDATE:
-		ra->mmps_mode = mt7996_mcu_get_mmps_mode(sta->deflink.smps_mode);
+	case RATE_PARAM_MMPS_UPDATE: {
+		struct ieee80211_sta *sta = wcid_to_sta(&msta_link->wcid);
+		struct ieee80211_link_sta *link_sta;
+
+		link_sta = rcu_dereference(sta->link[link_id]);
+		if (!link_sta) {
+			dev_kfree_skb(skb);
+			goto error_unlock;
+		}
+
+		ra->mmps_mode = mt7996_mcu_get_mmps_mode(link_sta->smps_mode);
 		break;
+	}
 	default:
 		break;
 	}
 	ra->field = cpu_to_le32(field);
 
+	rcu_read_unlock();
+
 	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
 				     MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
+error_unlock:
+	rcu_read_unlock();
+
+	return err;
 }
 
 static int
-mt7996_mcu_add_rate_ctrl_fixed(struct mt7996_dev *dev, struct ieee80211_vif *vif,
-			       struct ieee80211_sta *sta)
+mt7996_mcu_add_rate_ctrl_fixed(struct mt7996_dev *dev, struct mt7996_sta *msta,
+			       struct ieee80211_vif *vif, u8 link_id)
 {
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct cfg80211_chan_def *chandef = &mvif->deflink.phy->mt76->chandef;
-	struct cfg80211_bitrate_mask *mask = &mvif->deflink.bitrate_mask;
-	enum nl80211_band band = chandef->chan->band;
+	struct ieee80211_link_sta *link_sta;
+	struct cfg80211_bitrate_mask mask;
+	struct mt7996_sta_link *msta_link;
+	struct mt7996_vif_link *link;
 	struct sta_phy_uni phy = {};
-	int ret, nrates = 0;
+	struct ieee80211_sta *sta;
+	int ret, nrates = 0, idx;
+	enum nl80211_band band;
+	struct mt76_phy *mphy;
+	bool has_he;
 
 #define __sta_phy_bitrate_mask_check(_mcs, _gi, _ht, _he)			\
 	do {									\
-		u8 i, gi = mask->control[band]._gi;				\
+		u8 i, gi = mask.control[band]._gi;				\
 		gi = (_he) ? gi : gi == NL80211_TXRATE_FORCE_SGI;		\
 		phy.sgi = gi;							\
-		phy.he_ltf = mask->control[band].he_ltf;			\
-		for (i = 0; i < ARRAY_SIZE(mask->control[band]._mcs); i++) {	\
-			if (!mask->control[band]._mcs[i])			\
+		phy.he_ltf = mask.control[band].he_ltf;				\
+		for (i = 0; i < ARRAY_SIZE(mask.control[band]._mcs); i++) {	\
+			if (!mask.control[band]._mcs[i])			\
 				continue;					\
-			nrates += hweight16(mask->control[band]._mcs[i]);	\
-			phy.mcs = ffs(mask->control[band]._mcs[i]) - 1;		\
+			nrates += hweight16(mask.control[band]._mcs[i]);	\
+			phy.mcs = ffs(mask.control[band]._mcs[i]) - 1;		\
 			if (_ht)						\
 				phy.mcs += 8 * i;				\
 		}								\
 	} while (0)
 
-	if (sta->deflink.he_cap.has_he) {
+	rcu_read_lock();
+
+	link = mt7996_vif_link(dev, vif, link_id);
+	if (!link)
+		goto error_unlock;
+
+	msta_link = mt7996_sta_link(msta, link_id);
+	if (!msta_link)
+		goto error_unlock;
+
+	sta = wcid_to_sta(&msta_link->wcid);
+	link_sta = rcu_dereference(sta->link[link_id]);
+	if (!link_sta)
+		goto error_unlock;
+
+	mphy = mt76_vif_link_phy(&link->mt76);
+	if (!mphy)
+		goto error_unlock;
+
+	band = mphy->chandef.chan->band;
+	has_he = link_sta->he_cap.has_he;
+	mask = link->bitrate_mask;
+	idx = msta_link->wcid.idx;
+
+	if (has_he) {
 		__sta_phy_bitrate_mask_check(he_mcs, he_gi, 0, 1);
-	} else if (sta->deflink.vht_cap.vht_supported) {
+	} else if (link_sta->vht_cap.vht_supported) {
 		__sta_phy_bitrate_mask_check(vht_mcs, gi, 0, 0);
-	} else if (sta->deflink.ht_cap.ht_supported) {
+	} else if (link_sta->ht_cap.ht_supported) {
 		__sta_phy_bitrate_mask_check(ht_mcs, gi, 1, 0);
 	} else {
-		nrates = hweight32(mask->control[band].legacy);
-		phy.mcs = ffs(mask->control[band].legacy) - 1;
+		nrates = hweight32(mask.control[band].legacy);
+		phy.mcs = ffs(mask.control[band].legacy) - 1;
 	}
+
+	rcu_read_unlock();
+
 #undef __sta_phy_bitrate_mask_check
 
 	/* fall back to auto rate control */
-	if (mask->control[band].gi == NL80211_TXRATE_DEFAULT_GI &&
-	    mask->control[band].he_gi == GENMASK(7, 0) &&
-	    mask->control[band].he_ltf == GENMASK(7, 0) &&
+	if (mask.control[band].gi == NL80211_TXRATE_DEFAULT_GI &&
+	    mask.control[band].he_gi == GENMASK(7, 0) &&
+	    mask.control[band].he_ltf == GENMASK(7, 0) &&
 	    nrates != 1)
 		return 0;
 
 	/* fixed single rate */
 	if (nrates == 1) {
-		ret = mt7996_mcu_set_fixed_field(dev, vif, sta, &phy,
+		ret = mt7996_mcu_set_fixed_field(dev, msta, &phy, link_id,
 						 RATE_PARAM_FIXED_MCS);
 		if (ret)
 			return ret;
 	}
 
 	/* fixed GI */
-	if (mask->control[band].gi != NL80211_TXRATE_DEFAULT_GI ||
-	    mask->control[band].he_gi != GENMASK(7, 0)) {
-		struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
+	if (mask.control[band].gi != NL80211_TXRATE_DEFAULT_GI ||
+	    mask.control[band].he_gi != GENMASK(7, 0)) {
 		u32 addr;
 
 		/* firmware updates only TXCMD but doesn't take WTBL into
 		 * account, so driver should update here to reflect the
 		 * actual txrate hardware sends out.
 		 */
-		addr = mt7996_mac_wtbl_lmac_addr(dev, msta->wcid.idx, 7);
-		if (sta->deflink.he_cap.has_he)
+		addr = mt7996_mac_wtbl_lmac_addr(dev, idx, 7);
+		if (has_he)
 			mt76_rmw_field(dev, addr, GENMASK(31, 24), phy.sgi);
 		else
 			mt76_rmw_field(dev, addr, GENMASK(15, 12), phy.sgi);
 
-		ret = mt7996_mcu_set_fixed_field(dev, vif, sta, &phy,
+		ret = mt7996_mcu_set_fixed_field(dev, msta, &phy, link_id,
 						 RATE_PARAM_FIXED_GI);
 		if (ret)
 			return ret;
 	}
 
 	/* fixed HE_LTF */
-	if (mask->control[band].he_ltf != GENMASK(7, 0)) {
-		ret = mt7996_mcu_set_fixed_field(dev, vif, sta, &phy,
+	if (mask.control[band].he_ltf != GENMASK(7, 0)) {
+		ret = mt7996_mcu_set_fixed_field(dev, msta, &phy, link_id,
 						 RATE_PARAM_FIXED_HE_LTF);
 		if (ret)
 			return ret;
 	}
 
 	return 0;
+
+error_unlock:
+	rcu_read_unlock();
+
+	return -ENODEV;
 }
 
 static void
 mt7996_mcu_sta_rate_ctrl_tlv(struct sk_buff *skb, struct mt7996_dev *dev,
-			     struct ieee80211_vif *vif, struct ieee80211_sta *sta)
+			     struct ieee80211_vif *vif,
+			     struct ieee80211_bss_conf *link_conf,
+			     struct ieee80211_link_sta *link_sta,
+			     struct mt7996_vif_link *link)
 {
 #define INIT_RCPI 180
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct mt76_phy *mphy = mvif->deflink.phy->mt76;
-	struct cfg80211_chan_def *chandef = &mphy->chandef;
-	struct cfg80211_bitrate_mask *mask = &mvif->deflink.bitrate_mask;
-	enum nl80211_band band = chandef->chan->band;
+	struct mt76_phy *mphy = mt76_vif_link_phy(&link->mt76);
+	struct cfg80211_bitrate_mask *mask = &link->bitrate_mask;
+	u32 cap = link_sta->sta->wme ? STA_CAP_WMM : 0;
+	struct cfg80211_chan_def *chandef;
 	struct sta_rec_ra_uni *ra;
+	enum nl80211_band band;
 	struct tlv *tlv;
-	u32 supp_rate = sta->deflink.supp_rates[band];
-	u32 cap = sta->wme ? STA_CAP_WMM : 0;
+	u32 supp_rate;
+
+	if (!mphy)
+		return;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_RA, sizeof(*ra));
 	ra = (struct sta_rec_ra_uni *)tlv;
 
+	chandef = &mphy->chandef;
+	band = chandef->chan->band;
+	supp_rate = link_sta->supp_rates[band];
+
 	ra->valid = true;
 	ra->auto_rate = true;
-	ra->phy_mode = mt76_connac_get_phy_mode(mphy, vif, band, &sta->deflink);
+	ra->phy_mode = mt76_connac_get_phy_mode(mphy, vif, band, link_sta);
 	ra->channel = chandef->chan->hw_value;
-	ra->bw = (sta->deflink.bandwidth == IEEE80211_STA_RX_BW_320) ?
-		 CMD_CBW_320MHZ : sta->deflink.bandwidth;
+	ra->bw = (link_sta->bandwidth == IEEE80211_STA_RX_BW_320) ?
+		 CMD_CBW_320MHZ : link_sta->bandwidth;
 	ra->phy.bw = ra->bw;
-	ra->mmps_mode = mt7996_mcu_get_mmps_mode(sta->deflink.smps_mode);
+	ra->mmps_mode = mt7996_mcu_get_mmps_mode(link_sta->smps_mode);
 
 	if (supp_rate) {
 		supp_rate &= mask->control[band].legacy;
@@ -2047,60 +2445,60 @@ mt7996_mcu_sta_rate_ctrl_tlv(struct sk_buff *skb, struct mt7996_dev *dev,
 		}
 	}
 
-	if (sta->deflink.ht_cap.ht_supported) {
+	if (link_sta->ht_cap.ht_supported) {
 		ra->supp_mode |= MODE_HT;
-		ra->af = sta->deflink.ht_cap.ampdu_factor;
-		ra->ht_gf = !!(sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_GRN_FLD);
+		ra->af = link_sta->ht_cap.ampdu_factor;
+		ra->ht_gf = !!(link_sta->ht_cap.cap & IEEE80211_HT_CAP_GRN_FLD);
 
 		cap |= STA_CAP_HT;
-		if (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_SGI_20)
+		if (link_sta->ht_cap.cap & IEEE80211_HT_CAP_SGI_20)
 			cap |= STA_CAP_SGI_20;
-		if (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_SGI_40)
+		if (link_sta->ht_cap.cap & IEEE80211_HT_CAP_SGI_40)
 			cap |= STA_CAP_SGI_40;
-		if (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_TX_STBC)
+		if (link_sta->ht_cap.cap & IEEE80211_HT_CAP_TX_STBC)
 			cap |= STA_CAP_TX_STBC;
-		if (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_RX_STBC)
+		if (link_sta->ht_cap.cap & IEEE80211_HT_CAP_RX_STBC)
 			cap |= STA_CAP_RX_STBC;
-		if (vif->bss_conf.ht_ldpc &&
-		    (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_LDPC_CODING))
+		if (link_conf->ht_ldpc &&
+		    (link_sta->ht_cap.cap & IEEE80211_HT_CAP_LDPC_CODING))
 			cap |= STA_CAP_LDPC;
 
-		mt7996_mcu_set_sta_ht_mcs(sta, ra->ht_mcs,
+		mt7996_mcu_set_sta_ht_mcs(link_sta, ra->ht_mcs,
 					  mask->control[band].ht_mcs);
 		ra->supp_ht_mcs = *(__le32 *)ra->ht_mcs;
 	}
 
-	if (sta->deflink.vht_cap.vht_supported) {
+	if (link_sta->vht_cap.vht_supported) {
 		u8 af;
 
 		ra->supp_mode |= MODE_VHT;
 		af = FIELD_GET(IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK,
-			       sta->deflink.vht_cap.cap);
+			       link_sta->vht_cap.cap);
 		ra->af = max_t(u8, ra->af, af);
 
 		cap |= STA_CAP_VHT;
-		if (sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_SHORT_GI_80)
+		if (link_sta->vht_cap.cap & IEEE80211_VHT_CAP_SHORT_GI_80)
 			cap |= STA_CAP_VHT_SGI_80;
-		if (sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_SHORT_GI_160)
+		if (link_sta->vht_cap.cap & IEEE80211_VHT_CAP_SHORT_GI_160)
 			cap |= STA_CAP_VHT_SGI_160;
-		if (sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_TXSTBC)
+		if (link_sta->vht_cap.cap & IEEE80211_VHT_CAP_TXSTBC)
 			cap |= STA_CAP_VHT_TX_STBC;
-		if (sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_RXSTBC_1)
+		if (link_sta->vht_cap.cap & IEEE80211_VHT_CAP_RXSTBC_1)
 			cap |= STA_CAP_VHT_RX_STBC;
-		if ((vif->type != NL80211_IFTYPE_AP || vif->bss_conf.vht_ldpc) &&
-		    (sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_RXLDPC))
+		if ((vif->type != NL80211_IFTYPE_AP || link_conf->vht_ldpc) &&
+		    (link_sta->vht_cap.cap & IEEE80211_VHT_CAP_RXLDPC))
 			cap |= STA_CAP_VHT_LDPC;
 
-		mt7996_mcu_set_sta_vht_mcs(sta, ra->supp_vht_mcs,
+		mt7996_mcu_set_sta_vht_mcs(link_sta, ra->supp_vht_mcs,
 					   mask->control[band].vht_mcs);
 	}
 
-	if (sta->deflink.he_cap.has_he) {
+	if (link_sta->he_cap.has_he) {
 		ra->supp_mode |= MODE_HE;
 		cap |= STA_CAP_HE;
 
-		if (sta->deflink.he_6ghz_capa.capa)
-			ra->af = le16_get_bits(sta->deflink.he_6ghz_capa.capa,
+		if (link_sta->he_6ghz_capa.capa)
+			ra->af = le16_get_bits(link_sta->he_6ghz_capa.capa,
 					       IEEE80211_HE_6GHZ_CAP_MAX_AMPDU_LEN_EXP);
 	}
 	ra->sta_cap = cpu_to_le32(cap);
@@ -2108,47 +2506,77 @@ mt7996_mcu_sta_rate_ctrl_tlv(struct sk_buff *skb, struct mt7996_dev *dev,
 	memset(ra->rx_rcpi, INIT_RCPI, sizeof(ra->rx_rcpi));
 }
 
-int mt7996_mcu_add_rate_ctrl(struct mt7996_dev *dev, struct ieee80211_vif *vif,
-			     struct ieee80211_sta *sta, bool changed)
+int mt7996_mcu_add_rate_ctrl(struct mt7996_dev *dev, struct mt7996_sta *msta,
+			     struct ieee80211_vif *vif, u8 link_id,
+			     bool changed)
 {
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
+	struct ieee80211_bss_conf *link_conf;
+	struct ieee80211_link_sta *link_sta;
+	struct mt7996_sta_link *msta_link;
+	struct mt7996_vif_link *link;
+	struct ieee80211_sta *sta;
 	struct sk_buff *skb;
-	int ret;
+	int ret = -ENODEV;
 
-	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, &mvif->deflink.mt76,
-					      &msta->wcid,
+	rcu_read_lock();
+
+	link = mt7996_vif_link(dev, vif, link_id);
+	if (!link)
+		goto error_unlock;
+
+	msta_link = mt7996_sta_link(msta, link_id);
+	if (!msta_link)
+		goto error_unlock;
+
+	sta = wcid_to_sta(&msta_link->wcid);
+	link_sta = rcu_dereference(sta->link[link_id]);
+	if (!link_sta)
+		goto error_unlock;
+
+	link_conf = rcu_dereference(vif->link_conf[link_id]);
+	if (!link_conf)
+		goto error_unlock;
+
+	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, &link->mt76,
+					      &msta_link->wcid,
 					      MT7996_STA_UPDATE_MAX_SIZE);
-	if (IS_ERR(skb))
-		return PTR_ERR(skb);
+	if (IS_ERR(skb)) {
+		ret = PTR_ERR(skb);
+		goto error_unlock;
+	}
 
 	/* firmware rc algorithm refers to sta_rec_he for HE control.
 	 * once dev->rc_work changes the settings driver should also
 	 * update sta_rec_he here.
 	 */
 	if (changed)
-		mt7996_mcu_sta_he_tlv(skb, sta);
+		mt7996_mcu_sta_he_tlv(skb, link_sta, link);
 
 	/* sta_rec_ra accommodates BW, NSS and only MCS range format
 	 * i.e 0-{7,8,9} for VHT.
 	 */
-	mt7996_mcu_sta_rate_ctrl_tlv(skb, dev, vif, sta);
+	mt7996_mcu_sta_rate_ctrl_tlv(skb, dev, vif, link_conf, link_sta, link);
+
+	rcu_read_unlock();
 
 	ret = mt76_mcu_skb_send_msg(&dev->mt76, skb,
 				    MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
 	if (ret)
 		return ret;
 
-	return mt7996_mcu_add_rate_ctrl_fixed(dev, vif, sta);
+	return mt7996_mcu_add_rate_ctrl_fixed(dev, msta, vif, link_id);
+
+error_unlock:
+	rcu_read_unlock();
+
+	return ret;
 }
 
 static int
-mt7996_mcu_add_group(struct mt7996_dev *dev, struct ieee80211_vif *vif,
-		     struct ieee80211_sta *sta)
+mt7996_mcu_add_group(struct mt7996_dev *dev, struct mt7996_vif_link *link,
+		     struct mt76_wcid *wcid)
 {
 #define MT_STA_BSS_GROUP		1
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct mt7996_sta *msta;
 	struct {
 		u8 __rsv1[4];
 
@@ -2163,76 +2591,216 @@ mt7996_mcu_add_group(struct mt7996_dev *dev, struct ieee80211_vif *vif,
 		.tag = cpu_to_le16(UNI_VOW_DRR_CTRL),
 		.len = cpu_to_le16(sizeof(req) - 4),
 		.action = cpu_to_le32(MT_STA_BSS_GROUP),
-		.val = cpu_to_le32(mvif->deflink.mt76.idx % 16),
+		.val = cpu_to_le32(link->mt76.idx % 16),
+		.wlan_idx = cpu_to_le16(wcid->idx),
 	};
-
-	msta = sta ? (struct mt7996_sta *)sta->drv_priv : &mvif->deflink.sta;
-	req.wlan_idx = cpu_to_le16(msta->wcid.idx);
 
 	return mt76_mcu_send_msg(&dev->mt76, MCU_WM_UNI_CMD(VOW), &req,
 				 sizeof(req), true);
 }
 
-int mt7996_mcu_add_sta(struct mt7996_dev *dev, struct ieee80211_vif *vif,
-		       struct mt76_vif_link *mlink,
-		       struct ieee80211_sta *sta, int conn_state, bool newly)
+int mt7996_mcu_mld_reconf_stop_link(struct mt7996_dev *dev,
+				    struct ieee80211_vif *vif,
+				    u16 removed_links)
 {
-	struct ieee80211_link_sta *link_sta = NULL;
-	struct mt76_wcid *wcid = mlink->wcid;
+	unsigned long rem_links = removed_links;
+	struct mld_reconf_stop_link *sl;
+	struct mld_req_hdr hdr = {};
+	unsigned int link_id;
+	struct sk_buff *skb;
+	struct tlv *tlv;
+
+	skb = mt76_mcu_msg_alloc(&dev->mt76, NULL, sizeof(hdr) + sizeof(*sl));
+	if (!skb)
+		return -ENOMEM;
+
+	memcpy(hdr.mld_addr, vif->addr, ETH_ALEN);
+	skb_put_data(skb, &hdr, sizeof(hdr));
+
+	tlv = mt7996_mcu_add_uni_tlv(skb, UNI_CMD_MLD_RECONF_STOP_LINK,
+				     sizeof(*sl));
+	sl = (struct mld_reconf_stop_link *)tlv;
+	sl->link_bitmap = cpu_to_le16(removed_links);
+
+	for_each_set_bit(link_id, &rem_links, IEEE80211_MLD_MAX_NUM_LINKS) {
+		struct mt7996_vif_link *link;
+
+		link = mt7996_vif_link(dev, vif, link_id);
+		if (!link)
+			continue;
+
+		sl->bss_idx[link_id] = link->mt76.idx;
+	}
+
+	return mt76_mcu_skb_send_msg(&dev->mt76, skb, MCU_WM_UNI_CMD(MLD),
+				     true);
+}
+
+int mt7996_mcu_mld_link_oper(struct mt7996_dev *dev,
+			     struct ieee80211_bss_conf *link_conf,
+			     struct mt7996_vif_link *link, bool add)
+{
+	struct ieee80211_vif *vif = link_conf->vif;
+	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
+	struct bss_mld_link_op_tlv *mld_op;
+	struct sk_buff *skb;
+	struct tlv *tlv;
+
+	skb = __mt7996_mcu_alloc_bss_req(&dev->mt76, &link->mt76,
+					 MT7996_BSS_UPDATE_MAX_SIZE);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	tlv = mt7996_mcu_add_uni_tlv(skb, UNI_BSS_INFO_MLD_LINK_OP,
+				     sizeof(*mld_op));
+	mld_op = (struct bss_mld_link_op_tlv *)tlv;
+	mld_op->link_operation = add;
+	mld_op->own_mld_id = link->mld_idx;
+	mld_op->link_id = link_conf->link_id;
+	mld_op->group_mld_id = add ? mvif->mld_group_idx : 0xff;
+	mld_op->remap_idx = add ? mvif->mld_remap_idx : 0xff;
+	memcpy(mld_op->mac_addr, vif->addr, ETH_ALEN);
+
+	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
+				     MCU_WMWA_UNI_CMD(BSS_INFO_UPDATE), true);
+}
+
+static void
+mt7996_mcu_sta_mld_setup_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
+			     struct ieee80211_vif *vif,
+			     struct ieee80211_sta *sta)
+{
+	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
+	unsigned int nlinks = hweight16(sta->valid_links);
+	struct mld_setup_link *mld_setup_link;
+	struct ieee80211_link_sta *link_sta;
+	struct sta_rec_mld_setup *mld_setup;
+	struct mt7996_sta_link *msta_link;
+	unsigned int link_id;
+	struct tlv *tlv;
+
+	msta_link = mt7996_sta_link_protected(dev, msta, msta->deflink_id);
+	if (!msta_link)
+		return;
+
+	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_MLD,
+				      sizeof(struct sta_rec_mld_setup) +
+				      sizeof(struct mld_setup_link) * nlinks);
+
+	mld_setup = (struct sta_rec_mld_setup *)tlv;
+	memcpy(mld_setup->mld_addr, sta->addr, ETH_ALEN);
+	mld_setup->setup_wcid = cpu_to_le16(msta_link->wcid.idx);
+	mld_setup->primary_id = cpu_to_le16(msta_link->wcid.idx);
+
+	if (nlinks > 1) {
+		msta_link = mt7996_sta_link_protected(dev, msta,
+						      msta->seclink_id);
+		if (!msta_link)
+			return;
+	}
+	mld_setup->seconed_id = cpu_to_le16(msta_link->wcid.idx);
+	mld_setup->link_num = nlinks;
+
+	mld_setup_link = (struct mld_setup_link *)mld_setup->link_info;
+	for_each_sta_active_link(vif, sta, link_sta, link_id) {
+		struct mt7996_vif_link *link;
+
+		msta_link = mt7996_sta_link_protected(dev, msta, link_id);
+		if (!msta_link)
+			continue;
+
+		link = mt7996_vif_link(dev, vif, link_id);
+		if (!link)
+			continue;
+
+		mld_setup_link->wcid = cpu_to_le16(msta_link->wcid.idx);
+		mld_setup_link->bss_idx = link->mt76.idx;
+		mld_setup_link++;
+	}
+}
+
+static void
+mt7996_mcu_sta_eht_mld_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
+			   struct ieee80211_sta *sta)
+{
+	struct sta_rec_eht_mld *eht_mld;
+	struct tlv *tlv;
+	int i;
+
+	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_EHT_MLD, sizeof(*eht_mld));
+	eht_mld = (struct sta_rec_eht_mld *)tlv;
+
+	for (i = 0; i < ARRAY_SIZE(eht_mld->str_cap); i++)
+		eht_mld->str_cap[i] = 0x7;
+}
+
+int mt7996_mcu_add_sta(struct mt7996_dev *dev,
+		       struct ieee80211_bss_conf *link_conf,
+		       struct ieee80211_link_sta *link_sta,
+		       struct mt7996_vif_link *link,
+		       struct mt7996_sta_link *msta_link,
+		       int conn_state, bool newly)
+{
+	struct mt76_wcid *wcid = msta_link ? &msta_link->wcid : link->mt76.wcid;
+	struct ieee80211_sta *sta = link_sta ? link_sta->sta : NULL;
 	struct sk_buff *skb;
 	int ret;
 
-	if (sta) {
-		struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
-
-		wcid = &msta->wcid;
-		link_sta = &sta->deflink;
-	}
-
-	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, mlink, wcid,
+	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, &link->mt76, wcid,
 					      MT7996_STA_UPDATE_MAX_SIZE);
 	if (IS_ERR(skb))
 		return PTR_ERR(skb);
 
 	/* starec basic */
-	mt76_connac_mcu_sta_basic_tlv(&dev->mt76, skb, &vif->bss_conf, link_sta,
+	mt76_connac_mcu_sta_basic_tlv(&dev->mt76, skb, link_conf, link_sta,
 				      conn_state, newly);
 
 	if (conn_state == CONN_STATE_DISCONNECT)
 		goto out;
 
 	/* starec hdr trans */
-	mt7996_mcu_sta_hdr_trans_tlv(dev, skb, vif, wcid);
+	mt7996_mcu_sta_hdr_trans_tlv(dev, skb, link_conf->vif, wcid);
 	/* starec tx proc */
 	mt7996_mcu_sta_tx_proc_tlv(skb);
 
 	/* tag order is in accordance with firmware dependency. */
-	if (sta) {
+	if (link_sta) {
 		/* starec hdrt mode */
 		mt7996_mcu_sta_hdrt_tlv(dev, skb);
-		/* starec bfer */
-		mt7996_mcu_sta_bfer_tlv(dev, skb, vif, sta);
+		if (conn_state == CONN_STATE_CONNECT) {
+			/* starec bfer */
+			mt7996_mcu_sta_bfer_tlv(dev, skb, link_conf, link_sta,
+						link);
+			/* starec bfee */
+			mt7996_mcu_sta_bfee_tlv(dev, skb, link_conf, link_sta,
+						link);
+		}
 		/* starec ht */
-		mt7996_mcu_sta_ht_tlv(skb, sta);
+		mt7996_mcu_sta_ht_tlv(skb, link_sta);
 		/* starec vht */
-		mt7996_mcu_sta_vht_tlv(skb, sta);
+		mt7996_mcu_sta_vht_tlv(skb, link_sta);
 		/* starec uapsd */
-		mt76_connac_mcu_sta_uapsd(skb, vif, sta);
+		mt76_connac_mcu_sta_uapsd(skb, link_conf->vif, sta);
 		/* starec amsdu */
-		mt7996_mcu_sta_amsdu_tlv(dev, skb, vif, sta);
+		mt7996_mcu_sta_amsdu_tlv(dev, skb, link_conf->vif, link_sta,
+					 msta_link);
 		/* starec he */
-		mt7996_mcu_sta_he_tlv(skb, sta);
+		mt7996_mcu_sta_he_tlv(skb, link_sta, link);
 		/* starec he 6g*/
-		mt7996_mcu_sta_he_6g_tlv(skb, sta);
+		mt7996_mcu_sta_he_6g_tlv(skb, link_sta);
 		/* starec eht */
-		mt7996_mcu_sta_eht_tlv(skb, sta);
+		mt7996_mcu_sta_eht_tlv(skb, link_sta);
 		/* starec muru */
-		mt7996_mcu_sta_muru_tlv(dev, skb, vif, sta);
-		/* starec bfee */
-		mt7996_mcu_sta_bfee_tlv(dev, skb, vif, sta);
+		mt7996_mcu_sta_muru_tlv(dev, skb, link_conf, link_sta);
+
+		if (sta->mlo) {
+			mt7996_mcu_sta_mld_setup_tlv(dev, skb, link_conf->vif,
+						     sta);
+			mt7996_mcu_sta_eht_mld_tlv(dev, skb, sta);
+		}
 	}
 
-	ret = mt7996_mcu_add_group(dev, vif, sta);
+	ret = mt7996_mcu_add_group(dev, link, wcid);
 	if (ret) {
 		dev_kfree_skb(skb);
 		return ret;
@@ -2242,156 +2810,160 @@ out:
 				     MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
 }
 
+int mt7996_mcu_teardown_mld_sta(struct mt7996_dev *dev,
+				struct mt7996_vif_link *link,
+				struct mt7996_sta_link *msta_link)
+{
+	struct sk_buff *skb;
+
+	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, &link->mt76,
+					      &msta_link->wcid,
+					      MT7996_STA_UPDATE_MAX_SIZE);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	mt76_connac_mcu_add_tlv(skb, STA_REC_MLD_OFF, sizeof(struct tlv));
+
+	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
+				     MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
+}
+
+void mt7996_mcu_update_sta_rec_bw(void *data, struct ieee80211_sta *sta)
+{
+	struct mt7996_vif_link *link = (struct mt7996_vif_link *)data;
+	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
+	struct mt7996_phy *phy = mt7996_vif_link_phy(link);
+	struct mt7996_sta_link *msta_link;
+	struct mt7996_dev *dev;
+	struct ieee80211_bss_conf *link_conf;
+	struct ieee80211_link_sta *link_sta;
+	struct ieee80211_vif *vif;
+	struct sk_buff *skb;
+	int link_id;
+
+	if (!phy)
+		return;
+
+	if (link->mt76.mvif != &msta->vif->mt76)
+		return;
+
+	dev = phy->dev;
+	link_id = link->msta_link.wcid.link_id;
+	link_sta = link_sta_dereference_protected(sta, link_id);
+	if (!link_sta)
+		return;
+
+	msta_link = mt7996_sta_link_protected(dev, msta, link_id);
+	if (!msta_link)
+		return;
+
+	vif = container_of((void *)msta->vif, struct ieee80211_vif, drv_priv);
+	link_conf = link_conf_dereference_protected(vif, link_id);
+	if (!link_conf)
+		return;
+
+	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, &link->mt76,
+					      &msta_link->wcid,
+					      MT7996_STA_UPDATE_MAX_SIZE);
+	if (IS_ERR(skb))
+		return;
+
+	mt7996_mcu_sta_bfer_tlv(dev, skb, link_conf, link_sta, link);
+	mt7996_mcu_sta_rate_ctrl_tlv(skb, dev, vif, link_conf, link_sta, link);
+
+	mt76_mcu_skb_send_msg(&dev->mt76, skb,
+			      MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
+}
+
 static int
-mt7996_mcu_sta_key_tlv(struct mt76_wcid *wcid,
+mt7996_mcu_sta_key_tlv(struct mt76_dev *dev, struct mt76_wcid *wcid,
 		       struct sk_buff *skb,
 		       struct ieee80211_key_conf *key,
 		       enum set_key_cmd cmd)
 {
 	struct sta_rec_sec_uni *sec;
+	struct sec_key_uni *sec_key;
 	struct tlv *tlv;
+	u8 cipher;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_KEY_V2, sizeof(*sec));
 	sec = (struct sta_rec_sec_uni *)tlv;
-	sec->add = cmd;
+	/* due to connac3 FW design, we only do remove key for BIGTK; even for
+	 * removal, the field should be filled with SET_KEY
+	 */
+	sec->add = SET_KEY;
+	sec->n_cipher = 1;
+	sec_key = &sec->key[0];
+	sec_key->wlan_idx = cpu_to_le16(wcid->idx);
+	sec_key->key_id = key->keyidx;
 
-	if (cmd == SET_KEY) {
-		struct sec_key_uni *sec_key;
-		u8 cipher;
+	if (cmd != SET_KEY)
+		return 0;
 
-		cipher = mt76_connac_mcu_get_cipher(key->cipher);
-		if (cipher == MCU_CIPHER_NONE)
-			return -EOPNOTSUPP;
+	cipher = mt76_connac_mcu_get_cipher(key->cipher);
+	if (cipher == MCU_CIPHER_NONE)
+		return -EOPNOTSUPP;
 
-		sec_key = &sec->key[0];
-		sec_key->wlan_idx = cpu_to_le16(wcid->idx);
-		sec_key->mgmt_prot = 0;
-		sec_key->cipher_id = cipher;
-		sec_key->cipher_len = sizeof(*sec_key);
-		sec_key->key_id = key->keyidx;
-		sec_key->key_len = key->keylen;
-		sec_key->need_resp = 0;
-		memcpy(sec_key->key, key->key, key->keylen);
+	sec_key->mgmt_prot = 0;
+	sec_key->cipher_id = cipher;
+	sec_key->cipher_len = sizeof(*sec_key);
+	sec_key->key_len = key->keylen;
+	sec_key->need_resp = 0;
+	memcpy(sec_key->key, key->key, key->keylen);
 
-		if (cipher == MCU_CIPHER_TKIP) {
-			/* Rx/Tx MIC keys are swapped */
-			memcpy(sec_key->key + 16, key->key + 24, 8);
-			memcpy(sec_key->key + 24, key->key + 16, 8);
-		}
-
-		sec->n_cipher = 1;
-	} else {
-		sec->n_cipher = 0;
+	if (cipher == MCU_CIPHER_TKIP) {
+		/* Rx/Tx MIC keys are swapped */
+		memcpy(sec_key->key + 16, key->key + 24, 8);
+		memcpy(sec_key->key + 24, key->key + 16, 8);
+		return 0;
 	}
+
+	if (sec_key->key_id != 6 && sec_key->key_id != 7)
+		return 0;
+
+	switch (key->cipher) {
+	case WLAN_CIPHER_SUITE_AES_CMAC:
+		sec_key->cipher_id = MCU_CIPHER_BCN_PROT_CMAC_128;
+		break;
+	case WLAN_CIPHER_SUITE_BIP_GMAC_128:
+		sec_key->cipher_id = MCU_CIPHER_BCN_PROT_GMAC_128;
+		break;
+	case WLAN_CIPHER_SUITE_BIP_GMAC_256:
+		sec_key->cipher_id = MCU_CIPHER_BCN_PROT_GMAC_256;
+		break;
+	case WLAN_CIPHER_SUITE_BIP_CMAC_256:
+		if (!is_mt7990(dev))
+			return -EOPNOTSUPP;
+		sec_key->cipher_id = MCU_CIPHER_BCN_PROT_CMAC_256;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	sec_key->bcn_mode = is_mt7990(dev) ? BP_HW_MODE : BP_SW_MODE;
 
 	return 0;
 }
 
-int mt7996_mcu_add_key(struct mt76_dev *dev, struct ieee80211_vif *vif,
+int mt7996_mcu_add_key(struct mt76_dev *dev, struct mt7996_vif_link *link,
 		       struct ieee80211_key_conf *key, int mcu_cmd,
 		       struct mt76_wcid *wcid, enum set_key_cmd cmd)
 {
-	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct sk_buff *skb;
 	int ret;
 
-	skb = __mt76_connac_mcu_alloc_sta_req(dev, mvif, wcid,
-					      MT7996_STA_UPDATE_MAX_SIZE);
+	skb = __mt76_connac_mcu_alloc_sta_req(dev, (struct mt76_vif_link *)link,
+					      wcid, MT7996_STA_UPDATE_MAX_SIZE);
 	if (IS_ERR(skb))
 		return PTR_ERR(skb);
 
-	ret = mt7996_mcu_sta_key_tlv(wcid, skb, key, cmd);
-	if (ret)
-		return ret;
-
-	return mt76_mcu_skb_send_msg(dev, skb, mcu_cmd, true);
-}
-
-static int mt7996_mcu_get_pn(struct mt7996_dev *dev, struct ieee80211_vif *vif,
-			     u8 *pn)
-{
-#define TSC_TYPE_BIGTK_PN 2
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct sta_rec_pn_info *pn_info;
-	struct sk_buff *skb, *rskb;
-	struct tlv *tlv;
-	int ret;
-
-	skb = mt76_connac_mcu_alloc_sta_req(&dev->mt76, &mvif->deflink.mt76, &mvif->deflink.sta.wcid);
-	if (IS_ERR(skb))
-		return PTR_ERR(skb);
-
-	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_PN_INFO, sizeof(*pn_info));
-	pn_info = (struct sta_rec_pn_info *)tlv;
-
-	pn_info->tsc_type = TSC_TYPE_BIGTK_PN;
-	ret = mt76_mcu_skb_send_and_get_msg(&dev->mt76, skb,
-					    MCU_WM_UNI_CMD_QUERY(STA_REC_UPDATE),
-					    true, &rskb);
-	if (ret)
-		return ret;
-
-	skb_pull(rskb, 4);
-
-	pn_info = (struct sta_rec_pn_info *)rskb->data;
-	if (le16_to_cpu(pn_info->tag) == STA_REC_PN_INFO)
-		memcpy(pn, pn_info->pn, 6);
-
-	dev_kfree_skb(rskb);
-	return 0;
-}
-
-int mt7996_mcu_bcn_prot_enable(struct mt7996_dev *dev, struct ieee80211_vif *vif,
-			       struct ieee80211_key_conf *key)
-{
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct mt7996_mcu_bcn_prot_tlv *bcn_prot;
-	struct sk_buff *skb;
-	struct tlv *tlv;
-	u8 pn[6] = {};
-	int len = sizeof(struct bss_req_hdr) +
-		  sizeof(struct mt7996_mcu_bcn_prot_tlv);
-	int ret;
-
-	skb = __mt7996_mcu_alloc_bss_req(&dev->mt76, &mvif->deflink.mt76, len);
-	if (IS_ERR(skb))
-		return PTR_ERR(skb);
-
-	tlv = mt76_connac_mcu_add_tlv(skb, UNI_BSS_INFO_BCN_PROT, sizeof(*bcn_prot));
-
-	bcn_prot = (struct mt7996_mcu_bcn_prot_tlv *)tlv;
-
-	ret = mt7996_mcu_get_pn(dev, vif, pn);
+	ret = mt7996_mcu_sta_key_tlv(dev, wcid, skb, key, cmd);
 	if (ret) {
 		dev_kfree_skb(skb);
 		return ret;
 	}
 
-	switch (key->cipher) {
-	case WLAN_CIPHER_SUITE_AES_CMAC:
-		bcn_prot->cipher_id = MCU_CIPHER_BCN_PROT_CMAC_128;
-		break;
-	case WLAN_CIPHER_SUITE_BIP_GMAC_128:
-		bcn_prot->cipher_id = MCU_CIPHER_BCN_PROT_GMAC_128;
-		break;
-	case WLAN_CIPHER_SUITE_BIP_GMAC_256:
-		bcn_prot->cipher_id = MCU_CIPHER_BCN_PROT_GMAC_256;
-		break;
-	case WLAN_CIPHER_SUITE_BIP_CMAC_256:
-	default:
-		dev_err(dev->mt76.dev, "Not supported Bigtk Cipher\n");
-		dev_kfree_skb(skb);
-		return -EOPNOTSUPP;
-	}
-
-	pn[0]++;
-	memcpy(bcn_prot->pn, pn, 6);
-	bcn_prot->enable = BP_SW_MODE;
-	memcpy(bcn_prot->key, key->key, WLAN_MAX_KEY_LEN);
-	bcn_prot->key_id = key->keyidx;
-
-	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
-				     MCU_WMWA_UNI_CMD(BSS_INFO_UPDATE), true);
+	return mt76_mcu_skb_send_msg(dev, skb, mcu_cmd, true);
 }
 
 int mt7996_mcu_add_dev_info(struct mt7996_phy *phy, struct ieee80211_vif *vif,
@@ -2450,6 +3022,16 @@ mt7996_mcu_beacon_cntdwn(struct sk_buff *rskb, struct sk_buff *skb,
 
 	info = (struct bss_bcn_cntdwn_tlv *)tlv;
 	info->cnt = skb->data[offs->cntdwn_counter_offs[0]];
+
+	/* abort the CCA countdown when starting CSA countdown */
+	if (csa) {
+		struct bss_bcn_cntdwn_tlv *cca_info;
+
+		tlv = mt7996_mcu_add_uni_tlv(rskb, UNI_BSS_INFO_BCN_BCC,
+					     sizeof(*cca_info));
+		cca_info = (struct bss_bcn_cntdwn_tlv *)tlv;
+		cca_info->cca.abort = true;
+	}
 }
 
 static void
@@ -2505,12 +3087,18 @@ mt7996_mcu_beacon_mbss(struct sk_buff *rskb, struct sk_buff *skb,
 static void
 mt7996_mcu_beacon_cont(struct mt7996_dev *dev,
 		       struct ieee80211_bss_conf *link_conf,
+		       struct mt7996_vif_link *link,
 		       struct sk_buff *rskb, struct sk_buff *skb,
 		       struct bss_bcn_content_tlv *bcn,
 		       struct ieee80211_mutable_offsets *offs)
 {
-	struct mt76_wcid *wcid = &dev->mt76.global_wcid;
-	u8 *buf;
+	u8 *buf, keyidx = link->msta_link.wcid.hw_key_idx2;
+	struct mt76_wcid *wcid;
+
+	if (is_mt7990(&dev->mt76) && (keyidx == 6 || keyidx == 7))
+		wcid = &link->msta_link.wcid;
+	else
+		wcid = &dev->mt76.global_wcid;
 
 	bcn->pkt_len = cpu_to_le16(MT_TXD_SIZE + skb->len);
 	bcn->tim_ie_pos = cpu_to_le16(offs->tim_offset);
@@ -2526,16 +3114,18 @@ mt7996_mcu_beacon_cont(struct mt7996_dev *dev,
 
 	buf = (u8 *)bcn + sizeof(*bcn);
 	mt7996_mac_write_txwi(dev, (__le32 *)buf, skb, wcid, NULL, 0, 0,
-			      BSS_CHANGED_BEACON);
+			      BSS_CHANGED_BEACON, link_conf->link_id);
 
 	memcpy(buf + MT_TXD_SIZE, skb->data, skb->len);
 }
 
 int mt7996_mcu_add_beacon(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-			  struct ieee80211_bss_conf *link_conf)
+			  struct ieee80211_bss_conf *link_conf, bool enabled)
 {
 	struct mt7996_dev *dev = mt7996_hw_dev(hw);
-	struct mt76_vif_link *mlink = mt76_vif_conf_link(&dev->mt76, vif, link_conf);
+	struct mt7996_vif_link *link = mt7996_vif_conf_link(dev, vif, link_conf);
+	struct mt76_phy *mphy = link ? mt76_vif_link_phy(&link->mt76) : NULL;
+	struct mt76_vif_link *mlink = link ? &link->mt76 : NULL;
 	struct ieee80211_mutable_offsets offs;
 	struct ieee80211_tx_info *info;
 	struct sk_buff *skb, *rskb;
@@ -2549,13 +3139,16 @@ int mt7996_mcu_add_beacon(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	if (!mlink)
 		return -EINVAL;
 
+	if (mphy && mphy->offchannel)
+		enabled = false;
+
 	rskb = __mt7996_mcu_alloc_bss_req(&dev->mt76, mlink,
 					  MT7996_MAX_BSS_OFFLOAD_SIZE);
 	if (IS_ERR(rskb))
 		return PTR_ERR(rskb);
 
 	skb = ieee80211_beacon_get_template(hw, vif, &offs, link_conf->link_id);
-	if (link_conf->enable_beacon && !skb) {
+	if (enabled && !skb) {
 		dev_kfree_skb(rskb);
 		return -EINVAL;
 	}
@@ -2574,14 +3167,14 @@ int mt7996_mcu_add_beacon(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	len = ALIGN(sizeof(*bcn) + MT_TXD_SIZE + extra_len, 4);
 	tlv = mt7996_mcu_add_uni_tlv(rskb, UNI_BSS_INFO_BCN_CONTENT, len);
 	bcn = (struct bss_bcn_content_tlv *)tlv;
-	bcn->enable = link_conf->enable_beacon;
+	bcn->enable = enabled;
 	if (!bcn->enable)
 		goto out;
 
 	info = IEEE80211_SKB_CB(skb);
 	info->hw_queue |= FIELD_PREP(MT_TX_HW_QUEUE_PHY, mlink->band_idx);
 
-	mt7996_mcu_beacon_cont(dev, link_conf, rskb, skb, bcn, &offs);
+	mt7996_mcu_beacon_cont(dev, link_conf, link, rskb, skb, bcn, &offs);
 	if (link_conf->bssid_indicator)
 		mt7996_mcu_beacon_mbss(rskb, skb, bcn, &offs);
 	mt7996_mcu_beacon_cntdwn(rskb, skb, &offs, link_conf->csa_active);
@@ -2592,13 +3185,14 @@ out:
 }
 
 int mt7996_mcu_beacon_inband_discov(struct mt7996_dev *dev,
-				    struct ieee80211_vif *vif, u32 changed)
+				    struct ieee80211_bss_conf *link_conf,
+				    struct mt7996_vif_link *link, u32 changed)
 {
 #define OFFLOAD_TX_MODE_SU	BIT(0)
 #define OFFLOAD_TX_MODE_MU	BIT(1)
+	struct mt76_phy *mphy = mt76_vif_link_phy(&link->mt76);
+	struct ieee80211_vif *vif = link_conf->vif;
 	struct ieee80211_hw *hw = mt76_hw(dev);
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct mt7996_phy *phy = mt7996_vif_link_phy(&mvif->deflink);
 	struct mt76_wcid *wcid = &dev->mt76.global_wcid;
 	struct bss_inband_discovery_tlv *discov;
 	struct ieee80211_tx_info *info;
@@ -2609,28 +3203,30 @@ int mt7996_mcu_beacon_inband_discov(struct mt7996_dev *dev,
 	u8 *buf, interval;
 	int len;
 
-	if (!phy)
+	if (!mphy)
 		return -EINVAL;
 
-	chandef = &phy->mt76->chandef;
+	chandef = &mphy->chandef;
 	band = chandef->chan->band;
 
-	if (vif->bss_conf.nontransmitted)
+	if (link_conf->nontransmitted)
 		return 0;
 
-	rskb = __mt7996_mcu_alloc_bss_req(&dev->mt76, &mvif->deflink.mt76,
+	rskb = __mt7996_mcu_alloc_bss_req(&dev->mt76, &link->mt76,
 					  MT7996_MAX_BSS_OFFLOAD_SIZE);
 	if (IS_ERR(rskb))
 		return PTR_ERR(rskb);
 
 	if (changed & BSS_CHANGED_FILS_DISCOVERY &&
-	    vif->bss_conf.fils_discovery.max_interval) {
-		interval = vif->bss_conf.fils_discovery.max_interval;
-		skb = ieee80211_get_fils_discovery_tmpl(hw, vif);
+	    link_conf->fils_discovery.max_interval) {
+		interval = link_conf->fils_discovery.max_interval;
+		skb = ieee80211_get_fils_discovery_tmpl(hw, vif,
+							link_conf->link_id);
 	} else if (changed & BSS_CHANGED_UNSOL_BCAST_PROBE_RESP &&
-		   vif->bss_conf.unsol_bcast_probe_resp_interval) {
-		interval = vif->bss_conf.unsol_bcast_probe_resp_interval;
-		skb = ieee80211_get_unsol_bcast_probe_resp_tmpl(hw, vif);
+		   link_conf->unsol_bcast_probe_resp_interval) {
+		interval = link_conf->unsol_bcast_probe_resp_interval;
+		skb = ieee80211_get_unsol_bcast_probe_resp_tmpl(hw, vif,
+								link_conf->link_id);
 	}
 
 	if (!skb) {
@@ -2648,7 +3244,7 @@ int mt7996_mcu_beacon_inband_discov(struct mt7996_dev *dev,
 	info = IEEE80211_SKB_CB(skb);
 	info->control.vif = vif;
 	info->band = band;
-	info->hw_queue |= FIELD_PREP(MT_TX_HW_QUEUE_PHY, phy->mt76->band_idx);
+	info->hw_queue |= FIELD_PREP(MT_TX_HW_QUEUE_PHY, mphy->band_idx);
 
 	len = ALIGN(sizeof(*discov) + MT_TXD_SIZE + skb->len, 4);
 	tlv = mt7996_mcu_add_uni_tlv(rskb, UNI_BSS_INFO_OFFLOAD, len);
@@ -2664,7 +3260,8 @@ int mt7996_mcu_beacon_inband_discov(struct mt7996_dev *dev,
 
 	buf = (u8 *)tlv + sizeof(*discov);
 
-	mt7996_mac_write_txwi(dev, (__le32 *)buf, skb, wcid, NULL, 0, 0, changed);
+	mt7996_mac_write_txwi(dev, (__le32 *)buf, skb, wcid, NULL, 0, 0,
+			      changed, link_conf->link_id);
 
 	memcpy(buf + MT_TXD_SIZE, skb->data, skb->len);
 
@@ -2891,6 +3488,9 @@ static int mt7996_load_ram(struct mt7996_dev *dev)
 	if (ret)
 		return ret;
 
+	if (!mt7996_has_wa(dev))
+		return 0;
+
 	ret = __mt7996_load_ram(dev, "DSP", fw_name(dev, FIRMWARE_DSP),
 				MT7996_RAM_TYPE_DSP);
 	if (ret)
@@ -2901,10 +3501,9 @@ static int mt7996_load_ram(struct mt7996_dev *dev)
 }
 
 static int
-mt7996_firmware_state(struct mt7996_dev *dev, bool wa)
+mt7996_firmware_state(struct mt7996_dev *dev, u8 fw_state)
 {
-	u32 state = FIELD_PREP(MT_TOP_MISC_FW_STATE,
-			       wa ? FW_STATE_RDY : FW_STATE_FW_DOWNLOAD);
+	u32 state = FIELD_PREP(MT_TOP_MISC_FW_STATE, fw_state);
 
 	if (!mt76_poll_msec(dev, MT_TOP_MISC, MT_TOP_MISC_FW_STATE,
 			    state, 1000)) {
@@ -2936,13 +3535,14 @@ mt7996_mcu_restart(struct mt76_dev *dev)
 
 static int mt7996_load_firmware(struct mt7996_dev *dev)
 {
+	u8 fw_state;
 	int ret;
 
 	/* make sure fw is download state */
-	if (mt7996_firmware_state(dev, false)) {
+	if (mt7996_firmware_state(dev, FW_STATE_FW_DOWNLOAD)) {
 		/* restart firmware once */
 		mt7996_mcu_restart(&dev->mt76);
-		ret = mt7996_firmware_state(dev, false);
+		ret = mt7996_firmware_state(dev, FW_STATE_FW_DOWNLOAD);
 		if (ret) {
 			dev_err(dev->mt76.dev,
 				"Firmware is not ready for download\n");
@@ -2958,7 +3558,8 @@ static int mt7996_load_firmware(struct mt7996_dev *dev)
 	if (ret)
 		return ret;
 
-	ret = mt7996_firmware_state(dev, true);
+	fw_state = mt7996_has_wa(dev) ? FW_STATE_RDY : FW_STATE_NORMAL_TRX;
+	ret = mt7996_firmware_state(dev, fw_state);
 	if (ret)
 		return ret;
 
@@ -3096,13 +3697,15 @@ int mt7996_mcu_init_firmware(struct mt7996_dev *dev)
 	if (ret)
 		return ret;
 
-	ret = mt7996_mcu_fw_log_2_host(dev, MCU_FW_LOG_WA, 0);
-	if (ret)
-		return ret;
+	if (mt7996_has_wa(dev)) {
+		ret = mt7996_mcu_fw_log_2_host(dev, MCU_FW_LOG_WA, 0);
+		if (ret)
+			return ret;
 
-	ret = mt7996_mcu_set_mwds(dev, 1);
-	if (ret)
-		return ret;
+		ret = mt7996_mcu_set_mwds(dev, 1);
+		if (ret)
+			return ret;
+	}
 
 	ret = mt7996_mcu_init_rx_airtime(dev);
 	if (ret)
@@ -3128,7 +3731,7 @@ int mt7996_mcu_init(struct mt7996_dev *dev)
 void mt7996_mcu_exit(struct mt7996_dev *dev)
 {
 	mt7996_mcu_restart(&dev->mt76);
-	if (mt7996_firmware_state(dev, false)) {
+	if (mt7996_firmware_state(dev, FW_STATE_FW_DOWNLOAD)) {
 		dev_err(dev->mt76.dev, "Failed to exit mcu\n");
 		goto out;
 	}
@@ -3145,7 +3748,7 @@ int mt7996_mcu_set_hdr_trans(struct mt7996_dev *dev, bool hdr_trans)
 {
 	struct {
 		u8 __rsv[4];
-	} __packed hdr;
+	} __packed hdr = {};
 	struct hdr_trans_blacklist *req_blacklist;
 	struct hdr_trans_en *req_en;
 	struct sk_buff *skb;
@@ -3188,6 +3791,9 @@ int mt7996_mcu_set_tx(struct mt7996_dev *dev, struct ieee80211_vif *vif,
 #define WMM_PARAM_SET		(WMM_AIFS_SET | WMM_CW_MIN_SET | \
 				 WMM_CW_MAX_SET | WMM_TXOP_SET)
 	struct mt7996_vif_link *link = mt7996_vif_conf_link(dev, vif, link_conf);
+	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
+	unsigned int link_id = link_conf->link_id;
+	struct mt7996_vif_link_info *link_info = &mvif->link_info[link_id];
 	struct {
 		u8 bss_idx;
 		u8 __rsv[3];
@@ -3205,7 +3811,7 @@ int mt7996_mcu_set_tx(struct mt7996_dev *dev, struct ieee80211_vif *vif,
 	skb_put_data(skb, &hdr, sizeof(hdr));
 
 	for (ac = 0; ac < IEEE80211_NUM_ACS; ac++) {
-		struct ieee80211_tx_queue_params *q = &link->queue_params[ac];
+		struct ieee80211_tx_queue_params *q = &link_info->queue_params[ac];
 		struct edca *e;
 		struct tlv *tlv;
 
@@ -3415,11 +4021,10 @@ int mt7996_mcu_rdd_background_enable(struct mt7996_phy *phy,
 				     struct cfg80211_chan_def *chandef)
 {
 	struct mt7996_dev *dev = phy->dev;
-	int err, region;
+	int err, region, rdd_idx = mt7996_get_rdd_idx(phy, true);
 
 	if (!chandef) { /* disable offchain */
-		err = mt7996_mcu_rdd_cmd(dev, RDD_STOP, MT_RX_SEL2,
-					 0, 0);
+		err = mt7996_mcu_rdd_cmd(dev, RDD_STOP, rdd_idx, 0);
 		if (err)
 			return err;
 
@@ -3445,8 +4050,7 @@ int mt7996_mcu_rdd_background_enable(struct mt7996_phy *phy,
 		break;
 	}
 
-	return mt7996_mcu_rdd_cmd(dev, RDD_START, MT_RX_SEL2,
-				  0, region);
+	return mt7996_mcu_rdd_cmd(dev, RDD_START, rdd_idx, region);
 }
 
 int mt7996_mcu_set_chan_info(struct mt7996_phy *phy, u16 tag)
@@ -3496,8 +4100,7 @@ int mt7996_mcu_set_chan_info(struct mt7996_phy *phy, u16 tag)
 
 	if (phy->mt76->hw->conf.flags & IEEE80211_CONF_MONITOR)
 		req.switch_reason = CH_SWITCH_NORMAL;
-	else if (phy->mt76->offchannel ||
-		 phy->mt76->hw->conf.flags & IEEE80211_CONF_IDLE)
+	else if (phy->mt76->offchannel || !phy->mt76->chanctx)
 		req.switch_reason = CH_SWITCH_SCAN_BYPASS_DPD;
 	else if (!cfg80211_reg_can_beacon(phy->mt76->hw->wiphy, chandef,
 					  NL80211_IFTYPE_AP))
@@ -3518,23 +4121,173 @@ int mt7996_mcu_set_chan_info(struct mt7996_phy *phy, u16 tag)
 				 &req, sizeof(req), true);
 }
 
-static int mt7996_mcu_set_eeprom_flash(struct mt7996_dev *dev)
+static int
+mt7996_mcu_get_cal_free_data(struct mt7996_dev *dev)
+{
+#define MT_EE_7977BN_OFFSET	(0x1200 - 0x500)
+	struct cal_free_data {
+		u16 adie_offs;
+		u16 eep_offs;
+	};
+	static const struct cal_free_data cal_7975[] = {
+		{ 0x5cd, 0x451 }, { 0x5cf, 0x453 }, { 0x5d1, 0x455 },
+		{ 0x5d3, 0x457 }, { 0x6c0, 0x44c }, { 0x6c1, 0x44d },
+		{ 0x6c2, 0x44e }, { 0x6c3, 0x44f }, { 0x7a1, 0xba1 },
+		{ 0x7a6, 0xba6 }, { 0x7a8, 0xba8 }, { 0x7aa, 0xbaa },
+	};
+	static const struct cal_free_data cal_7976[] = {
+		{  0x4c, 0x44c }, {  0x4d, 0x44d }, {  0x4e, 0x44e },
+		{  0x4f, 0x44f }, {  0x50, 0x450 }, {  0x51, 0x451 },
+		{  0x53, 0x453 }, {  0x55, 0x455 }, {  0x57, 0x457 },
+		{  0x59, 0x459 }, {  0x70, 0x470 }, {  0x71, 0x471 },
+		{ 0x790, 0xb90 }, { 0x791, 0xb91 }, { 0x794, 0xb94 },
+		{ 0x795, 0xb95 }, { 0x7a6, 0xba6 }, { 0x7a8, 0xba8 },
+		{ 0x7aa, 0xbaa },
+	};
+	static const struct cal_free_data cal_7977[] = {
+		{ 0x4c, 0x124c }, { 0x4d, 0x124d }, { 0x4e, 0x124e },
+		{ 0x4f, 0x124f }, { 0x50, 0x1250 }, { 0x51, 0x1251 },
+		{ 0x53, 0x1253 }, { 0x55, 0x1255 }, { 0x57, 0x1257 },
+		{ 0x59, 0x1259 }, { 0x69, 0x1269 }, { 0x6a, 0x126a },
+		{ 0x7a, 0x127a }, { 0x7b, 0x127b }, { 0x7c, 0x127c },
+		{ 0x7d, 0x127d }, { 0x7e, 0x127e },
+	};
+	static const struct cal_free_data cal_7978[] = {
+		{  0x91, 0xb91 }, {  0x95, 0xb95 }, { 0x100, 0x480 },
+		{ 0x102, 0x482 }, { 0x104, 0x484 }, { 0x106, 0x486 },
+		{ 0x107, 0x487 }, { 0x108, 0x488 }, { 0x109, 0x489 },
+		{ 0x10a, 0x48a }, { 0x10b, 0x48b }, { 0x10c, 0x48c },
+		{ 0x10e, 0x48e }, { 0x110, 0x490 },
+	};
+	static const struct cal_free_data cal_7979[] = {
+		{ 0x4c, 0x124c }, { 0x4d, 0x124d }, { 0x4e, 0x124e },
+		{ 0x4f, 0x124f }, { 0x50, 0x1250 }, { 0x51, 0x1251 },
+		{ 0x53, 0x1253 }, { 0x55, 0x1255 }, { 0x57, 0x1257 },
+		{ 0x59, 0x1259 }, { 0x69, 0x1269 }, { 0x6a, 0x126a },
+		{ 0x7a, 0x127a }, { 0x7b, 0x127b }, { 0x7c, 0x127c },
+		{ 0x7e, 0x127e }, { 0x80, 0x1280 },
+	};
+	const struct cal_free_data *cal_arr[__MT_MAX_BAND];
+	u16 cal_arr_len[__MT_MAX_BAND] = {};
+	u8 *eeprom = (u8 *)dev->mt76.eeprom.data;
+	int band, i, ret;
+
+#define CAL_ARR(_band, _adie) do {				\
+		cal_arr[_band] = cal_##_adie;			\
+		cal_arr_len[_band] = ARRAY_SIZE(cal_##_adie);	\
+	} while (0)
+
+	switch (mt76_chip(&dev->mt76)) {
+	case MT7996_DEVICE_ID:
+		/* adie 0 */
+		if (dev->var.fem == MT7996_FEM_INT &&
+		    dev->var.type != MT7996_VAR_TYPE_233)
+			CAL_ARR(0, 7975);
+		else
+			CAL_ARR(0, 7976);
+
+		/* adie 1 */
+		if (dev->var.type == MT7996_VAR_TYPE_444)
+			CAL_ARR(1, 7977);
+
+		/* adie 2 */
+		CAL_ARR(2, 7977);
+		break;
+	case MT7992_DEVICE_ID:
+		/* adie 0 */
+		if (dev->var.type == MT7992_VAR_TYPE_44 &&
+		    dev->var.fem != MT7996_FEM_EXT)
+			CAL_ARR(0, 7975);
+		else if (dev->var.type == MT7992_VAR_TYPE_24)
+			CAL_ARR(0, 7978);
+		else
+			CAL_ARR(0, 7976);
+
+		/* adie 1 */
+		if (dev->var.type == MT7992_VAR_TYPE_44 &&
+		    dev->var.fem != MT7996_FEM_INT)
+			CAL_ARR(1, 7977);
+		else if (dev->var.type != MT7992_VAR_TYPE_23)
+			CAL_ARR(1, 7979);
+		break;
+	case MT7990_DEVICE_ID:
+		/* adie 0 */
+		CAL_ARR(0, 7976);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	for (band = 0; band < __MT_MAX_BAND; band++) {
+		u8 buf[MT7996_EEPROM_BLOCK_SIZE];
+		const struct cal_free_data *cal;
+		u16 prev_block_idx = -1;
+		u16 adie_base;
+
+		if (!cal_arr_len[band])
+			continue;
+
+		if (band == MT_BAND0)
+			adie_base = MT7996_EFUSE_BASE_OFFS_ADIE0;
+		else if (band == MT_BAND1 && is_mt7992(&dev->mt76))
+			adie_base = MT7992_EFUSE_BASE_OFFS_ADIE1;
+		else if (band == MT_BAND1)
+			adie_base = MT7996_EFUSE_BASE_OFFS_ADIE1;
+		else
+			adie_base = MT7996_EFUSE_BASE_OFFS_ADIE2;
+
+		cal = cal_arr[band];
+		for (i = 0; i < cal_arr_len[band]; i++) {
+			u16 adie_offset = cal[i].adie_offs + adie_base;
+			u16 eep_offset = cal[i].eep_offs;
+			u16 block_idx = adie_offset / MT7996_EEPROM_BLOCK_SIZE;
+			u16 offset = adie_offset % MT7996_EEPROM_BLOCK_SIZE;
+
+			if (is_mt7996(&dev->mt76) && band == MT_BAND1 &&
+			    dev->var.type == MT7996_VAR_TYPE_444)
+				eep_offset -= MT_EE_7977BN_OFFSET;
+
+			if (prev_block_idx != block_idx) {
+				memset(buf, 0, sizeof(buf));
+				ret = mt7996_mcu_get_eeprom(dev, adie_offset, buf,
+							    MT7996_EEPROM_BLOCK_SIZE,
+							    EEPROM_MODE_EFUSE);
+				if (ret) {
+					if (ret != -EINVAL)
+						return ret;
+					prev_block_idx = -1;
+					continue;
+				}
+			}
+			eeprom[eep_offset] = buf[offset];
+			prev_block_idx = block_idx;
+		}
+	}
+
+	return 0;
+}
+
+int mt7996_mcu_set_eeprom(struct mt7996_dev *dev)
 {
 #define MAX_PAGE_IDX_MASK	GENMASK(7, 5)
 #define PAGE_IDX_MASK		GENMASK(4, 2)
 #define PER_PAGE_SIZE		0x400
-	struct mt7996_mcu_eeprom req = {
+	struct mt7996_mcu_eeprom_update req = {
 		.tag = cpu_to_le16(UNI_EFUSE_BUFFER_MODE),
 		.buffer_mode = EE_MODE_BUFFER
 	};
 	u16 eeprom_size = MT7996_EEPROM_SIZE;
 	u8 total = DIV_ROUND_UP(eeprom_size, PER_PAGE_SIZE);
 	u8 *eep = (u8 *)dev->mt76.eeprom.data;
-	int eep_len, i;
+	int ret, eep_len, i;
+
+	ret = mt7996_mcu_get_cal_free_data(dev);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < total; i++, eep += eep_len) {
 		struct sk_buff *skb;
-		int ret, msg_len;
+		int msg_len;
 
 		if (i == total - 1 && !!(eeprom_size % PER_PAGE_SIZE))
 			eep_len = eeprom_size % PER_PAGE_SIZE;
@@ -3563,59 +4316,66 @@ static int mt7996_mcu_set_eeprom_flash(struct mt7996_dev *dev)
 	return 0;
 }
 
-int mt7996_mcu_set_eeprom(struct mt7996_dev *dev)
+int mt7996_mcu_get_eeprom(struct mt7996_dev *dev, u32 offset, u8 *buf, u32 buf_len,
+			  enum mt7996_eeprom_mode mode)
 {
-	struct mt7996_mcu_eeprom req = {
-		.tag = cpu_to_le16(UNI_EFUSE_BUFFER_MODE),
-		.len = cpu_to_le16(sizeof(req) - 4),
-		.buffer_mode = EE_MODE_EFUSE,
-		.format = EE_FORMAT_WHOLE
+	struct mt7996_mcu_eeprom_access req = {
+		.info.len = cpu_to_le16(sizeof(req) - 4),
 	};
-
-	if (dev->flash_mode)
-		return mt7996_mcu_set_eeprom_flash(dev);
-
-	return mt76_mcu_send_msg(&dev->mt76, MCU_WM_UNI_CMD(EFUSE_CTRL),
-				 &req, sizeof(req), true);
-}
-
-int mt7996_mcu_get_eeprom(struct mt7996_dev *dev, u32 offset, u8 *buf, u32 buf_len)
-{
-	struct {
-		u8 _rsv[4];
-
-		__le16 tag;
-		__le16 len;
-		__le32 addr;
-		__le32 valid;
-		u8 data[16];
-	} __packed req = {
-		.tag = cpu_to_le16(UNI_EFUSE_ACCESS),
-		.len = cpu_to_le16(sizeof(req) - 4),
-		.addr = cpu_to_le32(round_down(offset,
-				    MT7996_EEPROM_BLOCK_SIZE)),
-	};
+	struct mt7996_mcu_eeprom_access_event *event;
 	struct sk_buff *skb;
-	bool valid;
-	int ret;
+	int ret, cmd;
+	u32 addr;
 
-	ret = mt76_mcu_send_and_get_msg(&dev->mt76,
-					MCU_WM_UNI_CMD_QUERY(EFUSE_CTRL),
-					&req, sizeof(req), true, &skb);
+	switch (mode) {
+	case EEPROM_MODE_EFUSE:
+		addr = round_down(offset, MT7996_EEPROM_BLOCK_SIZE);
+		cmd = MCU_WM_UNI_CMD_QUERY(EFUSE_CTRL);
+		req.info.tag = cpu_to_le16(UNI_EFUSE_ACCESS);
+		break;
+	case EEPROM_MODE_EXT:
+		addr = round_down(offset, MT7996_EXT_EEPROM_BLOCK_SIZE);
+		cmd = MCU_WM_UNI_CMD_QUERY(EXT_EEPROM_CTRL);
+		req.info.tag = cpu_to_le16(UNI_EXT_EEPROM_ACCESS);
+		req.eeprom.ext_eeprom.data_len = cpu_to_le32(buf_len);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	req.info.addr = cpu_to_le32(addr);
+	ret = mt76_mcu_send_and_get_msg(&dev->mt76, cmd, &req, sizeof(req),
+					true, &skb);
 	if (ret)
 		return ret;
 
-	valid = le32_to_cpu(*(__le32 *)(skb->data + 16));
-	if (valid) {
-		u32 addr = le32_to_cpu(*(__le32 *)(skb->data + 12));
+	event = (struct mt7996_mcu_eeprom_access_event *)skb->data;
+	if (event->valid) {
+		u32 ret_len = le32_to_cpu(event->eeprom.ext_eeprom.data_len);
+
+		addr = le32_to_cpu(event->addr);
 
 		if (!buf)
 			buf = (u8 *)dev->mt76.eeprom.data + addr;
-		if (!buf_len || buf_len > MT7996_EEPROM_BLOCK_SIZE)
-			buf_len = MT7996_EEPROM_BLOCK_SIZE;
 
-		skb_pull(skb, 48);
-		memcpy(buf, skb->data, buf_len);
+		switch (mode) {
+		case EEPROM_MODE_EFUSE:
+			if (!buf_len || buf_len > MT7996_EEPROM_BLOCK_SIZE)
+				buf_len = MT7996_EEPROM_BLOCK_SIZE;
+
+			memcpy(buf, event->eeprom.efuse, buf_len);
+			break;
+		case EEPROM_MODE_EXT:
+			if (!buf_len || buf_len > MT7996_EXT_EEPROM_BLOCK_SIZE)
+				buf_len = MT7996_EXT_EEPROM_BLOCK_SIZE;
+
+			memcpy(buf, event->eeprom.ext_eeprom.data,
+			       ret_len < buf_len ? ret_len : buf_len);
+			break;
+		default:
+			ret = -EINVAL;
+			break;
+		}
 	} else {
 		ret = -EINVAL;
 	}
@@ -3625,7 +4385,7 @@ int mt7996_mcu_get_eeprom(struct mt7996_dev *dev, u32 offset, u8 *buf, u32 buf_l
 	return ret;
 }
 
-int mt7996_mcu_get_eeprom_free_block(struct mt7996_dev *dev, u8 *block_num)
+int mt7996_mcu_get_efuse_free_block(struct mt7996_dev *dev, u8 *block_num)
 {
 	struct {
 		u8 _rsv[4];
@@ -3657,7 +4417,6 @@ int mt7996_mcu_get_eeprom_free_block(struct mt7996_dev *dev, u8 *block_num)
 
 int mt7996_mcu_get_chip_config(struct mt7996_dev *dev, u32 *cap)
 {
-#define NIC_CAP	3
 #define UNI_EVENT_CHIP_CONFIG_EFUSE_VERSION	0x21
 	struct {
 		u8 _rsv[4];
@@ -3665,7 +4424,7 @@ int mt7996_mcu_get_chip_config(struct mt7996_dev *dev, u32 *cap)
 		__le16 tag;
 		__le16 len;
 	} __packed req = {
-		.tag = cpu_to_le16(NIC_CAP),
+		.tag = cpu_to_le16(UNI_CHIP_CONFIG_NIC_CAPA),
 		.len = cpu_to_le16(sizeof(req) - 4),
 	};
 	struct sk_buff *skb;
@@ -4068,12 +4827,12 @@ mt7996_mcu_set_obss_spr_pd(struct mt7996_phy *phy,
 }
 
 static int
-mt7996_mcu_set_obss_spr_siga(struct mt7996_phy *phy, struct ieee80211_vif *vif,
+mt7996_mcu_set_obss_spr_siga(struct mt7996_phy *phy,
+			     struct mt7996_vif_link *link,
 			     struct ieee80211_he_obss_pd *he_obss_pd)
 {
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
 	struct mt7996_dev *dev = phy->dev;
-	u8 omac = mvif->deflink.mt76.omac_idx;
+	u8 omac = link->mt76.omac_idx;
 	struct {
 		u8 band_idx;
 		u8 __rsv[3];
@@ -4145,7 +4904,8 @@ mt7996_mcu_set_obss_spr_bitmap(struct mt7996_phy *phy,
 				 sizeof(req), true);
 }
 
-int mt7996_mcu_add_obss_spr(struct mt7996_phy *phy, struct ieee80211_vif *vif,
+int mt7996_mcu_add_obss_spr(struct mt7996_phy *phy,
+			    struct mt7996_vif_link *link,
 			    struct ieee80211_he_obss_pd *he_obss_pd)
 {
 	int ret;
@@ -4179,7 +4939,7 @@ int mt7996_mcu_add_obss_spr(struct mt7996_phy *phy, struct ieee80211_vif *vif,
 		return ret;
 
 	/* Set SR prohibit */
-	ret = mt7996_mcu_set_obss_spr_siga(phy, vif, he_obss_pd);
+	ret = mt7996_mcu_set_obss_spr_siga(phy, link, he_obss_pd);
 	if (ret)
 		return ret;
 
@@ -4215,7 +4975,7 @@ int mt7996_mcu_update_bss_color(struct mt7996_dev *dev,
 #define TWT_AGRT_PROTECT	BIT(2)
 
 int mt7996_mcu_twt_agrt_update(struct mt7996_dev *dev,
-			       struct mt7996_vif *mvif,
+			       struct mt7996_vif_link *link,
 			       struct mt7996_twt_flow *flow,
 			       int cmd)
 {
@@ -4246,12 +5006,12 @@ int mt7996_mcu_twt_agrt_update(struct mt7996_dev *dev,
 		.len = cpu_to_le16(sizeof(req) - 4),
 		.tbl_idx = flow->table_id,
 		.cmd = cmd,
-		.own_mac_idx = mvif->deflink.mt76.omac_idx,
+		.own_mac_idx = link->mt76.omac_idx,
 		.flowid = flow->id,
 		.peer_id = cpu_to_le16(flow->wcid),
 		.duration = flow->duration,
-		.bss = mvif->deflink.mt76.idx,
-		.bss_idx = mvif->deflink.mt76.idx,
+		.bss = link->mt76.idx,
+		.bss_idx = link->mt76.idx,
 		.start_tsf = cpu_to_le64(flow->tsf),
 		.mantissa = flow->mantissa,
 		.exponent = flow->exp,
@@ -4312,8 +5072,36 @@ int mt7996_mcu_set_radio_en(struct mt7996_phy *phy, bool enable)
 				 &req, sizeof(req), true);
 }
 
-int mt7996_mcu_rdd_cmd(struct mt7996_dev *dev, int cmd, u8 index,
-		       u8 rx_sel, u8 val)
+int mt7996_mcu_rdd_resume_tx(struct mt7996_phy *phy)
+{
+	struct {
+		u8 band_idx;
+		u8 _rsv[3];
+
+		__le16 tag;
+		__le16 len;
+		u8 mac_enable;
+		u8 _rsv2[3];
+	} __packed req = {
+		.band_idx = phy->mt76->band_idx,
+		.tag = cpu_to_le16(UNI_BAND_CONFIG_MAC_ENABLE_CTRL),
+		.len = cpu_to_le16(sizeof(req) - 4),
+		.mac_enable = 2,
+	};
+	int ret;
+
+	if (!phy->rdd_tx_paused)
+		return 0;
+
+	ret = mt76_mcu_send_msg(&phy->dev->mt76, MCU_WM_UNI_CMD(BAND_CONFIG),
+				&req, sizeof(req), true);
+	if (!ret)
+		phy->rdd_tx_paused = false;
+
+	return ret;
+}
+
+int mt7996_mcu_rdd_cmd(struct mt7996_dev *dev, int cmd, u8 rdd_idx, u8 val)
 {
 	struct {
 		u8 _rsv[4];
@@ -4330,8 +5118,7 @@ int mt7996_mcu_rdd_cmd(struct mt7996_dev *dev, int cmd, u8 index,
 		.tag = cpu_to_le16(UNI_RDD_CTRL_PARM),
 		.len = cpu_to_le16(sizeof(req) - 4),
 		.ctrl = cmd,
-		.rdd_idx = index,
-		.rdd_rx_sel = rx_sel,
+		.rdd_idx = rdd_idx,
 		.val = val,
 	};
 
@@ -4341,22 +5128,19 @@ int mt7996_mcu_rdd_cmd(struct mt7996_dev *dev, int cmd, u8 index,
 
 int mt7996_mcu_wtbl_update_hdr_trans(struct mt7996_dev *dev,
 				     struct ieee80211_vif *vif,
-				     struct ieee80211_sta *sta)
+				     struct mt7996_vif_link *link,
+				     struct mt7996_sta_link *msta_link)
 {
-	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
-	struct mt7996_sta *msta;
 	struct sk_buff *skb;
 
-	msta = sta ? (struct mt7996_sta *)sta->drv_priv : &mvif->deflink.sta;
-
-	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, &mvif->deflink.mt76,
-					      &msta->wcid,
+	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, &link->mt76,
+					      &msta_link->wcid,
 					      MT7996_STA_UPDATE_MAX_SIZE);
 	if (IS_ERR(skb))
 		return PTR_ERR(skb);
 
 	/* starec hdr trans */
-	mt7996_mcu_sta_hdr_trans_tlv(dev, skb, vif, &msta->wcid);
+	mt7996_mcu_sta_hdr_trans_tlv(dev, skb, vif, &msta_link->wcid);
 	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
 				     MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
 }
@@ -4579,7 +5363,7 @@ int mt7996_mcu_set_txpower_sku(struct mt7996_phy *phy)
 	struct sk_buff *skb;
 	int i, tx_power;
 
-	tx_power = mt7996_get_power_bound(phy, phy->txpower);
+	tx_power = mt76_get_power_bound(mphy, phy->txpower);
 	tx_power = mt76_get_rate_power_limits(mphy, mphy->chandef.chan,
 					      &la, tx_power);
 	mphy->txpower_cur = tx_power;
@@ -4624,7 +5408,48 @@ int mt7996_mcu_cp_support(struct mt7996_dev *dev, u8 mode)
 	    mode > mt76_connac_lmac_mapping(IEEE80211_AC_VO))
 		return -EINVAL;
 
+	if (!mt7996_has_wa(dev)) {
+		struct {
+			u8 _rsv[4];
+
+			__le16 tag;
+			__le16 len;
+			u8 cp_mode;
+			u8 rsv[3];
+		} __packed req = {
+			.tag = cpu_to_le16(UNI_CMD_SDO_CP_MODE),
+			.len = cpu_to_le16(sizeof(req) - 4),
+			.cp_mode = mode,
+		};
+
+		return mt76_mcu_send_msg(&dev->mt76, MCU_WA_UNI_CMD(SDO),
+					 &req, sizeof(req), false);
+	}
+
 	cp_mode = cpu_to_le32(mode);
+
 	return mt76_mcu_send_msg(&dev->mt76, MCU_WA_EXT_CMD(CP_SUPPORT),
 				 &cp_mode, sizeof(cp_mode), true);
+}
+
+int mt7996_mcu_set_dup_wtbl(struct mt7996_dev *dev)
+{
+#define DUP_WTBL_NUM	80
+	struct {
+		u8 _rsv[4];
+
+		__le16 tag;
+		__le16 len;
+		__le16 base;
+		__le16 num;
+		u8 _rsv2[4];
+	} __packed req = {
+		.tag = cpu_to_le16(UNI_CHIP_CONFIG_DUP_WTBL),
+		.len = cpu_to_le16(sizeof(req) - 4),
+		.base = cpu_to_le16(MT7996_WTBL_STA - DUP_WTBL_NUM + 1),
+		.num = cpu_to_le16(DUP_WTBL_NUM),
+	};
+
+	return mt76_mcu_send_msg(&dev->mt76, MCU_WM_UNI_CMD(CHIP_CONFIG), &req,
+				 sizeof(req), true);
 }

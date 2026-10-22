@@ -269,7 +269,7 @@ fail:
 	return ret;
 }
 
-void isys_setup_hw(struct ipu6_isys *isys)
+static void isys_setup_hw(struct ipu6_isys *isys)
 {
 	void __iomem *base = isys->pdata->base;
 	const u8 *thd = isys->pdata->ipdata->hw_variant.cdc_fifo_threshold;
@@ -341,7 +341,7 @@ static void ipu6_isys_csi2_isr(struct ipu6_isys_csi2 *csi2)
 	}
 }
 
-irqreturn_t isys_isr(struct ipu6_bus_device *adev)
+static irqreturn_t isys_isr(struct ipu6_bus_device *adev)
 {
 	struct ipu6_isys *isys = ipu6_bus_get_drvdata(adev);
 	void __iomem *base = isys->pdata->base;
@@ -857,9 +857,6 @@ static int isys_runtime_pm_resume(struct device *dev)
 	unsigned long flags;
 	int ret;
 
-	if (!isys)
-		return 0;
-
 	ret = ipu6_mmu_hw_init(adev->mmu);
 	if (ret)
 		return ret;
@@ -884,12 +881,8 @@ static int isys_runtime_pm_resume(struct device *dev)
 static int isys_runtime_pm_suspend(struct device *dev)
 {
 	struct ipu6_bus_device *adev = to_ipu6_bus_device(dev);
-	struct ipu6_isys *isys;
+	struct ipu6_isys *isys = dev_get_drvdata(dev);
 	unsigned long flags;
-
-	isys = dev_get_drvdata(dev);
-	if (!isys)
-		return 0;
 
 	spin_lock_irqsave(&isys->power_lock, flags);
 	isys->power = 0;
@@ -1070,10 +1063,6 @@ static int isys_probe(struct auxiliary_device *auxdev,
 	if (!isys->csi2)
 		return -ENOMEM;
 
-	ret = ipu6_mmu_hw_init(adev->mmu);
-	if (ret)
-		return ret;
-
 	/* initial sensor type */
 	isys->sensor_type = isys->pdata->ipdata->sensor_type_start;
 
@@ -1089,7 +1078,6 @@ static int isys_probe(struct auxiliary_device *auxdev,
 	INIT_LIST_HEAD(&isys->framebuflist);
 	INIT_LIST_HEAD(&isys->framebuflist_fw);
 
-	isys->line_align = IPU6_ISYS_2600_MEM_LINE_ALIGN;
 	isys->icache_prefetch = 0;
 
 	dev_set_drvdata(&auxdev->dev, isys);
@@ -1126,8 +1114,6 @@ static int isys_probe(struct auxiliary_device *auxdev,
 	if (ret)
 		goto free_fw_msg_bufs;
 
-	ipu6_mmu_hw_cleanup(adev->mmu);
-
 	return 0;
 
 free_fw_msg_bufs:
@@ -1148,8 +1134,6 @@ release_firmware:
 
 	mutex_destroy(&isys->mutex);
 	mutex_destroy(&isys->stream_mutex);
-
-	ipu6_mmu_hw_cleanup(adev->mmu);
 
 	return ret;
 }
@@ -1294,12 +1278,11 @@ static int isys_isr_one(struct ipu6_bus_device *adev)
 		 */
 		ipu6_put_fw_msg_buf(ipu6_bus_get_drvdata(adev), resp->buf_id);
 		if (resp->pin_id < IPU6_ISYS_OUTPUT_PINS &&
-		    stream->output_pins[resp->pin_id].pin_ready)
-			stream->output_pins[resp->pin_id].pin_ready(stream,
-								    resp);
+		    stream->output_pins_queue[resp->pin_id])
+			ipu6_isys_queue_buf_ready(stream, resp);
 		else
 			dev_warn(&adev->auxdev.dev,
-				 "%d:No data pin ready handler for pin id %d\n",
+				 "%d:No queue for pin id %d\n",
 				 resp->stream_handle, resp->pin_id);
 		if (csi2)
 			ipu6_isys_csi2_error(csi2);
@@ -1375,7 +1358,7 @@ MODULE_AUTHOR("Sakari Ailus <sakari.ailus@linux.intel.com>");
 MODULE_AUTHOR("Tianshu Qiu <tian.shu.qiu@intel.com>");
 MODULE_AUTHOR("Bingbu Cao <bingbu.cao@intel.com>");
 MODULE_AUTHOR("Yunliang Ding <yunliang.ding@intel.com>");
-MODULE_AUTHOR("Hongju Wang <hongju.wang@intel.com>");
+MODULE_AUTHOR("Hongju Wang");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Intel IPU6 input system driver");
 MODULE_IMPORT_NS("INTEL_IPU6");

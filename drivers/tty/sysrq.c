@@ -712,7 +712,8 @@ static void sysrq_parse_reset_sequence(struct sysrq_state *state)
 
 static void sysrq_do_reset(struct timer_list *t)
 {
-	struct sysrq_state *state = from_timer(state, t, keyreset_timer);
+	struct sysrq_state *state = timer_container_of(state, t,
+						       keyreset_timer);
 
 	state->reset_requested = true;
 
@@ -743,7 +744,7 @@ static void sysrq_detect_reset_sequence(struct sysrq_state *state,
 		 */
 		if (value && state->reset_seq_cnt) {
 			state->reset_canceled = true;
-			del_timer(&state->keyreset_timer);
+			timer_delete(&state->keyreset_timer);
 		}
 	} else if (value == 0) {
 		/*
@@ -751,7 +752,7 @@ static void sysrq_detect_reset_sequence(struct sysrq_state *state,
 		 * to be pressed and held for the reset timeout
 		 * to hold.
 		 */
-		del_timer(&state->keyreset_timer);
+		timer_delete(&state->keyreset_timer);
 
 		if (--state->reset_seq_cnt == 0)
 			state->reset_canceled = false;
@@ -970,7 +971,7 @@ static int sysrq_connect(struct input_handler *handler,
 	struct sysrq_state *sysrq;
 	int error;
 
-	sysrq = kzalloc(sizeof(struct sysrq_state), GFP_KERNEL);
+	sysrq = kzalloc_obj(struct sysrq_state);
 	if (!sysrq)
 		return -ENOMEM;
 
@@ -1118,6 +1119,46 @@ int sysrq_toggle_support(int enable_mask)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(sysrq_toggle_support);
+
+static int sysrq_sysctl_handler(const struct ctl_table *table, int write,
+				void *buffer, size_t *lenp, loff_t *ppos)
+{
+	int tmp, ret;
+	struct ctl_table t = *table;
+
+	tmp = sysrq_mask();
+	t.data = &tmp;
+
+	/*
+	 * Behaves like do_proc_dointvec as t does not have min nor max.
+	 */
+	ret = proc_dointvec_minmax(&t, write, buffer, lenp, ppos);
+	if (ret)
+		return ret;
+
+	if (write)
+		sysrq_toggle_support(tmp);
+
+	return 0;
+}
+
+static const struct ctl_table sysrq_sysctl_table[] = {
+	{
+		.procname	= "sysrq",
+		.data		= NULL,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= sysrq_sysctl_handler,
+	},
+};
+
+static int __init init_sysrq_sysctl(void)
+{
+	register_sysctl_init("kernel", sysrq_sysctl_table);
+	return 0;
+}
+
+subsys_initcall(init_sysrq_sysctl);
 
 static int __sysrq_swap_key_ops(u8 key, const struct sysrq_key_op *insert_op_p,
 				const struct sysrq_key_op *remove_op_p)

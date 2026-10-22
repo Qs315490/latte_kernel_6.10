@@ -57,6 +57,10 @@ enum rdma_restrack_type {
 	 */
 	RDMA_RESTRACK_SRQ,
 	/**
+	 * @RDMA_RESTRACK_DMAH: DMA handle
+	 */
+	RDMA_RESTRACK_DMAH,
+	/**
 	 * @RDMA_RESTRACK_MAX: Last entry, used for array dclarations
 	 */
 	RDMA_RESTRACK_MAX
@@ -83,11 +87,11 @@ struct rdma_restrack_entry {
 	 * query stage.
 	 */
 	u8			no_track : 1;
-	/*
+	/**
 	 * @kref: Protect destroy of the resource
 	 */
 	struct kref		kref;
-	/*
+	/**
 	 * @comp: Signal that all consumers of resource are completed their work
 	 */
 	struct completion	comp;

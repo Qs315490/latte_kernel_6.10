@@ -13,7 +13,6 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/extcon-provider.h>
-#include <linux/mod_devicetable.h>
 
 /* Two bytes: type + subtype */
 #define PM8916_PERPH_TYPE 0x04
@@ -274,15 +273,6 @@ static int pm8916_lbc_charger_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EINVAL,
 				     "Wrong amount of reg values: %d (4 expected)\n", len);
 
-	irq = platform_get_irq_byname(pdev, "usb_vbus");
-	if (irq < 0)
-		return irq;
-
-	ret = devm_request_threaded_irq(dev, irq, NULL, pm8916_lbc_charger_state_changed_irq,
-					IRQF_ONESHOT, "pm8916_lbc", chg);
-	if (ret)
-		return ret;
-
 	ret = device_property_read_u32_array(dev, "reg", chg->reg, len);
 	if (ret)
 		return ret;
@@ -322,7 +312,7 @@ static int pm8916_lbc_charger_probe(struct platform_device *pdev)
 		dev_err_probe(dev, ret, "Error while parsing device tree\n");
 
 	psy_cfg.drv_data = chg;
-	psy_cfg.of_node = dev->of_node;
+	psy_cfg.fwnode = dev_fwnode(dev);
 
 	chg->charger = devm_power_supply_register(dev, &pm8916_lbc_charger_psy_desc, &psy_cfg);
 	if (IS_ERR(chg->charger))
@@ -332,6 +322,10 @@ static int pm8916_lbc_charger_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "Unable to get battery info\n");
 
+	irq = platform_get_irq_byname(pdev, "usb_vbus");
+	if (irq < 0)
+		return irq;
+
 	chg->edev = devm_extcon_dev_allocate(dev, pm8916_lbc_charger_cable);
 	if (IS_ERR(chg->edev))
 		return PTR_ERR(chg->edev);
@@ -339,6 +333,11 @@ static int pm8916_lbc_charger_probe(struct platform_device *pdev)
 	ret = devm_extcon_dev_register(dev, chg->edev);
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "failed to register extcon device\n");
+
+	ret = devm_request_threaded_irq(dev, irq, NULL, pm8916_lbc_charger_state_changed_irq,
+					IRQF_ONESHOT, "pm8916_lbc", chg);
+	if (ret)
+		return ret;
 
 	ret = regmap_read(chg->regmap, chg->reg[LBC_USB] + PM8916_INT_RT_STS, &tmp);
 	if (ret)

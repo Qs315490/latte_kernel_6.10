@@ -9,12 +9,16 @@ struct nvkm_device_tegra {
 	struct nvkm_device device;
 	struct platform_device *pdev;
 
+	void __iomem *regs;
+
 	struct reset_control *rst;
 	struct clk *clk;
 	struct clk *clk_ref;
 	struct clk *clk_pwr;
 
 	struct regulator *vdd;
+
+	struct tegra_pmc *pmc;
 
 	struct {
 		/*

@@ -32,9 +32,6 @@ struct fwnode_handle;
 #define NMK_GPIO_RWIMSC	0x50
 #define NMK_GPIO_FWIMSC	0x54
 #define NMK_GPIO_WKS	0x58
-/* These appear in DB8540 and later ASICs */
-#define NMK_GPIO_EDGELEVEL 0x5C
-#define NMK_GPIO_LEVEL	0x60
 
 /* Pull up/down values */
 enum nmk_gpio_pull {
@@ -114,8 +111,7 @@ struct nmk_gpio_chip {
 }
 
 /**
- * enum prcm_gpiocr_reg_index
- * Used to reference an PRCM GPIOCR register address.
+ * enum prcm_gpiocr_reg_index - Used to reference a PRCM GPIOCR register address.
  */
 enum prcm_gpiocr_reg_index {
 	PRCM_IDX_GPIOCR1,
@@ -123,8 +119,7 @@ enum prcm_gpiocr_reg_index {
 	PRCM_IDX_GPIOCR3
 };
 /**
- * enum prcm_gpiocr_altcx_index
- * Used to reference an Other alternate-C function.
+ * enum prcm_gpiocr_altcx_index - Used to reference an Other alternate-C function.
  */
 enum prcm_gpiocr_altcx_index {
 	PRCM_IDX_GPIOCR_ALTC1,
@@ -135,7 +130,7 @@ enum prcm_gpiocr_altcx_index {
 };
 
 /**
- * struct prcm_gpio_altcx - Other alternate-C function
+ * struct prcm_gpiocr_altcx - Other alternate-C function
  * @used: other alternate-C function availability
  * @reg_index: PRCM GPIOCR register index used to control the function
  * @control_bit: PRCM GPIOCR bit used to control the function
@@ -147,7 +142,7 @@ struct prcm_gpiocr_altcx {
 } __packed;
 
 /**
- * struct prcm_gpio_altcx_pin_desc - Other alternate-C pin
+ * struct prcm_gpiocr_altcx_pin_desc - Other alternate-C pin
  * @pin: The pin number
  * @altcx: array of other alternate-C[1-4] functions
  */
@@ -193,7 +188,7 @@ struct nmk_pingroup {
  *		numbering.
  * @npins:	The number of entries in @pins.
  * @functions:	The functions supported on this SoC.
- * @nfunction:	The number of entries in @functions.
+ * @nfunctions:	The number of entries in @functions.
  * @groups:	An array describing all pin groups the pin SoC supports.
  * @ngroups:	The number of entries in @groups.
  * @altcx_pins:	The pins that support Other alternate-C function on this SoC
@@ -238,19 +233,6 @@ nmk_pinctrl_db8500_init(const struct nmk_pinctrl_soc_data **soc)
 
 #endif
 
-#ifdef CONFIG_PINCTRL_DB8540
-
-void nmk_pinctrl_db8540_init(const struct nmk_pinctrl_soc_data **soc);
-
-#else
-
-static inline void
-nmk_pinctrl_db8540_init(const struct nmk_pinctrl_soc_data **soc)
-{
-}
-
-#endif
-
 struct platform_device;
 
 #ifdef CONFIG_DEBUG_FS
@@ -261,16 +243,14 @@ struct platform_device;
  * true.
  */
 void nmk_gpio_dbg_show_one(struct seq_file *s, struct pinctrl_dev *pctldev,
-			   struct gpio_chip *chip, unsigned int offset,
-			   unsigned int gpio);
+			   struct gpio_chip *chip, unsigned int offset);
 
 #else
 
 static inline void nmk_gpio_dbg_show_one(struct seq_file *s,
 					 struct pinctrl_dev *pctldev,
 					 struct gpio_chip *chip,
-					 unsigned int offset,
-					 unsigned int gpio)
+					 unsigned int offset)
 {
 }
 

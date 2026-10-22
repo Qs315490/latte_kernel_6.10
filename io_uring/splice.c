@@ -11,6 +11,7 @@
 
 #include <uapi/linux/io_uring.h>
 
+#include "filetable.h"
 #include "io_uring.h"
 #include "splice.h"
 
@@ -51,7 +52,8 @@ void io_splice_cleanup(struct io_kiocb *req)
 {
 	struct io_splice *sp = io_kiocb_to_cmd(req, struct io_splice);
 
-	io_put_rsrc_node(req->ctx, sp->rsrc_node);
+	if (sp->rsrc_node)
+		io_put_rsrc_node(req->ctx, sp->rsrc_node);
 }
 
 static struct file *io_splice_get_file(struct io_kiocb *req,
@@ -102,7 +104,7 @@ done:
 	if (ret != sp->len)
 		req_set_fail(req);
 	io_req_set_res(req, ret, 0);
-	return IOU_OK;
+	return IOU_COMPLETE;
 }
 
 int io_splice_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
@@ -143,5 +145,5 @@ done:
 	if (ret != sp->len)
 		req_set_fail(req);
 	io_req_set_res(req, ret, 0);
-	return IOU_OK;
+	return IOU_COMPLETE;
 }

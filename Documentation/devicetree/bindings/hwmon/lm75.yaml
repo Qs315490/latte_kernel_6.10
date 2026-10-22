@@ -28,6 +28,7 @@ properties:
       - maxim,max31725
       - maxim,max31726
       - maxim,mcp980x
+      - nxp,p3t1750
       - nxp,p3t1755
       - nxp,pct2075
       - st,stds75
@@ -53,6 +54,13 @@ properties:
   interrupts:
     maxItems: 1
 
+  ti,alert-polarity-active-high:
+    description: Alert pin is asserted based on the value of alert polarity
+      bit of configuration register. Default value is normal (0 which maps to
+      active-low). The other value is inverted (1 which maps to active-high).
+      Specify this property to set the alert polarity to active-high.
+    $ref: /schemas/types.yaml#/definitions/flag
+
 required:
   - compatible
   - reg
@@ -69,6 +77,7 @@ allOf:
                 - ti,tmp100
                 - ti,tmp101
                 - ti,tmp112
+                - ti,tmp75
     then:
       properties:
         interrupts: false

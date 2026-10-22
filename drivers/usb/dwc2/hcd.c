@@ -3227,7 +3227,7 @@ host:
 
 static void dwc2_wakeup_detected(struct timer_list *t)
 {
-	struct dwc2_hsotg *hsotg = from_timer(hsotg, t, wkp_timer);
+	struct dwc2_hsotg *hsotg = timer_container_of(hsotg, t, wkp_timer);
 	u32 hprt0;
 
 	dev_dbg(hsotg->dev, "%s()\n", __func__);
@@ -3823,7 +3823,7 @@ static struct dwc2_hcd_urb *dwc2_hcd_urb_alloc(struct dwc2_hsotg *hsotg,
 {
 	struct dwc2_hcd_urb *urb;
 
-	urb = kzalloc(struct_size(urb, iso_descs, iso_desc_count), mem_flags);
+	urb = kzalloc_flex(*urb, iso_descs, iso_desc_count, mem_flags);
 	if (urb)
 		urb->packet_count = iso_desc_count;
 	return urb;
@@ -4743,7 +4743,7 @@ static int _dwc2_hcd_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
 		qh_allocated = true;
 	}
 
-	qtd = kzalloc(sizeof(*qtd), mem_flags);
+	qtd = kzalloc_obj(*qtd, mem_flags);
 	if (!qtd) {
 		retval = -ENOMEM;
 		goto fail1;
@@ -4804,6 +4804,7 @@ static int _dwc2_hcd_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
 	struct dwc2_hsotg *hsotg = dwc2_hcd_to_hsotg(hcd);
 	int rc;
 	unsigned long flags;
+	int urb_status;
 
 	dev_dbg(hsotg->dev, "DWC OTG HCD URB Dequeue\n");
 	dwc2_dump_urb_info(hcd, urb, "urb_dequeue");
@@ -4828,11 +4829,12 @@ static int _dwc2_hcd_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
 
 	/* Higher layer software sets URB status */
 	spin_unlock(&hsotg->lock);
+	urb_status = urb->status;
 	usb_hcd_giveback_urb(hcd, urb, status);
 	spin_lock(&hsotg->lock);
 
 	dev_dbg(hsotg->dev, "Called usb_hcd_giveback_urb()\n");
-	dev_dbg(hsotg->dev, "  urb->status = %d\n", urb->status);
+	dev_dbg(hsotg->dev, "  urb->status = %d\n", urb_status);
 out:
 	spin_unlock_irqrestore(&hsotg->lock, flags);
 
@@ -5081,7 +5083,7 @@ static void dwc2_hcd_free(struct dwc2_hsotg *hsotg)
 
 	cancel_work_sync(&hsotg->phy_reset_work);
 
-	del_timer(&hsotg->wkp_timer);
+	timer_delete(&hsotg->wkp_timer);
 }
 
 static void dwc2_hcd_release(struct dwc2_hsotg *hsotg)
@@ -5218,7 +5220,7 @@ int dwc2_hcd_init(struct dwc2_hsotg *hsotg)
 	memset(&hsotg->hc_ptr_array[0], 0, sizeof(hsotg->hc_ptr_array));
 
 	for (i = 0; i < num_channels; i++) {
-		channel = kzalloc(sizeof(*channel), GFP_KERNEL);
+		channel = kzalloc_obj(*channel);
 		if (!channel)
 			goto error3;
 		channel->hc_num = i;
@@ -5474,6 +5476,49 @@ int dwc2_restore_host_registers(struct dwc2_hsotg *hsotg)
 	return 0;
 }
 
+int dwc2_host_backup_critical_registers(struct dwc2_hsotg *hsotg)
+{
+	int ret;
+
+	/* Backup all registers */
+	ret = dwc2_backup_global_registers(hsotg);
+	if (ret) {
+		dev_err(hsotg->dev, "%s: failed to backup global registers\n",
+			__func__);
+		return ret;
+	}
+
+	ret = dwc2_backup_host_registers(hsotg);
+	if (ret) {
+		dev_err(hsotg->dev, "%s: failed to backup host registers\n",
+			__func__);
+		return ret;
+	}
+
+	return 0;
+}
+
+int dwc2_host_restore_critical_registers(struct dwc2_hsotg *hsotg)
+{
+	int ret;
+
+	ret = dwc2_restore_global_registers(hsotg);
+	if (ret) {
+		dev_err(hsotg->dev, "%s: failed to restore registers\n",
+			__func__);
+		return ret;
+	}
+
+	ret = dwc2_restore_host_registers(hsotg);
+	if (ret) {
+		dev_err(hsotg->dev, "%s: failed to restore host registers\n",
+			__func__);
+		return ret;
+	}
+
+	return 0;
+}
+
 /**
  * dwc2_host_enter_hibernation() - Put controller in Hibernation.
  *
@@ -5489,18 +5534,9 @@ int dwc2_host_enter_hibernation(struct dwc2_hsotg *hsotg)
 	u32 gpwrdn;
 
 	dev_dbg(hsotg->dev, "Preparing host for hibernation\n");
-	ret = dwc2_backup_global_registers(hsotg);
-	if (ret) {
-		dev_err(hsotg->dev, "%s: failed to backup global registers\n",
-			__func__);
+	ret = dwc2_host_backup_critical_registers(hsotg);
+	if (ret)
 		return ret;
-	}
-	ret = dwc2_backup_host_registers(hsotg);
-	if (ret) {
-		dev_err(hsotg->dev, "%s: failed to backup host registers\n",
-			__func__);
-		return ret;
-	}
 
 	/* Enter USB Suspend Mode */
 	hprt0 = dwc2_readl(hsotg, HPRT0);
@@ -5694,20 +5730,9 @@ int dwc2_host_exit_hibernation(struct dwc2_hsotg *hsotg, int rem_wakeup,
 	dwc2_writel(hsotg, 0xffffffff, GINTSTS);
 
 	/* Restore global registers */
-	ret = dwc2_restore_global_registers(hsotg);
-	if (ret) {
-		dev_err(hsotg->dev, "%s: failed to restore registers\n",
-			__func__);
+	ret = dwc2_host_restore_critical_registers(hsotg);
+	if (ret)
 		return ret;
-	}
-
-	/* Restore host registers */
-	ret = dwc2_restore_host_registers(hsotg);
-	if (ret) {
-		dev_err(hsotg->dev, "%s: failed to restore host registers\n",
-			__func__);
-		return ret;
-	}
 
 	if (rem_wakeup) {
 		dwc2_hcd_rem_wakeup(hsotg);
@@ -5774,19 +5799,9 @@ int dwc2_host_enter_partial_power_down(struct dwc2_hsotg *hsotg)
 		dev_warn(hsotg->dev, "Suspend wasn't generated\n");
 
 	/* Backup all registers */
-	ret = dwc2_backup_global_registers(hsotg);
-	if (ret) {
-		dev_err(hsotg->dev, "%s: failed to backup global registers\n",
-			__func__);
+	ret = dwc2_host_backup_critical_registers(hsotg);
+	if (ret)
 		return ret;
-	}
-
-	ret = dwc2_backup_host_registers(hsotg);
-	if (ret) {
-		dev_err(hsotg->dev, "%s: failed to backup host registers\n",
-			__func__);
-		return ret;
-	}
 
 	/*
 	 * Clear any pending interrupts since dwc2 will not be able to
@@ -5855,19 +5870,9 @@ int dwc2_host_exit_partial_power_down(struct dwc2_hsotg *hsotg,
 
 	udelay(100);
 	if (restore) {
-		ret = dwc2_restore_global_registers(hsotg);
-		if (ret) {
-			dev_err(hsotg->dev, "%s: failed to restore registers\n",
-				__func__);
+		ret = dwc2_host_restore_critical_registers(hsotg);
+		if (ret)
 			return ret;
-		}
-
-		ret = dwc2_restore_host_registers(hsotg);
-		if (ret) {
-			dev_err(hsotg->dev, "%s: failed to restore host registers\n",
-				__func__);
-			return ret;
-		}
 	}
 
 	/* Drive resume signaling and exit suspend mode on the port. */

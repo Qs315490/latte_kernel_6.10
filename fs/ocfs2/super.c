@@ -129,7 +129,7 @@ static const struct super_operations ocfs2_sops = {
 	.statfs		= ocfs2_statfs,
 	.alloc_inode	= ocfs2_alloc_inode,
 	.free_inode	= ocfs2_free_inode,
-	.drop_inode	= ocfs2_drop_inode,
+	.drop_inode	= inode_just_drop,
 	.evict_inode	= ocfs2_evict_inode,
 	.sync_fs	= ocfs2_sync_fs,
 	.put_super	= ocfs2_put_super,
@@ -1200,7 +1200,7 @@ static int ocfs2_init_fs_context(struct fs_context *fc)
 {
 	struct mount_options *mopt;
 
-	mopt = kzalloc(sizeof(struct mount_options), GFP_KERNEL);
+	mopt = kzalloc_obj(struct mount_options);
 	if (!mopt)
 		return -EINVAL;
 
@@ -1224,7 +1224,6 @@ static struct file_system_type ocfs2_fs_type = {
 	.name           = "ocfs2",
 	.kill_sb        = kill_block_super,
 	.fs_flags       = FS_REQUIRES_DEV|FS_RENAME_DOES_D_MOVE,
-	.next           = NULL,
 	.init_fs_context = ocfs2_init_fs_context,
 	.parameters	= ocfs2_param_spec,
 };
@@ -1812,6 +1811,9 @@ static void ocfs2_dismount_volume(struct super_block *sb, int mnt_err)
 	/* Orphan scan should be stopped as early as possible */
 	ocfs2_orphan_scan_stop(osb);
 
+	/* Stop quota recovery so that we can disable quotas */
+	ocfs2_recovery_disable_quota(osb);
+
 	ocfs2_disable_quotas(osb);
 
 	/* All dquots should be freed by now */
@@ -1950,7 +1952,7 @@ static int ocfs2_initialize_super(struct super_block *sb,
 	struct ocfs2_super *osb;
 	u64 total_blocks;
 
-	osb = kzalloc(sizeof(struct ocfs2_super), GFP_KERNEL);
+	osb = kzalloc_obj(struct ocfs2_super);
 	if (!osb) {
 		status = -ENOMEM;
 		mlog_errno(status);
@@ -1959,7 +1961,7 @@ static int ocfs2_initialize_super(struct super_block *sb,
 
 	sb->s_fs_info = osb;
 	sb->s_op = &ocfs2_sops;
-	sb->s_d_op = &ocfs2_dentry_ops;
+	set_default_d_op(sb, &ocfs2_dentry_ops);
 	sb->s_export_op = &ocfs2_export_ops;
 	sb->s_qcop = &dquot_quotactl_sysfile_ops;
 	sb->dq_op = &ocfs2_quota_operations;
@@ -1993,8 +1995,6 @@ static int ocfs2_initialize_super(struct super_block *sb,
 	spin_lock_init(&osb->osb_lock);
 	spin_lock_init(&osb->osb_xattr_lock);
 	ocfs2_init_steal_slots(osb);
-
-	mutex_init(&osb->system_file_mutex);
 
 	atomic_set(&osb->alloc_stats.moves, 0);
 	atomic_set(&osb->alloc_stats.local_data, 0);
@@ -2121,7 +2121,7 @@ static int ocfs2_initialize_super(struct super_block *sb,
 		osb->osb_cluster_stack[0] = '\0';
 	}
 
-	get_random_bytes(&osb->s_next_generation, sizeof(u32));
+	osb->s_next_generation = get_random_u32();
 
 	/*
 	 * FIXME
@@ -2484,7 +2484,7 @@ static int ocfs2_handle_error(struct super_block *sb)
 		rv = -EIO;
 	} else { /* default option */
 		rv = -EROFS;
-		if (sb_rdonly(sb) && (ocfs2_is_soft_readonly(osb) || ocfs2_is_hard_readonly(osb)))
+		if (sb_rdonly(sb) && ocfs2_emergency_state(osb))
 			return rv;
 
 		pr_crit("OCFS2: File system is now read-only.\n");

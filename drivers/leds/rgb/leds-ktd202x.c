@@ -391,7 +391,7 @@ static int ktd202x_setup_led_rgb(struct ktd202x *chip, struct fwnode_handle *fwn
 	int i = 0;
 
 	num_channels = 0;
-	fwnode_for_each_available_child_node(fwnode, child)
+	fwnode_for_each_child_node(fwnode, child)
 		num_channels++;
 
 	if (!num_channels || num_channels > chip->num_leds)
@@ -401,7 +401,7 @@ static int ktd202x_setup_led_rgb(struct ktd202x *chip, struct fwnode_handle *fwn
 	if (!info)
 		return -ENOMEM;
 
-	fwnode_for_each_available_child_node(fwnode, child) {
+	fwnode_for_each_child_node(fwnode, child) {
 		u32 mono_color;
 		u32 reg;
 		int ret;
@@ -605,9 +605,9 @@ static void ktd202x_shutdown(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ktd202x_id[] = {
-	{"ktd2026", KTD2026_NUM_LEDS},
-	{"ktd2027", KTD2027_NUM_LEDS},
-	{}
+	{ .name = "ktd2026", .driver_data = KTD2026_NUM_LEDS },
+	{ .name = "ktd2027", .driver_data = KTD2027_NUM_LEDS },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ktd202x_id);
 

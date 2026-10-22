@@ -357,7 +357,7 @@ static void rt2x00lib_fill_tx_status(struct rt2x00_dev *rt2x00dev,
 	}
 
 	/*
-	 * Every single frame has it's own tx status, hence report
+	 * Every single frame has its own tx status, hence report
 	 * every frame as ampdu of size 1.
 	 *
 	 * TODO: if we can find out how many frames were aggregated
@@ -496,7 +496,7 @@ void rt2x00lib_txdone(struct queue_entry *entry,
 	/*
 	 * If the IV/EIV data was stripped from the frame before it was
 	 * passed to the hardware, we should now reinsert it again because
-	 * mac80211 will expect the same data to be present it the
+	 * mac80211 will expect the same data to be present in the
 	 * frame as it was passed to us.
 	 */
 	if (rt2x00_has_cap_hw_crypto(rt2x00dev))
@@ -679,7 +679,7 @@ static void rt2x00lib_rxdone_check_ps(struct rt2x00_dev *rt2x00dev,
 	/* Check whenever the PHY can be turned off again. */
 
 	/* 1. What about buffered unicast traffic for our AID? */
-	cam = ieee80211_check_tim(tim_ie, tim_len, rt2x00dev->aid);
+	cam = ieee80211_check_tim(tim_ie, tim_len, rt2x00dev->aid, false);
 
 	/* 2. Maybe the AP wants to send multicast/broadcast data? */
 	cam |= (tim_ie->bitmap_ctrl & 0x01);
@@ -988,14 +988,20 @@ static void rt2x00lib_rate(struct ieee80211_rate *entry,
 		entry->flags |= IEEE80211_RATE_SHORT_PREAMBLE;
 }
 
-void rt2x00lib_set_mac_address(struct rt2x00_dev *rt2x00dev, u8 *eeprom_mac_addr)
+int rt2x00lib_set_mac_address(struct rt2x00_dev *rt2x00dev, u8 *eeprom_mac_addr)
 {
-	of_get_mac_address(rt2x00dev->dev->of_node, eeprom_mac_addr);
+	int ret;
+
+	ret = of_get_mac_address(rt2x00dev->dev->of_node, eeprom_mac_addr);
+	if (ret == -EPROBE_DEFER)
+		return ret;
 
 	if (!is_valid_ether_addr(eeprom_mac_addr)) {
 		eth_random_addr(eeprom_mac_addr);
 		rt2x00_eeprom_dbg(rt2x00dev, "MAC: %pM\n", eeprom_mac_addr);
 	}
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(rt2x00lib_set_mac_address);
 
@@ -1014,11 +1020,11 @@ static int rt2x00lib_probe_hw_modes(struct rt2x00_dev *rt2x00dev,
 	if (spec->supported_rates & SUPPORT_RATE_OFDM)
 		num_rates += 8;
 
-	channels = kcalloc(spec->num_channels, sizeof(*channels), GFP_KERNEL);
+	channels = kzalloc_objs(*channels, spec->num_channels);
 	if (!channels)
 		return -ENOMEM;
 
-	rates = kcalloc(num_rates, sizeof(*rates), GFP_KERNEL);
+	rates = kzalloc_objs(*rates, num_rates);
 	if (!rates)
 		goto exit_free_channels;
 
@@ -1382,7 +1388,7 @@ int rt2x00lib_probe_dev(struct rt2x00_dev *rt2x00dev)
 			                      GFP_KERNEL);
 		if (!rt2x00dev->drv_data) {
 			retval = -ENOMEM;
-			goto exit;
+			return retval;
 		}
 	}
 
@@ -1391,8 +1397,8 @@ int rt2x00lib_probe_dev(struct rt2x00_dev *rt2x00dev)
 	mutex_init(&rt2x00dev->conf_mutex);
 	INIT_LIST_HEAD(&rt2x00dev->bar_list);
 	spin_lock_init(&rt2x00dev->bar_list_lock);
-	hrtimer_init(&rt2x00dev->txstatus_timer, CLOCK_MONOTONIC,
-		     HRTIMER_MODE_REL);
+	hrtimer_setup(&rt2x00dev->txstatus_timer, hrtimer_dummy_timeout, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL);
 
 	set_bit(DEVICE_STATE_PRESENT, &rt2x00dev->flags);
 
@@ -1416,7 +1422,7 @@ int rt2x00lib_probe_dev(struct rt2x00_dev *rt2x00dev)
 	    alloc_ordered_workqueue("%s", 0, wiphy_name(rt2x00dev->hw->wiphy));
 	if (!rt2x00dev->workqueue) {
 		retval = -ENOMEM;
-		goto exit;
+		goto exit_free_drv_data;
 	}
 
 	INIT_WORK(&rt2x00dev->intf_work, rt2x00lib_intf_scheduled);
@@ -1487,6 +1493,14 @@ int rt2x00lib_probe_dev(struct rt2x00_dev *rt2x00dev)
 
 exit:
 	rt2x00lib_remove_dev(rt2x00dev);
+
+	return retval;
+
+exit_free_drv_data:
+	clear_bit(DEVICE_STATE_PRESENT, &rt2x00dev->flags);
+
+	kfree(rt2x00dev->drv_data);
+	rt2x00dev->drv_data = NULL;
 
 	return retval;
 }

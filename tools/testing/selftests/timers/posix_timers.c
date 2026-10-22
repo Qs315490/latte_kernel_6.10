@@ -7,6 +7,7 @@
  * Kernel loop code stolen from Steven Rostedt <srostedt@redhat.com>
  */
 #define _GNU_SOURCE
+#include <sys/prctl.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <stdio.h>
@@ -17,8 +18,9 @@
 #include <time.h>
 #include <include/vdso/time64.h>
 #include <pthread.h>
+#include <stdbool.h>
 
-#include "../kselftest.h"
+#include "kselftest.h"
 
 #define DELAY 2
 
@@ -76,19 +78,25 @@ static void sig_handler(int nr)
 	done = 1;
 }
 
+static inline int64_t calcdiff_ns(struct timespec t1, struct timespec t2)
+{
+	int64_t diff;
+
+	diff = NSEC_PER_SEC * (int64_t)((int) t1.tv_sec - (int) t2.tv_sec);
+	diff += ((int) t1.tv_nsec - (int) t2.tv_nsec);
+	return diff;
+}
+
 /*
  * Check the expected timer expiration matches the GTOD elapsed delta since
  * we armed the timer. Keep a 0.5 sec error margin due to various jitter.
  */
-static int check_diff(struct timeval start, struct timeval end)
+static int check_diff(struct timespec start, struct timespec end)
 {
-	long long diff;
+	long long diff = calcdiff_ns(end, start);
 
-	diff = end.tv_usec - start.tv_usec;
-	diff += (end.tv_sec - start.tv_sec) * USEC_PER_SEC;
-
-	if (llabs(diff - DELAY * USEC_PER_SEC) > USEC_PER_SEC / 2) {
-		printf("Diff too high: %lld..", diff);
+	if (llabs(diff - DELAY * NSEC_PER_SEC) > NSEC_PER_SEC / 2) {
+		printf("Diff too high: %lld ns..", diff);
 		return -1;
 	}
 
@@ -97,22 +105,25 @@ static int check_diff(struct timeval start, struct timeval end)
 
 static void check_itimer(int which, const char *name)
 {
-	struct timeval start, end;
+	struct timespec start, end;
 	struct itimerval val = {
 		.it_value.tv_sec = DELAY,
 	};
+	int clock_id = CLOCK_REALTIME;
 
 	done = 0;
 
 	if (which == ITIMER_VIRTUAL)
 		signal(SIGVTALRM, sig_handler);
-	else if (which == ITIMER_PROF)
+	else if (which == ITIMER_PROF) {
+		clock_id = CLOCK_THREAD_CPUTIME_ID;
 		signal(SIGPROF, sig_handler);
+	}
 	else if (which == ITIMER_REAL)
 		signal(SIGALRM, sig_handler);
 
-	if (gettimeofday(&start, NULL) < 0)
-		fatal_error(name, "gettimeofday()");
+	if (clock_gettime(clock_id, &start))
+		fatal_error(name, "clock_gettime()");
 
 	if (setitimer(which, &val, NULL) < 0)
 		fatal_error(name, "setitimer()");
@@ -124,18 +135,19 @@ static void check_itimer(int which, const char *name)
 	else if (which == ITIMER_REAL)
 		idle_loop();
 
-	if (gettimeofday(&end, NULL) < 0)
-		fatal_error(name, "gettimeofday()");
+	if (clock_gettime(clock_id, &end))
+		fatal_error(name, "clock_gettime()");
 
 	ksft_test_result(check_diff(start, end) == 0, "%s\n", name);
 }
 
 static void check_timer_create(int which, const char *name)
 {
-	struct timeval start, end;
+	struct timespec start, end;
 	struct itimerspec val = {
 		.it_value.tv_sec = DELAY,
 	};
+	int clock_id = CLOCK_REALTIME;
 	timer_t id;
 
 	done = 0;
@@ -146,16 +158,16 @@ static void check_timer_create(int which, const char *name)
 	if (signal(SIGALRM, sig_handler) == SIG_ERR)
 		fatal_error(name, "signal()");
 
-	if (gettimeofday(&start, NULL) < 0)
-		fatal_error(name, "gettimeofday()");
+	if (clock_gettime(clock_id, &start))
+		fatal_error(name, "clock_gettime()");
 
 	if (timer_settime(id, 0, &val, NULL) < 0)
 		fatal_error(name, "timer_settime()");
 
 	user_loop();
 
-	if (gettimeofday(&end, NULL) < 0)
-		fatal_error(name, "gettimeofday()");
+	if (clock_gettime(clock_id, &end))
+		fatal_error(name, "clock_gettime()");
 
 	ksft_test_result(check_diff(start, end) == 0,
 			 "timer_create() per %s\n", name);
@@ -443,15 +455,6 @@ static void check_delete(void)
 	ksft_test_result(!tsig.signals, "check_delete\n");
 }
 
-static inline int64_t calcdiff_ns(struct timespec t1, struct timespec t2)
-{
-	int64_t diff;
-
-	diff = NSEC_PER_SEC * (int64_t)((int) t1.tv_sec - (int) t2.tv_sec);
-	diff += ((int) t1.tv_nsec - (int) t2.tv_nsec);
-	return diff;
-}
-
 static void check_sigev_none(int which, const char *name)
 {
 	struct timespec start, now;
@@ -599,13 +602,89 @@ static void check_overrun(int which, const char *name)
 			 "check_overrun %s\n", name);
 }
 
+#include <sys/syscall.h>
+
+static int do_timer_create(int *id)
+{
+	return syscall(__NR_timer_create, CLOCK_MONOTONIC, NULL, id);
+}
+
+static int do_timer_delete(int id)
+{
+	return syscall(__NR_timer_delete, id);
+}
+
+#ifndef PR_TIMER_CREATE_RESTORE_IDS
+# define PR_TIMER_CREATE_RESTORE_IDS		77
+# define PR_TIMER_CREATE_RESTORE_IDS_OFF	 0
+# define PR_TIMER_CREATE_RESTORE_IDS_ON		 1
+# define PR_TIMER_CREATE_RESTORE_IDS_GET	 2
+#endif
+
+static void check_timer_create_exact(void)
+{
+	int id;
+
+	if (prctl(PR_TIMER_CREATE_RESTORE_IDS, PR_TIMER_CREATE_RESTORE_IDS_ON, 0, 0, 0)) {
+		switch (errno) {
+		case EINVAL:
+			ksft_test_result_skip("check timer create exact, not supported\n");
+			return;
+		default:
+			ksft_test_result_skip("check timer create exact, errno = %d\n", errno);
+			return;
+		}
+	}
+
+	if (prctl(PR_TIMER_CREATE_RESTORE_IDS, PR_TIMER_CREATE_RESTORE_IDS_GET, 0, 0, 0) != 1)
+		fatal_error(NULL, "prctl(GET) failed\n");
+
+	id = 8;
+	if (do_timer_create(&id) < 0)
+		fatal_error(NULL, "timer_create()");
+
+	if (do_timer_delete(id))
+		fatal_error(NULL, "timer_delete()");
+
+	if (prctl(PR_TIMER_CREATE_RESTORE_IDS, PR_TIMER_CREATE_RESTORE_IDS_OFF, 0, 0, 0))
+		fatal_error(NULL, "prctl(OFF)");
+
+	if (prctl(PR_TIMER_CREATE_RESTORE_IDS, PR_TIMER_CREATE_RESTORE_IDS_GET, 0, 0, 0) != 0)
+		fatal_error(NULL, "prctl(GET) failed\n");
+
+	if (id != 8) {
+		ksft_test_result_fail("check timer create exact %d != 8\n", id);
+		return;
+	}
+
+	/* Validate that it went back to normal mode and allocates ID 9 */
+	if (do_timer_create(&id) < 0)
+		fatal_error(NULL, "timer_create()");
+
+	if (do_timer_delete(id))
+		fatal_error(NULL, "timer_delete()");
+
+	if (id == 9)
+		ksft_test_result_pass("check timer create exact\n");
+	else
+		ksft_test_result_fail("check timer create exact. Disabling failed.\n");
+}
+
 int main(int argc, char **argv)
 {
+	bool run_sig_ign_tests = ksft_min_kernel_version(6, 13);
+
 	ksft_print_header();
-	ksft_set_plan(18);
+	if (run_sig_ign_tests) {
+		ksft_set_plan(19);
+	} else {
+		ksft_set_plan(10);
+	}
 
 	ksft_print_msg("Testing posix timers. False negative may happen on CPU execution \n");
 	ksft_print_msg("based timers if other threads run on the CPU...\n");
+
+	check_timer_create_exact();
 
 	check_itimer(ITIMER_VIRTUAL, "ITIMER_VIRTUAL");
 	check_itimer(ITIMER_PROF, "ITIMER_PROF");
@@ -624,15 +703,20 @@ int main(int argc, char **argv)
 	check_timer_create(CLOCK_PROCESS_CPUTIME_ID, "CLOCK_PROCESS_CPUTIME_ID");
 	check_timer_distribution();
 
-	check_sig_ign(0);
-	check_sig_ign(1);
-	check_rearm();
-	check_delete();
-	check_sigev_none(CLOCK_MONOTONIC, "CLOCK_MONOTONIC");
-	check_sigev_none(CLOCK_PROCESS_CPUTIME_ID, "CLOCK_PROCESS_CPUTIME_ID");
-	check_gettime(CLOCK_MONOTONIC, "CLOCK_MONOTONIC");
-	check_gettime(CLOCK_PROCESS_CPUTIME_ID, "CLOCK_PROCESS_CPUTIME_ID");
-	check_gettime(CLOCK_THREAD_CPUTIME_ID, "CLOCK_THREAD_CPUTIME_ID");
+	if (run_sig_ign_tests) {
+		check_sig_ign(0);
+		check_sig_ign(1);
+		check_rearm();
+		check_delete();
+		check_sigev_none(CLOCK_MONOTONIC, "CLOCK_MONOTONIC");
+		check_sigev_none(CLOCK_PROCESS_CPUTIME_ID, "CLOCK_PROCESS_CPUTIME_ID");
+		check_gettime(CLOCK_MONOTONIC, "CLOCK_MONOTONIC");
+		check_gettime(CLOCK_PROCESS_CPUTIME_ID, "CLOCK_PROCESS_CPUTIME_ID");
+		check_gettime(CLOCK_THREAD_CPUTIME_ID, "CLOCK_THREAD_CPUTIME_ID");
+	} else {
+		ksft_print_msg("Skipping SIG_IGN tests on kernel < 6.13\n");
+	}
+
 	check_overrun(CLOCK_MONOTONIC, "CLOCK_MONOTONIC");
 	check_overrun(CLOCK_PROCESS_CPUTIME_ID, "CLOCK_PROCESS_CPUTIME_ID");
 	check_overrun(CLOCK_THREAD_CPUTIME_ID, "CLOCK_THREAD_CPUTIME_ID");

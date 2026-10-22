@@ -12,13 +12,18 @@
 #include "io_uring.h"
 #include "epoll.h"
 
-#if defined(CONFIG_EPOLL)
 struct io_epoll {
 	struct file			*file;
 	int				epfd;
 	int				op;
 	int				fd;
 	struct epoll_event		event;
+};
+
+struct io_epoll_wait {
+	struct file			*file;
+	int				maxevents;
+	struct epoll_event __user	*events;
 };
 
 int io_epoll_ctl_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
@@ -46,16 +51,53 @@ int io_epoll_ctl_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 int io_epoll_ctl(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_epoll *ie = io_kiocb_to_cmd(req, struct io_epoll);
-	int ret;
 	bool force_nonblock = issue_flags & IO_URING_F_NONBLOCK;
+	struct epoll_key key;
+	int ret;
 
-	ret = do_epoll_ctl(ie->epfd, ie->op, ie->fd, &ie->event, force_nonblock);
+	CLASS(fd, f)(ie->epfd);
+	if (fd_empty(f))
+		return -EBADF;
+
+	CLASS(fd, tf)(ie->fd);
+	if (fd_empty(tf))
+		return -EBADF;
+
+	key.file = fd_file(tf);
+	key.fd = ie->fd;
+	ret = do_epoll_ctl_file(fd_file(f), ie->op, &key, &ie->event, force_nonblock);
 	if (force_nonblock && ret == -EAGAIN)
 		return -EAGAIN;
 
 	if (ret < 0)
 		req_set_fail(req);
 	io_req_set_res(req, ret, 0);
-	return IOU_OK;
+	return IOU_COMPLETE;
 }
-#endif
+
+int io_epoll_wait_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
+{
+	struct io_epoll_wait *iew = io_kiocb_to_cmd(req, struct io_epoll_wait);
+
+	if (sqe->off || sqe->rw_flags || sqe->buf_index || sqe->splice_fd_in)
+		return -EINVAL;
+
+	iew->maxevents = READ_ONCE(sqe->len);
+	iew->events = u64_to_user_ptr(READ_ONCE(sqe->addr));
+	return 0;
+}
+
+int io_epoll_wait(struct io_kiocb *req, unsigned int issue_flags)
+{
+	struct io_epoll_wait *iew = io_kiocb_to_cmd(req, struct io_epoll_wait);
+	int ret;
+
+	ret = epoll_sendevents(req->file, iew->events, iew->maxevents);
+	if (ret == 0)
+		return -EAGAIN;
+	if (ret < 0)
+		req_set_fail(req);
+
+	io_req_set_res(req, ret, 0);
+	return IOU_COMPLETE;
+}

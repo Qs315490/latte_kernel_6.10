@@ -40,7 +40,7 @@ static ssize_t elog_id_show(struct elog_obj *elog_obj,
 			    struct elog_attribute *attr,
 			    char *buf)
 {
-	return sprintf(buf, "0x%llx\n", elog_obj->id);
+	return sysfs_emit(buf, "0x%llx\n", elog_obj->id);
 }
 
 static const char *elog_type_to_string(uint64_t type)
@@ -55,16 +55,15 @@ static ssize_t elog_type_show(struct elog_obj *elog_obj,
 			      struct elog_attribute *attr,
 			      char *buf)
 {
-	return sprintf(buf, "0x%llx %s\n",
-		       elog_obj->type,
-		       elog_type_to_string(elog_obj->type));
+	return sysfs_emit(buf, "0x%llx %s\n", elog_obj->type,
+			  elog_type_to_string(elog_obj->type));
 }
 
 static ssize_t elog_ack_show(struct elog_obj *elog_obj,
 			     struct elog_attribute *attr,
 			     char *buf)
 {
-	return sprintf(buf, "ack - acknowledge log message\n");
+	return sysfs_emit(buf, "ack - acknowledge log message\n");
 }
 
 static ssize_t elog_ack_store(struct elog_obj *elog_obj,
@@ -156,7 +155,7 @@ static const struct kobj_type elog_ktype = {
 #define OPAL_MAX_ERRLOG_SIZE	16384
 
 static ssize_t raw_attr_read(struct file *filep, struct kobject *kobj,
-			     struct bin_attribute *bin_attr,
+			     const struct bin_attribute *bin_attr,
 			     char *buffer, loff_t pos, size_t count)
 {
 	int opal_rc;
@@ -190,7 +189,7 @@ static void create_elog_obj(uint64_t id, size_t size, uint64_t type)
 	struct elog_obj *elog;
 	int rc;
 
-	elog = kzalloc(sizeof(*elog), GFP_KERNEL);
+	elog = kzalloc_obj(*elog);
 	if (!elog)
 		return;
 

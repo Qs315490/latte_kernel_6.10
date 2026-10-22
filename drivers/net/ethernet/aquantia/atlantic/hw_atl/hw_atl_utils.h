@@ -226,7 +226,6 @@ struct __packed offload_info {
 	struct offload_port_info ports;
 	struct offload_ka_info kas;
 	struct offload_rr_info rrs;
-	u8 buf[];
 };
 
 struct __packed hw_atl_utils_fw_rpc {
@@ -318,6 +317,13 @@ struct __packed hw_atl_utils_settings {
 	u32 msm_options;
 	u32 dac_cable_serdes_modes;
 	u32 media_detect;
+};
+
+struct __packed smbus_request {
+	u32 msg_id;
+	u32 device_id;
+	u32 address;
+	u32 length;
 };
 
 enum macsec_msg_type {

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2018-2024 Intel Corporation
+ * Copyright (C) 2018-2025 Intel Corporation
  */
 #ifndef __iwl_fw_dbg_tlv_h__
 #define __iwl_fw_dbg_tlv_h__
@@ -16,7 +16,7 @@
 #define IWL_FW_INI_PRESET_DISABLE		0xff
 
 /**
- * struct iwl_fw_ini_hcmd
+ * struct iwl_fw_ini_hcmd - debug configuration host command
  *
  * @id: the debug configuration command type for instance: 0xf6 / 0xf5 / DHC
  * @group: the desired cmd group
@@ -199,7 +199,7 @@ struct iwl_fw_ini_region_tlv {
 } __packed; /* FW_TLV_DEBUG_REGION_API_S_VER_1 */
 
 /**
- * struct iwl_fw_ini_debug_info_tlv
+ * struct iwl_fw_ini_debug_info_tlv - debug info TLV
  *
  * debug configuration name for a specific image
  *
@@ -311,7 +311,7 @@ struct iwl_fw_ini_conf_set_tlv {
 } __packed; /* FW_TLV_DEBUG_CONFIG_SET_API_S_VER_1 */
 
 /**
- * enum iwl_fw_ini_config_set_type
+ * enum iwl_fw_ini_config_set_type - configuration set type
  *
  * @IWL_FW_INI_CONFIG_SET_TYPE_INVALID: invalid config set
  * @IWL_FW_INI_CONFIG_SET_TYPE_DEVICE_PERIPHERY_MAC: for PERIPHERY MAC configuration
@@ -337,7 +337,7 @@ enum iwl_fw_ini_config_set_type {
 } __packed;
 
 /**
- * enum iwl_fw_ini_allocation_id
+ * enum iwl_fw_ini_allocation_id - allocation ID
  *
  * @IWL_FW_INI_ALLOCATION_INVALID: invalid
  * @IWL_FW_INI_ALLOCATION_ID_DBGC1: allocation meant for DBGC1 configuration
@@ -356,7 +356,7 @@ enum iwl_fw_ini_allocation_id {
 }; /* FW_DEBUG_TLV_ALLOCATION_ID_E_VER_1 */
 
 /**
- * enum iwl_fw_ini_buffer_location
+ * enum iwl_fw_ini_buffer_location - buffer location
  *
  * @IWL_FW_INI_LOCATION_INVALID: invalid
  * @IWL_FW_INI_LOCATION_SRAM_PATH: SRAM location
@@ -373,7 +373,7 @@ enum iwl_fw_ini_buffer_location {
 }; /* FW_DEBUG_TLV_BUFFER_LOCATION_E_VER_1 */
 
 /**
- * enum iwl_fw_ini_region_type
+ * enum iwl_fw_ini_region_type - region type
  *
  * @IWL_FW_INI_REGION_INVALID: invalid
  * @IWL_FW_INI_REGION_TLV: uCode and debug TLVs
@@ -437,7 +437,7 @@ enum iwl_fw_ini_region_device_memory_subtype {
 }; /* FW_TLV_DEBUG_REGION_DEVICE_MEMORY_SUBTYPE_API_E */
 
 /**
- * enum iwl_fw_ini_time_point
+ * enum iwl_fw_ini_time_point - time point type
  *
  * Hard coded time points in which the driver can send hcmd or perform dump
  * collection
@@ -527,6 +527,8 @@ enum iwl_fw_ini_time_point {
  * @IWL_FW_INI_APPLY_POLICY_OVERRIDE_DATA: override trigger data.
  *	Append otherwise
  * @IWL_FW_INI_APPLY_POLICY_DUMP_COMPLETE_CMD: send cmd once dump collected
+ * @IWL_FW_INI_APPLY_POLICY_SPLIT_DUMP_RESET: split this dump into regions
+ *	before and after the reset handshake
  */
 enum iwl_fw_ini_trigger_apply_policy {
 	IWL_FW_INI_APPLY_POLICY_MATCH_TIME_POINT	= BIT(0),
@@ -535,6 +537,7 @@ enum iwl_fw_ini_trigger_apply_policy {
 	IWL_FW_INI_APPLY_POLICY_OVERRIDE_CFG		= BIT(9),
 	IWL_FW_INI_APPLY_POLICY_OVERRIDE_DATA		= BIT(10),
 	IWL_FW_INI_APPLY_POLICY_DUMP_COMPLETE_CMD	= BIT(16),
+	IWL_FW_INI_APPLY_POLICY_SPLIT_DUMP_RESET	= BIT(17),
 };
 
 /**
@@ -556,12 +559,14 @@ enum iwl_fw_ini_trigger_reset_fw_policy {
  * @IWL_FW_INI_DEBUG_DUMP_POLICY_NO_LIMIT: OS has no limit of dump size
  * @IWL_FW_INI_DEBUG_DUMP_POLICY_MAX_LIMIT_600KB: mini dump only 600KB region dump
  * @IWL_FW_IWL_DEBUG_DUMP_POLICY_MAX_LIMIT_5MB: mini dump 5MB size dump
+ * @IWL_FW_IWL_DEBUG_DUMP_POLICY_BEFORE_RESET: dump this region before reset
+ *	handshake (if requested by %IWL_FW_INI_APPLY_POLICY_SPLIT_DUMP_RESET)
  */
 enum iwl_fw_ini_dump_policy {
 	IWL_FW_INI_DEBUG_DUMP_POLICY_NO_LIMIT           = BIT(0),
 	IWL_FW_INI_DEBUG_DUMP_POLICY_MAX_LIMIT_600KB    = BIT(1),
 	IWL_FW_IWL_DEBUG_DUMP_POLICY_MAX_LIMIT_5MB      = BIT(2),
-
+	IWL_FW_IWL_DEBUG_DUMP_POLICY_BEFORE_RESET	= BIT(3),
 };
 
 /**

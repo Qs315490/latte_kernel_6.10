@@ -919,7 +919,7 @@ void wlc_lcnphy_read_table(struct brcms_phy *pi, struct phytbl_info *pti)
 
 static void
 wlc_lcnphy_common_read_table(struct brcms_phy *pi, u32 tbl_id,
-			     const u16 *tbl_ptr, u32 tbl_len,
+			     u16 *tbl_ptr, u32 tbl_len,
 			     u32 tbl_width, u32 tbl_offset)
 {
 	struct phytbl_info tab;
@@ -1319,7 +1319,7 @@ wlc_lcnphy_rx_iq_cal(struct brcms_phy *pi,
 	s16 *ptr;
 	struct brcms_phy_lcnphy *pi_lcn = pi->u.pi_lcnphy;
 
-	ptr = kmalloc_array(131, sizeof(s16), GFP_ATOMIC);
+	ptr = kmalloc_objs(s16, 131, GFP_ATOMIC);
 	if (NULL == ptr)
 		return false;
 	if (module == 2) {
@@ -1607,7 +1607,6 @@ wlc_lcnphy_radio_2064_channel_tune_4313(struct brcms_phy *pi, u8 channel)
 {
 	uint i;
 	const struct chan_info_2064_lcnphy *ci;
-	u8 rfpll_doubler = 0;
 	u8 pll_pwrup, pll_pwrup_ovr;
 	s32 qFcal;
 	u8 d15, d16, f16, e44, e45;
@@ -1618,18 +1617,12 @@ wlc_lcnphy_radio_2064_channel_tune_4313(struct brcms_phy *pi, u8 channel)
 	u16 g30, d28;
 
 	ci = &chan_info_2064_lcnphy[0];
-	rfpll_doubler = 1;
 
 	mod_radio_reg(pi, RADIO_2064_REG09D, 0x4, 0x1 << 2);
 
 	write_radio_reg(pi, RADIO_2064_REG09E, 0xf);
-	if (!rfpll_doubler) {
-		loop_bw = PLL_2064_LOOP_BW;
-		d30 = PLL_2064_D30;
-	} else {
-		loop_bw = PLL_2064_LOOP_BW_DOUBLER;
-		d30 = PLL_2064_D30_DOUBLER;
-	}
+	loop_bw = PLL_2064_LOOP_BW_DOUBLER;
+	d30 = PLL_2064_D30_DOUBLER;
 
 	if (CHSPEC_IS2G(pi->radio_chanspec)) {
 		for (i = 0; i < ARRAY_SIZE(chan_info_2064_lcnphy); i++)
@@ -1669,7 +1662,7 @@ wlc_lcnphy_radio_2064_channel_tune_4313(struct brcms_phy *pi, u8 channel)
 	e44 = 0;
 	e45 = 0;
 
-	fpfd = rfpll_doubler ? (pi->xtalfreq << 1) : (pi->xtalfreq);
+	fpfd = pi->xtalfreq << 1;
 	if (pi->xtalfreq > 26000000)
 		e44 = 1;
 	if (pi->xtalfreq > 52000000)
@@ -3605,7 +3598,7 @@ wlc_lcnphy_a1(struct brcms_phy *pi, int cal_type, int num_levels,
 	u16 *phy_c32;
 	phy_c21 = 0;
 	phy_c10 = phy_c13 = phy_c14 = phy_c8 = 0;
-	ptr = kmalloc_array(131, sizeof(s16), GFP_ATOMIC);
+	ptr = kmalloc_objs(s16, 131, GFP_ATOMIC);
 	if (NULL == ptr)
 		return;
 
@@ -4790,7 +4783,7 @@ void wlc_phy_init_lcnphy(struct brcms_phy *pi)
 	wlc_lcnphy_calib_modes(pi, PHY_PERICAL_PHYINIT);
 }
 
-static bool wlc_phy_txpwr_srom_read_lcnphy(struct brcms_phy *pi)
+static void wlc_phy_txpwr_srom_read_lcnphy(struct brcms_phy *pi)
 {
 	s8 txpwr = 0;
 	int i;
@@ -4879,8 +4872,6 @@ static bool wlc_phy_txpwr_srom_read_lcnphy(struct brcms_phy *pi)
 				sprom->ant_available_bg);
 	}
 	pi_lcn->lcnphy_cck_dig_filt_type = -1;
-
-	return true;
 }
 
 void wlc_2064_vco_cal(struct brcms_phy *pi)
@@ -4968,7 +4959,7 @@ bool wlc_phy_attach_lcnphy(struct brcms_phy *pi)
 {
 	struct brcms_phy_lcnphy *pi_lcn;
 
-	pi_lcn = kzalloc(sizeof(*pi_lcn), GFP_ATOMIC);
+	pi_lcn = kzalloc_obj(*pi_lcn, GFP_ATOMIC);
 	if (!pi_lcn)
 		return false;
 
@@ -4992,10 +4983,7 @@ bool wlc_phy_attach_lcnphy(struct brcms_phy *pi)
 	pi->pi_fptr.radioloftget = wlc_lcnphy_get_radio_loft;
 	pi->pi_fptr.detach = wlc_phy_detach_lcnphy;
 
-	if (!wlc_phy_txpwr_srom_read_lcnphy(pi)) {
-		kfree(pi->u.pi_lcnphy);
-		return false;
-	}
+	wlc_phy_txpwr_srom_read_lcnphy(pi);
 
 	if (LCNREV_IS(pi->pubpi.phy_rev, 1)) {
 		if (pi_lcn->lcnphy_tempsense_option == 3) {

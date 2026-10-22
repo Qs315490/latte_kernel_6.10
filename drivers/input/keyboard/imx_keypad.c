@@ -183,7 +183,8 @@ static void imx_keypad_fire_events(struct imx_keypad *keypad,
  */
 static void imx_keypad_check_for_events(struct timer_list *t)
 {
-	struct imx_keypad *keypad = from_timer(keypad, t, check_matrix_timer);
+	struct imx_keypad *keypad = timer_container_of(keypad, t,
+						       check_matrix_timer);
 	unsigned short matrix_volatile_state[MAX_MATRIX_KEY_COLS];
 	unsigned short reg_val;
 	bool state_changed, is_zero_matrix;
@@ -323,7 +324,7 @@ static void imx_keypad_config(struct imx_keypad *keypad)
 	reg_val |= (keypad->cols_en_mask & 0xff) << 8;	/* cols */
 	writew(reg_val, keypad->mmio_base + KPCR);
 
-	/* Write 0's to KPDR[15:8] (Colums) */
+	/* Write 0's to KPDR[15:8] (Columns) */
 	reg_val = readw(keypad->mmio_base + KPDR);
 	reg_val &= 0x00ff;
 	writew(reg_val, keypad->mmio_base + KPDR);
@@ -356,7 +357,7 @@ static void imx_keypad_inhibit(struct imx_keypad *keypad)
 	reg_val |= KBD_STAT_KPKR | KBD_STAT_KPKD;
 	writew(reg_val, keypad->mmio_base + KPSR);
 
-	/* Colums as open drain and disable all rows */
+	/* Columns as open drain and disable all rows */
 	reg_val = (keypad->cols_en_mask & 0xff) << 8;
 	writew(reg_val, keypad->mmio_base + KPCR);
 }
@@ -370,7 +371,7 @@ static void imx_keypad_close(struct input_dev *dev)
 	/* Mark keypad as being inactive */
 	keypad->enabled = false;
 	synchronize_irq(keypad->irq);
-	del_timer_sync(&keypad->check_matrix_timer);
+	timer_delete_sync(&keypad->check_matrix_timer);
 
 	imx_keypad_inhibit(keypad);
 

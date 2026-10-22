@@ -21,6 +21,7 @@ use Cwd;
 use File::Find;
 use File::Spec::Functions;
 use open qw(:std :encoding(UTF-8));
+use JSON::PP;
 
 my $cur_path = fastgetcwd() . '/';
 my $lk_path = "./";
@@ -50,6 +51,7 @@ my $output_multiline = 1;
 my $output_separator = ", ";
 my $output_roles = 0;
 my $output_rolestats = 1;
+my $output_substatus = undef;
 my $output_section_maxlen = 50;
 my $scm = 0;
 my $tree = 1;
@@ -67,6 +69,7 @@ my $pattern_depth = 0;
 my $self_test = undef;
 my $version = 0;
 my $help = 0;
+my $json = 0;
 my $find_maintainer_files = 0;
 my $maintainer_path;
 my $vcs_used = 0;
@@ -269,6 +272,7 @@ if (!GetOptions(
 		'separator=s' => \$output_separator,
 		'subsystem!' => \$subsystem,
 		'status!' => \$status,
+		'substatus!' => \$output_substatus,
 		'scm!' => \$scm,
 		'tree!' => \$tree,
 		'web!' => \$web,
@@ -283,6 +287,7 @@ if (!GetOptions(
 		'find-maintainer-files' => \$find_maintainer_files,
 		'mpath|maintainer-path=s' => \$maintainer_path,
 		'self-test:s' => \$self_test,
+		'json!' => \$json,
 		'v|version' => \$version,
 		'h|help|usage' => \$help,
 		)) {
@@ -313,6 +318,10 @@ if (-t STDIN && !@ARGV) {
 $output_multiline = 0 if ($output_separator ne ", ");
 $output_rolestats = 1 if ($interactive);
 $output_roles = 1 if ($output_rolestats);
+
+if (!defined $output_substatus) {
+    $output_substatus = $email && $output_roles && -t STDOUT;
+}
 
 if ($sections || $letters ne "") {
     $sections = 1;
@@ -369,8 +378,10 @@ sub read_maintainer_file {
 	    ##Filename pattern matching
 	    if ($type eq "F" || $type eq "X") {
 		$value =~ s@\.@\\\.@g;       ##Convert . to \.
+		$value =~ s/\*\*/\x00/g;     ##Convert ** to placeholder
 		$value =~ s/\*/\.\*/g;       ##Convert * to .*
 		$value =~ s/\?/\./g;         ##Convert ? to .
+		$value =~ s/\x00/(?:.*)/g;   ##Convert placeholder to (?:.*)
 		##if pattern is a directory and it lacks a trailing slash, add one
 		if ((-d $value)) {
 		    $value =~ s@([^/])$@$1/@;
@@ -637,38 +648,53 @@ my @web = ();
 my @bug = ();
 my @subsystem = ();
 my @status = ();
+my @substatus = ();
 my %deduplicate_name_hash = ();
 my %deduplicate_address_hash = ();
 
 my @maintainers = get_maintainers();
-if (@maintainers) {
-    @maintainers = merge_email(@maintainers);
-    output(@maintainers);
-}
 
-if ($scm) {
-    @scm = uniq(@scm);
-    output(@scm);
-}
+@maintainers = merge_email(@maintainers) if (@maintainers);
+@scm = uniq(@scm) if ($scm);
+@substatus = uniq(@substatus) if ($output_substatus);
+@status = uniq(@status) if ($status);
+@subsystem = uniq(@subsystem) if ($subsystem);
+@web = uniq(@web) if ($web);
+@bug = uniq(@bug) if ($bug);
 
-if ($status) {
-    @status = uniq(@status);
-    output(@status);
-}
+if ($json) {
+    my @json_maintainers;
+    for my $m (@maintainers) {
+	my ($addr, $role);
+	if ($output_roles && $m =~ /^(.*?)\s+\((.+)\)\s*$/) {
+	    $addr = $1;
+	    $role = $2;
+	} else {
+	    $addr = $m;
+	}
+	my ($name, $email_addr) = parse_email($addr);
+	my %entry = (name => $name, email => $email_addr);
+	$entry{role} = $role if (defined $role && $role ne '');
+	push(@json_maintainers, \%entry);
+    }
 
-if ($subsystem) {
-    @subsystem = uniq(@subsystem);
-    output(@subsystem);
-}
+    my %result = (maintainers => \@json_maintainers);
+    $result{scm} = \@scm if ($scm);
+    $result{status} = \@status if ($status);
+    $result{subsystem} = \@subsystem if ($subsystem);
+    $result{web} = \@web if ($web);
+    $result{bug} = \@bug if ($bug);
 
-if ($web) {
-    @web = uniq(@web);
-    output(@web);
-}
-
-if ($bug) {
-    @bug = uniq(@bug);
-    output(@bug);
+    my $json_encoder = JSON::PP->new->canonical->utf8;
+    print($json_encoder->encode(\%result) . "\n");
+} else {
+    output(@maintainers) if (@maintainers);
+    output(@scm) if ($scm);
+    output(@substatus) if ($output_substatus);
+    output(@status) if ($status);
+    output(@subsystem) if ($subsystem);
+    output(@web) if ($web);
+    output(@bug) if ($bug);
 }
 
 exit($exit);
@@ -734,8 +760,10 @@ sub self_test {
 	if (($type eq "F" || $type eq "X") &&
 	    ($self_test eq "" || $self_test =~ /\bpatterns\b/)) {
 	    $value =~ s@\.@\\\.@g;       ##Convert . to \.
+	    $value =~ s/\*\*/\x00/g;     ##Convert ** to placeholder
 	    $value =~ s/\*/\.\*/g;       ##Convert * to .*
 	    $value =~ s/\?/\./g;         ##Convert ? to .
+	    $value =~ s/\x00/(?:.*)/g;   ##Convert placeholder to (?:.*)
 	    ##if pattern is a directory and it lacks a trailing slash, add one
 	    if ((-d $value)) {
 		$value =~ s@([^/])$@$1/@;
@@ -859,6 +887,7 @@ sub get_maintainers {
     @bug = ();
     @subsystem = ();
     @status = ();
+    @substatus = ();
     %deduplicate_name_hash = ();
     %deduplicate_address_hash = ();
     if ($email_git_all_signature_types) {
@@ -908,7 +937,7 @@ sub get_maintainers {
 				my $value_pd = ($value =~ tr@/@@);
 				my $file_pd = ($file  =~ tr@/@@);
 				$value_pd++ if (substr($value,-1,1) ne "/");
-				$value_pd = -1 if ($value =~ /^\.\*/);
+				$value_pd = -1 if ($value =~ /^(\.\*|\(\?:\.\*\))/);
 				if ($value_pd >= $file_pd &&
 				    range_is_maintained($start, $end) &&
 				    range_has_maintainer($start, $end)) {
@@ -942,6 +971,7 @@ sub get_maintainers {
 			$line =~ s/([^\\])\.([^\*])/$1\?$2/g;
 			$line =~ s/([^\\])\.$/$1\?/g;	##Convert . back to ?
 			$line =~ s/\\\./\./g;       	##Convert \. to .
+			$line =~ s/\(\?:\.\*\)/\*\*/g;	##Convert (?:.*) to **
 			$line =~ s/\.\*/\*/g;       	##Convert .* to *
 		    }
 		    my $count = $line =~ s/^([A-Z]):/$1:\t/g;
@@ -1035,7 +1065,7 @@ sub file_match_pattern {
 	if ($file =~ m@^$pattern@) {
 	    my $s1 = ($file =~ tr@/@@);
 	    my $s2 = ($pattern =~ tr@/@@);
-	    if ($s1 == $s2) {
+	    if ($s1 == $s2 || $pattern =~ /\(\?:/) {
 		return 1;
 	    }
 	}
@@ -1071,8 +1101,9 @@ MAINTAINER field selection options:
     --moderated => include moderated lists(s) if any (default: true)
     --s => include subscriber only list(s) if any (default: false)
     --remove-duplicates => minimize duplicate email names/addresses
-    --roles => show roles (status:subsystem, git-signer, list, etc...)
+    --roles => show roles (role:subsystem, git-signer, list, etc...)
     --rolestats => show roles and statistics (commits/total_commits, %)
+    --substatus => show subsystem status if not Maintained (default: match --roles when output is tty)"
     --file-emails => add email addresses found in -f file (default: 0 (off))
     --fixes => for patches, add signatures of commits with 'Fixes: <commit>' (default: 1 (on))
   --scm => print SCM tree(s) if any
@@ -1085,6 +1116,7 @@ Output type options:
   --separator [, ] => separator for multiple entries on 1 line
     using --separator also sets --nomultiline if --separator is not [, ]
   --multiline => print 1 entry per line
+  --json => output results as JSON
 
 Other options:
   --pattern-depth => Number of pattern directory traversals (default: 0 (all))
@@ -1284,8 +1316,9 @@ sub get_maintainer_role {
     my $start = find_starting_index($index);
     my $end = find_ending_index($index);
 
-    my $role = "unknown";
+    my $role = "maintainer";
     my $subsystem = get_subsystem_name($index);
+    my $status = "unknown";
 
     for ($i = $start + 1; $i < $end; $i++) {
 	my $tv = $typevalue[$i];
@@ -1293,23 +1326,13 @@ sub get_maintainer_role {
 	    my $ptype = $1;
 	    my $pvalue = $2;
 	    if ($ptype eq "S") {
-		$role = $pvalue;
+		$status = $pvalue;
 	    }
 	}
     }
 
-    $role = lc($role);
-    if      ($role eq "supported") {
-	$role = "supporter";
-    } elsif ($role eq "maintained") {
-	$role = "maintainer";
-    } elsif ($role eq "odd fixes") {
-	$role = "odd fixer";
-    } elsif ($role eq "orphan") {
-	$role = "orphan minder";
-    } elsif ($role eq "obsolete") {
-	$role = "obsolete minder";
-    } elsif ($role eq "buried alive in reporters") {
+    $status = lc($status);
+    if ($status eq "buried alive in reporters") {
 	$role = "chief penguin";
     }
 
@@ -1335,7 +1358,9 @@ sub add_categories {
     my $start = find_starting_index($index);
     my $end = find_ending_index($index);
 
-    push(@subsystem, $typevalue[$start]);
+    my $subsystem = $typevalue[$start];
+    push(@subsystem, $subsystem);
+    my $status = "Unknown";
 
     for ($i = $start + 1; $i < $end; $i++) {
 	my $tv = $typevalue[$i];
@@ -1386,8 +1411,8 @@ sub add_categories {
 		}
 	    } elsif ($ptype eq "R") {
 		if ($email_reviewer) {
-		    my $subsystem = get_subsystem_name($i);
-		    push_email_addresses($pvalue, "reviewer:$subsystem" . $suffix);
+		    my $subs = get_subsystem_name($i);
+		    push_email_addresses($pvalue, "reviewer:$subs" . $suffix);
 		}
 	    } elsif ($ptype eq "T") {
 		push(@scm, $pvalue . $suffix);
@@ -1397,8 +1422,13 @@ sub add_categories {
 		push(@bug, $pvalue . $suffix);
 	    } elsif ($ptype eq "S") {
 		push(@status, $pvalue . $suffix);
+		$status = $pvalue;
 	    }
 	}
+    }
+
+    if ($subsystem ne "THE REST" and $status ne "Maintained") {
+	push(@substatus, $subsystem . " status: " . $status . $suffix)
     }
 }
 
@@ -1903,6 +1933,7 @@ EOT
 		$done = 1;
 		$output_rolestats = 0;
 		$output_roles = 0;
+		$output_substatus = 0;
 		last;
 	    } elsif ($nr =~ /^\d+$/ && $nr > 0 && $nr <= $count) {
 		$selected{$nr - 1} = !$selected{$nr - 1};

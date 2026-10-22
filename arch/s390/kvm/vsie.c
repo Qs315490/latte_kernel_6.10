@@ -6,16 +6,18 @@
  *
  *    Author(s): David Hildenbrand <dahi@linux.vnet.ibm.com>
  */
+#include <linux/align.h>
 #include <linux/vmalloc.h>
 #include <linux/kvm_host.h>
 #include <linux/bug.h>
+#include <linux/compiler.h>
 #include <linux/list.h>
 #include <linux/bitmap.h>
 #include <linux/sched/signal.h>
+#include <linux/stddef.h>
 #include <linux/io.h>
 #include <linux/mman.h>
 
-#include <asm/gmap.h>
 #include <asm/mmu_context.h>
 #include <asm/sclp.h>
 #include <asm/nmi.h>
@@ -42,8 +44,11 @@ struct vsie_page {
 	 * are reused conditionally, should be accessed via READ_ONCE.
 	 */
 	struct kvm_s390_sie_block *scb_o;	/* 0x0218 */
-	/* the shadow gmap in use by the vsie_page */
-	struct gmap *gmap;			/* 0x0220 */
+	/*
+	 * Flags: must be set/cleared atomically after the vsie page can be
+	 * looked up by other CPUs.
+	 */
+	unsigned long flags;			/* 0x0220 */
 	/* address of the last reported fault to guest2 */
 	unsigned long fault_addr;		/* 0x0228 */
 	/* calculated guest addresses of satellite control blocks */
@@ -58,15 +63,14 @@ struct vsie_page {
 	 * radix tree.
 	 */
 	gpa_t scb_gpa;				/* 0x0258 */
-	/*
-	 * Flags: must be set/cleared atomically after the vsie page can be
-	 * looked up by other CPUs.
-	 */
-	unsigned long flags;			/* 0x0260 */
-	__u8 reserved[0x0700 - 0x0268];		/* 0x0268 */
-	struct kvm_s390_crypto_cb crycb;	/* 0x0700 */
-	__u8 fac[S390_ARCH_FAC_LIST_SIZE_BYTE];	/* 0x0800 */
+	/* the shadow gmap in use by the vsie_page */
+	struct gmap_cache gmap_cache;		/* 0x0260 */
+	__u8 reserved[0x06f8 - 0x0278];		/* 0x0278 */
+	struct kvm_s390_crypto_cb crycb;	/* 0x06f8 */
+	__u8 fac[8 + S390_ARCH_FAC_LIST_SIZE_BYTE];/* 0x07f8 */
 };
+
+static_assert(sizeof(struct vsie_page) == PAGE_SIZE);
 
 /* trigger a validity icpt for the given scb */
 static int set_validity_icpt(struct kvm_s390_sie_block *scb,
@@ -124,8 +128,8 @@ static int prepare_cpuflags(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 	struct kvm_s390_sie_block *scb_o = vsie_page->scb_o;
 	int newflags, cpuflags = atomic_read(&scb_o->cpuflags);
 
-	/* we don't allow ESA/390 guests */
-	if (!(cpuflags & CPUSTAT_ZARCH))
+	/* we don't allow ESA/390 guests unless explicitly enabled */
+	if (!(cpuflags & CPUSTAT_ZARCH) && !vcpu->kvm->arch.allow_vsie_esamode)
 		return set_validity_icpt(scb_s, 0x0001U);
 
 	if (cpuflags & (CPUSTAT_RRF | CPUSTAT_MCDS))
@@ -134,7 +138,9 @@ static int prepare_cpuflags(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 		return set_validity_icpt(scb_s, 0x0007U);
 
 	/* intervention requests will be set later */
-	newflags = CPUSTAT_ZARCH;
+	newflags = 0;
+	if (cpuflags & CPUSTAT_ZARCH)
+		newflags = CPUSTAT_ZARCH;
 	if (cpuflags & CPUSTAT_GED && test_kvm_facility(vcpu->kvm, 8))
 		newflags |= CPUSTAT_GED;
 	if (cpuflags & CPUSTAT_GED2 && test_kvm_facility(vcpu->kvm, 78)) {
@@ -384,6 +390,17 @@ end:
 	return 0;
 }
 
+static void shadow_esa(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
+{
+	struct kvm_s390_sie_block *scb_s = &vsie_page->scb_s;
+
+	/* Ensure these bits are indeed turned off */
+	scb_s->eca &= ~ECA_VX;
+	scb_s->ecb &= ~(ECB_GS | ECB_TE);
+	scb_s->ecb3 &= ~ECB3_RI;
+	scb_s->ecd &= ~ECD_HOSTREGMGMT;
+}
+
 /* shadow (round up/down) the ibc to avoid validity icpt */
 static void prepare_ibc(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 {
@@ -465,7 +482,7 @@ static int shadow_scb(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 	struct kvm_s390_sie_block *scb_s = &vsie_page->scb_s;
 	/* READ_ONCE does not work on bitfields - use a temporary variable */
 	const uint32_t __new_prefix = scb_o->prefix;
-	const uint32_t new_prefix = READ_ONCE(__new_prefix);
+	uint32_t new_prefix = READ_ONCE(__new_prefix);
 	const bool wants_tx = READ_ONCE(scb_o->ecb) & ECB_TE;
 	bool had_tx = scb_s->ecb & ECB_TE;
 	unsigned long new_mso = 0;
@@ -512,6 +529,11 @@ static int shadow_scb(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 		scb_s->ictl |= ICTL_ISKE | ICTL_SSKE | ICTL_RRBE;
 
 	scb_s->icpua = scb_o->icpua;
+
+	if (!(atomic_read(&scb_s->cpuflags) & CPUSTAT_ZARCH))
+		new_prefix &= GUEST_PREFIX_MASK_ESA;
+	else
+		new_prefix &= GUEST_PREFIX_MASK_ZARCH;
 
 	if (!(atomic_read(&scb_s->cpuflags) & CPUSTAT_SM))
 		new_mso = READ_ONCE(scb_o->mso) & 0xfffffffffff00000UL;
@@ -587,6 +609,9 @@ static int shadow_scb(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 	scb_s->hpid = HPID_VSIE;
 	scb_s->cpnc = scb_o->cpnc;
 
+	if (!(atomic_read(&scb_s->cpuflags) & CPUSTAT_ZARCH))
+		shadow_esa(vcpu, vsie_page);
+
 	prepare_ibc(vcpu, vsie_page);
 	rc = shadow_crycb(vcpu, vsie_page);
 out:
@@ -595,26 +620,17 @@ out:
 	return rc;
 }
 
-void kvm_s390_vsie_gmap_notifier(struct gmap *gmap, unsigned long start,
-				 unsigned long end)
+void kvm_s390_vsie_gmap_notifier(struct gmap *gmap, gpa_t start, gpa_t end)
 {
-	struct kvm *kvm = gmap->private;
-	struct vsie_page *cur;
+	struct vsie_page *cur, *next;
 	unsigned long prefix;
-	int i;
 
-	if (!gmap_is_shadow(gmap))
-		return;
+	KVM_BUG_ON(!test_bit(GMAP_FLAG_SHADOW, &gmap->flags), gmap->kvm);
 	/*
 	 * Only new shadow blocks are added to the list during runtime,
 	 * therefore we can safely reference them all the time.
 	 */
-	for (i = 0; i < kvm->arch.vsie.page_count; i++) {
-		cur = READ_ONCE(kvm->arch.vsie.pages[i]);
-		if (!cur)
-			continue;
-		if (READ_ONCE(cur->gmap) != gmap)
-			continue;
+	list_for_each_entry_safe(cur, next, &gmap->scb_users, gmap_cache.list) {
 		prefix = cur->scb_s.prefix << GUEST_PREFIX_SHIFT;
 		/* with mso/msl, the prefix lies at an offset */
 		prefix += cur->scb_s.mso;
@@ -635,7 +651,7 @@ void kvm_s390_vsie_gmap_notifier(struct gmap *gmap, unsigned long start,
  *          - -EAGAIN if the caller can retry immediately
  *          - -ENOMEM if out of memory
  */
-static int map_prefix(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
+static int map_prefix(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page, struct gmap *sg)
 {
 	struct kvm_s390_sie_block *scb_s = &vsie_page->scb_s;
 	u64 prefix = scb_s->prefix << GUEST_PREFIX_SHIFT;
@@ -650,10 +666,9 @@ static int map_prefix(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 	/* with mso/msl, the prefix lies at offset *mso* */
 	prefix += scb_s->mso;
 
-	rc = kvm_s390_shadow_fault(vcpu, vsie_page->gmap, prefix, NULL);
+	rc = gaccess_shadow_fault(vcpu, sg, prefix, NULL, true);
 	if (!rc && (scb_s->ecb & ECB_TE))
-		rc = kvm_s390_shadow_fault(vcpu, vsie_page->gmap,
-					   prefix + PAGE_SIZE, NULL);
+		rc = gaccess_shadow_fault(vcpu, sg, prefix + PAGE_SIZE, NULL, true);
 	/*
 	 * We don't have to mprotect, we will be called for all unshadows.
 	 * SIE will detect if protection applies and trigger a validity.
@@ -765,7 +780,7 @@ static int pin_blocks(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 		else if ((gpa & ~0x1fffUL) == kvm_s390_get_prefix(vcpu))
 			rc = set_validity_icpt(scb_s, 0x0011U);
 		else if ((gpa & PAGE_MASK) !=
-			 ((gpa + sizeof(struct bsca_block) - 1) & PAGE_MASK))
+			 ((gpa + offsetof(struct bsca_block, cpu[0]) - 1) & PAGE_MASK))
 			rc = set_validity_icpt(scb_s, 0x003bU);
 		if (!rc) {
 			rc = pin_guest_page(vcpu->kvm, gpa, &hpa);
@@ -934,8 +949,9 @@ static int inject_fault(struct kvm_vcpu *vcpu, __u16 code, __u64 vaddr,
  *          - > 0 if control has to be given to guest 2
  *          - < 0 if an error occurred
  */
-static int handle_fault(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
+static int handle_fault(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page, struct gmap *sg)
 {
+	bool wr = kvm_s390_cur_gmap_fault_is_write();
 	int rc;
 
 	if ((current->thread.gmap_int_code & PGM_INT_CODE_MASK) == PGM_PROTECTION)
@@ -943,12 +959,10 @@ static int handle_fault(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 		return inject_fault(vcpu, PGM_PROTECTION,
 				    current->thread.gmap_teid.addr * PAGE_SIZE, 1);
 
-	rc = kvm_s390_shadow_fault(vcpu, vsie_page->gmap,
-				   current->thread.gmap_teid.addr * PAGE_SIZE, NULL);
+	rc = gaccess_shadow_fault(vcpu, sg, current->thread.gmap_teid.addr * PAGE_SIZE, NULL, wr);
 	if (rc > 0) {
 		rc = inject_fault(vcpu, rc,
-				  current->thread.gmap_teid.addr * PAGE_SIZE,
-				  kvm_s390_cur_gmap_fault_is_write());
+				  current->thread.gmap_teid.addr * PAGE_SIZE, wr);
 		if (rc >= 0)
 			vsie_page->fault_addr = current->thread.gmap_teid.addr * PAGE_SIZE;
 	}
@@ -961,12 +975,10 @@ static int handle_fault(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
  *
  * Will ignore any errors. The next SIE fault will do proper fault handling.
  */
-static void handle_last_fault(struct kvm_vcpu *vcpu,
-			      struct vsie_page *vsie_page)
+static void handle_last_fault(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page, struct gmap *sg)
 {
 	if (vsie_page->fault_addr)
-		kvm_s390_shadow_fault(vcpu, vsie_page->gmap,
-				      vsie_page->fault_addr, NULL);
+		gaccess_shadow_fault(vcpu, sg, vsie_page->fault_addr, NULL, true);
 	vsie_page->fault_addr = 0;
 }
 
@@ -991,6 +1003,45 @@ static void retry_vsie_icpt(struct vsie_page *vsie_page)
 	clear_vsie_icpt(vsie_page);
 }
 
+static int handle_stfle_0(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page,
+			  u32 fac_list_origin)
+{
+	struct kvm_s390_sie_block *scb_s = &vsie_page->scb_s;
+
+	/*
+	 * format-0 -> size of nested guest's facility list == guest's size
+	 * guest's size == host's size, since STFLE is interpretatively executed
+	 * using a format-0 for the guest, too.
+	 */
+	if (read_guest_real(vcpu, fac_list_origin, &vsie_page->fac,
+			    stfle_size() * sizeof(u64)))
+		return set_validity_icpt(scb_s, 0x1090U);
+	scb_s->fac = (u32)virt_to_phys(&vsie_page->fac);
+	return 0;
+}
+
+static int handle_stfle_2(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page, u32 fac_list_origin)
+{
+	struct kvm_s390_flcb2 *flcb_s = (struct kvm_s390_flcb2 *)vsie_page->fac;
+	struct kvm_s390_sie_block *scb_s = &vsie_page->scb_s;
+	u64 len;
+
+	if (read_guest_real(vcpu, fac_list_origin, &len, sizeof(len)))
+		return set_validity_icpt(scb_s, 0x1090U);
+
+	/* discard reserved bits */
+	len = (len & U8_MAX);
+	flcb_s->header_val = len;
+	len += 1;
+
+	if (read_guest_real(vcpu, fac_list_origin + offsetof(struct kvm_s390_flcb2, facilities),
+			    &flcb_s->facilities, len * sizeof(u64)))
+		return set_validity_icpt(scb_s, 0x1090U);
+
+	scb_s->fac = (u32)virt_to_phys(&vsie_page->fac) | S390_ARCH_FAC_FORMAT_2;
+	return 0;
+}
+
 /*
  * Try to shadow + enable the guest 2 provided facility list.
  * Retry instruction execution if enabled for and provided by guest 2.
@@ -1000,29 +1051,34 @@ static void retry_vsie_icpt(struct vsie_page *vsie_page)
  */
 static int handle_stfle(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 {
-	struct kvm_s390_sie_block *scb_s = &vsie_page->scb_s;
-	__u32 fac = READ_ONCE(vsie_page->scb_o->fac);
+	bool has_astfleie2 = test_kvm_cpu_feat(vcpu->kvm, KVM_S390_VM_CPU_FEAT_ASTFLEIE2);
+	u32 fac = READ_ONCE(vsie_page->scb_o->fac);
+	int format_mask, format;
+	u32 origin;
 
-	/*
-	 * Alternate-STFLE-Interpretive-Execution facilities are not supported
-	 * -> format-0 flcb
-	 */
+	/* assert no overflow with maximum len */
+	BUILD_BUG_ON(sizeof(vsie_page->fac) < ((S390_ARCH_FAC_LIST_SIZE_U64 + 1) * sizeof(u64)));
+	BUILD_BUG_ON(!IS_ALIGNED(offsetof(struct vsie_page, fac), 8));
+
 	if (fac && test_kvm_facility(vcpu->kvm, 7)) {
 		retry_vsie_icpt(vsie_page);
 		/*
 		 * The facility list origin (FLO) is in bits 1 - 28 of the FLD
 		 * so we need to mask here before reading.
 		 */
-		fac = fac & 0x7ffffff8U;
-		/*
-		 * format-0 -> size of nested guest's facility list == guest's size
-		 * guest's size == host's size, since STFLE is interpretatively executed
-		 * using a format-0 for the guest, too.
-		 */
-		if (read_guest_real(vcpu, fac, &vsie_page->fac,
-				    stfle_size() * sizeof(u64)))
-			return set_validity_icpt(scb_s, 0x1090U);
-		scb_s->fac = (u32)virt_to_phys(&vsie_page->fac);
+		origin = fac & 0x7ffffff8U;
+		format_mask = has_astfleie2 ? 3 : 0;
+		format = fac & format_mask;
+		switch (format) {
+		case 0:
+			return handle_stfle_0(vcpu, vsie_page, origin);
+		case 1:
+			return set_validity_icpt(&vsie_page->scb_s, 0x1330U);
+		case 2:
+			return handle_stfle_2(vcpu, vsie_page, origin);
+		case 3:
+			return set_validity_icpt(&vsie_page->scb_s, 0x1330U);
+		}
 	}
 	return 0;
 }
@@ -1048,11 +1104,12 @@ static u64 vsie_get_register(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page,
 	}
 }
 
-static int vsie_handle_mvpg(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
+static int vsie_handle_mvpg(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page, struct gmap *sg)
 {
 	struct kvm_s390_sie_block *scb_s = &vsie_page->scb_s;
-	unsigned long pei_dest, pei_src, src, dest, mask, prefix;
+	unsigned long src, dest, mask, prefix;
 	u64 *pei_block = &vsie_page->scb_o->mcic;
+	union mvpg_pei pei_dest, pei_src;
 	int edat, rc_dest, rc_src;
 	union ctlreg0 cr0;
 
@@ -1066,8 +1123,8 @@ static int vsie_handle_mvpg(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 	src = vsie_get_register(vcpu, vsie_page, scb_s->ipb >> 16) & mask;
 	src = _kvm_s390_real_to_abs(prefix, src) + scb_s->mso;
 
-	rc_dest = kvm_s390_shadow_fault(vcpu, vsie_page->gmap, dest, &pei_dest);
-	rc_src = kvm_s390_shadow_fault(vcpu, vsie_page->gmap, src, &pei_src);
+	rc_dest = gaccess_shadow_fault(vcpu, sg, dest, &pei_dest, true);
+	rc_src = gaccess_shadow_fault(vcpu, sg, src, &pei_src, false);
 	/*
 	 * Either everything went well, or something non-critical went wrong
 	 * e.g. because of a race. In either case, simply retry.
@@ -1102,8 +1159,8 @@ static int vsie_handle_mvpg(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 		rc_src = rc_src != PGM_PAGE_TRANSLATION ? rc_src : 0;
 	}
 	if (!rc_dest && !rc_src) {
-		pei_block[0] = pei_dest;
-		pei_block[1] = pei_src;
+		pei_block[0] = pei_dest.val;
+		pei_block[1] = pei_src.val;
 		return 1;
 	}
 
@@ -1127,16 +1184,17 @@ static int vsie_handle_mvpg(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
  *          - > 0 if control has to be given to guest 2
  *          - < 0 if an error occurred
  */
-static int do_vsie_run(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
+static int do_vsie_run(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page, struct gmap *sg)
 	__releases(vcpu->kvm->srcu)
 	__acquires(vcpu->kvm->srcu)
 {
 	struct kvm_s390_sie_block *scb_s = &vsie_page->scb_s;
 	struct kvm_s390_sie_block *scb_o = vsie_page->scb_o;
+	unsigned long sie_return = SIE64_RETURN_NORMAL;
 	int guest_bp_isolation;
 	int rc = 0;
 
-	handle_last_fault(vcpu, vsie_page);
+	handle_last_fault(vcpu, vsie_page, sg);
 
 	kvm_vcpu_srcu_read_unlock(vcpu);
 
@@ -1153,10 +1211,6 @@ static int do_vsie_run(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 	    vcpu->arch.sie_block->fpf & FPF_BPBC)
 		set_thread_flag(TIF_ISOLATE_BP_GUEST);
 
-	local_irq_disable();
-	guest_enter_irqoff();
-	local_irq_enable();
-
 	/*
 	 * Simulate a SIE entry of the VCPU (see sie64a), so VCPU blocking
 	 * and VCPU requests also hinder the vSIE from running and lead
@@ -1166,14 +1220,26 @@ static int do_vsie_run(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 	vcpu->arch.sie_block->prog0c |= PROG_IN_SIE;
 	current->thread.gmap_int_code = 0;
 	barrier();
-	if (!kvm_s390_vcpu_sie_inhibited(vcpu))
-		rc = sie64a(scb_s, vcpu->run->s.regs.gprs, vsie_page->gmap->asce);
+	if (!kvm_s390_vcpu_sie_inhibited(vcpu)) {
+xfer_to_guest_mode_check:
+		local_irq_disable();
+		xfer_to_guest_mode_prepare();
+		if (xfer_to_guest_mode_work_pending()) {
+			local_irq_enable();
+			rc = kvm_xfer_to_guest_mode_handle_work(vcpu);
+			if (rc)
+				goto skip_sie;
+			goto xfer_to_guest_mode_check;
+		}
+		guest_timing_enter_irqoff();
+		sie_return = kvm_s390_enter_exit_sie(scb_s, vcpu->run->s.regs.gprs, sg->asce.val);
+		guest_timing_exit_irqoff();
+		local_irq_enable();
+	}
+
+skip_sie:
 	barrier();
 	vcpu->arch.sie_block->prog0c &= ~PROG_IN_SIE;
-
-	local_irq_disable();
-	guest_exit_irqoff();
-	local_irq_enable();
 
 	/* restore guest state for bp isolation override */
 	if (!guest_bp_isolation)
@@ -1181,16 +1247,17 @@ static int do_vsie_run(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 
 	kvm_vcpu_srcu_read_lock(vcpu);
 
-	if (rc == -EINTR) {
-		VCPU_EVENT(vcpu, 3, "%s", "machine check");
+	if (sie_return == SIE64_RETURN_MCCK) {
 		kvm_s390_reinject_machine_check(vcpu, &vsie_page->mcck_info);
 		return 0;
 	}
 
+	WARN_ON_ONCE(sie_return != SIE64_RETURN_NORMAL);
+
 	if (rc > 0)
 		rc = 0; /* we could still have an icpt */
 	else if (current->thread.gmap_int_code)
-		return handle_fault(vcpu, vsie_page);
+		return handle_fault(vcpu, vsie_page, sg);
 
 	switch (scb_s->icptcode) {
 	case ICPT_INST:
@@ -1208,7 +1275,7 @@ static int do_vsie_run(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 		break;
 	case ICPT_PARTEXEC:
 		if (scb_s->ipa == 0xb254)
-			rc = vsie_handle_mvpg(vcpu, vsie_page);
+			rc = vsie_handle_mvpg(vcpu, vsie_page, sg);
 		break;
 	}
 	return rc;
@@ -1216,43 +1283,67 @@ static int do_vsie_run(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 
 static void release_gmap_shadow(struct vsie_page *vsie_page)
 {
-	if (vsie_page->gmap)
-		gmap_put(vsie_page->gmap);
-	WRITE_ONCE(vsie_page->gmap, NULL);
+	struct gmap *gmap = vsie_page->gmap_cache.gmap;
+
+	lockdep_assert_held(&gmap->kvm->arch.gmap->children_lock);
+
+	list_del(&vsie_page->gmap_cache.list);
+	vsie_page->gmap_cache.gmap = NULL;
 	prefix_unmapped(vsie_page);
+
+	if (list_empty(&gmap->scb_users)) {
+		gmap_remove_child(gmap);
+		gmap_put(gmap);
+	}
 }
 
-static int acquire_gmap_shadow(struct kvm_vcpu *vcpu,
-			       struct vsie_page *vsie_page)
+static struct gmap *acquire_gmap_shadow(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 {
-	unsigned long asce;
 	union ctlreg0 cr0;
 	struct gmap *gmap;
+	union asce asce;
 	int edat;
 
-	asce = vcpu->arch.sie_block->gcr[1];
+	asce.val = vcpu->arch.sie_block->gcr[1];
 	cr0.val = vcpu->arch.sie_block->gcr[0];
 	edat = cr0.edat && test_kvm_facility(vcpu->kvm, 8);
 	edat += edat && test_kvm_facility(vcpu->kvm, 78);
 
-	/*
-	 * ASCE or EDAT could have changed since last icpt, or the gmap
-	 * we're holding has been unshadowed. If the gmap is still valid,
-	 * we can safely reuse it.
-	 */
-	if (vsie_page->gmap && gmap_shadow_valid(vsie_page->gmap, asce, edat)) {
-		vcpu->kvm->stat.gmap_shadow_reuse++;
-		return 0;
+	scoped_guard(spinlock, &vcpu->kvm->arch.gmap->children_lock) {
+		gmap = vsie_page->gmap_cache.gmap;
+		if (gmap) {
+			/*
+			 * ASCE or EDAT could have changed since last icpt, or the gmap
+			 * we're holding has been unshadowed. If the gmap is still valid,
+			 * we can safely reuse it.
+			 */
+			if (gmap_is_shadow_valid(gmap, asce, edat)) {
+				vcpu->kvm->stat.gmap_shadow_reuse++;
+				gmap_get(gmap);
+				return gmap;
+			}
+			/* release the old shadow and mark the prefix as unmapped */
+			release_gmap_shadow(vsie_page);
+		}
 	}
-
-	/* release the old shadow - if any, and mark the prefix as unmapped */
-	release_gmap_shadow(vsie_page);
-	gmap = gmap_shadow(vcpu->arch.gmap, asce, edat);
+again:
+	gmap = gmap_create_shadow(vcpu->arch.mc, vcpu->kvm->arch.gmap, asce, edat);
 	if (IS_ERR(gmap))
-		return PTR_ERR(gmap);
-	vcpu->kvm->stat.gmap_shadow_create++;
-	WRITE_ONCE(vsie_page->gmap, gmap);
-	return 0;
+		return gmap;
+	scoped_guard(spinlock, &vcpu->kvm->arch.gmap->children_lock) {
+		/* unlikely race condition, remove the previous shadow */
+		if (vsie_page->gmap_cache.gmap)
+			release_gmap_shadow(vsie_page);
+		if (!gmap->parent) {
+			gmap_put(gmap);
+			goto again;
+		}
+		vcpu->kvm->stat.gmap_shadow_create++;
+		list_add(&vsie_page->gmap_cache.list, &gmap->scb_users);
+		vsie_page->gmap_cache.gmap = gmap;
+		prefix_unmapped(vsie_page);
+	}
+	return gmap;
 }
 
 /*
@@ -1305,15 +1396,20 @@ static void unregister_shadow_scb(struct kvm_vcpu *vcpu)
 static int vsie_run(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 {
 	struct kvm_s390_sie_block *scb_s = &vsie_page->scb_s;
+	struct gmap *sg = NULL;
 	int rc = 0;
 
 	while (1) {
-		rc = acquire_gmap_shadow(vcpu, vsie_page);
+		sg = acquire_gmap_shadow(vcpu, vsie_page);
+		if (IS_ERR(sg)) {
+			rc = PTR_ERR(sg);
+			sg = NULL;
+		}
 		if (!rc)
-			rc = map_prefix(vcpu, vsie_page);
+			rc = map_prefix(vcpu, vsie_page, sg);
 		if (!rc) {
 			update_intervention_requests(vsie_page);
-			rc = do_vsie_run(vcpu, vsie_page);
+			rc = do_vsie_run(vcpu, vsie_page, sg);
 		}
 		atomic_andnot(PROG_BLOCK_SIE, &scb_s->prog20);
 
@@ -1331,14 +1427,17 @@ static int vsie_run(struct kvm_vcpu *vcpu, struct vsie_page *vsie_page)
 		 * but rewind the PSW to re-enter SIE once that's completed
 		 * instead of passing a "no action" intercept to the guest.
 		 */
-		if (signal_pending(current) ||
-		    kvm_s390_vcpu_has_irq(vcpu, 0) ||
+		if (kvm_s390_vcpu_has_irq(vcpu, 0) ||
 		    kvm_s390_vcpu_sie_inhibited(vcpu)) {
 			kvm_s390_rewind_psw(vcpu, 4);
 			break;
 		}
+		if (sg)
+			sg = gmap_put(sg);
 		cond_resched();
 	}
+	if (sg)
+		sg = gmap_put(sg);
 
 	if (rc == -EFAULT) {
 		/*
@@ -1434,8 +1533,7 @@ static struct vsie_page *get_vsie_page(struct kvm *kvm, unsigned long addr)
 	vsie_page->scb_gpa = ULONG_MAX;
 
 	/* Double use of the same address or allocation failure. */
-	if (radix_tree_insert(&kvm->arch.vsie.addr_to_page, addr >> 9,
-			      vsie_page)) {
+	if (radix_tree_insert(&kvm->arch.vsie.addr_to_page, addr >> 9, vsie_page)) {
 		put_vsie_page(vsie_page);
 		mutex_unlock(&kvm->arch.vsie.mutex);
 		return NULL;
@@ -1444,7 +1542,12 @@ static struct vsie_page *get_vsie_page(struct kvm *kvm, unsigned long addr)
 	mutex_unlock(&kvm->arch.vsie.mutex);
 
 	memset(&vsie_page->scb_s, 0, sizeof(struct kvm_s390_sie_block));
-	release_gmap_shadow(vsie_page);
+	if (vsie_page->gmap_cache.gmap) {
+		scoped_guard(spinlock, &kvm->arch.gmap->children_lock)
+			if (vsie_page->gmap_cache.gmap)
+				release_gmap_shadow(vsie_page);
+	}
+	prefix_unmapped(vsie_page);
 	vsie_page->fault_addr = 0;
 	vsie_page->scb_s.ihcpu = 0xffffU;
 	return vsie_page;
@@ -1469,18 +1572,19 @@ int kvm_s390_handle_vsie(struct kvm_vcpu *vcpu)
 	if (unlikely(scb_addr & 0x1ffUL))
 		return kvm_s390_inject_program_int(vcpu, PGM_SPECIFICATION);
 
-	if (signal_pending(current) || kvm_s390_vcpu_has_irq(vcpu, 0) ||
-	    kvm_s390_vcpu_sie_inhibited(vcpu)) {
+	if (kvm_s390_vcpu_has_irq(vcpu, 0) || kvm_s390_vcpu_sie_inhibited(vcpu)) {
 		kvm_s390_rewind_psw(vcpu, 4);
 		return 0;
 	}
 
 	vsie_page = get_vsie_page(vcpu->kvm, scb_addr);
-	if (IS_ERR(vsie_page))
+	if (IS_ERR(vsie_page)) {
 		return PTR_ERR(vsie_page);
-	else if (!vsie_page)
+	} else if (!vsie_page) {
 		/* double use of sie control block - simply do nothing */
+		kvm_s390_rewind_psw(vcpu, 4);
 		return 0;
+	}
 
 	rc = pin_scb(vcpu, vsie_page, scb_addr);
 	if (rc)
@@ -1521,8 +1625,10 @@ void kvm_s390_vsie_destroy(struct kvm *kvm)
 	mutex_lock(&kvm->arch.vsie.mutex);
 	for (i = 0; i < kvm->arch.vsie.page_count; i++) {
 		vsie_page = kvm->arch.vsie.pages[i];
+		scoped_guard(spinlock, &kvm->arch.gmap->children_lock)
+			if (vsie_page->gmap_cache.gmap)
+				release_gmap_shadow(vsie_page);
 		kvm->arch.vsie.pages[i] = NULL;
-		release_gmap_shadow(vsie_page);
 		/* free the radix tree entry */
 		if (vsie_page->scb_gpa != ULONG_MAX)
 			radix_tree_delete(&kvm->arch.vsie.addr_to_page,

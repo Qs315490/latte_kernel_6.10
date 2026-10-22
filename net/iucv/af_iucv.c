@@ -10,8 +10,7 @@
  *		Ursula Braun <ursula.braun@de.ibm.com>
  */
 
-#define KMSG_COMPONENT "af_iucv"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "af_iucv: " fmt
 
 #include <linux/filter.h>
 #include <linux/module.h>
@@ -27,7 +26,9 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/security.h>
+#include <linux/uio.h>
 #include <net/sock.h>
+#include <asm/machine.h>
 #include <asm/ebcdic.h>
 #include <asm/cpcmd.h>
 #include <linux/kmod.h>
@@ -127,6 +128,8 @@ static inline void low_nmcpy(unsigned char *dst, char *src)
  * if the socket data len is > 7, the function returns 8.
  *
  * Use this function to allocate socket buffers to store iucv message data.
+ *
+ * Returns: Length of the IUCV message.
  */
 static inline size_t iucv_msg_length(struct iucv_message *msg)
 {
@@ -145,7 +148,7 @@ static inline size_t iucv_msg_length(struct iucv_message *msg)
  * @state:	first iucv sk state
  * @state2:	second iucv sk state
  *
- * Returns true if the socket in either in the first or second state.
+ * Returns: true if the socket is either in the first or second state.
  */
 static int iucv_sock_in_state(struct sock *sk, int state, int state2)
 {
@@ -156,9 +159,9 @@ static int iucv_sock_in_state(struct sock *sk, int state, int state2)
  * iucv_below_msglim() - function to check if messages can be sent
  * @sk:		sock structure
  *
- * Returns true if the send queue length is lower than the message limit.
- * Always returns true if the socket is not connected (no iucv path for
- * checking the message limit).
+ * Returns: true, if either the socket is not connected (no iucv path for
+ * checking the message limit) or if the send queue length is lower
+ * than the message limit.
  */
 static inline int iucv_below_msglim(struct sock *sk)
 {
@@ -334,6 +337,7 @@ static void iucv_sever_path(struct sock *sk, int with_user_data)
 	unsigned char user_data[16];
 	struct iucv_sock *iucv = iucv_sk(sk);
 	struct iucv_path *path = iucv->path;
+	struct sock_msg_q *p, *n;
 
 	/* Whoever resets the path pointer, must sever and free it. */
 	if (xchg(&iucv->path, NULL)) {
@@ -345,6 +349,19 @@ static void iucv_sever_path(struct sock *sk, int with_user_data)
 		} else
 			pr_iucv->path_sever(path, NULL);
 		iucv_path_free(path);
+
+		/*
+		 * Message notifications queued on message_q still reference
+		 * the now freed path; drop them, otherwise a later recvmsg()
+		 * would pass the freed iucv_path to message_receive() via
+		 * iucv_process_message_q().
+		 */
+		spin_lock_bh(&iucv->message_q.lock);
+		list_for_each_entry_safe(p, n, &iucv->message_q.list, list) {
+			list_del(&p->list);
+			kfree(p);
+		}
+		spin_unlock_bh(&iucv->message_q.lock);
 	}
 }
 
@@ -552,16 +569,17 @@ static void __iucv_auto_name(struct iucv_sock *iucv)
 {
 	char name[12];
 
-	sprintf(name, "%08x", atomic_inc_return(&iucv_sk_list.autobind_name));
+	scnprintf(name, sizeof(name),
+		  "%08x", atomic_inc_return(&iucv_sk_list.autobind_name));
 	while (__iucv_get_sock_by_name(name)) {
-		sprintf(name, "%08x",
-			atomic_inc_return(&iucv_sk_list.autobind_name));
+		scnprintf(name, sizeof(name), "%08x",
+			  atomic_inc_return(&iucv_sk_list.autobind_name));
 	}
 	memcpy(iucv->src_name, name, 8);
 }
 
 /* Bind an unbound socket */
-static int iucv_sock_bind(struct socket *sock, struct sockaddr *addr,
+static int iucv_sock_bind(struct socket *sock, struct sockaddr_unsized *addr,
 			  int addr_len)
 {
 	DECLARE_SOCKADDR(struct sockaddr_iucv *, sa, addr);
@@ -666,7 +684,7 @@ static int iucv_sock_autobind(struct sock *sk)
 	return err;
 }
 
-static int afiucv_path_connect(struct socket *sock, struct sockaddr *addr)
+static int afiucv_path_connect(struct socket *sock, struct sockaddr_unsized *addr)
 {
 	DECLARE_SOCKADDR(struct sockaddr_iucv *, sa, addr);
 	struct sock *sk = sock->sk;
@@ -712,7 +730,7 @@ done:
 }
 
 /* Connect an unconnected socket */
-static int iucv_sock_connect(struct socket *sock, struct sockaddr *addr,
+static int iucv_sock_connect(struct socket *sock, struct sockaddr_unsized *addr,
 			     int alen, int flags)
 {
 	DECLARE_SOCKADDR(struct sockaddr_iucv *, sa, addr);
@@ -882,7 +900,7 @@ static int iucv_sock_getname(struct socket *sock, struct sockaddr *addr,
  * list and the socket data len at index 7 (last byte).
  * See also iucv_msg_length().
  *
- * Returns the error code from the iucv_message_send() call.
+ * Returns: the return code from the iucv_message_send() call.
  */
 static int iucv_send_iprm(struct iucv_path *path, struct iucv_message *msg,
 			  struct sk_buff *skb)
@@ -1186,7 +1204,7 @@ static void iucv_process_message(struct sock *sk, struct sk_buff *skb,
 
 	IUCV_SKB_CB(skb)->offset = 0;
 	if (sk_filter(sk, skb)) {
-		atomic_inc(&sk->sk_drops);	/* skb rejected by filter */
+		sk_drops_inc(sk);	/* skb rejected by filter */
 		kfree_skb(skb);
 		return;
 	}
@@ -1532,48 +1550,53 @@ static int iucv_sock_setsockopt(struct socket *sock, int level, int optname,
 }
 
 static int iucv_sock_getsockopt(struct socket *sock, int level, int optname,
-				char __user *optval, int __user *optlen)
+				sockopt_t *opt)
 {
 	struct sock *sk = sock->sk;
 	struct iucv_sock *iucv = iucv_sk(sk);
 	unsigned int val;
-	int len;
+	int len, rc;
 
 	if (level != SOL_IUCV)
 		return -ENOPROTOOPT;
 
-	if (get_user(len, optlen))
-		return -EFAULT;
-
+	len = opt->optlen;
 	if (len < 0)
 		return -EINVAL;
 
 	len = min_t(unsigned int, len, sizeof(int));
 
+	rc = 0;
+
+	lock_sock(sk);
 	switch (optname) {
 	case SO_IPRMDATA_MSG:
 		val = (iucv->flags & IUCV_IPRMDATA) ? 1 : 0;
 		break;
 	case SO_MSGLIMIT:
-		lock_sock(sk);
 		val = (iucv->path != NULL) ? iucv->path->msglim	/* connected */
 					   : iucv->msglimit;	/* default */
-		release_sock(sk);
 		break;
 	case SO_MSGSIZE:
-		if (sk->sk_state == IUCV_OPEN)
-			return -EBADFD;
+		if (sk->sk_state == IUCV_OPEN) {
+			rc = -EBADFD;
+			break;
+		}
 		val = (iucv->hs_dev) ? iucv->hs_dev->mtu -
 				sizeof(struct af_iucv_trans_hdr) - ETH_HLEN :
 				0x7fffffff;
 		break;
 	default:
-		return -ENOPROTOOPT;
+		rc = -ENOPROTOOPT;
+		break;
 	}
+	release_sock(sk);
 
-	if (put_user(len, optlen))
-		return -EFAULT;
-	if (copy_to_user(optval, &val, len))
+	if (rc)
+		return rc;
+
+	opt->optlen = len;
+	if (copy_to_iter(&val, len, &opt->iter_out) != len)
 		return -EFAULT;
 
 	return 0;
@@ -1718,7 +1741,7 @@ static void iucv_callback_rx(struct iucv_path *path, struct iucv_message *msg)
 	goto out_unlock;
 
 save_message:
-	save_msg = kzalloc(sizeof(struct sock_msg_q), GFP_ATOMIC | GFP_DMA);
+	save_msg = kzalloc_obj(struct sock_msg_q, GFP_ATOMIC | GFP_DMA);
 	if (!save_msg)
 		goto out_unlock;
 	save_msg->path = path;
@@ -1863,7 +1886,8 @@ static int afiucv_hs_callback_syn(struct sock *sk, struct sk_buff *skb)
 		afiucv_swap_src_dest(skb);
 		trans_hdr->flags = AF_IUCV_FLAG_SYN | AF_IUCV_FLAG_FIN;
 		err = dev_queue_xmit(skb);
-		iucv_sock_kill(nsk);
+		if (nsk)
+			iucv_sock_kill(nsk);
 		bh_unlock_sock(sk);
 		goto out;
 	}
@@ -2010,7 +2034,7 @@ static int afiucv_hs_callback_rx(struct sock *sk, struct sk_buff *skb)
 	skb_reset_network_header(skb);
 	IUCV_SKB_CB(skb)->offset = 0;
 	if (sk_filter(sk, skb)) {
-		atomic_inc(&sk->sk_drops);	/* skb rejected by filter */
+		sk_drops_inc(sk);	/* skb rejected by filter */
 		kfree_skb(skb);
 		return NET_RX_SUCCESS;
 	}
@@ -2080,6 +2104,8 @@ static int afiucv_hs_rcv(struct sk_buff *skb, struct net_device *dev,
 			}
 		}
 	}
+	if (sk)
+		sock_hold(sk);
 	read_unlock(&iucv_sk_list.lock);
 	if (!iucv)
 		sk = NULL;
@@ -2129,6 +2155,8 @@ static int afiucv_hs_rcv(struct sk_buff *skb, struct net_device *dev,
 		kfree_skb(skb);
 	}
 
+	if (sk)
+		sock_put(sk);
 	return err;
 }
 
@@ -2225,7 +2253,7 @@ static const struct proto_ops iucv_sock_ops = {
 	.socketpair	= sock_no_socketpair,
 	.shutdown	= iucv_sock_shutdown,
 	.setsockopt	= iucv_sock_setsockopt,
-	.getsockopt	= iucv_sock_getsockopt,
+	.getsockopt_iter = iucv_sock_getsockopt,
 };
 
 static int iucv_sock_create(struct net *net, struct socket *sock, int protocol,
@@ -2272,7 +2300,7 @@ static int __init afiucv_init(void)
 {
 	int err;
 
-	if (MACHINE_IS_VM && IS_ENABLED(CONFIG_IUCV)) {
+	if (machine_is_vm() && IS_ENABLED(CONFIG_IUCV)) {
 		cpcmd("QUERY USERID", iucv_userid, sizeof(iucv_userid), &err);
 		if (unlikely(err)) {
 			WARN_ON(err);

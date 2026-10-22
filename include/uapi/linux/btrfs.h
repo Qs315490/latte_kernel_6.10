@@ -336,6 +336,7 @@ struct btrfs_ioctl_fs_info_args {
 #define BTRFS_FEATURE_INCOMPAT_EXTENT_TREE_V2	(1ULL << 13)
 #define BTRFS_FEATURE_INCOMPAT_RAID_STRIPE_TREE	(1ULL << 14)
 #define BTRFS_FEATURE_INCOMPAT_SIMPLE_QUOTA	(1ULL << 16)
+#define BTRFS_FEATURE_INCOMPAT_REMAP_TREE	(1ULL << 17)
 
 struct btrfs_ioctl_feature_flags {
 	__u64 compat_flags;
@@ -597,7 +598,7 @@ struct btrfs_ioctl_search_args_v2 {
 	__u64 buf_size;		   /* in - size of buffer
 					    * out - on EOVERFLOW: needed size
 					    *       to store item */
-	__u64 buf[];                       /* out - found items */
+	__u8 buf[];                        /* out - found items */
 };
 
 /* With a @src_length of zero, the range from @src_offset->EOF is cloned! */
@@ -615,7 +616,12 @@ struct btrfs_ioctl_clone_range_args {
  */
 #define BTRFS_DEFRAG_RANGE_COMPRESS 1
 #define BTRFS_DEFRAG_RANGE_START_IO 2
+#define BTRFS_DEFRAG_RANGE_COMPRESS_LEVEL 4
+/* Request no compression on the range (uncompress if necessary). */
+#define BTRFS_DEFRAG_RANGE_NOCOMPRESS	8
 #define BTRFS_DEFRAG_RANGE_FLAGS_SUPP	(BTRFS_DEFRAG_RANGE_COMPRESS |		\
+					 BTRFS_DEFRAG_RANGE_COMPRESS_LEVEL |	\
+					 BTRFS_DEFRAG_RANGE_NOCOMPRESS |	\
 					 BTRFS_DEFRAG_RANGE_START_IO)
 
 struct btrfs_ioctl_defrag_range_args {
@@ -640,10 +646,18 @@ struct btrfs_ioctl_defrag_range_args {
 
 	/*
 	 * which compression method to use if turning on compression
-	 * for this defrag operation.  If unspecified, zlib will
-	 * be used
+	 * for this defrag operation. If unspecified, zlib will be
+	 * used. If compression level is also being specified, set the
+	 * BTRFS_DEFRAG_RANGE_COMPRESS_LEVEL flag and fill the compress
+	 * member structure instead of the compress_type field.
 	 */
-	__u32 compress_type;
+	union {
+		__u32 compress_type;
+		struct {
+			__u8 type;
+			__s8 level;
+		} compress;
+	};
 
 	/* spare for later */
 	__u32 unused[4];
@@ -1086,6 +1100,44 @@ enum btrfs_err_code {
 	BTRFS_ERROR_DEV_RAID1C4_MIN_NOT_MET,
 };
 
+/* Flags for struct btrfs_ioctl_get_csums_entry::type. */
+#define BTRFS_GET_CSUMS_HAS_CSUMS			(1U << 0)
+#define BTRFS_GET_CSUMS_ZEROED				(1U << 1)
+#define BTRFS_GET_CSUMS_NODATASUM			(1U << 2)
+#define BTRFS_GET_CSUMS_COMPRESSED			(1U << 3)
+#define BTRFS_GET_CSUMS_ENCRYPTED			(1U << 4)
+#define BTRFS_GET_CSUMS_INLINE				(1U << 5)
+
+struct btrfs_ioctl_get_csums_entry {
+	/* File offset of this range. */
+	__u64 offset;
+	/* Length in bytes. */
+	__u64 length;
+	/* One of BTRFS_GET_CSUMS_* types. */
+	__u32 type;
+	/* Padding, must be 0. */
+	__u32 reserved;
+};
+
+struct btrfs_ioctl_get_csums_args {
+	/* In/out: file offset in bytes. */
+	__u64 offset;
+	/* In/out: range length in bytes. */
+	__u64 length;
+	/* In/out: buffer capacity / bytes written. */
+	__u64 buf_size;
+	/* In: flags, must be 0 for now. */
+	__u64 flags;
+	/* Out: entries of type btrfs_ioctl_get_csums_entry + csum data */
+	__u8 buf[];
+};
+
+/* Flags for IOC_SHUTDOWN, must match XFS_FSOP_GOING_FLAGS_* flags. */
+#define BTRFS_SHUTDOWN_FLAGS_DEFAULT			0x0
+#define BTRFS_SHUTDOWN_FLAGS_LOGFLUSH			0x1
+#define BTRFS_SHUTDOWN_FLAGS_NOLOGFLUSH			0x2
+#define BTRFS_SHUTDOWN_FLAGS_LAST			0x3
+
 #define BTRFS_IOC_SNAP_CREATE _IOW(BTRFS_IOCTL_MAGIC, 1, \
 				   struct btrfs_ioctl_vol_args)
 #define BTRFS_IOC_DEFRAG _IOW(BTRFS_IOCTL_MAGIC, 2, \
@@ -1206,6 +1258,11 @@ enum btrfs_err_code {
 				     struct btrfs_ioctl_encoded_io_args)
 #define BTRFS_IOC_SUBVOL_SYNC_WAIT _IOW(BTRFS_IOCTL_MAGIC, 65, \
 					struct btrfs_ioctl_subvol_wait)
+#define BTRFS_IOC_GET_CSUMS _IOWR(BTRFS_IOCTL_MAGIC, 66, \
+				  struct btrfs_ioctl_get_csums_args)
+
+/* Shutdown ioctl should follow XFS's interfaces, thus not using btrfs magic. */
+#define BTRFS_IOC_SHUTDOWN	_IOR('X', 125, __u32)
 
 #ifdef __cplusplus
 }

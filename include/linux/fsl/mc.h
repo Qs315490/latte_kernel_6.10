@@ -11,7 +11,7 @@
 #define _FSL_MC_H_
 
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/fsl_mc.h>
 #include <linux/interrupt.h>
 #include <uapi/linux/fsl_mc.h>
 
@@ -178,9 +178,6 @@ struct fsl_mc_obj_desc {
  * @regions: pointer to array of MMIO region entries
  * @irqs: pointer to array of pointers to interrupts allocated to this device
  * @resource: generic resource associated with this MC object device, if any.
- * @driver_override: driver name to force a match; do not set directly,
- *                   because core frees it; use driver_set_override() to
- *                   set or clear it.
  *
  * Generic device object for MC object devices that are "attached" to a
  * MC bus.
@@ -214,7 +211,6 @@ struct fsl_mc_device {
 	struct fsl_mc_device_irq **irqs;
 	struct fsl_mc_resource *resource;
 	struct device_link *consumer_link;
-	const char *driver_override;
 };
 
 #define to_fsl_mc_device(_dev) \
@@ -361,9 +357,11 @@ int mc_send_command(struct fsl_mc_io *mc_io, struct fsl_mc_command *cmd);
 
 #ifdef CONFIG_FSL_MC_BUS
 #define dev_is_fsl_mc(_dev) ((_dev)->bus == &fsl_mc_bus_type)
+u32 fsl_mc_get_msi_id(struct device *dev);
 #else
 /* If fsl-mc bus is not present device cannot belong to fsl-mc bus */
 #define dev_is_fsl_mc(_dev) (0)
+#define fsl_mc_get_msi_id(_dev)	(0)
 #endif
 
 /* Macro to check if a device is a container device */
@@ -417,17 +415,11 @@ int __must_check fsl_mc_portal_allocate(struct fsl_mc_device *mc_dev,
 
 void fsl_mc_portal_free(struct fsl_mc_io *mc_io);
 
-int fsl_mc_portal_reset(struct fsl_mc_io *mc_io);
-
 int __must_check fsl_mc_object_allocate(struct fsl_mc_device *mc_dev,
 					enum fsl_mc_pool_type pool_type,
 					struct fsl_mc_device **new_mc_adev);
 
 void fsl_mc_object_free(struct fsl_mc_device *mc_adev);
-
-struct irq_domain *fsl_mc_msi_create_irq_domain(struct fwnode_handle *fwnode,
-						struct msi_domain_info *info,
-						struct irq_domain *parent);
 
 int __must_check fsl_mc_allocate_irqs(struct fsl_mc_device *mc_dev);
 

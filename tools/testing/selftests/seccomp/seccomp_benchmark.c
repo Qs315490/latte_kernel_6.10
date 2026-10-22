@@ -1,6 +1,6 @@
 /*
  * Strictly speaking, this is not a test. But it can report during test
- * runs so relative performace can be measured.
+ * runs so relative performance can be measured.
  */
 #define _GNU_SOURCE
 #include <assert.h>
@@ -20,7 +20,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 
-#include "../kselftest.h"
+#include "kselftest.h"
 
 unsigned long long timing(clockid_t clk_id, unsigned long long samples)
 {

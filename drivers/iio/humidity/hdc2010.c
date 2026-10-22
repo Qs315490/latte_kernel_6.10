@@ -44,7 +44,6 @@ struct hdc2010_data {
 	struct i2c_client *client;
 	struct mutex lock;
 	u8 measurement_config;
-	u8 interrupt_config;
 	u8 drdy_config;
 };
 
@@ -169,13 +168,12 @@ static int hdc2010_read_raw(struct iio_dev *indio_dev,
 			*val = hdc2010_get_heater_status(data);
 			return IIO_VAL_INT;
 		}
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 		mutex_lock(&data->lock);
 		ret = hdc2010_get_prim_measurement_word(data, chan);
 		mutex_unlock(&data->lock);
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 		if (ret < 0)
 			return ret;
 		*val = ret;
@@ -184,13 +182,12 @@ static int hdc2010_read_raw(struct iio_dev *indio_dev,
 	case IIO_CHAN_INFO_PEAK: {
 		int ret;
 
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 		mutex_lock(&data->lock);
 		ret = hdc2010_get_peak_measurement_byte(data, chan);
 		mutex_unlock(&data->lock);
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 		if (ret < 0)
 			return ret;
 		/* Scaling up the value so we can use same offset as RAW */
@@ -320,8 +317,8 @@ static void hdc2010_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id hdc2010_id[] = {
-	{ "hdc2010" },
-	{ "hdc2080" },
+	{ .name = "hdc2010" },
+	{ .name = "hdc2080" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, hdc2010_id);

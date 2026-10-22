@@ -78,7 +78,6 @@ static struct clock_event_device ce_broadcast_hrtimer = {
 	.set_state_shutdown	= bc_shutdown,
 	.set_next_ktime		= bc_set_next,
 	.features		= CLOCK_EVT_FEAT_ONESHOT |
-				  CLOCK_EVT_FEAT_KTIME |
 				  CLOCK_EVT_FEAT_HRTIMER,
 	.rating			= 0,
 	.bound_on		= -1,
@@ -100,7 +99,6 @@ static enum hrtimer_restart bc_handler(struct hrtimer *t)
 
 void tick_setup_hrtimer_broadcast(void)
 {
-	hrtimer_init(&bctimer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_HARD);
-	bctimer.function = bc_handler;
+	hrtimer_setup(&bctimer, bc_handler, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_HARD);
 	clockevents_register_device(&ce_broadcast_hrtimer);
 }

@@ -124,7 +124,17 @@ static inline void put_ei(struct eventfs_inode *ei)
 static inline void free_ei(struct eventfs_inode *ei)
 {
 	if (ei) {
+		/* The ei should have no children if it is being freed. */
+		WARN_ON_ONCE(!list_empty(&ei->children));
 		ei->is_freed = 1;
+		/*
+		 * The SRCU iteration has a smp_rmb() to make sure it
+		 * sees a child (that may have already been freed)
+		 * before it reads is_free. If is_free is set, it must
+		 * not use the child it acquired from ei->children, as
+		 * the list may be used for SRCU.
+		 */
+		smp_wmb();
 		put_ei(ei);
 	}
 }
@@ -180,29 +190,25 @@ static int eventfs_set_attr(struct mnt_idmap *idmap, struct dentry *dentry,
 	const char *name;
 	int ret;
 
-	mutex_lock(&eventfs_mutex);
+	guard(mutex)(&eventfs_mutex);
 	ei = dentry->d_fsdata;
-	if (ei->is_freed) {
-		/* Do not allow changes if the event is about to be removed. */
-		mutex_unlock(&eventfs_mutex);
+	/* Do not allow changes if the event is about to be removed. */
+	if (ei->is_freed)
 		return -ENODEV;
-	}
 
 	/* Preallocate the children mode array if necessary */
 	if (!(dentry->d_inode->i_mode & S_IFDIR)) {
 		if (!ei->entry_attrs) {
-			ei->entry_attrs = kcalloc(ei->nr_entries, sizeof(*ei->entry_attrs),
-						  GFP_NOFS);
-			if (!ei->entry_attrs) {
-				ret = -ENOMEM;
-				goto out;
-			}
+			ei->entry_attrs = kzalloc_objs(*ei->entry_attrs,
+						       ei->nr_entries, GFP_NOFS);
+			if (!ei->entry_attrs)
+				return -ENOMEM;
 		}
 	}
 
 	ret = simple_setattr(idmap, dentry, iattr);
 	if (ret < 0)
-		goto out;
+		return ret;
 
 	/*
 	 * If this is a dir, then update the ei cache, only the file
@@ -225,8 +231,6 @@ static int eventfs_set_attr(struct mnt_idmap *idmap, struct dentry *dentry,
 			}
 		}
 	}
- out:
-	mutex_unlock(&eventfs_mutex);
 	return ret;
 }
 
@@ -249,6 +253,8 @@ static void eventfs_set_attrs(struct eventfs_inode *ei, bool update_uid, kuid_t 
 			      bool update_gid, kgid_t gid, int level)
 {
 	struct eventfs_inode *ei_child;
+
+	lockdep_assert_held(&eventfs_mutex);
 
 	/* Update events/<system>/<event> */
 	if (WARN_ON_ONCE(level > 3))
@@ -393,8 +399,7 @@ static struct dentry *lookup_file(struct eventfs_inode *parent_ei,
 	// Files have their parent's ei as their fsdata
 	dentry->d_fsdata = get_ei(parent_ei);
 
-	d_add(dentry, inode);
-	return NULL;
+	return d_splice_alias(inode, dentry);
 };
 
 /**
@@ -424,8 +429,7 @@ static struct dentry *lookup_dir_entry(struct dentry *dentry,
 
 	dentry->d_fsdata = get_ei(ei);
 
-	d_add(dentry, inode);
-	return NULL;
+	return d_splice_alias(inode, dentry);
 }
 
 static inline struct eventfs_inode *init_ei(struct eventfs_inode *ei, const char *name)
@@ -439,7 +443,7 @@ static inline struct eventfs_inode *init_ei(struct eventfs_inode *ei, const char
 
 static inline struct eventfs_inode *alloc_ei(const char *name)
 {
-	struct eventfs_inode *ei = kzalloc(sizeof(*ei), GFP_KERNEL);
+	struct eventfs_inode *ei = kzalloc_obj(*ei);
 	struct eventfs_inode *result;
 
 	if (!ei)
@@ -454,7 +458,7 @@ static inline struct eventfs_inode *alloc_ei(const char *name)
 
 static inline struct eventfs_inode *alloc_root_ei(const char *name)
 {
-	struct eventfs_root_inode *rei = kzalloc(sizeof(*rei), GFP_KERNEL);
+	struct eventfs_root_inode *rei = kzalloc_obj(*rei);
 	struct eventfs_inode *ei;
 
 	if (!rei)
@@ -528,26 +532,24 @@ static struct dentry *eventfs_root_lookup(struct inode *dir,
 	struct tracefs_inode *ti;
 	struct eventfs_inode *ei;
 	const char *name = dentry->d_name.name;
-	struct dentry *result = NULL;
 
 	ti = get_tracefs(dir);
 	if (WARN_ON_ONCE(!(ti->flags & TRACEFS_EVENT_INODE)))
 		return ERR_PTR(-EIO);
 
-	mutex_lock(&eventfs_mutex);
+	guard(mutex)(&eventfs_mutex);
 
 	ei = ti->private;
 	if (!ei || ei->is_freed)
-		goto out;
+		return NULL;
 
 	list_for_each_entry(ei_child, &ei->children, list) {
 		if (strcmp(ei_child->name, name) != 0)
 			continue;
 		/* A child is freed and removed from the list at the same time */
 		if (WARN_ON_ONCE(ei_child->is_freed))
-			goto out;
-		result = lookup_dir_entry(dentry, ei, ei_child);
-		goto out;
+			return NULL;
+		return lookup_dir_entry(dentry, ei, ei_child);
 	}
 
 	for (int i = 0; i < ei->nr_entries; i++) {
@@ -561,14 +563,12 @@ static struct dentry *eventfs_root_lookup(struct inode *dir,
 
 		data = ei->data;
 		if (entry->callback(name, &mode, &data, &fops) <= 0)
-			goto out;
+			return NULL;
 
-		result = lookup_file_dentry(dentry, ei, i, mode, data, fops);
-		goto out;
+		return lookup_file_dentry(dentry, ei, i, mode, data, fops);
+
 	}
- out:
-	mutex_unlock(&eventfs_mutex);
-	return result;
+	return NULL;
 }
 
 /*
@@ -584,8 +584,6 @@ static int eventfs_iterate(struct file *file, struct dir_context *ctx)
 	struct eventfs_inode *ei;
 	const char *name;
 	umode_t mode;
-	int idx;
-	int ret = -EINVAL;
 	int ino;
 	int i, r, c;
 
@@ -598,22 +596,18 @@ static int eventfs_iterate(struct file *file, struct dir_context *ctx)
 
 	c = ctx->pos - 2;
 
-	idx = srcu_read_lock(&eventfs_srcu);
+	guard(srcu)(&eventfs_srcu);
 
-	mutex_lock(&eventfs_mutex);
-	ei = READ_ONCE(ti->private);
-	if (ei && ei->is_freed)
-		ei = NULL;
-	mutex_unlock(&eventfs_mutex);
-
-	if (!ei)
-		goto out;
+	scoped_guard(mutex, &eventfs_mutex) {
+		ei = READ_ONCE(ti->private);
+		if (!ei || ei->is_freed)
+			return -EINVAL;
+	}
 
 	/*
 	 * Need to create the dentries and inodes to have a consistent
 	 * inode number.
 	 */
-	ret = 0;
 
 	/* Start at 'c' to jump over already read entries */
 	for (i = c; i < ei->nr_entries; i++, ctx->pos++) {
@@ -622,21 +616,19 @@ static int eventfs_iterate(struct file *file, struct dir_context *ctx)
 		entry = &ei->entries[i];
 		name = entry->name;
 
-		mutex_lock(&eventfs_mutex);
 		/* If ei->is_freed then just bail here, nothing more to do */
-		if (ei->is_freed) {
-			mutex_unlock(&eventfs_mutex);
-			goto out;
+		scoped_guard(mutex, &eventfs_mutex) {
+			if (ei->is_freed)
+				return -EINVAL;
+			r = entry->callback(name, &mode, &cdata, &fops);
 		}
-		r = entry->callback(name, &mode, &cdata, &fops);
-		mutex_unlock(&eventfs_mutex);
 		if (r <= 0)
 			continue;
 
 		ino = EVENTFS_FILE_INODE_INO;
 
 		if (!dir_emit(ctx, name, strlen(name), ino, DT_REG))
-			goto out;
+			return -EINVAL;
 	}
 
 	/* Subtract the skipped entries above */
@@ -644,6 +636,20 @@ static int eventfs_iterate(struct file *file, struct dir_context *ctx)
 
 	list_for_each_entry_srcu(ei_child, &ei->children, list,
 				 srcu_read_lock_held(&eventfs_srcu)) {
+
+		/*
+		 * If the ei is being freed, then the ei->children may be
+		 * being used as the rcu list, which means the next element
+		 * may be garbage. The ei->is_free is set before switching
+		 * the ei->children over to ei->rcu. The read memory barrier
+		 * here makes sure the ei_child is read before is_free is
+		 * updated.
+		 *
+		 * Matches the smp_wmb() in free_ei()
+		 */
+		smp_rmb();
+		if (ei->is_freed)
+			return -EINVAL;
 
 		if (c > 0) {
 			c--;
@@ -659,19 +665,13 @@ static int eventfs_iterate(struct file *file, struct dir_context *ctx)
 
 		ino = eventfs_dir_ino(ei_child);
 
-		if (!dir_emit(ctx, name, strlen(name), ino, DT_DIR))
-			goto out_dec;
+		if (!dir_emit(ctx, name, strlen(name), ino, DT_DIR)) {
+			/* Incremented ctx->pos without adding something, reset it */
+			ctx->pos--;
+			return -EINVAL;
+		}
 	}
-	ret = 1;
- out:
-	srcu_read_unlock(&eventfs_srcu, idx);
-
-	return ret;
-
- out_dec:
-	/* Incremented ctx->pos without adding something, reset it */
-	ctx->pos--;
-	goto out;
+	return 1;
 }
 
 /**
@@ -728,11 +728,10 @@ struct eventfs_inode *eventfs_create_dir(const char *name, struct eventfs_inode 
 	INIT_LIST_HEAD(&ei->children);
 	INIT_LIST_HEAD(&ei->list);
 
-	mutex_lock(&eventfs_mutex);
-	if (!parent->is_freed)
-		list_add_tail(&ei->list, &parent->children);
-	mutex_unlock(&eventfs_mutex);
-
+	scoped_guard(mutex, &eventfs_mutex) {
+		if (!parent->is_freed)
+			list_add_tail_rcu(&ei->list, &parent->children);
+	}
 	/* Was the parent freed? */
 	if (list_empty(&ei->list)) {
 		cleanup_ei(ei);
@@ -757,7 +756,7 @@ struct eventfs_inode *eventfs_create_events_dir(const char *name, struct dentry 
 						const struct eventfs_entry *entries,
 						int size, void *data)
 {
-	struct dentry *dentry = tracefs_start_creating(name, parent);
+	struct dentry *dentry;
 	struct eventfs_root_inode *rei;
 	struct eventfs_inode *ei;
 	struct tracefs_inode *ti;
@@ -768,6 +767,7 @@ struct eventfs_inode *eventfs_create_events_dir(const char *name, struct dentry 
 	if (security_locked_down(LOCKDOWN_TRACEFS))
 		return NULL;
 
+	dentry = tracefs_start_creating(name, parent);
 	if (IS_ERR(dentry))
 		return ERR_CAST(dentry);
 
@@ -822,7 +822,7 @@ struct eventfs_inode *eventfs_create_events_dir(const char *name, struct dentry 
 	 * something not worth much. Keeping directory links at 1
 	 * tells userspace not to trust the link number.
 	 */
-	d_instantiate(dentry, inode);
+	d_make_persistent(dentry, inode);
 	/* The dentry of the "events" parent does keep track though */
 	inc_nlink(dentry->d_parent->d_inode);
 	fsnotify_mkdir(dentry->d_parent->d_inode, dentry);
@@ -846,7 +846,7 @@ struct eventfs_inode *eventfs_create_events_dir(const char *name, struct dentry 
  */
 static void eventfs_remove_rec(struct eventfs_inode *ei, int level)
 {
-	struct eventfs_inode *ei_child;
+	struct eventfs_inode *ei_child, *tmp;
 
 	/*
 	 * Check recursion depth. It should never be greater than 3:
@@ -859,7 +859,7 @@ static void eventfs_remove_rec(struct eventfs_inode *ei, int level)
 		return;
 
 	/* search for nested folders or files */
-	list_for_each_entry(ei_child, &ei->children, list)
+	list_for_each_entry_safe(ei_child, tmp, &ei->children, list)
 		eventfs_remove_rec(ei_child, level + 1);
 
 	list_del_rcu(&ei->list);
@@ -877,9 +877,8 @@ void eventfs_remove_dir(struct eventfs_inode *ei)
 	if (!ei)
 		return;
 
-	mutex_lock(&eventfs_mutex);
+	guard(mutex)(&eventfs_mutex);
 	eventfs_remove_rec(ei, 0);
-	mutex_unlock(&eventfs_mutex);
 }
 
 /**
@@ -909,5 +908,17 @@ void eventfs_remove_events_dir(struct eventfs_inode *ei)
 	 * and destroyed dynamically.
 	 */
 	d_invalidate(dentry);
-	dput(dentry);
+	d_make_discardable(dentry);
+}
+
+int eventfs_remount_lock(void)
+{
+	mutex_lock(&eventfs_mutex);
+	return srcu_read_lock(&eventfs_srcu);
+}
+
+void eventfs_remount_unlock(int srcu_idx)
+{
+	srcu_read_unlock(&eventfs_srcu, srcu_idx);
+	mutex_unlock(&eventfs_mutex);
 }

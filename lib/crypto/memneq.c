@@ -59,9 +59,10 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <linux/unaligned.h>
-#include <crypto/algapi.h>
+#include <crypto/utils.h>
+#include <linux/export.h>
 #include <linux/module.h>
+#include <linux/unaligned.h>
 
 /* Generic path for arbitrary size */
 static inline unsigned long
@@ -158,7 +159,7 @@ static inline unsigned long __crypto_memneq_16(const void *a, const void *b)
 /* Compare two areas of memory without leaking timing information,
  * and with special optimizations for common sizes.  Users should
  * not call this function directly, but should instead use
- * crypto_memneq defined in crypto/algapi.h.
+ * crypto_memneq defined in crypto/utils.h.
  */
 noinline unsigned long __crypto_memneq(const void *a, const void *b,
 				       size_t size)

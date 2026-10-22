@@ -55,7 +55,7 @@ struct octep_vf_mmio {
 
 struct octep_vf_hw_ops {
 	void (*setup_iq_regs)(struct octep_vf_device *oct, int q);
-	void (*setup_oq_regs)(struct octep_vf_device *oct, int q);
+	int (*setup_oq_regs)(struct octep_vf_device *oct, int q);
 	void (*setup_mbox_regs)(struct octep_vf_device *oct, int mbox);
 
 	irqreturn_t (*non_ioq_intr_handler)(void *ioq_vector);
@@ -319,8 +319,6 @@ static inline u16 OCTEP_VF_MINOR_REV(struct octep_vf_device *oct)
 
 #define octep_vf_read_csr64(octep_vf_dev, reg_off)         \
 	readq((octep_vf_dev)->mmio.hw_addr + (reg_off))
-
-extern struct workqueue_struct *octep_vf_wq;
 
 int octep_vf_device_setup(struct octep_vf_device *oct);
 int octep_vf_setup_iqs(struct octep_vf_device *oct);

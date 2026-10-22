@@ -4,7 +4,7 @@
  * Copyright (c) 2014 Christoph Hellwig.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
 #include "xfs_log_format.h"
@@ -225,7 +225,7 @@ xfs_filestream_lookup_association(
 	atomic_inc(&pag_group(pag)->xg_active_ref);
 	xfs_mru_cache_done(mp->m_filestream);
 
-	trace_xfs_filestream_lookup(pag, ap->ip->i_ino);
+	trace_xfs_filestream_lookup(pag, I_INO(ap->ip));
 
 	ap->blkno = xfs_agbno_to_fsb(pag, 0);
 	xfs_bmap_adjacent(ap);
@@ -304,26 +304,19 @@ xfs_filestream_create_association(
 	 * for us, so all we need to do here is take another active reference to
 	 * the perag for the cached association.
 	 *
-	 * If we fail to store the association, we need to drop the fstrms
-	 * counter as well as drop the perag reference we take here for the
-	 * item. We do not need to return an error for this failure - as long as
-	 * we return a referenced AG, the allocation can still go ahead just
-	 * fine.
+	 * If we fail to store the association, we do not need to return an
+	 * error for this failure - as long as we return a referenced AG, the
+	 * allocation can still go ahead just fine.
 	 */
-	item = kmalloc(sizeof(*item), GFP_KERNEL | __GFP_RETRY_MAYFAIL);
+	item = kmalloc_obj(*item, GFP_KERNEL | __GFP_RETRY_MAYFAIL);
 	if (!item)
 		goto out_put_fstrms;
 
 	atomic_inc(&pag_group(args->pag)->xg_active_ref);
 	item->pag = args->pag;
-	error = xfs_mru_cache_insert(mp->m_filestream, pino, &item->mru);
-	if (error)
-		goto out_free_item;
+	xfs_mru_cache_insert(mp->m_filestream, pino, &item->mru);
 	return 0;
 
-out_free_item:
-	xfs_perag_rele(item->pag);
-	kfree(item);
 out_put_fstrms:
 	atomic_dec(&args->pag->pagf_fstrms);
 	return 0;
@@ -352,7 +345,7 @@ xfs_filestream_select_ag(
 	args->total = ap->total;
 	pip = xfs_filestream_get_parent(ap->ip);
 	if (pip) {
-		ino = pip->i_ino;
+		ino = I_INO(pip);
 		error = xfs_filestream_lookup_association(ap, args, ino,
 				longest);
 		xfs_irele(pip);
@@ -377,7 +370,7 @@ void
 xfs_filestream_deassociate(
 	struct xfs_inode	*ip)
 {
-	xfs_mru_cache_delete(ip->i_mount->m_filestream, ip->i_ino);
+	xfs_mru_cache_delete(ip->i_mount->m_filestream, I_INO(ip));
 }
 
 int

@@ -291,7 +291,7 @@ static int gc_n64_init_ff(struct input_dev *dev, int i)
 	struct gc_subdev *sdev;
 	int err;
 
-	sdev = kmalloc(sizeof(*sdev), GFP_KERNEL);
+	sdev = kmalloc_obj(*sdev);
 	if (!sdev)
 		return -ENOMEM;
 
@@ -726,7 +726,7 @@ static void gc_psx_process_packet(struct gc *gc)
 
 static void gc_timer(struct timer_list *t)
 {
-	struct gc *gc = from_timer(gc, t, timer);
+	struct gc *gc = timer_container_of(gc, t, timer);
 
 /*
  * N64 pads - must be read first, any read confuses them for 200 us
@@ -786,7 +786,7 @@ static void gc_close(struct input_dev *dev)
 	guard(mutex)(&gc->mutex);
 
 	if (!--gc->used) {
-		del_timer_sync(&gc->timer);
+		timer_delete_sync(&gc->timer);
 		parport_write_control(gc->pd->port, 0x00);
 		parport_release(gc->pd);
 	}
@@ -948,7 +948,7 @@ static void gc_attach(struct parport *pp)
 		return;
 	}
 
-	gc = kzalloc(sizeof(*gc), GFP_KERNEL);
+	gc = kzalloc_obj(*gc);
 	if (!gc) {
 		pr_err("Not enough memory\n");
 		goto err_unreg_pardev;

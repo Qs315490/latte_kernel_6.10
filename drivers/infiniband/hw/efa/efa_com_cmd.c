@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause
 /*
- * Copyright 2018-2024 Amazon.com, Inc. or its affiliates. All rights reserved.
+ * Copyright 2018-2026 Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
 #include "efa_com.h"
 #include "efa_com_cmd.h"
+
+#define EFA_DEFAULT_LINK_SPEED_GBPS 100
 
 int efa_com_create_qp(struct efa_com_dev *edev,
 		      struct efa_com_create_qp_params *params,
@@ -468,6 +470,8 @@ int efa_com_get_device_attr(struct efa_com_dev *edev,
 	result->device_caps = resp.u.device_attr.device_caps;
 	result->guid = resp.u.device_attr.guid;
 	result->max_link_speed_gbps = resp.u.device_attr.max_link_speed_gbps;
+	if (!result->max_link_speed_gbps)
+		result->max_link_speed_gbps = EFA_DEFAULT_LINK_SPEED_GBPS;
 
 	if (result->admin_api_version < 1) {
 		ibdev_err_ratelimited(
@@ -479,31 +483,46 @@ int efa_com_get_device_attr(struct efa_com_dev *edev,
 
 	edev->supported_features = resp.u.device_attr.supported_features;
 	err = efa_com_get_feature(edev, &resp,
-				  EFA_ADMIN_QUEUE_ATTR);
+				  EFA_ADMIN_QUEUE_ATTR_1);
 	if (err) {
 		ibdev_err_ratelimited(edev->efa_dev,
-				      "Failed to get queue attributes %d\n",
+				      "Failed to get queue attributes1 %d\n",
 				      err);
 		return err;
 	}
 
-	result->max_qp = resp.u.queue_attr.max_qp;
-	result->max_sq_depth = resp.u.queue_attr.max_sq_depth;
-	result->max_rq_depth = resp.u.queue_attr.max_rq_depth;
-	result->max_cq = resp.u.queue_attr.max_cq;
-	result->max_cq_depth = resp.u.queue_attr.max_cq_depth;
-	result->inline_buf_size = resp.u.queue_attr.inline_buf_size;
-	result->max_sq_sge = resp.u.queue_attr.max_wr_send_sges;
-	result->max_rq_sge = resp.u.queue_attr.max_wr_recv_sges;
-	result->max_mr = resp.u.queue_attr.max_mr;
-	result->max_mr_pages = resp.u.queue_attr.max_mr_pages;
-	result->max_pd = resp.u.queue_attr.max_pd;
-	result->max_ah = resp.u.queue_attr.max_ah;
-	result->max_llq_size = resp.u.queue_attr.max_llq_size;
-	result->sub_cqs_per_cq = resp.u.queue_attr.sub_cqs_per_cq;
-	result->max_wr_rdma_sge = resp.u.queue_attr.max_wr_rdma_sges;
-	result->max_tx_batch = resp.u.queue_attr.max_tx_batch;
-	result->min_sq_depth = resp.u.queue_attr.min_sq_depth;
+	result->max_qp = resp.u.queue_attr_1.max_qp;
+	result->max_sq_depth = resp.u.queue_attr_1.max_sq_depth;
+	result->max_rq_depth = resp.u.queue_attr_1.max_rq_depth;
+	result->max_cq = resp.u.queue_attr_1.max_cq;
+	result->max_cq_depth = resp.u.queue_attr_1.max_cq_depth;
+	result->inline_buf_size = resp.u.queue_attr_1.inline_buf_size;
+	result->max_sq_sge = resp.u.queue_attr_1.max_wr_send_sges;
+	result->max_rq_sge = resp.u.queue_attr_1.max_wr_recv_sges;
+	result->max_mr = resp.u.queue_attr_1.max_mr;
+	result->max_mr_pages = resp.u.queue_attr_1.max_mr_pages;
+	result->max_pd = resp.u.queue_attr_1.max_pd;
+	result->max_ah = resp.u.queue_attr_1.max_ah;
+	result->max_llq_size = resp.u.queue_attr_1.max_llq_size;
+	result->sub_cqs_per_cq = resp.u.queue_attr_1.sub_cqs_per_cq;
+	result->max_wr_rdma_sge = resp.u.queue_attr_1.max_wr_rdma_sges;
+	result->max_tx_batch = resp.u.queue_attr_1.max_tx_batch;
+	result->min_sq_depth = resp.u.queue_attr_1.min_sq_depth;
+
+	if (efa_com_check_supported_feature_id(edev, EFA_ADMIN_QUEUE_ATTR_2)) {
+		err = efa_com_get_feature(edev, &resp,
+					  EFA_ADMIN_QUEUE_ATTR_2);
+		if (err) {
+			ibdev_err_ratelimited(
+				edev->efa_dev,
+				"Failed to get queue attributes2 %d\n", err);
+			return err;
+		}
+
+		result->inline_buf_size_ex = resp.u.queue_attr_2.inline_buf_size_ex;
+	} else {
+		result->inline_buf_size_ex = result->inline_buf_size;
+	}
 
 	err = efa_com_get_feature(edev, &resp, EFA_ADMIN_NETWORK_ATTR);
 	if (err) {
@@ -769,6 +788,11 @@ int efa_com_get_stats(struct efa_com_dev *edev,
 	struct efa_com_admin_queue *aq = &edev->aq;
 	struct efa_admin_aq_get_stats_cmd cmd = {};
 	struct efa_admin_acq_get_stats_resp resp;
+	struct efa_admin_rdma_write_stats *rws;
+	struct efa_admin_rdma_read_stats *rrs;
+	struct efa_admin_messages_stats *ms;
+	struct efa_admin_network_stats *ns;
+	struct efa_admin_basic_stats *bs;
 	int err;
 
 	cmd.aq_common_descriptor.opcode = EFA_ADMIN_GET_STATS;
@@ -791,29 +815,41 @@ int efa_com_get_stats(struct efa_com_dev *edev,
 
 	switch (cmd.type) {
 	case EFA_ADMIN_GET_STATS_TYPE_BASIC:
-		result->basic_stats.tx_bytes = resp.u.basic_stats.tx_bytes;
-		result->basic_stats.tx_pkts = resp.u.basic_stats.tx_pkts;
-		result->basic_stats.rx_bytes = resp.u.basic_stats.rx_bytes;
-		result->basic_stats.rx_pkts = resp.u.basic_stats.rx_pkts;
-		result->basic_stats.rx_drops = resp.u.basic_stats.rx_drops;
+		bs = &resp.u.basic_stats;
+		result->basic_stats.tx_bytes = bs->tx_bytes;
+		result->basic_stats.tx_pkts = bs->tx_pkts;
+		result->basic_stats.rx_bytes = bs->rx_bytes;
+		result->basic_stats.rx_pkts = bs->rx_pkts;
+		result->basic_stats.rx_drops = bs->rx_drops;
 		break;
 	case EFA_ADMIN_GET_STATS_TYPE_MESSAGES:
-		result->messages_stats.send_bytes = resp.u.messages_stats.send_bytes;
-		result->messages_stats.send_wrs = resp.u.messages_stats.send_wrs;
-		result->messages_stats.recv_bytes = resp.u.messages_stats.recv_bytes;
-		result->messages_stats.recv_wrs = resp.u.messages_stats.recv_wrs;
+		ms = &resp.u.messages_stats;
+		result->messages_stats.send_bytes = ms->send_bytes;
+		result->messages_stats.send_wrs = ms->send_wrs;
+		result->messages_stats.recv_bytes = ms->recv_bytes;
+		result->messages_stats.recv_wrs = ms->recv_wrs;
 		break;
 	case EFA_ADMIN_GET_STATS_TYPE_RDMA_READ:
-		result->rdma_read_stats.read_wrs = resp.u.rdma_read_stats.read_wrs;
-		result->rdma_read_stats.read_bytes = resp.u.rdma_read_stats.read_bytes;
-		result->rdma_read_stats.read_wr_err = resp.u.rdma_read_stats.read_wr_err;
-		result->rdma_read_stats.read_resp_bytes = resp.u.rdma_read_stats.read_resp_bytes;
+		rrs = &resp.u.rdma_read_stats;
+		result->rdma_read_stats.read_wrs = rrs->read_wrs;
+		result->rdma_read_stats.read_bytes = rrs->read_bytes;
+		result->rdma_read_stats.read_wr_err = rrs->read_wr_err;
+		result->rdma_read_stats.read_resp_bytes = rrs->read_resp_bytes;
 		break;
 	case EFA_ADMIN_GET_STATS_TYPE_RDMA_WRITE:
-		result->rdma_write_stats.write_wrs = resp.u.rdma_write_stats.write_wrs;
-		result->rdma_write_stats.write_bytes = resp.u.rdma_write_stats.write_bytes;
-		result->rdma_write_stats.write_wr_err = resp.u.rdma_write_stats.write_wr_err;
-		result->rdma_write_stats.write_recv_bytes = resp.u.rdma_write_stats.write_recv_bytes;
+		rws = &resp.u.rdma_write_stats;
+		result->rdma_write_stats.write_wrs = rws->write_wrs;
+		result->rdma_write_stats.write_bytes = rws->write_bytes;
+		result->rdma_write_stats.write_wr_err = rws->write_wr_err;
+		result->rdma_write_stats.write_recv_bytes = rws->write_recv_bytes;
+		break;
+	case EFA_ADMIN_GET_STATS_TYPE_NETWORK:
+		ns = &resp.u.network_stats;
+		result->network_stats.retrans_bytes = ns->retrans_bytes;
+		result->network_stats.retrans_pkts = ns->retrans_pkts;
+		result->network_stats.retrans_timeout_events = ns->retrans_timeout_events;
+		result->network_stats.unresponsive_remote_events = ns->unresponsive_remote_events;
+		result->network_stats.impaired_remote_conn_events = ns->impaired_remote_conn_events;
 		break;
 	}
 

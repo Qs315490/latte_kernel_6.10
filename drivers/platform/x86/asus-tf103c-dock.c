@@ -21,7 +21,6 @@
 #include <linux/input.h>
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
-#include <linux/mod_devicetable.h>
 #include <linux/moduleparam.h>
 #include <linux/module.h>
 #include <linux/pm.h>
@@ -856,7 +855,7 @@ static int tf103c_dock_probe(struct i2c_client *client)
 	/* 5. Setup irqchip for touchpad IRQ pass-through */
 	dock->tp_irqchip.name = KBUILD_MODNAME;
 
-	dock->tp_irq_domain = irq_domain_add_linear(NULL, 1, &irq_domain_simple_ops, NULL);
+	dock->tp_irq_domain = irq_domain_create_linear(NULL, 1, &irq_domain_simple_ops, NULL);
 	if (!dock->tp_irq_domain)
 		return -ENOMEM;
 

@@ -1404,6 +1404,23 @@ int kfd_parse_crat_table(void *crat_image, struct list_head *device_list,
 	sub_type_hdr = (struct crat_subtype_generic *)(crat_table+1);
 	while ((char *)sub_type_hdr + sizeof(struct crat_subtype_generic) <
 			((char *)crat_image) + image_len) {
+		if (!sub_type_hdr->length ||
+		    sub_type_hdr->length < sizeof(struct crat_subtype_generic)) {
+			pr_warn("Invalid CRAT subtype length %u\n",
+				sub_type_hdr->length);
+			ret = -EINVAL;
+			break;
+		}
+
+		/* Validate subtype fits within remaining image */
+		if ((char *)sub_type_hdr + sub_type_hdr->length >
+		    (char *)crat_image + image_len) {
+			pr_warn("CRAT subtype length %u exceeds image bounds\n",
+				sub_type_hdr->length);
+			ret = -EINVAL;
+			break;
+		}
+
 		if (sub_type_hdr->flags & CRAT_SUBTYPE_FLAGS_ENABLED) {
 			ret = kfd_parse_subtype(sub_type_hdr, device_list);
 			if (ret)
@@ -1704,6 +1721,11 @@ int kfd_get_gpu_cache_info(struct kfd_node *kdev, struct kfd_gpu_cache_info **pc
 		case IP_VERSION(11, 5, 0):
 		case IP_VERSION(11, 5, 1):
 		case IP_VERSION(11, 5, 2):
+		case IP_VERSION(11, 5, 3):
+		case IP_VERSION(11, 5, 4):
+		case IP_VERSION(11, 5, 6):
+		case IP_VERSION(11, 7, 0):
+		case IP_VERSION(11, 7, 1):
 			/* Cacheline size not available in IP discovery for gc11.
 			 * kfd_fill_gpu_cache_info_from_gfx_config to hard code it
 			 */
@@ -1711,6 +1733,7 @@ int kfd_get_gpu_cache_info(struct kfd_node *kdev, struct kfd_gpu_cache_info **pc
 			fallthrough;
 		case IP_VERSION(12, 0, 0):
 		case IP_VERSION(12, 0, 1):
+		case IP_VERSION(12, 1, 0):
 			num_of_cache_types =
 				kfd_fill_gpu_cache_info_from_gfx_config(kdev->kfd,
 									cache_line_size_missing,
@@ -1818,7 +1841,7 @@ static int kfd_fill_mem_info_for_cpu(int numa_node_id, int *avail_size,
 	return 0;
 }
 
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
 static int kfd_fill_iolink_info_for_cpu(int numa_node_id, int *avail_size,
 				uint32_t *num_entries,
 				struct crat_subtype_iolink *sub_type_hdr)
@@ -1877,7 +1900,7 @@ static int kfd_create_vcrat_image_cpu(void *pcrat_image, size_t *size)
 	struct crat_subtype_generic *sub_type_hdr;
 	int avail_size = *size;
 	int numa_node_id;
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
 	uint32_t entries = 0;
 #endif
 	int ret = 0;
@@ -1942,7 +1965,7 @@ static int kfd_create_vcrat_image_cpu(void *pcrat_image, size_t *size)
 			sub_type_hdr->length);
 
 		/* Fill in Subtype: IO Link */
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
 		ret = kfd_fill_iolink_info_for_cpu(numa_node_id, &avail_size,
 				&entries,
 				(struct crat_subtype_iolink *)sub_type_hdr);
@@ -2132,9 +2155,6 @@ static int kfd_fill_gpu_direct_io_link_to_cpu(int *avail_size,
 		bool ext_cpu = KFD_GC_VERSION(kdev) != IP_VERSION(9, 4, 3);
 		int mem_bw = 819200, weight = ext_cpu ? KFD_CRAT_XGMI_WEIGHT :
 							KFD_CRAT_INTRA_SOCKET_WEIGHT;
-		uint32_t bandwidth = ext_cpu ? amdgpu_amdkfd_get_xgmi_bandwidth_mbytes(
-							kdev->adev, NULL, true) : mem_bw;
-
 		/*
 		 * with host gpu xgmi link, host can access gpu memory whether
 		 * or not pcie bar type is large, so always create bidirectional
@@ -2143,8 +2163,16 @@ static int kfd_fill_gpu_direct_io_link_to_cpu(int *avail_size,
 		sub_type_hdr->flags |= CRAT_IOLINK_FLAGS_BI_DIRECTIONAL;
 		sub_type_hdr->io_interface_type = CRAT_IOLINK_TYPE_XGMI;
 		sub_type_hdr->weight_xgmi = weight;
-		sub_type_hdr->minimum_bandwidth_mbs = bandwidth;
-		sub_type_hdr->maximum_bandwidth_mbs = bandwidth;
+		if (ext_cpu) {
+			amdgpu_xgmi_get_bandwidth(kdev->adev, NULL,
+						  AMDGPU_XGMI_BW_MODE_PER_LINK,
+						  AMDGPU_XGMI_BW_UNIT_MBYTES,
+						  &sub_type_hdr->minimum_bandwidth_mbs,
+						  &sub_type_hdr->maximum_bandwidth_mbs);
+		} else {
+			sub_type_hdr->minimum_bandwidth_mbs = mem_bw;
+			sub_type_hdr->maximum_bandwidth_mbs = mem_bw;
+		}
 	} else {
 		sub_type_hdr->io_interface_type = CRAT_IOLINK_TYPE_PCIEXPRESS;
 		sub_type_hdr->minimum_bandwidth_mbs =
@@ -2197,12 +2225,12 @@ static int kfd_fill_gpu_xgmi_link_to_gpu(int *avail_size,
 
 	if (use_ta_info) {
 		sub_type_hdr->weight_xgmi = KFD_CRAT_XGMI_WEIGHT *
-			amdgpu_amdkfd_get_xgmi_hops_count(kdev->adev, peer_kdev->adev);
-		sub_type_hdr->maximum_bandwidth_mbs =
-			amdgpu_amdkfd_get_xgmi_bandwidth_mbytes(kdev->adev,
-							peer_kdev->adev, false);
-		sub_type_hdr->minimum_bandwidth_mbs = sub_type_hdr->maximum_bandwidth_mbs ?
-			amdgpu_amdkfd_get_xgmi_bandwidth_mbytes(kdev->adev, NULL, true) : 0;
+			amdgpu_xgmi_get_hops_count(kdev->adev, peer_kdev->adev);
+		amdgpu_xgmi_get_bandwidth(kdev->adev, peer_kdev->adev,
+					  AMDGPU_XGMI_BW_MODE_PER_PEER,
+					  AMDGPU_XGMI_BW_UNIT_MBYTES,
+					  &sub_type_hdr->minimum_bandwidth_mbs,
+					  &sub_type_hdr->maximum_bandwidth_mbs);
 	} else {
 		bool is_single_hop = kdev->kfd == peer_kdev->kfd;
 		int weight = is_single_hop ? KFD_CRAT_INTRA_SOCKET_WEIGHT :
@@ -2351,7 +2379,7 @@ static int kfd_create_vcrat_image_gpu(void *pcrat_image,
 	if (kdev->kfd->hive_id) {
 		for (nid = 0; nid < proximity_domain; ++nid) {
 			peer_dev = kfd_topology_device_by_proximity_domain_no_lock(nid);
-			if (!peer_dev->gpu)
+			if (!peer_dev || !peer_dev->gpu)
 				continue;
 			if (peer_dev->gpu->kfd->hive_id != kdev->kfd->hive_id)
 				continue;

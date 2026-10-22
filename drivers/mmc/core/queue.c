@@ -167,7 +167,7 @@ static struct scatterlist *mmc_alloc_sg(unsigned short sg_len, gfp_t gfp)
 {
 	struct scatterlist *sg;
 
-	sg = kmalloc_array(sg_len, sizeof(*sg), gfp);
+	sg = kmalloc_objs(*sg, sg_len, gfp);
 	if (sg)
 		sg_init_table(sg, sg_len);
 
@@ -184,9 +184,14 @@ static void mmc_queue_setup_discard(struct mmc_card *card,
 		return;
 
 	lim->max_hw_discard_sectors = max_discard;
-	if (mmc_can_secure_erase_trim(card))
-		lim->max_secure_erase_sectors = max_discard;
-	if (mmc_can_trim(card) && card->erased_byte == 0)
+	if (mmc_card_can_secure_erase_trim(card)) {
+		if (mmc_card_fixed_secure_erase_trim_time(card))
+			lim->max_secure_erase_sectors = UINT_MAX >> card->erase_shift;
+		else
+			lim->max_secure_erase_sectors = max_discard;
+	}
+
+	if (mmc_card_can_trim(card) && card->erased_byte == 0)
 		lim->max_write_zeroes_sectors = max_discard;
 
 	/* granularity must not be greater than max. discard */
@@ -203,14 +208,20 @@ static unsigned short mmc_get_max_segments(struct mmc_host *host)
 }
 
 static int mmc_mq_init_request(struct blk_mq_tag_set *set, struct request *req,
-			       unsigned int hctx_idx, unsigned int numa_node)
+			       unsigned int hctx_idx, int numa_node)
 {
 	struct mmc_queue_req *mq_rq = req_to_mmc_queue_req(req);
 	struct mmc_queue *mq = set->driver_data;
 	struct mmc_card *card = mq->card;
 	struct mmc_host *host = card->host;
+	u16 sg_len = mmc_get_max_segments(host);
 
-	mq_rq->sg = mmc_alloc_sg(mmc_get_max_segments(host), GFP_KERNEL);
+	if (!sg_len) {
+		dev_err(mmc_dev(host), "Wrong max_segs assigned\n");
+		return -EINVAL;
+	}
+
+	mq_rq->sg = mmc_alloc_sg(sg_len, GFP_KERNEL);
 	if (!mq_rq->sg)
 		return -ENOMEM;
 
@@ -352,7 +363,7 @@ static struct gendisk *mmc_alloc_disk(struct mmc_queue *mq,
 	};
 	struct gendisk *disk;
 
-	if (mmc_can_erase(card))
+	if (mmc_card_can_erase(card))
 		mmc_queue_setup_discard(card, &lim);
 
 	lim.max_hw_sectors = min(host->max_blk_count, host->max_req_size / 512);
@@ -523,5 +534,5 @@ unsigned int mmc_queue_map_sg(struct mmc_queue *mq, struct mmc_queue_req *mqrq)
 {
 	struct request *req = mmc_queue_req_to_req(mqrq);
 
-	return blk_rq_map_sg(mq->queue, req, mqrq->sg);
+	return blk_rq_map_sg(req, mqrq->sg);
 }

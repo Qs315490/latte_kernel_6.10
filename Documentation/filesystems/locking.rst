@@ -66,7 +66,7 @@ prototypes::
 	int (*link) (struct dentry *,struct inode *,struct dentry *);
 	int (*unlink) (struct inode *,struct dentry *);
 	int (*symlink) (struct mnt_idmap *, struct inode *,struct dentry *,const char *);
-	int (*mkdir) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t);
+	struct dentry *(*mkdir) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t);
 	int (*rmdir) (struct inode *,struct dentry *);
 	int (*mknod) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t,dev_t);
 	int (*rename) (struct mnt_idmap *, struct inode *, struct dentry *,
@@ -80,15 +80,17 @@ prototypes::
 	int (*getattr) (struct mnt_idmap *, const struct path *, struct kstat *, u32, unsigned int);
 	ssize_t (*listxattr) (struct dentry *, char *, size_t);
 	int (*fiemap)(struct inode *, struct fiemap_extent_info *, u64 start, u64 len);
-	void (*update_time)(struct inode *, struct timespec *, int);
+	void (*update_time)(struct inode *inode, enum fs_update_time type,
+			    int flags);
+	void (*sync_lazytime)(struct inode *inode);
 	int (*atomic_open)(struct inode *, struct dentry *,
 				struct file *, unsigned open_flag,
 				umode_t create_mode);
 	int (*tmpfile) (struct mnt_idmap *, struct inode *,
 			struct file *, umode_t);
 	int (*fileattr_set)(struct mnt_idmap *idmap,
-			    struct dentry *dentry, struct fileattr *fa);
-	int (*fileattr_get)(struct dentry *dentry, struct fileattr *fa);
+			    struct dentry *dentry, struct file_kattr *fa);
+	int (*fileattr_get)(struct dentry *dentry, struct file_kattr *fa);
 	struct posix_acl * (*get_acl)(struct mnt_idmap *, struct dentry *, int);
 	struct offset_ctx *(*get_offset_ctx)(struct inode *inode);
 
@@ -117,6 +119,7 @@ getattr:	no
 listxattr:	no
 fiemap:		no
 update_time:	no
+sync_lazytime:	no
 atomic_open:	shared (exclusive if O_CREAT is set in open flags)
 tmpfile:	no
 fileattr_get:	no or exclusive
@@ -177,7 +180,6 @@ prototypes::
 	int (*freeze_fs) (struct super_block *);
 	int (*unfreeze_fs) (struct super_block *);
 	int (*statfs) (struct dentry *, struct kstatfs *);
-	int (*remount_fs) (struct super_block *, int *, char *);
 	void (*umount_begin) (struct super_block *);
 	int (*show_options)(struct seq_file *, struct dentry *);
 	ssize_t (*quota_read)(struct super_block *, int, char *, size_t, loff_t);
@@ -201,7 +203,6 @@ sync_fs:		read
 freeze_fs:		write
 unfreeze_fs:		write
 statfs:			maybe(read)	(see below)
-remount_fs:		write
 umount_begin:		no
 show_options:		no		(namespace_sem)
 quota_read:		no		(see below)
@@ -226,8 +227,6 @@ file_system_type
 
 prototypes::
 
-	struct dentry *(*mount) (struct file_system_type *, int,
-		       const char *, void *);
 	void (*kill_sb) (struct super_block *);
 
 locking rules:
@@ -235,12 +234,8 @@ locking rules:
 =======		=========
 ops		may block
 =======		=========
-mount		yes
 kill_sb		yes
 =======		=========
-
-->mount() returns ERR_PTR or the root dentry; its superblock should be locked
-on return.
 
 ->kill_sb() takes a write-locked superblock, does all shutdown work on it,
 unlocks and drops the reference.
@@ -249,15 +244,14 @@ address_space_operations
 ========================
 prototypes::
 
-	int (*writepage)(struct page *page, struct writeback_control *wbc);
 	int (*read_folio)(struct file *, struct folio *);
 	int (*writepages)(struct address_space *, struct writeback_control *);
 	bool (*dirty_folio)(struct address_space *, struct folio *folio);
 	void (*readahead)(struct readahead_control *);
-	int (*write_begin)(struct file *, struct address_space *mapping,
+	int (*write_begin)(const struct kiocb *, struct address_space *mapping,
 				loff_t pos, unsigned len,
 				struct folio **foliop, void **fsdata);
-	int (*write_end)(struct file *, struct address_space *mapping,
+	int (*write_end)(const struct kiocb *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned copied,
 				struct folio *folio, void *fsdata);
 	sector_t (*bmap)(struct address_space *, sector_t);
@@ -280,7 +274,6 @@ locking rules:
 ======================	======================== =========	===============
 ops			folio locked		 i_rwsem	invalidate_lock
 ======================	======================== =========	===============
-writepage:		yes, unlocks (see below)
 read_folio:		yes, unlocks				shared
 writepages:
 dirty_folio:		maybe
@@ -309,54 +302,6 @@ completion.
 
 ->readahead() unlocks the folios that I/O is attempted on like ->read_folio().
 
-->writepage() is used for two purposes: for "memory cleansing" and for
-"sync".  These are quite different operations and the behaviour may differ
-depending upon the mode.
-
-If writepage is called for sync (wbc->sync_mode != WBC_SYNC_NONE) then
-it *must* start I/O against the page, even if that would involve
-blocking on in-progress I/O.
-
-If writepage is called for memory cleansing (sync_mode ==
-WBC_SYNC_NONE) then its role is to get as much writeout underway as
-possible.  So writepage should try to avoid blocking against
-currently-in-progress I/O.
-
-If the filesystem is not called for "sync" and it determines that it
-would need to block against in-progress I/O to be able to start new I/O
-against the page the filesystem should redirty the page with
-redirty_page_for_writepage(), then unlock the page and return zero.
-This may also be done to avoid internal deadlocks, but rarely.
-
-If the filesystem is called for sync then it must wait on any
-in-progress I/O and then start new I/O.
-
-The filesystem should unlock the page synchronously, before returning to the
-caller, unless ->writepage() returns special WRITEPAGE_ACTIVATE
-value. WRITEPAGE_ACTIVATE means that page cannot really be written out
-currently, and VM should stop calling ->writepage() on this page for some
-time. VM does this by moving page to the head of the active list, hence the
-name.
-
-Unless the filesystem is going to redirty_page_for_writepage(), unlock the page
-and return zero, writepage *must* run set_page_writeback() against the page,
-followed by unlocking it.  Once set_page_writeback() has been run against the
-page, write I/O can be submitted and the write I/O completion handler must run
-end_page_writeback() once the I/O is complete.  If no I/O is submitted, the
-filesystem must run end_page_writeback() against the page before returning from
-writepage.
-
-That is: after 2.5.12, pages which are under writeout are *not* locked.  Note,
-if the filesystem needs the page to be locked during writeout, that is ok, too,
-the page is allowed to be unlocked at any point in time between the calls to
-set_page_writeback() and end_page_writeback().
-
-Note, failure to run either redirty_page_for_writepage() or the combination of
-set_page_writeback()/end_page_writeback() on a page submitted to writepage
-will leave the page itself marked clean but it will be tagged as dirty in the
-radix tree.  This incoherency can lead to all sorts of hard-to-debug problems
-in the filesystem like having dirty inodes at umount and losing written data.
-
 ->writepages() is used for periodic writeback and for syscall-initiated
 sync operations.  The address_space should start I/O against at least
 ``*nr_to_write`` pages.  ``*nr_to_write`` must be decremented for each page
@@ -364,8 +309,8 @@ which is written.  The address_space implementation may write more (or less)
 pages than ``*nr_to_write`` asks for, but it should try to be reasonably close.
 If nr_to_write is NULL, all dirty pages must be written.
 
-writepages should _only_ write pages which are present on
-mapping->io_pages.
+writepages should _only_ write pages which are present in
+mapping->i_pages.
 
 ->dirty_folio() is called from various places in the kernel when
 the target folio is marked as needing writeback.  The folio cannot be
@@ -453,6 +398,7 @@ prototypes::
 	bool (*lm_breaker_owns_lease)(struct file_lock *);
         bool (*lm_lock_expirable)(struct file_lock *);
         void (*lm_expire_lock)(void);
+        bool (*lm_breaker_timedout)(struct file_lease *);
 
 locking rules:
 
@@ -466,21 +412,9 @@ lm_change		yes		no			no
 lm_breaker_owns_lease:	yes     	no			no
 lm_lock_expirable	yes		no			no
 lm_expire_lock		no		no			yes
+lm_open_conflict	yes		no			no
+lm_breaker_timedout     yes             no                      no
 ======================	=============	=================	=========
-
-buffer_head
-===========
-
-prototypes::
-
-	void (*b_end_io)(struct buffer_head *bh, int uptodate);
-
-locking rules:
-
-called from interrupts. In other words, extreme care is needed here.
-bh is locked, but that's all warranties we have here. Currently only RAID1,
-highmem, fs/buffer.c, and fs/ntfs/aops.c are providing these. Block devices
-call this method upon the IO completion.
 
 block_device_operations
 =======================
@@ -493,7 +427,7 @@ prototypes::
 	int (*direct_access) (struct block_device *, sector_t, void **,
 				unsigned long *);
 	void (*unlock_native_capacity) (struct gendisk *);
-	int (*getgeo)(struct block_device *, struct hd_geometry *);
+	int (*getgeo)(struct gendisk *, struct hd_geometry *);
 	void (*swap_slot_free_notify) (struct block_device *, unsigned long);
 
 locking rules:
@@ -636,7 +570,7 @@ write_info:	yes		dqonoff_sem
 FS recursion means calling ->quota_read() and ->quota_write() from superblock
 operations.
 
-More details about quota locking can be found in fs/dquot.c.
+More details about quota locking can be found in fs/quota/dquot.c.
 
 vm_operations_struct
 ====================

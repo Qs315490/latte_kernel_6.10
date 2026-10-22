@@ -95,29 +95,6 @@ u32 av7110_debiread(struct av7110 *av7110, u32 config, int addr, unsigned int co
 	return result;
 }
 
-/* av7110 ARM core boot stuff */
-#if 0
-void av7110_reset_arm(struct av7110 *av7110)
-{
-	saa7146_setgpio(av7110->dev, RESET_LINE, SAA7146_GPIO_OUTLO);
-
-	/* Disable DEBI and GPIO irq */
-	SAA7146_IER_DISABLE(av7110->dev, MASK_19 | MASK_03);
-	SAA7146_ISR_CLEAR(av7110->dev, MASK_19 | MASK_03);
-
-	saa7146_setgpio(av7110->dev, RESET_LINE, SAA7146_GPIO_OUTHI);
-	msleep(30);	/* the firmware needs some time to initialize */
-
-	ARM_ResetMailBox(av7110);
-
-	SAA7146_ISR_CLEAR(av7110->dev, MASK_19 | MASK_03);
-	SAA7146_IER_ENABLE(av7110->dev, MASK_03);
-
-	av7110->arm_ready = 1;
-	dprintk(1, "reset ARM\n");
-}
-#endif  /*  0  */
-
 static int waitdebi(struct av7110 *av7110, int adr, int state)
 {
 	int k;
@@ -312,7 +289,7 @@ int av7110_wait_msgstate(struct av7110 *av7110, u16 flags)
 			pr_err("%s(): timeout waiting for MSGSTATE %04x\n", __func__, stat & flags);
 			return -ETIMEDOUT;
 		}
-		msleep(1);
+		usleep_range(1000, 2000);
 	}
 	return 0;
 }
@@ -343,7 +320,7 @@ static int __av7110_send_fw_cmd(struct av7110 *av7110, u16 *buf, int length)
 			av7110->arm_errors++;
 			return -ETIMEDOUT;
 		}
-		msleep(1);
+		usleep_range(1000, 2000);
 	}
 
 	if (FW_VERSION(av7110->arm_app) <= 0x261f)
@@ -359,7 +336,7 @@ static int __av7110_send_fw_cmd(struct av7110 *av7110, u16 *buf, int length)
 			pr_err("%s(): timeout waiting for HANDSHAKE_REG\n", __func__);
 			return -ETIMEDOUT;
 		}
-		msleep(1);
+		usleep_range(1000, 2000);
 	}
 #endif
 
@@ -405,7 +382,7 @@ static int __av7110_send_fw_cmd(struct av7110 *av7110, u16 *buf, int length)
 				av7110->arm_errors++;
 				return -ETIMEDOUT;
 			}
-			msleep(1);
+			usleep_range(1000, 2000);
 		}
 	}
 
@@ -433,7 +410,7 @@ static int __av7110_send_fw_cmd(struct av7110 *av7110, u16 *buf, int length)
 			       __func__, (buf[0] >> 8) & 0xff);
 			return -ETIMEDOUT;
 		}
-		msleep(1);
+		usleep_range(1000, 2000);
 	}
 
 	stat = rdebi(av7110, DEBINOSWAP, MSGSTATE, 0, 2);
@@ -498,29 +475,6 @@ int av7110_fw_cmd(struct av7110 *av7110, int type, int com, int num, ...)
 	return ret;
 }
 
-#if 0
-int av7110_send_ci_cmd(struct av7110 *av7110, u8 subcom, u8 *buf, u8 len)
-{
-	int i, ret;
-	u16 cmd[18] = { ((COMTYPE_COMMON_IF << 8) + subcom),
-		16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-
-	dprintk(4, "%p\n", av7110);
-
-	for (i = 0; i < len && i < 32; i++) {
-		if (i % 2 == 0)
-			cmd[(i / 2) + 2] = (u16)(buf[i]) << 8;
-		else
-			cmd[(i / 2) + 2] |= buf[i];
-	}
-
-	ret = av7110_send_fw_cmd(av7110, cmd, 18);
-	if (ret && ret != -ERESTARTSYS)
-		pr_err("%s(): error %d\n", __func__, ret);
-	return ret;
-}
-#endif  /*  0  */
-
 int av7110_fw_request(struct av7110 *av7110, u16 *request_buf,
 		      int request_buf_len, u16 *reply_buf, int reply_buf_len)
 {
@@ -559,7 +513,7 @@ int av7110_fw_request(struct av7110 *av7110, u16 *request_buf,
 			return -ETIMEDOUT;
 		}
 #ifdef _NOHANDSHAKE
-		msleep(1);
+		usleep_range(1000, 2000);
 #endif
 	}
 
@@ -574,7 +528,7 @@ int av7110_fw_request(struct av7110 *av7110, u16 *request_buf,
 			mutex_unlock(&av7110->dcomlock);
 			return -ETIMEDOUT;
 		}
-		msleep(1);
+		usleep_range(1000, 2000);
 	}
 #endif
 
@@ -719,7 +673,7 @@ static int FlushText(struct av7110 *av7110)
 			mutex_unlock(&av7110->dcomlock);
 			return -ETIMEDOUT;
 		}
-		msleep(1);
+		usleep_range(1000, 2000);
 	}
 	mutex_unlock(&av7110->dcomlock);
 	return 0;
@@ -745,7 +699,7 @@ static int WriteText(struct av7110 *av7110, u8 win, u16 x, u16 y, char *buf)
 			mutex_unlock(&av7110->dcomlock);
 			return -ETIMEDOUT;
 		}
-		msleep(1);
+		usleep_range(1000, 2000);
 	}
 #ifndef _NOHANDSHAKE
 	start = jiffies;
@@ -758,7 +712,7 @@ static int WriteText(struct av7110 *av7110, u8 win, u16 x, u16 y, char *buf)
 			mutex_unlock(&av7110->dcomlock);
 			return -ETIMEDOUT;
 		}
-		msleep(1);
+		usleep_range(1000, 2000);
 	}
 #endif
 	for (i = 0; i < length / 2; i++)

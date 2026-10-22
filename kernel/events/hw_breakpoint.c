@@ -185,7 +185,8 @@ static inline int hw_breakpoint_slots_cached(int type)
 static __init bool
 bp_slots_histogram_alloc(struct bp_slots_histogram *hist, enum bp_type_idx type)
 {
-	hist->count = kcalloc(hw_breakpoint_slots_cached(type), sizeof(*hist->count), GFP_KERNEL);
+	hist->count = kzalloc_objs(*hist->count,
+				   hw_breakpoint_slots_cached(type));
 	return hist->count;
 }
 
@@ -950,9 +951,10 @@ static int hw_breakpoint_event_init(struct perf_event *bp)
 		return -ENOENT;
 
 	/*
-	 * no branch sampling for breakpoint events
+	 * Check if breakpoint type is supported before proceeding.
+	 * Also, no branch sampling for breakpoint events.
 	 */
-	if (has_branch_stack(bp))
+	if (!hw_breakpoint_slots_cached(find_slot_idx(bp->attr.bp_type)) || has_branch_stack(bp))
 		return -EOPNOTSUPP;
 
 	err = register_perf_hw_breakpoint(bp);

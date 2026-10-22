@@ -158,6 +158,9 @@ static void iforce_usb_irq(struct urb *urb)
 		goto exit;
 	}
 
+	if (!urb->actual_length)
+		goto exit;
+
 	iforce_process_packet(iforce, iforce_usb->data_in[0],
 			      iforce_usb->data_in + 1, urb->actual_length - 1);
 
@@ -207,7 +210,7 @@ static int iforce_usb_probe(struct usb_interface *intf,
 	if (!usb_endpoint_is_int_out(epout))
 		return -ENODEV;
 
-	iforce_usb = kzalloc(sizeof(*iforce_usb), GFP_KERNEL);
+	iforce_usb = kzalloc_obj(*iforce_usb);
 	if (!iforce_usb)
 		goto fail;
 

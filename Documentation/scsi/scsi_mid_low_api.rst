@@ -37,7 +37,7 @@ ISA adapters).]
 The SCSI mid level isolates an LLD from other layers such as the SCSI
 upper layer drivers and the block layer.
 
-This version of the document roughly matches linux kernel version 2.6.8 .
+This version of the document roughly matches Linux kernel version 2.6.8 .
 
 Documentation
 =============
@@ -48,7 +48,7 @@ found in that directory. A more recent copy of this document may be found
 at https://docs.kernel.org/scsi/scsi_mid_low_api.html. Many LLDs are
 documented in Documentation/scsi (e.g. aic7xxx.rst). The SCSI mid-level is
 briefly described in scsi.rst which contains a URL to a document describing
-the SCSI subsystem in the Linux Kernel 2.4 series. Two upper level
+the SCSI subsystem in the Linux kernel 2.4 series. Two upper level
 drivers have documents in that directory: st.rst (SCSI tape driver) and
 scsi-generic.rst (for the sg driver).
 
@@ -75,7 +75,7 @@ It is probably best to study how existing LLDs are organized.
 As the 2.5 series development kernels evolve into the 2.6 series
 production series, changes are being introduced into this interface. An
 example of this is driver initialization code where there are now 2 models
-available. The older one, similar to what was found in the lk 2.4 series,
+available. The older one, similar to what was found in the Linux 2.4 series,
 is based on hosts that are detected at HBA driver load time. This will be
 referred to the "passive" initialization model. The newer model allows HBAs
 to be hot plugged (and unplugged) during the lifetime of the LLD and will
@@ -380,7 +380,7 @@ Details::
 
     /**
     * scsi_bios_ptable - return copy of block device's partition table
-    * @dev:        pointer to block device
+    * @dev:        pointer to gendisk
     *
     *      Returns pointer to partition table, or NULL for failure
     *
@@ -390,7 +390,7 @@ Details::
     *
     *      Defined in: drivers/scsi/scsicam.c
     **/
-    unsigned char *scsi_bios_ptable(struct block_device *dev)
+    unsigned char *scsi_bios_ptable(struct gendisk *dev)
 
 
     /**
@@ -623,7 +623,7 @@ Details::
     *      bios_param - fetch head, sector, cylinder info for a disk
     *      @sdev: pointer to scsi device context (defined in
     *             include/scsi/scsi_device.h)
-    *      @bdev: pointer to block device context (defined in fs.h)
+    *      @disk: pointer to gendisk (defined in blkdev.h)
     *      @capacity:  device size (in 512 byte sectors)
     *      @params: three element array to place output:
     *              params[0] number of heads (max 255)
@@ -643,7 +643,7 @@ Details::
     *
     *      Optionally defined in: LLD
     **/
-	int bios_param(struct scsi_device * sdev, struct block_device *bdev,
+	int bios_param(struct scsi_device * sdev, struct gendisk *disk,
 		    sector_t capacity, int params[3])
 
 
@@ -903,7 +903,8 @@ Details::
     *
     *      Defined in: LLD
     **/
-	int queuecommand(struct Scsi_Host *shost, struct scsi_cmnd * scp)
+	enum scsi_qc_status queuecommand(struct Scsi_Host *shost,
+					 struct scsi_cmnd *scp)
 
 
     /**
@@ -1026,7 +1027,7 @@ initialized from the driver's struct scsi_host_template instance. Members
 of interest:
 
     host_no
-		 - system wide unique number that is used for identifying
+		 - system-wide unique number that is used for identifying
                    this host. Issued in ascending order from 0.
     can_queue
 		 - must be greater than 0; do not send more than can_queue
@@ -1053,7 +1054,7 @@ of interest:
 		 - pointer to driver's struct scsi_host_template from which
                    this struct Scsi_Host instance was spawned
     hostt->proc_name
-		 - name of LLD. This is the driver name that sysfs uses
+		 - name of LLD. This is the driver name that sysfs uses.
     transportt
 		 - pointer to driver's struct scsi_transport_template instance
                    (if any). FC and SPI transports currently supported.
@@ -1067,7 +1068,7 @@ The scsi_host structure is defined in include/scsi/scsi_host.h
 struct scsi_device
 ------------------
 Generally, there is one instance of this structure for each SCSI logical unit
-on a host. Scsi devices connected to a host are uniquely identified by a
+on a host. SCSI devices connected to a host are uniquely identified by a
 channel number, target id and logical unit number (lun).
 The structure is defined in include/scsi/scsi_device.h
 
@@ -1091,7 +1092,7 @@ Members of interest:
 		 - should be set by LLD prior to calling 'done'. A value
                    of 0 implies a successfully completed command (and all
                    data (if any) has been transferred to or from the SCSI
-                   target device). 'result' is a 32 bit unsigned integer that
+                   target device). 'result' is a 32-bit unsigned integer that
                    can be viewed as 2 related bytes. The SCSI status value is
                    in the LSB. See include/scsi/scsi.h status_byte() and
                    host_byte() macros and related constants.
@@ -1180,8 +1181,8 @@ may get out of synchronization. This is why it is best for the LLD
 to perform autosense.
 
 
-Changes since lk 2.4 series
-===========================
+Changes since Linux kernel 2.4 series
+=====================================
 io_request_lock has been replaced by several finer grained locks. The lock
 relevant to LLDs is struct Scsi_Host::host_lock and there is
 one per SCSI host.

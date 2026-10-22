@@ -267,7 +267,7 @@ static struct marvell_c22_pcs *marvell_c22_pcs_alloc(struct device *dev,
 {
 	struct marvell_c22_pcs *mpcs;
 
-	mpcs = kzalloc(sizeof(*mpcs), GFP_KERNEL);
+	mpcs = kzalloc_obj(*mpcs);
 	if (!mpcs)
 		return NULL;
 
@@ -275,7 +275,6 @@ static struct marvell_c22_pcs *marvell_c22_pcs_alloc(struct device *dev,
 	mpcs->mdio.bus = bus;
 	mpcs->mdio.addr = addr;
 	mpcs->phylink_pcs.ops = &marvell_c22_pcs_ops;
-	mpcs->phylink_pcs.neg_mode = true;
 
 	return mpcs;
 }
@@ -325,19 +324,17 @@ static int mv88e6352_pcs_init(struct mv88e6xxx_chip *chip, int port)
 	struct mii_bus *bus;
 	struct device *dev;
 	unsigned int irq;
-	int err;
+	int lane, err;
 
-	mv88e6xxx_reg_lock(chip);
-	err = mv88e6352_g2_scratch_port_has_serdes(chip, port);
-	mv88e6xxx_reg_unlock(chip);
-	if (err <= 0)
-		return err;
+	lane = mv88e6xxx_serdes_get_lane(chip, port);
+	if (lane < 0)
+		return 0;
 
 	irq = mv88e6xxx_serdes_irq_mapping(chip, port);
 	bus = mv88e6xxx_default_mdio_bus(chip);
 	dev = chip->dev;
 
-	mpcs = marvell_c22_pcs_alloc(dev, bus, MV88E6352_ADDR_SERDES);
+	mpcs = marvell_c22_pcs_alloc(dev, bus, lane);
 	if (!mpcs)
 		return -ENOMEM;
 

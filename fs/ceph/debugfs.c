@@ -9,11 +9,14 @@
 #include <linux/seq_file.h>
 #include <linux/math64.h>
 #include <linux/ktime.h>
+#include <linux/uaccess.h>
+#include <linux/atomic.h>
 
 #include <linux/ceph/libceph.h>
 #include <linux/ceph/mon_client.h>
 #include <linux/ceph/auth.h>
 #include <linux/ceph/debugfs.h>
+#include <linux/ceph/decode.h>
 
 #include "super.h"
 
@@ -21,6 +24,36 @@
 
 #include "mds_client.h"
 #include "metric.h"
+#include "subvolume_metrics.h"
+
+/**
+ * struct ceph_session_feature_desc - Maps feature bits to names for debugfs
+ * @bit: Feature bit number from enum ceph_feature_type (see mds_client.h)
+ * @name: Human-readable feature name for debugfs output
+ *
+ * Used by metric_features_show() to display negotiated session features.
+ */
+struct ceph_session_feature_desc {
+	unsigned int bit;
+	const char *name;
+};
+
+static const struct ceph_session_feature_desc ceph_session_feature_table[] = {
+	{ CEPHFS_FEATURE_METRIC_COLLECT, "METRIC_COLLECT" },
+	{ CEPHFS_FEATURE_REPLY_ENCODING, "REPLY_ENCODING" },
+	{ CEPHFS_FEATURE_RECLAIM_CLIENT, "RECLAIM_CLIENT" },
+	{ CEPHFS_FEATURE_LAZY_CAP_WANTED, "LAZY_CAP_WANTED" },
+	{ CEPHFS_FEATURE_MULTI_RECONNECT, "MULTI_RECONNECT" },
+	{ CEPHFS_FEATURE_DELEG_INO, "DELEG_INO" },
+	{ CEPHFS_FEATURE_ALTERNATE_NAME, "ALTERNATE_NAME" },
+	{ CEPHFS_FEATURE_NOTIFY_SESSION_STATE, "NOTIFY_SESSION_STATE" },
+	{ CEPHFS_FEATURE_OP_GETVXATTR, "OP_GETVXATTR" },
+	{ CEPHFS_FEATURE_32BITS_RETRY_FWD, "32BITS_RETRY_FWD" },
+	{ CEPHFS_FEATURE_NEW_SNAPREALM_INFO, "NEW_SNAPREALM_INFO" },
+	{ CEPHFS_FEATURE_HAS_OWNER_UIDGID, "HAS_OWNER_UIDGID" },
+	{ CEPHFS_FEATURE_MDS_AUTH_CAPS_CHECK, "MDS_AUTH_CAPS_CHECK" },
+	{ CEPHFS_FEATURE_SUBVOLUME_METRICS, "SUBVOLUME_METRICS" },
+};
 
 static int mdsmap_show(struct seq_file *s, void *p)
 {
@@ -55,8 +88,6 @@ static int mdsc_show(struct seq_file *s, void *p)
 	struct ceph_mds_client *mdsc = fsc->mdsc;
 	struct ceph_mds_request *req;
 	struct rb_node *rp;
-	int pathlen = 0;
-	u64 pathbase;
 	char *path;
 
 	mutex_lock(&mdsc->mutex);
@@ -81,8 +112,8 @@ static int mdsc_show(struct seq_file *s, void *p)
 		if (req->r_inode) {
 			seq_printf(s, " #%llx", ceph_ino(req->r_inode));
 		} else if (req->r_dentry) {
-			path = ceph_mdsc_build_path(mdsc, req->r_dentry, &pathlen,
-						    &pathbase, 0);
+			struct ceph_path_info path_info = {0};
+			path = ceph_mdsc_build_path(mdsc, req->r_dentry, &path_info, 0);
 			if (IS_ERR(path))
 				path = NULL;
 			spin_lock(&req->r_dentry->d_lock);
@@ -91,7 +122,7 @@ static int mdsc_show(struct seq_file *s, void *p)
 				   req->r_dentry,
 				   path ? path : "");
 			spin_unlock(&req->r_dentry->d_lock);
-			ceph_mdsc_free_path(path, pathlen);
+			ceph_mdsc_free_path_info(&path_info);
 		} else if (req->r_path1) {
 			seq_printf(s, " #%llx/%s", req->r_ino1.ino,
 				   req->r_path1);
@@ -100,8 +131,8 @@ static int mdsc_show(struct seq_file *s, void *p)
 		}
 
 		if (req->r_old_dentry) {
-			path = ceph_mdsc_build_path(mdsc, req->r_old_dentry, &pathlen,
-						    &pathbase, 0);
+			struct ceph_path_info path_info = {0};
+			path = ceph_mdsc_build_path(mdsc, req->r_old_dentry, &path_info, 0);
 			if (IS_ERR(path))
 				path = NULL;
 			spin_lock(&req->r_old_dentry->d_lock);
@@ -111,7 +142,7 @@ static int mdsc_show(struct seq_file *s, void *p)
 				   req->r_old_dentry,
 				   path ? path : "");
 			spin_unlock(&req->r_old_dentry->d_lock);
-			ceph_mdsc_free_path(path, pathlen);
+			ceph_mdsc_free_path_info(&path_info);
 		} else if (req->r_path2 && req->r_op != CEPH_MDS_OP_SYMLINK) {
 			if (req->r_ino2.ino)
 				seq_printf(s, " #%llx/%s", req->r_ino2.ino,
@@ -362,16 +393,226 @@ static int status_show(struct seq_file *s, void *p)
 	return 0;
 }
 
+static int reset_status_show(struct seq_file *s, void *p)
+{
+	struct ceph_fs_client *fsc = s->private;
+	struct ceph_mds_client *mdsc = fsc->mdsc;
+	struct ceph_client_reset_state *st;
+	u64 trigger = 0, success = 0, failure = 0;
+	unsigned long last_start = 0, last_finish = 0;
+	int last_errno = 0;
+	enum ceph_client_reset_phase phase = CEPH_CLIENT_RESET_IDLE;
+	bool drain_timed_out = false;
+	int sessions_reset = 0;
+	int blocked_requests = 0;
+	char reason[CEPH_CLIENT_RESET_REASON_LEN];
+
+	if (!mdsc)
+		return 0;
+
+	st = &mdsc->reset_state;
+
+	spin_lock(&st->lock);
+	trigger = st->trigger_count;
+	success = st->success_count;
+	failure = st->failure_count;
+	last_start = st->last_start;
+	last_finish = st->last_finish;
+	last_errno = st->last_errno;
+	phase = st->phase;
+	drain_timed_out = st->drain_timed_out;
+	sessions_reset = st->sessions_reset;
+	strscpy(reason, st->last_reason, sizeof(reason));
+	spin_unlock(&st->lock);
+
+	blocked_requests = atomic_read(&st->blocked_requests);
+
+	seq_printf(s, "phase: %s\n", ceph_reset_phase_name(phase));
+	seq_printf(s, "trigger_count: %llu\n", trigger);
+	seq_printf(s, "success_count: %llu\n", success);
+	seq_printf(s, "failure_count: %llu\n", failure);
+	if (last_start)
+		seq_printf(s, "last_start_ms_ago: %u\n",
+			   jiffies_to_msecs(jiffies - last_start));
+	else
+		seq_puts(s, "last_start_ms_ago: (never)\n");
+	if (last_finish)
+		seq_printf(s, "last_finish_ms_ago: %u\n",
+			   jiffies_to_msecs(jiffies - last_finish));
+	else
+		seq_puts(s, "last_finish_ms_ago: (never)\n");
+	seq_printf(s, "last_errno: %d\n", last_errno);
+	seq_printf(s, "last_reason: %s\n",
+		   reason[0] ? reason : "(none)");
+	seq_printf(s, "drain_timed_out: %s\n",
+		   drain_timed_out ? "yes" : "no");
+	seq_printf(s, "sessions_reset: %d\n", sessions_reset);
+	seq_printf(s, "blocked_requests: %d\n", blocked_requests);
+
+	return 0;
+}
+
+static ssize_t reset_trigger_write(struct file *file, const char __user *buf,
+				   size_t len, loff_t *ppos)
+{
+	struct ceph_fs_client *fsc = file->private_data;
+	struct ceph_mds_client *mdsc = fsc->mdsc;
+	char reason[CEPH_CLIENT_RESET_REASON_LEN];
+	size_t copy;
+	int ret;
+
+	if (!mdsc)
+		return -ENODEV;
+
+	copy = min_t(size_t, len, sizeof(reason) - 1);
+	if (copy && copy_from_user(reason, buf, copy))
+		return -EFAULT;
+	reason[copy] = '\0';
+	strim(reason);
+
+	ret = ceph_mdsc_schedule_reset(mdsc, reason);
+	if (ret)
+		return ret;
+
+	return len;
+}
+
+static int subvolume_metrics_show(struct seq_file *s, void *p)
+{
+	struct ceph_fs_client *fsc = s->private;
+	struct ceph_mds_client *mdsc = fsc->mdsc;
+	struct ceph_subvol_metric_snapshot *snapshot = NULL;
+	u32 nr = 0;
+	u64 total_sent = 0;
+	u64 nonzero_sends = 0;
+	u32 i;
+
+	if (!mdsc) {
+		seq_puts(s, "mds client unavailable\n");
+		return 0;
+	}
+
+	mutex_lock(&mdsc->subvol_metrics_last_mutex);
+	if (mdsc->subvol_metrics_last && mdsc->subvol_metrics_last_nr) {
+		nr = mdsc->subvol_metrics_last_nr;
+		snapshot = kmemdup_array(mdsc->subvol_metrics_last, nr,
+					 sizeof(*snapshot), GFP_KERNEL);
+		if (!snapshot)
+			nr = 0;
+	}
+	total_sent = mdsc->subvol_metrics_sent;
+	nonzero_sends = mdsc->subvol_metrics_nonzero_sends;
+	mutex_unlock(&mdsc->subvol_metrics_last_mutex);
+
+	seq_puts(s, "Last sent subvolume metrics:\n");
+	if (!nr) {
+		seq_puts(s, "  (none)\n");
+	} else {
+		seq_puts(s, "  subvol_id          rd_ops    wr_ops    rd_bytes       wr_bytes       rd_lat_us      wr_lat_us\n");
+		for (i = 0; i < nr; i++) {
+			const struct ceph_subvol_metric_snapshot *e = &snapshot[i];
+
+			seq_printf(s, "  %-18llu %-9llu %-9llu %-14llu %-14llu %-14llu %-14llu\n",
+				   e->subvolume_id,
+				   e->read_ops, e->write_ops,
+				   e->read_bytes, e->write_bytes,
+				   e->read_latency_us, e->write_latency_us);
+		}
+	}
+	kfree(snapshot);
+
+	seq_puts(s, "\nStatistics:\n");
+	seq_printf(s, "  entries_sent:      %llu\n", total_sent);
+	seq_printf(s, "  non_zero_sends:    %llu\n", nonzero_sends);
+
+	seq_puts(s, "\nPending (unsent) subvolume metrics:\n");
+	ceph_subvolume_metrics_dump(&mdsc->subvol_metrics, s);
+	return 0;
+}
+
 DEFINE_SHOW_ATTRIBUTE(mdsmap);
 DEFINE_SHOW_ATTRIBUTE(mdsc);
 DEFINE_SHOW_ATTRIBUTE(caps);
 DEFINE_SHOW_ATTRIBUTE(mds_sessions);
 DEFINE_SHOW_ATTRIBUTE(status);
+DEFINE_SHOW_ATTRIBUTE(reset_status);
 DEFINE_SHOW_ATTRIBUTE(metrics_file);
 DEFINE_SHOW_ATTRIBUTE(metrics_latency);
 DEFINE_SHOW_ATTRIBUTE(metrics_size);
 DEFINE_SHOW_ATTRIBUTE(metrics_caps);
+DEFINE_SHOW_ATTRIBUTE(subvolume_metrics);
 
+static int metric_features_show(struct seq_file *s, void *p)
+{
+	struct ceph_fs_client *fsc = s->private;
+	struct ceph_mds_client *mdsc = fsc->mdsc;
+	unsigned long session_features = 0;
+	bool have_session = false;
+	bool metric_collect = false;
+	bool subvol_support = false;
+	bool metrics_enabled = false;
+	bool subvol_enabled = false;
+	int i;
+
+	if (!mdsc) {
+		seq_puts(s, "mds client unavailable\n");
+		return 0;
+	}
+
+	mutex_lock(&mdsc->mutex);
+	if (mdsc->metric.session) {
+		have_session = true;
+		session_features = mdsc->metric.session->s_features;
+	}
+	mutex_unlock(&mdsc->mutex);
+
+	if (have_session) {
+		metric_collect =
+			test_bit(CEPHFS_FEATURE_METRIC_COLLECT,
+				 &session_features);
+		subvol_support =
+			test_bit(CEPHFS_FEATURE_SUBVOLUME_METRICS,
+				 &session_features);
+	}
+
+	metrics_enabled = !disable_send_metrics && have_session && metric_collect;
+	subvol_enabled = metrics_enabled && subvol_support;
+
+	seq_printf(s,
+		   "metrics_enabled: %s (disable_send_metrics=%d, session=%s, metric_collect=%s)\n",
+		   metrics_enabled ? "yes" : "no",
+		   disable_send_metrics ? 1 : 0,
+		   have_session ? "yes" : "no",
+		   metric_collect ? "yes" : "no");
+	seq_printf(s, "subvolume_metrics_enabled: %s\n",
+		   subvol_enabled ? "yes" : "no");
+	seq_printf(s, "session_feature_bits: 0x%lx\n", session_features);
+
+	if (!have_session) {
+		seq_puts(s, "(no active MDS session for metrics)\n");
+		return 0;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(ceph_session_feature_table); i++) {
+		const struct ceph_session_feature_desc *desc =
+			&ceph_session_feature_table[i];
+		bool set = test_bit(desc->bit, &session_features);
+
+		seq_printf(s, "  %-24s : %s\n", desc->name,
+			   set ? "yes" : "no");
+	}
+
+	return 0;
+}
+
+DEFINE_SHOW_ATTRIBUTE(metric_features);
+
+static const struct file_operations ceph_reset_trigger_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.write = reset_trigger_write,
+	.llseek = noop_llseek,
+};
 
 /*
  * debugfs
@@ -406,6 +647,8 @@ void ceph_fs_debugfs_cleanup(struct ceph_fs_client *fsc)
 	debugfs_remove(fsc->debugfs_caps);
 	debugfs_remove(fsc->debugfs_status);
 	debugfs_remove(fsc->debugfs_mdsc);
+	debugfs_remove_recursive(fsc->debugfs_reset_dir);
+	debugfs_remove(fsc->debugfs_subvolume_metrics);
 	debugfs_remove_recursive(fsc->debugfs_metrics_dir);
 	doutc(fsc->client, "done\n");
 }
@@ -453,6 +696,15 @@ void ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 						fsc,
 						&caps_fops);
 
+	fsc->debugfs_reset_dir = debugfs_create_dir("reset",
+						    fsc->client->debugfs_dir);
+	debugfs_create_file("trigger", 0200,
+			    fsc->debugfs_reset_dir, fsc,
+			    &ceph_reset_trigger_fops);
+	debugfs_create_file("status", 0400,
+			    fsc->debugfs_reset_dir, fsc,
+			    &reset_status_fops);
+
 	fsc->debugfs_status = debugfs_create_file("status",
 						  0400,
 						  fsc->client->debugfs_dir,
@@ -470,6 +722,12 @@ void ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 			    &metrics_size_fops);
 	debugfs_create_file("caps", 0400, fsc->debugfs_metrics_dir, fsc,
 			    &metrics_caps_fops);
+	debugfs_create_file("metric_features", 0400, fsc->debugfs_metrics_dir,
+			    fsc, &metric_features_fops);
+	fsc->debugfs_subvolume_metrics =
+		debugfs_create_file("subvolumes", 0400,
+				    fsc->debugfs_metrics_dir, fsc,
+				    &subvolume_metrics_fops);
 	doutc(fsc->client, "done\n");
 }
 

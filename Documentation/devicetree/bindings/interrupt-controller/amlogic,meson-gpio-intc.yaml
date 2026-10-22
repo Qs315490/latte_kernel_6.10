@@ -35,7 +35,15 @@ properties:
               - amlogic,meson-sm1-gpio-intc
               - amlogic,meson-a1-gpio-intc
               - amlogic,meson-s4-gpio-intc
+              - amlogic,a4-gpio-intc
+              - amlogic,a4-gpio-ao-intc
+              - amlogic,a5-gpio-intc
+              - amlogic,a9-gpio-intc
+              - amlogic,a9-gpio-ao-intc
               - amlogic,c3-gpio-intc
+              - amlogic,s6-gpio-intc
+              - amlogic,s7-gpio-intc
+              - amlogic,s7d-gpio-intc
               - amlogic,t7-gpio-intc
           - const: amlogic,meson-gpio-intc
 
@@ -49,8 +57,8 @@ properties:
 
   amlogic,channel-interrupts:
     description: Array with the upstream hwirq numbers
-    minItems: 8
-    maxItems: 12
+    minItems: 2
+    maxItems: 20
     $ref: /schemas/types.yaml#/definitions/uint32-array
 
 required:
@@ -59,6 +67,31 @@ required:
   - interrupt-controller
   - "#interrupt-cells"
   - amlogic,channel-interrupts
+
+if:
+  properties:
+    compatible:
+      contains:
+        const: amlogic,a4-gpio-ao-intc
+then:
+  properties:
+    amlogic,channel-interrupts:
+      maxItems: 2
+else:
+  if:
+    properties:
+      compatible:
+        contains:
+          const: amlogic,a9-gpio-ao-intc
+  then:
+    properties:
+      amlogic,channel-interrupts:
+        minItems: 20
+  else:
+    properties:
+      amlogic,channel-interrupts:
+        minItems: 8
+        maxItems: 12
 
 additionalProperties: false
 

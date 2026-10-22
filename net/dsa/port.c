@@ -116,19 +116,15 @@ static bool dsa_port_can_configure_learning(struct dsa_port *dp)
 
 bool dsa_port_supports_hwtstamp(struct dsa_port *dp)
 {
+	struct kernel_hwtstamp_config config = {};
 	struct dsa_switch *ds = dp->ds;
-	struct ifreq ifr = {};
 	int err;
 
 	if (!ds->ops->port_hwtstamp_get || !ds->ops->port_hwtstamp_set)
 		return false;
 
-	/* "See through" shim implementations of the "get" method.
-	 * Since we can't cook up a complete ioctl request structure, this will
-	 * fail in copy_to_user() with -EFAULT, which hopefully is enough to
-	 * detect a valid implementation.
-	 */
-	err = ds->ops->port_hwtstamp_get(ds, dp->index, &ifr);
+	/* "See through" shim implementations of the "get" method. */
+	err = ds->ops->port_hwtstamp_get(ds, dp->index, &config);
 	return err != -EOPNOTSUPP;
 }
 
@@ -435,7 +431,7 @@ static int dsa_port_bridge_create(struct dsa_port *dp,
 		return 0;
 	}
 
-	bridge = kzalloc(sizeof(*bridge), GFP_KERNEL);
+	bridge = kzalloc_obj(*bridge);
 	if (!bridge)
 		return -ENOMEM;
 
@@ -621,7 +617,7 @@ static int dsa_port_lag_create(struct dsa_port *dp,
 		return 0;
 	}
 
-	lag = kzalloc(sizeof(*lag), GFP_KERNEL);
+	lag = kzalloc_obj(*lag);
 	if (!lag)
 		return -ENOMEM;
 
@@ -1912,6 +1908,9 @@ void dsa_port_hsr_leave(struct dsa_port *dp, struct net_device *hsr)
 {
 	struct dsa_switch *ds = dp->ds;
 	int err;
+
+	if (!dp->hsr_dev)
+		return;
 
 	dp->hsr_dev = NULL;
 

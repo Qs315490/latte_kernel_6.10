@@ -43,6 +43,15 @@ riscv64)
 	BZIMAGE="arch/riscv/boot/Image"
 	ARCH="riscv"
 	;;
+ppc64el)
+	QEMU_BINARY=qemu-system-ppc64
+	QEMU_CONSOLE="hvc0"
+	# KVM could not be tested for powerpc, therefore not enabled for now.
+	HOST_FLAGS=(-machine pseries -cpu POWER9)
+	CROSS_FLAGS=(-machine pseries -cpu POWER9)
+	BZIMAGE="vmlinux"
+	ARCH="powerpc"
+	;;
 *)
 	echo "Unsupported architecture"
 	exit 1
@@ -373,7 +382,7 @@ main()
 	local exit_command="poweroff -f"
 	local debug_shell="no"
 
-	while getopts ':hskl:id:j:' opt; do
+	while getopts ':hsl:id:j:' opt; do
 		case ${opt} in
 		l)
 			LOCAL_ROOTFS_IMAGE="$OPTARG"

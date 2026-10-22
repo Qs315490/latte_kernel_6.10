@@ -18,7 +18,6 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
@@ -28,7 +27,6 @@
 #include <linux/kfifo.h>
 #include <linux/ioctl.h>
 #include <linux/firmware.h>
-#include <linux/uaccess.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 
@@ -528,7 +526,7 @@ static int tx_active(struct edgeport_port *port)
 	u8 *lsr;
 	int bytes_left = 0;
 
-	oedb = kmalloc(sizeof(*oedb), GFP_KERNEL);
+	oedb = kmalloc_obj(*oedb);
 	if (!oedb)
 		return -ENOMEM;
 
@@ -680,7 +678,7 @@ static int check_i2c_image(struct edgeport_serial *serial)
 	u8 *buffer;
 	u16 ttype;
 
-	rom_desc = kmalloc(sizeof(*rom_desc), GFP_KERNEL);
+	rom_desc = kmalloc_obj(*rom_desc);
 	if (!rom_desc)
 		return -ENOMEM;
 
@@ -759,7 +757,7 @@ static int get_manuf_info(struct edgeport_serial *serial, u8 *buffer)
 	struct edge_ti_manuf_descriptor *desc;
 	struct device *dev = &serial->serial->dev->dev;
 
-	rom_desc = kmalloc(sizeof(*rom_desc), GFP_KERNEL);
+	rom_desc = kmalloc_obj(*rom_desc);
 	if (!rom_desc)
 		return -ENOMEM;
 
@@ -773,6 +771,12 @@ static int get_manuf_info(struct edgeport_serial *serial, u8 *buffer)
 	}
 
 	/* Read the descriptor data */
+	if (le16_to_cpu(rom_desc->Size) != sizeof(struct edge_ti_manuf_descriptor)) {
+		dev_err(dev, "unexpected Edge descriptor length: %u\n",
+			le16_to_cpu(rom_desc->Size));
+		status = -EINVAL;
+		goto exit;
+	}
 	status = read_rom(serial, start_address+sizeof(struct ti_i2c_desc),
 					le16_to_cpu(rom_desc->Size), buffer);
 	if (status)
@@ -838,6 +842,11 @@ static int build_i2c_fw_hdr(u8 *header, const struct firmware *fw)
 	/* Pointer to fw_down memory image */
 	img_header = (struct ti_i2c_image_header *)&fw->data[4];
 
+	if (le16_to_cpu(img_header->Length) >
+			buffer_size - sizeof(struct ti_i2c_firmware_rec)) {
+		kfree(buffer);
+		return -EINVAL;
+	}
 	memcpy(buffer + sizeof(struct ti_i2c_firmware_rec),
 		&fw->data[4 + sizeof(struct ti_i2c_image_header)],
 		le16_to_cpu(img_header->Length));
@@ -1089,7 +1098,7 @@ static int do_download_mode(struct edgeport_serial *serial,
 	 * Validate Hardware version number
 	 * Read Manufacturing Descriptor from TI Based Edgeport
 	 */
-	ti_manuf_desc = kmalloc(sizeof(*ti_manuf_desc), GFP_KERNEL);
+	ti_manuf_desc = kmalloc_obj(*ti_manuf_desc);
 	if (!ti_manuf_desc)
 		return -ENOMEM;
 
@@ -1107,7 +1116,7 @@ static int do_download_mode(struct edgeport_serial *serial,
 		return -EINVAL;
 	}
 
-	rom_desc = kmalloc(sizeof(*rom_desc), GFP_KERNEL);
+	rom_desc = kmalloc_obj(*rom_desc);
 	if (!rom_desc) {
 		kfree(ti_manuf_desc);
 		return -ENOMEM;
@@ -1123,8 +1132,7 @@ static int do_download_mode(struct edgeport_serial *serial,
 		dev_dbg(dev, "%s - Found Type FIRMWARE (Type 2) record\n",
 				__func__);
 
-		firmware_version = kmalloc(sizeof(*firmware_version),
-							GFP_KERNEL);
+		firmware_version = kmalloc_obj(*firmware_version);
 		if (!firmware_version) {
 			kfree(rom_desc);
 			kfree(ti_manuf_desc);
@@ -1419,7 +1427,7 @@ static int do_boot_mode(struct edgeport_serial *serial,
 		 * Validate Hardware version number
 		 * Read Manufacturing Descriptor from TI Based Edgeport
 		 */
-		ti_manuf_desc = kmalloc(sizeof(*ti_manuf_desc), GFP_KERNEL);
+		ti_manuf_desc = kmalloc_obj(*ti_manuf_desc);
 		if (!ti_manuf_desc)
 			return -ENOMEM;
 
@@ -1456,6 +1464,12 @@ static int do_boot_mode(struct edgeport_serial *serial,
 		/* Allocate a 15.5k buffer + 3 byte header */
 		buffer_size = (((1024 * 16) - 512) +
 					sizeof(struct ti_i2c_image_header));
+		if (fw->size - 4 > buffer_size) {
+			dev_err(dev, "%s - firmware image is too large\n",
+				__func__);
+			return -EINVAL;
+		}
+
 		buffer = kmalloc(buffer_size, GFP_KERNEL);
 		if (!buffer)
 			return -ENOMEM;
@@ -2219,7 +2233,7 @@ static void change_port_settings(struct tty_struct *tty,
 	unsigned cflag;
 	int status;
 
-	config = kmalloc (sizeof (*config), GFP_KERNEL);
+	config = kmalloc_obj(*config);
 	if (!config) {
 		tty->termios = *old_termios;
 		return;
@@ -2458,7 +2472,7 @@ static void edge_heartbeat_work(struct work_struct *work)
 	serial = container_of(work, struct edgeport_serial,
 			heartbeat_work.work);
 
-	rom_desc = kmalloc(sizeof(*rom_desc), GFP_KERNEL);
+	rom_desc = kmalloc_obj(*rom_desc);
 
 	/* Descriptor address request is enough to reset the firmware timer */
 	if (!rom_desc || !get_descriptor_addr(serial, I2C_DESC_TYPE_ION,
@@ -2497,7 +2511,7 @@ static int edge_startup(struct usb_serial *serial)
 	u16 product_id;
 
 	/* create our private serial structure */
-	edge_serial = kzalloc(sizeof(struct edgeport_serial), GFP_KERNEL);
+	edge_serial = kzalloc_obj(struct edgeport_serial);
 	if (!edge_serial)
 		return -ENOMEM;
 
@@ -2551,7 +2565,7 @@ static int edge_port_probe(struct usb_serial_port *port)
 	struct edgeport_port *edge_port;
 	int ret;
 
-	edge_port = kzalloc(sizeof(*edge_port), GFP_KERNEL);
+	edge_port = kzalloc_obj(*edge_port);
 	if (!edge_port)
 		return -ENOMEM;
 

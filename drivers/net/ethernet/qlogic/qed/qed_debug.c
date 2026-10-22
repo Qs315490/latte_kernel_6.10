@@ -4462,10 +4462,11 @@ static enum dbg_status qed_protection_override_dump(struct qed_hwfn *p_hwfn,
 		goto out;
 	}
 
-	/* Add override window info to buffer */
+	/* Add override window info to buffer, preventing buffer overflow */
 	override_window_dwords =
-		qed_rd(p_hwfn, p_ptt, GRC_REG_NUMBER_VALID_OVERRIDE_WINDOW) *
-		PROTECTION_OVERRIDE_ELEMENT_DWORDS;
+		min(qed_rd(p_hwfn, p_ptt, GRC_REG_NUMBER_VALID_OVERRIDE_WINDOW) *
+		PROTECTION_OVERRIDE_ELEMENT_DWORDS,
+		PROTECTION_OVERRIDE_DEPTH_DWORDS);
 	if (override_window_dwords) {
 		addr = BYTES_TO_DWORDS(GRC_REG_PROTECTION_OVERRIDE_WINDOW);
 		offset += qed_grc_dump_addr_range(p_hwfn,
@@ -6820,9 +6821,7 @@ qed_mcp_trace_alloc_meta_data(struct qed_hwfn *p_hwfn,
 
 	/* Read number of formats and allocate memory for all formats */
 	meta->formats_num = qed_read_dword_from_buf(meta_buf_bytes, &offset);
-	meta->formats = kcalloc(meta->formats_num,
-				sizeof(struct mcp_trace_format),
-				GFP_KERNEL);
+	meta->formats = kzalloc_objs(struct mcp_trace_format, meta->formats_num);
 	if (!meta->formats)
 		return DBG_STATUS_VIRT_MEM_ALLOC_FAILED;
 
@@ -7535,8 +7534,7 @@ enum dbg_status qed_dbg_user_set_bin_ptr(struct qed_hwfn *p_hwfn,
 enum dbg_status qed_dbg_alloc_user_data(struct qed_hwfn *p_hwfn,
 					void **user_data_ptr)
 {
-	*user_data_ptr = kzalloc(sizeof(struct dbg_tools_user_data),
-				 GFP_KERNEL);
+	*user_data_ptr = kzalloc_obj(struct dbg_tools_user_data);
 	if (!(*user_data_ptr))
 		return DBG_STATUS_VIRT_MEM_ALLOC_FAILED;
 
@@ -7612,31 +7610,6 @@ enum dbg_status qed_print_mcp_trace_results(struct qed_hwfn *p_hwfn,
 	return qed_parse_mcp_trace_dump(p_hwfn,
 					dump_buf,
 					results_buf, &parsed_buf_size, true);
-}
-
-enum dbg_status qed_print_mcp_trace_results_cont(struct qed_hwfn *p_hwfn,
-						 u32 *dump_buf,
-						 char *results_buf)
-{
-	u32 parsed_buf_size;
-
-	return qed_parse_mcp_trace_dump(p_hwfn, dump_buf, results_buf,
-					&parsed_buf_size, false);
-}
-
-enum dbg_status qed_print_mcp_trace_line(struct qed_hwfn *p_hwfn,
-					 u8 *dump_buf,
-					 u32 num_dumped_bytes,
-					 char *results_buf)
-{
-	u32 parsed_results_bytes;
-
-	return qed_parse_mcp_trace_buf(p_hwfn,
-				       dump_buf,
-				       num_dumped_bytes,
-				       0,
-				       num_dumped_bytes,
-				       results_buf, &parsed_results_bytes);
 }
 
 /* Frees the specified MCP Trace meta data */

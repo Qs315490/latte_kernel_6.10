@@ -252,7 +252,7 @@ static int merge_cluster_tables(void)
 	for (i = 0; i < MAX_CLUSTERS; i++)
 		count += get_table_count(freq_table[i]);
 
-	table = kcalloc(count, sizeof(*table), GFP_KERNEL);
+	table = kzalloc_objs(*table, count);
 	if (!table)
 		return -ENOMEM;
 
@@ -471,7 +471,6 @@ static struct cpufreq_driver ve_spc_cpufreq_driver = {
 	.init			= ve_spc_cpufreq_init,
 	.exit			= ve_spc_cpufreq_exit,
 	.register_em		= cpufreq_register_em_with_opp,
-	.attr			= cpufreq_generic_attr,
 };
 
 #ifdef CONFIG_BL_SWITCHER

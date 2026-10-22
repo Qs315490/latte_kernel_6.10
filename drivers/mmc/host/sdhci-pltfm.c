@@ -95,13 +95,6 @@ void sdhci_get_property(struct platform_device *pdev)
 	sdhci_get_compatibility(pdev);
 
 	device_property_read_u32(dev, "clock-frequency", &pltfm_host->clock);
-
-	if (device_property_present(dev, "keep-power-in-suspend"))
-		host->mmc->pm_caps |= MMC_PM_KEEP_POWER;
-
-	if (device_property_read_bool(dev, "wakeup-source") ||
-	    device_property_read_bool(dev, "enable-sdio-wakeup")) /* legacy */
-		host->mmc->pm_caps |= MMC_PM_WAKE_SDIO_IRQ;
 }
 EXPORT_SYMBOL_GPL(sdhci_get_property);
 
@@ -146,20 +139,11 @@ struct sdhci_host *sdhci_pltfm_init(struct platform_device *pdev,
 }
 EXPORT_SYMBOL_GPL(sdhci_pltfm_init);
 
-void sdhci_pltfm_free(struct platform_device *pdev)
-{
-	struct sdhci_host *host = platform_get_drvdata(pdev);
-
-	sdhci_free_host(host);
-}
-EXPORT_SYMBOL_GPL(sdhci_pltfm_free);
-
 int sdhci_pltfm_init_and_add_host(struct platform_device *pdev,
 				  const struct sdhci_pltfm_data *pdata,
 				  size_t priv_size)
 {
 	struct sdhci_host *host;
-	int ret = 0;
 
 	host = sdhci_pltfm_init(pdev, pdata, priv_size);
 	if (IS_ERR(host))
@@ -167,11 +151,7 @@ int sdhci_pltfm_init_and_add_host(struct platform_device *pdev,
 
 	sdhci_get_property(pdev);
 
-	ret = sdhci_add_host(host);
-	if (ret)
-		sdhci_pltfm_free(pdev);
-
-	return ret;
+	return sdhci_add_host(host);
 }
 EXPORT_SYMBOL_GPL(sdhci_pltfm_init_and_add_host);
 
@@ -181,7 +161,6 @@ void sdhci_pltfm_remove(struct platform_device *pdev)
 	int dead = (readl(host->ioaddr + SDHCI_INT_STATUS) == 0xffffffff);
 
 	sdhci_remove_host(host, dead);
-	sdhci_pltfm_free(pdev);
 }
 EXPORT_SYMBOL_GPL(sdhci_pltfm_remove);
 
@@ -228,19 +207,6 @@ const struct dev_pm_ops sdhci_pltfm_pmops = {
 	SET_SYSTEM_SLEEP_PM_OPS(sdhci_pltfm_suspend, sdhci_pltfm_resume)
 };
 EXPORT_SYMBOL_GPL(sdhci_pltfm_pmops);
-
-static int __init sdhci_pltfm_drv_init(void)
-{
-	pr_info("sdhci-pltfm: SDHCI platform and OF driver helper\n");
-
-	return 0;
-}
-module_init(sdhci_pltfm_drv_init);
-
-static void __exit sdhci_pltfm_drv_exit(void)
-{
-}
-module_exit(sdhci_pltfm_drv_exit);
 
 MODULE_DESCRIPTION("SDHCI platform and OF driver helper");
 MODULE_AUTHOR("Intel Corporation");

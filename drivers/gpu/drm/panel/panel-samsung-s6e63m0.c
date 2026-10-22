@@ -13,6 +13,7 @@
 
 #include <linux/backlight.h>
 #include <linux/delay.h>
+#include <linux/export.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/property.h>
@@ -676,9 +677,13 @@ int s6e63m0_probe(struct device *dev, void *trsp,
 	u32 max_brightness;
 	int ret;
 
-	ctx = devm_kzalloc(dev, sizeof(struct s6e63m0), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	ctx = devm_drm_panel_alloc(dev, __typeof(*ctx), panel,
+				  &s6e63m0_drm_funcs,
+				  dsi_mode ? DRM_MODE_CONNECTOR_DSI :
+				  DRM_MODE_CONNECTOR_DPI);
+
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	ctx->transport_data = trsp;
 	ctx->dsi_mode = dsi_mode;
@@ -710,10 +715,6 @@ int s6e63m0_probe(struct device *dev, void *trsp,
 		dev_err(dev, "cannot get reset-gpios %ld\n", PTR_ERR(ctx->reset_gpio));
 		return PTR_ERR(ctx->reset_gpio);
 	}
-
-	drm_panel_init(&ctx->panel, dev, &s6e63m0_drm_funcs,
-		       dsi_mode ? DRM_MODE_CONNECTOR_DSI :
-		       DRM_MODE_CONNECTOR_DPI);
 
 	ret = s6e63m0_backlight_register(ctx, max_brightness);
 	if (ret < 0)

@@ -315,6 +315,18 @@ static int me4000_xilinx_download(struct comedi_device *dev,
 	unsigned int val;
 	unsigned int i;
 
+	/* Get data stream length from header. */
+	if (size >= 4) {
+		file_length = (((unsigned int)data[0] & 0xff) << 24) +
+			      (((unsigned int)data[1] & 0xff) << 16) +
+			      (((unsigned int)data[2] & 0xff) << 8) +
+			      ((unsigned int)data[3] & 0xff);
+	}
+	if (size < 16 || file_length > size - 16) {
+		dev_err(dev->class_dev, "Firmware length inconsistency\n");
+		return -EINVAL;
+	}
+
 	if (!xilinx_iobase)
 		return -ENODEV;
 
@@ -346,10 +358,6 @@ static int me4000_xilinx_download(struct comedi_device *dev,
 	outl(val, devpriv->plx_regbase + PLX9052_CNTRL);
 
 	/* Download Xilinx firmware */
-	file_length = (((unsigned int)data[0] & 0xff) << 24) +
-		      (((unsigned int)data[1] & 0xff) << 16) +
-		      (((unsigned int)data[2] & 0xff) << 8) +
-		      ((unsigned int)data[3] & 0xff);
 	usleep_range(10, 1000);
 
 	for (i = 0; i < file_length; i++) {
@@ -1246,20 +1254,20 @@ static int me4000_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id me4000_pci_table[] = {
-	{ PCI_VDEVICE(MEILHAUS, 0x4650), BOARD_ME4650 },
-	{ PCI_VDEVICE(MEILHAUS, 0x4660), BOARD_ME4660 },
-	{ PCI_VDEVICE(MEILHAUS, 0x4661), BOARD_ME4660I },
-	{ PCI_VDEVICE(MEILHAUS, 0x4662), BOARD_ME4660S },
-	{ PCI_VDEVICE(MEILHAUS, 0x4663), BOARD_ME4660IS },
-	{ PCI_VDEVICE(MEILHAUS, 0x4670), BOARD_ME4670 },
-	{ PCI_VDEVICE(MEILHAUS, 0x4671), BOARD_ME4670I },
-	{ PCI_VDEVICE(MEILHAUS, 0x4672), BOARD_ME4670S },
-	{ PCI_VDEVICE(MEILHAUS, 0x4673), BOARD_ME4670IS },
-	{ PCI_VDEVICE(MEILHAUS, 0x4680), BOARD_ME4680 },
-	{ PCI_VDEVICE(MEILHAUS, 0x4681), BOARD_ME4680I },
-	{ PCI_VDEVICE(MEILHAUS, 0x4682), BOARD_ME4680S },
-	{ PCI_VDEVICE(MEILHAUS, 0x4683), BOARD_ME4680IS },
-	{ 0 }
+	{ PCI_VDEVICE(MEILHAUS, 0x4650), .driver_data = BOARD_ME4650 },
+	{ PCI_VDEVICE(MEILHAUS, 0x4660), .driver_data = BOARD_ME4660 },
+	{ PCI_VDEVICE(MEILHAUS, 0x4661), .driver_data = BOARD_ME4660I },
+	{ PCI_VDEVICE(MEILHAUS, 0x4662), .driver_data = BOARD_ME4660S },
+	{ PCI_VDEVICE(MEILHAUS, 0x4663), .driver_data = BOARD_ME4660IS },
+	{ PCI_VDEVICE(MEILHAUS, 0x4670), .driver_data = BOARD_ME4670 },
+	{ PCI_VDEVICE(MEILHAUS, 0x4671), .driver_data = BOARD_ME4670I },
+	{ PCI_VDEVICE(MEILHAUS, 0x4672), .driver_data = BOARD_ME4670S },
+	{ PCI_VDEVICE(MEILHAUS, 0x4673), .driver_data = BOARD_ME4670IS },
+	{ PCI_VDEVICE(MEILHAUS, 0x4680), .driver_data = BOARD_ME4680 },
+	{ PCI_VDEVICE(MEILHAUS, 0x4681), .driver_data = BOARD_ME4680I },
+	{ PCI_VDEVICE(MEILHAUS, 0x4682), .driver_data = BOARD_ME4680S },
+	{ PCI_VDEVICE(MEILHAUS, 0x4683), .driver_data = BOARD_ME4680IS },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, me4000_pci_table);
 

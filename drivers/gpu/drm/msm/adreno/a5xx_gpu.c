@@ -131,6 +131,8 @@ static void a5xx_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit)
 	struct msm_ringbuffer *ring = submit->ring;
 	unsigned int i, ibs = 0;
 
+	adreno_check_and_reenable_stall(adreno_gpu);
+
 	if (IS_ENABLED(CONFIG_DRM_MSM_GPU_SUDO) && submit->in_rb) {
 		ring->cur_ctx_seqno = 0;
 		a5xx_submit_in_rb(gpu, submit);
@@ -620,7 +622,7 @@ static int a5xx_ucode_load(struct msm_gpu *gpu)
 			a5xx_gpu->shadow = msm_gem_kernel_new(gpu->dev,
 				sizeof(u32) * gpu->nr_rings,
 				MSM_BO_WC | MSM_BO_MAP_PRIV,
-				gpu->aspace, &a5xx_gpu->shadow_bo,
+				gpu->vm, &a5xx_gpu->shadow_bo,
 				&a5xx_gpu->shadow_iova);
 
 			if (IS_ERR(a5xx_gpu->shadow))
@@ -750,17 +752,13 @@ static int a5xx_hw_init(struct msm_gpu *gpu)
 	gpu_write(gpu, REG_A5XX_UCHE_CACHE_WAYS, 0x02);
 
 	/* Disable L2 bypass in the UCHE */
-	gpu_write(gpu, REG_A5XX_UCHE_TRAP_BASE_LO, lower_32_bits(adreno_gpu->uche_trap_base));
-	gpu_write(gpu, REG_A5XX_UCHE_TRAP_BASE_HI, upper_32_bits(adreno_gpu->uche_trap_base));
-	gpu_write(gpu, REG_A5XX_UCHE_WRITE_THRU_BASE_LO, lower_32_bits(adreno_gpu->uche_trap_base));
-	gpu_write(gpu, REG_A5XX_UCHE_WRITE_THRU_BASE_HI, upper_32_bits(adreno_gpu->uche_trap_base));
+	gpu_write64(gpu, REG_A5XX_UCHE_TRAP_BASE, adreno_gpu->uche_trap_base);
+	gpu_write64(gpu, REG_A5XX_UCHE_WRITE_THRU_BASE, adreno_gpu->uche_trap_base);
 
 	/* Set the GMEM VA range (0 to gpu->gmem) */
-	gpu_write(gpu, REG_A5XX_UCHE_GMEM_RANGE_MIN_LO, 0x00100000);
-	gpu_write(gpu, REG_A5XX_UCHE_GMEM_RANGE_MIN_HI, 0x00000000);
-	gpu_write(gpu, REG_A5XX_UCHE_GMEM_RANGE_MAX_LO,
+	gpu_write64(gpu, REG_A5XX_UCHE_GMEM_RANGE_MIN, 0x00100000);
+	gpu_write64(gpu, REG_A5XX_UCHE_GMEM_RANGE_MAX,
 		0x00100000 + adreno_gpu->info->gmem - 1);
-	gpu_write(gpu, REG_A5XX_UCHE_GMEM_RANGE_MAX_HI, 0x00000000);
 
 	if (adreno_is_a505(adreno_gpu) || adreno_is_a506(adreno_gpu) ||
 	    adreno_is_a508(adreno_gpu) || adreno_is_a510(adreno_gpu)) {
@@ -833,8 +831,8 @@ static int a5xx_hw_init(struct msm_gpu *gpu)
 
 	gpu_write(gpu, REG_A5XX_RBBM_AHB_CNTL2, 0x0000003F);
 
-	BUG_ON(adreno_gpu->ubwc_config.highest_bank_bit < 13);
-	hbb = adreno_gpu->ubwc_config.highest_bank_bit - 13;
+	BUG_ON(adreno_gpu->ubwc_config->highest_bank_bit < 13);
+	hbb = adreno_gpu->ubwc_config->highest_bank_bit - 13;
 
 	gpu_write(gpu, REG_A5XX_TPL1_MODE_CNTL, hbb << 7);
 	gpu_write(gpu, REG_A5XX_RB_MODE_CNTL, hbb << 1);
@@ -1040,22 +1038,22 @@ static void a5xx_destroy(struct msm_gpu *gpu)
 	a5xx_preempt_fini(gpu);
 
 	if (a5xx_gpu->pm4_bo) {
-		msm_gem_unpin_iova(a5xx_gpu->pm4_bo, gpu->aspace);
+		msm_gem_unpin_iova(a5xx_gpu->pm4_bo, gpu->vm);
 		drm_gem_object_put(a5xx_gpu->pm4_bo);
 	}
 
 	if (a5xx_gpu->pfp_bo) {
-		msm_gem_unpin_iova(a5xx_gpu->pfp_bo, gpu->aspace);
+		msm_gem_unpin_iova(a5xx_gpu->pfp_bo, gpu->vm);
 		drm_gem_object_put(a5xx_gpu->pfp_bo);
 	}
 
 	if (a5xx_gpu->gpmu_bo) {
-		msm_gem_unpin_iova(a5xx_gpu->gpmu_bo, gpu->aspace);
+		msm_gem_unpin_iova(a5xx_gpu->gpmu_bo, gpu->vm);
 		drm_gem_object_put(a5xx_gpu->gpmu_bo);
 	}
 
 	if (a5xx_gpu->shadow_bo) {
-		msm_gem_unpin_iova(a5xx_gpu->shadow_bo, gpu->aspace);
+		msm_gem_unpin_iova(a5xx_gpu->shadow_bo, gpu->vm);
 		drm_gem_object_put(a5xx_gpu->shadow_bo);
 	}
 
@@ -1215,9 +1213,7 @@ static void a5xx_rbbm_err_irq(struct msm_gpu *gpu, u32 status)
 
 static void a5xx_uche_err_irq(struct msm_gpu *gpu)
 {
-	uint64_t addr = (uint64_t) gpu_read(gpu, REG_A5XX_UCHE_TRAP_LOG_HI);
-
-	addr |= gpu_read(gpu, REG_A5XX_UCHE_TRAP_LOG_LO);
+	uint64_t addr = gpu_read64(gpu, REG_A5XX_UCHE_TRAP_LOG);
 
 	dev_err_ratelimited(gpu->dev->dev, "UCHE | Out of bounds access | addr=0x%llX\n",
 		addr);
@@ -1253,7 +1249,7 @@ static void a5xx_fault_detect_irq(struct msm_gpu *gpu)
 		gpu_read(gpu, REG_A5XX_CP_IB2_BUFSZ));
 
 	/* Turn off the hangcheck timer to keep it from bothering us */
-	del_timer(&gpu->hangcheck_timer);
+	timer_delete(&gpu->hangcheck_timer);
 
 	kthread_queue_work(gpu->worker, &gpu->recover_work);
 }
@@ -1433,11 +1429,9 @@ static int a5xx_pm_suspend(struct msm_gpu *gpu)
 	return 0;
 }
 
-static int a5xx_get_timestamp(struct msm_gpu *gpu, uint64_t *value)
+static u64 a5xx_get_timestamp(struct msm_gpu *gpu)
 {
-	*value = gpu_read64(gpu, REG_A5XX_RBBM_ALWAYSON_COUNTER_LO);
-
-	return 0;
+	return gpu_read64(gpu, REG_A5XX_RBBM_ALWAYSON_COUNTER_LO);
 }
 
 struct a5xx_crashdumper {
@@ -1455,7 +1449,7 @@ static int a5xx_crashdumper_init(struct msm_gpu *gpu,
 		struct a5xx_crashdumper *dumper)
 {
 	dumper->ptr = msm_gem_kernel_new(gpu->dev,
-		SZ_1M, MSM_BO_WC, gpu->aspace,
+		SZ_1M, MSM_BO_WC, gpu->vm,
 		&dumper->bo, &dumper->iova);
 
 	if (!IS_ERR(dumper->ptr))
@@ -1555,7 +1549,7 @@ static void a5xx_gpu_state_get_hlsq_regs(struct msm_gpu *gpu,
 
 	if (a5xx_crashdumper_run(gpu, &dumper)) {
 		kfree(a5xx_state->hlsqregs);
-		msm_gem_kernel_put(dumper.bo, gpu->aspace);
+		msm_gem_kernel_put(dumper.bo, gpu->vm);
 		return;
 	}
 
@@ -1563,13 +1557,12 @@ static void a5xx_gpu_state_get_hlsq_regs(struct msm_gpu *gpu,
 	memcpy(a5xx_state->hlsqregs, dumper.ptr + (256 * SZ_1K),
 		count * sizeof(u32));
 
-	msm_gem_kernel_put(dumper.bo, gpu->aspace);
+	msm_gem_kernel_put(dumper.bo, gpu->vm);
 }
 
 static struct msm_gpu_state *a5xx_gpu_state_get(struct msm_gpu *gpu)
 {
-	struct a5xx_gpu_state *a5xx_state = kzalloc(sizeof(*a5xx_state),
-			GFP_KERNEL);
+	struct a5xx_gpu_state *a5xx_state = kzalloc_obj(*a5xx_state);
 	bool stalled = !!(gpu_read(gpu, REG_A5XX_RBBM_STATUS3) & BIT(24));
 
 	if (!a5xx_state)
@@ -1689,34 +1682,6 @@ static uint32_t a5xx_get_rptr(struct msm_gpu *gpu, struct msm_ringbuffer *ring)
 	return ring->memptrs->rptr = gpu_read(gpu, REG_A5XX_CP_RB_RPTR);
 }
 
-static const struct adreno_gpu_funcs funcs = {
-	.base = {
-		.get_param = adreno_get_param,
-		.set_param = adreno_set_param,
-		.hw_init = a5xx_hw_init,
-		.ucode_load = a5xx_ucode_load,
-		.pm_suspend = a5xx_pm_suspend,
-		.pm_resume = a5xx_pm_resume,
-		.recover = a5xx_recover,
-		.submit = a5xx_submit,
-		.active_ring = a5xx_active_ring,
-		.irq = a5xx_irq,
-		.destroy = a5xx_destroy,
-#if defined(CONFIG_DEBUG_FS) || defined(CONFIG_DEV_COREDUMP)
-		.show = a5xx_show,
-#endif
-#if defined(CONFIG_DEBUG_FS)
-		.debugfs_init = a5xx_debugfs_init,
-#endif
-		.gpu_busy = a5xx_gpu_busy,
-		.gpu_state_get = a5xx_gpu_state_get,
-		.gpu_state_put = a5xx_gpu_state_put,
-		.create_address_space = adreno_create_address_space,
-		.get_rptr = a5xx_get_rptr,
-	},
-	.get_timestamp = a5xx_get_timestamp,
-};
-
 static void check_speed_bin(struct device *dev)
 {
 	struct nvmem_cell *cell;
@@ -1749,7 +1714,7 @@ static void check_speed_bin(struct device *dev)
 	devm_pm_opp_set_supported_hw(dev, &val, 1);
 }
 
-struct msm_gpu *a5xx_gpu_init(struct drm_device *dev)
+static struct msm_gpu *a5xx_gpu_init(struct drm_device *dev)
 {
 	struct msm_drm_private *priv = dev->dev_private;
 	struct platform_device *pdev = priv->gpu_pdev;
@@ -1758,9 +1723,10 @@ struct msm_gpu *a5xx_gpu_init(struct drm_device *dev)
 	struct adreno_gpu *adreno_gpu;
 	struct msm_gpu *gpu;
 	unsigned int nr_rings;
+	u32 speedbin;
 	int ret;
 
-	a5xx_gpu = kzalloc(sizeof(*a5xx_gpu), GFP_KERNEL);
+	a5xx_gpu = kzalloc_obj(*a5xx_gpu);
 	if (!a5xx_gpu)
 		return ERR_PTR(-ENOMEM);
 
@@ -1778,29 +1744,58 @@ struct msm_gpu *a5xx_gpu_init(struct drm_device *dev)
 	if (config->info->revn == 510)
 		nr_rings = 1;
 
-	ret = adreno_gpu_init(dev, pdev, adreno_gpu, &funcs, nr_rings);
+	ret = adreno_gpu_init(dev, pdev, adreno_gpu, config->info->funcs, nr_rings);
 	if (ret) {
 		a5xx_destroy(&(a5xx_gpu->base.base));
 		return ERR_PTR(ret);
 	}
 
-	if (gpu->aspace)
-		msm_mmu_set_fault_handler(gpu->aspace->mmu, gpu, a5xx_fault_handler);
+	/* Set the speedbin value that is passed to userspace */
+	if (adreno_read_speedbin(&pdev->dev, &speedbin) || !speedbin)
+		speedbin = 0xffff;
+	adreno_gpu->speedbin = (uint16_t) (0xffff & speedbin);
+
+	msm_mmu_set_fault_handler(to_msm_vm(gpu->vm)->mmu, gpu,
+				  a5xx_fault_handler);
 
 	/* Set up the preemption specific bits and pieces for each ringbuffer */
 	a5xx_preempt_init(gpu);
 
-	/* Set the highest bank bit */
-	if (adreno_is_a540(adreno_gpu) || adreno_is_a530(adreno_gpu))
-		adreno_gpu->ubwc_config.highest_bank_bit = 15;
-	else
-		adreno_gpu->ubwc_config.highest_bank_bit = 14;
-
-	/* a5xx only supports UBWC 1.0, these are not configurable */
-	adreno_gpu->ubwc_config.macrotile_mode = 0;
-	adreno_gpu->ubwc_config.ubwc_swizzle = 0x7;
+	/* Inherit the common config and make some necessary fixups */
+	adreno_gpu->ubwc_config = qcom_ubwc_config_get_data();
+	if (IS_ERR(adreno_gpu->ubwc_config))
+		return ERR_CAST(adreno_gpu->ubwc_config);
 
 	adreno_gpu->uche_trap_base = 0x0001ffffffff0000ull;
 
 	return gpu;
 }
+
+const struct adreno_gpu_funcs a5xx_gpu_funcs = {
+	.base = {
+		.get_param = adreno_get_param,
+		.set_param = adreno_set_param,
+		.hw_init = a5xx_hw_init,
+		.ucode_load = a5xx_ucode_load,
+		.pm_suspend = a5xx_pm_suspend,
+		.pm_resume = a5xx_pm_resume,
+		.recover = a5xx_recover,
+		.submit = a5xx_submit,
+		.active_ring = a5xx_active_ring,
+		.irq = a5xx_irq,
+		.destroy = a5xx_destroy,
+#if defined(CONFIG_DEBUG_FS) || defined(CONFIG_DEV_COREDUMP)
+		.show = a5xx_show,
+#endif
+#if defined(CONFIG_DEBUG_FS)
+		.debugfs_init = a5xx_debugfs_init,
+#endif
+		.gpu_busy = a5xx_gpu_busy,
+		.gpu_state_get = a5xx_gpu_state_get,
+		.gpu_state_put = a5xx_gpu_state_put,
+		.create_vm = adreno_create_vm,
+		.get_rptr = a5xx_get_rptr,
+	},
+	.init = a5xx_gpu_init,
+	.get_timestamp = a5xx_get_timestamp,
+};

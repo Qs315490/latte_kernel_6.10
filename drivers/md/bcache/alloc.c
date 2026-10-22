@@ -24,21 +24,18 @@
  * Since the gens and priorities are all stored contiguously on disk, we can
  * batch this up: We fill up the free_inc list with freshly invalidated buckets,
  * call prio_write(), and when prio_write() finishes we pull buckets off the
- * free_inc list and optionally discard them.
+ * free_inc list.
  *
  * free_inc isn't the only freelist - if it was, we'd often to sleep while
  * priorities and gens were being written before we could allocate. c->free is a
  * smaller freelist, and buckets on that list are always ready to be used.
- *
- * If we've got discards enabled, that happens when a bucket moves from the
- * free_inc list to the free list.
  *
  * There is another freelist, because sometimes we have buckets that we know
  * have nothing pointing into them - these we can reuse without waiting for
  * priorities to be rewritten. These come from freed btree nodes and buckets
  * that garbage collection discovered no longer had valid keys pointing into
  * them (because they were overwritten). That's the unused list - buckets on the
- * unused list move to the free list, optionally being discarded in the process.
+ * unused list move to the free list.
  *
  * It's also important to ensure that gens don't wrap around - with respect to
  * either the oldest gen in the btree or the gen on disk. This is quite
@@ -118,8 +115,7 @@ void bch_rescale_priorities(struct cache_set *c, int sectors)
 /*
  * Background allocation thread: scans for buckets to be invalidated,
  * invalidates them, rewrites prios/gens (marking them as invalidated on disk),
- * then optionally issues discard commands to the newly free buckets, then puts
- * them on the various freelists.
+ * then puts them on the various freelists.
  */
 
 static inline bool can_inc_bucket_gen(struct bucket *b)
@@ -164,61 +160,40 @@ static void bch_invalidate_one_bucket(struct cache *ca, struct bucket *b)
  * prio is worth 1/8th of what INITIAL_PRIO is worth.
  */
 
-static inline unsigned int new_bucket_prio(struct cache *ca, struct bucket *b)
-{
-	unsigned int min_prio = (INITIAL_PRIO - ca->set->min_prio) / 8;
+#define bucket_prio(b)							\
+({									\
+	unsigned int min_prio = (INITIAL_PRIO - ca->set->min_prio) / 8;	\
+									\
+	(b->prio - ca->set->min_prio + min_prio) * GC_SECTORS_USED(b);	\
+})
 
-	return (b->prio - ca->set->min_prio + min_prio) * GC_SECTORS_USED(b);
-}
-
-static inline bool new_bucket_max_cmp(const void *l, const void *r, void *args)
-{
-	struct bucket **lhs = (struct bucket **)l;
-	struct bucket **rhs = (struct bucket **)r;
-	struct cache *ca = args;
-
-	return new_bucket_prio(ca, *lhs) > new_bucket_prio(ca, *rhs);
-}
-
-static inline bool new_bucket_min_cmp(const void *l, const void *r, void *args)
-{
-	struct bucket **lhs = (struct bucket **)l;
-	struct bucket **rhs = (struct bucket **)r;
-	struct cache *ca = args;
-
-	return new_bucket_prio(ca, *lhs) < new_bucket_prio(ca, *rhs);
-}
+#define bucket_max_cmp(l, r)	(bucket_prio(l) < bucket_prio(r))
+#define bucket_min_cmp(l, r)	(bucket_prio(l) > bucket_prio(r))
 
 static void invalidate_buckets_lru(struct cache *ca)
 {
 	struct bucket *b;
-	const struct min_heap_callbacks bucket_max_cmp_callback = {
-		.less = new_bucket_max_cmp,
-		.swp = NULL,
-	};
-	const struct min_heap_callbacks bucket_min_cmp_callback = {
-		.less = new_bucket_min_cmp,
-		.swp = NULL,
-	};
+	ssize_t i;
 
-	ca->heap.nr = 0;
+	ca->heap.used = 0;
 
 	for_each_bucket(b, ca) {
 		if (!bch_can_invalidate_bucket(ca, b))
 			continue;
 
-		if (!min_heap_full(&ca->heap))
-			min_heap_push(&ca->heap, &b, &bucket_max_cmp_callback, ca);
-		else if (!new_bucket_max_cmp(&b, min_heap_peek(&ca->heap), ca)) {
+		if (!heap_full(&ca->heap))
+			heap_add(&ca->heap, b, bucket_max_cmp);
+		else if (bucket_max_cmp(b, heap_peek(&ca->heap))) {
 			ca->heap.data[0] = b;
-			min_heap_sift_down(&ca->heap, 0, &bucket_max_cmp_callback, ca);
+			heap_sift(&ca->heap, 0, bucket_max_cmp);
 		}
 	}
 
-	min_heapify_all(&ca->heap, &bucket_min_cmp_callback, ca);
+	for (i = ca->heap.used / 2 - 1; i >= 0; --i)
+		heap_sift(&ca->heap, i, bucket_min_cmp);
 
 	while (!fifo_full(&ca->free_inc)) {
-		if (!ca->heap.nr) {
+		if (!heap_pop(&ca->heap, b, bucket_min_cmp)) {
 			/*
 			 * We don't want to be calling invalidate_buckets()
 			 * multiple times when it can't do anything
@@ -227,8 +202,6 @@ static void invalidate_buckets_lru(struct cache *ca)
 			wake_up_gc(ca->set);
 			return;
 		}
-		b = min_heap_peek(&ca->heap)[0];
-		min_heap_pop(&ca->heap, &bucket_min_cmp_callback, ca);
 
 		bch_invalidate_one_bucket(ca, b);
 	}
@@ -344,22 +317,13 @@ static int bch_allocator_thread(void *arg)
 	while (1) {
 		/*
 		 * First, we pull buckets off of the unused and free_inc lists,
-		 * possibly issue discards to them, then we add the bucket to
-		 * the free list:
+		 * then we add the bucket to the free list:
 		 */
 		while (1) {
 			long bucket;
 
 			if (!fifo_pop(&ca->free_inc, bucket))
 				break;
-
-			if (ca->discard) {
-				mutex_unlock(&ca->set->bucket_lock);
-				blkdev_issue_discard(ca->bdev,
-					bucket_to_sector(ca->set, bucket),
-					ca->sb.bucket_size, GFP_KERNEL);
-				mutex_lock(&ca->set->bucket_lock);
-			}
 
 			allocator_wait(ca, bch_allocator_push(ca, bucket));
 			wake_up(&ca->set->btree_cache_wait);
@@ -435,7 +399,11 @@ long bch_bucket_alloc(struct cache *ca, unsigned int reserve, bool wait)
 				TASK_UNINTERRUPTIBLE);
 
 		mutex_unlock(&ca->set->bucket_lock);
+
+		atomic_inc(&ca->set->bucket_wait_cnt);
 		schedule();
+		atomic_dec(&ca->set->bucket_wait_cnt);
+
 		mutex_lock(&ca->set->bucket_lock);
 	} while (!fifo_pop(&ca->free[RESERVE_NONE], r) &&
 		 !fifo_pop(&ca->free[reserve], r));
@@ -729,7 +697,7 @@ int bch_open_buckets_alloc(struct cache_set *c)
 	spin_lock_init(&c->data_bucket_lock);
 
 	for (i = 0; i < MAX_OPEN_BUCKETS; i++) {
-		struct open_bucket *b = kzalloc(sizeof(*b), GFP_KERNEL);
+		struct open_bucket *b = kzalloc_obj(*b);
 
 		if (!b)
 			return -ENOMEM;

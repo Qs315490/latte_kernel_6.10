@@ -8,7 +8,6 @@
 #include <linux/container_of.h>
 #include <linux/dmi.h>
 #include <linux/lockdep.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_data/cros_ec_commands.h>
@@ -47,29 +46,20 @@ struct cros_chctl_priv {
 static int cros_chctl_send_charge_control_cmd(struct cros_ec_device *cros_ec,
 					      u8 cmd_version, struct ec_params_charge_control *req)
 {
+	int ret;
 	static const u8 outsizes[] = {
 		[1] = offsetof(struct ec_params_charge_control, cmd),
 		[2] = sizeof(struct ec_params_charge_control),
 		[3] = sizeof(struct ec_params_charge_control),
 	};
 
-	struct {
-		struct cros_ec_command msg;
-		union {
-			struct ec_params_charge_control req;
-			struct ec_response_charge_control resp;
-		} __packed data;
-	} __packed buf = {
-		.msg = {
-			.command = EC_CMD_CHARGE_CONTROL,
-			.version = cmd_version,
-			.insize  = 0,
-			.outsize = outsizes[cmd_version],
-		},
-		.data.req = *req,
-	};
+	ret = cros_ec_cmd(cros_ec, cmd_version, EC_CMD_CHARGE_CONTROL, req,
+			  outsizes[cmd_version], NULL, 0);
 
-	return cros_ec_cmd_xfer_status(cros_ec, &buf.msg);
+	if (ret < 0)
+		return ret;
+
+	return 0;
 }
 
 static int cros_chctl_configure_ec(struct cros_chctl_priv *priv)
@@ -329,9 +319,10 @@ static int cros_chctl_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id cros_chctl_id[] = {
-	{ "cros-charge-control", 0 },
-	{}
+	{ .name = "cros-charge-control" },
+	{ }
 };
+MODULE_DEVICE_TABLE(platform, cros_chctl_id);
 
 static struct platform_driver cros_chctl_driver = {
 	.driver.name	= "cros-charge-control",
@@ -340,7 +331,6 @@ static struct platform_driver cros_chctl_driver = {
 };
 module_platform_driver(cros_chctl_driver);
 
-MODULE_DEVICE_TABLE(platform, cros_chctl_id);
 MODULE_DESCRIPTION("ChromeOS EC charge control");
 MODULE_AUTHOR("Thomas Weißschuh <linux@weissschuh.net>");
 MODULE_LICENSE("GPL");

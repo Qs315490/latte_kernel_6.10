@@ -3,8 +3,11 @@
  * Copyright © 2023 Intel Corporation
  */
 
+#include <linux/time64.h>
+
 #include <drm/drm_managed.h>
 
+#include <generated/xe_wa_oob.h>
 #include "xe_force_wake.h"
 #include "xe_device.h"
 #include "xe_gt.h"
@@ -12,10 +15,10 @@
 #include "xe_gt_sysfs.h"
 #include "xe_guc_pc.h"
 #include "regs/xe_gt_regs.h"
-#include "xe_macros.h"
 #include "xe_mmio.h"
 #include "xe_pm.h"
 #include "xe_sriov.h"
+#include "xe_wa.h"
 
 /**
  * DOC: Xe GT Idle
@@ -69,6 +72,8 @@ static u64 get_residency_ms(struct xe_gt_idle *gtidle, u64 cur_residency)
 {
 	u64 delta, overflow_residency, prev_residency;
 
+	lockdep_assert_held(&gtidle->lock);
+
 	overflow_residency = BIT_ULL(32);
 
 	/*
@@ -90,7 +95,7 @@ static u64 get_residency_ms(struct xe_gt_idle *gtidle, u64 cur_residency)
 	gtidle->cur_residency = cur_residency;
 
 	/* residency multiplier in ns, convert to ms */
-	cur_residency = mul_u64_u32_div(cur_residency, gtidle->residency_multiplier, 1e6);
+	cur_residency = mul_u64_u32_div(cur_residency, gtidle->residency_multiplier, NSEC_PER_MSEC);
 
 	return cur_residency;
 }
@@ -101,7 +106,6 @@ void xe_gt_idle_enable_pg(struct xe_gt *gt)
 	struct xe_gt_idle *gtidle = &gt->gtidle;
 	struct xe_mmio *mmio = &gt->mmio;
 	u32 vcs_mask, vecs_mask;
-	unsigned int fw_ref;
 	int i, j;
 
 	if (IS_SRIOV_VF(xe))
@@ -119,8 +123,11 @@ void xe_gt_idle_enable_pg(struct xe_gt *gt)
 	if (vcs_mask || vecs_mask)
 		gtidle->powergate_enable = MEDIA_POWERGATE_ENABLE;
 
-	if (!xe_gt_is_media_type(gt))
+	if (xe_gt_is_main_type(gt))
 		gtidle->powergate_enable |= RENDER_POWERGATE_ENABLE;
+
+	if (MEDIA_VERx100(xe) >= 1100 && MEDIA_VERx100(xe) < 1255)
+		gtidle->powergate_enable |= MEDIA_SAMPLERS_POWERGATE_ENABLE;
 
 	if (xe->info.platform != XE_DG1) {
 		for (i = XE_HW_ENGINE_VCS0, j = 0; i <= XE_HW_ENGINE_VCS7; ++i, ++j) {
@@ -130,7 +137,7 @@ void xe_gt_idle_enable_pg(struct xe_gt *gt)
 		}
 	}
 
-	fw_ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GT);
+	CLASS(xe_force_wake, fw_ref)(gt_to_fw(gt), XE_FW_GT);
 	if (xe->info.skip_guc_pc) {
 		/*
 		 * GuC sets the hysteresis value when GuC PC is enabled
@@ -140,14 +147,18 @@ void xe_gt_idle_enable_pg(struct xe_gt *gt)
 		xe_mmio_write32(mmio, RENDER_POWERGATE_IDLE_HYSTERESIS, 25);
 	}
 
+	if (XE_GT_WA(gt, 14020316580))
+		gtidle->powergate_enable &= ~(VDN_HCP_POWERGATE_ENABLE(0) |
+					      VDN_MFXVDENC_POWERGATE_ENABLE(0) |
+					      VDN_HCP_POWERGATE_ENABLE(2) |
+					      VDN_MFXVDENC_POWERGATE_ENABLE(2));
+
 	xe_mmio_write32(mmio, POWERGATE_ENABLE, gtidle->powergate_enable);
-	xe_force_wake_put(gt_to_fw(gt), fw_ref);
 }
 
 void xe_gt_idle_disable_pg(struct xe_gt *gt)
 {
 	struct xe_gt_idle *gtidle = &gt->gtidle;
-	unsigned int fw_ref;
 
 	if (IS_SRIOV_VF(gt_to_xe(gt)))
 		return;
@@ -155,9 +166,26 @@ void xe_gt_idle_disable_pg(struct xe_gt *gt)
 	xe_device_assert_mem_access(gt_to_xe(gt));
 	gtidle->powergate_enable = 0;
 
-	fw_ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GT);
+	CLASS(xe_force_wake, fw_ref)(gt_to_fw(gt), XE_FW_GT);
 	xe_mmio_write32(&gt->mmio, POWERGATE_ENABLE, gtidle->powergate_enable);
-	xe_force_wake_put(gt_to_fw(gt), fw_ref);
+}
+
+static void force_wake_domains_show(struct xe_gt *gt, struct drm_printer *p)
+{
+	struct xe_force_wake_domain *domain;
+	struct xe_force_wake *fw = gt_to_fw(gt);
+	unsigned int tmp;
+	unsigned long flags;
+
+	spin_lock_irqsave(&fw->lock, flags);
+	for_each_fw_domain(domain, fw, tmp) {
+		drm_printf(p, "%s.ref_count=%u, %s.fwake=0x%x\n",
+			   xe_force_wake_domain_to_str(domain->id),
+			   READ_ONCE(domain->ref),
+			   xe_force_wake_domain_to_str(domain->id),
+			   xe_mmio_read32(&gt->mmio, domain->reg_ctl));
+	}
+	spin_unlock_irqrestore(&fw->lock, flags);
 }
 
 /**
@@ -176,7 +204,6 @@ int xe_gt_idle_pg_print(struct xe_gt *gt, struct drm_printer *p)
 	enum xe_gt_idle_state state;
 	u32 pg_enabled, pg_status = 0;
 	u32 vcs_mask, vecs_mask;
-	unsigned int fw_ref;
 	int n;
 	/*
 	 * Media Slices
@@ -213,14 +240,12 @@ int xe_gt_idle_pg_print(struct xe_gt *gt, struct drm_printer *p)
 
 	/* Do not wake the GT to read powergating status */
 	if (state != GT_IDLE_C6) {
-		fw_ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GT);
-		if (!fw_ref)
+		CLASS(xe_force_wake, fw_ref)(gt_to_fw(gt), XE_FW_GT);
+		if (!fw_ref.domains)
 			return -ETIMEDOUT;
 
 		pg_enabled = xe_mmio_read32(&gt->mmio, POWERGATE_ENABLE);
 		pg_status = xe_mmio_read32(&gt->mmio, POWERGATE_DOMAIN_STATUS);
-
-		xe_force_wake_put(gt_to_fw(gt), fw_ref);
 	}
 
 	if (gt->info.engine_mask & XE_HW_ENGINE_RCS_MASK) {
@@ -244,58 +269,81 @@ int xe_gt_idle_pg_print(struct xe_gt *gt, struct drm_printer *p)
 				drm_printf(p, "Media Slice%d Power Gate Status: %s\n", n,
 					   str_up_down(pg_status & media_slices[n].status_bit));
 	}
+
+	if (MEDIA_VERx100(xe) >= 1100 && MEDIA_VERx100(xe) < 1255)
+		drm_printf(p, "Media Samplers Power Gating Enabled: %s\n",
+			   str_yes_no(pg_enabled & MEDIA_SAMPLERS_POWERGATE_ENABLE));
+
+	if (gt->info.engine_mask & BIT(XE_HW_ENGINE_GSCCS0)) {
+		drm_printf(p, "GSC Power Gate Status: %s\n",
+			   str_up_down(pg_status & GSC_AWAKE_STATUS));
+	}
+
+	force_wake_domains_show(gt, p);
+
 	return 0;
 }
 
-static ssize_t name_show(struct device *dev,
-			 struct device_attribute *attr, char *buff)
+static ssize_t name_show(struct kobject *kobj,
+			 struct kobj_attribute *attr, char *buff)
 {
+	struct device *dev = kobj_to_dev(kobj);
 	struct xe_gt_idle *gtidle = dev_to_gtidle(dev);
 	struct xe_guc_pc *pc = gtidle_to_pc(gtidle);
-	ssize_t ret;
 
-	xe_pm_runtime_get(pc_to_xe(pc));
-	ret = sysfs_emit(buff, "%s\n", gtidle->name);
-	xe_pm_runtime_put(pc_to_xe(pc));
-
-	return ret;
+	guard(xe_pm_runtime)(pc_to_xe(pc));
+	return sysfs_emit(buff, "%s\n", gtidle->name);
 }
-static DEVICE_ATTR_RO(name);
+static struct kobj_attribute name_attr = __ATTR_RO(name);
 
-static ssize_t idle_status_show(struct device *dev,
-				struct device_attribute *attr, char *buff)
+static ssize_t idle_status_show(struct kobject *kobj,
+				struct kobj_attribute *attr, char *buff)
 {
+	struct device *dev = kobj_to_dev(kobj);
 	struct xe_gt_idle *gtidle = dev_to_gtidle(dev);
 	struct xe_guc_pc *pc = gtidle_to_pc(gtidle);
 	enum xe_gt_idle_state state;
 
-	xe_pm_runtime_get(pc_to_xe(pc));
-	state = gtidle->idle_status(pc);
-	xe_pm_runtime_put(pc_to_xe(pc));
+	scoped_guard(xe_pm_runtime, pc_to_xe(pc))
+		state = gtidle->idle_status(pc);
 
 	return sysfs_emit(buff, "%s\n", gt_idle_state_to_string(state));
 }
-static DEVICE_ATTR_RO(idle_status);
+static struct kobj_attribute idle_status_attr = __ATTR_RO(idle_status);
 
-static ssize_t idle_residency_ms_show(struct device *dev,
-				      struct device_attribute *attr, char *buff)
+u64 xe_gt_idle_residency_msec(struct xe_gt_idle *gtidle)
 {
+	struct xe_guc_pc *pc = gtidle_to_pc(gtidle);
+	u64 residency;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&gtidle->lock, flags);
+	residency = get_residency_ms(gtidle, gtidle->idle_residency(pc));
+	raw_spin_unlock_irqrestore(&gtidle->lock, flags);
+
+	return residency;
+}
+
+
+static ssize_t idle_residency_ms_show(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buff)
+{
+	struct device *dev = kobj_to_dev(kobj);
 	struct xe_gt_idle *gtidle = dev_to_gtidle(dev);
 	struct xe_guc_pc *pc = gtidle_to_pc(gtidle);
 	u64 residency;
 
-	xe_pm_runtime_get(pc_to_xe(pc));
-	residency = gtidle->idle_residency(pc);
-	xe_pm_runtime_put(pc_to_xe(pc));
+	scoped_guard(xe_pm_runtime, pc_to_xe(pc))
+		residency = xe_gt_idle_residency_msec(gtidle);
 
-	return sysfs_emit(buff, "%llu\n", get_residency_ms(gtidle, residency));
+	return sysfs_emit(buff, "%llu\n", residency);
 }
-static DEVICE_ATTR_RO(idle_residency_ms);
+static struct kobj_attribute idle_residency_attr = __ATTR_RO(idle_residency_ms);
 
 static const struct attribute *gt_idle_attrs[] = {
-	&dev_attr_name.attr,
-	&dev_attr_idle_status.attr,
-	&dev_attr_idle_residency_ms.attr,
+	&name_attr.attr,
+	&idle_status_attr.attr,
+	&idle_residency_attr.attr,
 	NULL,
 };
 
@@ -303,15 +351,11 @@ static void gt_idle_fini(void *arg)
 {
 	struct kobject *kobj = arg;
 	struct xe_gt *gt = kobj_to_gt(kobj->parent);
-	unsigned int fw_ref;
 
 	xe_gt_idle_disable_pg(gt);
 
-	if (gt_to_xe(gt)->info.skip_guc_pc) {
-		fw_ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GT);
+	if (gt_to_xe(gt)->info.skip_guc_pc)
 		xe_gt_idle_disable_c6(gt);
-		xe_force_wake_put(gt_to_fw(gt), fw_ref);
-	}
 
 	sysfs_remove_files(kobj, gt_idle_attrs);
 	kobject_put(kobj);
@@ -330,6 +374,8 @@ int xe_gt_idle_init(struct xe_gt_idle *gtidle)
 	kobj = kobject_create_and_add("gtidle", gt->sysfs);
 	if (!kobj)
 		return -ENOMEM;
+
+	raw_spin_lock_init(&gtidle->lock);
 
 	if (xe_gt_is_media_type(gt)) {
 		snprintf(gtidle->name, sizeof(gtidle->name), "gt%d-mc", gt->info.id);
@@ -369,14 +415,19 @@ void xe_gt_idle_enable_c6(struct xe_gt *gt)
 			RC_CTL_HW_ENABLE | RC_CTL_TO_MODE | RC_CTL_RC6_ENABLE);
 }
 
-void xe_gt_idle_disable_c6(struct xe_gt *gt)
+int xe_gt_idle_disable_c6(struct xe_gt *gt)
 {
 	xe_device_assert_mem_access(gt_to_xe(gt));
-	xe_force_wake_assert_held(gt_to_fw(gt), XE_FW_GT);
 
 	if (IS_SRIOV_VF(gt_to_xe(gt)))
-		return;
+		return 0;
+
+	CLASS(xe_force_wake, fw_ref)(gt_to_fw(gt), XE_FW_GT);
+	if (!fw_ref.domains)
+		return -ETIMEDOUT;
 
 	xe_mmio_write32(&gt->mmio, RC_CONTROL, 0);
 	xe_mmio_write32(&gt->mmio, RC_STATE, 0);
+
+	return 0;
 }

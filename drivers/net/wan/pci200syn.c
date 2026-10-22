@@ -281,7 +281,7 @@ static int pci200_pci_init_one(struct pci_dev *pdev,
 		return i;
 	}
 
-	card = kzalloc(sizeof(card_t), GFP_KERNEL);
+	card = kzalloc_obj(card_t);
 	if (!card) {
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
@@ -397,9 +397,9 @@ static int pci200_pci_init_one(struct pci_dev *pdev,
 }
 
 static const struct pci_device_id pci200_pci_tbl[] = {
-	{ PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050, PCI_VENDOR_ID_PLX,
-	  PCI_DEVICE_ID_PLX_PCI200SYN, 0, 0, 0 },
-	{ 0, }
+	{ PCI_VDEVICE_SUB(PLX, PCI_DEVICE_ID_PLX_9050,
+			  PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_PCI200SYN) },
+	{ }
 };
 
 static struct pci_driver pci200_pci_driver = {

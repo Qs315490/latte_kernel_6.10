@@ -18,7 +18,7 @@
 #include <linux/of_address.h>
 #include <linux/slab.h>
 
-#include "irq-msi-lib.h"
+#include <linux/irqchip/irq-msi-lib.h>
 
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 
@@ -157,6 +157,7 @@ static const struct irq_domain_ops odmi_domain_ops = {
 static const struct msi_parent_ops odmi_msi_parent_ops = {
 	.supported_flags	= ODMI_MSI_FLAGS_SUPPORTED,
 	.required_flags		= ODMI_MSI_FLAGS_REQUIRED,
+	.chip_flags		= MSI_CHIP_FLAG_SET_EOI,
 	.bus_select_token	= DOMAIN_BUS_GENERIC_MSI,
 	.bus_select_mask	= MATCH_PLATFORM_MSI,
 	.prefix			= "ODMI-",
@@ -166,13 +167,18 @@ static const struct msi_parent_ops odmi_msi_parent_ops = {
 static int __init mvebu_odmi_init(struct device_node *node,
 				  struct device_node *parent)
 {
-	struct irq_domain *parent_domain, *inner_domain;
+	struct irq_domain_info info = {
+		.fwnode	= of_fwnode_handle(node),
+		.ops	= &odmi_domain_ops,
+		.size	= odmis_count * NODMIS_PER_FRAME,
+		.parent	= irq_find_host(parent),
+	};
 	int ret, i;
 
 	if (of_property_read_u32(node, "marvell,odmi-frames", &odmis_count))
 		return -EINVAL;
 
-	odmis = kcalloc(odmis_count, sizeof(struct odmi_data), GFP_KERNEL);
+	odmis = kzalloc_objs(struct odmi_data, odmis_count);
 	if (!odmis)
 		return -ENOMEM;
 
@@ -202,28 +208,16 @@ static int __init mvebu_odmi_init(struct device_node *node,
 		}
 	}
 
-	parent_domain = irq_find_host(parent);
+	if (msi_create_parent_irq_domain(&info, &odmi_msi_parent_ops))
+		return 0;
 
-	inner_domain = irq_domain_create_hierarchy(parent_domain, 0,
-						   odmis_count * NODMIS_PER_FRAME,
-						   of_node_to_fwnode(node),
-						   &odmi_domain_ops, NULL);
-	if (!inner_domain) {
-		ret = -ENOMEM;
-		goto err_unmap;
-	}
-
-	irq_domain_update_bus_token(inner_domain, DOMAIN_BUS_GENERIC_MSI);
-	inner_domain->flags |= IRQ_DOMAIN_FLAG_MSI_PARENT;
-	inner_domain->msi_parent_ops = &odmi_msi_parent_ops;
-
-	return 0;
+	ret = -ENOMEM;
 
 err_unmap:
 	for (i = 0; i < odmis_count; i++) {
 		struct odmi_data *odmi = &odmis[i];
 
-		if (odmi->base && !IS_ERR(odmi->base))
+		if (!IS_ERR_OR_NULL(odmi->base))
 			iounmap(odmis[i].base);
 	}
 	bitmap_free(odmis_bm);

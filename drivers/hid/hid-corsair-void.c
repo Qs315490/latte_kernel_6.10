@@ -507,7 +507,7 @@ static void corsair_void_status_work_handler(struct work_struct *work)
 	struct delayed_work *delayed_work;
 	int battery_ret;
 
-	delayed_work = container_of(work, struct delayed_work, work);
+	delayed_work = to_delayed_work(work);
 	drvdata = container_of(delayed_work, struct corsair_void_drvdata,
 			       delayed_status_work);
 
@@ -525,7 +525,7 @@ static void corsair_void_firmware_work_handler(struct work_struct *work)
 	struct delayed_work *delayed_work;
 	int firmware_ret;
 
-	delayed_work = container_of(work, struct delayed_work, work);
+	delayed_work = to_delayed_work(work);
 	drvdata = container_of(delayed_work, struct corsair_void_drvdata,
 			       delayed_firmware_work);
 
@@ -553,9 +553,8 @@ static void corsair_void_add_battery(struct corsair_void_drvdata *drvdata)
 
 	if (IS_ERR(new_supply)) {
 		hid_err(drvdata->hid_dev,
-			"failed to register battery '%s' (reason: %ld)\n",
-			drvdata->battery_desc.name,
-			PTR_ERR(new_supply));
+			"failed to register battery '%s' (reason: %pe)\n",
+			drvdata->battery_desc.name, new_supply);
 		return;
 	}
 

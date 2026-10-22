@@ -10,6 +10,9 @@ source lib.sh
 ret=0
 timeout=5
 
+SCTP_TEST_TIMEOUT=60
+STRESS_TEST_TIMEOUT=30
+
 cleanup()
 {
 	ip netns pids "$ns1" | xargs kill 2>/dev/null
@@ -40,7 +43,7 @@ TMPFILE3=$(mktemp)
 
 TMPINPUT=$(mktemp)
 COUNT=200
-[ "$KSFT_MACHINE_SLOW" = "yes" ] && COUNT=25
+[ "$KSFT_MACHINE_SLOW" = "yes" ] && COUNT=$((COUNT/8))
 dd conv=sparse status=none if=/dev/zero bs=1M count=$COUNT of="$TMPINPUT"
 
 if ! ip link add veth0 netns "$nsrouter" type veth peer name eth0 netns "$ns1" > /dev/null 2>&1; then
@@ -82,11 +85,12 @@ ip -net "$ns3" route add default via 10.0.3.1
 ip -net "$ns3" route add default via dead:3::1
 
 load_ruleset() {
-	local name=$1
-	local prio=$2
+	local family=$1
+	local name=$2
+	local prio=$3
 
 ip netns exec "$nsrouter" nft -f /dev/stdin <<EOF
-table inet $name {
+table $family $name {
 	chain nfq {
 		ip protocol icmp queue bypass
 		icmpv6 type { "echo-request", "echo-reply" } queue num 1 bypass
@@ -225,6 +229,7 @@ nf_queue_wait()
 test_queue()
 {
 	local expected="$1"
+	local family="$2"
 	local last=""
 
 	# spawn nf_queue listeners
@@ -252,11 +257,13 @@ test_queue()
 		if [ x"$last" != x"$expected packets total" ]; then
 			echo "FAIL: Expected $expected packets total, but got $last" 1>&2
 			ip netns exec "$nsrouter" nft list ruleset
+			echo -n "$TMPFILE0: ";cat "$TMPFILE0"
+			echo -n "$TMPFILE1: ";cat "$TMPFILE1"
 			exit 1
 		fi
 	done
 
-	echo "PASS: Expected and received $last"
+	echo "PASS: Expected and received $last ($family)"
 }
 
 listener_ready()
@@ -275,9 +282,11 @@ test_tcp_forward()
 	busywait "$BUSYWAIT_TIMEOUT" listener_ready "$ns2"
 	busywait "$BUSYWAIT_TIMEOUT" nf_queue_wait "$nsrouter" 2
 
+	local tthen=$(date +%s)
+
 	ip netns exec "$ns1" socat -u STDIN TCP:10.0.2.99:12345 <"$TMPINPUT" >/dev/null
 
-	wait "$rpid" && echo "PASS: tcp and nfqueue in forward chain"
+	wait_and_check_retval "$rpid" "tcp and nfqueue in forward chain" "$tthen"
 	kill "$nfqpid"
 }
 
@@ -288,13 +297,14 @@ test_tcp_localhost()
 
 	ip netns exec "$nsrouter" ./nf_queue -q 3 &
 	local nfqpid=$!
+	local tthen=$(date +%s)
 
 	busywait "$BUSYWAIT_TIMEOUT" listener_ready "$nsrouter"
 	busywait "$BUSYWAIT_TIMEOUT" nf_queue_wait "$nsrouter" 3
 
 	ip netns exec "$nsrouter" socat -u STDIN TCP:127.0.0.1:12345 <"$TMPINPUT" >/dev/null
 
-	wait "$rpid" && echo "PASS: tcp via loopback"
+	wait_and_check_retval "$rpid" "tcp via loopback" "$tthen"
 	kill "$nfqpid"
 }
 
@@ -394,6 +404,8 @@ EOF
 
 	kill "$nfqpid"
 	echo "PASS: icmp+nfqueue via vrf"
+	ip -net "$ns1" link del tvrf
+	ip netns exec "$ns1" nft flush ruleset
 }
 
 sctp_listener_ready()
@@ -417,6 +429,23 @@ check_output_files()
 	fi
 }
 
+wait_and_check_retval()
+{
+	local rpid="$1"
+	local msg="$2"
+	local tthen="$3"
+	local tnow=$(date +%s)
+
+	if wait "$rpid";then
+		echo -n "PASS: "
+	else
+		echo -n "FAIL: "
+		ret=1
+	fi
+
+	printf "%s (duration: %ds)\n" "$msg" $((tnow-tthen))
+}
+
 test_sctp_forward()
 {
 	ip netns exec "$nsrouter" nft -f /dev/stdin <<EOF
@@ -428,13 +457,14 @@ table inet sctpq {
         }
 }
 EOF
-	timeout 60 ip netns exec "$ns2" socat -u SCTP-LISTEN:12345 STDOUT > "$TMPFILE1" &
+	timeout "$SCTP_TEST_TIMEOUT" ip netns exec "$ns2" socat -u SCTP-LISTEN:12345 STDOUT > "$TMPFILE1" &
 	local rpid=$!
 
 	busywait "$BUSYWAIT_TIMEOUT" sctp_listener_ready "$ns2"
 
 	ip netns exec "$nsrouter" ./nf_queue -q 10 -G &
 	local nfqpid=$!
+	local tthen=$(date +%s)
 
 	ip netns exec "$ns1" socat -u STDIN SCTP:10.0.2.99:12345 <"$TMPINPUT" >/dev/null
 
@@ -443,7 +473,7 @@ EOF
 		exit 1
 	fi
 
-	wait "$rpid" && echo "PASS: sctp and nfqueue in forward chain"
+	wait_and_check_retval "$rpid" "sctp and nfqueue in forward chain" "$tthen"
 	kill "$nfqpid"
 
 	check_output_files "$TMPINPUT" "$TMPFILE1" "sctp forward"
@@ -462,13 +492,14 @@ EOF
 	# reduce test file size, software segmentation causes sk wmem increase.
 	dd conv=sparse status=none if=/dev/zero bs=1M count=$((COUNT/2)) of="$TMPINPUT"
 
-	timeout 60 ip netns exec "$ns2" socat -u SCTP-LISTEN:12345 STDOUT > "$TMPFILE1" &
+	timeout "$SCTP_TEST_TIMEOUT" ip netns exec "$ns2" socat -u SCTP-LISTEN:12345 STDOUT > "$TMPFILE1" &
 	local rpid=$!
 
 	busywait "$BUSYWAIT_TIMEOUT" sctp_listener_ready "$ns2"
 
 	ip netns exec "$ns1" ./nf_queue -q 11 &
 	local nfqpid=$!
+	local tthen=$(date +%s)
 
 	ip netns exec "$ns1" socat -u STDIN SCTP:10.0.2.99:12345 <"$TMPINPUT" >/dev/null
 
@@ -478,7 +509,7 @@ EOF
 	fi
 
 	# must wait before checking completeness of output file.
-	wait "$rpid" && echo "PASS: sctp and nfqueue in output chain with GSO"
+	wait_and_check_retval "$rpid" "sctp and nfqueue in output chain with GSO" "$tthen"
 	kill "$nfqpid"
 
 	check_output_files "$TMPINPUT" "$TMPFILE1" "sctp output"
@@ -486,7 +517,7 @@ EOF
 
 udp_listener_ready()
 {
-	ss -S -N "$1" -uln -o "sport = :12345" | grep -q 12345
+	ss -S -N "$1" -uln -o "sport = :$2" | grep -q "$2"
 }
 
 output_files_written()
@@ -494,7 +525,7 @@ output_files_written()
 	test -s "$1" && test -s "$2"
 }
 
-test_udp_ct_race()
+test_udp_nat_race()
 {
         ip netns exec "$nsrouter" nft -f /dev/stdin <<EOF
 flush ruleset
@@ -521,8 +552,8 @@ EOF
 	ip netns exec "$nsrouter" ./nf_queue -q 12 -d 1000 &
 	local nfqpid=$!
 
-	busywait "$BUSYWAIT_TIMEOUT" udp_listener_ready "$ns2"
-	busywait "$BUSYWAIT_TIMEOUT" udp_listener_ready "$ns3"
+	busywait "$BUSYWAIT_TIMEOUT" udp_listener_ready "$ns2" 12345
+	busywait "$BUSYWAIT_TIMEOUT" udp_listener_ready "$ns3" 12345
 	busywait "$BUSYWAIT_TIMEOUT" nf_queue_wait "$nsrouter" 12
 
 	# Send two packets, one should end up in ns1, other in ns2.
@@ -533,7 +564,7 @@ EOF
 
 	busywait 10000 output_files_written "$TMPFILE1" "$TMPFILE2"
 
-	kill "$nfqpid"
+	kill "$nfqpid" "$rpid1" "$rpid2"
 
 	if ! ip netns exec "$nsrouter" bash -c 'conntrack -L -p udp --dport 12345 2>/dev/null | wc -l | grep -q "^1"'; then
 		echo "FAIL: Expected One udp conntrack entry"
@@ -561,6 +592,208 @@ EOF
 	echo "PASS: both udp receivers got one packet each"
 }
 
+# Make sure UDPGRO aggregated packets don't lose
+# their skb->nfct entry when nfqueue passes the
+# skb to userspace with software gso segmentation on.
+test_udp_gro_ct()
+{
+	local errprefix="FAIL: test_udp_gro_ct:"
+	local timeout=5
+
+	ip netns exec "$nsrouter" conntrack -F 2>/dev/null
+
+        ip netns exec "$nsrouter" nft -f /dev/stdin <<EOF
+flush ruleset
+table inet udpq {
+	# Number of packets/bytes queued to userspace
+	counter toqueue { }
+	# Number of packets/bytes reinjected from userspace with 'ct new' intact
+	counter fromqueue { }
+	# These two counters should be identical and not 0.
+
+	chain prerouting {
+		type filter hook prerouting priority -300; policy accept;
+
+		# userspace sends small packets, if < 1000, UDPGRO did
+		# not kick in, but test needs a 'new' conntrack with udpgro skb.
+		meta iifname veth0 meta l4proto udp meta length > 1000 accept
+
+		# don't pick up non-gso packets and don't queue them to
+		# userspace.
+		notrack
+	}
+
+        chain postrouting {
+		type filter hook postrouting priority 0; policy accept;
+
+		# Only queue unconfirmed fraglist gro skbs to userspace.
+		udp dport 12346 ct status ! confirmed counter name "toqueue" mark set 1 queue num 1
+        }
+
+	chain validate {
+		type filter hook postrouting priority 1; policy accept;
+		# ... and only count those that were reinjected with the
+		# skb->nfct intact.
+		mark 1 counter name "fromqueue"
+	}
+}
+EOF
+	timeout "$timeout" ip netns exec "$ns2" socat UDP-LISTEN:12346,fork,pf=ipv4 OPEN:"$TMPFILE1",trunc &
+	local rpid=$!
+
+	ip netns exec "$nsrouter" nice -n -19 ./nf_queue -G -c -q 1 -o -t 2 > "$TMPFILE2" &
+	local nfqpid=$!
+
+	ip netns exec "$nsrouter" ethtool -K "veth0" rx-udp-gro-forwarding on rx-gro-list on generic-receive-offload on
+
+	busywait "$BUSYWAIT_TIMEOUT" udp_listener_ready "$ns2" 12346
+	busywait "$BUSYWAIT_TIMEOUT" nf_queue_wait "$nsrouter" 1
+
+	local bs=512
+	local count=$(((32 * 1024 * 1024) / bs))
+
+	local nprocs=$(nproc)
+	[ $nprocs -gt 1 ] && nprocs=$((nprocs - 1))
+
+	dd if=/dev/zero bs="$bs" count="$count" 2>/dev/null | for i in $(seq 1 $nprocs); do
+		timeout "$timeout" nice -n 19 ip netns exec "$ns1" \
+			socat -u -b 512 STDIN UDP-DATAGRAM:10.0.2.99:12346,reuseport,bind=0.0.0.0:55221 &
+	done
+
+	busywait 10000 test -s "$TMPFILE1"
+
+	kill "$rpid"
+
+	wait
+
+	local p
+	local b
+	local pqueued
+	local bqueued
+
+	c=$(ip netns exec "$nsrouter" nft list counter inet udpq "toqueue" | grep packets)
+	read p pqueued b bqueued <<EOF
+$c
+EOF
+	local preinject
+	local breinject
+	c=$(ip netns exec "$nsrouter" nft list counter inet udpq "fromqueue" | grep packets)
+	read p preinject b breinject <<EOF
+$c
+EOF
+	ip netns exec "$nsrouter" ethtool -K "veth0" rx-udp-gro-forwarding off
+	ip netns exec "$nsrouter" ethtool -K "veth1" rx-udp-gro-forwarding off
+
+	if [ "$pqueued" -eq 0 ];then
+		# happens when gro did not build at least on aggregate
+		echo "SKIP: No packets were queued"
+		return
+	fi
+
+	local saw_ct_entry=0
+	if ip netns exec "$nsrouter" bash -c 'conntrack -L -p udp --dport 12346 2>/dev/null | wc -l | grep -q "^1"'; then
+		saw_ct_entry=1
+	else
+		echo "$errprefix Expected udp conntrack entry"
+		ip netns exec "$nsrouter" conntrack -L
+		ret=1
+	fi
+
+	if [ "$pqueued" -ge "$preinject" ] ;then
+		echo "$errprefix Expected software segmentation to occur, had $pqueued and $preinject"
+		ret=1
+		return
+	fi
+
+	# sw segmentation adds extra udp and ip headers.
+	local breinject_expect=$((preinject * (512 + 20 + 8)))
+
+	if [ "$breinject" -eq "$breinject_expect" ]; then
+		if [ "$saw_ct_entry" -eq 1 ];then
+			echo "PASS: fraglist gro skb passed with conntrack entry"
+		else
+			echo "$errprefix fraglist gro skb passed without conntrack entry"
+			ret=1
+		fi
+	else
+		echo "$errprefix Counter mismatch, conntrack entry dropped by nfqueue? Queued: $pqueued, $bqueued. Post-queue: $preinject, $breinject. Expected $breinject_expect"
+		ret=1
+	fi
+
+	if ! ip netns exec "$nsrouter" nft delete table inet udpq; then
+		echo "$errprefix: Could not delete udpq table"
+		ret=1
+	fi
+}
+
+check_tainted()
+{
+	local msg="$1"
+
+	if [ "$tainted_then" -ne 0 ];then
+		return
+	fi
+
+	read tainted_now < /proc/sys/kernel/tainted
+	if [ "$tainted_now" -eq 0 ];then
+		echo "PASS: $msg"
+	else
+		echo "TAINT: $msg"
+		dmesg
+		ret=1
+	fi
+}
+
+test_queue_stress()
+{
+	read tainted_then < /proc/sys/kernel/tainted
+	local i
+
+        ip netns exec "$nsrouter" nft -f /dev/stdin <<EOF
+flush ruleset
+table inet t {
+	chain forward {
+		type filter hook forward priority 0; policy accept;
+
+		queue flags bypass to numgen random mod 8
+	}
+}
+EOF
+	timeout "$STRESS_TEST_TIMEOUT" ip netns exec "$ns2" \
+		socat -u UDP-LISTEN:12345,fork,pf=ipv4 STDOUT > /dev/null &
+
+	timeout "$STRESS_TEST_TIMEOUT" ip netns exec "$ns3" \
+		socat -u UDP-LISTEN:12345,fork,pf=ipv4 STDOUT > /dev/null &
+
+	for i in $(seq 0 7); do
+		ip netns exec "$nsrouter" timeout "$STRESS_TEST_TIMEOUT" \
+			./nf_queue -q $i -t 2 -O -b > /dev/null &
+	done
+
+	ip netns exec "$ns1" timeout "$STRESS_TEST_TIMEOUT" \
+		ping -q -f 10.0.2.99 > /dev/null 2>&1 &
+	ip netns exec "$ns1" timeout "$STRESS_TEST_TIMEOUT" \
+		ping -q -f 10.0.3.99 > /dev/null 2>&1 &
+	ip netns exec "$ns1" timeout "$STRESS_TEST_TIMEOUT" \
+		ping -q -f "dead:2::99" > /dev/null 2>&1 &
+	ip netns exec "$ns1" timeout "$STRESS_TEST_TIMEOUT" \
+		ping -q -f "dead:3::99" > /dev/null 2>&1 &
+
+	busywait "$BUSYWAIT_TIMEOUT" udp_listener_ready "$ns2" 12345
+	busywait "$BUSYWAIT_TIMEOUT" udp_listener_ready "$ns3" 12345
+
+	for i in $(seq 1 4);do
+		ip netns exec "$ns1" timeout "$STRESS_TEST_TIMEOUT" \
+			socat -u STDIN UDP-DATAGRAM:10.0.2.99:12345 < /dev/zero > /dev/null &
+		ip netns exec "$ns1" timeout "$STRESS_TEST_TIMEOUT" \
+			socat -u STDIN UDP-DATAGRAM:10.0.3.99:12345 < /dev/zero > /dev/null &
+	done
+
+	wait
+
+	check_tainted "concurrent queueing"
+}
+
 test_queue_removal()
 {
 	read tainted_then < /proc/sys/kernel/tainted
@@ -584,18 +817,48 @@ EOF
 
 	ip netns exec "$ns1" nft flush ruleset
 
-	if [ "$tainted_then" -ne 0 ];then
-		return
+	check_tainted "queue program exiting while packets queued"
+}
+
+test_queue_bridge()
+{
+	ip -net "$nsrouter" addr flush dev veth0
+	ip -net "$nsrouter" addr flush dev veth1
+
+	ip -net "$nsrouter" link add br0 type bridge
+	ip -net "$nsrouter" link set veth0 master br0
+	ip -net "$nsrouter" link set veth1 master br0
+
+	ip -net "$nsrouter" link set br0 up
+
+	ip -net "$nsrouter" addr add 10.0.2.1/16 dev br0
+	ip -net "$nsrouter" addr add dead:2::1/64 dev br0 nodad
+
+	ip -net "$ns1" addr flush dev eth0
+	ip -net "$ns2" addr flush dev eth0
+
+	ip -net "$ns1" addr add 10.0.1.1/16 dev eth0
+	ip -net "$ns1" addr add dead:2::2/64 dev eth0 nodad
+
+	ip -net "$ns2" addr add 10.0.2.99/16 dev eth0
+	ip -net "$ns2" addr add dead:2::99/64 dev eth0 nodad
+
+	ip netns exec "$nsrouter" nft flush ruleset
+
+	ip netns exec "$nsrouter" sysctl net.ipv6.conf.all.forwarding=0 > /dev/null
+	ip netns exec "$nsrouter" sysctl net.ipv4.conf.veth0.forwarding=0 > /dev/null
+	ip netns exec "$nsrouter" sysctl net.ipv4.conf.veth1.forwarding=0 > /dev/null
+
+	if ! test_ping;then
+		echo "FAIL: netns bridge connectivity" 1>&2
+		exit $ret
 	fi
 
-	read tainted_now < /proc/sys/kernel/tainted
-	if [ "$tainted_now" -eq 0 ];then
-		echo "PASS: queue program exiting while packets queued"
-	else
-		echo "TAINT: queue program exiting while packets queued"
-		dmesg
-		ret=1
-	fi
+	load_ruleset "bridge" "filter" 10
+	test_queue 10 "bridge"
+
+	load_ruleset "bridge" "filter2" 20
+	test_queue 20 "bridge"
 }
 
 ip netns exec "$nsrouter" sysctl net.ipv6.conf.all.forwarding=1 > /dev/null
@@ -603,7 +866,7 @@ ip netns exec "$nsrouter" sysctl net.ipv4.conf.veth0.forwarding=1 > /dev/null
 ip netns exec "$nsrouter" sysctl net.ipv4.conf.veth1.forwarding=1 > /dev/null
 ip netns exec "$nsrouter" sysctl net.ipv4.conf.veth2.forwarding=1 > /dev/null
 
-load_ruleset "filter" 0
+load_ruleset "inet" "filter" 0
 
 if test_ping; then
 	# queue bypass works (rules were skipped, no listener)
@@ -626,11 +889,11 @@ load_counter_ruleset 10
 # 1x icmp prerouting,forward,postrouting -> 3 queue events (6 incl. reply).
 # 1x icmp prerouting,input,output postrouting -> 4 queue events incl. reply.
 # so we expect that userspace program receives 10 packets.
-test_queue 10
+test_queue 10 "inet"
 
 # same.  We queue to a second program as well.
-load_ruleset "filter2" 20
-test_queue 20
+load_ruleset "inet" "filter2" 20
+test_queue 20 "inet"
 ip netns exec "$ns1" nft flush ruleset
 
 test_tcp_forward
@@ -639,10 +902,15 @@ test_tcp_localhost_connectclose
 test_tcp_localhost_requeue
 test_sctp_forward
 test_sctp_output
-test_udp_ct_race
+test_udp_nat_race
+test_udp_gro_ct
+test_queue_stress
 
 # should be last, adds vrf device in ns1 and changes routes
 test_icmp_vrf
 test_queue_removal
+
+# turns router into a bridge
+test_queue_bridge
 
 exit $ret

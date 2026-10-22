@@ -3,6 +3,8 @@
 
 import errno
 import os
+import random
+from typing import Union
 from lib.py import ksft_run, ksft_exit, ksft_eq, ksft_raises, KsftSkipEx
 from lib.py import CmdExitFailure, EthtoolFamily, NlError
 from lib.py import NetDrvEnv
@@ -20,8 +22,7 @@ def _get_hds_mode(cfg, netnl) -> str:
 
 
 def _xdp_onoff(cfg):
-    test_dir = os.path.dirname(os.path.realpath(__file__))
-    prog = test_dir + "/../../net/lib/xdp_dummy.bpf.o"
+    prog = cfg.net_lib_dir / "xdp_dummy.bpf.o"
     ip("link set dev %s xdp obj %s sec xdp" %
        (cfg.ifname, prog))
     ip("link set dev %s xdp off" % cfg.ifname)
@@ -59,7 +60,39 @@ def get_hds_thresh(cfg, netnl) -> None:
     if 'hds-thresh' not in rings:
         raise KsftSkipEx('hds-thresh not supported by device')
 
+
+def _hds_reset(cfg, netnl, rings) -> None:
+    cur = netnl.rings_get({'header': {'dev-index': cfg.ifindex}})
+
+    arg = {'header': {'dev-index': cfg.ifindex}}
+    if cur.get('tcp-data-split') != rings.get('tcp-data-split'):
+        # Try to reset to "unknown" first, we don't know if the setting
+        # was the default or user chose it. Default seems more likely.
+        arg['tcp-data-split'] = "unknown"
+        netnl.rings_set(arg)
+        cur = netnl.rings_get({'header': {'dev-index': cfg.ifindex}})
+        if cur['tcp-data-split'] == rings['tcp-data-split']:
+            del arg['tcp-data-split']
+        else:
+            # Try the explicit setting
+            arg['tcp-data-split'] = rings['tcp-data-split']
+    if cur.get('hds-thresh') != rings.get('hds-thresh'):
+        arg['hds-thresh'] = rings['hds-thresh']
+    if len(arg) > 1:
+        netnl.rings_set(arg)
+
+
+def _defer_reset_hds(cfg, netnl) -> Union[dict, None]:
+    try:
+        rings = netnl.rings_get({'header': {'dev-index': cfg.ifindex}})
+        if 'hds-thresh' in rings or 'tcp-data-split' in rings:
+            defer(_hds_reset, cfg, netnl, rings)
+    except NlError as e:
+        pass
+
+
 def set_hds_enable(cfg, netnl) -> None:
+    _defer_reset_hds(cfg, netnl)
     try:
         netnl.rings_set({'header': {'dev-index': cfg.ifindex}, 'tcp-data-split': 'enabled'})
     except NlError as e:
@@ -77,6 +110,7 @@ def set_hds_enable(cfg, netnl) -> None:
     ksft_eq('enabled', rings['tcp-data-split'])
 
 def set_hds_disable(cfg, netnl) -> None:
+    _defer_reset_hds(cfg, netnl)
     try:
         netnl.rings_set({'header': {'dev-index': cfg.ifindex}, 'tcp-data-split': 'disabled'})
     except NlError as e:
@@ -94,6 +128,7 @@ def set_hds_disable(cfg, netnl) -> None:
     ksft_eq('disabled', rings['tcp-data-split'])
 
 def set_hds_thresh_zero(cfg, netnl) -> None:
+    _defer_reset_hds(cfg, netnl)
     try:
         netnl.rings_set({'header': {'dev-index': cfg.ifindex}, 'hds-thresh': 0})
     except NlError as e:
@@ -110,7 +145,39 @@ def set_hds_thresh_zero(cfg, netnl) -> None:
 
     ksft_eq(0, rings['hds-thresh'])
 
+def set_hds_thresh_random(cfg, netnl) -> None:
+    _defer_reset_hds(cfg, netnl)
+    try:
+        rings = netnl.rings_get({'header': {'dev-index': cfg.ifindex}})
+    except NlError as e:
+        raise KsftSkipEx('ring-get not supported by device')
+    if 'hds-thresh' not in rings:
+        raise KsftSkipEx('hds-thresh not supported by device')
+    if 'hds-thresh-max' not in rings:
+        raise KsftSkipEx('hds-thresh-max not defined by device')
+
+    if rings['hds-thresh-max'] < 2:
+        raise KsftSkipEx('hds-thresh-max is too small')
+    elif rings['hds-thresh-max'] == 2:
+        hds_thresh = 1
+    else:
+        while True:
+            hds_thresh = random.randint(1, rings['hds-thresh-max'] - 1)
+            if hds_thresh != rings['hds-thresh']:
+                break
+
+    try:
+        netnl.rings_set({'header': {'dev-index': cfg.ifindex}, 'hds-thresh': hds_thresh})
+    except NlError as e:
+        if e.error == errno.EINVAL:
+            raise KsftSkipEx("hds-thresh-set not supported by the device")
+        elif e.error == errno.EOPNOTSUPP:
+            raise KsftSkipEx("ring-set not supported by the device")
+    rings = netnl.rings_get({'header': {'dev-index': cfg.ifindex}})
+    ksft_eq(hds_thresh, rings['hds-thresh'])
+
 def set_hds_thresh_max(cfg, netnl) -> None:
+    _defer_reset_hds(cfg, netnl)
     try:
         rings = netnl.rings_get({'header': {'dev-index': cfg.ifindex}})
     except NlError as e:
@@ -128,6 +195,7 @@ def set_hds_thresh_max(cfg, netnl) -> None:
     ksft_eq(rings['hds-thresh'], rings['hds-thresh-max'])
 
 def set_hds_thresh_gt(cfg, netnl) -> None:
+    _defer_reset_hds(cfg, netnl)
     try:
         rings = netnl.rings_get({'header': {'dev-index': cfg.ifindex}})
     except NlError as e:
@@ -149,6 +217,7 @@ def set_xdp(cfg, netnl) -> None:
     """
     mode = _get_hds_mode(cfg, netnl)
     if mode == 'enabled':
+        _defer_reset_hds(cfg, netnl)
         netnl.rings_set({'header': {'dev-index': cfg.ifindex},
                          'tcp-data-split': 'unknown'})
 
@@ -244,6 +313,7 @@ def main() -> None:
                   get_hds_thresh,
                   set_hds_disable,
                   set_hds_enable,
+                  set_hds_thresh_random,
                   set_hds_thresh_zero,
                   set_hds_thresh_max,
                   set_hds_thresh_gt,

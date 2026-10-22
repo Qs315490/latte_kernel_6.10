@@ -163,7 +163,6 @@ struct pnv_phb {
 		unsigned int		*io_segmap;
 
 		/* IRQ chip */
-		int			irq_chip_init;
 		struct irq_chip		irq_chip;
 
 		/* Sorted list of used PE's based
@@ -252,13 +251,14 @@ struct pnv_iov_data {
 	struct resource holes[PCI_SRIOV_NUM_BARS];
 };
 
-static inline struct pnv_iov_data *pnv_iov_get(struct pci_dev *pdev)
+static inline struct pnv_iov_data *pnv_iov_get(const struct pci_dev *pdev)
 {
 	return pdev->dev.archdata.iov_data;
 }
 
 void pnv_pci_ioda_fixup_iov(struct pci_dev *pdev);
-resource_size_t pnv_pci_iov_resource_alignment(struct pci_dev *pdev, int resno);
+resource_size_t pnv_pci_iov_resource_alignment(const struct pci_dev *pdev,
+					       int resno);
 
 int pnv_pcibios_sriov_enable(struct pci_dev *pdev, u16 num_vfs);
 int pnv_pcibios_sriov_disable(struct pci_dev *pdev);
@@ -281,7 +281,6 @@ extern int pnv_eeh_phb_reset(struct pci_controller *hose, int option);
 
 extern struct pnv_ioda_pe *pnv_pci_bdfn_to_pe(struct pnv_phb *phb, u16 bdfn);
 extern struct pnv_ioda_pe *pnv_ioda_get_pe(struct pci_dev *dev);
-extern void pnv_set_msi_irq_chip(struct pnv_phb *phb, unsigned int virq);
 extern unsigned long pnv_pci_ioda2_get_table_size(__u32 page_shift,
 		__u64 window_size, __u32 levels);
 extern int pnv_eeh_post_init(void);

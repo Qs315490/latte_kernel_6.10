@@ -2,6 +2,7 @@
 /*
  * Copyright (C) 2015 Microchip Technology
  */
+#include <linux/bitfield.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mii.h>
@@ -25,6 +26,7 @@ struct lan88xx_priv {
 	int	chip_id;
 	int	chip_rev;
 	__u32	wolopts;
+	u8	downshift_cnt;
 };
 
 static int lan88xx_read_page(struct phy_device *phydev)
@@ -35,47 +37,6 @@ static int lan88xx_read_page(struct phy_device *phydev)
 static int lan88xx_write_page(struct phy_device *phydev, int page)
 {
 	return __phy_write(phydev, LAN88XX_EXT_PAGE_ACCESS, page);
-}
-
-static int lan88xx_phy_config_intr(struct phy_device *phydev)
-{
-	int rc;
-
-	if (phydev->interrupts == PHY_INTERRUPT_ENABLED) {
-		/* unmask all source and clear them before enable */
-		rc = phy_write(phydev, LAN88XX_INT_MASK, 0x7FFF);
-		rc = phy_read(phydev, LAN88XX_INT_STS);
-		rc = phy_write(phydev, LAN88XX_INT_MASK,
-			       LAN88XX_INT_MASK_MDINTPIN_EN_ |
-			       LAN88XX_INT_MASK_LINK_CHANGE_);
-	} else {
-		rc = phy_write(phydev, LAN88XX_INT_MASK, 0);
-		if (rc)
-			return rc;
-
-		/* Ack interrupts after they have been disabled */
-		rc = phy_read(phydev, LAN88XX_INT_STS);
-	}
-
-	return rc < 0 ? rc : 0;
-}
-
-static irqreturn_t lan88xx_handle_interrupt(struct phy_device *phydev)
-{
-	int irq_status;
-
-	irq_status = phy_read(phydev, LAN88XX_INT_STS);
-	if (irq_status < 0) {
-		phy_error(phydev);
-		return IRQ_NONE;
-	}
-
-	if (!(irq_status & LAN88XX_INT_STS_LINK_CHANGE_))
-		return IRQ_NONE;
-
-	phy_trigger_machine(phydev);
-
-	return IRQ_HANDLED;
 }
 
 static int lan88xx_suspend(struct phy_device *phydev)
@@ -234,6 +195,73 @@ static void lan88xx_config_TR_regs(struct phy_device *phydev)
 		phydev_warn(phydev, "Failed to Set Register[0x1686]\n");
 }
 
+static int lan88xx_get_downshift(struct phy_device *phydev, u8 *data)
+{
+	int val;
+
+	val = phy_read_paged(phydev, 1, LAN78XX_PHY_CTRL3);
+	if (val < 0)
+		return val;
+
+	if (!(val & LAN78XX_PHY_CTRL3_AUTO_DOWNSHIFT)) {
+		*data = DOWNSHIFT_DEV_DISABLE;
+		return 0;
+	}
+
+	*data = FIELD_GET(LAN78XX_PHY_CTRL3_DOWNSHIFT_CTRL_MASK, val) + 2;
+
+	return 0;
+}
+
+static int lan88xx_set_downshift(struct phy_device *phydev, u8 cnt)
+{
+	u32 mask = LAN78XX_PHY_CTRL3_DOWNSHIFT_CTRL_MASK |
+		   LAN78XX_PHY_CTRL3_AUTO_DOWNSHIFT;
+
+	if (cnt == DOWNSHIFT_DEV_DISABLE)
+		return phy_modify_paged(phydev, 1, LAN78XX_PHY_CTRL3,
+					LAN78XX_PHY_CTRL3_AUTO_DOWNSHIFT, 0);
+
+	if (cnt == DOWNSHIFT_DEV_DEFAULT_COUNT)
+		cnt = 2;
+
+	if (cnt < 2 || cnt > 5)
+		return -EINVAL;
+
+	return phy_modify_paged(phydev, 1, LAN78XX_PHY_CTRL3, mask,
+				FIELD_PREP(LAN78XX_PHY_CTRL3_DOWNSHIFT_CTRL_MASK,
+					   cnt - 2) |
+				LAN78XX_PHY_CTRL3_AUTO_DOWNSHIFT);
+}
+
+static int lan88xx_get_tunable(struct phy_device *phydev,
+			       struct ethtool_tunable *tuna, void *data)
+{
+	switch (tuna->id) {
+	case ETHTOOL_PHY_DOWNSHIFT:
+		return lan88xx_get_downshift(phydev, data);
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
+static int lan88xx_set_tunable(struct phy_device *phydev,
+			       struct ethtool_tunable *tuna, const void *data)
+{
+	struct lan88xx_priv *priv = phydev->priv;
+	int ret;
+
+	switch (tuna->id) {
+	case ETHTOOL_PHY_DOWNSHIFT:
+		ret = lan88xx_set_downshift(phydev, *(const u8 *)data);
+		if (!ret)
+			priv->downshift_cnt = *(const u8 *)data;
+		return ret;
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
 static int lan88xx_probe(struct phy_device *phydev)
 {
 	struct device *dev = &phydev->mdio.dev;
@@ -246,6 +274,7 @@ static int lan88xx_probe(struct phy_device *phydev)
 		return -ENOMEM;
 
 	priv->wolopts = 0;
+	priv->downshift_cnt = 2;
 
 	len = of_property_read_variable_u32_array(dev->of_node,
 						  "microchip,led-modes",
@@ -325,7 +354,8 @@ static void lan88xx_set_mdix(struct phy_device *phydev)
 
 static int lan88xx_config_init(struct phy_device *phydev)
 {
-	int val;
+	struct lan88xx_priv *priv = phydev->priv;
+	int val, err;
 
 	/*Zerodetect delay enable */
 	val = phy_read_mmd(phydev, MDIO_MMD_PCS,
@@ -337,6 +367,10 @@ static int lan88xx_config_init(struct phy_device *phydev)
 
 	/* Config DSP registers */
 	lan88xx_config_TR_regs(phydev);
+
+	err = lan88xx_set_downshift(phydev, priv->downshift_cnt);
+	if (err < 0)
+		return err;
 
 	return 0;
 }
@@ -373,7 +407,7 @@ static void lan88xx_link_change_notify(struct phy_device *phydev)
 	 * As workaround, set to 10 before setting to 100
 	 * at forced 100 F/H mode.
 	 */
-	if (!phydev->autoneg && phydev->speed == 100) {
+	if (phydev->state == PHY_NOLINK && !phydev->autoneg && phydev->speed == 100) {
 		/* disable phy interrupt */
 		temp = phy_read(phydev, LAN88XX_INT_MASK);
 		temp &= ~LAN88XX_INT_MASK_MDINTPIN_EN_;
@@ -515,6 +549,8 @@ static struct phy_driver microchip_phy_driver[] = {
 	/* This mask (0xfffffff2) is to differentiate from
 	 * LAN8742 (phy_id 0x0007c130 and 0x0007c131)
 	 * and allows future phy_id revisions.
+	 * These PHYs are integrated in LAN7800 and LAN7850 USB/Ethernet
+	 * controllers.
 	 */
 	.phy_id_mask	= 0xfffffff2,
 	.name		= "Microchip LAN88xx",
@@ -527,15 +563,19 @@ static struct phy_driver microchip_phy_driver[] = {
 	.config_init	= lan88xx_config_init,
 	.config_aneg	= lan88xx_config_aneg,
 	.link_change_notify = lan88xx_link_change_notify,
+	.soft_reset	= genphy_soft_reset,
 
-	.config_intr	= lan88xx_phy_config_intr,
-	.handle_interrupt = lan88xx_handle_interrupt,
+	/* Interrupt handling is broken, do not define related
+	 * functions to force polling.
+	 */
 
 	.suspend	= lan88xx_suspend,
 	.resume		= genphy_resume,
 	.set_wol	= lan88xx_set_wol,
 	.read_page	= lan88xx_read_page,
 	.write_page	= lan88xx_write_page,
+	.get_tunable	= lan88xx_get_tunable,
+	.set_tunable	= lan88xx_set_tunable,
 },
 {
 	PHY_ID_MATCH_MODEL(PHY_ID_LAN937X_TX),

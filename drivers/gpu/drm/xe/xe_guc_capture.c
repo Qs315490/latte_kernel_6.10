@@ -13,17 +13,14 @@
 #include "abi/guc_log_abi.h"
 #include "regs/xe_engine_regs.h"
 #include "regs/xe_gt_regs.h"
-#include "regs/xe_guc_regs.h"
-#include "regs/xe_regs.h"
 
-#include "xe_bo.h"
+#include "xe_bo_types.h"
 #include "xe_device.h"
 #include "xe_exec_queue_types.h"
 #include "xe_gt.h"
 #include "xe_gt_mcr.h"
 #include "xe_gt_printk.h"
 #include "xe_guc.h"
-#include "xe_guc_ads.h"
 #include "xe_guc_capture.h"
 #include "xe_guc_capture_types.h"
 #include "xe_guc_ct.h"
@@ -105,49 +102,53 @@ struct __guc_capture_parsed_output {
  *     3. Incorrect order will trigger XE_WARN.
  */
 #define COMMON_XELP_BASE_GLOBAL \
-	{ FORCEWAKE_GT,			REG_32BIT,	0,	0,	"FORCEWAKE_GT"}
+	{ FORCEWAKE_GT,			REG_32BIT,	0,	0,	0,	"FORCEWAKE_GT"}
 
 #define COMMON_BASE_ENGINE_INSTANCE \
-	{ RING_HWSTAM(0),		REG_32BIT,	0,	0,	"HWSTAM"}, \
-	{ RING_HWS_PGA(0),		REG_32BIT,	0,	0,	"RING_HWS_PGA"}, \
-	{ RING_HEAD(0),			REG_32BIT,	0,	0,	"RING_HEAD"}, \
-	{ RING_TAIL(0),			REG_32BIT,	0,	0,	"RING_TAIL"}, \
-	{ RING_CTL(0),			REG_32BIT,	0,	0,	"RING_CTL"}, \
-	{ RING_MI_MODE(0),		REG_32BIT,	0,	0,	"RING_MI_MODE"}, \
-	{ RING_MODE(0),			REG_32BIT,	0,	0,	"RING_MODE"}, \
-	{ RING_ESR(0),			REG_32BIT,	0,	0,	"RING_ESR"}, \
-	{ RING_EMR(0),			REG_32BIT,	0,	0,	"RING_EMR"}, \
-	{ RING_EIR(0),			REG_32BIT,	0,	0,	"RING_EIR"}, \
-	{ RING_IMR(0),			REG_32BIT,	0,	0,	"RING_IMR"}, \
-	{ RING_IPEHR(0),		REG_32BIT,	0,	0,	"IPEHR"}, \
-	{ RING_INSTDONE(0),		REG_32BIT,	0,	0,	"RING_INSTDONE"}, \
-	{ INDIRECT_RING_STATE(0),	REG_32BIT,	0,	0,	"INDIRECT_RING_STATE"}, \
-	{ RING_ACTHD(0),		REG_64BIT_LOW_DW, 0,	0,	NULL}, \
-	{ RING_ACTHD_UDW(0),		REG_64BIT_HI_DW, 0,	0,	"ACTHD"}, \
-	{ RING_BBADDR(0),		REG_64BIT_LOW_DW, 0,	0,	NULL}, \
-	{ RING_BBADDR_UDW(0),		REG_64BIT_HI_DW, 0,	0,	"RING_BBADDR"}, \
-	{ RING_START(0),		REG_64BIT_LOW_DW, 0,	0,	NULL}, \
-	{ RING_START_UDW(0),		REG_64BIT_HI_DW, 0,	0,	"RING_START"}, \
-	{ RING_DMA_FADD(0),		REG_64BIT_LOW_DW, 0,	0,	NULL}, \
-	{ RING_DMA_FADD_UDW(0),		REG_64BIT_HI_DW, 0,	0,	"RING_DMA_FADD"}, \
-	{ RING_EXECLIST_STATUS_LO(0),	REG_64BIT_LOW_DW, 0,	0,	NULL}, \
-	{ RING_EXECLIST_STATUS_HI(0),	REG_64BIT_HI_DW, 0,	0,	"RING_EXECLIST_STATUS"}, \
-	{ RING_EXECLIST_SQ_CONTENTS_LO(0), REG_64BIT_LOW_DW, 0,	0,	NULL}, \
-	{ RING_EXECLIST_SQ_CONTENTS_HI(0), REG_64BIT_HI_DW, 0,	0,	"RING_EXECLIST_SQ_CONTENTS"}
+	{ RING_HWSTAM(0),		REG_32BIT,	0,	0,	0,	"HWSTAM"}, \
+	{ RING_HWS_PGA(0),		REG_32BIT,	0,	0,	0,	"RING_HWS_PGA"}, \
+	{ RING_HEAD(0),			REG_32BIT,	0,	0,	0,	"RING_HEAD"}, \
+	{ RING_TAIL(0),			REG_32BIT,	0,	0,	0,	"RING_TAIL"}, \
+	{ RING_CTL(0),			REG_32BIT,	0,	0,	0,	"RING_CTL"}, \
+	{ RING_MI_MODE(0),		REG_32BIT,	0,	0,	0,	"RING_MI_MODE"}, \
+	{ GFX_MODE(0),			REG_32BIT,	0,	0,	0,	"GFX_MODE"}, \
+	{ RING_ESR(0),			REG_32BIT,	0,	0,	0,	"RING_ESR"}, \
+	{ RING_EMR(0),			REG_32BIT,	0,	0,	0,	"RING_EMR"}, \
+	{ RING_EIR(0),			REG_32BIT,	0,	0,	0,	"RING_EIR"}, \
+	{ RING_IMR(0),			REG_32BIT,	0,	0,	0,	"RING_IMR"}, \
+	{ RING_IPEHR(0),		REG_32BIT,	0,	0,	0,	"IPEHR"}, \
+	{ RING_INSTDONE(0),		REG_32BIT,	0,	0,	0,	"RING_INSTDONE"}, \
+	{ INDIRECT_RING_STATE(0),	REG_32BIT,	0,	0,	0,	"INDIRECT_RING_STATE"}, \
+	{ RING_CURRENT_LRCA(0),		REG_32BIT,	0,	0,	0,	"CURRENT_LRCA"}, \
+	{ RING_ACTHD(0),		REG_64BIT_LOW_DW, 0,	0,	0,	NULL}, \
+	{ RING_ACTHD_UDW(0),		REG_64BIT_HI_DW, 0,	0,	0,	"ACTHD"}, \
+	{ RING_BBADDR(0),		REG_64BIT_LOW_DW, 0,	0,	0,	NULL}, \
+	{ RING_BBADDR_UDW(0),		REG_64BIT_HI_DW, 0,	0,	0,	"RING_BBADDR"}, \
+	{ RING_START(0),		REG_64BIT_LOW_DW, 0,	0,	0,	NULL}, \
+	{ RING_START_UDW(0),		REG_64BIT_HI_DW, 0,	0,	0,	"RING_START"}, \
+	{ RING_DMA_FADD(0),		REG_64BIT_LOW_DW, 0,	0,	0,	NULL}, \
+	{ RING_DMA_FADD_UDW(0),		REG_64BIT_HI_DW, 0,	0,	0,	"RING_DMA_FADD"}, \
+	{ RING_EXECLIST_STATUS_LO(0),	REG_64BIT_LOW_DW, 0,	0,	0,	NULL}, \
+	{ RING_EXECLIST_STATUS_HI(0),	REG_64BIT_HI_DW, 0,	0,	0,	"RING_EXECLIST_STATUS"}, \
+	{ RING_EXECLIST_SQ_CONTENTS_LO(0), REG_64BIT_LOW_DW, 0,	0,	0,	NULL}, \
+	{ RING_EXECLIST_SQ_CONTENTS_HI(0), REG_64BIT_HI_DW, 0,	0,	0,	"RING_EXECLIST_SQ_CONTENTS"}
 
 #define COMMON_XELP_RC_CLASS \
-	{ RCU_MODE,			REG_32BIT,	0,	0,	"RCU_MODE"}
+	{ RCU_MODE,			REG_32BIT,	0,	0,	0,	"RCU_MODE"}
 
 #define COMMON_XELP_RC_CLASS_INSTDONE \
-	{ SC_INSTDONE,			REG_32BIT,	0,	0,	"SC_INSTDONE"}, \
-	{ SC_INSTDONE_EXTRA,		REG_32BIT,	0,	0,	"SC_INSTDONE_EXTRA"}, \
-	{ SC_INSTDONE_EXTRA2,		REG_32BIT,	0,	0,	"SC_INSTDONE_EXTRA2"}
+	{ SC_INSTDONE,			REG_32BIT,	0,	0,	0,	"SC_INSTDONE"}, \
+	{ SC_INSTDONE_EXTRA,		REG_32BIT,	0,	0,	0,	"SC_INSTDONE_EXTRA"}, \
+	{ SC_INSTDONE_EXTRA2,		REG_32BIT,	0,	0,	0,	"SC_INSTDONE_EXTRA2"}
 
 #define XELP_VEC_CLASS_REGS \
-	{ SFC_DONE(0),			0,	0,	0,	"SFC_DONE[0]"}, \
-	{ SFC_DONE(1),			0,	0,	0,	"SFC_DONE[1]"}, \
-	{ SFC_DONE(2),			0,	0,	0,	"SFC_DONE[2]"}, \
-	{ SFC_DONE(3),			0,	0,	0,	"SFC_DONE[3]"}
+	{ SFC_DONE(0),			0,	0,	0,	0,	"SFC_DONE[0]"}, \
+	{ SFC_DONE(1),			0,	0,	0,	0,	"SFC_DONE[1]"}, \
+	{ SFC_DONE(2),			0,	0,	0,	0,	"SFC_DONE[2]"}, \
+	{ SFC_DONE(3),			0,	0,	0,	0,	"SFC_DONE[3]"}
+
+#define XE3P_BASE_ENGINE_INSTANCE \
+	{ RING_CSMQDEBUG(0),		REG_32BIT,	0,	0,	0,	"CSMQDEBUG"}
 
 /* XE_LP Global */
 static const struct __guc_mmio_reg_descr xe_lp_global_regs[] = {
@@ -193,6 +194,12 @@ static const struct __guc_mmio_reg_descr xe_blt_inst_regs[] = {
 /* XE_LP - GSC Per-Engine-Instance */
 static const struct __guc_mmio_reg_descr xe_lp_gsc_inst_regs[] = {
 	COMMON_BASE_ENGINE_INSTANCE,
+};
+
+/* Render / Compute Per-Engine-Instance */
+static const struct __guc_mmio_reg_descr xe3p_rc_inst_regs[] = {
+	COMMON_BASE_ENGINE_INSTANCE,
+	XE3P_BASE_ENGINE_INSTANCE,
 };
 
 /*
@@ -245,6 +252,21 @@ static const struct __guc_mmio_reg_descr_group xe_hpg_lists[] = {
 	{}
 };
 
+ /* List of lists for Xe3p and beyond */
+static const struct __guc_mmio_reg_descr_group xe3p_lists[] = {
+	MAKE_REGLIST(xe_lp_global_regs, PF, GLOBAL, 0),
+	MAKE_REGLIST(xe_hpg_rc_class_regs, PF, ENGINE_CLASS, GUC_CAPTURE_LIST_CLASS_RENDER_COMPUTE),
+	MAKE_REGLIST(xe3p_rc_inst_regs, PF, ENGINE_INSTANCE, GUC_CAPTURE_LIST_CLASS_RENDER_COMPUTE),
+	MAKE_REGLIST(empty_regs_list, PF, ENGINE_CLASS, GUC_CAPTURE_LIST_CLASS_VIDEO),
+	MAKE_REGLIST(xe_vd_inst_regs, PF, ENGINE_INSTANCE, GUC_CAPTURE_LIST_CLASS_VIDEO),
+	MAKE_REGLIST(xe_vec_class_regs, PF, ENGINE_CLASS, GUC_CAPTURE_LIST_CLASS_VIDEOENHANCE),
+	MAKE_REGLIST(xe_vec_inst_regs, PF, ENGINE_INSTANCE, GUC_CAPTURE_LIST_CLASS_VIDEOENHANCE),
+	MAKE_REGLIST(empty_regs_list, PF, ENGINE_CLASS, GUC_CAPTURE_LIST_CLASS_BLITTER),
+	MAKE_REGLIST(xe_blt_inst_regs, PF, ENGINE_INSTANCE, GUC_CAPTURE_LIST_CLASS_BLITTER),
+	MAKE_REGLIST(empty_regs_list, PF, ENGINE_CLASS, GUC_CAPTURE_LIST_CLASS_GSC_OTHER),
+	MAKE_REGLIST(xe_lp_gsc_inst_regs, PF, ENGINE_INSTANCE, GUC_CAPTURE_LIST_CLASS_GSC_OTHER),
+	{}
+};
 static const char * const capture_list_type_names[] = {
 	"Global",
 	"Class",
@@ -292,7 +314,9 @@ guc_capture_remove_stale_matches_from_list(struct xe_guc_state_capture *gc,
 static const struct __guc_mmio_reg_descr_group *
 guc_capture_get_device_reglist(struct xe_device *xe)
 {
-	if (GRAPHICS_VERx100(xe) >= 1255)
+	if (GRAPHICS_VER(xe) >= 35)
+		return xe3p_lists;
+	else if (GRAPHICS_VERx100(xe) >= 1255)
 		return xe_hpg_lists;
 	else
 		return xe_lp_lists;
@@ -352,15 +376,16 @@ static const struct __ext_steer_reg xehpg_extregs[] = {
 
 static void __fill_ext_reg(struct __guc_mmio_reg_descr *ext,
 			   const struct __ext_steer_reg *extlist,
-			   int slice_id, int subslice_id)
+			   u32 dss_id, u16 slice_id, u16 subslice_id)
 {
 	if (!ext || !extlist)
 		return;
 
 	ext->reg = XE_REG(extlist->reg.__reg.addr);
 	ext->flags = FIELD_PREP(GUC_REGSET_STEERING_NEEDED, 1);
-	ext->flags = FIELD_PREP(GUC_REGSET_STEERING_GROUP, slice_id);
+	ext->flags |= FIELD_PREP(GUC_REGSET_STEERING_GROUP, slice_id);
 	ext->flags |= FIELD_PREP(GUC_REGSET_STEERING_INSTANCE, subslice_id);
+	ext->dss_id = dss_id;
 	ext->regname = extlist->name;
 }
 
@@ -397,7 +422,7 @@ static void guc_capture_alloc_steered_lists(struct xe_guc *guc)
 {
 	struct xe_gt *gt = guc_to_gt(guc);
 	u16 slice, subslice;
-	int iter, i, total = 0;
+	int dss, i, total = 0;
 	const struct __guc_mmio_reg_descr_group *lists = guc->capture->reglists;
 	const struct __guc_mmio_reg_descr_group *list;
 	struct __guc_mmio_reg_descr_group *extlists;
@@ -436,8 +461,14 @@ static void guc_capture_alloc_steered_lists(struct xe_guc *guc)
 	if (!list || guc->capture->extlists)
 		return;
 
-	total = bitmap_weight(gt->fuse_topo.g_dss_mask, sizeof(gt->fuse_topo.g_dss_mask) * 8) *
-		guc_capture_get_steer_reg_num(guc_to_xe(guc));
+	{
+		xe_dss_mask_t all_dss;
+
+		total = bitmap_weighted_or(all_dss, gt->fuse_topo.g_dss_mask,
+					   gt->fuse_topo.c_dss_mask,
+					   XE_MAX_DSS_FUSE_BITS) *
+			guc_capture_get_steer_reg_num(guc_to_xe(guc));
+	}
 
 	if (!total)
 		return;
@@ -454,15 +485,15 @@ static void guc_capture_alloc_steered_lists(struct xe_guc *guc)
 
 	/* For steering registers, the list is generated at run-time */
 	extarray = (struct __guc_mmio_reg_descr *)extlists[0].list;
-	for_each_dss_steering(iter, gt, slice, subslice) {
+	for_each_dss_steering(dss, gt, slice, subslice) {
 		for (i = 0; i < ARRAY_SIZE(xe_extregs); ++i) {
-			__fill_ext_reg(extarray, &xe_extregs[i], slice, subslice);
+			__fill_ext_reg(extarray, &xe_extregs[i], dss, slice, subslice);
 			++extarray;
 		}
 
 		if (has_xehpg_extregs)
 			for (i = 0; i < ARRAY_SIZE(xehpg_extregs); ++i) {
-				__fill_ext_reg(extarray, &xehpg_extregs[i], slice, subslice);
+				__fill_ext_reg(extarray, &xehpg_extregs[i], dss, slice, subslice);
 				++extarray;
 			}
 	}
@@ -815,7 +846,7 @@ static void check_guc_capture_size(struct xe_guc *guc)
 {
 	int capture_size = guc_capture_output_size_est(guc);
 	int spare_size = capture_size * GUC_CAPTURE_OVERBUFFER_MULTIPLIER;
-	u32 buffer_size = xe_guc_log_section_size_capture(&guc->log);
+	u32 buffer_size = XE_GUC_LOG_STATE_CAPTURE_BUFFER_SIZE;
 
 	/*
 	 * NOTE: capture_size is much smaller than the capture region
@@ -921,7 +952,7 @@ guc_capture_init_node(struct xe_guc *guc, struct __guc_capture_parsed_output *no
  *                  ADS module also calls separately for PF vs VF.
  *
  *     --> alloc B: GuC output capture buf (registered via guc_init_params(log_param))
- *                  Size = #define CAPTURE_BUFFER_SIZE (warns if on too-small)
+ *                  Size = XE_GUC_LOG_STATE_CAPTURE_BUFFER_SIZE (warns if on too-small)
  *                  Note2: 'x 3' to hold multiple capture groups
  *
  * GUC Runtime notify capture:
@@ -1339,7 +1370,7 @@ static int __guc_capture_flushlog_complete(struct xe_guc *guc)
 {
 	u32 action[] = {
 		XE_GUC_ACTION_LOG_BUFFER_FILE_FLUSH_COMPLETE,
-		GUC_LOG_BUFFER_CAPTURE
+		GUC_LOG_TYPE_STATE_CAPTURE
 	};
 
 	return xe_guc_ct_send_g2h_handler(&guc->ct, action, ARRAY_SIZE(action));
@@ -1356,8 +1387,8 @@ static void __guc_capture_process_output(struct xe_guc *guc)
 	u32 log_buf_state_offset;
 	u32 src_data_offset;
 
-	log_buf_state_offset = sizeof(struct guc_log_buffer_state) * GUC_LOG_BUFFER_CAPTURE;
-	src_data_offset = xe_guc_get_log_buffer_offset(&guc->log, GUC_LOG_BUFFER_CAPTURE);
+	log_buf_state_offset = sizeof(struct guc_log_buffer_state) * GUC_LOG_TYPE_STATE_CAPTURE;
+	src_data_offset = XE_GUC_LOG_STATE_CAPTURE_OFFSET;
 
 	/*
 	 * Make a copy of the state structure, inside GuC log buffer
@@ -1367,15 +1398,15 @@ static void __guc_capture_process_output(struct xe_guc *guc)
 	xe_map_memcpy_from(guc_to_xe(guc), &log_buf_state_local, &guc->log.bo->vmap,
 			   log_buf_state_offset, sizeof(struct guc_log_buffer_state));
 
-	buffer_size = xe_guc_get_log_buffer_size(&guc->log, GUC_LOG_BUFFER_CAPTURE);
+	buffer_size = XE_GUC_LOG_STATE_CAPTURE_BUFFER_SIZE;
 	read_offset = log_buf_state_local.read_ptr;
 	write_offset = log_buf_state_local.sampled_write_ptr;
 	full_count = FIELD_GET(GUC_LOG_BUFFER_STATE_BUFFER_FULL_CNT, log_buf_state_local.flags);
 
 	/* Bookkeeping stuff */
 	tmp = FIELD_GET(GUC_LOG_BUFFER_STATE_FLUSH_TO_FILE, log_buf_state_local.flags);
-	guc->log.stats[GUC_LOG_BUFFER_CAPTURE].flush += tmp;
-	new_overflow = xe_guc_check_log_buf_overflow(&guc->log, GUC_LOG_BUFFER_CAPTURE,
+	guc->log.stats[GUC_LOG_TYPE_STATE_CAPTURE].flush += tmp;
+	new_overflow = xe_guc_check_log_buf_overflow(&guc->log, GUC_LOG_TYPE_STATE_CAPTURE,
 						     full_count);
 
 	/* Now copy the actual logs. */
@@ -1672,18 +1703,16 @@ snapshot_print_by_list_order(struct xe_hw_engine_snapshot *snapshot, struct drm_
 {
 	struct xe_gt *gt = snapshot->hwe->gt;
 	struct xe_device *xe = gt_to_xe(gt);
-	struct xe_guc *guc = &gt->uc.guc;
 	struct xe_devcoredump *devcoredump = &xe->devcoredump;
 	struct xe_devcoredump_snapshot *devcore_snapshot = &devcoredump->snapshot;
 	struct gcap_reg_list_info *reginfo = NULL;
 	u32 i, last_value = 0;
-	bool is_ext, low32_ready = false;
+	bool low32_ready = false;
 
 	if (!list || !list->list || list->num_regs == 0)
 		return;
 	XE_WARN_ON(!devcore_snapshot->matched_node);
 
-	is_ext = list == guc->capture->extlists;
 	reginfo = &devcore_snapshot->matched_node->reginfo[type];
 
 	/*
@@ -1749,17 +1778,12 @@ snapshot_print_by_list_order(struct xe_hw_engine_snapshot *snapshot, struct drm_
 			 */
 			XE_WARN_ON(low32_ready);
 
-			if (is_ext) {
-				int dss, group, instance;
-
-				group = FIELD_GET(GUC_REGSET_STEERING_GROUP, reg_desc->flags);
-				instance = FIELD_GET(GUC_REGSET_STEERING_INSTANCE, reg_desc->flags);
-				dss = xe_gt_mcr_steering_info_to_dss_id(gt, group, instance);
-
-				drm_printf(p, "\t%s[%u]: 0x%08x\n", reg_desc->regname, dss, value);
-			} else {
+			if (FIELD_GET(GUC_REGSET_STEERING_NEEDED, reg_desc->flags))
+				drm_printf(p, "\t%s[%u]: 0x%08x\n", reg_desc->regname,
+					   reg_desc->dss_id, value);
+			else
 				drm_printf(p, "\t%s: 0x%08x\n", reg_desc->regname, value);
-			}
+
 			break;
 		}
 	}
@@ -1862,7 +1886,14 @@ xe_guc_capture_get_matching_and_lock(struct xe_exec_queue *q)
 		return NULL;
 
 	xe = gt_to_xe(q->gt);
-	if (xe->wedged.mode >= 2 || !xe_device_uc_enabled(xe) || IS_SRIOV_VF(xe))
+
+	if (xe->wedged.mode == XE_WEDGED_MODE_UPON_ANY_HANG_NO_RESET)
+		return NULL;
+
+	if (!xe_device_uc_enabled(xe))
+		return NULL;
+
+	if (IS_SRIOV_VF(xe))
 		return NULL;
 
 	ss = &xe->devcoredump.snapshot;

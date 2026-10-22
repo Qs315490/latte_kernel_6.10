@@ -155,7 +155,7 @@ struct ad5770r_output_modes {
 	int max;
 };
 
-static struct ad5770r_output_modes ad5770r_rng_tbl[] = {
+static const struct ad5770r_output_modes ad5770r_rng_tbl[] = {
 	{ 0, AD5770R_CH0_0_300, 0, 300 },
 	{ 0, AD5770R_CH0_NEG_60_0, -60, 0 },
 	{ 0, AD5770R_CH0_NEG_60_300, -60, 300 },
@@ -322,7 +322,7 @@ static int ad5770r_read_raw(struct iio_dev *indio_dev,
 				       chan->address,
 				       st->transf_buf, 2);
 		if (ret)
-			return 0;
+			return ret;
 
 		buf16 = get_unaligned_le16(st->transf_buf);
 		*val = buf16 >> 2;
@@ -637,13 +637,13 @@ static int ad5770r_probe(struct spi_device *spi)
 
 static const struct of_device_id ad5770r_of_id[] = {
 	{ .compatible = "adi,ad5770r", },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ad5770r_of_id);
 
 static const struct spi_device_id ad5770r_id[] = {
 	{ "ad5770r", 0 },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad5770r_id);
 

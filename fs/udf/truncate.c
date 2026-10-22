@@ -115,7 +115,7 @@ void udf_truncate_tail_extent(struct inode *inode)
 	}
 	/* This inode entry is in-memory only and thus we don't have to mark
 	 * the inode dirty */
-	if (ret == 0)
+	if (ret >= 0)
 		iinfo->i_lenExtents = inode->i_size;
 	brelse(epos.bh);
 }
@@ -186,7 +186,7 @@ static void udf_update_alloc_ext_desc(struct inode *inode,
 		len += lenalloc;
 
 	udf_update_tag(epos->bh->b_data, len);
-	mark_buffer_dirty_inode(epos->bh, inode);
+	mmb_mark_buffer_dirty(epos->bh, &UDF_I(inode)->i_metadata_bhs);
 }
 
 /*

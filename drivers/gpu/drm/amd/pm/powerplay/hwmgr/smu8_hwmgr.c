@@ -270,42 +270,6 @@ static int smu8_construct_max_power_limits_table(struct pp_hwmgr *hwmgr,
 	return 0;
 }
 
-static int smu8_init_dynamic_state_adjustment_rule_settings(
-			struct pp_hwmgr *hwmgr,
-			ATOM_CLK_VOLT_CAPABILITY *disp_voltage_table)
-{
-	struct phm_clock_voltage_dependency_table *table_clk_vlt;
-
-	table_clk_vlt = kzalloc(struct_size(table_clk_vlt, entries, 8),
-				GFP_KERNEL);
-
-	if (NULL == table_clk_vlt) {
-		pr_err("Can not allocate memory!\n");
-		return -ENOMEM;
-	}
-
-	table_clk_vlt->count = 8;
-	table_clk_vlt->entries[0].clk = PP_DAL_POWERLEVEL_0;
-	table_clk_vlt->entries[0].v = 0;
-	table_clk_vlt->entries[1].clk = PP_DAL_POWERLEVEL_1;
-	table_clk_vlt->entries[1].v = 1;
-	table_clk_vlt->entries[2].clk = PP_DAL_POWERLEVEL_2;
-	table_clk_vlt->entries[2].v = 2;
-	table_clk_vlt->entries[3].clk = PP_DAL_POWERLEVEL_3;
-	table_clk_vlt->entries[3].v = 3;
-	table_clk_vlt->entries[4].clk = PP_DAL_POWERLEVEL_4;
-	table_clk_vlt->entries[4].v = 4;
-	table_clk_vlt->entries[5].clk = PP_DAL_POWERLEVEL_5;
-	table_clk_vlt->entries[5].v = 5;
-	table_clk_vlt->entries[6].clk = PP_DAL_POWERLEVEL_6;
-	table_clk_vlt->entries[6].v = 6;
-	table_clk_vlt->entries[7].clk = PP_DAL_POWERLEVEL_7;
-	table_clk_vlt->entries[7].v = 7;
-	hwmgr->dyn_state.vddc_dep_on_dal_pwrl = table_clk_vlt;
-
-	return 0;
-}
-
 static int smu8_get_system_info_data(struct pp_hwmgr *hwmgr)
 {
 	struct smu8_hwmgr *data = hwmgr->backend;
@@ -394,7 +358,7 @@ static int smu8_get_system_info_data(struct pp_hwmgr *hwmgr)
 	}
 
 	if (le32_to_cpu(info->ulGPUCapInfo) &
-		SYS_INFO_GPUCAPS__ENABEL_DFS_BYPASS) {
+		SYS_INFO_GPUCAPS__ENABLE_DFS_BYPASS) {
 		phm_cap_set(hwmgr->platform_descriptor.platformCaps,
 				    PHM_PlatformCaps_EnableDFSBypass);
 	}
@@ -403,9 +367,6 @@ static int smu8_get_system_info_data(struct pp_hwmgr *hwmgr)
 
 	smu8_construct_max_power_limits_table (hwmgr,
 				    &hwmgr->dyn_state.max_clock_voltage_on_ac);
-
-	smu8_init_dynamic_state_adjustment_rule_settings(hwmgr,
-				    &info->sDISPCLK_Voltage[0]);
 
 	return result;
 }
@@ -1122,7 +1083,7 @@ static int smu8_hwmgr_backend_init(struct pp_hwmgr *hwmgr)
 	int result = 0;
 	struct smu8_hwmgr *data;
 
-	data = kzalloc(sizeof(struct smu8_hwmgr), GFP_KERNEL);
+	data = kzalloc_obj(struct smu8_hwmgr);
 	if (data == NULL)
 		return -ENOMEM;
 
@@ -1150,9 +1111,6 @@ static int smu8_hwmgr_backend_init(struct pp_hwmgr *hwmgr)
 static int smu8_hwmgr_backend_fini(struct pp_hwmgr *hwmgr)
 {
 	if (hwmgr != NULL) {
-		kfree(hwmgr->dyn_state.vddc_dep_on_dal_pwrl);
-		hwmgr->dyn_state.vddc_dep_on_dal_pwrl = NULL;
-
 		kfree(hwmgr->backend);
 		hwmgr->backend = NULL;
 	}
@@ -1522,27 +1480,6 @@ static int smu8_store_cc6_data(struct pp_hwmgr *hwmgr, uint32_t separation_time,
 	return 0;
 }
 
-static int smu8_get_dal_power_level(struct pp_hwmgr *hwmgr,
-		struct amd_pp_simple_clock_info *info)
-{
-	uint32_t i;
-	const struct phm_clock_voltage_dependency_table *table =
-			hwmgr->dyn_state.vddc_dep_on_dal_pwrl;
-	const struct phm_clock_and_voltage_limits *limits =
-			&hwmgr->dyn_state.max_clock_voltage_on_ac;
-
-	info->engine_max_clock = limits->sclk;
-	info->memory_max_clock = limits->mclk;
-
-	for (i = table->count - 1; i > 0; i--) {
-		if (limits->vddc >= table->entries[i].v) {
-			info->level = table->entries[i].clk;
-			return 0;
-		}
-	}
-	return -EINVAL;
-}
-
 static int smu8_force_clock_level(struct pp_hwmgr *hwmgr,
 		enum pp_clock_type type, uint32_t mask)
 {
@@ -1564,14 +1501,15 @@ static int smu8_force_clock_level(struct pp_hwmgr *hwmgr,
 	return 0;
 }
 
-static int smu8_print_clock_levels(struct pp_hwmgr *hwmgr,
-		enum pp_clock_type type, char *buf)
+static int smu8_emit_clock_levels(struct pp_hwmgr *hwmgr,
+				  enum pp_clock_type type, char *buf,
+				  int *offset)
 {
 	struct smu8_hwmgr *data = hwmgr->backend;
 	struct phm_clock_voltage_dependency_table *sclk_table =
 			hwmgr->dyn_state.vddc_dependency_on_sclk;
 	uint32_t i, now;
-	int size = 0;
+	int size = *offset;
 
 	switch (type) {
 	case PP_SCLK:
@@ -1582,9 +1520,9 @@ static int smu8_print_clock_levels(struct pp_hwmgr *hwmgr,
 				CURR_SCLK_INDEX);
 
 		for (i = 0; i < sclk_table->count; i++)
-			size += sprintf(buf + size, "%d: %uMhz %s\n",
-					i, sclk_table->entries[i].clk / 100,
-					(i == now) ? "*" : "");
+			size += sysfs_emit_at(buf, size, "%d: %uMhz %s\n", i,
+					      sclk_table->entries[i].clk / 100,
+					      (i == now) ? "*" : "");
 		break;
 	case PP_MCLK:
 		now = PHM_GET_FIELD(cgs_read_ind_register(hwmgr->device,
@@ -1594,14 +1532,20 @@ static int smu8_print_clock_levels(struct pp_hwmgr *hwmgr,
 				CURR_MCLK_INDEX);
 
 		for (i = SMU8_NUM_NBPMEMORYCLOCK; i > 0; i--)
-			size += sprintf(buf + size, "%d: %uMhz %s\n",
-					SMU8_NUM_NBPMEMORYCLOCK-i, data->sys_info.nbp_memory_clock[i-1] / 100,
-					(SMU8_NUM_NBPMEMORYCLOCK-i == now) ? "*" : "");
+			size += sysfs_emit_at(
+				buf, size, "%d: %uMhz %s\n",
+				SMU8_NUM_NBPMEMORYCLOCK - i,
+				data->sys_info.nbp_memory_clock[i - 1] / 100,
+				(SMU8_NUM_NBPMEMORYCLOCK - i == now) ? "*" :
+								       "");
 		break;
 	default:
 		break;
 	}
-	return size;
+
+	*offset = size;
+
+	return 0;
 }
 
 static int smu8_get_performance_level(struct pp_hwmgr *hwmgr, const struct pp_hw_power_state *state,
@@ -2044,7 +1988,6 @@ static const struct pp_hwmgr_func smu8_hwmgr_funcs = {
 	.apply_state_adjust_rules = smu8_apply_state_adjust_rules,
 	.force_dpm_level = smu8_dpm_force_dpm_level,
 	.get_power_state_size = smu8_get_power_state_size,
-	.powerdown_uvd = smu8_dpm_powerdown_uvd,
 	.powergate_uvd = smu8_dpm_powergate_uvd,
 	.powergate_vce = smu8_dpm_powergate_vce,
 	.powergate_acp = smu8_dpm_powergate_acp,
@@ -2056,8 +1999,7 @@ static const struct pp_hwmgr_func smu8_hwmgr_funcs = {
 	.set_cpu_power_state = smu8_set_cpu_power_state,
 	.store_cc6_data = smu8_store_cc6_data,
 	.force_clock_level = smu8_force_clock_level,
-	.print_clock_levels = smu8_print_clock_levels,
-	.get_dal_power_level = smu8_get_dal_power_level,
+	.emit_clock_levels = smu8_emit_clock_levels,
 	.get_performance_level = smu8_get_performance_level,
 	.get_current_shallow_sleep_clocks = smu8_get_current_shallow_sleep_clocks,
 	.get_clock_by_type = smu8_get_clock_by_type,

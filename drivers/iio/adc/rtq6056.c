@@ -9,7 +9,6 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
@@ -300,7 +299,7 @@ static int rtq6056_adc_read_channel(struct rtq6056_priv *priv,
 		return IIO_VAL_INT;
 	case RTQ6056_REG_SHUNTVOLT:
 	case RTQ6056_REG_CURRENT:
-		*val = sign_extend32(regval, 16);
+		*val = sign_extend32(regval, 15);
 		return IIO_VAL_INT;
 	default:
 		return -EINVAL;
@@ -514,26 +513,37 @@ static int rtq6056_adc_read_avail(struct iio_dev *indio_dev,
 	}
 }
 
-static int rtq6056_adc_write_raw(struct iio_dev *indio_dev,
-				 struct iio_chan_spec const *chan, int val,
-				 int val2, long mask)
+static int __rtq6056_adc_write_raw(struct iio_dev *indio_dev,
+				   struct iio_chan_spec const *chan, int val,
+				   long mask)
 {
 	struct rtq6056_priv *priv = iio_priv(indio_dev);
 	const struct richtek_dev_data *devdata = priv->devdata;
 
-	iio_device_claim_direct_scoped(return -EBUSY, indio_dev) {
-		switch (mask) {
-		case IIO_CHAN_INFO_SAMP_FREQ:
-			if (devdata->fixed_samp_freq)
-				return -EINVAL;
-			return rtq6056_adc_set_samp_freq(priv, chan, val);
-		case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
-			return devdata->set_average(priv, val);
-		default:
+	switch (mask) {
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		if (devdata->fixed_samp_freq)
 			return -EINVAL;
-		}
+		return rtq6056_adc_set_samp_freq(priv, chan, val);
+	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
+		return devdata->set_average(priv, val);
+	default:
+		return -EINVAL;
 	}
-	unreachable();
+}
+
+static int rtq6056_adc_write_raw(struct iio_dev *indio_dev,
+				 struct iio_chan_spec const *chan, int val,
+				 int val2, long mask)
+{
+	int ret;
+
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
+
+	ret = __rtq6056_adc_write_raw(indio_dev, chan, val, mask);
+	iio_device_release_direct(indio_dev);
+	return ret;
 }
 
 static const char *rtq6056_channel_labels[RTQ6056_MAX_CHANNEL] = {
@@ -590,9 +600,8 @@ static ssize_t shunt_resistor_store(struct device *dev,
 	struct rtq6056_priv *priv = iio_priv(indio_dev);
 	int val, val_fract, ret;
 
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret)
-		return ret;
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
 
 	ret = iio_str_to_fixpoint(buf, 100000, &val, &val_fract);
 	if (ret)
@@ -601,7 +610,7 @@ static ssize_t shunt_resistor_store(struct device *dev,
 	ret = rtq6056_set_shunt_resistor(priv, val * 1000000 + val_fract);
 
 out_store:
-	iio_device_release_direct_mode(indio_dev);
+	iio_device_release_direct(indio_dev);
 
 	return ret ?: len;
 }
@@ -635,11 +644,9 @@ static irqreturn_t rtq6056_buffer_trigger_handler(int irq, void *p)
 	struct {
 		u16 vals[RTQ6056_MAX_CHANNEL];
 		aligned_s64 timestamp;
-	} data;
+	} data = { };
 	unsigned int raw;
 	int i = 0, bit, ret;
-
-	memset(&data, 0, sizeof(data));
 
 	pm_runtime_get_sync(dev);
 
@@ -656,7 +663,8 @@ static irqreturn_t rtq6056_buffer_trigger_handler(int irq, void *p)
 		data.vals[i++] = raw;
 	}
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &data, iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &data, sizeof(data),
+				    iio_get_time_ns(indio_dev));
 
 out:
 	pm_runtime_mark_last_busy(dev);
@@ -719,7 +727,7 @@ static int rtq6056_probe(struct i2c_client *i2c)
 	if (!i2c_check_functionality(i2c->adapter, I2C_FUNC_SMBUS_WORD_DATA))
 		return -EOPNOTSUPP;
 
-	devdata = device_get_match_data(dev);
+	devdata = i2c_get_match_data(i2c);
 	if (!devdata)
 		return dev_err_probe(dev, -EINVAL, "Invalid dev data\n");
 
@@ -862,6 +870,13 @@ static const struct richtek_dev_data rtq6059_devdata = {
 	.set_average = rtq6059_adc_set_average,
 };
 
+static const struct i2c_device_id rtq6056_id[] = {
+	{ "rtq6056", (kernel_ulong_t)&rtq6056_devdata },
+	{ "rtq6059", (kernel_ulong_t)&rtq6059_devdata },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, rtq6056_id);
+
 static const struct of_device_id rtq6056_device_match[] = {
 	{ .compatible = "richtek,rtq6056", .data = &rtq6056_devdata },
 	{ .compatible = "richtek,rtq6059", .data = &rtq6059_devdata },
@@ -876,6 +891,7 @@ static struct i2c_driver rtq6056_driver = {
 		.pm = pm_ptr(&rtq6056_pm_ops),
 	},
 	.probe = rtq6056_probe,
+	.id_table = rtq6056_id,
 };
 module_i2c_driver(rtq6056_driver);
 

@@ -53,7 +53,6 @@ static inline void arch_exit_work(unsigned long ti_work)
 	if (unlikely(ti_work & _TIF_IO_BITMAP))
 		tss_update_io_bitmap();
 
-	fpregs_assert_state_consistent();
 	if (unlikely(ti_work & _TIF_NEED_FPU_LOAD))
 		switch_fpu_return();
 }
@@ -61,7 +60,9 @@ static inline void arch_exit_work(unsigned long ti_work)
 static inline void arch_exit_to_user_mode_prepare(struct pt_regs *regs,
 						  unsigned long ti_work)
 {
-	if (IS_ENABLED(CONFIG_X86_DEBUG_FPU) || unlikely(ti_work))
+	fpregs_assert_state_consistent();
+
+	if (unlikely(ti_work))
 		arch_exit_work(ti_work);
 
 	fred_update_rsp0();
@@ -81,17 +82,12 @@ static inline void arch_exit_to_user_mode_prepare(struct pt_regs *regs,
 	current_thread_info()->status &= ~(TS_COMPAT | TS_I386_REGS_POKED);
 #endif
 
-	/*
-	 * This value will get limited by KSTACK_OFFSET_MAX(), which is 10
-	 * bits. The actual entropy will be further reduced by the compiler
-	 * when applying stack alignment constraints (see cc_stack_align4/8 in
-	 * arch/x86/Makefile), which will remove the 3 (x86_64) or 2 (ia32)
-	 * low bits from any entropy chosen here.
-	 *
-	 * Therefore, final stack offset entropy will be 7 (x86_64) or
-	 * 8 (ia32) bits.
-	 */
-	choose_random_kstack_offset(rdtsc());
+	/* Avoid unnecessary reads of 'x86_ibpb_exit_to_user' */
+	if (cpu_feature_enabled(X86_FEATURE_IBPB_EXIT_TO_USER) &&
+	    this_cpu_read(x86_ibpb_exit_to_user)) {
+		indirect_branch_prediction_barrier();
+		this_cpu_write(x86_ibpb_exit_to_user, false);
+	}
 }
 #define arch_exit_to_user_mode_prepare arch_exit_to_user_mode_prepare
 
@@ -100,5 +96,7 @@ static __always_inline void arch_exit_to_user_mode(void)
 	amd_clear_divider();
 }
 #define arch_exit_to_user_mode arch_exit_to_user_mode
+
+extern void x86_entry_from_kvm(unsigned int entry_type, unsigned int vector);
 
 #endif

@@ -14,6 +14,7 @@
 #include "pvr_rogue_defs.h"
 #include "pvr_rogue_fwif_client.h"
 #include "pvr_rogue_fwif_shared.h"
+#include "pvr_trace.h"
 #include "pvr_vm.h"
 
 #include <uapi/drm/pvr_drm.h>
@@ -29,7 +30,6 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/of_device.h>
@@ -44,6 +44,7 @@
  * This driver supports the following PowerVR/IMG graphics cores from Imagination Technologies:
  *
  * * AXE-1-16M (found in Texas Instruments AM62)
+ * * BXS-4-64 MC1 (found in Texas Instruments J721S2/AM68)
  */
 
 /**
@@ -513,7 +514,8 @@ copy_out:
 	if (err < 0)
 		return err;
 
-	args->size = sizeof(query);
+	if (args->size > sizeof(query))
+		args->size = sizeof(query);
 	return 0;
 }
 
@@ -594,7 +596,8 @@ copy_out:
 	if (err < 0)
 		return err;
 
-	args->size = sizeof(query);
+	if (args->size > sizeof(query))
+		args->size = sizeof(query);
 	return 0;
 }
 
@@ -1149,6 +1152,8 @@ pvr_ioctl_submit_jobs(struct drm_device *drm_dev, void *raw_args,
 	int idx;
 	int err;
 
+	trace_pvr_job_submit_ioctl(pvr_dev, args->jobs.count);
+
 	if (!drm_dev_enter(drm_dev, &idx))
 		return -EIO;
 
@@ -1251,14 +1256,13 @@ pvr_set_uobj_array(const struct drm_pvr_obj_array *out, u32 min_stride, u32 obj_
 			if (copy_to_user(out_ptr, in_ptr, cpy_elem_size))
 				return -EFAULT;
 
-			out_ptr += obj_size;
-			in_ptr += out->stride;
-		}
+			if (out->stride > obj_size &&
+			    clear_user(out_ptr + cpy_elem_size, out->stride - obj_size)) {
+				return -EFAULT;
+			}
 
-		if (out->stride > obj_size &&
-		    clear_user(u64_to_user_ptr(out->array + obj_size),
-			       out->stride - obj_size)) {
-			return -EFAULT;
+			out_ptr += out->stride;
+			in_ptr += obj_size;
 		}
 	}
 
@@ -1311,7 +1315,7 @@ pvr_drm_driver_open(struct drm_device *drm_dev, struct drm_file *file)
 	struct pvr_device *pvr_dev = to_pvr_device(drm_dev);
 	struct pvr_file *pvr_file;
 
-	pvr_file = kzalloc(sizeof(*pvr_file), GFP_KERNEL);
+	pvr_file = kzalloc_obj(*pvr_file);
 	if (!pvr_file)
 		return -ENOMEM;
 
@@ -1411,6 +1415,10 @@ pvr_probe(struct platform_device *plat_dev)
 
 	platform_set_drvdata(plat_dev, drm_dev);
 
+	err = pvr_power_domains_init(pvr_dev);
+	if (err)
+		return err;
+
 	init_rwsem(&pvr_dev->reset_sem);
 
 	pvr_context_device_init(pvr_dev);
@@ -1450,6 +1458,8 @@ err_watchdog_fini:
 err_context_fini:
 	pvr_context_device_fini(pvr_dev);
 
+	pvr_power_domains_fini(pvr_dev);
+
 	return err;
 }
 
@@ -1470,10 +1480,36 @@ static void pvr_remove(struct platform_device *plat_dev)
 	pvr_watchdog_fini(pvr_dev);
 	pvr_queue_device_fini(pvr_dev);
 	pvr_context_device_fini(pvr_dev);
+	pvr_power_domains_fini(pvr_dev);
 }
 
+static const struct pvr_device_data pvr_device_data_manual = {
+	.pwr_ops = &pvr_power_sequence_ops_manual,
+};
+
+static const struct pvr_device_data pvr_device_data_pwrseq = {
+	.pwr_ops = &pvr_power_sequence_ops_pwrseq,
+};
+
 static const struct of_device_id dt_match[] = {
-	{ .compatible = "img,img-axe", .data = NULL },
+	{
+		.compatible = "thead,th1520-gpu",
+		.data = &pvr_device_data_pwrseq,
+	},
+	{
+		.compatible = "img,img-rogue",
+		.data = &pvr_device_data_manual,
+	},
+
+	/*
+	 * This legacy compatible string was introduced early on before the more generic
+	 * "img,img-rogue" was added. Keep it around here for compatibility, but never use
+	 * "img,img-axe" in new devicetrees.
+	 */
+	{
+		.compatible = "img,img-axe",
+		.data = &pvr_device_data_manual,
+	},
 	{}
 };
 MODULE_DEVICE_TABLE(of, dt_match);
@@ -1498,3 +1534,5 @@ MODULE_DESCRIPTION(PVR_DRIVER_DESC);
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_IMPORT_NS("DMA_BUF");
 MODULE_FIRMWARE("powervr/rogue_33.15.11.3_v1.fw");
+MODULE_FIRMWARE("powervr/rogue_36.52.104.182_v1.fw");
+MODULE_FIRMWARE("powervr/rogue_36.53.104.796_v1.fw");

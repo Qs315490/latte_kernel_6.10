@@ -55,17 +55,17 @@ static int lp873x_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	if (ret < 0)
 		return ret;
 
-	return val & BIT(offset * BITS_PER_GPO);
+	return !!(val & BIT(offset * BITS_PER_GPO));
 }
 
-static void lp873x_gpio_set(struct gpio_chip *chip, unsigned int offset,
-			    int value)
+static int lp873x_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			   int value)
 {
 	struct lp873x_gpio *gpio = gpiochip_get_data(chip);
 
-	regmap_update_bits(gpio->lp873->regmap, LP873X_REG_GPO_CTRL,
-			   BIT(offset * BITS_PER_GPO),
-			   value ? BIT(offset * BITS_PER_GPO) : 0);
+	return regmap_update_bits(gpio->lp873->regmap, LP873X_REG_GPO_CTRL,
+				  BIT(offset * BITS_PER_GPO),
+				  value ? BIT(offset * BITS_PER_GPO) : 0);
 }
 
 static int lp873x_gpio_request(struct gpio_chip *gc, unsigned int offset)
@@ -156,7 +156,7 @@ static int lp873x_gpio_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id lp873x_gpio_id_table[] = {
-	{ "lp873x-gpio", },
+	{ .name = "lp873x-gpio" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, lp873x_gpio_id_table);

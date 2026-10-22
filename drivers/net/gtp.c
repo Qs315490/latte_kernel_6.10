@@ -21,9 +21,10 @@
 #include <linux/file.h>
 #include <linux/gtp.h>
 
+#include <net/flow.h>
+#include <net/inet_dscp.h>
 #include <net/net_namespace.h>
 #include <net/protocol.h>
-#include <net/inet_dscp.h>
 #include <net/inet_sock.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
@@ -352,7 +353,7 @@ static struct rtable *ip4_route_output_gtp(struct flowi4 *fl4,
 	fl4->flowi4_oif		= sk->sk_bound_dev_if;
 	fl4->daddr		= daddr;
 	fl4->saddr		= saddr;
-	fl4->flowi4_tos		= inet_dscp_to_dsfield(inet_sk_dscp(inet_sk(sk)));
+	fl4->flowi4_dscp	= inet_sk_dscp(inet_sk(sk));
 	fl4->flowi4_scope	= ip_sock_rt_scope(sk);
 	fl4->flowi4_proto	= sk->sk_protocol;
 
@@ -373,7 +374,7 @@ static struct rt6_info *ip6_route_output_gtp(struct net *net,
 	fl6->saddr		= *saddr;
 	fl6->flowi6_proto	= sk->sk_protocol;
 
-	dst = ipv6_stub->ipv6_dst_lookup_flow(net, sk, fl6, NULL);
+	dst = ip6_dst_lookup_flow(net, sk, fl6, NULL);
 	if (IS_ERR(dst))
 		return ERR_PTR(-ENETUNREACH);
 
@@ -446,7 +447,8 @@ static int gtp0_send_echo_resp_ip(struct gtp_dev *gtp, struct sk_buff *skb)
 			    htons(GTP0_PORT), htons(GTP0_PORT),
 			    !net_eq(sock_net(gtp->sk1u),
 				    dev_net(gtp->dev)),
-			    false);
+			    false,
+			    0);
 
 	return 0;
 }
@@ -631,7 +633,7 @@ static void gtp1u_build_echo_msg(struct gtp1_header_long *hdr, __u8 msg_type)
 	hdr->tid = 0;
 
 	/* seq, npdu and next should be counted to the length of the GTP packet
-	 * that's why szie of gtp1_header should be subtracted,
+	 * that's why size of gtp1_header should be subtracted,
 	 * not size of gtp1_header_long.
 	 */
 
@@ -667,8 +669,9 @@ static int gtp1u_send_echo_resp(struct gtp_dev *gtp, struct sk_buff *skb)
 		return -1;
 
 	/* pull GTP and UDP headers */
-	skb_pull_data(skb,
-		      sizeof(struct gtp1_header_long) + sizeof(struct udphdr));
+	if (!skb_pull_data(skb, sizeof(struct gtp1_header_long) +
+				sizeof(struct udphdr)))
+		return -1;
 
 	gtp_pkt = skb_push(skb, sizeof(struct gtp1u_packet));
 	memset(gtp_pkt, 0, sizeof(struct gtp1u_packet));
@@ -704,7 +707,8 @@ static int gtp1u_send_echo_resp(struct gtp_dev *gtp, struct sk_buff *skb)
 			    htons(GTP1U_PORT), htons(GTP1U_PORT),
 			    !net_eq(sock_net(gtp->sk1u),
 				    dev_net(gtp->dev)),
-			    false);
+			    false,
+			    0);
 	return 0;
 }
 
@@ -823,12 +827,16 @@ static int gtp1u_udp_encap_recv(struct gtp_dev *gtp, struct sk_buff *skb)
 	if (!pskb_may_pull(skb, hdrlen))
 		return -1;
 
+	gtp1 = (struct gtp1_header *)(skb->data + sizeof(struct udphdr));
+
+	if (gtp1->flags & GTP1_F_EXTHDR &&
+	    gtp_parse_exthdrs(skb, &hdrlen) < 0)
+		return -1;
+
 	if (gtp_inner_proto(skb, hdrlen, &inner_proto) < 0) {
 		netdev_dbg(gtp->dev, "GTP packet does not encapsulate an IP packet\n");
 		return -1;
 	}
-
-	gtp1 = (struct gtp1_header *)(skb->data + sizeof(struct udphdr));
 
 	pctx = gtp1_pdp_find(gtp, ntohl(gtp1->tid),
 			     gtp_proto_to_family(inner_proto));
@@ -836,10 +844,6 @@ static int gtp1u_udp_encap_recv(struct gtp_dev *gtp, struct sk_buff *skb)
 		netdev_dbg(gtp->dev, "No PDP ctx to decap skb=%p\n", skb);
 		return 1;
 	}
-
-	if (gtp1->flags & GTP1_F_EXTHDR &&
-	    gtp_parse_exthdrs(skb, &hdrlen) < 0)
-		return -1;
 
 	return gtp_rx(pctx, skb, hdrlen, gtp->role, inner_proto);
 }
@@ -882,8 +886,8 @@ static void gtp_encap_disable_sock(struct sock *sk)
 static void gtp_encap_disable(struct gtp_dev *gtp)
 {
 	if (gtp->sk_created) {
-		udp_tunnel_sock_release(gtp->sk0->sk_socket);
-		udp_tunnel_sock_release(gtp->sk1u->sk_socket);
+		udp_tunnel_sock_release(gtp->sk0);
+		udp_tunnel_sock_release(gtp->sk1u);
 		gtp->sk_created = false;
 		gtp->sk0 = NULL;
 		gtp->sk1u = NULL;
@@ -1304,7 +1308,7 @@ static netdev_tx_t gtp_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 				    pktinfo.gtph_port, pktinfo.gtph_port,
 				    !net_eq(sock_net(pktinfo.pctx->sk),
 					    dev_net(dev)),
-				    false);
+				    false, 0);
 		break;
 	case AF_INET6:
 #if IS_ENABLED(CONFIG_IPV6)
@@ -1314,7 +1318,7 @@ static netdev_tx_t gtp_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 				     ip6_dst_hoplimit(&pktinfo.rt->dst),
 				     0,
 				     pktinfo.gtph_port, pktinfo.gtph_port,
-				     false);
+				     false, 0);
 #else
 		goto tx_err;
 #endif
@@ -1431,7 +1435,7 @@ static struct sock *gtp_create_sock(int type, struct gtp_dev *gtp,
 	tuncfg.encap_rcv = gtp_encap_recv;
 	tuncfg.encap_destroy = NULL;
 
-	setup_udp_tunnel_sock(net, sock, &tuncfg);
+	setup_udp_tunnel_sock(net, sock->sk, &tuncfg);
 
 	return sock->sk;
 }
@@ -1448,7 +1452,7 @@ static int gtp_create_sockets(struct gtp_dev *gtp, const struct nlattr *nla,
 
 	sk1u = gtp_create_sock(UDP_ENCAP_GTP1U, gtp, nla, family);
 	if (IS_ERR(sk1u)) {
-		udp_tunnel_sock_release(sk0->sk_socket);
+		udp_tunnel_sock_release(sk0);
 		return PTR_ERR(sk1u);
 	}
 
@@ -1462,10 +1466,12 @@ static int gtp_create_sockets(struct gtp_dev *gtp, const struct nlattr *nla,
 #define GTP_TH_MAXLEN	(sizeof(struct udphdr) + sizeof(struct gtp0_header))
 #define GTP_IPV6_MAXLEN	(sizeof(struct ipv6hdr) + GTP_TH_MAXLEN)
 
-static int gtp_newlink(struct net *src_net, struct net_device *dev,
-		       struct nlattr *tb[], struct nlattr *data[],
+static int gtp_newlink(struct net_device *dev,
+		       struct rtnl_newlink_params *params,
 		       struct netlink_ext_ack *extack)
 {
+	struct net *link_net = rtnl_newlink_link_net(params);
+	struct nlattr **data = params->data;
 	unsigned int role = GTP_ROLE_GGSN;
 	struct gtp_dev *gtp;
 	struct gtp_net *gn;
@@ -1496,7 +1502,7 @@ static int gtp_newlink(struct net *src_net, struct net_device *dev,
 	gtp->restart_count = nla_get_u8_default(data[IFLA_GTP_RESTART_COUNT],
 						0);
 
-	gtp->net = src_net;
+	gtp->net = link_net;
 
 	err = gtp_hashtable_new(gtp, hashsize);
 	if (err < 0)
@@ -1526,7 +1532,7 @@ static int gtp_newlink(struct net *src_net, struct net_device *dev,
 		goto out_encap;
 	}
 
-	gn = net_generic(src_net, gtp_net_id);
+	gn = net_generic(link_net, gtp_net_id);
 	list_add(&gtp->list, &gn->gtp_dev_list);
 	dev->priv_destructor = gtp_destructor;
 
@@ -1618,13 +1624,13 @@ static int gtp_hashtable_new(struct gtp_dev *gtp, int hsize)
 {
 	int i;
 
-	gtp->addr_hash = kmalloc_array(hsize, sizeof(struct hlist_head),
-				       GFP_KERNEL | __GFP_NOWARN);
+	gtp->addr_hash = kmalloc_objs(struct hlist_head, hsize,
+				      GFP_KERNEL | __GFP_NOWARN);
 	if (gtp->addr_hash == NULL)
 		return -ENOMEM;
 
-	gtp->tid_hash = kmalloc_array(hsize, sizeof(struct hlist_head),
-				      GFP_KERNEL | __GFP_NOWARN);
+	gtp->tid_hash = kmalloc_objs(struct hlist_head, hsize,
+				     GFP_KERNEL | __GFP_NOWARN);
 	if (gtp->tid_hash == NULL)
 		goto err1;
 
@@ -1684,7 +1690,7 @@ static struct sock *gtp_encap_enable_socket(int fd, int type,
 	tuncfg.encap_rcv = gtp_encap_recv;
 	tuncfg.encap_destroy = gtp_encap_destroy;
 
-	setup_udp_tunnel_sock(sock_net(sock->sk), sock, &tuncfg);
+	setup_udp_tunnel_sock(sock_net(sock->sk), sk, &tuncfg);
 
 out_rel_sock:
 	release_sock(sock->sk);
@@ -1912,7 +1918,7 @@ static struct pdp_ctx *gtp_pdp_add(struct gtp_dev *gtp, struct sock *sk,
 
 	}
 
-	pctx = kmalloc(sizeof(*pctx), GFP_ATOMIC);
+	pctx = kmalloc_obj(*pctx, GFP_ATOMIC);
 	if (pctx == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -2395,15 +2401,17 @@ static int gtp_genl_send_echo_req(struct sk_buff *skb, struct genl_info *info)
 		return -ENODEV;
 	}
 
+	local_bh_disable();
 	udp_tunnel_xmit_skb(rt, sk, skb_to_send,
 			    fl4.saddr, fl4.daddr,
-			    fl4.flowi4_tos,
+			    inet_dscp_to_dsfield(fl4.flowi4_dscp),
 			    ip4_dst_hoplimit(&rt->dst),
 			    0,
 			    port, port,
 			    !net_eq(sock_net(sk),
 				    dev_net(gtp->dev)),
-			    false);
+			    false, 0);
+	local_bh_enable();
 	return 0;
 }
 
@@ -2473,23 +2481,19 @@ static int __net_init gtp_net_init(struct net *net)
 	return 0;
 }
 
-static void __net_exit gtp_net_exit_batch_rtnl(struct list_head *net_list,
-					       struct list_head *dev_to_kill)
+static void __net_exit gtp_net_exit_rtnl(struct net *net,
+					 struct list_head *dev_to_kill)
 {
-	struct net *net;
+	struct gtp_net *gn = net_generic(net, gtp_net_id);
+	struct gtp_dev *gtp, *gtp_next;
 
-	list_for_each_entry(net, net_list, exit_list) {
-		struct gtp_net *gn = net_generic(net, gtp_net_id);
-		struct gtp_dev *gtp, *gtp_next;
-
-		list_for_each_entry_safe(gtp, gtp_next, &gn->gtp_dev_list, list)
-			gtp_dellink(gtp->dev, dev_to_kill);
-	}
+	list_for_each_entry_safe(gtp, gtp_next, &gn->gtp_dev_list, list)
+		gtp_dellink(gtp->dev, dev_to_kill);
 }
 
 static struct pernet_operations gtp_net_ops = {
 	.init	= gtp_net_init,
-	.exit_batch_rtnl = gtp_net_exit_batch_rtnl,
+	.exit_rtnl = gtp_net_exit_rtnl,
 	.id	= &gtp_net_id,
 	.size	= sizeof(struct gtp_net),
 };

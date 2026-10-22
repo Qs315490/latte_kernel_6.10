@@ -8,7 +8,7 @@
 /* From include/linux/filter.h */
 #define MAX_BPF_STACK    512
 
-#if defined(__TARGET_ARCH_x86)
+#if defined(__TARGET_ARCH_x86) || defined(__TARGET_ARCH_arm64)
 
 struct elem {
 	struct bpf_timer t;
@@ -27,9 +27,21 @@ __description("Private stack, single prog")
 __success
 __arch_x86_64
 __jited("	movabsq	$0x{{.*}}, %r9")
-__jited("	addq	%gs:0x{{.*}}, %r9")
+__jited("	addq	%gs:{{.*}}, %r9")
 __jited("	movl	$0x2a, %edi")
 __jited("	movq	%rdi, -0x100(%r9)")
+__arch_arm64
+__jited("	stp	x25, x27, [sp, {{.*}}]!")
+__jited("	mov	x27, {{.*}}")
+__jited("	movk	x27, {{.*}}, lsl #16")
+__jited("	movk	x27, {{.*}}")
+__jited("	mrs	x10, TPIDR_EL{{[0-1]}}")
+__jited("	add	x27, x27, x10")
+__jited("	add	x25, x27, {{.*}}")
+__jited("	mov	x0, #0x2a")
+__jited("	str	x0, [x27]")
+__jited("...")
+__jited("	ldp	x25, x27, [sp], {{.*}}")
 __naked void private_stack_single_prog(void)
 {
 	asm volatile ("			\
@@ -45,6 +57,9 @@ __description("No private stack")
 __success
 __arch_x86_64
 __jited("	subq	$0x8, %rsp")
+__arch_arm64
+__jited("	mov	x25, sp")
+__jited("	sub	sp, sp, #0x10")
 __naked void no_private_stack_nested(void)
 {
 	asm volatile ("			\
@@ -71,16 +86,31 @@ __naked static void cumulative_stack_depth_subprog(void)
 SEC("kprobe")
 __description("Private stack, subtree > MAX_BPF_STACK")
 __success
+__log_level(4) __msg("stack depth 512+32 max 512")
 __arch_x86_64
 /* private stack fp for the main prog */
 __jited("	movabsq	$0x{{.*}}, %r9")
-__jited("	addq	%gs:0x{{.*}}, %r9")
+__jited("	addq	%gs:{{.*}}, %r9")
 __jited("	movl	$0x2a, %edi")
 __jited("	movq	%rdi, -0x200(%r9)")
 __jited("	pushq	%r9")
+__jited("...")
 __jited("	callq	0x{{.*}}")
 __jited("	popq	%r9")
 __jited("	xorl	%eax, %eax")
+__arch_arm64
+__jited("	stp	x25, x27, [sp, {{.*}}]!")
+__jited("	mov	x27, {{.*}}")
+__jited("	movk	x27, {{.*}}, lsl #16")
+__jited("	movk	x27, {{.*}}")
+__jited("	mrs	x10, TPIDR_EL{{[0-1]}}")
+__jited("	add	x27, x27, x10")
+__jited("	add	x25, x27, {{.*}}")
+__jited("	mov	x0, #0x2a")
+__jited("	str	x0, [x27]")
+__jited("	bl	{{.*}}")
+__jited("...")
+__jited("	ldp	x25, x27, [sp], {{.*}}")
 __naked void private_stack_nested_1(void)
 {
 	asm volatile ("				\
@@ -122,15 +152,35 @@ __jited("	pushq	%rbp")
 __jited("	movq	%rsp, %rbp")
 __jited("	endbr64")
 __jited("	movabsq	$0x{{.*}}, %r9")
-__jited("	addq	%gs:0x{{.*}}, %r9")
+__jited("	addq	%gs:{{.*}}, %r9")
 __jited("	pushq	%r9")
+__jited("...")
 __jited("	callq")
 __jited("	popq	%r9")
 __jited("	movl	$0x2a, %edi")
 __jited("	movq	%rdi, -0x200(%r9)")
 __jited("	pushq	%r9")
+__jited("...")
 __jited("	callq")
 __jited("	popq	%r9")
+__arch_arm64
+__jited("func #1")
+__jited("...")
+__jited("	stp	x25, x27, [sp, {{.*}}]!")
+__jited("	mov	x27, {{.*}}")
+__jited("	movk	x27, {{.*}}, lsl #16")
+__jited("	movk	x27, {{.*}}")
+__jited("	mrs	x10, TPIDR_EL{{[0-1]}}")
+__jited("	add	x27, x27, x10")
+__jited("	add	x25, x27, {{.*}}")
+__jited("	bl	0x{{.*}}")
+__jited("	mov	x8, x0")
+__jited("	mov	x0, #0x2a")
+__jited("	str	x0, [x27]")
+__jited("	bl	0x{{.*}}")
+__jited("	mov	x8, x0")
+__jited("	mov	x8, #0x0")
+__jited("	ldp	x25, x27, [sp], {{.*}}")
 __naked void private_stack_callback(void)
 {
 	asm volatile ("			\
@@ -152,8 +202,31 @@ __description("Private stack, exception in main prog")
 __success __retval(0)
 __arch_x86_64
 __jited("	pushq	%r9")
+__jited("...")
 __jited("	callq")
 __jited("	popq	%r9")
+__arch_arm64
+__jited("	stp	x29, x30, [sp, #-0x10]!")
+__jited("	mov	x29, sp")
+__jited("	stp	xzr, x26, [sp, #-0x10]!")
+__jited("	mov	x26, sp")
+__jited("	stp	x19, x20, [sp, #-0x10]!")
+__jited("	stp	x21, x22, [sp, #-0x10]!")
+__jited("	stp	x23, x24, [sp, #-0x10]!")
+__jited("	stp	x25, x26, [sp, #-0x10]!")
+__jited("	stp	x27, x28, [sp, #-0x10]!")
+__jited("	mov	x27, {{.*}}")
+__jited("	movk	x27, {{.*}}, lsl #16")
+__jited("	movk	x27, {{.*}}")
+__jited("	mrs	x10, TPIDR_EL{{[0-1]}}")
+__jited("	add	x27, x27, x10")
+__jited("	add	x25, x27, {{.*}}")
+__jited("	mov	x0, #0x2a")
+__jited("	str	x0, [x27]")
+__jited("	mov	x0, #0x0")
+__jited("	bl	0x{{.*}}")
+__jited("	mov	x8, x0")
+__jited("	ldp	x27, x28, [sp], #0x10")
 int private_stack_exception_main_prog(void)
 {
 	asm volatile ("			\
@@ -177,8 +250,22 @@ __success __retval(0)
 __arch_x86_64
 __jited("	movq	%rdi, -0x200(%r9)")
 __jited("	pushq	%r9")
+__jited("...")
 __jited("	callq")
 __jited("	popq	%r9")
+__arch_arm64
+__jited("	stp	x27, x28, [sp, #-0x10]!")
+__jited("	mov	x27, {{.*}}")
+__jited("	movk	x27, {{.*}}, lsl #16")
+__jited("	movk	x27, {{.*}}")
+__jited("	mrs	x10, TPIDR_EL{{[0-1]}}")
+__jited("	add	x27, x27, x10")
+__jited("	add	x25, x27, {{.*}}")
+__jited("	mov	x0, #0x2a")
+__jited("	str	x0, [x27]")
+__jited("	bl	0x{{.*}}")
+__jited("	mov	x8, x0")
+__jited("	ldp	x27, x28, [sp], #0x10")
 int private_stack_exception_sub_prog(void)
 {
 	asm volatile ("			\
@@ -220,6 +307,10 @@ __description("Private stack, async callback, not nested")
 __success __retval(0)
 __arch_x86_64
 __jited("	movabsq	$0x{{.*}}, %r9")
+__arch_arm64
+__jited("	mrs	x10, TPIDR_EL{{[0-1]}}")
+__jited("	add	x27, x27, x10")
+__jited("	add	x25, x27, {{.*}}")
 int private_stack_async_callback_1(void)
 {
 	struct bpf_timer *arr_timer;
@@ -239,8 +330,12 @@ int private_stack_async_callback_1(void)
 SEC("fentry/bpf_fentry_test9")
 __description("Private stack, async callback, potential nesting")
 __success __retval(0)
+__load_if_JITed()
+__log_level(4) __msg("stack depth 8+0+256+0 max 272")
 __arch_x86_64
 __jited("	subq	$0x100, %rsp")
+__arch_arm64
+__jited("	sub	sp, sp, #0x100")
 int private_stack_async_callback_2(void)
 {
 	struct bpf_timer *arr_timer;
@@ -254,6 +349,18 @@ int private_stack_async_callback_2(void)
 	bpf_timer_set_callback(arr_timer, timer_cb1);
 	bpf_timer_start(arr_timer, 0, 0);
 	subprog1(&array_key);
+	return 0;
+}
+
+SEC("fentry/bpf_fentry_test9")
+__description("private stack, max stack depth is private stack")
+__success
+__log_level(4) __msg("stack depth 8+256+0 max 256")
+int private_stack_max_depth(void)
+{
+	int x = 0;
+
+	subprog1(&x);
 	return 0;
 }
 

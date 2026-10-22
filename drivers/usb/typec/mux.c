@@ -35,7 +35,9 @@ static int switch_fwnode_match(struct device *dev, const void *fwnode)
 static void *typec_switch_match(const struct fwnode_handle *fwnode,
 				const char *id, void *data)
 {
+	struct typec_switch_dev **sw_devs = data;
 	struct device *dev;
+	int i;
 
 	/*
 	 * Device graph (OF graph) does not give any means to identify the
@@ -55,6 +57,13 @@ static void *typec_switch_match(const struct fwnode_handle *fwnode,
 	 */
 	dev = class_find_device(&typec_mux_class, NULL, fwnode,
 				switch_fwnode_match);
+
+	/* Skip duplicates */
+	for (i = 0; i < TYPEC_MUX_MAX_DEVS; i++)
+		if (to_typec_switch_dev(dev) == sw_devs[i]) {
+			put_device(dev);
+			return NULL;
+		}
 
 	return dev ? to_typec_switch_dev(dev) : ERR_PTR(-EPROBE_DEFER);
 }
@@ -76,11 +85,12 @@ struct typec_switch *fwnode_typec_switch_get(struct fwnode_handle *fwnode)
 	int err;
 	int i;
 
-	sw = kzalloc(sizeof(*sw), GFP_KERNEL);
+	sw = kzalloc_obj(*sw);
 	if (!sw)
 		return ERR_PTR(-ENOMEM);
 
-	count = fwnode_connection_find_matches(fwnode, "orientation-switch", NULL,
+	count = fwnode_connection_find_matches(fwnode, "orientation-switch",
+					       (void **)sw_devs,
 					       typec_switch_match,
 					       (void **)sw_devs,
 					       ARRAY_SIZE(sw_devs));
@@ -171,7 +181,7 @@ typec_switch_register(struct device *parent,
 	if (!desc || !desc->set)
 		return ERR_PTR(-EINVAL);
 
-	sw_dev = kzalloc(sizeof(*sw_dev), GFP_KERNEL);
+	sw_dev = kzalloc_obj(*sw_dev);
 	if (!sw_dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -214,7 +224,7 @@ int typec_switch_set(struct typec_switch *sw,
 		sw_dev = sw->sw_devs[i];
 
 		ret = sw_dev->set(sw_dev, orientation);
-		if (ret)
+		if (ret && ret != -EOPNOTSUPP)
 			return ret;
 	}
 
@@ -301,7 +311,7 @@ struct typec_mux *fwnode_typec_mux_get(struct fwnode_handle *fwnode)
 	int err;
 	int i;
 
-	mux = kzalloc(sizeof(*mux), GFP_KERNEL);
+	mux = kzalloc_obj(*mux);
 	if (!mux)
 		return ERR_PTR(-ENOMEM);
 
@@ -378,7 +388,7 @@ int typec_mux_set(struct typec_mux *mux, struct typec_mux_state *state)
 		mux_dev = mux->mux_devs[i];
 
 		ret = mux_dev->set(mux_dev, state);
-		if (ret)
+		if (ret && ret != -EOPNOTSUPP)
 			return ret;
 	}
 
@@ -415,7 +425,7 @@ typec_mux_register(struct device *parent, const struct typec_mux_desc *desc)
 	if (!desc || !desc->set)
 		return ERR_PTR(-EINVAL);
 
-	mux_dev = kzalloc(sizeof(*mux_dev), GFP_KERNEL);
+	mux_dev = kzalloc_obj(*mux_dev);
 	if (!mux_dev)
 		return ERR_PTR(-ENOMEM);
 

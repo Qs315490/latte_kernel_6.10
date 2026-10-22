@@ -15,9 +15,9 @@
 #include <sched.h>
 #include <fcntl.h>
 
-#include "../../kselftest.h"
+#include "kselftest.h"
 #include "log.h"
-#include "wrappers.h"
+#include "../wrappers.h"
 
 static long get_file_dev_and_inode(void *addr, struct statx *stx)
 {

@@ -1,12 +1,10 @@
+// SPDX-License-Identifier: MIT
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2014-2016 Intel Corporation
  */
 
 #include <linux/anon_inodes.h>
 #include <linux/mman.h>
-#include <linux/pfn_t.h>
 #include <linux/sizes.h>
 
 #include <drm/drm_cache.h>
@@ -18,12 +16,13 @@
 #include "i915_gem_evict.h"
 #include "i915_gem_gtt.h"
 #include "i915_gem_ioctls.h"
-#include "i915_gem_object.h"
 #include "i915_gem_mman.h"
+#include "i915_gem_object.h"
+#include "i915_gem_ttm.h"
+#include "i915_jiffies.h"
 #include "i915_mm.h"
 #include "i915_trace.h"
 #include "i915_user_extensions.h"
-#include "i915_gem_ttm.h"
 #include "i915_vma.h"
 
 static inline bool
@@ -731,7 +730,7 @@ mmap_offset_attach(struct drm_i915_gem_object *obj,
 	if (mmo)
 		goto out;
 
-	mmo = kmalloc(sizeof(*mmo), GFP_KERNEL);
+	mmo = kmalloc_obj(*mmo);
 	if (!mmo)
 		return ERR_PTR(-ENOMEM);
 

@@ -92,20 +92,41 @@ properties:
 
   ieee80211-freq-limit: true
 
-  qcom,ath10k-calibration-data:
+  qcom,calibration-data:
     $ref: /schemas/types.yaml#/definitions/uint8-array
     description:
       Calibration data + board-specific data as a byte array. The length
       can vary between hardware versions.
 
-  qcom,ath10k-calibration-variant:
+  qcom,ath10k-calibration-data:
+    $ref: /schemas/types.yaml#/definitions/uint8-array
+    deprecated: true
+    description:
+      Calibration data + board-specific data as a byte array. The length
+      can vary between hardware versions.
+
+  qcom,calibration-variant:
     $ref: /schemas/types.yaml#/definitions/string
     description:
       Unique variant identifier of the calibration data in board-2.bin
       for designs with colliding bus and device specific ids
 
+  qcom,ath10k-calibration-variant:
+    $ref: /schemas/types.yaml#/definitions/string
+    deprecated: true
+    description:
+      Unique variant identifier of the calibration data in board-2.bin
+      for designs with colliding bus and device specific ids
+
+  qcom,pre-calibration-data:
+    $ref: /schemas/types.yaml#/definitions/uint8-array
+    description:
+      Pre-calibration data as a byte array. The length can vary between
+      hardware versions.
+
   qcom,ath10k-pre-calibration-data:
     $ref: /schemas/types.yaml#/definitions/uint8-array
+    deprecated: true
     description:
       Pre-calibration data as a byte array. The length can vary between
       hardware versions.
@@ -137,7 +158,13 @@ properties:
     description: State bits used by the AP to signal the WLAN Q6.
     items:
       - description: Signal bits used to enable/disable low power mode
-                     on WCN in the case of WoW (Wake on Wireless).
+          on WCN in the case of WoW (Wake on Wireless).
+        items:
+          - description: Phandle to the Shared Memory Point 2 Point device
+              handling the communication with a remote processor
+          - description: Single bit index to toggle in the value sent to
+              the remote processor
+            maximum: 32
 
   qcom,smem-state-names:
     description: The names of the state bits used for SMP2P output.
@@ -149,6 +176,12 @@ properties:
     description:
       Quirk specifying that the firmware expects the 8bit version
       of the host capability QMI request
+
+  qcom,snoc-host-cap-skip-quirk:
+    type: boolean
+    description:
+      Quirk specifying that the firmware wants to skip the host
+      capability QMI request
 
   qcom,xo-cal-data:
     $ref: /schemas/types.yaml#/definitions/uint32
@@ -270,6 +303,11 @@ allOf:
 
       required:
         - interrupts
+
+  - not:
+      required:
+        - qcom,snoc-host-cap-8bit-quirk
+        - qcom,snoc-host-cap-skip-quirk
 
 examples:
   # SNoC

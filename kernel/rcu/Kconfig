@@ -18,7 +18,7 @@ config TREE_RCU
 
 config PREEMPT_RCU
 	bool
-	default y if PREEMPTION
+	default y if (PREEMPT || PREEMPT_RT || PREEMPT_DYNAMIC)
 	select TREE_RCU
 	help
 	  This option selects the RCU implementation that is
@@ -65,11 +65,24 @@ config TREE_SRCU
 	help
 	  This option selects the full-fledged version of SRCU.
 
+config FORCE_NEED_SRCU_NMI_SAFE
+	bool "Force selection of NEED_SRCU_NMI_SAFE"
+	depends on !TINY_SRCU
+	depends on RCU_EXPERT
+	depends on ARCH_HAS_NMI_SAFE_THIS_CPU_OPS
+	select NEED_SRCU_NMI_SAFE
+	default n
+	help
+	  This option forces selection of the NEED_SRCU_NMI_SAFE
+	  Kconfig option, allowing testing of srcu_read_lock_nmisafe()
+	  and srcu_read_unlock_nmisafe() on architectures (like x86)
+	  that select the ARCH_HAS_NMI_SAFE_THIS_CPU_OPS Kconfig option.
+
 config NEED_SRCU_NMI_SAFE
 	def_bool HAVE_NMI && !ARCH_HAS_NMI_SAFE_THIS_CPU_OPS && !TINY_SRCU
 
 config TASKS_RCU_GENERIC
-	def_bool TASKS_RCU || TASKS_RUDE_RCU || TASKS_TRACE_RCU
+	def_bool TASKS_RCU || TASKS_RUDE_RCU
 	help
 	  This option enables generic infrastructure code supporting
 	  task-based RCU implementations.  Not for manual selection.
@@ -91,7 +104,7 @@ config NEED_TASKS_RCU
 
 config TASKS_RCU
 	bool
-	default NEED_TASKS_RCU && (PREEMPTION || PREEMPT_AUTO)
+	default NEED_TASKS_RCU && PREEMPTION
 	select IRQ_WORK
 
 config FORCE_TASKS_RUDE_RCU
@@ -128,6 +141,29 @@ config TASKS_TRACE_RCU
 	bool
 	default n
 	select IRQ_WORK
+
+config TASKS_TRACE_RCU_NO_MB
+	bool "Override RCU Tasks Trace inclusion of read-side memory barriers"
+	depends on RCU_EXPERT && TASKS_TRACE_RCU
+	default ARCH_WANTS_NO_INSTR
+	help
+	  This option prevents the use of read-side memory barriers in
+	  rcu_read_lock_tasks_trace() and rcu_read_unlock_tasks_trace()
+	  even in kernels built with CONFIG_ARCH_WANTS_NO_INSTR=n, that is,
+	  in kernels that do not have noinstr set up in entry/exit code.
+	  By setting this option, you are promising to carefully review
+	  use of ftrace, BPF, and friends to ensure that no tracing
+	  operation is attached to a function that runs in that portion
+	  of the entry/exit code that RCU does not watch, that is,
+	  where rcu_is_watching() returns false.  Alternatively, you
+	  might choose to never remove traces except by rebooting.
+
+	  Those wishing to disable read-side memory barriers for an entire
+	  architecture can select this Kconfig option, hence the polarity.
+
+	  Say Y here if you need speed and will review use of tracing.
+	  Say N here for certain esoteric testing of RCU itself.
+	  Take the default if you are unsure.
 
 config RCU_STALL_COMMON
 	def_bool TREE_RCU
@@ -300,44 +336,32 @@ config RCU_NOCB_CPU_CB_BOOST
 	  Say Y here if you want to set RT priority for offloading kthreads.
 	  Say N here if you are building a !PREEMPT_RT kernel and are unsure.
 
-config TASKS_TRACE_RCU_READ_MB
-	bool "Tasks Trace RCU readers use memory barriers in user and idle"
-	depends on RCU_EXPERT && TASKS_TRACE_RCU
-	default PREEMPT_RT || NR_CPUS < 8
-	help
-	  Use this option to further reduce the number of IPIs sent
-	  to CPUs executing in userspace or idle during tasks trace
-	  RCU grace periods.  Given that a reasonable setting of
-	  the rcupdate.rcu_task_ipi_delay kernel boot parameter
-	  eliminates such IPIs for many workloads, proper setting
-	  of this Kconfig option is important mostly for aggressive
-	  real-time installations and for battery-powered devices,
-	  hence the default chosen above.
-
-	  Say Y here if you hate IPIs.
-	  Say N here if you hate read-side memory barriers.
-	  Take the default if you are unsure.
-
 config RCU_LAZY
 	bool "RCU callback lazy invocation functionality"
 	depends on RCU_NOCB_CPU
 	default n
 	help
-	  To save power, batch RCU callbacks and flush after delay, memory
-	  pressure, or callback list growing too big.
+	  To save power, batch RCU callbacks and delay starting the
+	  corresponding grace  period for multiple seconds.  The grace
+	  period will be started after this delay, in case of memory
+	  pressure, or if the corresponding CPU's callback list grows
+	  too large.
 
-	  Requires rcu_nocbs=all to be set.
+	  These delays happen only on rcu_nocbs CPUs, that is, CPUs
+	  whose callbacks have been offloaded.
 
-	  Use rcutree.enable_rcu_lazy=0 to turn it off at boot time.
+	  Use the rcutree.enable_rcu_lazy=0 kernel-boot parameter to
+	  globally disable these delays.
 
 config RCU_LAZY_DEFAULT_OFF
 	bool "Turn RCU lazy invocation off by default"
 	depends on RCU_LAZY
 	default n
 	help
-	  Allows building the kernel with CONFIG_RCU_LAZY=y yet keep it default
-	  off. Boot time param rcutree.enable_rcu_lazy=1 can be used to switch
-	  it back on.
+	  Build the kernel with CONFIG_RCU_LAZY=y, but cause the kernel
+	  to boot with these energy-efficiency delays disabled.  Use the
+	  rcutree.enable_rcu_lazy=0 kernel-boot parameter to override
+	  the this option at boot time, thus re-enabling these delays.
 
 config RCU_DOUBLE_CHECK_CB_TIME
 	bool "RCU callback-batch backup time check"

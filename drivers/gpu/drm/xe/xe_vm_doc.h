@@ -7,7 +7,7 @@
 #define _XE_VM_DOC_H_
 
 /**
- * DOC: XE VM (user address space)
+ * DOC: Xe VM (user address space)
  *
  * VM creation
  * ===========
@@ -202,13 +202,13 @@
  * User pointers are user allocated memory (malloc'd, mmap'd, etc..) for which the
  * user wants to create a GPU mapping. Typically in other DRM drivers a dummy BO
  * was created and then a binding was created. We bypass creating a dummy BO in
- * XE and simply create a binding directly from the userptr.
+ * Xe and simply create a binding directly from the userptr.
  *
  * Invalidation
  * ------------
  *
  * Since this a core kernel managed memory the kernel can move this memory
- * whenever it wants. We register an invalidation MMU notifier to alert XE when
+ * whenever it wants. We register an invalidation MMU notifier to alert Xe when
  * a user pointer is about to move. The invalidation notifier needs to block
  * until all pending users (jobs or compute mode engines) of the userptr are
  * idle to ensure no faults. This done by waiting on all of VM's dma-resv slots.
@@ -419,7 +419,7 @@
  * =======
  *
  * VM locking protects all of the core data paths (bind operations, execs,
- * evictions, and compute mode rebind worker) in XE.
+ * evictions, and compute mode rebind worker) in Xe.
  *
  * Locks
  * -----
@@ -431,7 +431,7 @@
  * bind path also acquires this lock in write while the exec / compute mode
  * rebind worker acquires this lock in read mode.
  *
- * VM dma-resv lock (vm->ttm.base.resv->lock) - WW lock. Protects VM dma-resv
+ * VM dma-resv lock (vm->gpuvm.r_obj->resv->lock) - WW lock. Protects VM dma-resv
  * slots which is shared with any private BO in the VM. Expected to be acquired
  * during VM binds, execs, and compute mode rebind worker. This lock is also
  * held when private BOs are being evicted.

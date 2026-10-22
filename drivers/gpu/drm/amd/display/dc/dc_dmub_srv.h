@@ -56,9 +56,10 @@ struct dc_dmub_srv {
 	union dmub_shared_state_ips_driver_signals driver_signals;
 	bool idle_allowed;
 	bool needs_idle_wake;
+	bool cursor_offload_enabled;
 };
 
-void dc_dmub_srv_wait_idle(struct dc_dmub_srv *dc_dmub_srv);
+bool dc_dmub_srv_wait_for_pending(struct dc_dmub_srv *dc_dmub_srv);
 
 bool dc_dmub_srv_optimized_init_done(struct dc_dmub_srv *dc_dmub_srv);
 
@@ -94,7 +95,7 @@ void dc_dmub_srv_clear_inbox0_ack(struct dc_dmub_srv *dmub_srv);
 void dc_dmub_srv_wait_for_inbox0_ack(struct dc_dmub_srv *dmub_srv);
 void dc_dmub_srv_send_inbox0_cmd(struct dc_dmub_srv *dmub_srv, union dmub_inbox0_data_register data);
 
-bool dc_dmub_srv_get_diagnostic_data(struct dc_dmub_srv *dc_dmub_srv, struct dmub_diagnostic_data *dmub_oca);
+bool dc_dmub_srv_get_diagnostic_data(struct dc_dmub_srv *dc_dmub_srv);
 
 void dc_dmub_setup_subvp_dmub_command(struct dc *dc, struct dc_state *context, bool enable);
 void dc_dmub_srv_log_diagnostic_data(struct dc_dmub_srv *dc_dmub_srv);
@@ -210,6 +211,95 @@ void dc_dmub_srv_fams2_passthrough_flip(
 		struct dc_surface_update *srf_updates,
 		int surface_count);
 
+bool dmub_lsdma_init(struct dc_dmub_srv *dc_dmub_srv);
+bool dmub_lsdma_send_linear_copy_command(
+	struct dc_dmub_srv *dc_dmub_srv,
+	uint64_t src_addr,
+	uint64_t dst_addr,
+	uint32_t count);
+
+struct lsdma_linear_sub_window_copy_params {
+	uint32_t src_lo;
+	uint32_t src_hi;
+
+	uint32_t dst_lo;
+	uint32_t dst_hi;
+
+	uint32_t src_x        : 16;
+	uint32_t src_y        : 16;
+
+	uint32_t dst_x        : 16;
+	uint32_t dst_y        : 16;
+
+	uint32_t rect_x       : 16;
+	uint32_t rect_y       : 16;
+
+	uint32_t src_pitch    : 16;
+	uint32_t dst_pitch    : 16;
+
+	uint32_t src_slice_pitch;
+	uint32_t dst_slice_pitch;
+
+	uint32_t tmz              : 4;
+	uint32_t element_size     : 3;
+	uint32_t src_cache_policy : 3;
+	uint32_t dst_cache_policy : 3;
+	uint32_t padding          : 19;
+};
+
+bool dmub_lsdma_send_linear_sub_window_copy_command(
+	struct dc_dmub_srv *dc_dmub_srv,
+	struct lsdma_linear_sub_window_copy_params copy_data
+);
+bool dmub_lsdma_send_pio_copy_command(
+	struct dc_dmub_srv *dc_dmub_srv,
+	uint64_t src_addr,
+	uint64_t dst_addr,
+	uint32_t byte_count,
+	uint32_t overlap_disable);
+bool dmub_lsdma_send_pio_constfill_command(
+	struct dc_dmub_srv *dc_dmub_srv,
+	uint64_t dst_addr,
+	uint32_t byte_count,
+	uint32_t data);
+
+struct lsdma_send_tiled_to_tiled_copy_command_params {
+	uint64_t src_addr;
+	uint64_t dst_addr;
+
+	uint32_t src_x            : 16;
+	uint32_t src_y            : 16;
+
+	uint32_t dst_x            : 16;
+	uint32_t dst_y            : 16;
+
+	uint32_t src_width        : 16;
+	uint32_t dst_width        : 16;
+
+	uint32_t rect_x           : 16;
+	uint32_t rect_y           : 16;
+
+	uint32_t src_height       : 16;
+	uint32_t dst_height       : 16;
+
+	uint32_t data_format      : 6;
+	uint32_t swizzle_mode     : 5;
+	uint32_t element_size     : 3;
+	uint32_t dcc              : 1;
+	uint32_t tmz              : 4;
+	uint32_t read_compress    : 2;
+	uint32_t write_compress   : 2;
+	uint32_t max_com          : 2;
+	uint32_t max_uncom        : 1;
+	uint32_t src_cache_policy : 3;
+	uint32_t dst_cache_policy : 3;
+};
+
+bool dmub_lsdma_send_tiled_to_tiled_copy_command(
+	struct dc_dmub_srv *dc_dmub_srv,
+	struct lsdma_send_tiled_to_tiled_copy_command_params params);
+bool dmub_lsdma_send_poll_reg_write_command(struct dc_dmub_srv *dc_dmub_srv, uint32_t reg_addr, uint32_t reg_data);
+
 /**
  * struct ips_residency_info - struct containing info from dmub_ips_residency_stats
  *
@@ -223,7 +313,7 @@ void dc_dmub_srv_fams2_passthrough_flip(
  * @histogram: Histogram of given IPS state durations - bucket definitions in dmub_ips.c
  */
 struct ips_residency_info {
-	enum dmub_ips_mode ips_mode;
+	enum ips_residency_mode ips_mode;
 	unsigned int residency_percent;
 	unsigned int entry_counter;
 	unsigned int total_active_time_us[2];
@@ -231,21 +321,67 @@ struct ips_residency_info {
 	unsigned int histogram[16];
 };
 
-/**
- * bool dc_dmub_srv_ips_residency_cntl() - Controls IPS residency measurement status
- *
- * @dc_dmub_srv: The DC DMUB service pointer
- * @start_measurement: Describes whether to start or stop measurement
- *
- * Return: true if GPINT was sent successfully, false otherwise
- */
-bool dc_dmub_srv_ips_residency_cntl(struct dc_dmub_srv *dc_dmub_srv, bool start_measurement);
+bool dc_dmub_srv_ips_residency_cntl(const struct dc_context *ctx, uint8_t panel_inst, bool start_measurement);
+
+bool dc_dmub_srv_ips_query_residency_info(const struct dc_context *ctx, uint8_t panel_inst,
+					  struct dmub_ips_residency_info *driver_info,
+					  enum ips_residency_mode ips_mode);
 
 /**
- * bool dc_dmub_srv_ips_query_residency_info() - Queries DMCUB for residency info
+ * dc_dmub_srv_cursor_offload_init() - Enables or disables cursor offloading for a stream.
  *
- * @dc_dmub_srv: The DC DMUB service pointer
- * @output: Output struct to copy the the residency info to
+ * @dc: pointer to DC object
  */
-void dc_dmub_srv_ips_query_residency_info(struct dc_dmub_srv *dc_dmub_srv, struct ips_residency_info *output);
+void dc_dmub_srv_cursor_offload_init(struct dc *dc);
+
+/**
+ * dc_dmub_srv_control_cursor_offload() - Enables or disables cursor offloading for a stream.
+ *
+ * @dc: pointer to DC object
+ * @context: the DC context to reference for pipe allocations
+ * @stream: the stream to control
+ * @enable: true to enable cursor offload, false to disable
+ */
+void dc_dmub_srv_control_cursor_offload(struct dc *dc, struct dc_state *context,
+					const struct dc_stream_state *stream, bool enable);
+
+/**
+ * dc_dmub_srv_program_cursor_now() - Requests immediate cursor programming for a given pipe.
+ *
+ * @dc: pointer to DC object
+ * @pipe: top-most pipe for a stream.
+ */
+void dc_dmub_srv_program_cursor_now(struct dc *dc, const struct pipe_ctx *pipe);
+
+/**
+ * dc_dmub_srv_is_cursor_offload_enabled() - Checks if cursor offload is supported.
+ *
+ * @dc: pointer to DC object
+ *
+ * Return: true if cursor offload is supported, false otherwise
+ */
+bool dc_dmub_srv_is_cursor_offload_enabled(const struct dc *dc);
+
+/**
+ * dc_dmub_srv_boot_time_crc_init() - Initializes DMUB boot time CRC.
+ *
+ * @dc - pointer to DC object
+ * @gpu_addr - address for the boot time CRC buffer
+ * @size - size of the boot time CRC buffer
+ */
+void dc_dmub_srv_boot_time_crc_init(const struct dc *dc, uint64_t gpu_addr, uint32_t size);
+
+/**
+ * dc_dmub_srv_release_hw() - Notifies DMUB service that HW access is no longer required.
+ *
+ * @dc - pointer to DC object
+ */
+void dc_dmub_srv_release_hw(const struct dc *dc);
+
+/**
+ * dc_dmub_srv_log_preos_dmcub_info() - Logs preos dmcub fw info.
+ *
+ * @dc - pointer to DC object
+ */
+void dc_dmub_srv_log_preos_dmcub_info(struct dc_dmub_srv *dc_dmub_srv);
 #endif /* _DMUB_DC_SRV_H_ */

@@ -57,6 +57,7 @@ extern const struct kfd2kgd_calls gfx_v10_kfd2kgd;
 extern const struct kfd2kgd_calls gfx_v10_3_kfd2kgd;
 extern const struct kfd2kgd_calls gfx_v11_kfd2kgd;
 extern const struct kfd2kgd_calls gfx_v12_kfd2kgd;
+extern const struct kfd2kgd_calls gfx_v12_1_kfd2kgd;
 
 static int kfd_gtt_sa_init(struct kfd_dev *kfd, unsigned int buf_size,
 				unsigned int chunk_size);
@@ -94,6 +95,8 @@ static void kfd_device_info_set_sdma_info(struct kfd_dev *kfd)
 	case IP_VERSION(5, 2, 2):/* NAVY_FLOUNDER */
 	case IP_VERSION(5, 2, 4):/* DIMGREY_CAVEFISH */
 	case IP_VERSION(5, 2, 5):/* BEIGE_GOBY */
+		kfd->device_info.num_sdma_queues_per_engine = 8;
+		break;
 	case IP_VERSION(6, 0, 0):
 	case IP_VERSION(6, 0, 1):
 	case IP_VERSION(6, 0, 2):
@@ -101,38 +104,21 @@ static void kfd_device_info_set_sdma_info(struct kfd_dev *kfd)
 	case IP_VERSION(6, 1, 0):
 	case IP_VERSION(6, 1, 1):
 	case IP_VERSION(6, 1, 2):
+	case IP_VERSION(6, 1, 3):
+	case IP_VERSION(6, 1, 4):
+	case IP_VERSION(6, 4, 0):
 	case IP_VERSION(7, 0, 0):
 	case IP_VERSION(7, 0, 1):
+	case IP_VERSION(7, 1, 0):
 		kfd->device_info.num_sdma_queues_per_engine = 8;
+		/* Reserve 1 for paging and 1 for gfx */
+		kfd->device_info.num_reserved_sdma_queues_per_engine = 2;
 		break;
 	default:
 		dev_warn(kfd_device,
 			"Default sdma queue per engine(8) is set due to mismatch of sdma ip block(SDMA_HWIP:0x%x).\n",
 			sdma_version);
 		kfd->device_info.num_sdma_queues_per_engine = 8;
-	}
-
-	bitmap_zero(kfd->device_info.reserved_sdma_queues_bitmap, KFD_MAX_SDMA_QUEUES);
-
-	switch (sdma_version) {
-	case IP_VERSION(6, 0, 0):
-	case IP_VERSION(6, 0, 1):
-	case IP_VERSION(6, 0, 2):
-	case IP_VERSION(6, 0, 3):
-	case IP_VERSION(6, 1, 0):
-	case IP_VERSION(6, 1, 1):
-	case IP_VERSION(6, 1, 2):
-	case IP_VERSION(7, 0, 0):
-	case IP_VERSION(7, 0, 1):
-		/* Reserve 1 for paging and 1 for gfx */
-		kfd->device_info.num_reserved_sdma_queues_per_engine = 2;
-		/* BIT(0)=engine-0 queue-0; BIT(1)=engine-1 queue-0; BIT(2)=engine-0 queue-1; ... */
-		bitmap_set(kfd->device_info.reserved_sdma_queues_bitmap, 0,
-			   kfd->adev->sdma.num_instances *
-			   kfd->device_info.num_reserved_sdma_queues_per_engine);
-		break;
-	default:
-		break;
 	}
 }
 
@@ -180,12 +166,21 @@ static void kfd_device_info_set_event_interrupt_class(struct kfd_dev *kfd)
 	case IP_VERSION(11, 5, 0):
 	case IP_VERSION(11, 5, 1):
 	case IP_VERSION(11, 5, 2):
+	case IP_VERSION(11, 5, 3):
+	case IP_VERSION(11, 5, 4):
+	case IP_VERSION(11, 5, 6):
+	case IP_VERSION(11, 7, 0):
+	case IP_VERSION(11, 7, 1):
 		kfd->device_info.event_interrupt_class = &event_interrupt_class_v11;
 		break;
 	case IP_VERSION(12, 0, 0):
 	case IP_VERSION(12, 0, 1):
 		/* GFX12_TODO: Change to v12 version. */
 		kfd->device_info.event_interrupt_class = &event_interrupt_class_v11;
+		break;
+	case IP_VERSION(12, 1, 0):
+		kfd->device_info.event_interrupt_class =
+						&event_interrupt_class_v12_1;
 		break;
 	default:
 		dev_warn(kfd_device, "v9 event interrupt handler is set due to "
@@ -349,11 +344,6 @@ struct kfd_dev *kgd2kfd_probe(struct amdgpu_device *adev, bool vf)
 			f2g = &aldebaran_kfd2kgd;
 			break;
 		case IP_VERSION(9, 4, 3):
-			gfx_target_version = adev->rev_id >= 1 ? 90402
-					   : adev->flags & AMD_IS_APU ? 90400
-					   : 90401;
-			f2g = &gc_9_4_3_kfd2kgd;
-			break;
 		case IP_VERSION(9, 4, 4):
 			gfx_target_version = 90402;
 			f2g = &gc_9_4_3_kfd2kgd;
@@ -454,6 +444,23 @@ struct kfd_dev *kgd2kfd_probe(struct amdgpu_device *adev, bool vf)
 			gfx_target_version = 110502;
 			f2g = &gfx_v11_kfd2kgd;
 			break;
+		case IP_VERSION(11, 5, 3):
+			gfx_target_version = 110503;
+			f2g = &gfx_v11_kfd2kgd;
+			break;
+		case IP_VERSION(11, 5, 4):
+		case IP_VERSION(11, 5, 6):
+                        gfx_target_version = 110504;
+                        f2g = &gfx_v11_kfd2kgd;
+                        break;
+		case IP_VERSION(11, 7, 0):
+			gfx_target_version = 110700;
+			f2g = &gfx_v11_kfd2kgd;
+			break;
+		case IP_VERSION(11, 7, 1):
+			gfx_target_version = 110701;
+			f2g = &gfx_v11_kfd2kgd;
+			break;
 		case IP_VERSION(12, 0, 0):
 			gfx_target_version = 120000;
 			f2g = &gfx_v12_kfd2kgd;
@@ -461,6 +468,10 @@ struct kfd_dev *kgd2kfd_probe(struct amdgpu_device *adev, bool vf)
 		case IP_VERSION(12, 0, 1):
 			gfx_target_version = 120001;
 			f2g = &gfx_v12_kfd2kgd;
+			break;
+		case IP_VERSION(12, 1, 0):
+			gfx_target_version = 120500;
+			f2g = &gfx_v12_1_kfd2kgd;
 			break;
 		default:
 			break;
@@ -480,7 +491,7 @@ struct kfd_dev *kgd2kfd_probe(struct amdgpu_device *adev, bool vf)
 		return NULL;
 	}
 
-	kfd = kzalloc(sizeof(*kfd), GFP_KERNEL);
+	kfd = kzalloc_obj(*kfd);
 	if (!kfd)
 		return NULL;
 
@@ -493,6 +504,7 @@ struct kfd_dev *kgd2kfd_probe(struct amdgpu_device *adev, bool vf)
 	mutex_init(&kfd->doorbell_mutex);
 
 	ida_init(&kfd->doorbell_ida);
+	atomic_set(&kfd->kfd_processes_count, 0);
 
 	return kfd;
 }
@@ -546,11 +558,16 @@ static void kfd_cwsr_init(struct kfd_dev *kfd)
 			BUILD_BUG_ON(sizeof(cwsr_trap_gfx11_hex) > PAGE_SIZE);
 			kfd->cwsr_isa = cwsr_trap_gfx11_hex;
 			kfd->cwsr_isa_size = sizeof(cwsr_trap_gfx11_hex);
-		} else {
+		} else if (KFD_GC_VERSION(kfd) < IP_VERSION(12, 1, 0)) {
 			BUILD_BUG_ON(sizeof(cwsr_trap_gfx12_hex)
 					     > KFD_CWSR_TMA_OFFSET);
 			kfd->cwsr_isa = cwsr_trap_gfx12_hex;
 			kfd->cwsr_isa_size = sizeof(cwsr_trap_gfx12_hex);
+		} else {
+			BUILD_BUG_ON(sizeof(cwsr_trap_gfx12_1_0_hex)
+					     > KFD_CWSR_TMA_OFFSET);
+			kfd->cwsr_isa = cwsr_trap_gfx12_1_0_hex;
+			kfd->cwsr_isa_size = sizeof(cwsr_trap_gfx12_1_0_hex);
 		}
 
 		kfd->cwsr_enabled = true;
@@ -583,9 +600,13 @@ static int kfd_gws_init(struct kfd_node *node)
 			&& kfd->mec2_fw_version >= 0x6b) ||
 		(KFD_GC_VERSION(node) >= IP_VERSION(11, 0, 0)
 			&& KFD_GC_VERSION(node) < IP_VERSION(12, 0, 0)
-			&& mes_rev >= 68))))
+			&& mes_rev >= 68) ||
+		(KFD_GC_VERSION(node) >= IP_VERSION(12, 0, 0))))) {
+		if (KFD_GC_VERSION(node) >= IP_VERSION(12, 0, 0))
+			node->adev->gds.gws_size = 64;
 		ret = amdgpu_amdkfd_alloc_gws(node->adev,
 				node->adev->gds.gws_size, &node->gws);
+	}
 
 	return ret;
 }
@@ -675,6 +696,7 @@ static void kfd_setup_interrupt_bitmap(struct kfd_node *node,
 	struct amdgpu_device *adev = node->adev;
 	uint32_t xcc_mask = node->xcc_mask;
 	uint32_t xcc, mapped_xcc;
+	uint32_t bitmap;
 	/*
 	 * Interrupt bitmap is setup for processing interrupts from
 	 * different XCDs and AIDs.
@@ -696,9 +718,22 @@ static void kfd_setup_interrupt_bitmap(struct kfd_node *node,
 	 * - AND VMID reported in the interrupt lies within the
 	 *   VMID range of the node.
 	 */
-	for_each_inst(xcc, xcc_mask) {
-		mapped_xcc = GET_INST(GC, xcc);
-		node->interrupt_bitmap |= (mapped_xcc % 2 ? 5 : 3) << (4 * (mapped_xcc / 2));
+	switch (KFD_GC_VERSION(node)) {
+	case IP_VERSION(12, 1, 0):
+		for_each_inst(xcc, xcc_mask) {
+			mapped_xcc = GET_INST(GC, xcc);
+			bitmap = 0x2 | (0x4 << (mapped_xcc % 4));
+			if (mapped_xcc/4)
+				bitmap = bitmap << 8;
+			node->interrupt_bitmap |= bitmap;
+		}
+		break;
+	default:
+		for_each_inst(xcc, xcc_mask) {
+			mapped_xcc = GET_INST(GC, xcc);
+			node->interrupt_bitmap |= (mapped_xcc % 2 ? 5 : 3) << (4 * (mapped_xcc / 2));
+		}
+		break;
 	}
 	dev_info(kfd_device, "Node: %d, interrupt_bitmap: %x\n", kfd_node_idx,
 							node->interrupt_bitmap);
@@ -713,6 +748,9 @@ bool kgd2kfd_device_init(struct kfd_dev *kfd,
 	unsigned int max_proc_per_quantum;
 	int partition_mode;
 	int xcp_idx;
+
+	kfd->profiler_process = NULL;
+	mutex_init(&kfd->profiler_lock);
 
 	kfd->mec_fw_version = amdgpu_amdkfd_get_fw_version(kfd->adev,
 			KGD_ENGINE_MEC1);
@@ -761,7 +799,7 @@ bool kgd2kfd_device_init(struct kfd_dev *kfd,
 	 * If the VMID range changes for multi-partition capable GPUs, then
 	 * this code MUST be revisited.
 	 */
-	if (kfd->adev->xcp_mgr) {
+	if (kfd->adev->xcp_mgr && (KFD_GC_VERSION(kfd) != IP_VERSION(12, 1, 0))) {
 		partition_mode = amdgpu_xcp_query_partition_mode(kfd->adev->xcp_mgr,
 								 AMDGPU_XCP_FL_LOCKED);
 		if (partition_mode == AMDGPU_CPX_PARTITION_MODE &&
@@ -798,12 +836,13 @@ bool kgd2kfd_device_init(struct kfd_dev *kfd,
 	/* add another 512KB for all other allocations on gart (HPD, fences) */
 	size += 512 * 1024;
 
-	if (amdgpu_amdkfd_alloc_gtt_mem(
-			kfd->adev, size, &kfd->gtt_mem,
+	if (amdgpu_amdkfd_alloc_kernel_mem(
+			kfd->adev, size, AMDGPU_GEM_DOMAIN_GTT,
+			&kfd->gtt_mem,
 			&kfd->gtt_start_gpu_addr, &kfd->gtt_start_cpu_ptr,
 			false)) {
 		dev_err(kfd_device, "Could not allocate %d bytes\n", size);
-		goto alloc_gtt_mem_failure;
+		goto alloc_kernel_mem_failure;
 	}
 
 	dev_info(kfd_device, "Allocated %d bytes on gart\n", size);
@@ -841,7 +880,7 @@ bool kgd2kfd_device_init(struct kfd_dev *kfd,
 
 	/* Allocate the KFD nodes */
 	for (i = 0, xcp_idx = 0; i < kfd->num_nodes; i++) {
-		node = kzalloc(sizeof(struct kfd_node), GFP_KERNEL);
+		node = kzalloc_obj(struct kfd_node);
 		if (!node)
 			goto node_alloc_error;
 
@@ -868,7 +907,8 @@ bool kgd2kfd_device_init(struct kfd_dev *kfd,
 		}
 
 		if (partition_mode == AMDGPU_CPX_PARTITION_MODE &&
-		    kfd->num_nodes != 1) {
+		    kfd->num_nodes != 1 &&
+		    (KFD_GC_VERSION(kfd) != IP_VERSION(12, 1, 0))) {
 			/* For multi-partition capable GPUs and CPX mode, first
 			 * XCD gets VMID range 4-9 and second XCD gets VMID
 			 * range 10-15.
@@ -889,6 +929,7 @@ bool kgd2kfd_device_init(struct kfd_dev *kfd,
 			node->compute_vmid_bitmap =
 				gpu_resources->compute_vmid_bitmap;
 		}
+
 		node->max_proc_per_quantum = max_proc_per_quantum;
 		atomic_set(&node->sram_ecc_flag, 0);
 
@@ -927,8 +968,8 @@ node_alloc_error:
 kfd_doorbell_error:
 	kfd_gtt_sa_fini(kfd);
 kfd_gtt_sa_init_error:
-	amdgpu_amdkfd_free_gtt_mem(kfd->adev, &kfd->gtt_mem);
-alloc_gtt_mem_failure:
+	amdgpu_amdkfd_free_kernel_mem(kfd->adev, &kfd->gtt_mem);
+alloc_kernel_mem_failure:
 	dev_err(kfd_device,
 		"device %x:%x NOT added due to errors\n",
 		kfd->adev->pdev->vendor, kfd->adev->pdev->device);
@@ -945,10 +986,14 @@ void kgd2kfd_device_exit(struct kfd_dev *kfd)
 		kfd_doorbell_fini(kfd);
 		ida_destroy(&kfd->doorbell_ida);
 		kfd_gtt_sa_fini(kfd);
-		amdgpu_amdkfd_free_gtt_mem(kfd->adev, &kfd->gtt_mem);
+		amdgpu_amdkfd_free_kernel_mem(kfd->adev, &kfd->gtt_mem);
+		mutex_destroy(&kfd->profiler_lock);
 	}
 
 	kfree(kfd);
+
+	/* after remove a kfd device unlock kfd driver */
+	kgd2kfd_unlock_kfd(NULL);
 }
 
 int kgd2kfd_pre_reset(struct kfd_dev *kfd,
@@ -965,7 +1010,7 @@ int kgd2kfd_pre_reset(struct kfd_dev *kfd,
 		kfd_smi_event_update_gpu_reset(node, false, reset_context);
 	}
 
-	kgd2kfd_suspend(kfd, false);
+	kgd2kfd_suspend(kfd, true);
 
 	for (i = 0; i < kfd->num_nodes; i++)
 		kfd_signal_reset_event(kfd->nodes[i]);
@@ -1007,13 +1052,33 @@ int kgd2kfd_post_reset(struct kfd_dev *kfd)
 	return 0;
 }
 
-bool kfd_is_locked(void)
+bool kfd_is_locked(struct kfd_dev *kfd)
 {
+	uint8_t id  = 0;
+	struct kfd_node *dev;
+
 	lockdep_assert_held(&kfd_processes_mutex);
-	return  (kfd_locked > 0);
+
+	/* check reset/suspend lock */
+	if (kfd_locked > 0)
+		return true;
+
+	if (kfd)
+		return kfd->kfd_dev_lock > 0;
+
+	/* check lock on all cgroup accessible devices */
+	while (kfd_topology_enum_kfd_devices(id++, &dev) == 0) {
+		if (!dev || kfd_devcgroup_check_permission(dev))
+			continue;
+
+		if (dev->kfd->kfd_dev_lock > 0)
+			return true;
+	}
+
+	return false;
 }
 
-void kgd2kfd_suspend(struct kfd_dev *kfd, bool run_pm)
+void kgd2kfd_suspend(struct kfd_dev *kfd, bool suspend_proc)
 {
 	struct kfd_node *node;
 	int i;
@@ -1021,14 +1086,8 @@ void kgd2kfd_suspend(struct kfd_dev *kfd, bool run_pm)
 	if (!kfd->init_complete)
 		return;
 
-	/* for runtime suspend, skip locking kfd */
-	if (!run_pm) {
-		mutex_lock(&kfd_processes_mutex);
-		/* For first KFD device suspend all the KFD processes */
-		if (++kfd_locked == 1)
-			kfd_suspend_all_processes();
-		mutex_unlock(&kfd_processes_mutex);
-	}
+	if (suspend_proc)
+		kgd2kfd_suspend_process(kfd);
 
 	for (i = 0; i < kfd->num_nodes; i++) {
 		node = kfd->nodes[i];
@@ -1036,9 +1095,9 @@ void kgd2kfd_suspend(struct kfd_dev *kfd, bool run_pm)
 	}
 }
 
-int kgd2kfd_resume(struct kfd_dev *kfd, bool run_pm)
+int kgd2kfd_resume(struct kfd_dev *kfd, bool resume_proc)
 {
-	int ret, i;
+	int ret = 0, i;
 
 	if (!kfd->init_complete)
 		return 0;
@@ -1049,14 +1108,36 @@ int kgd2kfd_resume(struct kfd_dev *kfd, bool run_pm)
 			return ret;
 	}
 
-	/* for runtime resume, skip unlocking kfd */
-	if (!run_pm) {
-		mutex_lock(&kfd_processes_mutex);
-		if (--kfd_locked == 0)
-			ret = kfd_resume_all_processes();
-		WARN_ONCE(kfd_locked < 0, "KFD suspend / resume ref. error");
-		mutex_unlock(&kfd_processes_mutex);
-	}
+	if (resume_proc)
+		ret = kgd2kfd_resume_process(kfd);
+
+	return ret;
+}
+
+void kgd2kfd_suspend_process(struct kfd_dev *kfd)
+{
+	if (!kfd->init_complete)
+		return;
+
+	mutex_lock(&kfd_processes_mutex);
+	/* For first KFD device suspend all the KFD processes */
+	if (++kfd_locked == 1)
+		kfd_suspend_all_processes();
+	mutex_unlock(&kfd_processes_mutex);
+}
+
+int kgd2kfd_resume_process(struct kfd_dev *kfd)
+{
+	int ret = 0;
+
+	if (!kfd->init_complete)
+		return 0;
+
+	mutex_lock(&kfd_processes_mutex);
+	if (--kfd_locked == 0)
+		ret = kfd_resume_all_processes();
+	WARN_ONCE(kfd_locked < 0, "KFD suspend / resume ref. error");
+	mutex_unlock(&kfd_processes_mutex);
 
 	return ret;
 }
@@ -1091,7 +1172,15 @@ void kgd2kfd_interrupt(struct kfd_dev *kfd, const void *ih_ring_entry)
 	}
 
 	for (i = 0; i < kfd->num_nodes; i++) {
-		node = kfd->nodes[i];
+		/* Race if another thread in b/w
+		 * kfd_cleanup_nodes and kfree(kfd),
+		 * when kfd->nodes[i] = NULL
+		 */
+		if (kfd->nodes[i])
+			node = kfd->nodes[i];
+		else
+			return;
+
 		spin_lock_irqsave(&node->interrupt_lock, flags);
 
 		if (node->interrupts_active
@@ -1151,12 +1240,13 @@ int kgd2kfd_resume_mm(struct mm_struct *mm)
  *   prepare for safe eviction of KFD BOs that belong to the specified
  *   process.
  *
- * @mm: mm_struct that identifies the specified KFD process
+ * @mm: mm_struct that identifies a group of KFD processes
+ * @context_id: an id that identifies a specific KFD context in the above kfd process group
  * @fence: eviction fence attached to KFD process BOs
  *
  */
 int kgd2kfd_schedule_evict_and_restore_process(struct mm_struct *mm,
-					       struct dma_fence *fence)
+					       u16 context_id, struct dma_fence *fence)
 {
 	struct kfd_process *p;
 	unsigned long active_time;
@@ -1168,7 +1258,7 @@ int kgd2kfd_schedule_evict_and_restore_process(struct mm_struct *mm,
 	if (dma_fence_is_signaled(fence))
 		return 0;
 
-	p = kfd_lookup_process_by_mm(mm);
+	p = kfd_lookup_process_by_id(mm, context_id);
 	if (!p)
 		return -ENODEV;
 
@@ -1255,7 +1345,7 @@ int kfd_gtt_sa_allocate(struct kfd_node *node, unsigned int size,
 	if (size > kfd->gtt_sa_num_of_chunks * kfd->gtt_sa_chunk_size)
 		return -ENOMEM;
 
-	*mem_obj = kzalloc(sizeof(struct kfd_mem_obj), GFP_KERNEL);
+	*mem_obj = kzalloc_obj(struct kfd_mem_obj);
 	if (!(*mem_obj))
 		return -ENOMEM;
 
@@ -1436,24 +1526,66 @@ unsigned int kfd_get_num_xgmi_sdma_engines(struct kfd_node *node)
 		kfd_get_num_sdma_engines(node);
 }
 
-int kgd2kfd_check_and_lock_kfd(void)
+int kgd2kfd_check_and_lock_kfd(struct kfd_dev *kfd)
 {
+	struct kfd_process *p;
+	int r = 0, temp, idx;
+
 	mutex_lock(&kfd_processes_mutex);
-	if (!hash_empty(kfd_processes_table) || kfd_is_locked()) {
-		mutex_unlock(&kfd_processes_mutex);
-		return -EBUSY;
+
+	/* kfd_processes_count is per kfd_dev, return -EBUSY without
+	 * further check
+	 */
+	if (!!atomic_read(&kfd->kfd_processes_count)) {
+		pr_debug("process_wq_release not finished\n");
+		r = -EBUSY;
+		goto out;
 	}
 
-	++kfd_locked;
+	if (hash_empty(kfd_processes_table) && !kfd_is_locked(kfd))
+		goto out;
+
+	/* fail under system reset/resume or kfd device is partition switching. */
+	if (kfd_is_locked(kfd)) {
+		r = -EBUSY;
+		goto out;
+	}
+
+	/*
+	 * ensure all running processes are cgroup excluded from device before mode switch.
+	 * i.e. no pdd was created on the process socket.
+	 */
+	idx = srcu_read_lock(&kfd_processes_srcu);
+	hash_for_each_rcu(kfd_processes_table, temp, p, kfd_processes) {
+		int i;
+
+		for (i = 0; i < p->n_pdds; i++) {
+			if (p->pdds[i]->dev->kfd != kfd)
+				continue;
+
+			r = -EBUSY;
+			goto proc_check_unlock;
+		}
+	}
+
+proc_check_unlock:
+	srcu_read_unlock(&kfd_processes_srcu, idx);
+out:
+	if (!r)
+		++kfd->kfd_dev_lock;
 	mutex_unlock(&kfd_processes_mutex);
 
-	return 0;
+	return r;
 }
 
-void kgd2kfd_unlock_kfd(void)
+/* unlock a kfd dev or kfd driver */
+void kgd2kfd_unlock_kfd(struct kfd_dev *kfd)
 {
 	mutex_lock(&kfd_processes_mutex);
-	--kfd_locked;
+	if (kfd)
+		--kfd->kfd_dev_lock;
+	else
+		--kfd_locked;
 	mutex_unlock(&kfd_processes_mutex);
 }
 
@@ -1479,6 +1611,25 @@ int kgd2kfd_start_sched(struct kfd_dev *kfd, uint32_t node_id)
 	return ret;
 }
 
+int kgd2kfd_start_sched_all_nodes(struct kfd_dev *kfd)
+{
+	struct kfd_node *node;
+	int i, r;
+
+	if (!kfd->init_complete)
+		return 0;
+
+	for (i = 0; i < kfd->num_nodes; i++) {
+		node = kfd->nodes[i];
+		r = node->dqm->ops.unhalt(node->dqm);
+		if (r) {
+			dev_err(kfd_device, "Error in starting scheduler\n");
+			return r;
+		}
+	}
+	return 0;
+}
+
 int kgd2kfd_stop_sched(struct kfd_dev *kfd, uint32_t node_id)
 {
 	struct kfd_node *node;
@@ -1494,6 +1645,39 @@ int kgd2kfd_stop_sched(struct kfd_dev *kfd, uint32_t node_id)
 
 	node = kfd->nodes[node_id];
 	return node->dqm->ops.halt(node->dqm);
+}
+
+int kgd2kfd_stop_sched_all_nodes(struct kfd_dev *kfd)
+{
+	struct kfd_node *node;
+	int i, r;
+
+	if (!kfd->init_complete)
+		return 0;
+
+	for (i = 0; i < kfd->num_nodes; i++) {
+		node = kfd->nodes[i];
+		r = node->dqm->ops.halt(node->dqm);
+		if (r)
+			return r;
+	}
+	return 0;
+}
+
+int amdgpu_amdkfd_stop_sched_all(struct amdgpu_device *adev)
+{
+	if (!adev->kfd.init_complete)
+		return 0;
+
+	return kgd2kfd_stop_sched_all_nodes(adev->kfd.dev);
+}
+
+int amdgpu_amdkfd_start_sched_all(struct amdgpu_device *adev)
+{
+	if (!adev->kfd.init_complete)
+		return 0;
+
+	return kgd2kfd_start_sched_all_nodes(adev->kfd.dev);
 }
 
 bool kgd2kfd_compute_active(struct kfd_dev *kfd, uint32_t node_id)
@@ -1556,15 +1740,20 @@ bool kgd2kfd_vmfault_fast_path(struct amdgpu_device *adev, struct amdgpu_iv_entr
 {
 	struct kfd_process *p;
 	u32 cam_index;
+	u32 src_data_idx;
+
+	src_data_idx = (amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(12, 1, 0)) ?
+			3 : 2;
 
 	if (entry->ih == &adev->irq.ih_soft || entry->ih == &adev->irq.ih1) {
-		p = kfd_lookup_process_by_pasid(entry->pasid);
+		p = kfd_lookup_process_by_pasid(entry->pasid, NULL);
 		if (!p)
 			return true;
 
 		if (p->gpu_page_fault && !p->debug_trap_enabled) {
 			if (retry_fault && adev->irq.retry_cam_enabled) {
-				cam_index = entry->src_data[2] & 0x3ff;
+				cam_index = entry->src_data[src_data_idx] & 0x3ff;
+
 				WDOORBELL32(adev->irq.retry_cam_doorbell_index, cam_index);
 			}
 
@@ -1581,6 +1770,42 @@ bool kgd2kfd_vmfault_fast_path(struct amdgpu_device *adev, struct amdgpu_iv_entr
 	return false;
 }
 
+/** kgd2kfd_teardown_processes - gracefully tear down existing
+ *  kfd processes that use adev
+ *
+ * @adev: amdgpu_device where kfd processes run on and will be
+ *  teardown
+ *
+ */
+void kgd2kfd_teardown_processes(struct amdgpu_device *adev)
+{
+	struct hlist_node *p_temp;
+	struct kfd_process *p;
+	struct kfd_node *dev;
+	unsigned int temp;
+
+	mutex_lock(&kfd_processes_mutex);
+
+	if (hash_empty(kfd_processes_table)) {
+		mutex_unlock(&kfd_processes_mutex);
+		return;
+	}
+
+	hash_for_each_safe(kfd_processes_table, temp, p_temp, p, kfd_processes) {
+		for (int i = 0; i < p->n_pdds; i++) {
+			dev = p->pdds[i]->dev;
+			if (dev->adev == adev)
+				kfd_signal_process_terminate_event(p);
+		}
+	}
+
+	mutex_unlock(&kfd_processes_mutex);
+
+	/* wait all kfd processes use adev terminate */
+	while (!!atomic_read(&adev->kfd.dev->kfd_processes_count))
+		cond_resched();
+}
+
 #if defined(CONFIG_DEBUG_FS)
 
 /* This function will send a package to HIQ to hang the HWS
@@ -1590,6 +1815,11 @@ int kfd_debugfs_hang_hws(struct kfd_node *dev)
 {
 	if (dev->dqm->sched_policy != KFD_SCHED_POLICY_HWS) {
 		pr_err("HWS is not enabled");
+		return -EINVAL;
+	}
+
+	if (dev->kfd->shared_resources.enable_mes) {
+		dev_err(dev->adev->dev, "Inducing MES hang is not supported\n");
 		return -EINVAL;
 	}
 

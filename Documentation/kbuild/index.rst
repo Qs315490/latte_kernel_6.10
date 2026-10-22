@@ -23,9 +23,4 @@ Kernel Build System
     llvm
     gendwarfksyms
 
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`
+    bash-completion

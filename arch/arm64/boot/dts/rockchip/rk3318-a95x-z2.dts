@@ -184,7 +184,7 @@
 
 &gmac2phy {
 	assigned-clock-parents = <&cru SCLK_MAC2PHY_SRC>;
-	assigned-clock-rate = <50000000>;
+	assigned-clock-rates = <50000000>;
 	assigned-clocks = <&cru SCLK_MAC2PHY>;
 	status = "okay";
 };
@@ -274,13 +274,13 @@
 
 &pwm0 {
 	pinctrl-0 = <&pwm0_pin_pull_up>;
-	pinctrl-names = "active";
+	pinctrl-names = "default";
 	status = "okay";
 };
 
 &pwm1 {
 	pinctrl-0 = <&pwm1_pin_pull_up>;
-	pinctrl-names = "active";
+	pinctrl-names = "default";
 	status = "okay";
 };
 

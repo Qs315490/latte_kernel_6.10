@@ -13,6 +13,7 @@
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
+#include <linux/string_choices.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
 
@@ -562,7 +563,7 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 			ret = readbytes(i2c_adap, pmsg);
 			if (ret >= 1)
 				bit_dbg(2, &i2c_adap->dev, "read %d byte%s\n",
-					ret, ret == 1 ? "" : "s");
+					ret, str_plural(ret));
 			if (ret < pmsg->len) {
 				if (ret >= 0)
 					ret = -EIO;
@@ -573,7 +574,7 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 			ret = sendbytes(i2c_adap, pmsg);
 			if (ret >= 1)
 				bit_dbg(2, &i2c_adap->dev, "wrote %d byte%s\n",
-					ret, ret == 1 ? "" : "s");
+					ret, str_plural(ret));
 			if (ret < pmsg->len) {
 				if (ret >= 0)
 					ret = -EIO;
@@ -619,8 +620,8 @@ static u32 bit_func(struct i2c_adapter *adap)
 /* -----exported algorithm data: -------------------------------------	*/
 
 const struct i2c_algorithm i2c_bit_algo = {
-	.master_xfer = bit_xfer,
-	.master_xfer_atomic = bit_xfer_atomic,
+	.xfer = bit_xfer,
+	.xfer_atomic = bit_xfer_atomic,
 	.functionality = bit_func,
 };
 EXPORT_SYMBOL(i2c_bit_algo);

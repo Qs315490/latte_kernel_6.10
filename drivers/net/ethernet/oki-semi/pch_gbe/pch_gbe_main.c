@@ -198,23 +198,21 @@ pch_tx_timestamp(struct pch_gbe_adapter *adapter, struct sk_buff *skb)
 	pch_ch_event_write(pdev, TX_SNAPSHOT_LOCKED);
 }
 
-static int hwtstamp_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
+static int pch_gbe_hwtstamp_set(struct net_device *netdev,
+				struct kernel_hwtstamp_config *cfg,
+				struct netlink_ext_ack *extack)
 {
-	struct hwtstamp_config cfg;
 	struct pch_gbe_adapter *adapter = netdev_priv(netdev);
 	struct pci_dev *pdev;
 	u8 station[20];
 
-	if (copy_from_user(&cfg, ifr->ifr_data, sizeof(cfg)))
-		return -EFAULT;
-
 	/* Get ieee1588's dev information */
 	pdev = adapter->ptp_pdev;
 
-	if (cfg.tx_type != HWTSTAMP_TX_OFF && cfg.tx_type != HWTSTAMP_TX_ON)
+	if (cfg->tx_type != HWTSTAMP_TX_OFF && cfg->tx_type != HWTSTAMP_TX_ON)
 		return -ERANGE;
 
-	switch (cfg.rx_filter) {
+	switch (cfg->rx_filter) {
 	case HWTSTAMP_FILTER_NONE:
 		adapter->hwts_rx_en = 0;
 		break;
@@ -223,17 +221,17 @@ static int hwtstamp_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 		pch_ch_control_write(pdev, SLAVE_MODE | CAP_MODE0);
 		break;
 	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
-		adapter->hwts_rx_en = 1;
+		adapter->hwts_rx_en = cfg->rx_filter;
 		pch_ch_control_write(pdev, MASTER_MODE | CAP_MODE0);
 		break;
 	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
-		adapter->hwts_rx_en = 1;
+		adapter->hwts_rx_en = cfg->rx_filter;
 		pch_ch_control_write(pdev, V2_MODE | CAP_MODE2);
 		strcpy(station, PTP_L4_MULTICAST_SA);
 		pch_set_station_address(station, pdev);
 		break;
 	case HWTSTAMP_FILTER_PTP_V2_L2_EVENT:
-		adapter->hwts_rx_en = 1;
+		adapter->hwts_rx_en = cfg->rx_filter;
 		pch_ch_control_write(pdev, V2_MODE | CAP_MODE2);
 		strcpy(station, PTP_L2_MULTICAST_SA);
 		pch_set_station_address(station, pdev);
@@ -242,12 +240,23 @@ static int hwtstamp_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 		return -ERANGE;
 	}
 
-	adapter->hwts_tx_en = cfg.tx_type == HWTSTAMP_TX_ON;
+	adapter->hwts_tx_en = cfg->tx_type == HWTSTAMP_TX_ON;
 
 	/* Clear out any old time stamps. */
 	pch_ch_event_write(pdev, TX_SNAPSHOT_LOCKED | RX_SNAPSHOT_LOCKED);
 
-	return copy_to_user(ifr->ifr_data, &cfg, sizeof(cfg)) ? -EFAULT : 0;
+	return 0;
+}
+
+static int pch_gbe_hwtstamp_get(struct net_device *netdev,
+				struct kernel_hwtstamp_config *cfg)
+{
+	struct pch_gbe_adapter *adapter = netdev_priv(netdev);
+
+	cfg->tx_type = adapter->hwts_tx_en ? HWTSTAMP_TX_ON : HWTSTAMP_TX_OFF;
+	cfg->rx_filter = adapter->hwts_rx_en;
+
+	return 0;
 }
 
 static inline void pch_gbe_mac_load_mac_addr(struct pch_gbe_hw *hw)
@@ -1014,8 +1023,8 @@ static void pch_gbe_set_mode(struct pch_gbe_adapter *adapter, u16 speed,
  */
 static void pch_gbe_watchdog(struct timer_list *t)
 {
-	struct pch_gbe_adapter *adapter = from_timer(adapter, t,
-						     watchdog_timer);
+	struct pch_gbe_adapter *adapter = timer_container_of(adapter, t,
+							     watchdog_timer);
 	struct net_device *netdev = adapter->netdev;
 	struct pch_gbe_hw *hw = &adapter->hw;
 
@@ -1411,13 +1420,25 @@ pch_gbe_alloc_rx_buffers_pool(struct pch_gbe_adapter *adapter,
 	return 0;
 }
 
+static void pch_gbe_free_rx_buffers_pool(struct pch_gbe_adapter *adapter,
+					 struct pch_gbe_rx_ring *rx_ring)
+{
+	dma_free_coherent(&adapter->pdev->dev, rx_ring->rx_buff_pool_size,
+			  rx_ring->rx_buff_pool, rx_ring->rx_buff_pool_logic);
+	rx_ring->rx_buff_pool_logic = 0;
+	rx_ring->rx_buff_pool_size = 0;
+	rx_ring->rx_buff_pool = NULL;
+}
+
 /**
  * pch_gbe_alloc_tx_buffers - Allocate transmit buffers
  * @adapter:   Board private structure
  * @tx_ring:   Tx descriptor ring
+ *
+ * Return: 0 on success, -ENOMEM if a TX skb allocation fails.
  */
-static void pch_gbe_alloc_tx_buffers(struct pch_gbe_adapter *adapter,
-					struct pch_gbe_tx_ring *tx_ring)
+static int pch_gbe_alloc_tx_buffers(struct pch_gbe_adapter *adapter,
+				    struct pch_gbe_tx_ring *tx_ring)
 {
 	struct pch_gbe_buffer *buffer_info;
 	struct sk_buff *skb;
@@ -1431,12 +1452,17 @@ static void pch_gbe_alloc_tx_buffers(struct pch_gbe_adapter *adapter,
 	for (i = 0; i < tx_ring->count; i++) {
 		buffer_info = &tx_ring->buffer_info[i];
 		skb = netdev_alloc_skb(adapter->netdev, bufsz);
+		if (!skb) {
+			pch_gbe_clean_tx_ring(adapter, tx_ring);
+			return -ENOMEM;
+		}
 		skb_reserve(skb, PCH_GBE_DMA_ALIGN);
 		buffer_info->skb = skb;
 		tx_desc = PCH_GBE_TX_DESC(*tx_ring, i);
 		tx_desc->gbec_status = (DSC_INIT16);
 	}
-	return;
+
+	return 0;
 }
 
 /**
@@ -1878,7 +1904,12 @@ int pch_gbe_up(struct pch_gbe_adapter *adapter)
 			   "Error: can't bring device up - alloc rx buffers pool failed\n");
 		goto freeirq;
 	}
-	pch_gbe_alloc_tx_buffers(adapter, tx_ring);
+	err = pch_gbe_alloc_tx_buffers(adapter, tx_ring);
+	if (err) {
+		netdev_err(netdev,
+			   "Error: can't bring device up - alloc tx buffers failed\n");
+		goto freebuf;
+	}
 	pch_gbe_alloc_rx_buffers(adapter, rx_ring, rx_ring->count);
 	adapter->tx_queue_len = netdev->tx_queue_len;
 	pch_gbe_enable_dma_rx(&adapter->hw);
@@ -1892,6 +1923,8 @@ int pch_gbe_up(struct pch_gbe_adapter *adapter)
 
 	return 0;
 
+freebuf:
+	pch_gbe_free_rx_buffers_pool(adapter, rx_ring);
 freeirq:
 	pch_gbe_free_irq(adapter);
 out:
@@ -1916,7 +1949,7 @@ void pch_gbe_down(struct pch_gbe_adapter *adapter)
 	pch_gbe_irq_disable(adapter);
 	pch_gbe_free_irq(adapter);
 
-	del_timer_sync(&adapter->watchdog_timer);
+	timer_delete_sync(&adapter->watchdog_timer);
 
 	netdev->tx_queue_len = adapter->tx_queue_len;
 	netif_carrier_off(netdev);
@@ -1927,11 +1960,7 @@ void pch_gbe_down(struct pch_gbe_adapter *adapter)
 	pch_gbe_clean_tx_ring(adapter, adapter->tx_ring);
 	pch_gbe_clean_rx_ring(adapter, adapter->rx_ring);
 
-	dma_free_coherent(&adapter->pdev->dev, rx_ring->rx_buff_pool_size,
-			  rx_ring->rx_buff_pool, rx_ring->rx_buff_pool_logic);
-	rx_ring->rx_buff_pool_logic = 0;
-	rx_ring->rx_buff_pool_size = 0;
-	rx_ring->rx_buff_pool = NULL;
+	pch_gbe_free_rx_buffers_pool(adapter, rx_ring);
 }
 
 /**
@@ -2234,9 +2263,6 @@ static int pch_gbe_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 
 	netdev_dbg(netdev, "cmd : 0x%04x\n", cmd);
 
-	if (cmd == SIOCSHWTSTAMP)
-		return hwtstamp_ioctl(netdev, ifr, cmd);
-
 	return generic_mii_ioctl(&adapter->mii, if_mii(ifr), cmd, NULL);
 }
 
@@ -2328,6 +2354,8 @@ static const struct net_device_ops pch_gbe_netdev_ops = {
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller = pch_gbe_netpoll,
 #endif
+	.ndo_hwtstamp_get = pch_gbe_hwtstamp_get,
+	.ndo_hwtstamp_set = pch_gbe_hwtstamp_set,
 };
 
 static pci_ers_result_t pch_gbe_io_error_detected(struct pci_dev *pdev,

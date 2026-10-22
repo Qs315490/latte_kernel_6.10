@@ -18,10 +18,11 @@
 #include <sound/core.h>
 #include <sound/ac97_codec.h>
 #include <sound/soc.h>
-#include <sound/pxa2xx-lib.h>
 #include <sound/dmaengine_pcm.h>
 
 #include <linux/platform_data/asoc-pxa.h>
+
+#include "pxa2xx-lib.h"
 
 #define PCDR	0x0040  /* PCM FIFO Data Register */
 #define MODR	0x0140  /* Modem FIFO Data Register */
@@ -198,7 +199,7 @@ static struct snd_soc_dai_driver pxa_ac97_dai_driver[] = {
 
 static const struct snd_soc_component_driver pxa_ac97_component = {
 	.name		= "pxa-ac97",
-	.pcm_construct	= pxa2xx_soc_pcm_new,
+	.pcm_new	= pxa2xx_soc_pcm_new,
 	.open		= pxa2xx_soc_pcm_open,
 	.close		= pxa2xx_soc_pcm_close,
 	.hw_params	= pxa2xx_soc_pcm_hw_params,
@@ -222,9 +223,7 @@ static int pxa2xx_ac97_dev_probe(struct platform_device *pdev)
 {
 	int ret;
 	struct ac97_controller *ctrl;
-	pxa2xx_audio_ops_t *pdata = pdev->dev.platform_data;
 	struct resource *regs;
-	void **codecs_pdata;
 
 	if (pdev->id != -1) {
 		dev_err(&pdev->dev, "PXA2xx has only one AC97 port.\n");
@@ -247,10 +246,8 @@ static int pxa2xx_ac97_dev_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	codecs_pdata = pdata ? pdata->codec_pdata : NULL;
 	ctrl = snd_ac97_controller_register(&pxa2xx_ac97_ops, &pdev->dev,
-					    AC97_SLOTS_AVAILABLE_ALL,
-					    codecs_pdata);
+					    AC97_SLOTS_AVAILABLE_ALL);
 	if (IS_ERR(ctrl))
 		return PTR_ERR(ctrl);
 

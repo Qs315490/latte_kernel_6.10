@@ -3,9 +3,6 @@
 
 set -ex
 
-# Clean up stale rebases that GitLab might not have removed when reusing a checkout dir
-rm -rf .git/rebase-apply
-
 . .gitlab-ci/container/container_pre_build.sh
 
 # libssl-dev was uninstalled because it was considered an ephemeral package
@@ -19,6 +16,7 @@ if [[ "$KERNEL_ARCH" = "arm64" ]]; then
     GCC_ARCH="aarch64-linux-gnu"
     DEBIAN_ARCH="arm64"
     DEVICE_TREES="arch/arm64/boot/dts/rockchip/rk3399-gru-kevin.dtb"
+    DEVICE_TREES+=" arch/arm64/boot/dts/rockchip/rk3588-rock-5b.dtb"
     DEVICE_TREES+=" arch/arm64/boot/dts/amlogic/meson-gxl-s805x-libretech-ac.dtb"
     DEVICE_TREES+=" arch/arm64/boot/dts/allwinner/sun50i-h6-pine-h64.dtb"
     DEVICE_TREES+=" arch/arm64/boot/dts/amlogic/meson-gxm-khadas-vim2.dtb"
@@ -61,25 +59,24 @@ export PATH=$NEWPATH:$PATH
 
 git config --global user.email "fdo@example.com"
 git config --global user.name "freedesktop.org CI"
-git config --global pull.rebase true
 
 # cleanup git state on the worker
-rm -rf .git/rebase-merge
+rm -rf .git/rebase-merge .git/rebase-apply
 
 # Try to merge fixes from target repo
 if [ "$(git ls-remote --exit-code --heads ${UPSTREAM_REPO} ${TARGET_BRANCH}-external-fixes)" ]; then
-    git pull ${UPSTREAM_REPO} ${TARGET_BRANCH}-external-fixes
+    git pull --no-rebase ${UPSTREAM_REPO} ${TARGET_BRANCH}-external-fixes
 fi
 
 # Try to merge fixes from local repo if this isn't a merge request
 # otherwise try merging the fixes from the merge target
 if [ -z "$CI_MERGE_REQUEST_PROJECT_PATH" ]; then
     if [ "$(git ls-remote --exit-code --heads origin ${TARGET_BRANCH}-external-fixes)" ]; then
-        git pull origin ${TARGET_BRANCH}-external-fixes
+        git pull --no-rebase origin ${TARGET_BRANCH}-external-fixes
     fi
 else
     if [ "$(git ls-remote --exit-code --heads ${CI_MERGE_REQUEST_PROJECT_URL} ${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}-external-fixes)" ]; then
-        git pull ${CI_MERGE_REQUEST_PROJECT_URL} ${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}-external-fixes
+        git pull --no-rebase ${CI_MERGE_REQUEST_PROJECT_URL} ${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}-external-fixes
     fi
 fi
 
@@ -98,14 +95,14 @@ done
 
 make ${KERNEL_IMAGE_NAME}
 
-mkdir -p /lava-files/
+mkdir -p /kernel/
 for image in ${KERNEL_IMAGE_NAME}; do
-    cp arch/${KERNEL_ARCH}/boot/${image} /lava-files/.
+    cp arch/${KERNEL_ARCH}/boot/${image} /kernel/.
 done
 
 if [[ -n ${DEVICE_TREES} ]]; then
     make dtbs
-    cp ${DEVICE_TREES} /lava-files/.
+    cp ${DEVICE_TREES} /kernel/.
 fi
 
 make modules
@@ -113,33 +110,22 @@ mkdir -p install/modules/
 INSTALL_MOD_PATH=install/modules/ make modules_install
 
 if [[ ${DEBIAN_ARCH} = "arm64" ]]; then
-    make Image.lzma
-    mkimage \
-        -f auto \
-        -A arm \
-        -O linux \
-        -d arch/arm64/boot/Image.lzma \
-        -C lzma\
-        -b arch/arm64/boot/dts/qcom/sdm845-cheza-r3.dtb \
-        /lava-files/cheza-kernel
-    KERNEL_IMAGE_NAME+=" cheza-kernel"
-
     # Make a gzipped copy of the Image for db410c.
-    gzip -k /lava-files/Image
+    gzip -k /kernel/Image
     KERNEL_IMAGE_NAME+=" Image.gz"
 fi
 
 # Pass needed files to the test stage
 mkdir -p install
 cp -rfv .gitlab-ci/* install/.
-cp -rfv ci/*  install/.
+cp -rfv bin/ci/*  install/.
 cp -rfv install/common install/ci-common
 cp -rfv drivers/gpu/drm/ci/* install/.
 
 . .gitlab-ci/container/container_post_build.sh
 
 if [[ "$UPLOAD_TO_MINIO" = "1" ]]; then
-    xz -7 -c -T${FDO_CI_CONCURRENT:-4} vmlinux > /lava-files/vmlinux.xz
+    xz -7 -c -T${FDO_CI_CONCURRENT:-4} vmlinux > /kernel/vmlinux.xz
     FILES_TO_UPLOAD="$KERNEL_IMAGE_NAME vmlinux.xz"
 
     if [[ -n $DEVICE_TREES ]]; then
@@ -148,7 +134,7 @@ if [[ "$UPLOAD_TO_MINIO" = "1" ]]; then
 
     ls -l "${S3_JWT_FILE}"
     for f in $FILES_TO_UPLOAD; do
-        ci-fairy s3cp --token-file "${S3_JWT_FILE}" /lava-files/$f \
+        ci-fairy s3cp --token-file "${S3_JWT_FILE}" /kernel/$f \
                 https://${PIPELINE_ARTIFACTS_BASE}/${DEBIAN_ARCH}/$f
     done
 
@@ -165,7 +151,7 @@ ln -s common artifacts/install/ci-common
 cp .config artifacts/${CI_JOB_NAME}_config
 
 for image in ${KERNEL_IMAGE_NAME}; do
-    cp /lava-files/$image artifacts/install/.
+    cp /kernel/$image artifacts/install/.
 done
 
 tar -C artifacts -cf artifacts/install.tar install

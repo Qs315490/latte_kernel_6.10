@@ -6,6 +6,7 @@
  */
 
 #include <linux/nvme-auth.h>
+#include <linux/blkdev.h>
 
 #include "nvme.h"
 #include "fabrics.h"
@@ -258,6 +259,9 @@ static struct attribute *nvme_ns_attrs[] = {
 #ifdef CONFIG_NVME_MULTIPATH
 	&dev_attr_ana_grpid.attr,
 	&dev_attr_ana_state.attr,
+	&dev_attr_queue_depth.attr,
+	&dev_attr_numa_nodes.attr,
+	&dev_attr_delayed_removal_secs.attr,
 #endif
 	&dev_attr_io_passthru_err_log_enabled.attr,
 	NULL,
@@ -290,6 +294,16 @@ static umode_t nvme_ns_attrs_are_visible(struct kobject *kobj,
 		if (!nvme_ctrl_use_ana(nvme_get_ns_from_dev(dev)->ctrl))
 			return 0;
 	}
+	if (a == &dev_attr_queue_depth.attr || a == &dev_attr_numa_nodes.attr) {
+		if (nvme_disk_is_ns_head(dev_to_disk(dev)))
+			return 0;
+	}
+	if (a == &dev_attr_delayed_removal_secs.attr) {
+		struct gendisk *disk = dev_to_disk(dev);
+
+		if (!nvme_disk_is_ns_head(disk))
+			return 0;
+	}
 #endif
 	return a->mode;
 }
@@ -299,8 +313,146 @@ static const struct attribute_group nvme_ns_attr_group = {
 	.is_visible	= nvme_ns_attrs_are_visible,
 };
 
+#ifdef CONFIG_NVME_MULTIPATH
+/*
+ * NOTE: The dummy attribute does not appear in sysfs. It exists solely to allow
+ * control over the visibility of the multipath sysfs node. Without at least one
+ * attribute defined in nvme_ns_mpath_attrs[], the sysfs implementation does not
+ * invoke the multipath_sysfs_group_visible() method. As a result, we would not
+ * be able to control the visibility of the multipath sysfs node.
+ */
+static struct attribute dummy_attr = {
+	.name = "dummy",
+};
+
+static struct attribute *nvme_ns_mpath_attrs[] = {
+	&dummy_attr,
+	NULL,
+};
+
+static bool multipath_sysfs_group_visible(struct kobject *kobj)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+
+	return nvme_disk_is_ns_head(dev_to_disk(dev));
+}
+DEFINE_SIMPLE_SYSFS_GROUP_VISIBLE(multipath_sysfs)
+
+const struct attribute_group nvme_ns_mpath_attr_group = {
+	.name           = "multipath",
+	.attrs		= nvme_ns_mpath_attrs,
+	.is_visible     = SYSFS_GROUP_VISIBLE(multipath_sysfs),
+};
+#endif
+
+static ssize_t command_retries_count_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct nvme_ns *ns = nvme_get_ns_from_dev(dev);
+
+	return sysfs_emit(buf, "%lu\n", atomic_long_read(&ns->retries));
+}
+
+static ssize_t command_retries_count_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	unsigned long retries;
+	int err;
+	struct nvme_ns *ns = nvme_get_ns_from_dev(dev);
+
+	err = kstrtoul(buf, 0, &retries);
+	if (err)
+		return -EINVAL;
+
+	atomic_long_set(&ns->retries, retries);
+
+	return count;
+}
+static DEVICE_ATTR_RW(command_retries_count);
+
+static ssize_t nvme_io_errors_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct nvme_ns *ns = nvme_get_ns_from_dev(dev);
+
+	return sysfs_emit(buf, "%lu\n", atomic_long_read(&ns->errors));
+}
+
+static ssize_t nvme_io_errors_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	unsigned long errors;
+	int err;
+	struct nvme_ns *ns = nvme_get_ns_from_dev(dev);
+
+	err = kstrtoul(buf, 0, &errors);
+	if (err)
+		return -EINVAL;
+
+	atomic_long_set(&ns->errors, errors);
+
+	return count;
+}
+
+static struct device_attribute dev_attr_io_errors =
+	__ATTR(command_error_count, 0644,
+		nvme_io_errors_show, nvme_io_errors_store);
+
+static struct attribute *nvme_ns_diag_attrs[] = {
+	&dev_attr_command_retries_count.attr,
+	&dev_attr_io_errors.attr,
+#ifdef CONFIG_NVME_MULTIPATH
+	&dev_attr_multipath_failover_count.attr,
+	&dev_attr_io_requeue_no_usable_path_count.attr,
+	&dev_attr_io_fail_no_available_path_count.attr,
+#endif
+	NULL,
+};
+
+static umode_t nvme_ns_diag_attrs_are_visible(struct kobject *kobj,
+		struct attribute *a, int n)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+
+	if (a == &dev_attr_command_retries_count.attr) {
+		if (nvme_disk_is_ns_head(dev_to_disk(dev)))
+			return 0;
+	}
+	if (a == &dev_attr_io_errors.attr) {
+		struct gendisk *disk = dev_to_disk(dev);
+
+		if (nvme_disk_is_ns_head(disk))
+			return 0;
+	}
+#ifdef CONFIG_NVME_MULTIPATH
+	if (a == &dev_attr_multipath_failover_count.attr) {
+		if (nvme_disk_is_ns_head(dev_to_disk(dev)))
+			return 0;
+	}
+	if (a == &dev_attr_io_requeue_no_usable_path_count.attr) {
+		if (!nvme_disk_is_ns_head(dev_to_disk(dev)))
+			return 0;
+	}
+	if (a == &dev_attr_io_fail_no_available_path_count.attr) {
+		if (!nvme_disk_is_ns_head(dev_to_disk(dev)))
+			return 0;
+	}
+#endif
+	return a->mode;
+}
+
+static const struct attribute_group nvme_ns_diag_attr_group = {
+	.name		= "diag",
+	.attrs		= nvme_ns_diag_attrs,
+	.is_visible	= nvme_ns_diag_attrs_are_visible,
+};
+
 const struct attribute_group *nvme_ns_attr_groups[] = {
 	&nvme_ns_attr_group,
+#ifdef CONFIG_NVME_MULTIPATH
+	&nvme_ns_mpath_attr_group,
+#endif
+	&nvme_ns_diag_attr_group,
 	NULL,
 };
 
@@ -546,6 +698,114 @@ static ssize_t dctype_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(dctype);
 
+static ssize_t quirks_show(struct device *dev, struct device_attribute *attr,
+                char *buf)
+{
+	int count = 0, i;
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	unsigned long quirks = ctrl->quirks;
+
+	if (!quirks)
+		return sysfs_emit(buf, "none\n");
+
+	for (i = 0; quirks; ++i) {
+		if (quirks & 1) {
+			count += sysfs_emit_at(buf, count, "%s\n",
+					nvme_quirk_name(BIT(i)));
+		}
+		quirks >>= 1;
+	}
+
+	return count;
+}
+static DEVICE_ATTR_RO(quirks);
+
+static ssize_t nvme_admin_timeout_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n",
+				jiffies_to_msecs(ctrl->admin_timeout));
+}
+
+static ssize_t nvme_admin_timeout_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	u32 timeout;
+	int err;
+
+	/*
+	 * Wait until the controller reaches the LIVE state to be sure that
+	 * admin_q and fabrics_q are properly initialized.
+	 */
+	if (!test_bit(NVME_CTRL_STARTED_ONCE, &ctrl->flags))
+		return -EBUSY;
+
+	err = kstrtou32(buf, 10, &timeout);
+	if (err || !timeout)
+		return -EINVAL;
+
+	ctrl->admin_timeout = msecs_to_jiffies(timeout);
+
+	blk_queue_rq_timeout(ctrl->admin_q, ctrl->admin_timeout);
+	if (ctrl->fabrics_q)
+		blk_queue_rq_timeout(ctrl->fabrics_q, ctrl->admin_timeout);
+
+	return count;
+}
+
+static DEVICE_ATTR(admin_timeout, S_IRUGO | S_IWUSR,
+	nvme_admin_timeout_show, nvme_admin_timeout_store);
+
+static ssize_t nvme_io_timeout_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", jiffies_to_msecs(ctrl->io_timeout));
+}
+
+static ssize_t nvme_io_timeout_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	struct nvme_ns *ns;
+	u32 timeout;
+	int err;
+
+	/*
+	 * Wait until the controller reaches the LIVE state to be sure that
+	 * connect_q is properly initialized.
+	 */
+	if (!test_bit(NVME_CTRL_STARTED_ONCE, &ctrl->flags))
+		return -EBUSY;
+
+	err = kstrtou32(buf, 10, &timeout);
+	if (err || !timeout)
+		return -EINVAL;
+
+	/* Take the namespaces_lock to avoid racing against nvme_alloc_ns() */
+	mutex_lock(&ctrl->namespaces_lock);
+
+	ctrl->io_timeout = msecs_to_jiffies(timeout);
+	list_for_each_entry(ns, &ctrl->namespaces, list)
+		blk_queue_rq_timeout(ns->queue, ctrl->io_timeout);
+
+	mutex_unlock(&ctrl->namespaces_lock);
+
+	if (ctrl->connect_q)
+		blk_queue_rq_timeout(ctrl->connect_q, ctrl->io_timeout);
+
+	return count;
+}
+
+static DEVICE_ATTR(io_timeout, S_IRUGO | S_IWUSR,
+	nvme_io_timeout_show, nvme_io_timeout_store);
+
 #ifdef CONFIG_NVME_HOST_AUTH
 static ssize_t nvme_ctrl_dhchap_secret_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -581,7 +841,7 @@ static ssize_t nvme_ctrl_dhchap_secret_store(struct device *dev,
 		struct nvme_dhchap_key *key, *host_key;
 		int ret;
 
-		ret = nvme_auth_generate_key(dhchap_secret, &key);
+		ret = nvme_auth_parse_key(dhchap_secret, &key);
 		if (ret) {
 			kfree(dhchap_secret);
 			return ret;
@@ -639,7 +899,7 @@ static ssize_t nvme_ctrl_dhchap_ctrl_secret_store(struct device *dev,
 		struct nvme_dhchap_key *key, *ctrl_key;
 		int ret;
 
-		ret = nvme_auth_generate_key(dhchap_secret, &key);
+		ret = nvme_auth_parse_key(dhchap_secret, &key);
 		if (ret) {
 			kfree(dhchap_secret);
 			return ret;
@@ -687,6 +947,9 @@ static struct attribute *nvme_dev_attrs[] = {
 	&dev_attr_kato.attr,
 	&dev_attr_cntrltype.attr,
 	&dev_attr_dctype.attr,
+	&dev_attr_quirks.attr,
+	&dev_attr_admin_timeout.attr,
+	&dev_attr_io_timeout.attr,
 #ifdef CONFIG_NVME_HOST_AUTH
 	&dev_attr_dhchap_secret.attr,
 	&dev_attr_dhchap_ctrl_secret.attr,
@@ -751,7 +1014,49 @@ static ssize_t tls_configured_key_show(struct device *dev,
 
 	return sysfs_emit(buf, "%08x\n", key_serial(key));
 }
-static DEVICE_ATTR_RO(tls_configured_key);
+
+static ssize_t tls_configured_key_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	int error, qid;
+
+	error = kstrtoint(buf, 10, &qid);
+	if (error)
+		return error;
+
+	/*
+	 * We currently only allow userspace to write a `0` indicating
+	 * generate a new key.
+	 */
+	if (qid)
+		return -EINVAL;
+
+	if (!ctrl->opts || !ctrl->opts->concat)
+		return -EOPNOTSUPP;
+
+	error = nvme_auth_negotiate(ctrl, 0);
+	if (error < 0) {
+		nvme_reset_ctrl(ctrl);
+		return error;
+	}
+
+	error = nvme_auth_wait(ctrl, 0);
+	if (error < 0) {
+		nvme_reset_ctrl(ctrl);
+		return error;
+	}
+
+	/*
+	 * We need to reset the TLS connection, so let's just
+	 * reset the controller.
+	 */
+	nvme_reset_ctrl(ctrl);
+
+	return count;
+}
+static DEVICE_ATTR_RW(tls_configured_key);
 
 static ssize_t tls_keyring_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -763,10 +1068,26 @@ static ssize_t tls_keyring_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(tls_keyring);
 
+static ssize_t tls_mode_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	const char *mode;
+
+	if (ctrl->opts->tls)
+		mode = "tls";
+	else
+		mode = "concat";
+
+	return sysfs_emit(buf, "%s\n", mode);
+}
+static DEVICE_ATTR_RO(tls_mode);
+
 static struct attribute *nvme_tls_attrs[] = {
 	&dev_attr_tls_key.attr,
 	&dev_attr_tls_configured_key.attr,
 	&dev_attr_tls_keyring.attr,
+	&dev_attr_tls_mode.attr,
 	NULL,
 };
 
@@ -780,13 +1101,16 @@ static umode_t nvme_tls_attrs_are_visible(struct kobject *kobj,
 		return 0;
 
 	if (a == &dev_attr_tls_key.attr &&
-	    !ctrl->opts->tls)
+	    !ctrl->opts->tls && !ctrl->opts->concat)
 		return 0;
 	if (a == &dev_attr_tls_configured_key.attr &&
-	    !ctrl->opts->tls_key)
+	    !ctrl->opts->concat)
 		return 0;
 	if (a == &dev_attr_tls_keyring.attr &&
 	    !ctrl->opts->keyring)
+		return 0;
+	if (a == &dev_attr_tls_mode.attr &&
+	    !ctrl->opts->tls && !ctrl->opts->concat)
 		return 0;
 
 	return a->mode;
@@ -798,11 +1122,121 @@ static const struct attribute_group nvme_tls_attrs_group = {
 };
 #endif
 
+static ssize_t nvme_adm_errors_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%lu\n",
+			(unsigned long)atomic_long_read(&ctrl->errors));
+}
+
+static ssize_t nvme_adm_errors_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	unsigned long errors;
+	int err;
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	err = kstrtoul(buf, 0, &errors);
+	if (err)
+		return -EINVAL;
+
+	atomic_long_set(&ctrl->errors, errors);
+
+	return count;
+}
+
+static struct device_attribute dev_attr_adm_errors =
+	__ATTR(command_error_count, 0644,
+		nvme_adm_errors_show, nvme_adm_errors_store);
+
+static ssize_t reset_count_show(struct device *dev,
+		   struct device_attribute *attr, char *buf)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%lu\n", atomic_long_read(&ctrl->nr_reset));
+}
+
+static ssize_t reset_count_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	int err;
+	unsigned long reset_cnt;
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	err = kstrtoul(buf, 0, &reset_cnt);
+	if (err)
+		return -EINVAL;
+
+	atomic_long_set(&ctrl->nr_reset, reset_cnt);
+
+	return count;
+}
+
+static ssize_t reconnect_count_show(struct device *dev,
+		   struct device_attribute *attr, char *buf)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%lu\n",
+			  atomic_long_read(&ctrl->acc_reconnects) +
+			  ctrl->nr_reconnects);
+}
+
+static ssize_t reconnect_count_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	int err;
+	unsigned long reconnect_cnt;
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	err = kstrtoul(buf, 0, &reconnect_cnt);
+	if (err)
+		return -EINVAL;
+
+	atomic_long_set(&ctrl->acc_reconnects, reconnect_cnt);
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(reconnect_count);
+
+static DEVICE_ATTR_RW(reset_count);
+
+static struct attribute *nvme_dev_diag_attrs[] = {
+	&dev_attr_adm_errors.attr,
+	&dev_attr_reset_count.attr,
+	&dev_attr_reconnect_count.attr,
+	NULL,
+};
+
+static umode_t nvme_dev_diag_attrs_are_visible(struct kobject *kobj,
+		struct attribute *a, int n)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	if (a == &dev_attr_reconnect_count.attr && !ctrl->opts)
+		return 0;
+
+	return a->mode;
+}
+
+const struct attribute_group nvme_dev_diag_attrs_group = {
+	.name		= "diag",
+	.attrs		= nvme_dev_diag_attrs,
+	.is_visible	= nvme_dev_diag_attrs_are_visible,
+};
+EXPORT_SYMBOL_GPL(nvme_dev_diag_attrs_group);
+
 const struct attribute_group *nvme_dev_attr_groups[] = {
 	&nvme_dev_attrs_group,
 #ifdef CONFIG_NVME_TCP_TLS
 	&nvme_tls_attrs_group,
 #endif
+	&nvme_dev_diag_attrs_group,
 	NULL,
 };
 

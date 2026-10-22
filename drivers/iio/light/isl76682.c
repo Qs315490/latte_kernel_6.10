@@ -59,7 +59,7 @@ struct isl76682_range {
 	u32				ir;
 };
 
-static struct isl76682_range isl76682_range_table[] = {
+static const struct isl76682_range isl76682_range_table[] = {
 	{ ISL76682_COMMAND_RANGE_LUX_1K, 15000, 10500 },
 	{ ISL76682_COMMAND_RANGE_LUX_4K, 60000, 42000 },
 	{ ISL76682_COMMAND_RANGE_LUX_16K, 240000, 168000 },
@@ -319,7 +319,7 @@ static int isl76682_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id isl76682_id[] = {
-	{ "isl76682" },
+	{ .name = "isl76682" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, isl76682_id);

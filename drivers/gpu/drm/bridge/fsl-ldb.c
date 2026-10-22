@@ -92,6 +92,7 @@ struct fsl_ldb {
 	const struct fsl_ldb_devdata *devdata;
 	bool ch0_enabled;
 	bool ch1_enabled;
+	bool use_termination_resistor;
 };
 
 static bool fsl_ldb_is_dual(const struct fsl_ldb *fsl_ldb)
@@ -113,19 +114,19 @@ static unsigned long fsl_ldb_link_frequency(struct fsl_ldb *fsl_ldb, int clock)
 }
 
 static int fsl_ldb_attach(struct drm_bridge *bridge,
+			  struct drm_encoder *encoder,
 			  enum drm_bridge_attach_flags flags)
 {
 	struct fsl_ldb *fsl_ldb = to_fsl_ldb(bridge);
 
-	return drm_bridge_attach(bridge->encoder, fsl_ldb->panel_bridge,
+	return drm_bridge_attach(encoder, fsl_ldb->panel_bridge,
 				 bridge, flags);
 }
 
 static void fsl_ldb_atomic_enable(struct drm_bridge *bridge,
-				  struct drm_bridge_state *old_bridge_state)
+				  struct drm_atomic_commit *state)
 {
 	struct fsl_ldb *fsl_ldb = to_fsl_ldb(bridge);
-	struct drm_atomic_state *state = old_bridge_state->base.state;
 	const struct drm_bridge_state *bridge_state;
 	const struct drm_crtc_state *crtc_state;
 	const struct drm_display_mode *mode;
@@ -181,9 +182,9 @@ static void fsl_ldb_atomic_enable(struct drm_bridge *bridge,
 
 	configured_link_freq = clk_get_rate(fsl_ldb->clk);
 	if (configured_link_freq != requested_link_freq)
-		dev_warn(fsl_ldb->dev, "Configured LDB clock (%lu Hz) does not match requested LVDS clock: %lu Hz\n",
-			 configured_link_freq,
-			 requested_link_freq);
+		dev_warn(fsl_ldb->dev,
+			 "Configured %pC clock (%lu Hz) does not match requested LVDS clock: %lu Hz\n",
+			 fsl_ldb->clk, configured_link_freq, requested_link_freq);
 
 	clk_prepare_enable(fsl_ldb->clk);
 
@@ -212,6 +213,9 @@ static void fsl_ldb_atomic_enable(struct drm_bridge *bridge,
 	/* Program LVDS_CTRL */
 	reg = LVDS_CTRL_CC_ADJ(2) | LVDS_CTRL_PRE_EMPH_EN |
 	      LVDS_CTRL_PRE_EMPH_ADJ(3) | LVDS_CTRL_VBG_EN;
+
+	if (fsl_ldb->use_termination_resistor)
+		reg |= LVDS_CTRL_HS_EN;
 	regmap_write(fsl_ldb->regmap, fsl_ldb->devdata->lvds_ctrl, reg);
 
 	/* Wait for VBG to stabilize. */
@@ -224,7 +228,7 @@ static void fsl_ldb_atomic_enable(struct drm_bridge *bridge,
 }
 
 static void fsl_ldb_atomic_disable(struct drm_bridge *bridge,
-				   struct drm_bridge_state *old_bridge_state)
+				   struct drm_atomic_commit *state)
 {
 	struct fsl_ldb *fsl_ldb = to_fsl_ldb(bridge);
 
@@ -298,16 +302,15 @@ static int fsl_ldb_probe(struct platform_device *pdev)
 	struct fsl_ldb *fsl_ldb;
 	int dual_link;
 
-	fsl_ldb = devm_kzalloc(dev, sizeof(*fsl_ldb), GFP_KERNEL);
-	if (!fsl_ldb)
-		return -ENOMEM;
+	fsl_ldb = devm_drm_bridge_alloc(dev, struct fsl_ldb, bridge, &funcs);
+	if (IS_ERR(fsl_ldb))
+		return PTR_ERR(fsl_ldb);
 
 	fsl_ldb->devdata = of_device_get_match_data(dev);
 	if (!fsl_ldb->devdata)
 		return -EINVAL;
 
 	fsl_ldb->dev = &pdev->dev;
-	fsl_ldb->bridge.funcs = &funcs;
 	fsl_ldb->bridge.of_node = dev->of_node;
 
 	fsl_ldb->clk = devm_clk_get(dev, "ldb");
@@ -340,6 +343,9 @@ static int fsl_ldb_probe(struct platform_device *pdev)
 	of_node_put(panel_node);
 	if (IS_ERR(panel))
 		return PTR_ERR(panel);
+
+	if (of_property_present(dev->of_node, "nxp,enable-termination-resistor"))
+		fsl_ldb->use_termination_resistor = true;
 
 	fsl_ldb->panel_bridge = devm_drm_panel_bridge_add(dev, panel);
 	if (IS_ERR(fsl_ldb->panel_bridge))

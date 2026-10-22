@@ -3,7 +3,7 @@
  * Copyright (c) 2021-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -121,7 +121,7 @@ xrep_tempfile_create(
 		 * remote target block, so the owner is irrelevant.
 		 */
 		error = xfs_symlink_write_target(tp, sc->tempip,
-				sc->tempip->i_ino, ".", 1, 0, 0);
+				I_INO(sc->tempip), ".", 1, 0, 0);
 		if (error)
 			goto out_trans_cancel;
 	}
@@ -174,6 +174,7 @@ out_release_inode:
 		xfs_iunlock(sc->tempip, XFS_ILOCK_EXCL);
 		xfs_finish_inode_setup(sc->tempip);
 		xchk_irele(sc, sc->tempip);
+		sc->tempip = NULL;
 	}
 out_release_dquots:
 	xfs_qm_dqrele(udqp);

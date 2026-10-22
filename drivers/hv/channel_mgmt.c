@@ -20,6 +20,7 @@
 #include <linux/delay.h>
 #include <linux/cpu.h>
 #include <linux/hyperv.h>
+#include <linux/export.h>
 #include <asm/mshyperv.h>
 #include <linux/sched/isolation.h>
 
@@ -353,7 +354,7 @@ static struct vmbus_channel *alloc_channel(void)
 {
 	struct vmbus_channel *channel;
 
-	channel = kzalloc(sizeof(*channel), GFP_ATOMIC);
+	channel = kzalloc_obj(*channel, GFP_ATOMIC);
 	if (!channel)
 		return NULL;
 
@@ -383,8 +384,18 @@ static void free_channel(struct vmbus_channel *channel)
 
 void vmbus_channel_map_relid(struct vmbus_channel *channel)
 {
-	if (WARN_ON(channel->offermsg.child_relid >= MAX_CHANNEL_RELIDS))
+	u32 new_relid = channel->offermsg.child_relid;
+
+	if (WARN_ON(new_relid >= MAX_CHANNEL_RELIDS))
 		return;
+
+	/*
+	 * This function is always called in the tasklet for the connect CPU.
+	 * So updating the relid hiwater mark does not need to be atomic.
+	 */
+	if (new_relid > READ_ONCE(vmbus_connection.relid_hiwater))
+		WRITE_ONCE(vmbus_connection.relid_hiwater, new_relid);
+
 	/*
 	 * The mapping of the channel's relid is visible from the CPUs that
 	 * execute vmbus_chan_sched() by the time that vmbus_chan_sched() will
@@ -410,9 +421,7 @@ void vmbus_channel_map_relid(struct vmbus_channel *channel)
 	 *      of the VMBus driver and vmbus_chan_sched() can not run before
 	 *      vmbus_bus_resume() has completed execution (cf. resume_noirq).
 	 */
-	virt_store_mb(
-		vmbus_connection.channels[channel->offermsg.child_relid],
-		channel);
+	virt_store_mb(vmbus_connection.channels[new_relid], channel);
 }
 
 void vmbus_channel_unmap_relid(struct vmbus_channel *channel)
@@ -843,14 +852,14 @@ static void vmbus_wait_for_unload(void)
 				= per_cpu_ptr(hv_context.cpu_context, cpu);
 
 			/*
-			 * In a CoCo VM the synic_message_page is not allocated
+			 * In a CoCo VM the hyp_synic_message_page is not allocated
 			 * in hv_synic_alloc(). Instead it is set/cleared in
-			 * hv_synic_enable_regs() and hv_synic_disable_regs()
+			 * hv_hyp_synic_enable_regs() and hv_hyp_synic_disable_regs()
 			 * such that it is set only when the CPU is online. If
 			 * not all present CPUs are online, the message page
 			 * might be NULL, so skip such CPUs.
 			 */
-			page_addr = hv_cpu->synic_message_page;
+			page_addr = hv_cpu->hyp_synic_message_page;
 			if (!page_addr)
 				continue;
 
@@ -891,7 +900,7 @@ completed:
 		struct hv_per_cpu_context *hv_cpu
 			= per_cpu_ptr(hv_context.cpu_context, cpu);
 
-		page_addr = hv_cpu->synic_message_page;
+		page_addr = hv_cpu->hyp_synic_message_page;
 		if (!page_addr)
 			continue;
 
@@ -943,6 +952,7 @@ void vmbus_initiate_unload(bool crash)
 	else
 		vmbus_wait_for_unload();
 }
+EXPORT_SYMBOL_GPL(vmbus_initiate_unload);
 
 static void vmbus_setup_channel_state(struct vmbus_channel *channel,
 				      struct vmbus_channel_offer_channel *offer)
@@ -1021,6 +1031,7 @@ static void vmbus_onoffer(struct vmbus_channel_message_header *hdr)
 	struct vmbus_channel_offer_channel *offer;
 	struct vmbus_channel *oldchannel, *newchannel;
 	size_t offer_sz;
+	bool co_ring_buffer, co_external_memory;
 
 	offer = (struct vmbus_channel_offer_channel *)hdr;
 
@@ -1031,6 +1042,22 @@ static void vmbus_onoffer(struct vmbus_channel_message_header *hdr)
 				   offer->child_relid);
 		atomic_dec(&vmbus_connection.offer_in_progress);
 		return;
+	}
+
+	co_ring_buffer = is_co_ring_buffer(offer);
+	co_external_memory = is_co_external_memory(offer);
+	if (!co_ring_buffer && co_external_memory) {
+		pr_err("Invalid offer relid=%d: the ring buffer isn't encrypted\n",
+			offer->child_relid);
+		return;
+	}
+	if (co_ring_buffer || co_external_memory) {
+		if (vmbus_proto_version < VERSION_WIN10_V6_0 || !vmbus_is_confidential()) {
+			pr_err("Invalid offer relid=%d: no support for confidential VMBus\n",
+				offer->child_relid);
+			atomic_dec(&vmbus_connection.offer_in_progress);
+			return;
+		}
 	}
 
 	oldchannel = find_primary_channel_by_offer(offer);
@@ -1111,6 +1138,8 @@ static void vmbus_onoffer(struct vmbus_channel_message_header *hdr)
 		pr_err("Unable to allocate channel object\n");
 		return;
 	}
+	newchannel->co_ring_buffer = co_ring_buffer;
+	newchannel->co_external_memory = co_external_memory;
 
 	vmbus_setup_channel_state(newchannel, offer);
 

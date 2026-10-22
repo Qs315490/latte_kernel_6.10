@@ -6,9 +6,15 @@
 #ifndef __INTEL_RESET_H__
 #define __INTEL_RESET_H__
 
-struct drm_i915_private;
+#include <linux/types.h>
 
-void intel_display_reset_prepare(struct drm_i915_private *i915);
-void intel_display_reset_finish(struct drm_i915_private *i915);
+struct intel_display;
+
+bool intel_display_reset_supported(struct intel_display *display);
+bool intel_display_reset_test(struct intel_display *display);
+void intel_display_reset_prepare(struct intel_display *display);
+void intel_display_reset_finish(struct intel_display *display, bool test_only);
+
+void intel_display_reset_debugfs_register(struct intel_display *display);
 
 #endif /* __INTEL_RESET_H__ */

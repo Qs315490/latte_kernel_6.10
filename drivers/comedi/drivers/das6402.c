@@ -560,14 +560,16 @@ static int das6402_attach(struct comedi_device *dev,
 	if (!devpriv)
 		return -ENOMEM;
 
-	ret = comedi_request_region(dev, it->options[0], 0x10);
+	ret = comedi_check_request_region(dev, it->options[0], 0x10,
+					  0, 0x3ff, 16);
 	if (ret)
 		return ret;
 
 	das6402_reset(dev);
 
 	/* IRQs 2,3,5,6,7, 10,11,15 are valid for "enhanced" mode */
-	if ((1 << it->options[1]) & 0x8cec) {
+	if (it->options[1] > 0 && it->options[1] < 16 &&
+	    (1 << it->options[1]) & 0x8cec) {
 		ret = request_irq(it->options[1], das6402_interrupt, 0,
 				  dev->board_name, dev);
 		if (ret == 0) {

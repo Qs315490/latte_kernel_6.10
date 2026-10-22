@@ -3,16 +3,43 @@
  * Copyright 2024 NXP
  */
 
+#include <linux/debugfs.h>
+#include <linux/device/devres.h>
 #include <linux/firmware/imx/sm.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/scmi_protocol.h>
 #include <linux/scmi_imx_protocol.h>
+#include <linux/seq_file.h>
+#include <linux/sizes.h>
 
 static const struct scmi_imx_misc_proto_ops *imx_misc_ctrl_ops;
 static struct scmi_protocol_handle *ph;
-struct notifier_block scmi_imx_misc_ctrl_nb;
+static struct notifier_block scmi_imx_misc_ctrl_nb;
+
+static const char * const rst_imx95[] = {
+	"cm33_lockup", "cm33_swreq", "cm7_lockup", "cm7_swreq", "fccu",
+	"jtag_sw", "ele", "tempsense", "wdog1", "wdog2", "wdog3", "wdog4",
+	"wdog5", "jtag", "cm33_exc", "bbm", "sw", "sm_err", "fusa_sreco",
+	"pmic", "unused", "unused", "unused", "unused", "unused", "unused",
+	"unused", "unused", "unused", "unused", "unused", "por",
+};
+
+static const char * const rst_imx94[] = {
+	"cm33_lockup", "cm33_swreq", "cm70_lockup", "cm70_swreq", "fccu",
+	"jtag_sw", "ele", "tempsense", "wdog1", "wdog2", "wdog3", "wdog4",
+	"wdog5", "jtag", "wdog6", "wdog7", "wdog8", "wo_netc", "cm33s_lockup",
+	"cm33s_swreq", "cm71_lockup", "cm71_swreq", "cm33_exc", "bbm", "sw",
+	"sm_err", "fusa_sreco", "pmic", "unused", "unused", "unused", "por",
+};
+
+static const struct of_device_id allowlist[] = {
+	{ .compatible = "fsl,imx952", .data = rst_imx95 },
+	{ .compatible = "fsl,imx95", .data = rst_imx95 },
+	{ .compatible = "fsl,imx94", .data = rst_imx94 },
+	{ /* Sentinel */ }
+};
 
 int scmi_imx_misc_ctrl_set(u32 id, u32 val)
 {
@@ -44,10 +71,86 @@ static int scmi_imx_misc_ctrl_notifier(struct notifier_block *nb,
 	return 0;
 }
 
+static int syslog_show(struct seq_file *file, void *priv)
+{
+	/* 4KB is large enough for syslog */
+	void *syslog __free(kfree) = kmalloc(SZ_4K, GFP_KERNEL);
+	/* syslog API use num words, not num bytes */
+	u16 size = SZ_4K / 4;
+	int ret;
+
+	if (!ph)
+		return -ENODEV;
+
+	ret = imx_misc_ctrl_ops->misc_syslog(ph, &size, syslog);
+	if (ret)
+		return ret;
+
+	seq_hex_dump(file, " ", DUMP_PREFIX_NONE, 16, sizeof(u32), syslog, size * 4, false);
+	seq_putc(file, '\n');
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(syslog);
+
+static void scmi_imx_misc_put(void *p)
+{
+	debugfs_remove((struct dentry *)p);
+}
+
+static int scmi_imx_misc_get_reason(struct scmi_device *sdev)
+{
+	struct scmi_imx_misc_reset_reason boot, shutdown;
+	const char **rst;
+	bool system = true;
+	int ret;
+
+	if (!of_machine_device_match(allowlist))
+		return 0;
+
+	rst = (const char **)of_machine_get_match_data(allowlist);
+
+	ret = imx_misc_ctrl_ops->misc_reset_reason(ph, system, &boot, &shutdown, NULL);
+	if (!ret) {
+		if (boot.valid)
+			dev_info(&sdev->dev, "%s Boot reason: %s, origin: %d, errid: %d\n",
+				 system ? "SYS" : "LM", rst[boot.reason],
+				 boot.orig_valid ? boot.origin : -1,
+				 boot.err_valid ? boot.errid : -1);
+		if (shutdown.valid)
+			dev_info(&sdev->dev, "%s shutdown reason: %s, origin: %d, errid: %d\n",
+				 system ? "SYS" : "LM", rst[shutdown.reason],
+				 shutdown.orig_valid ? shutdown.origin : -1,
+				 shutdown.err_valid ? shutdown.errid : -1);
+	} else {
+		dev_err(&sdev->dev, "Failed to get system reset reason: %d\n", ret);
+	}
+
+	system = false;
+	ret = imx_misc_ctrl_ops->misc_reset_reason(ph, system, &boot, &shutdown, NULL);
+	if (!ret) {
+		if (boot.valid)
+			dev_info(&sdev->dev, "%s Boot reason: %s, origin: %d, errid: %d\n",
+				 system ? "SYS" : "LM", rst[boot.reason],
+				 boot.orig_valid ? boot.origin : -1,
+				 boot.err_valid ? boot.errid : -1);
+		if (shutdown.valid)
+			dev_info(&sdev->dev, "%s shutdown reason: %s, origin: %d, errid: %d\n",
+				 system ? "SYS" : "LM", rst[shutdown.reason],
+				 shutdown.orig_valid ? shutdown.origin : -1,
+				 shutdown.err_valid ? shutdown.errid : -1);
+	} else {
+		dev_err(&sdev->dev, "Failed to get lm reset reason: %d\n", ret);
+	}
+
+	return 0;
+}
+
 static int scmi_imx_misc_ctrl_probe(struct scmi_device *sdev)
 {
 	const struct scmi_handle *handle = sdev->handle;
 	struct device_node *np = sdev->dev.of_node;
+	struct dentry *scmi_imx_dentry;
 	u32 src_id, flags;
 	int ret, i, num;
 
@@ -98,7 +201,12 @@ static int scmi_imx_misc_ctrl_probe(struct scmi_device *sdev)
 		}
 	}
 
-	return 0;
+	scmi_imx_dentry = debugfs_create_dir("scmi_imx", NULL);
+	debugfs_create_file("syslog", 0444, scmi_imx_dentry, &sdev->dev, &syslog_fops);
+
+	scmi_imx_misc_get_reason(sdev);
+
+	return devm_add_action_or_reset(&sdev->dev, scmi_imx_misc_put, scmi_imx_dentry);
 }
 
 static const struct scmi_device_id scmi_id_table[] = {

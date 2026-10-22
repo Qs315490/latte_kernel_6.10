@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <linux/compiler.h>
 #include <linux/string.h>
 
 #include "tests.h"
@@ -28,7 +29,7 @@
 static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 {
 	int i, err = -1;
-	volatile int tmp = 0;
+	volatile int tmp __maybe_unused = 0;
 	u64 total_periods = 0;
 	int nr_samples = 0;
 	char sbuf[STRERR_BUFSIZE];
@@ -104,12 +105,14 @@ static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 	while ((event = perf_mmap__read_event(&md->core)) != NULL) {
 		struct perf_sample sample;
 
+		perf_sample__init(&sample, /*all=*/false);
 		if (event->header.type != PERF_RECORD_SAMPLE)
 			goto next_event;
 
 		err = evlist__parse_sample(evlist, event, &sample);
 		if (err < 0) {
 			pr_debug("Error during parse sample\n");
+			perf_sample__exit(&sample);
 			goto out_delete_evlist;
 		}
 
@@ -117,6 +120,7 @@ static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 		nr_samples++;
 next_event:
 		perf_mmap__consume(&md->core);
+		perf_sample__exit(&sample);
 	}
 	perf_mmap__read_done(&md->core);
 

@@ -127,7 +127,7 @@ static struct fw_priv *__allocate_fw_priv(const char *fw_name,
 	if (offset != 0 && !(opt_flags & FW_OPT_PARTIAL))
 		return NULL;
 
-	fw_priv = kzalloc(sizeof(*fw_priv), GFP_ATOMIC);
+	fw_priv = kzalloc_obj(*fw_priv, GFP_ATOMIC);
 	if (!fw_priv)
 		return NULL;
 
@@ -747,7 +747,7 @@ _request_firmware_prepare(struct firmware **firmware_p, const char *name,
 	struct fw_priv *fw_priv;
 	int ret;
 
-	*firmware_p = firmware = kzalloc(sizeof(*firmware), GFP_KERNEL);
+	*firmware_p = firmware = kzalloc_obj(*firmware);
 	if (!firmware) {
 		dev_err(device, "%s: kmalloc(struct firmware) failed\n",
 			__func__);
@@ -806,67 +806,21 @@ static void fw_abort_batch_reqs(struct firmware *fw)
 }
 
 #if defined(CONFIG_FW_LOADER_DEBUG)
-#include <crypto/hash.h>
 #include <crypto/sha2.h>
 
 static void fw_log_firmware_info(const struct firmware *fw, const char *name, struct device *device)
 {
-	struct shash_desc *shash;
-	struct crypto_shash *alg;
-	u8 *sha256buf;
-	char *outbuf;
+	u8 digest[SHA256_DIGEST_SIZE];
 
-	alg = crypto_alloc_shash("sha256", 0, 0);
-	if (IS_ERR(alg))
-		return;
-
-	sha256buf = kmalloc(SHA256_DIGEST_SIZE, GFP_KERNEL);
-	outbuf = kmalloc(SHA256_BLOCK_SIZE + 1, GFP_KERNEL);
-	shash = kmalloc(sizeof(*shash) + crypto_shash_descsize(alg), GFP_KERNEL);
-	if (!sha256buf || !outbuf || !shash)
-		goto out_free;
-
-	shash->tfm = alg;
-
-	if (crypto_shash_digest(shash, fw->data, fw->size, sha256buf) < 0)
-		goto out_free;
-
-	for (int i = 0; i < SHA256_DIGEST_SIZE; i++)
-		sprintf(&outbuf[i * 2], "%02x", sha256buf[i]);
-	outbuf[SHA256_BLOCK_SIZE] = 0;
-	dev_dbg(device, "Loaded FW: %s, sha256: %s\n", name, outbuf);
-
-out_free:
-	kfree(shash);
-	kfree(outbuf);
-	kfree(sha256buf);
-	crypto_free_shash(alg);
+	sha256(fw->data, fw->size, digest);
+	dev_dbg(device, "Loaded FW: %s, sha256: %*phN\n",
+		name, SHA256_DIGEST_SIZE, digest);
 }
 #else
 static void fw_log_firmware_info(const struct firmware *fw, const char *name,
 				 struct device *device)
 {}
 #endif
-
-/*
- * Reject firmware file names with ".." path components.
- * There are drivers that construct firmware file names from device-supplied
- * strings, and we don't want some device to be able to tell us "I would like to
- * be sent my firmware from ../../../etc/shadow, please".
- *
- * Search for ".." surrounded by either '/' or start/end of string.
- *
- * This intentionally only looks at the firmware name, not at the firmware base
- * directory or at symlink contents.
- */
-static bool name_contains_dotdot(const char *name)
-{
-	size_t name_len = strlen(name);
-
-	return strcmp(name, "..") == 0 || strncmp(name, "../", 3) == 0 ||
-	       strstr(name, "/../") != NULL ||
-	       (name_len >= 3 && strcmp(name+name_len-3, "/..") == 0);
-}
 
 /* called from request_firmware() and request_firmware_work_func() */
 static int
@@ -875,8 +829,6 @@ _request_firmware(const struct firmware **firmware_p, const char *name,
 		  size_t offset, u32 opt_flags)
 {
 	struct firmware *fw = NULL;
-	struct cred *kern_cred = NULL;
-	const struct cred *old_cred;
 	bool nondirect = false;
 	int ret;
 
@@ -888,6 +840,17 @@ _request_firmware(const struct firmware **firmware_p, const char *name,
 		goto out;
 	}
 
+
+	/*
+	 * Reject firmware file names with ".." path components.
+	 * There are drivers that construct firmware file names from
+	 * device-supplied strings, and we don't want some device to be
+	 * able to tell us "I would like to be sent my firmware from
+	 * ../../../etc/shadow, please".
+	 *
+	 * This intentionally only looks at the firmware name, not at
+	 * the firmware base directory or at symlink contents.
+	 */
 	if (name_contains_dotdot(name)) {
 		dev_warn(device,
 			 "Firmware load for '%s' refused, path contains '..' component\n",
@@ -906,45 +869,38 @@ _request_firmware(const struct firmware **firmware_p, const char *name,
 	 * called by a driver when serving an unrelated request from userland, we use
 	 * the kernel credentials to read the file.
 	 */
-	kern_cred = prepare_kernel_cred(&init_task);
-	if (!kern_cred) {
-		ret = -ENOMEM;
-		goto out;
-	}
-	old_cred = override_creds(kern_cred);
+	scoped_with_kernel_creds() {
+		ret = fw_get_filesystem_firmware(device, fw->priv, "", NULL);
 
-	ret = fw_get_filesystem_firmware(device, fw->priv, "", NULL);
-
-	/* Only full reads can support decompression, platform, and sysfs. */
-	if (!(opt_flags & FW_OPT_PARTIAL))
-		nondirect = true;
+		/* Only full reads can support decompression, platform, and sysfs. */
+		if (!(opt_flags & FW_OPT_PARTIAL))
+			nondirect = true;
 
 #ifdef CONFIG_FW_LOADER_COMPRESS_ZSTD
-	if (ret == -ENOENT && nondirect)
-		ret = fw_get_filesystem_firmware(device, fw->priv, ".zst",
-						 fw_decompress_zstd);
+		if (ret == -ENOENT && nondirect)
+			ret = fw_get_filesystem_firmware(device, fw->priv, ".zst",
+							 fw_decompress_zstd);
 #endif
 #ifdef CONFIG_FW_LOADER_COMPRESS_XZ
-	if (ret == -ENOENT && nondirect)
-		ret = fw_get_filesystem_firmware(device, fw->priv, ".xz",
-						 fw_decompress_xz);
+		if (ret == -ENOENT && nondirect)
+			ret = fw_get_filesystem_firmware(device, fw->priv, ".xz",
+							 fw_decompress_xz);
 #endif
-	if (ret == -ENOENT && nondirect)
-		ret = firmware_fallback_platform(fw->priv);
+		if (ret == -ENOENT && nondirect)
+			ret = firmware_fallback_platform(fw->priv);
 
-	if (ret) {
-		if (!(opt_flags & FW_OPT_NO_WARN))
-			dev_warn(device,
-				 "Direct firmware load for %s failed with error %d\n",
-				 name, ret);
-		if (nondirect)
-			ret = firmware_fallback_sysfs(fw, name, device,
-						      opt_flags, ret);
-	} else
-		ret = assign_fw(fw, device);
-
-	revert_creds(old_cred);
-	put_cred(kern_cred);
+		if (ret) {
+			if (!(opt_flags & FW_OPT_NO_WARN))
+				dev_warn(device,
+					 "Direct firmware load for %s failed with error %d\n",
+					 name, ret);
+			if (nondirect)
+				ret = firmware_fallback_sysfs(fw, name, device,
+							      opt_flags, ret);
+		} else {
+			ret = assign_fw(fw, device);
+		}
+	}
 
 out:
 	if (ret < 0) {
@@ -1176,6 +1132,7 @@ EXPORT_SYMBOL(release_firmware);
 /* Async support */
 struct firmware_work {
 	struct work_struct work;
+	struct list_head list;
 	struct module *module;
 	const char *name;
 	struct device *device;
@@ -1183,6 +1140,17 @@ struct firmware_work {
 	void (*cont)(const struct firmware *fw, void *context);
 	u32 opt_flags;
 };
+
+static LIST_HEAD(firmware_work_list);
+static DEFINE_SPINLOCK(firmware_work_lock);
+
+static void firmware_work_free(struct firmware_work *fw_work)
+{
+	put_device(fw_work->device); /* taken in request_firmware_nowait() */
+	module_put(fw_work->module);
+	kfree_const(fw_work->name);
+	kfree(fw_work);
+}
 
 static void request_firmware_work_func(struct work_struct *work)
 {
@@ -1194,11 +1162,15 @@ static void request_firmware_work_func(struct work_struct *work)
 	_request_firmware(&fw, fw_work->name, fw_work->device, NULL, 0, 0,
 			  fw_work->opt_flags);
 	fw_work->cont(fw, fw_work->context);
-	put_device(fw_work->device); /* taken in request_firmware_nowait() */
 
-	module_put(fw_work->module);
-	kfree_const(fw_work->name);
-	kfree(fw_work);
+	spin_lock_irq(&firmware_work_lock);
+	if (!list_empty(&fw_work->list)) {
+		list_del_init(&fw_work->list);
+		spin_unlock_irq(&firmware_work_lock);
+		firmware_work_free(fw_work);
+		return;
+	}
+	spin_unlock_irq(&firmware_work_lock);
 }
 
 
@@ -1208,8 +1180,9 @@ static int _request_firmware_nowait(
 	void (*cont)(const struct firmware *fw, void *context), bool nowarn)
 {
 	struct firmware_work *fw_work;
+	unsigned long flags;
 
-	fw_work = kzalloc(sizeof(struct firmware_work), gfp);
+	fw_work = kzalloc_obj(struct firmware_work, gfp);
 	if (!fw_work)
 		return -ENOMEM;
 
@@ -1240,7 +1213,12 @@ static int _request_firmware_nowait(
 
 	get_device(fw_work->device);
 	INIT_WORK(&fw_work->work, request_firmware_work_func);
+
+	spin_lock_irqsave(&firmware_work_lock, flags);
+	list_add_tail(&fw_work->list, &firmware_work_list);
 	schedule_work(&fw_work->work);
+	spin_unlock_irqrestore(&firmware_work_lock, flags);
+
 	return 0;
 }
 
@@ -1302,6 +1280,44 @@ int firmware_request_nowait_nowarn(
 					gfp, context, cont, true);
 }
 EXPORT_SYMBOL_GPL(firmware_request_nowait_nowarn);
+
+/**
+ * request_firmware_nowait_cancel() - cancel an async firmware request
+ * @device: device for which the firmware is being loaded
+ * @context: context passed to request_firmware_nowait()
+ * @cont: callback passed to request_firmware_nowait()
+ *
+ * Cancel a pending request_firmware_nowait() request for @device, @context
+ * and @cont. If the associated work has already started, this function waits
+ * until the callback has returned. If the callback has already completed, this
+ * function does nothing.
+ *
+ * This function may sleep.
+ */
+void request_firmware_nowait_cancel(struct device *device, void *context,
+				    void (*cont)(const struct firmware *fw,
+						 void *context))
+{
+	struct firmware_work *fw_work = NULL;
+	struct firmware_work *tmp;
+
+	spin_lock_irq(&firmware_work_lock);
+	list_for_each_entry_reverse(tmp, &firmware_work_list, list) {
+		if (tmp->device == device && tmp->context == context &&
+		    tmp->cont == cont) {
+			fw_work = tmp;
+			list_del_init(&fw_work->list);
+			break;
+		}
+	}
+	spin_unlock_irq(&firmware_work_lock);
+
+	if (!fw_work)
+		return;
+	cancel_work_sync(&fw_work->work);
+	firmware_work_free(fw_work);
+}
+EXPORT_SYMBOL_GPL(request_firmware_nowait_cancel);
 
 #ifdef CONFIG_FW_CACHE
 static ASYNC_DOMAIN_EXCLUSIVE(fw_cache_domain);
@@ -1382,7 +1398,7 @@ static struct fw_cache_entry *alloc_fw_cache_entry(const char *name)
 {
 	struct fw_cache_entry *fce;
 
-	fce = kzalloc(sizeof(*fce), GFP_ATOMIC);
+	fce = kzalloc_obj(*fce, GFP_ATOMIC);
 	if (!fce)
 		goto exit;
 
@@ -1547,8 +1563,9 @@ static void device_cache_fw_images(void)
 
 	mutex_lock(&fw_lock);
 	fwc->state = FW_LOADER_START_CACHE;
-	dpm_for_each_dev(NULL, dev_cache_fw_image);
 	mutex_unlock(&fw_lock);
+
+	dpm_for_each_dev(NULL, dev_cache_fw_image);
 
 	/* wait for completion of caching firmware for all devices */
 	async_synchronize_full_domain(&fw_cache_domain);
@@ -1620,14 +1637,18 @@ static int fw_pm_notify(struct notifier_block *notify_block,
 }
 
 /* stop caching firmware once syscore_suspend is reached */
-static int fw_suspend(void)
+static int fw_suspend(void *data)
 {
 	fw_cache.state = FW_LOADER_NO_CACHE;
 	return 0;
 }
 
-static struct syscore_ops fw_syscore_ops = {
+static const struct syscore_ops fw_syscore_ops = {
 	.suspend = fw_suspend,
+};
+
+static struct syscore fw_syscore = {
+	.ops = &fw_syscore_ops,
 };
 
 static int __init register_fw_pm_ops(void)
@@ -1645,14 +1666,14 @@ static int __init register_fw_pm_ops(void)
 	if (ret)
 		return ret;
 
-	register_syscore_ops(&fw_syscore_ops);
+	register_syscore(&fw_syscore);
 
 	return ret;
 }
 
 static inline void unregister_fw_pm_ops(void)
 {
-	unregister_syscore_ops(&fw_syscore_ops);
+	unregister_syscore(&fw_syscore);
 	unregister_pm_notifier(&fw_cache.pm_notify);
 }
 #else

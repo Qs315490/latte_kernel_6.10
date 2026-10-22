@@ -845,14 +845,16 @@ out_ro:
  * @c: UBIFS file-system description object
  * @inode: inode the data node belongs to
  * @key: node key
- * @buf: buffer to write
+ * @folio: buffer to write
+ * @offset: offset to write at
  * @len: data length (must not exceed %UBIFS_BLOCK_SIZE)
  *
  * This function writes a data node to the journal. Returns %0 if the data node
  * was successfully written, and a negative error code in case of failure.
  */
 int ubifs_jnl_write_data(struct ubifs_info *c, const struct inode *inode,
-			 const union ubifs_key *key, const void *buf, int len)
+			 const union ubifs_key *key, struct folio *folio,
+			 size_t offset, int len)
 {
 	struct ubifs_data_node *data;
 	int err, lnum, offs, compr_type, out_len, compr_len, auth_len;
@@ -896,7 +898,8 @@ int ubifs_jnl_write_data(struct ubifs_info *c, const struct inode *inode,
 		compr_type = ui->compr_type;
 
 	out_len = compr_len = dlen - UBIFS_DATA_NODE_SZ;
-	ubifs_compress(c, buf, len, &data->data, &compr_len, &compr_type);
+	ubifs_compress_folio(c, folio, offset, len, &data->data, &compr_len,
+			     &compr_type);
 	ubifs_assert(c, compr_len <= UBIFS_BLOCK_SIZE);
 
 	if (encrypted) {
@@ -979,10 +982,10 @@ int ubifs_jnl_write_inode(struct ubifs_info *c, const struct inode *inode)
 	int kill_xattrs = ui->xattr_cnt && last_reference;
 	u8 hash[UBIFS_HASH_ARR_SZ];
 
-	dbg_jnl("ino %lu, nlink %u", inode->i_ino, inode->i_nlink);
+	dbg_jnl("ino %llu, nlink %u", inode->i_ino, inode->i_nlink);
 
 	if (kill_xattrs && ui->xattr_cnt > ubifs_xattr_max_cnt(c)) {
-		ubifs_err(c, "Cannot delete inode, it has too much xattrs!");
+		ubifs_err(c, "Cannot delete inode, it has too many xattrs!");
 		err = -EPERM;
 		ubifs_ro_mode(c, err);
 		return err;
@@ -1625,7 +1628,7 @@ static int truncate_data_node(const struct ubifs_info *c, const struct inode *in
 	int err, dlen, compr_type, out_len, data_size;
 
 	out_len = le32_to_cpu(dn->size);
-	buf = kmalloc_array(out_len, WORST_COMPR_FACTOR, GFP_NOFS);
+	buf = kmalloc(out_len, GFP_NOFS);
 	if (!buf)
 		return -ENOMEM;
 
@@ -1740,7 +1743,7 @@ int ubifs_jnl_truncate(struct ubifs_info *c, const struct inode *inode,
 			int dn_len = le32_to_cpu(dn->size);
 
 			if (dn_len <= 0 || dn_len > UBIFS_BLOCK_SIZE) {
-				ubifs_err(c, "bad data node (block %u, inode %lu)",
+				ubifs_err(c, "bad data node (block %u, inode %llu)",
 					  blk, inode->i_ino);
 				ubifs_dump_node(c, dn, dn_size);
 				err = -EUCLEAN;
@@ -1984,7 +1987,7 @@ int ubifs_jnl_change_xattr(struct ubifs_info *c, const struct inode *inode,
 	u8 hash_host[UBIFS_HASH_ARR_SZ];
 	u8 hash[UBIFS_HASH_ARR_SZ];
 
-	dbg_jnl("ino %lu, ino %lu", host->i_ino, inode->i_ino);
+	dbg_jnl("ino %llu, ino %llu", host->i_ino, inode->i_ino);
 	ubifs_assert(c, inode->i_nlink > 0);
 	ubifs_assert(c, mutex_is_locked(&host_ui->ui_mutex));
 

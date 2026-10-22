@@ -14,7 +14,6 @@
 #include <asm/apic.h>
 
 /* X2APIC */
-void __x2apic_send_IPI_dest(unsigned int apicid, int vector, unsigned int dest);
 u32 x2apic_get_apic_id(u32 id);
 
 void x2apic_send_IPI_all(int vector);
@@ -42,6 +41,15 @@ static inline unsigned int __prepare_ICR(unsigned int shortcut, int vector,
 	return icr;
 }
 
+#ifdef CONFIG_X86_X2APIC
+static inline void __x2apic_send_IPI_dest(unsigned int apicid, int vector, unsigned int dest)
+{
+	unsigned long cfg = __prepare_ICR(0, vector, dest);
+
+	native_x2apic_icr_write(cfg, apicid);
+}
+#endif
+
 void default_init_apic_ldr(void);
 
 void apic_mem_wait_icr_idle(void);
@@ -65,17 +73,4 @@ void default_send_IPI_self(int vector);
 void default_send_IPI_mask_sequence_logical(const struct cpumask *mask, int vector);
 void default_send_IPI_mask_allbutself_logical(const struct cpumask *mask, int vector);
 void default_send_IPI_mask_logical(const struct cpumask *mask, int vector);
-void x86_32_probe_bigsmp_early(void);
-void x86_32_install_bigsmp(void);
-#else
-static inline void x86_32_probe_bigsmp_early(void) { }
-static inline void x86_32_install_bigsmp(void) { }
-#endif
-
-#ifdef CONFIG_X86_BIGSMP
-bool apic_bigsmp_possible(bool cmdline_selected);
-void apic_bigsmp_force(void);
-#else
-static inline bool apic_bigsmp_possible(bool cmdline_selected) { return false; };
-static inline void apic_bigsmp_force(void) { }
 #endif

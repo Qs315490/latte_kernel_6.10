@@ -27,9 +27,10 @@
 #include <asm/smp.h>
 #include <asm/cpu.h>
 #include <asm/apic.h>
-#include <asm/cpuid.h>
+#include <asm/cpuid/api.h>
 #include <asm/cmdline.h>
 #include <asm/iommu.h>
+#include <asm/msr.h>
 
 /*
  * The RMP entry information as returned by the RMPREAD instruction.
@@ -116,6 +117,8 @@ static u64 rmp_segment_mask;
 
 static u64 rmp_cfg;
 
+static void *rmp_bookkeeping __ro_after_init;
+
 /* Mask to apply to a PFN to get the first PFN of a 2MB page */
 #define PFN_PMD_MASK	GENMASK_ULL(63, PMD_SHIFT - PAGE_SHIFT)
 
@@ -129,47 +132,30 @@ static unsigned long snp_nr_leaked_pages;
 #undef pr_fmt
 #define pr_fmt(fmt)	"SEV-SNP: " fmt
 
-static int __mfd_enable(unsigned int cpu)
+static void mfd_reconfigure(void *arg)
+{
+	if (!cc_platform_has(CC_ATTR_HOST_SEV_SNP))
+		return;
+
+	if (arg)
+		msr_set_bit(MSR_AMD64_SYSCFG, MSR_AMD64_SYSCFG_MFDM_BIT);
+	else
+		msr_clear_bit(MSR_AMD64_SYSCFG, MSR_AMD64_SYSCFG_MFDM_BIT);
+}
+
+static void snp_enable(void *arg)
 {
 	u64 val;
 
 	if (!cc_platform_has(CC_ATTR_HOST_SEV_SNP))
-		return 0;
+		return;
 
-	rdmsrl(MSR_AMD64_SYSCFG, val);
-
-	val |= MSR_AMD64_SYSCFG_MFDM;
-
-	wrmsrl(MSR_AMD64_SYSCFG, val);
-
-	return 0;
-}
-
-static __init void mfd_enable(void *arg)
-{
-	__mfd_enable(smp_processor_id());
-}
-
-static int __snp_enable(unsigned int cpu)
-{
-	u64 val;
-
-	if (!cc_platform_has(CC_ATTR_HOST_SEV_SNP))
-		return 0;
-
-	rdmsrl(MSR_AMD64_SYSCFG, val);
+	rdmsrq(MSR_AMD64_SYSCFG, val);
 
 	val |= MSR_AMD64_SYSCFG_SNP_EN;
 	val |= MSR_AMD64_SYSCFG_SNP_VMPL_EN;
 
-	wrmsrl(MSR_AMD64_SYSCFG, val);
-
-	return 0;
-}
-
-static __init void snp_enable(void *arg)
-{
-	__snp_enable(smp_processor_id());
+	wrmsrq(MSR_AMD64_SYSCFG, val);
 }
 
 static void __init __snp_fixup_e820_tables(u64 pa)
@@ -198,7 +184,6 @@ static void __init __snp_fixup_e820_tables(u64 pa)
 		pr_info("Reserving start/end of RMP table on a 2MB boundary [0x%016llx]\n", pa);
 		e820__range_update(pa, PMD_SIZE, E820_TYPE_RAM, E820_TYPE_RESERVED);
 		e820__range_update_table(e820_table_kexec, pa, PMD_SIZE, E820_TYPE_RAM, E820_TYPE_RESERVED);
-		e820__range_update_table(e820_table_firmware, pa, PMD_SIZE, E820_TYPE_RAM, E820_TYPE_RESERVED);
 		if (!memblock_is_region_reserved(pa, PMD_SIZE))
 			memblock_reserve(pa, PMD_SIZE);
 	}
@@ -260,21 +245,30 @@ void __init snp_fixup_e820_tables(void)
 	}
 }
 
-static bool __init clear_rmptable_bookkeeping(void)
+static void clear_rmp(void)
 {
-	void *bk;
+	unsigned int i;
+	u64 val;
 
-	bk = memremap(probed_rmp_base, RMPTABLE_CPU_BOOKKEEPING_SZ, MEMREMAP_WB);
-	if (!bk) {
-		pr_err("Failed to map RMP bookkeeping area\n");
-		return false;
+	if (!cc_platform_has(CC_ATTR_HOST_SEV_SNP))
+		return;
+
+	/* Clearing the RMP while SNP is enabled will cause an exception */
+	rdmsrq(MSR_AMD64_SYSCFG, val);
+	if (WARN_ON_ONCE(val & MSR_AMD64_SYSCFG_SNP_EN))
+		return;
+
+	memset(rmp_bookkeeping, 0, RMPTABLE_CPU_BOOKKEEPING_SZ);
+
+	for (i = 0; i < rst_max_index; i++) {
+		struct rmp_segment_desc *desc;
+
+		desc = rmp_segment_table[i];
+		if (!desc)
+			continue;
+
+		memset(desc->rmp_entry, 0, desc->size);
 	}
-
-	memset(bk, 0, RMPTABLE_CPU_BOOKKEEPING_SZ);
-
-	memunmap(bk);
-
-	return true;
 }
 
 static bool __init alloc_rmp_segment_desc(u64 segment_pa, u64 segment_size, u64 pa)
@@ -313,7 +307,7 @@ static bool __init alloc_rmp_segment_desc(u64 segment_pa, u64 segment_size, u64 
 		return false;
 	}
 
-	desc = kzalloc(sizeof(*desc), GFP_KERNEL);
+	desc = kzalloc_obj(*desc);
 	if (!desc) {
 		memunmap(rmp_segment);
 		return false;
@@ -494,11 +488,87 @@ e_free:
 static bool __init setup_rmptable(void)
 {
 	if (rmp_cfg & MSR_AMD64_SEG_RMP_ENABLED) {
-		return setup_segmented_rmptable();
+		if (!setup_segmented_rmptable())
+			return false;
 	} else {
-		return setup_contiguous_rmptable();
+		if (!setup_contiguous_rmptable())
+			return false;
 	}
+
+	rmp_bookkeeping = memremap(probed_rmp_base, RMPTABLE_CPU_BOOKKEEPING_SZ, MEMREMAP_WB);
+	if (!rmp_bookkeeping) {
+		pr_err("Failed to map RMP bookkeeping area\n");
+		free_rmp_segment_table();
+
+		return false;
+	}
+
+	return true;
 }
+
+static void clear_hsave_pa(void *arg)
+{
+	wrmsrq(MSR_VM_HSAVE_PA, 0);
+}
+
+int snp_prepare(void)
+{
+	int ret;
+	u64 val;
+
+	/*
+	 * Check if SEV-SNP is already enabled, this can happen in case of
+	 * kexec boot.
+	 */
+	rdmsrq(MSR_AMD64_SYSCFG, val);
+	if (val & MSR_AMD64_SYSCFG_SNP_EN)
+		return 0;
+
+	clear_rmp();
+
+	cpus_read_lock();
+
+	if (!cpumask_equal(cpu_online_mask, cpu_present_mask)) {
+		ret = -EOPNOTSUPP;
+		pr_warn("SNP init failed: not all CPUs online. (%*pbl online <-> %*pbl present masks).\n",
+			cpumask_pr_args(cpu_online_mask),
+			cpumask_pr_args(cpu_present_mask));
+		goto unlock;
+	}
+
+	wbinvd_on_all_cpus();
+
+	/*
+	 * MtrrFixDramModEn is not shared between threads on a core,
+	 * therefore it must be set on all CPUs prior to enabling SNP.
+	 */
+	on_each_cpu(mfd_reconfigure, (void *)1, 1);
+	on_each_cpu(snp_enable, NULL, 1);
+
+	/* SNP_INIT requires MSR_VM_HSAVE_PA to be cleared on all CPUs. */
+	on_each_cpu(clear_hsave_pa, NULL, 1);
+
+	ret = 0;
+
+unlock:
+	cpus_read_unlock();
+
+	return ret;
+}
+EXPORT_SYMBOL_FOR_MODULES(snp_prepare, "ccp");
+
+void snp_shutdown(void)
+{
+	u64 syscfg;
+
+	rdmsrq(MSR_AMD64_SYSCFG, syscfg);
+	if (syscfg & MSR_AMD64_SYSCFG_SNP_EN)
+		return;
+
+	clear_rmp();
+	on_each_cpu(mfd_reconfigure, NULL, 1);
+}
+EXPORT_SYMBOL_FOR_MODULES(snp_shutdown, "ccp");
 
 /*
  * Do the necessary preparations which are verified by the firmware as
@@ -507,9 +577,6 @@ static bool __init setup_rmptable(void)
  */
 int __init snp_rmptable_init(void)
 {
-	unsigned int i;
-	u64 val;
-
 	if (WARN_ON_ONCE(!cc_platform_has(CC_ATTR_HOST_SEV_SNP)))
 		return -ENOSYS;
 
@@ -518,42 +585,6 @@ int __init snp_rmptable_init(void)
 
 	if (!setup_rmptable())
 		return -ENOSYS;
-
-	/*
-	 * Check if SEV-SNP is already enabled, this can happen in case of
-	 * kexec boot.
-	 */
-	rdmsrl(MSR_AMD64_SYSCFG, val);
-	if (val & MSR_AMD64_SYSCFG_SNP_EN)
-		goto skip_enable;
-
-	/* Zero out the RMP bookkeeping area */
-	if (!clear_rmptable_bookkeeping()) {
-		free_rmp_segment_table();
-		return -ENOSYS;
-	}
-
-	/* Zero out the RMP entries */
-	for (i = 0; i < rst_max_index; i++) {
-		struct rmp_segment_desc *desc;
-
-		desc = rmp_segment_table[i];
-		if (!desc)
-			continue;
-
-		memset(desc->rmp_entry, 0, desc->size);
-	}
-
-	/* Flush the caches to ensure that data is written before SNP is enabled. */
-	wbinvd_on_all_cpus();
-
-	/* MtrrFixDramModEn must be enabled on all the CPUs prior to enabling SNP. */
-	on_each_cpu(mfd_enable, NULL, 1);
-
-	on_each_cpu(snp_enable, NULL, 1);
-
-skip_enable:
-	cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "x86/rmptable_init:online", __snp_enable, NULL);
 
 	/*
 	 * Setting crash_kexec_post_notifiers to 'true' to ensure that SNP panic
@@ -577,8 +608,8 @@ static bool probe_contiguous_rmptable_info(void)
 {
 	u64 rmp_sz, rmp_base, rmp_end;
 
-	rdmsrl(MSR_AMD64_RMP_BASE, rmp_base);
-	rdmsrl(MSR_AMD64_RMP_END, rmp_end);
+	rdmsrq(MSR_AMD64_RMP_BASE, rmp_base);
+	rdmsrq(MSR_AMD64_RMP_END, rmp_end);
 
 	if (!(rmp_base & RMP_ADDR_MASK) || !(rmp_end & RMP_ADDR_MASK)) {
 		pr_err("Memory for the RMP table has not been reserved by BIOS\n");
@@ -611,13 +642,13 @@ static bool probe_segmented_rmptable_info(void)
 	unsigned int eax, ebx, segment_shift, segment_shift_min, segment_shift_max;
 	u64 rmp_base, rmp_end;
 
-	rdmsrl(MSR_AMD64_RMP_BASE, rmp_base);
+	rdmsrq(MSR_AMD64_RMP_BASE, rmp_base);
 	if (!(rmp_base & RMP_ADDR_MASK)) {
 		pr_err("Memory for the RMP table has not been reserved by BIOS\n");
 		return false;
 	}
 
-	rdmsrl(MSR_AMD64_RMP_END, rmp_end);
+	rdmsrq(MSR_AMD64_RMP_END, rmp_end);
 	WARN_ONCE(rmp_end & RMP_ADDR_MASK,
 		  "Segmented RMP enabled but RMP_END MSR is non-zero\n");
 
@@ -653,7 +684,7 @@ static bool probe_segmented_rmptable_info(void)
 bool snp_probe_rmptable_info(void)
 {
 	if (cpu_feature_enabled(X86_FEATURE_SEGMENTED_RMP))
-		rdmsrl(MSR_AMD64_RMP_CFG, rmp_cfg);
+		rdmsrq(MSR_AMD64_RMP_CFG, rmp_cfg);
 
 	if (rmp_cfg & MSR_AMD64_SEG_RMP_ENABLED)
 		return probe_segmented_rmptable_info();
@@ -1029,7 +1060,7 @@ int rmp_make_shared(u64 pfn, enum pg_level level)
 }
 EXPORT_SYMBOL_GPL(rmp_make_shared);
 
-void snp_leak_pages(u64 pfn, unsigned int npages)
+void __snp_leak_pages(u64 pfn, unsigned int npages, bool dump_rmp)
 {
 	struct page *page = pfn_to_page(pfn);
 
@@ -1052,14 +1083,15 @@ void snp_leak_pages(u64 pfn, unsigned int npages)
 		    (PageHead(page) && compound_nr(page) <= npages))
 			list_add_tail(&page->buddy_list, &snp_leaked_pages_list);
 
-		dump_rmpentry(pfn);
+		if (dump_rmp)
+			dump_rmpentry(pfn);
 		snp_nr_leaked_pages++;
 		pfn++;
 		page++;
 	}
 	spin_unlock(&snp_leaked_pages_list_lock);
 }
-EXPORT_SYMBOL_GPL(snp_leak_pages);
+EXPORT_SYMBOL_GPL(__snp_leak_pages);
 
 void kdump_sev_callback(void)
 {

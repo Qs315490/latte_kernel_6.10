@@ -19,7 +19,6 @@
 #include <linux/input/touchscreen.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
@@ -446,12 +445,10 @@ static int msg2638_suspend(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	struct msg2638_ts_data *msg2638 = i2c_get_clientdata(client);
 
-	mutex_lock(&msg2638->input_dev->mutex);
+	guard(mutex)(&msg2638->input_dev->mutex);
 
 	if (input_device_enabled(msg2638->input_dev))
 		msg2638_stop(msg2638);
-
-	mutex_unlock(&msg2638->input_dev->mutex);
 
 	return 0;
 }
@@ -460,16 +457,17 @@ static int msg2638_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct msg2638_ts_data *msg2638 = i2c_get_clientdata(client);
-	int ret = 0;
+	int error;
 
-	mutex_lock(&msg2638->input_dev->mutex);
+	guard(mutex)(&msg2638->input_dev->mutex);
 
-	if (input_device_enabled(msg2638->input_dev))
-		ret = msg2638_start(msg2638);
+	if (input_device_enabled(msg2638->input_dev)) {
+		error = msg2638_start(msg2638);
+		if (error)
+			return error;
+	}
 
-	mutex_unlock(&msg2638->input_dev->mutex);
-
-	return ret;
+	return 0;
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(msg2638_pm_ops, msg2638_suspend, msg2638_resume);

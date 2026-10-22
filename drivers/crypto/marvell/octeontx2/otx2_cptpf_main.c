@@ -2,6 +2,7 @@
 /* Copyright (C) 2020 Marvell. */
 
 #include <linux/firmware.h>
+#include <linux/sysfs.h>
 #include "otx2_cpt_hw_types.h"
 #include "otx2_cpt_common.h"
 #include "otx2_cpt_devlink.h"
@@ -339,8 +340,7 @@ static int cptpf_flr_wq_init(struct otx2_cptpf_dev *cptpf, int num_vfs)
 	if (!cptpf->flr_wq)
 		return -ENOMEM;
 
-	cptpf->flr_work = kcalloc(num_vfs, sizeof(struct cptpf_flr_work),
-				  GFP_KERNEL);
+	cptpf->flr_work = kzalloc_objs(struct cptpf_flr_work, num_vfs);
 	if (!cptpf->flr_work)
 		goto destroy_wq;
 
@@ -507,7 +507,7 @@ static ssize_t sso_pf_func_ovrd_show(struct device *dev,
 {
 	struct otx2_cptpf_dev *cptpf = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", cptpf->sso_pf_func_ovrd);
+	return sysfs_emit(buf, "%d\n", cptpf->sso_pf_func_ovrd);
 }
 
 static ssize_t sso_pf_func_ovrd_store(struct device *dev,
@@ -533,7 +533,7 @@ static ssize_t kvf_limits_show(struct device *dev,
 {
 	struct otx2_cptpf_dev *cptpf = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", cptpf->kvf_limits);
+	return sysfs_emit(buf, "%d\n", cptpf->kvf_limits);
 }
 
 static ssize_t kvf_limits_store(struct device *dev,
@@ -639,6 +639,12 @@ static int cptpf_device_init(struct otx2_cptpf_dev *cptpf)
 	/* Disable all cores */
 	ret = otx2_cpt_disable_all_cores(cptpf);
 
+	otx2_cptlf_set_dev_info(&cptpf->lfs, cptpf->pdev, cptpf->reg_base,
+				&cptpf->afpf_mbox, BLKADDR_CPT0);
+	if (cptpf->has_cpt1)
+		otx2_cptlf_set_dev_info(&cptpf->cpt1_lfs, cptpf->pdev,
+					cptpf->reg_base, &cptpf->afpf_mbox,
+					BLKADDR_CPT1);
 	return ret;
 }
 
@@ -786,19 +792,19 @@ static int otx2_cptpf_probe(struct pci_dev *pdev,
 	cptpf->max_vfs = pci_sriov_get_totalvfs(pdev);
 	cptpf->kvf_limits = 1;
 
-	err = cn10k_cptpf_lmtst_init(cptpf);
+	/* Initialize CPT PF device */
+	err = cptpf_device_init(cptpf);
 	if (err)
 		goto unregister_intr;
 
-	/* Initialize CPT PF device */
-	err = cptpf_device_init(cptpf);
+	err = cn10k_cptpf_lmtst_init(cptpf);
 	if (err)
 		goto unregister_intr;
 
 	/* Initialize engine groups */
 	err = otx2_cpt_init_eng_grps(pdev, &cptpf->eng_grps);
 	if (err)
-		goto unregister_intr;
+		goto free_lmtst;
 
 	err = sysfs_create_group(&dev->kobj, &cptpf_sysfs_group);
 	if (err)
@@ -814,6 +820,8 @@ sysfs_grp_del:
 	sysfs_remove_group(&dev->kobj, &cptpf_sysfs_group);
 cleanup_eng_grps:
 	otx2_cpt_cleanup_eng_grps(pdev, &cptpf->eng_grps);
+free_lmtst:
+	cn10k_cpt_lmtst_free(pdev, &cptpf->lfs);
 unregister_intr:
 	cptpf_disable_afpf_mbox_intr(cptpf);
 destroy_afpf_mbox:
@@ -848,6 +856,8 @@ static void otx2_cptpf_remove(struct pci_dev *pdev)
 	cptpf_disable_afpf_mbox_intr(cptpf);
 	/* Destroy AF-PF mbox */
 	cptpf_afpf_mbox_destroy(cptpf);
+	/* Free LMTST memory */
+	cn10k_cpt_lmtst_free(pdev, &cptpf->lfs);
 	pci_set_drvdata(pdev, NULL);
 }
 
@@ -857,6 +867,7 @@ static const struct pci_device_id otx2_cpt_id_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, CN10K_CPT_PCI_PF_DEVICE_ID) },
 	{ 0, }  /* end of table */
 };
+MODULE_DEVICE_TABLE(pci, otx2_cpt_id_table);
 
 static struct pci_driver otx2_cpt_pci_driver = {
 	.name = OTX2_CPT_DRV_NAME,
@@ -873,4 +884,3 @@ MODULE_IMPORT_NS("CRYPTO_DEV_OCTEONTX2_CPT");
 MODULE_AUTHOR("Marvell");
 MODULE_DESCRIPTION(OTX2_CPT_DRV_STRING);
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(pci, otx2_cpt_id_table);

@@ -274,7 +274,7 @@ static int apci2032_auto_attach(struct comedi_device *dev,
 		struct apci2032_int_private *subpriv;
 
 		dev->read_subdev = s;
-		subpriv = kzalloc(sizeof(*subpriv), GFP_KERNEL);
+		subpriv = kzalloc_obj(*subpriv);
 		if (!subpriv)
 			return -ENOMEM;
 		spin_lock_init(&subpriv->spinlock);
@@ -312,8 +312,8 @@ static int apci2032_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id apci2032_pci_table[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x1004) },
-	{ 0 }
+	{ PCI_VDEVICE(ADDIDATA, 0x1004) },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, apci2032_pci_table);
 

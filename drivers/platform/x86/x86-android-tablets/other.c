@@ -5,13 +5,14 @@
  * devices typically have a bunch of things hardcoded, rather than specified
  * in their DSDT.
  *
- * Copyright (C) 2021-2023 Hans de Goede <hdegoede@redhat.com>
+ * Copyright (C) 2021-2023 Hans de Goede <hansg@kernel.org>
  */
 
 #include <linux/acpi.h>
 #include <linux/gpio.h>
 #include <linux/gpio/machine.h>
-#include <linux/input.h>
+#include <linux/gpio/property.h>
+#include <linux/input-event-codes.h>
 #include <linux/leds.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
@@ -22,102 +23,38 @@
 #include "shared-psy-info.h"
 #include "x86-android-tablets.h"
 
-/* Acer Iconia One 7 B1-750 has an Android factory image with everything hardcoded */
-static const char * const acer_b1_750_mount_matrix[] = {
-	"-1", "0", "0",
-	"0", "1", "0",
-	"0", "0", "1"
-};
-
-static const struct property_entry acer_b1_750_bma250e_props[] = {
-	PROPERTY_ENTRY_STRING_ARRAY("mount-matrix", acer_b1_750_mount_matrix),
-	{ }
-};
-
-static const struct software_node acer_b1_750_bma250e_node = {
-	.properties = acer_b1_750_bma250e_props,
-};
-
-static const struct x86_i2c_client_info acer_b1_750_i2c_clients[] __initconst = {
-	{
-		/* Novatek NVT-ts touchscreen */
-		.board_info = {
-			.type = "nt11205-ts",
-			.addr = 0x34,
-			.dev_name = "NVT-ts",
-		},
-		.adapter_path = "\\_SB_.I2C4",
-		.irq_data = {
-			.type = X86_ACPI_IRQ_TYPE_GPIOINT,
-			.chip = "INT33FC:02",
-			.index = 3,
-			.trigger = ACPI_EDGE_SENSITIVE,
-			.polarity = ACPI_ACTIVE_LOW,
-			.con_id = "NVT-ts_irq",
-		},
-	}, {
-		/* BMA250E accelerometer */
-		.board_info = {
-			.type = "bma250e",
-			.addr = 0x18,
-			.swnode = &acer_b1_750_bma250e_node,
-		},
-		.adapter_path = "\\_SB_.I2C3",
-		.irq_data = {
-			.type = X86_ACPI_IRQ_TYPE_GPIOINT,
-			.chip = "INT33FC:02",
-			.index = 25,
-			.trigger = ACPI_LEVEL_SENSITIVE,
-			.polarity = ACPI_ACTIVE_HIGH,
-			.con_id = "bma250e_irq",
-		},
-	},
-};
-
-static struct gpiod_lookup_table acer_b1_750_nvt_ts_gpios = {
-	.dev_id = "i2c-NVT-ts",
-	.table = {
-		GPIO_LOOKUP("INT33FC:01", 26, "reset", GPIO_ACTIVE_LOW),
-		{ }
-	},
-};
-
-static struct gpiod_lookup_table * const acer_b1_750_gpios[] = {
-	&acer_b1_750_nvt_ts_gpios,
-	&int3496_reference_gpios,
-	NULL
-};
-
-const struct x86_dev_info acer_b1_750_info __initconst = {
-	.i2c_client_info = acer_b1_750_i2c_clients,
-	.i2c_client_count = ARRAY_SIZE(acer_b1_750_i2c_clients),
-	.pdev_info = int3496_pdevs,
-	.pdev_count = 1,
-	.gpiod_lookup_tables = acer_b1_750_gpios,
-};
-
 /*
  * Advantech MICA-071
  * This is a standard Windows tablet, but it has an extra "quick launch" button
  * which is not described in the ACPI tables in anyway.
  * Use the x86-android-tablets infra to create a gpio-keys device for this.
  */
-static const struct x86_gpio_button advantech_mica_071_button __initconst = {
-	.button = {
-		.code = KEY_PROG1,
-		.active_low = true,
-		.desc = "prog1_key",
-		.type = EV_KEY,
-		.wakeup = false,
-		.debounce_interval = 50,
-	},
-	.chip = "INT33FC:00",
-	.pin = 2,
+static const struct software_node advantech_mica_071_gpio_keys_node = {
+	.name = "prog1_key",
+};
+
+static const struct property_entry advantech_mica_071_prog1_key_props[] = {
+	PROPERTY_ENTRY_U32("linux,code", KEY_PROG1),
+	PROPERTY_ENTRY_STRING("label", "prog1_key"),
+	PROPERTY_ENTRY_GPIO("gpios", &baytrail_gpiochip_nodes[0], 2, GPIO_ACTIVE_LOW),
+	PROPERTY_ENTRY_U32("debounce-interval", 50),
+	{ }
+};
+
+static const struct software_node advantech_mica_071_prog1_key_node = {
+	.parent = &advantech_mica_071_gpio_keys_node,
+	.properties = advantech_mica_071_prog1_key_props,
+};
+
+static const struct software_node *advantech_mica_071_button_swnodes[] = {
+	&advantech_mica_071_gpio_keys_node,
+	&advantech_mica_071_prog1_key_node,
+	NULL
 };
 
 const struct x86_dev_info advantech_mica_071_info __initconst = {
-	.gpio_button = &advantech_mica_071_button,
-	.gpio_button_count = 1,
+	.gpio_button_swnodes = advantech_mica_071_button_swnodes,
+	.gpiochip_type = X86_GPIOCHIP_BAYTRAIL,
 };
 
 /*
@@ -213,36 +150,46 @@ const struct x86_dev_info chuwi_hi8_info __initconst = {
  * in the button row with the power + volume-buttons labeled P and F.
  * Use the x86-android-tablets infra to create a gpio-keys device for these.
  */
-static const struct x86_gpio_button cyberbook_t116_buttons[] __initconst = {
-	{
-		.button = {
-			.code = KEY_PROG1,
-			.active_low = true,
-			.desc = "prog1_key",
-			.type = EV_KEY,
-			.wakeup = false,
-			.debounce_interval = 50,
-		},
-		.chip = "INT33FF:00",
-		.pin = 30,
-	},
-	{
-		.button = {
-			.code = KEY_PROG2,
-			.active_low = true,
-			.desc = "prog2_key",
-			.type = EV_KEY,
-			.wakeup = false,
-			.debounce_interval = 50,
-		},
-		.chip = "INT33FF:03",
-		.pin = 48,
-	},
+static const struct software_node cyberbook_t116_gpio_keys_node = {
+	.name = "prog_keys",
+};
+
+static const struct property_entry cyberbook_t116_prog1_key_props[] = {
+	PROPERTY_ENTRY_U32("linux,code", KEY_PROG1),
+	PROPERTY_ENTRY_STRING("label", "prog1_key"),
+	PROPERTY_ENTRY_GPIO("gpios", &cherryview_gpiochip_nodes[0], 30, GPIO_ACTIVE_LOW),
+	PROPERTY_ENTRY_U32("debounce-interval", 50),
+	{ }
+};
+
+static const struct software_node cyberbook_t116_prog1_key_node = {
+	.parent = &cyberbook_t116_gpio_keys_node,
+	.properties = cyberbook_t116_prog1_key_props,
+};
+
+static const struct property_entry cyberbook_t116_prog2_key_props[] = {
+	PROPERTY_ENTRY_U32("linux,code", KEY_PROG2),
+	PROPERTY_ENTRY_STRING("label", "prog2_key"),
+	PROPERTY_ENTRY_GPIO("gpios", &cherryview_gpiochip_nodes[3], 48, GPIO_ACTIVE_LOW),
+	PROPERTY_ENTRY_U32("debounce-interval", 50),
+	{ }
+};
+
+static const struct software_node cyberbook_t116_prog2_key_node = {
+	.parent = &cyberbook_t116_gpio_keys_node,
+	.properties = cyberbook_t116_prog2_key_props,
+};
+
+static const struct software_node *cyberbook_t116_buttons_swnodes[] = {
+	&cyberbook_t116_gpio_keys_node,
+	&cyberbook_t116_prog1_key_node,
+	&cyberbook_t116_prog2_key_node,
+	NULL
 };
 
 const struct x86_dev_info cyberbook_t116_info __initconst = {
-	.gpio_button = cyberbook_t116_buttons,
-	.gpio_button_count = ARRAY_SIZE(cyberbook_t116_buttons),
+	.gpio_button_swnodes = cyberbook_t116_buttons_swnodes,
+	.gpiochip_type = X86_GPIOCHIP_CHERRYVIEW,
 };
 
 #define CZC_EC_EXTRA_PORT	0x68
@@ -298,6 +245,8 @@ static const struct software_node medion_lifetab_s10346_accel_node = {
 static const struct property_entry medion_lifetab_s10346_touchscreen_props[] = {
 	PROPERTY_ENTRY_BOOL("touchscreen-inverted-x"),
 	PROPERTY_ENTRY_BOOL("touchscreen-swapped-x-y"),
+	PROPERTY_ENTRY_GPIO("reset-gpios", &baytrail_gpiochip_nodes[1], 26, GPIO_ACTIVE_HIGH),
+	PROPERTY_ENTRY_GPIO("irq-gpios", &baytrail_gpiochip_nodes[2], 3, GPIO_ACTIVE_HIGH),
 	{ }
 };
 
@@ -341,24 +290,10 @@ static const struct x86_i2c_client_info medion_lifetab_s10346_i2c_clients[] __in
 	},
 };
 
-static struct gpiod_lookup_table medion_lifetab_s10346_goodix_gpios = {
-	.dev_id = "i2c-goodix_ts",
-	.table = {
-		GPIO_LOOKUP("INT33FC:01", 26, "reset", GPIO_ACTIVE_HIGH),
-		GPIO_LOOKUP("INT33FC:02", 3, "irq", GPIO_ACTIVE_HIGH),
-		{ }
-	},
-};
-
-static struct gpiod_lookup_table * const medion_lifetab_s10346_gpios[] = {
-	&medion_lifetab_s10346_goodix_gpios,
-	NULL
-};
-
 const struct x86_dev_info medion_lifetab_s10346_info __initconst = {
 	.i2c_client_info = medion_lifetab_s10346_i2c_clients,
 	.i2c_client_count = ARRAY_SIZE(medion_lifetab_s10346_i2c_clients),
-	.gpiod_lookup_tables = medion_lifetab_s10346_gpios,
+	.gpiochip_type = X86_GPIOCHIP_BAYTRAIL,
 };
 
 /* Nextbook Ares 8 (BYT) tablets have an Android factory image with everything hardcoded */
@@ -417,17 +352,12 @@ static const struct x86_i2c_client_info nextbook_ares8_i2c_clients[] __initconst
 	},
 };
 
-static struct gpiod_lookup_table * const nextbook_ares8_gpios[] = {
-	&int3496_reference_gpios,
-	NULL
-};
-
 const struct x86_dev_info nextbook_ares8_info __initconst = {
 	.i2c_client_info = nextbook_ares8_i2c_clients,
 	.i2c_client_count = ARRAY_SIZE(nextbook_ares8_i2c_clients),
 	.pdev_info = int3496_pdevs,
 	.pdev_count = 1,
-	.gpiod_lookup_tables = nextbook_ares8_gpios,
+	.gpiochip_type = X86_GPIOCHIP_BAYTRAIL,
 };
 
 /* Nextbook Ares 8A (CHT) tablets have an Android factory image with everything hardcoded */
@@ -446,6 +376,17 @@ static const struct software_node nextbook_ares8a_accel_node = {
 	.properties = nextbook_ares8a_accel_props,
 };
 
+static const struct property_entry nextbook_ares8a_ft5416_props[] = {
+	PROPERTY_ENTRY_U32("touchscreen-size-x", 800),
+	PROPERTY_ENTRY_U32("touchscreen-size-y", 1280),
+	PROPERTY_ENTRY_GPIO("reset-gpios", &cherryview_gpiochip_nodes[1], 25, GPIO_ACTIVE_LOW),
+	{ }
+};
+
+static const struct software_node nextbook_ares8a_ft5416_node = {
+	.properties = nextbook_ares8a_ft5416_props,
+};
+
 static const struct x86_i2c_client_info nextbook_ares8a_i2c_clients[] __initconst = {
 	{
 		/* Freescale MMA8653FC accelerometer */
@@ -462,7 +403,7 @@ static const struct x86_i2c_client_info nextbook_ares8a_i2c_clients[] __initcons
 			.type = "edt-ft5x06",
 			.addr = 0x38,
 			.dev_name = "ft5416",
-			.swnode = &nextbook_ares8_touchscreen_node,
+			.swnode = &nextbook_ares8a_ft5416_node,
 		},
 		.adapter_path = "\\_SB_.PCI0.I2C6",
 		.irq_data = {
@@ -476,23 +417,10 @@ static const struct x86_i2c_client_info nextbook_ares8a_i2c_clients[] __initcons
 	},
 };
 
-static struct gpiod_lookup_table nextbook_ares8a_ft5416_gpios = {
-	.dev_id = "i2c-ft5416",
-	.table = {
-		GPIO_LOOKUP("INT33FF:01", 25, "reset", GPIO_ACTIVE_LOW),
-		{ }
-	},
-};
-
-static struct gpiod_lookup_table * const nextbook_ares8a_gpios[] = {
-	&nextbook_ares8a_ft5416_gpios,
-	NULL
-};
-
 const struct x86_dev_info nextbook_ares8a_info __initconst = {
 	.i2c_client_info = nextbook_ares8a_i2c_clients,
 	.i2c_client_count = ARRAY_SIZE(nextbook_ares8a_i2c_clients),
-	.gpiod_lookup_tables = nextbook_ares8a_gpios,
+	.gpiochip_type = X86_GPIOCHIP_CHERRYVIEW,
 };
 
 /*
@@ -501,22 +429,32 @@ const struct x86_dev_info nextbook_ares8a_info __initconst = {
  * This button has a WMI interface, but that is broken. Instead of trying to
  * use the broken WMI interface, instantiate a gpio-keys device for this.
  */
-static const struct x86_gpio_button peaq_c1010_button __initconst = {
-	.button = {
-		.code = KEY_SOUND,
-		.active_low = true,
-		.desc = "dolby_key",
-		.type = EV_KEY,
-		.wakeup = false,
-		.debounce_interval = 50,
-	},
-	.chip = "INT33FC:00",
-	.pin = 3,
+static const struct software_node peaq_c1010_gpio_keys_node = {
+	.name = "gpio_keys",
+};
+
+static const struct property_entry peaq_c1010_dolby_key_props[] = {
+	PROPERTY_ENTRY_U32("linux,code", KEY_SOUND),
+	PROPERTY_ENTRY_STRING("label", "dolby_key"),
+	PROPERTY_ENTRY_GPIO("gpios", &baytrail_gpiochip_nodes[0], 3, GPIO_ACTIVE_LOW),
+	PROPERTY_ENTRY_U32("debounce-interval", 50),
+	{ }
+};
+
+static const struct software_node peaq_c1010_dolby_key_node = {
+	.parent = &peaq_c1010_gpio_keys_node,
+	.properties = peaq_c1010_dolby_key_props,
+};
+
+static const struct software_node *peaq_c1010_button_swnodes[] = {
+	&peaq_c1010_gpio_keys_node,
+	&peaq_c1010_dolby_key_node,
+	NULL
 };
 
 const struct x86_dev_info peaq_c1010_info __initconst = {
-	.gpio_button = &peaq_c1010_button,
-	.gpio_button_count = 1,
+	.gpio_button_swnodes = peaq_c1010_button_swnodes,
+	.gpiochip_type = X86_GPIOCHIP_BAYTRAIL,
 };
 
 /*
@@ -544,6 +482,8 @@ static const struct property_entry whitelabel_tm800a550l_goodix_props[] = {
 	PROPERTY_ENTRY_STRING("firmware-name", "gt912-tm800a550l.fw"),
 	PROPERTY_ENTRY_STRING("goodix,config-name", "gt912-tm800a550l.cfg"),
 	PROPERTY_ENTRY_U32("goodix,main-clk", 54),
+	PROPERTY_ENTRY_GPIO("reset-gpios", &baytrail_gpiochip_nodes[1], 26, GPIO_ACTIVE_HIGH),
+	PROPERTY_ENTRY_GPIO("irq-gpios", &baytrail_gpiochip_nodes[2], 3, GPIO_ACTIVE_HIGH),
 	{ }
 };
 
@@ -579,83 +519,118 @@ static const struct x86_i2c_client_info whitelabel_tm800a550l_i2c_clients[] __in
 	},
 };
 
-static struct gpiod_lookup_table whitelabel_tm800a550l_goodix_gpios = {
-	.dev_id = "i2c-goodix_ts",
-	.table = {
-		GPIO_LOOKUP("INT33FC:01", 26, "reset", GPIO_ACTIVE_HIGH),
-		GPIO_LOOKUP("INT33FC:02", 3, "irq", GPIO_ACTIVE_HIGH),
-		{ }
-	},
-};
-
-static struct gpiod_lookup_table * const whitelabel_tm800a550l_gpios[] = {
-	&whitelabel_tm800a550l_goodix_gpios,
-	NULL
-};
-
 const struct x86_dev_info whitelabel_tm800a550l_info __initconst = {
 	.i2c_client_info = whitelabel_tm800a550l_i2c_clients,
 	.i2c_client_count = ARRAY_SIZE(whitelabel_tm800a550l_i2c_clients),
-	.gpiod_lookup_tables = whitelabel_tm800a550l_gpios,
+	.gpiochip_type = X86_GPIOCHIP_BAYTRAIL,
 };
 
 /*
- * Vexia EDU ATLA 10 tablet, Android 4.2 / 4.4 + Guadalinex Ubuntu tablet
+ * Vexia EDU ATLA 10 tablet 5V, Android 4.4 + Guadalinex Ubuntu tablet
+ * distributed to schools in the Spanish Andalucía region.
+ */
+static const struct property_entry vexia_edu_atla10_5v_touchscreen_props[] = {
+	PROPERTY_ENTRY_U32("hid-descr-addr", 0x0000),
+	PROPERTY_ENTRY_U32("post-reset-deassert-delay-ms", 120),
+	PROPERTY_ENTRY_GPIO("reset-gpios", &baytrail_gpiochip_nodes[1], 26, GPIO_ACTIVE_LOW),
+	{ }
+};
+
+static const struct software_node vexia_edu_atla10_5v_touchscreen_node = {
+	.properties = vexia_edu_atla10_5v_touchscreen_props,
+};
+
+static const struct x86_i2c_client_info vexia_edu_atla10_5v_i2c_clients[] __initconst = {
+	{
+		/* kxcjk1013 accelerometer */
+		.board_info = {
+			.type = "kxcjk1013",
+			.addr = 0x0f,
+			.dev_name = "kxcjk1013",
+		},
+		.adapter_path = "\\_SB_.I2C3",
+	}, {
+		/*  touchscreen controller */
+		.board_info = {
+			.type = "hid-over-i2c",
+			.addr = 0x38,
+			.dev_name = "FTSC1000",
+			.swnode = &vexia_edu_atla10_5v_touchscreen_node,
+		},
+		.adapter_path = "\\_SB_.I2C4",
+		.irq_data = {
+			.type = X86_ACPI_IRQ_TYPE_APIC,
+			.index = 0x44,
+			.trigger = ACPI_LEVEL_SENSITIVE,
+			.polarity = ACPI_ACTIVE_HIGH,
+		},
+	}
+};
+
+const struct x86_dev_info vexia_edu_atla10_5v_info __initconst = {
+	.i2c_client_info = vexia_edu_atla10_5v_i2c_clients,
+	.i2c_client_count = ARRAY_SIZE(vexia_edu_atla10_5v_i2c_clients),
+	.gpiochip_type = X86_GPIOCHIP_BAYTRAIL,
+};
+
+/*
+ * Vexia EDU ATLA 10 tablet 9V, Android 4.2 + Guadalinex Ubuntu tablet
  * distributed to schools in the Spanish Andalucía region.
  */
 static const char * const crystal_cove_pwrsrc_psy[] = { "crystal_cove_pwrsrc" };
 
-static const struct property_entry vexia_edu_atla10_ulpmc_props[] = {
+static const struct property_entry vexia_edu_atla10_9v_ulpmc_props[] = {
 	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", crystal_cove_pwrsrc_psy),
 	{ }
 };
 
-static const struct software_node vexia_edu_atla10_ulpmc_node = {
-	.properties = vexia_edu_atla10_ulpmc_props,
+static const struct software_node vexia_edu_atla10_9v_ulpmc_node = {
+	.properties = vexia_edu_atla10_9v_ulpmc_props,
 };
 
-static const char * const vexia_edu_atla10_accel_mount_matrix[] = {
+static const char * const vexia_edu_atla10_9v_accel_mount_matrix[] = {
 	"0", "-1", "0",
 	"1", "0", "0",
 	"0", "0", "1"
 };
 
-static const struct property_entry vexia_edu_atla10_accel_props[] = {
-	PROPERTY_ENTRY_STRING_ARRAY("mount-matrix", vexia_edu_atla10_accel_mount_matrix),
+static const struct property_entry vexia_edu_atla10_9v_accel_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("mount-matrix", vexia_edu_atla10_9v_accel_mount_matrix),
 	{ }
 };
 
-static const struct software_node vexia_edu_atla10_accel_node = {
-	.properties = vexia_edu_atla10_accel_props,
+static const struct software_node vexia_edu_atla10_9v_accel_node = {
+	.properties = vexia_edu_atla10_9v_accel_props,
 };
 
-static const struct property_entry vexia_edu_atla10_touchscreen_props[] = {
+static const struct property_entry vexia_edu_atla10_9v_touchscreen_props[] = {
 	PROPERTY_ENTRY_U32("hid-descr-addr", 0x0000),
 	PROPERTY_ENTRY_U32("post-reset-deassert-delay-ms", 120),
+	PROPERTY_ENTRY_GPIO("reset-gpios", &baytrail_gpiochip_nodes[0], 60, GPIO_ACTIVE_LOW),
 	{ }
 };
 
-static const struct software_node vexia_edu_atla10_touchscreen_node = {
-	.properties = vexia_edu_atla10_touchscreen_props,
+static const struct software_node vexia_edu_atla10_9v_touchscreen_node = {
+	.properties = vexia_edu_atla10_9v_touchscreen_props,
 };
 
-static const struct property_entry vexia_edu_atla10_pmic_props[] = {
+static const struct property_entry vexia_edu_atla10_9v_pmic_props[] = {
 	PROPERTY_ENTRY_BOOL("linux,register-pwrsrc-power_supply"),
 	{ }
 };
 
-static const struct software_node vexia_edu_atla10_pmic_node = {
-	.properties = vexia_edu_atla10_pmic_props,
+static const struct software_node vexia_edu_atla10_9v_pmic_node = {
+	.properties = vexia_edu_atla10_9v_pmic_props,
 };
 
-static const struct x86_i2c_client_info vexia_edu_atla10_i2c_clients[] __initconst = {
+static const struct x86_i2c_client_info vexia_edu_atla10_9v_i2c_clients[] __initconst = {
 	{
 		/* I2C attached embedded controller, used to access fuel-gauge */
 		.board_info = {
 			.type = "vexia_atla10_ec",
 			.addr = 0x76,
 			.dev_name = "ulpmc",
-			.swnode = &vexia_edu_atla10_ulpmc_node,
+			.swnode = &vexia_edu_atla10_9v_ulpmc_node,
 		},
 		.adapter_path = "0000:00:18.1",
 	}, {
@@ -680,7 +655,7 @@ static const struct x86_i2c_client_info vexia_edu_atla10_i2c_clients[] __initcon
 			.type = "kxtj21009",
 			.addr = 0x0f,
 			.dev_name = "kxtj21009",
-			.swnode = &vexia_edu_atla10_accel_node,
+			.swnode = &vexia_edu_atla10_9v_accel_node,
 		},
 		.adapter_path = "0000:00:18.5",
 	}, {
@@ -689,7 +664,7 @@ static const struct x86_i2c_client_info vexia_edu_atla10_i2c_clients[] __initcon
 			.type = "hid-over-i2c",
 			.addr = 0x38,
 			.dev_name = "FTSC1000",
-			.swnode = &vexia_edu_atla10_touchscreen_node,
+			.swnode = &vexia_edu_atla10_9v_touchscreen_node,
 		},
 		.adapter_path = "0000:00:18.6",
 		.irq_data = {
@@ -704,7 +679,7 @@ static const struct x86_i2c_client_info vexia_edu_atla10_i2c_clients[] __initcon
 			.type = "intel_soc_pmic_crc",
 			.addr = 0x6e,
 			.dev_name = "intel_soc_pmic_crc",
-			.swnode = &vexia_edu_atla10_pmic_node,
+			.swnode = &vexia_edu_atla10_9v_pmic_node,
 		},
 		.adapter_path = "0000:00:18.7",
 		.irq_data = {
@@ -716,7 +691,7 @@ static const struct x86_i2c_client_info vexia_edu_atla10_i2c_clients[] __initcon
 	}
 };
 
-static const struct x86_serdev_info vexia_edu_atla10_serdevs[] __initconst = {
+static const struct x86_serdev_info vexia_edu_atla10_9v_serdevs[] __initconst = {
 	{
 		.ctrl.pci.devfn = PCI_DEVFN(0x1e, 3),
 		.ctrl_devname = "serial0",
@@ -724,20 +699,7 @@ static const struct x86_serdev_info vexia_edu_atla10_serdevs[] __initconst = {
 	},
 };
 
-static struct gpiod_lookup_table vexia_edu_atla10_ft5416_gpios = {
-	.dev_id = "i2c-FTSC1000",
-	.table = {
-		GPIO_LOOKUP("INT33FC:00", 60, "reset", GPIO_ACTIVE_LOW),
-		{ }
-	},
-};
-
-static struct gpiod_lookup_table * const vexia_edu_atla10_gpios[] = {
-	&vexia_edu_atla10_ft5416_gpios,
-	NULL
-};
-
-static int __init vexia_edu_atla10_init(struct device *dev)
+static int __init vexia_edu_atla10_9v_init(struct device *dev)
 {
 	struct pci_dev *pdev;
 	int ret;
@@ -750,8 +712,10 @@ static int __init vexia_edu_atla10_init(struct device *dev)
 
 	/* Reprobe the SDIO controller to enumerate the now enabled Wifi module */
 	pdev = pci_get_domain_bus_and_slot(0, 0, PCI_DEVFN(0x11, 0));
-	if (!pdev)
-		return -EPROBE_DEFER;
+	if (!pdev) {
+		pr_warn("Could not get PCI SDIO at devfn 0x%02x\n", PCI_DEVFN(0x11, 0));
+		return 0;
+	}
 
 	ret = device_reprobe(&pdev->dev);
 	if (ret)
@@ -761,14 +725,14 @@ static int __init vexia_edu_atla10_init(struct device *dev)
 	return 0;
 }
 
-const struct x86_dev_info vexia_edu_atla10_info __initconst = {
-	.i2c_client_info = vexia_edu_atla10_i2c_clients,
-	.i2c_client_count = ARRAY_SIZE(vexia_edu_atla10_i2c_clients),
-	.serdev_info = vexia_edu_atla10_serdevs,
-	.serdev_count = ARRAY_SIZE(vexia_edu_atla10_serdevs),
-	.gpiod_lookup_tables = vexia_edu_atla10_gpios,
-	.init = vexia_edu_atla10_init,
+const struct x86_dev_info vexia_edu_atla10_9v_info __initconst = {
+	.i2c_client_info = vexia_edu_atla10_9v_i2c_clients,
+	.i2c_client_count = ARRAY_SIZE(vexia_edu_atla10_9v_i2c_clients),
+	.serdev_info = vexia_edu_atla10_9v_serdevs,
+	.serdev_count = ARRAY_SIZE(vexia_edu_atla10_9v_serdevs),
+	.init = vexia_edu_atla10_9v_init,
 	.use_pci = true,
+	.gpiochip_type = X86_GPIOCHIP_BAYTRAIL,
 };
 
 /*
@@ -888,12 +852,23 @@ static int match_rt5659_client(struct device *dev, const void *data)
 	return 1;
 }
 
+static struct gpiod_lookup_table xiaomi_mipad2_codec_rt5659_gpios = {
+	.dev_id = "i2c-10EC5659:01",
+	.table = {
+		GPIO_LOOKUP("INT33FF:00", 593 - 512, "ldo1-en", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("INT33FF:01", 656 - 610, "reset", GPIO_ACTIVE_HIGH),
+		{ }
+	},
+};
+
 static int __init xiaomi_mipad2_init(struct device *dev)
 {
 	struct device *client_dev;
 	struct i2c_client *client;
 	struct led_classdev *led_cdev;
 	int ret;
+
+	gpiod_add_lookup_table(&xiaomi_mipad2_codec_rt5659_gpios);
 
 	xiaomi_mipad2_led_pwm = devm_pwm_get(dev, "pwm_soc_lpss_2");
 	if (IS_ERR(xiaomi_mipad2_led_pwm))
@@ -914,10 +889,7 @@ static int __init xiaomi_mipad2_init(struct device *dev)
 	if (ret)
 		return dev_err_probe(dev, ret, "registering LED\n");
 
-	ret = software_node_register_node_group(ktd2026_node_group);
-	if (ret)
-		return dev_err_probe(dev, ret, "registering node_group\n");
-
+	/* ktd2026 的 swnode group 由 x86-android-tablets core 统一注册 */
 	ret = software_node_register(&rt5659_swnode);
 	if (ret)
 		return ret;
@@ -926,7 +898,7 @@ static int __init xiaomi_mipad2_init(struct device *dev)
 	client_dev = bus_find_device(&i2c_bus_type, NULL, NULL, match_rt5659_client);
 	if (!client_dev) {
 		pr_err("RT5659 I2C client not found\n");
-		goto END;
+		return 0;
 	}
 
 	client = to_i2c_client(client_dev);
@@ -935,14 +907,14 @@ static int __init xiaomi_mipad2_init(struct device *dev)
 	put_device(client_dev);
 	pr_info("Bound software node to RT5659\n");
 
-END:
 	return 0;
 }
 
 static void xiaomi_mipad2_exit(void)
 {
-	software_node_unregister_node_group(ktd2026_node_group);
+	/* ktd2026 的 swnode group 由 x86-android-tablets core 统一注销 */
 	software_node_unregister(&rt5659_swnode);
+	gpiod_remove_lookup_table(&xiaomi_mipad2_codec_rt5659_gpios);
 }
 
 /*
@@ -990,24 +962,10 @@ static const struct x86_i2c_client_info xiaomi_mipad2_i2c_clients[] __initconst 
 	}, 
 };
 
-static struct gpiod_lookup_table xiaomi_mipad2_codec_rt5659_gpios = {
-	.dev_id = "i2c-10EC5659:01",
-	.table = {
-		GPIO_LOOKUP("INT33FF:00", 593 - 512, "ldo1-en", GPIO_ACTIVE_HIGH),
-		GPIO_LOOKUP("INT33FF:01", 656 - 610, "reset", GPIO_ACTIVE_HIGH),
-		{ }
-	},
-};
-
-static struct gpiod_lookup_table * const xiaomi_mipad2_gpios[] = {
-	&xiaomi_mipad2_codec_rt5659_gpios,
-	NULL
-};
-
 const struct x86_dev_info xiaomi_mipad2_info __initconst = {
 	.i2c_client_info = xiaomi_mipad2_i2c_clients,
 	.i2c_client_count = ARRAY_SIZE(xiaomi_mipad2_i2c_clients),
+	.swnode_group = ktd2026_node_group,
 	.init = xiaomi_mipad2_init,
 	.exit = xiaomi_mipad2_exit,
-	.gpiod_lookup_tables = xiaomi_mipad2_gpios,
 };

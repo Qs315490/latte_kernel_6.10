@@ -11,6 +11,7 @@
 #include <linux/interrupt.h>
 #include <linux/dmaengine.h>
 #include <linux/delay.h>
+#include <linux/hex.h>
 #include <linux/netdevice.h>
 #include <linux/of_mdio.h>
 #include <linux/etherdevice.h>
@@ -380,9 +381,7 @@ static int pasemi_mac_setup_rx_resources(const struct net_device *dev)
 	spin_lock_init(&ring->lock);
 
 	ring->size = RX_RING_SIZE;
-	ring->ring_info = kcalloc(RX_RING_SIZE,
-				  sizeof(struct pasemi_mac_buffer),
-				  GFP_KERNEL);
+	ring->ring_info = kzalloc_objs(struct pasemi_mac_buffer, RX_RING_SIZE);
 
 	if (!ring->ring_info)
 		goto out_ring_info;
@@ -464,9 +463,7 @@ pasemi_mac_setup_tx_resources(const struct net_device *dev)
 	spin_lock_init(&ring->lock);
 
 	ring->size = TX_RING_SIZE;
-	ring->ring_info = kcalloc(TX_RING_SIZE,
-				  sizeof(struct pasemi_mac_buffer),
-				  GFP_KERNEL);
+	ring->ring_info = kzalloc_objs(struct pasemi_mac_buffer, TX_RING_SIZE);
 	if (!ring->ring_info)
 		goto out_ring_info;
 
@@ -934,7 +931,8 @@ static irqreturn_t pasemi_mac_rx_intr(int irq, void *data)
 
 static void pasemi_mac_tx_timer(struct timer_list *t)
 {
-	struct pasemi_mac_txring *txring = from_timer(txring, t, clean_timer);
+	struct pasemi_mac_txring *txring = timer_container_of(txring, t,
+							      clean_timer);
 	struct pasemi_mac *mac = txring->mac;
 
 	pasemi_mac_clean_tx(txring);
@@ -1288,7 +1286,7 @@ static int pasemi_mac_close(struct net_device *dev)
 		phy_disconnect(dev->phydev);
 	}
 
-	del_timer_sync(&mac->tx->clean_timer);
+	timer_delete_sync(&mac->tx->clean_timer);
 
 	netif_stop_queue(dev);
 	napi_disable(&mac->napi);

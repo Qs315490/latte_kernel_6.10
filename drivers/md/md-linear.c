@@ -5,7 +5,6 @@
  */
 
 #include <linux/blkdev.h>
-#include <linux/raid/md_u.h>
 #include <linux/seq_file.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -73,8 +72,11 @@ static int linear_set_limits(struct mddev *mddev)
 
 	md_init_stacking_limits(&lim);
 	lim.max_hw_sectors = mddev->chunk_sectors;
+	lim.logical_block_size = mddev->logical_block_size;
 	lim.max_write_zeroes_sectors = mddev->chunk_sectors;
+	lim.max_hw_wzeroes_unmap_sectors = mddev->chunk_sectors;
 	lim.io_min = mddev->chunk_sectors << 9;
+	lim.features |= BLK_FEAT_ATOMIC_WRITES;
 	err = mddev_stack_rdev_limits(mddev, &lim, MDDEV_STACK_INTEGRITY);
 	if (err)
 		return err;
@@ -90,7 +92,7 @@ static struct linear_conf *linear_conf(struct mddev *mddev, int raid_disks)
 	int cnt;
 	int i;
 
-	conf = kzalloc(struct_size(conf, disks, raid_disks), GFP_KERNEL);
+	conf = kzalloc_flex(*conf, disks, raid_disks);
 	if (!conf)
 		return ERR_PTR(-ENOMEM);
 
@@ -257,18 +259,10 @@ static bool linear_make_request(struct mddev *mddev, struct bio *bio)
 
 	if (unlikely(bio_end_sector(bio) > end_sector)) {
 		/* This bio crosses a device boundary, so we have to split it */
-		struct bio *split = bio_split(bio, end_sector - bio_sector,
-					      GFP_NOIO, &mddev->bio_set);
-
-		if (IS_ERR(split)) {
-			bio->bi_status = errno_to_blk_status(PTR_ERR(split));
-			bio_endio(bio);
+		bio = bio_submit_split_bioset(bio, end_sector - bio_sector,
+					      &mddev->bio_set);
+		if (!bio)
 			return true;
-		}
-
-		bio_chain(split, bio);
-		submit_bio_noacct(bio);
-		bio = split;
 	}
 
 	md_account_bio(mddev, &bio);
@@ -320,9 +314,13 @@ static void linear_quiesce(struct mddev *mddev, int state)
 }
 
 static struct md_personality linear_personality = {
-	.name		= "linear",
-	.level		= LEVEL_LINEAR,
-	.owner		= THIS_MODULE,
+	.head = {
+		.type	= MD_PERSONALITY,
+		.id	= ID_LINEAR,
+		.name	= "linear",
+		.owner	= THIS_MODULE,
+	},
+
 	.make_request	= linear_make_request,
 	.run		= linear_run,
 	.free		= linear_free,
@@ -335,12 +333,12 @@ static struct md_personality linear_personality = {
 
 static int __init linear_init(void)
 {
-	return register_md_personality(&linear_personality);
+	return register_md_submodule(&linear_personality.head);
 }
 
 static void linear_exit(void)
 {
-	unregister_md_personality(&linear_personality);
+	unregister_md_submodule(&linear_personality.head);
 }
 
 module_init(linear_init);

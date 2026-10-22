@@ -40,6 +40,7 @@ struct thermal_hwmon_temp {
 	struct thermal_zone_device *tz;
 	struct thermal_hwmon_attr temp_input;	/* hwmon sys attr */
 	struct thermal_hwmon_attr temp_crit;	/* hwmon sys attr */
+	bool temp_crit_present;
 };
 
 static LIST_HEAD(thermal_hwmon_list);
@@ -63,7 +64,7 @@ temp_input_show(struct device *dev, struct device_attribute *attr, char *buf)
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%d\n", temperature);
+	return sysfs_emit(buf, "%d\n", temperature);
 }
 
 static ssize_t
@@ -84,7 +85,7 @@ temp_crit_show(struct device *dev, struct device_attribute *attr, char *buf)
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%d\n", temperature);
+	return sysfs_emit(buf, "%d\n", temperature);
 }
 
 
@@ -96,7 +97,7 @@ thermal_hwmon_lookup_by_type(const struct thermal_zone_device *tz)
 
 	mutex_lock(&thermal_hwmon_list_lock);
 	list_for_each_entry(hwmon, &thermal_hwmon_list, node) {
-		strcpy(type, tz->type);
+		strscpy(type, tz->type);
 		strreplace(type, '-', '_');
 		if (!strcmp(hwmon->type, type)) {
 			mutex_unlock(&thermal_hwmon_list_lock);
@@ -145,7 +146,7 @@ int thermal_add_hwmon_sysfs(struct thermal_zone_device *tz)
 		goto register_sys_interface;
 	}
 
-	hwmon = kzalloc(sizeof(*hwmon), GFP_KERNEL);
+	hwmon = kzalloc_obj(*hwmon);
 	if (!hwmon)
 		return -ENOMEM;
 
@@ -160,7 +161,7 @@ int thermal_add_hwmon_sysfs(struct thermal_zone_device *tz)
 	}
 
  register_sys_interface:
-	temp = kzalloc(sizeof(*temp), GFP_KERNEL);
+	temp = kzalloc_obj(*temp);
 	if (!temp) {
 		result = -ENOMEM;
 		goto unregister_name;
@@ -191,6 +192,8 @@ int thermal_add_hwmon_sysfs(struct thermal_zone_device *tz)
 					    &temp->temp_crit.attr);
 		if (result)
 			goto unregister_input;
+
+		temp->temp_crit_present = true;
 	}
 
 	mutex_lock(&thermal_hwmon_list_lock);
@@ -209,7 +212,8 @@ int thermal_add_hwmon_sysfs(struct thermal_zone_device *tz)
 	if (new_hwmon_device)
 		hwmon_device_unregister(hwmon->device);
  free_mem:
-	kfree(hwmon);
+	if (new_hwmon_device)
+		kfree(hwmon);
 
 	return result;
 }
@@ -235,7 +239,7 @@ void thermal_remove_hwmon_sysfs(struct thermal_zone_device *tz)
 	}
 
 	device_remove_file(hwmon->device, &temp->temp_input.attr);
-	if (thermal_zone_crit_temp_valid(tz))
+	if (temp->temp_crit_present)
 		device_remove_file(hwmon->device, &temp->temp_crit.attr);
 
 	mutex_lock(&thermal_hwmon_list_lock);

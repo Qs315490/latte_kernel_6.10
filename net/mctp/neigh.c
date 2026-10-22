@@ -40,7 +40,7 @@ static int mctp_neigh_add(struct mctp_dev *mdev, mctp_eid_t eid,
 		goto out;
 	}
 
-	neigh = kzalloc(sizeof(*neigh), GFP_KERNEL);
+	neigh = kzalloc_obj(*neigh);
 	if (!neigh) {
 		rc = -ENOMEM;
 		goto out;
@@ -218,6 +218,7 @@ static int mctp_fill_neigh(struct sk_buff *skb, u32 portid, u32 seq, int event,
 		return -EMSGSIZE;
 
 	hdr = nlmsg_data(nlh);
+	memset(hdr, 0, sizeof(*hdr));
 	hdr->ndm_family = AF_MCTP;
 	hdr->ndm_ifindex = dev->ifindex;
 	hdr->ndm_state = 0; // TODO other state bits?
@@ -250,7 +251,10 @@ static int mctp_rtm_getneigh(struct sk_buff *skb, struct netlink_callback *cb)
 		int idx;
 	} *cbctx = (void *)cb->ctx;
 
-	ndmsg = nlmsg_data(cb->nlh);
+	ndmsg = nlmsg_payload(cb->nlh, sizeof(*ndmsg));
+	if (!ndmsg)
+		return -EINVAL;
+
 	req_ifindex = ndmsg->ndm_ifindex;
 
 	idx = 0;

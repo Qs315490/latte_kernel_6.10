@@ -208,22 +208,17 @@ error:
 static void gspca_input_create_urb(struct gspca_dev *gspca_dev)
 {
 	struct usb_interface *intf;
-	struct usb_host_interface *intf_desc;
 	struct usb_endpoint_descriptor *ep;
-	int i;
+	int ret;
 
 	if (gspca_dev->sd_desc->int_pkt_scan)  {
 		intf = usb_ifnum_to_if(gspca_dev->dev, gspca_dev->iface);
-		intf_desc = intf->cur_altsetting;
-		for (i = 0; i < intf_desc->desc.bNumEndpoints; i++) {
-			ep = &intf_desc->endpoint[i].desc;
-			if (usb_endpoint_dir_in(ep) &&
-			    usb_endpoint_xfer_int(ep)) {
 
-				alloc_and_submit_int_urb(gspca_dev, ep);
-				break;
-			}
-		}
+		ret = usb_find_int_in_endpoint(intf->cur_altsetting, &ep);
+		if (ret)
+			return;
+
+		alloc_and_submit_int_urb(gspca_dev, ep);
 	}
 }
 
@@ -1029,15 +1024,15 @@ static int vidioc_enum_fmt_vid_cap(struct file *file, void  *priv,
 	return 0;
 }
 
-static int vidioc_g_fmt_vid_cap(struct file *file, void *_priv,
+static int vidioc_g_fmt_vid_cap(struct file *file, void *priv,
 				struct v4l2_format *fmt)
 {
 	struct gspca_dev *gspca_dev = video_drvdata(file);
-	u32 priv = fmt->fmt.pix.priv;
+	u32 fmt_priv = fmt->fmt.pix.priv;
 
 	fmt->fmt.pix = gspca_dev->pixfmt;
 	/* some drivers use priv internally, so keep the original value */
-	fmt->fmt.pix.priv = priv;
+	fmt->fmt.pix.priv = fmt_priv;
 	return 0;
 }
 
@@ -1075,24 +1070,24 @@ static int try_fmt_vid_cap(struct gspca_dev *gspca_dev,
 	return mode;			/* used when s_fmt */
 }
 
-static int vidioc_try_fmt_vid_cap(struct file *file, void *_priv,
+static int vidioc_try_fmt_vid_cap(struct file *file, void *priv,
 				  struct v4l2_format *fmt)
 {
 	struct gspca_dev *gspca_dev = video_drvdata(file);
-	u32 priv = fmt->fmt.pix.priv;
+	u32 fmt_priv = fmt->fmt.pix.priv;
 
 	if (try_fmt_vid_cap(gspca_dev, fmt) < 0)
 		return -EINVAL;
 	/* some drivers use priv internally, so keep the original value */
-	fmt->fmt.pix.priv = priv;
+	fmt->fmt.pix.priv = fmt_priv;
 	return 0;
 }
 
-static int vidioc_s_fmt_vid_cap(struct file *file, void *_priv,
+static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
 				struct v4l2_format *fmt)
 {
 	struct gspca_dev *gspca_dev = video_drvdata(file);
-	u32 priv = fmt->fmt.pix.priv;
+	u32 fmt_priv = fmt->fmt.pix.priv;
 	int mode;
 
 	if (vb2_is_busy(&gspca_dev->queue))
@@ -1109,7 +1104,7 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *_priv,
 	else
 		gspca_dev->pixfmt = gspca_dev->cam.cam_mode[mode];
 	/* some drivers use priv internally, so keep the original value */
-	fmt->fmt.pix.priv = priv;
+	fmt->fmt.pix.priv = fmt_priv;
 	return 0;
 }
 
@@ -1700,19 +1695,6 @@ int gspca_resume(struct usb_interface *intf)
 }
 EXPORT_SYMBOL(gspca_resume);
 #endif
-
-/* -- module insert / remove -- */
-static int __init gspca_init(void)
-{
-	pr_info("v" GSPCA_VERSION " registered\n");
-	return 0;
-}
-static void __exit gspca_exit(void)
-{
-}
-
-module_init(gspca_init);
-module_exit(gspca_exit);
 
 module_param_named(debug, gspca_debug, int, 0644);
 MODULE_PARM_DESC(debug,

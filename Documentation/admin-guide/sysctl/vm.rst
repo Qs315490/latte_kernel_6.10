@@ -28,6 +28,7 @@ Currently, these files are in /proc/sys/vm:
 - compact_memory
 - compaction_proactiveness
 - compact_unevictable_allowed
+- defrag_mode
 - dirty_background_bytes
 - dirty_background_ratio
 - dirty_bytes
@@ -40,7 +41,6 @@ Currently, these files are in /proc/sys/vm:
 - extfrag_threshold
 - highmem_is_dirtyable
 - hugetlb_shm_group
-- laptop_mode
 - legacy_va_layout
 - lowmem_reserve_ratio
 - max_map_count
@@ -53,6 +53,7 @@ Currently, these files are in /proc/sys/vm:
 - mmap_min_addr
 - mmap_rnd_bits
 - mmap_rnd_compat_bits
+- movable_gigantic_pages
 - nr_hugepages
 - nr_hugepages_mempolicy
 - nr_overcommit_hugepages
@@ -74,6 +75,7 @@ Currently, these files are in /proc/sys/vm:
 - unprivileged_userfaultfd
 - user_reserve_kbytes
 - vfs_cache_pressure
+- vfs_cache_pressure_denom
 - watermark_boost_factor
 - watermark_scale_factor
 - zone_reclaim_mode
@@ -130,6 +132,12 @@ to latency spikes in unsuspecting applications. The kernel employs
 various heuristics to avoid wasting CPU cycles if it detects that
 proactive compaction is not being effective.
 
+Setting the value above 80 will, in addition to lowering the acceptable level
+of fragmentation, make the compaction code more sensitive to increases in
+fragmentation, i.e. compaction will trigger more often, but reduce
+fragmentation by a smaller amount.
+This makes the fragmentation level more stable over time.
+
 Be careful when setting it to extreme values like 100, as that may
 cause excessive background compaction activity.
 
@@ -145,6 +153,14 @@ On CONFIG_PREEMPT_RT the default value is 0 in order to avoid a page fault, due
 to compaction, which would block the task from becoming active until the fault
 is resolved.
 
+defrag_mode
+===========
+
+When set to 1, the page allocator tries harder to avoid fragmentation
+and maintain the ability to produce huge pages / higher-order pages.
+
+It is recommended to enable this right after boot, as fragmentation,
+once it occurred, can be long-lasting or even permanent.
 
 dirty_background_bytes
 ======================
@@ -214,6 +230,8 @@ by an atime update, a worker will be scheduled to make sure that inode
 eventually gets pushed out to disk.  This tunable is used to define when dirty
 inode is old enough to be eligible for writeback by the kernel flusher threads.
 And, it is also used as the interval to wakeup dirtytime_writeback thread.
+
+Setting this to zero disables periodic dirtytime writeback.
 
 
 dirty_writeback_centisecs
@@ -347,13 +365,6 @@ hugetlb_shm_group contains group id that is allowed to create SysV
 shared memory segment using hugetlb page.
 
 
-laptop_mode
-===========
-
-laptop_mode is a knob that controls "laptop mode". All the things that are
-controlled by this knob are discussed in Documentation/admin-guide/laptops/laptop-mode.rst.
-
-
 legacy_va_layout
 ================
 
@@ -449,8 +460,8 @@ The minimum value is 1 (1/1 -> 100%). The value less than 1 completely
 disables protection of the pages.
 
 
-max_map_count:
-==============
+max_map_count
+=============
 
 This file contains the maximum number of memory map areas a process
 may have. Memory map areas are used as a side-effect of calling
@@ -478,9 +489,13 @@ memory allocations.
 
 The default value depends on CONFIG_MEM_ALLOC_PROFILING_ENABLED_BY_DEFAULT.
 
+When CONFIG_MEM_ALLOC_PROFILING_DEBUG=y, this control is read-only to avoid
+warnings produced by allocations made while profiling is disabled and freed
+when it's enabled.
 
-memory_failure_early_kill:
-==========================
+
+memory_failure_early_kill
+=========================
 
 Control how to kill processes when uncorrected memory error (typically
 a 2bit error in a memory module) is detected in the background by hardware
@@ -606,6 +621,33 @@ architecture's minimum and maximum supported values.
 
 This value can be changed after boot using the
 /proc/sys/vm/mmap_rnd_compat_bits tunable
+
+
+movable_gigantic_pages
+======================
+
+This parameter controls whether gigantic pages may be allocated from
+ZONE_MOVABLE. If set to non-zero, gigantic pages can be allocated
+from ZONE_MOVABLE. ZONE_MOVABLE memory may be created via the kernel
+boot parameter `kernelcore` or via memory hotplug as discussed in
+Documentation/admin-guide/mm/memory-hotplug.rst.
+
+Support may depend on specific architecture.
+
+Note that using ZONE_MOVABLE gigantic pages make memory hotremove unreliable.
+
+Memory hot-remove operations will block indefinitely until the admin reserves
+sufficient gigantic pages to service migration requests associated with the
+memory offlining process.  As HugeTLB gigantic page reservation is a manual
+process (via `nodeN/hugepages/.../nr_hugepages` interfaces) this may not be
+obvious when just attempting to offline a block of memory.
+
+Additionally, as multiple gigantic pages may be reserved on a single block,
+it may appear that gigantic pages are available for migration when in reality
+they are in the process of being removed. For example if `memoryN` contains
+two gigantic pages, one reserved and one allocated, and an admin attempts to
+offline that block, this operations may hang indefinitely unless another
+reserved gigantic page is available on another block `memoryM`.
 
 
 nr_hugepages
@@ -992,6 +1034,8 @@ min(3% of current process size, user_reserve_kbytes) of free memory.
 This is intended to prevent a user from starting a single memory hogging
 process, such that they cannot recover (kill the hog).
 
+This setting has no effect when overcommit_memory is set to 0 or 1.
+
 user_reserve_kbytes defaults to min(3% of the current process size, 128MB).
 
 If this is reduced to zero, then the user will be allowed to allocate
@@ -1008,19 +1052,28 @@ vfs_cache_pressure
 This percentage value controls the tendency of the kernel to reclaim
 the memory which is used for caching of directory and inode objects.
 
-At the default value of vfs_cache_pressure=100 the kernel will attempt to
-reclaim dentries and inodes at a "fair" rate with respect to pagecache and
-swapcache reclaim.  Decreasing vfs_cache_pressure causes the kernel to prefer
-to retain dentry and inode caches. When vfs_cache_pressure=0, the kernel will
-never reclaim dentries and inodes due to memory pressure and this can easily
-lead to out-of-memory conditions. Increasing vfs_cache_pressure beyond 100
-causes the kernel to prefer to reclaim dentries and inodes.
+At the default value of vfs_cache_pressure=vfs_cache_pressure_denom the kernel
+will attempt to reclaim dentries and inodes at a "fair" rate with respect to
+pagecache and swapcache reclaim.  Decreasing vfs_cache_pressure causes the
+kernel to prefer to retain dentry and inode caches. When vfs_cache_pressure=0,
+the kernel will never reclaim dentries and inodes due to memory pressure and
+this can easily lead to out-of-memory conditions. Increasing vfs_cache_pressure
+beyond vfs_cache_pressure_denom causes the kernel to prefer to reclaim dentries
+and inodes.
 
-Increasing vfs_cache_pressure significantly beyond 100 may have negative
-performance impact. Reclaim code needs to take various locks to find freeable
-directory and inode objects. With vfs_cache_pressure=1000, it will look for
-ten times more freeable objects than there are.
+Increasing vfs_cache_pressure significantly beyond vfs_cache_pressure_denom may
+have negative performance impact. Reclaim code needs to take various locks to
+find freeable directory and inode objects. When vfs_cache_pressure equals
+(10 * vfs_cache_pressure_denom), it will look for ten times more freeable
+objects than there are.
 
+Note: This setting should always be used together with vfs_cache_pressure_denom.
+
+vfs_cache_pressure_denom
+========================
+
+Defaults to 100 (minimum allowed value). Requires corresponding
+vfs_cache_pressure setting to take effect.
 
 watermark_boost_factor
 ======================

@@ -106,7 +106,9 @@ static inline unsigned int isonum_733(u8 *p)
 	/* Ignore bigendian datum due to broken mastering programs */
 	return get_unaligned_le32(p);
 }
-extern int iso_date(u8 *, int);
+#define ISO_DATE_HIGH_SIERRA (1 << 0)
+#define ISO_DATE_LONG_FORM (1 << 1)
+struct timespec64 iso_date(u8 *p, int flags);
 
 struct inode;		/* To make gcc happy */
 
@@ -194,6 +196,9 @@ isofs_normalize_block_and_offset(struct iso_directory_record* de,
 			+ (unsigned long)isonum_711(de->ext_attr_length);
 	}
 }
+
+struct file_kattr;
+int isofs_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
 
 extern const struct inode_operations isofs_dir_inode_operations;
 extern const struct file_operations isofs_dir_operations;

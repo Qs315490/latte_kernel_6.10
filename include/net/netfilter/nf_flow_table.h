@@ -107,6 +107,19 @@ enum flow_offload_xmit_type {
 
 #define NF_FLOW_TABLE_ENCAP_MAX		2
 
+struct flow_offload_tunnel {
+	union {
+		struct in_addr	src_v4;
+		struct in6_addr	src_v6;
+	};
+	union {
+		struct in_addr	dst_v4;
+		struct in6_addr	dst_v6;
+	};
+
+	u8	l3_proto;
+};
+
 struct flow_offload_tuple {
 	union {
 		struct in_addr		src_v4;
@@ -130,22 +143,27 @@ struct flow_offload_tuple {
 		__be16			proto;
 	} encap[NF_FLOW_TABLE_ENCAP_MAX];
 
+	struct flow_offload_tunnel	tun;
+
 	/* All members above are keys for lookups, see flow_offload_hash(). */
 	struct { }			__hash;
 
-	u8				dir:2,
+	u16				dir:2,
 					xmit_type:3,
 					encap_num:2,
+					needs_gso_segment:1,
+					tun_num:2,
 					in_vlan_ingress:2;
 	u16				mtu;
+	u32				dst_cookie;
+	struct dst_entry		*dst_cache;
+
 	union {
 		struct {
-			struct dst_entry *dst_cache;
-			u32		dst_cookie;
+			u32		ifidx;
 		};
 		struct {
 			u32		ifidx;
-			u32		hw_ifidx;
 			u8		h_source[ETH_ALEN];
 			u8		h_dest[ETH_ALEN];
 		} out;
@@ -206,7 +224,9 @@ struct nf_flow_route {
 				u16		id;
 				__be16		proto;
 			} encap[NF_FLOW_TABLE_ENCAP_MAX];
+			struct flow_offload_tunnel tun;
 			u8			num_encaps:2,
+						num_tuns:2,
 						ingress_vlans:2;
 		} in;
 		struct {
@@ -214,6 +234,7 @@ struct nf_flow_route {
 			u32			hw_ifindex;
 			u8			h_source[ETH_ALEN];
 			u8			h_dest[ETH_ALEN];
+			u8			needs_gso_segment:1;
 		} out;
 		enum flow_offload_xmit_type	xmit_type;
 	} tuple[FLOW_OFFLOAD_DIR_MAX];
@@ -221,6 +242,12 @@ struct nf_flow_route {
 
 struct flow_offload *flow_offload_alloc(struct nf_conn *ct);
 void flow_offload_free(struct flow_offload *flow);
+
+struct nft_flowtable;
+struct nft_pktinfo;
+int nft_flow_route(const struct nft_pktinfo *pkt, const struct nf_conn *ct,
+		   struct nf_flow_route *route, enum ip_conntrack_dir dir,
+		   struct nft_flowtable *ft);
 
 static inline int
 nf_flow_table_offload_add_cb(struct nf_flowtable *flow_table,
@@ -331,6 +358,8 @@ static inline int nf_flow_register_bpf(void)
 
 void nf_flow_offload_add(struct nf_flowtable *flowtable,
 			 struct flow_offload *flow);
+void nf_flow_offload_refresh(struct nf_flowtable *flowtable,
+			     struct flow_offload *flow);
 void nf_flow_offload_del(struct nf_flowtable *flowtable,
 			 struct flow_offload *flow);
 void nf_flow_offload_stats(struct nf_flowtable *flowtable,
@@ -370,7 +399,7 @@ static inline __be16 __nf_flow_pppoe_proto(const struct sk_buff *skb)
 
 static inline bool nf_flow_pppoe_proto(struct sk_buff *skb, __be16 *inner_proto)
 {
-	if (!pskb_may_pull(skb, PPPOE_SES_HLEN))
+	if (!pskb_may_pull(skb, ETH_HLEN + PPPOE_SES_HLEN))
 		return false;
 
 	*inner_proto = __nf_flow_pppoe_proto(skb);

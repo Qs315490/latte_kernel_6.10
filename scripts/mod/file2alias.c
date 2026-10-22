@@ -94,6 +94,7 @@ module_alias_printf(struct module *mod, bool append_wildcard,
 		}
 	}
 
+	new->builtin_modname = NULL;
 	list_add_tail(&new->node, &mod->aliases);
 }
 
@@ -650,7 +651,26 @@ static void do_vio_entry(struct module *mod, void *symval)
 	module_alias_printf(mod, true, "%s", alias);
 }
 
-static void do_input(char *alias,
+static void __attribute__((format(printf, 3, 4)))
+alias_append(char *alias, size_t size, const char *fmt, ...)
+{
+	size_t len = strlen(alias);
+	va_list args;
+	int n;
+
+	if (len >= size)
+		fatal("alias buffer (%zu) overflow before append\n", size);
+
+	va_start(args, fmt);
+	n = vsnprintf(alias + len, size - len, fmt, args);
+	va_end(args);
+
+	if (n < 0 || (size_t)n >= size - len)
+		fatal("alias buffer (%zu) overflow on append (need %d, have %zu)\n",
+		      size, n, size - len);
+}
+
+static void do_input(char *alias, size_t size,
 		     kernel_ulong_t *arr, unsigned int min, unsigned int max)
 {
 	unsigned int i;
@@ -658,13 +678,14 @@ static void do_input(char *alias,
 	for (i = min; i <= max; i++)
 		if (get_unaligned_native(arr + i / BITS_PER_LONG) &
 		    (1ULL << (i % BITS_PER_LONG)))
-			sprintf(alias + strlen(alias), "%X,*", i);
+			alias_append(alias, size, "%X,*", i);
 }
 
 /* input:b0v0p0e0-eXkXrXaXmXlXsXfXwX where X is comma-separated %02X. */
 static void do_input_entry(struct module *mod, void *symval)
 {
 	char alias[256] = {};
+	const size_t sizeof_alias = sizeof(alias);
 
 	DEF_FIELD(symval, input_device_id, flags);
 	DEF_FIELD(symval, input_device_id, bustype);
@@ -686,35 +707,35 @@ static void do_input_entry(struct module *mod, void *symval)
 	ADD(alias, "p", flags & INPUT_DEVICE_ID_MATCH_PRODUCT, product);
 	ADD(alias, "e", flags & INPUT_DEVICE_ID_MATCH_VERSION, version);
 
-	sprintf(alias + strlen(alias), "-e*");
+	alias_append(alias, sizeof_alias, "-e*");
 	if (flags & INPUT_DEVICE_ID_MATCH_EVBIT)
-		do_input(alias, *evbit, 0, INPUT_DEVICE_ID_EV_MAX);
-	sprintf(alias + strlen(alias), "k*");
+		do_input(alias, sizeof_alias, *evbit, 0, INPUT_DEVICE_ID_EV_MAX);
+	alias_append(alias, sizeof_alias, "k*");
 	if (flags & INPUT_DEVICE_ID_MATCH_KEYBIT)
-		do_input(alias, *keybit,
+		do_input(alias, sizeof_alias, *keybit,
 			 INPUT_DEVICE_ID_KEY_MIN_INTERESTING,
 			 INPUT_DEVICE_ID_KEY_MAX);
-	sprintf(alias + strlen(alias), "r*");
+	alias_append(alias, sizeof_alias, "r*");
 	if (flags & INPUT_DEVICE_ID_MATCH_RELBIT)
-		do_input(alias, *relbit, 0, INPUT_DEVICE_ID_REL_MAX);
-	sprintf(alias + strlen(alias), "a*");
+		do_input(alias, sizeof_alias, *relbit, 0, INPUT_DEVICE_ID_REL_MAX);
+	alias_append(alias, sizeof_alias, "a*");
 	if (flags & INPUT_DEVICE_ID_MATCH_ABSBIT)
-		do_input(alias, *absbit, 0, INPUT_DEVICE_ID_ABS_MAX);
-	sprintf(alias + strlen(alias), "m*");
+		do_input(alias, sizeof_alias, *absbit, 0, INPUT_DEVICE_ID_ABS_MAX);
+	alias_append(alias, sizeof_alias, "m*");
 	if (flags & INPUT_DEVICE_ID_MATCH_MSCIT)
-		do_input(alias, *mscbit, 0, INPUT_DEVICE_ID_MSC_MAX);
-	sprintf(alias + strlen(alias), "l*");
+		do_input(alias, sizeof_alias, *mscbit, 0, INPUT_DEVICE_ID_MSC_MAX);
+	alias_append(alias, sizeof_alias, "l*");
 	if (flags & INPUT_DEVICE_ID_MATCH_LEDBIT)
-		do_input(alias, *ledbit, 0, INPUT_DEVICE_ID_LED_MAX);
-	sprintf(alias + strlen(alias), "s*");
+		do_input(alias, sizeof_alias, *ledbit, 0, INPUT_DEVICE_ID_LED_MAX);
+	alias_append(alias, sizeof_alias, "s*");
 	if (flags & INPUT_DEVICE_ID_MATCH_SNDBIT)
-		do_input(alias, *sndbit, 0, INPUT_DEVICE_ID_SND_MAX);
-	sprintf(alias + strlen(alias), "f*");
+		do_input(alias, sizeof_alias, *sndbit, 0, INPUT_DEVICE_ID_SND_MAX);
+	alias_append(alias, sizeof_alias, "f*");
 	if (flags & INPUT_DEVICE_ID_MATCH_FFBIT)
-		do_input(alias, *ffbit, 0, INPUT_DEVICE_ID_FF_MAX);
-	sprintf(alias + strlen(alias), "w*");
+		do_input(alias, sizeof_alias, *ffbit, 0, INPUT_DEVICE_ID_FF_MAX);
+	alias_append(alias, sizeof_alias, "w*");
 	if (flags & INPUT_DEVICE_ID_MATCH_SWBIT)
-		do_input(alias, *swbit, 0, INPUT_DEVICE_ID_SW_MAX);
+		do_input(alias, sizeof_alias, *swbit, 0, INPUT_DEVICE_ID_SW_MAX);
 
 	module_alias_printf(mod, false, "input:%s", alias);
 }
@@ -894,12 +915,16 @@ static const struct dmifield {
 	{ NULL,  DMI_NONE }
 };
 
-static void dmi_ascii_filter(char *d, const char *s)
+static void dmi_ascii_filter(char *d, size_t avail, const char *s)
 {
 	/* Filter out characters we don't want to see in the modalias string */
 	for (; *s; s++)
-		if (*s > ' ' && *s < 127 && *s != ':')
+		if (*s > ' ' && *s < 127 && *s != ':') {
+			if (avail <= 1)
+				fatal("%s: alias buffer overflow\n", __func__);
 			*(d++) = *s;
+			avail--;
+		}
 
 	*d = 0;
 }
@@ -908,6 +933,8 @@ static void dmi_ascii_filter(char *d, const char *s)
 static void do_dmi_entry(struct module *mod, void *symval)
 {
 	char alias[256] = {};
+	const size_t sizeof_alias = sizeof(alias);
+	size_t len;
 	int i, j;
 	DEF_FIELD_ADDR(symval, dmi_system_id, matches);
 
@@ -915,11 +942,12 @@ static void do_dmi_entry(struct module *mod, void *symval)
 		for (j = 0; j < 4; j++) {
 			if ((*matches)[j].slot &&
 			    (*matches)[j].slot == dmi_fields[i].field) {
-				sprintf(alias + strlen(alias), ":%s*",
-					dmi_fields[i].prefix);
-				dmi_ascii_filter(alias + strlen(alias),
+				alias_append(alias, sizeof_alias, ":%s*",
+					     dmi_fields[i].prefix);
+				len = strlen(alias);
+				dmi_ascii_filter(alias + len, sizeof_alias - len,
 						 (*matches)[j].substr);
-				strcat(alias, "*");
+				alias_append(alias, sizeof_alias, "*");
 			}
 		}
 	}
@@ -1109,6 +1137,14 @@ static void do_cpu_entry(struct module *mod, void *symval)
 	module_alias_printf(mod, false, "cpu:type:*:feature:*%04X*", feature);
 }
 
+/* Looks like: mcb:16zN */
+static void do_mcb_entry(struct module *mod, void *symval)
+{
+	DEF_FIELD(symval, mcb_device_id, device);
+
+	module_alias_printf(mod, false, "mcb:16z%03d", device);
+}
+
 /* Looks like: mei:S:uuid:N:* */
 static void do_mei_entry(struct module *mod, void *symval)
 {
@@ -1244,6 +1280,8 @@ static void do_tee_entry(struct module *mod, void *symval)
 static void do_wmi_entry(struct module *mod, void *symval)
 {
 	DEF_FIELD_ADDR(symval, wmi_device_id, guid_string);
+	char result[sizeof(*guid_string)];
+	int i;
 
 	if (strlen(*guid_string) != UUID_STRING_LEN) {
 		warn("Invalid WMI device id 'wmi:%s' in '%s'\n",
@@ -1251,7 +1289,31 @@ static void do_wmi_entry(struct module *mod, void *symval)
 		return;
 	}
 
-	module_alias_printf(mod, false, WMI_MODULE_PREFIX "%s", *guid_string);
+	for (i = 0; i < UUID_STRING_LEN; i++) {
+		char value = (*guid_string)[i];
+		bool valid = false;
+
+		if (i == 8 || i == 13 || i == 18 || i == 23) {
+			if (value == '-')
+				valid = true;
+		} else {
+			if (isxdigit(value))
+				valid = true;
+		}
+
+		if (!valid) {
+			warn("Invalid character %c inside WMI GUID string '%s' in '%s'\n",
+			     value, *guid_string, mod->name);
+			return;
+		}
+
+		/* Some GUIDs from BMOF definitions contain lowercase characters */
+		result[i] = toupper(value);
+	}
+
+	result[i] = '\0';
+
+	module_alias_printf(mod, false, WMI_MODULE_PREFIX "%s", result);
 }
 
 /* Looks like: mhi:S */
@@ -1443,6 +1505,7 @@ static const struct devtable devtable[] = {
 	{"mipscdmm", SIZE_mips_cdmm_device_id, do_mips_cdmm_entry},
 	{"x86cpu", SIZE_x86_cpu_id, do_x86cpu_entry},
 	{"cpu", SIZE_cpu_feature, do_cpu_entry},
+	{"mcb", SIZE_mcb_device_id, do_mcb_entry},
 	{"mei", SIZE_mei_cl_device_id, do_mei_entry},
 	{"rapidio", SIZE_rio_device_id, do_rio_entry},
 	{"ulpi", SIZE_ulpi_device_id, do_ulpi_entry},
@@ -1476,8 +1539,8 @@ void handle_moddevtable(struct module *mod, struct elf_info *info,
 {
 	void *symval;
 	char *zeros = NULL;
-	const char *type, *name;
-	size_t typelen;
+	const char *type, *name, *modname;
+	size_t typelen, modnamelen;
 	static const char *prefix = "__mod_device_table__";
 
 	/* We're looking for a section relative symbol */
@@ -1488,10 +1551,20 @@ void handle_moddevtable(struct module *mod, struct elf_info *info,
 	if (ELF_ST_TYPE(sym->st_info) != STT_OBJECT)
 		return;
 
-	/* All our symbols are of form __mod_device_table__<type>__<name>. */
+	/* All our symbols are of form __mod_device_table__kmod_<modname>__<type>__<name>. */
 	if (!strstarts(symname, prefix))
 		return;
-	type = symname + strlen(prefix);
+
+	modname = strstr(symname, "__kmod_");
+	if (!modname)
+		return;
+	modname += strlen("__kmod_");
+
+	type = strstr(modname, "__");
+	if (!type)
+		return;
+	modnamelen = type - modname;
+	type += strlen("__");
 
 	name = strstr(type, "__");
 	if (!name)
@@ -1514,6 +1587,22 @@ void handle_moddevtable(struct module *mod, struct elf_info *info,
 			do_table(name, symval, sym->st_size, p->id_size,
 				 p->device_id, p->do_entry, mod);
 			break;
+		}
+	}
+
+	if (mod->is_vmlinux) {
+		struct module_alias *alias;
+
+		/*
+		 * If this is vmlinux, record the name of the builtin module.
+		 * Traverse the linked list in the reverse order, and set the
+		 * builtin_modname unless it has already been set in the
+		 * previous call.
+		 */
+		list_for_each_entry_reverse(alias, &mod->aliases, node) {
+			if (alias->builtin_modname)
+				break;
+			alias->builtin_modname = xstrndup(modname, modnamelen);
 		}
 	}
 

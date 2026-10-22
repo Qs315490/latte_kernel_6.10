@@ -5,11 +5,13 @@
 
 #include <linux/shmem_fs.h>
 
+#include <linux/gpu_buddy.h>
+#include <drm/drm_print.h>
 #include <drm/ttm/ttm_placement.h>
 #include <drm/ttm/ttm_tt.h>
-#include <drm/drm_buddy.h>
 
 #include "i915_drv.h"
+#include "i915_jiffies.h"
 #include "i915_ttm_buddy_manager.h"
 #include "intel_memory_region.h"
 #include "intel_region_ttm.h"
@@ -198,7 +200,8 @@ static int i915_ttm_tt_shmem_populate(struct ttm_device *bdev,
 		struct address_space *mapping;
 		gfp_t mask;
 
-		filp = shmem_file_setup("i915-shmem-tt", size, VM_NORESERVE);
+		filp = shmem_file_setup("i915-shmem-tt", size,
+					mk_vma_flags(VMA_NORESERVE_BIT));
 		if (IS_ERR(filp))
 			return PTR_ERR(filp);
 
@@ -276,7 +279,7 @@ static struct ttm_tt *i915_ttm_tt_create(struct ttm_buffer_object *bo,
 	if (i915_ttm_is_ghost_object(bo))
 		return NULL;
 
-	i915_tt = kzalloc(sizeof(*i915_tt), GFP_KERNEL);
+	i915_tt = kzalloc_obj(*i915_tt);
 	if (!i915_tt)
 		return NULL;
 
@@ -416,8 +419,6 @@ void i915_ttm_free_cached_io_rsgt(struct drm_i915_gem_object *obj)
 int i915_ttm_purge(struct drm_i915_gem_object *obj)
 {
 	struct ttm_buffer_object *bo = i915_gem_to_ttm(obj);
-	struct i915_ttm_tt *i915_tt =
-		container_of(bo->ttm, typeof(*i915_tt), ttm);
 	struct ttm_operation_ctx ctx = {
 		.interruptible = true,
 		.no_wait_gpu = false,
@@ -432,16 +433,22 @@ int i915_ttm_purge(struct drm_i915_gem_object *obj)
 	if (ret)
 		return ret;
 
-	if (bo->ttm && i915_tt->filp) {
-		/*
-		 * The below fput(which eventually calls shmem_truncate) might
-		 * be delayed by worker, so when directly called to purge the
-		 * pages(like by the shrinker) we should try to be more
-		 * aggressive and release the pages immediately.
-		 */
-		shmem_truncate_range(file_inode(i915_tt->filp),
-				     0, (loff_t)-1);
-		fput(fetch_and_zero(&i915_tt->filp));
+	if (bo->ttm) {
+		struct i915_ttm_tt *i915_tt =
+			container_of(bo->ttm, typeof(*i915_tt), ttm);
+
+		if (i915_tt->filp) {
+			/*
+			 * The below fput(which eventually calls shmem_truncate)
+			 * might be delayed by worker, so when directly called
+			 * to purge the pages(like by the shrinker) we should
+			 * try to be more aggressive and release the pages
+			 * immediately.
+			 */
+			shmem_truncate_range(file_inode(i915_tt->filp),
+					     0, (loff_t)-1);
+			fput(fetch_and_zero(&i915_tt->filp));
+		}
 	}
 
 	obj->write_domain = 0;
@@ -994,7 +1001,7 @@ void i915_ttm_adjust_lru(struct drm_i915_gem_object *obj)
 		 * If we need to place an LMEM resource which doesn't need CPU
 		 * access then we should try not to victimize mappable objects
 		 * first, since we likely end up stealing more of the mappable
-		 * portion. And likewise when we try to find space for a mappble
+		 * portion. And likewise when we try to find space for a mappable
 		 * object, we know not to ever victimize objects that don't
 		 * occupy any mappable pages.
 		 */
@@ -1029,7 +1036,7 @@ static void i915_ttm_delayed_free(struct drm_i915_gem_object *obj)
 {
 	GEM_BUG_ON(!obj->ttm.created);
 
-	ttm_bo_put(i915_gem_to_ttm(obj));
+	ttm_bo_fini(i915_gem_to_ttm(obj));
 }
 
 static vm_fault_t vm_fault_ttm(struct vm_fault *vmf)
@@ -1325,7 +1332,7 @@ int __i915_gem_ttm_object_init(struct intel_memory_region *mem,
 	 * If this function fails, it will call the destructor, but
 	 * our caller still owns the object. So no freeing in the
 	 * destructor until obj->ttm.created is true.
-	 * Similarly, in delayed_destroy, we can't call ttm_bo_put()
+	 * Similarly, in delayed_destroy, we can't call ttm_bo_fini()
 	 * until successful initialization.
 	 */
 	ret = ttm_bo_init_reserved(&i915->bdev, i915_gem_to_ttm(obj), bo_type,

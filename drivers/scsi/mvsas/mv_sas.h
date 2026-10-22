@@ -35,10 +35,10 @@
 #define MVS_ID_NOT_MAPPED	0x7f
 #define WIDE_PORT_MAX_PHY		4
 #define mv_printk(fmt, arg ...)	\
-	printk(KERN_DEBUG"%s %d:" fmt, __FILE__, __LINE__, ## arg)
+	printk(KERN_DEBUG "%s: " fmt, __func__, ## arg)
 #ifdef MV_DEBUG
-#define mv_dprintk(format, arg...)	\
-	printk(KERN_DEBUG"%s %d:" format, __FILE__, __LINE__, ## arg)
+#define mv_dprintk(fmt, arg...)	\
+	mv_printk(fmt, ## arg)
 #else
 #define mv_dprintk(format, arg...) no_printk(format, ## arg)
 #endif
@@ -425,7 +425,6 @@ struct mvs_task_exec_info {
 void mvs_get_sas_addr(void *buf, u32 buflen);
 void mvs_iounmap(void __iomem *regs);
 int mvs_ioremap(struct mvs_info *mvi, int bar, int bar_ex);
-void mvs_phys_reset(struct mvs_info *mvi, u32 phy_mask, int hard);
 int mvs_phy_control(struct asd_sas_phy *sas_phy, enum phy_func func,
 			void *funcdata);
 void mvs_set_sas_addr(struct mvs_info *mvi, int port_id, u32 off_lo,

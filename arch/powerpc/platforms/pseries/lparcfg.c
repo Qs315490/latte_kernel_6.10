@@ -22,6 +22,7 @@
 #include <asm/papr-sysparm.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/hugetlb.h>
 #include <asm/lppaca.h>
@@ -78,6 +79,8 @@ struct hvcall_ppp_data {
 	u8	capped;
 	u8	weight;
 	u8	unallocated_weight;
+	u8      resource_group_index;
+	u16     active_procs_in_resource_group;
 	u16	active_procs_in_pool;
 	u16	active_system_procs;
 	u16	phys_platform_procs;
@@ -86,7 +89,7 @@ struct hvcall_ppp_data {
 };
 
 /*
- * H_GET_PPP hcall returns info in 4 parms.
+ * H_GET_PPP hcall returns info in 5 parms.
  *  entitled_capacity,unallocated_capacity,
  *  aggregation, resource_capability).
  *
@@ -94,11 +97,11 @@ struct hvcall_ppp_data {
  *  R5 = Unallocated Processor Capacity Percentage.
  *  R6 (AABBCCDDEEFFGGHH).
  *      XXXX - reserved (0)
- *          XXXX - reserved (0)
+ *          XXXX - Active Cores in Resource Group
  *              XXXX - Group Number
  *                  XXXX - Pool Number.
  *  R7 (IIJJKKLLMMNNOOPP).
- *      XX - reserved. (0)
+ *      XX - Resource group Number
  *        XX - bit 0-6 reserved (0).   bit 7 is Capped indicator.
  *          XX - variable processor Capacity Weight
  *            XX - Unallocated Variable Processor Capacity Weight.
@@ -120,9 +123,11 @@ static unsigned int h_get_ppp(struct hvcall_ppp_data *ppp_data)
 	ppp_data->entitlement = retbuf[0];
 	ppp_data->unallocated_entitlement = retbuf[1];
 
+	ppp_data->active_procs_in_resource_group = (retbuf[2] >> 4 * 8) & 0xffff;
 	ppp_data->group_num = (retbuf[2] >> 2 * 8) & 0xffff;
 	ppp_data->pool_num = retbuf[2] & 0xffff;
 
+	ppp_data->resource_group_index = (retbuf[3] >> 7 *  8) & 0xff;
 	ppp_data->capped = (retbuf[3] >> 6 * 8) & 0x01;
 	ppp_data->weight = (retbuf[3] >> 5 * 8) & 0xff;
 	ppp_data->unallocated_weight = (retbuf[3] >> 4 * 8) & 0xff;
@@ -142,7 +147,7 @@ static void show_gpci_data(struct seq_file *m)
 	unsigned int affinity_score;
 	long ret;
 
-	buf = kmalloc(sizeof(*buf), GFP_KERNEL);
+	buf = kmalloc_obj(*buf);
 	if (buf == NULL)
 		return;
 
@@ -235,6 +240,13 @@ static void parse_ppp_data(struct seq_file *m)
 	seq_printf(m, "capped=%d\n", ppp_data.capped);
 	seq_printf(m, "unallocated_capacity=%lld\n",
 		   ppp_data.unallocated_entitlement);
+
+	if (ppp_data.active_procs_in_resource_group)  {
+		seq_printf(m, "resource_group_number=%d\n",
+				ppp_data.resource_group_index);
+		seq_printf(m, "resource_group_active_processors=%d\n",
+				ppp_data.active_procs_in_resource_group);
+	}
 
 	/* The last bits of information returned from h_get_ppp are only
 	 * valid if the ibm,partition-performance-parameters-level
@@ -420,17 +432,18 @@ static void parse_system_parameter_string(struct seq_file *m)
 				w_idx = 0;
 			} else if (local_buffer[idx] == '=') {
 				/* code here to replace workbuffer contents
-				   with different keyword strings */
-				if (0 == strcmp(workbuffer, "MaxEntCap")) {
-					strcpy(workbuffer,
-					       "partition_max_entitled_capacity");
-					w_idx = strlen(workbuffer);
-				}
-				if (0 == strcmp(workbuffer, "MaxPlatProcs")) {
-					strcpy(workbuffer,
-					       "system_potential_processors");
-					w_idx = strlen(workbuffer);
-				}
+				 * with different keyword strings. Truncation
+				 * by strscpy is deliberately ignored because
+				 * SPLPAR_MAXLENGTH >= maximum string size.
+				 */
+				if (!strcmp(workbuffer, "MaxEntCap"))
+					w_idx = strscpy(workbuffer,
+							"partition_max_entitled_capacity",
+							SPLPAR_MAXLENGTH);
+				if (!strcmp(workbuffer, "MaxPlatProcs"))
+					w_idx = strscpy(workbuffer,
+							"system_potential_processors",
+							SPLPAR_MAXLENGTH);
 			}
 		}
 		kfree(workbuffer);
@@ -686,7 +699,7 @@ static ssize_t lparcfg_write(struct file *file, const char __user * buf,
 	if (!firmware_has_feature(FW_FEATURE_SPLPAR))
 		return -EINVAL;
 
-	if (count > sizeof(kbuf))
+	if (count == 0 || count > sizeof(kbuf))
 		return -EINVAL;
 
 	if (copy_from_user(kbuf, buf, count))

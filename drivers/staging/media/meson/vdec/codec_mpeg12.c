@@ -12,7 +12,7 @@
 #include "vdec_helpers.h"
 
 #define SIZE_WORKSPACE		SZ_128K
-/* Offset substracted by the firmware from the workspace paddr */
+/* Offset subtracted by the firmware from the workspace paddr */
 #define WORKSPACE_OFFSET	(5 * SZ_1K)
 
 /* map firmware registers to known MPEG1/2 functions */
@@ -66,7 +66,7 @@ static int codec_mpeg12_start(struct amvdec_session *sess)
 	struct codec_mpeg12 *mpeg12;
 	int ret;
 
-	mpeg12 = kzalloc(sizeof(*mpeg12), GFP_KERNEL);
+	mpeg12 = kzalloc_obj(*mpeg12);
 	if (!mpeg12)
 		return -ENOMEM;
 

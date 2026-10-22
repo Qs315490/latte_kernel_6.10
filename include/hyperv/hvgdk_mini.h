@@ -13,34 +13,37 @@ struct hv_u128 {
 	u64 high_part;
 } __packed;
 
-/* NOTE: when adding below, update hv_status_to_string() */
-#define HV_STATUS_SUCCESS			    0x0
-#define HV_STATUS_INVALID_HYPERCALL_CODE	    0x2
-#define HV_STATUS_INVALID_HYPERCALL_INPUT	    0x3
-#define HV_STATUS_INVALID_ALIGNMENT		    0x4
-#define HV_STATUS_INVALID_PARAMETER		    0x5
-#define HV_STATUS_ACCESS_DENIED			    0x6
-#define HV_STATUS_INVALID_PARTITION_STATE	    0x7
-#define HV_STATUS_OPERATION_DENIED		    0x8
-#define HV_STATUS_UNKNOWN_PROPERTY		    0x9
-#define HV_STATUS_PROPERTY_VALUE_OUT_OF_RANGE	    0xA
-#define HV_STATUS_INSUFFICIENT_MEMORY		    0xB
-#define HV_STATUS_INVALID_PARTITION_ID		    0xD
-#define HV_STATUS_INVALID_VP_INDEX		    0xE
-#define HV_STATUS_NOT_FOUND			    0x10
-#define HV_STATUS_INVALID_PORT_ID		    0x11
-#define HV_STATUS_INVALID_CONNECTION_ID		    0x12
-#define HV_STATUS_INSUFFICIENT_BUFFERS		    0x13
-#define HV_STATUS_NOT_ACKNOWLEDGED		    0x14
-#define HV_STATUS_INVALID_VP_STATE		    0x15
-#define HV_STATUS_NO_RESOURCES			    0x1D
-#define HV_STATUS_PROCESSOR_FEATURE_NOT_SUPPORTED   0x20
-#define HV_STATUS_INVALID_LP_INDEX		    0x41
-#define HV_STATUS_INVALID_REGISTER_VALUE	    0x50
-#define HV_STATUS_OPERATION_FAILED		    0x71
-#define HV_STATUS_TIME_OUT			    0x78
-#define HV_STATUS_CALL_PENDING			    0x79
-#define HV_STATUS_VTL_ALREADY_ENABLED		    0x86
+/* NOTE: when adding below, update hv_result_to_string() */
+#define HV_STATUS_SUCCESS				0x0
+#define HV_STATUS_INVALID_HYPERCALL_CODE		0x2
+#define HV_STATUS_INVALID_HYPERCALL_INPUT		0x3
+#define HV_STATUS_INVALID_ALIGNMENT			0x4
+#define HV_STATUS_INVALID_PARAMETER			0x5
+#define HV_STATUS_ACCESS_DENIED				0x6
+#define HV_STATUS_INVALID_PARTITION_STATE		0x7
+#define HV_STATUS_OPERATION_DENIED			0x8
+#define HV_STATUS_UNKNOWN_PROPERTY			0x9
+#define HV_STATUS_PROPERTY_VALUE_OUT_OF_RANGE		0xA
+#define HV_STATUS_INSUFFICIENT_MEMORY			0xB
+#define HV_STATUS_INVALID_PARTITION_ID			0xD
+#define HV_STATUS_INVALID_VP_INDEX			0xE
+#define HV_STATUS_NOT_FOUND				0x10
+#define HV_STATUS_INVALID_PORT_ID			0x11
+#define HV_STATUS_INVALID_CONNECTION_ID			0x12
+#define HV_STATUS_INSUFFICIENT_BUFFERS			0x13
+#define HV_STATUS_NOT_ACKNOWLEDGED			0x14
+#define HV_STATUS_INVALID_VP_STATE			0x15
+#define HV_STATUS_NO_RESOURCES				0x1D
+#define HV_STATUS_PROCESSOR_FEATURE_NOT_SUPPORTED	0x20
+#define HV_STATUS_INVALID_LP_INDEX			0x41
+#define HV_STATUS_INVALID_REGISTER_VALUE		0x50
+#define HV_STATUS_OPERATION_FAILED			0x71
+#define HV_STATUS_INSUFFICIENT_ROOT_MEMORY		0x73
+#define HV_STATUS_INSUFFICIENT_CONTIGUOUS_MEMORY	0x75
+#define HV_STATUS_TIME_OUT				0x78
+#define HV_STATUS_CALL_PENDING				0x79
+#define HV_STATUS_INSUFFICIENT_CONTIGUOUS_ROOT_MEMORY	0x83
+#define HV_STATUS_VTL_ALREADY_ENABLED			0x86
 
 /*
  * The Hyper-V TimeRefCount register and the TSC
@@ -51,6 +54,7 @@ struct hv_u128 {
 #define HV_HYP_PAGE_SHIFT		12
 #define HV_HYP_PAGE_SIZE		BIT(HV_HYP_PAGE_SHIFT)
 #define HV_HYP_PAGE_MASK		(~(HV_HYP_PAGE_SIZE - 1))
+#define HV_HYP_LARGE_PAGE_SHIFT		21
 
 #define HV_PARTITION_ID_INVALID		((u64)0)
 #define HV_PARTITION_ID_SELF		((u64)-1)
@@ -182,7 +186,7 @@ struct hv_tsc_emulation_control {	 /* HV_TSC_INVARIANT_CONTROL */
 
 #endif /* CONFIG_X86 */
 
-struct hv_get_partition_id {	 /* HV_OUTPUT_GET_PARTITION_ID */
+struct hv_output_get_partition_id {
 	u64 partition_id;
 } __packed;
 
@@ -204,7 +208,14 @@ union hv_reference_tsc_msr {
 /* The number of vCPUs in one sparse bank */
 #define HV_VCPUS_PER_SPARSE_BANK (64)
 
-/* Some of Hyper-V structs do not use hv_vpset where linux uses them */
+/*
+ * Some of Hyper-V structs do not use hv_vpset where linux uses them.
+ *
+ * struct hv_vpset is usually used as part of hypercall input. The portion
+ * that counts as "fixed size input header" vs. "variable size input header"
+ * varies per hypercall. See comments at relevant hypercall call sites as to
+ * how the "valid_bank_mask" field should be accounted.
+ */
 struct hv_vpset {	 /* HV_VP_SET */
 	u64 format;
 	u64 valid_bank_mask;
@@ -252,6 +263,7 @@ union hv_hypervisor_version_info {
 #define HYPERV_CPUID_VIRT_STACK_PROPERTIES	 0x40000082
 /* Support for the extended IOAPIC RTE format */
 #define HYPERV_VS_PROPERTIES_EAX_EXTENDED_IOAPIC_RTE	 BIT(2)
+#define HYPERV_VS_PROPERTIES_EAX_CONFIDENTIAL_VMBUS_AVAILABLE	 BIT(3)
 
 #define HYPERV_HYPERVISOR_PRESENT_BIT		 0x80000000
 #define HYPERV_CPUID_MIN			 0x40000005
@@ -374,6 +386,10 @@ union hv_hypervisor_version_info {
 #define HV_SHARED_GPA_BOUNDARY_ACTIVE			BIT(5)
 #define HV_SHARED_GPA_BOUNDARY_BITS			GENMASK(11, 6)
 
+/* HYPERV_CPUID_FEATURES.ECX bits. */
+#define HV_VP_DISPATCH_INTERRUPT_INJECTION_AVAILABLE	BIT(9)
+#define HV_VP_GHCB_ROOT_MAPPING_AVAILABLE		BIT(10)
+
 enum hv_isolation_type {
 	HV_ISOLATION_TYPE_NONE	= 0,	/* HV_PARTITION_ISOLATION_TYPE_NONE */
 	HV_ISOLATION_TYPE_VBS	= 1,
@@ -419,6 +435,7 @@ union hv_vp_assist_msr_contents {	 /* HV_REGISTER_VP_ASSIST_PAGE */
 /* HV_CALL_CODE */
 #define HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE		0x0002
 #define HVCALL_FLUSH_VIRTUAL_ADDRESS_LIST		0x0003
+#define HVCALL_GET_LOGICAL_PROCESSOR_RUN_TIME		0x0004
 #define HVCALL_NOTIFY_LONG_SPIN_WAIT			0x0008
 #define HVCALL_SEND_IPI					0x000b
 #define HVCALL_ENABLE_VP_VTL				0x000f
@@ -436,10 +453,13 @@ union hv_vp_assist_msr_contents {	 /* HV_REGISTER_VP_ASSIST_PAGE */
 #define HVCALL_WITHDRAW_MEMORY				0x0049
 #define HVCALL_MAP_GPA_PAGES				0x004b
 #define HVCALL_UNMAP_GPA_PAGES				0x004c
+#define HVCALL_INSTALL_INTERCEPT			0x004d
 #define HVCALL_CREATE_VP				0x004e
 #define HVCALL_DELETE_VP				0x004f
 #define HVCALL_GET_VP_REGISTERS				0x0050
 #define HVCALL_SET_VP_REGISTERS				0x0051
+#define HVCALL_TRANSLATE_VIRTUAL_ADDRESS		0x0052
+#define HVCALL_CLEAR_VIRTUAL_INTERRUPT			0x0056
 #define HVCALL_DELETE_PORT				0x0058
 #define HVCALL_DISCONNECT_PORT				0x005b
 #define HVCALL_POST_MESSAGE				0x005c
@@ -447,27 +467,42 @@ union hv_vp_assist_msr_contents {	 /* HV_REGISTER_VP_ASSIST_PAGE */
 #define HVCALL_POST_DEBUG_DATA				0x0069
 #define HVCALL_RETRIEVE_DEBUG_DATA			0x006a
 #define HVCALL_RESET_DEBUG_SESSION			0x006b
+#define HVCALL_MAP_STATS_PAGE				0x006c
+#define HVCALL_UNMAP_STATS_PAGE				0x006d
+#define HVCALL_SET_SYSTEM_PROPERTY			0x006f
 #define HVCALL_ADD_LOGICAL_PROCESSOR			0x0076
 #define HVCALL_GET_SYSTEM_PROPERTY			0x007b
 #define HVCALL_MAP_DEVICE_INTERRUPT			0x007c
 #define HVCALL_UNMAP_DEVICE_INTERRUPT			0x007d
 #define HVCALL_RETARGET_INTERRUPT			0x007e
+#define HVCALL_NOTIFY_PARTITION_EVENT                   0x0087
+#define HVCALL_ENTER_SLEEP_STATE			0x0084
 #define HVCALL_NOTIFY_PORT_RING_EMPTY			0x008b
+#define HVCALL_REGISTER_INTERCEPT_RESULT		0x0091
 #define HVCALL_ASSERT_VIRTUAL_INTERRUPT			0x0094
 #define HVCALL_CREATE_PORT				0x0095
 #define HVCALL_CONNECT_PORT				0x0096
 #define HVCALL_START_VP					0x0099
-#define HVCALL_GET_VP_ID_FROM_APIC_ID			0x009a
+#define HVCALL_GET_VP_INDEX_FROM_APIC_ID		0x009a
 #define HVCALL_FLUSH_GUEST_PHYSICAL_ADDRESS_SPACE	0x00af
 #define HVCALL_FLUSH_GUEST_PHYSICAL_ADDRESS_LIST	0x00b0
+#define HVCALL_SIGNAL_EVENT_DIRECT			0x00c0
+#define HVCALL_POST_MESSAGE_DIRECT			0x00c1
 #define HVCALL_DISPATCH_VP				0x00c2
+#define HVCALL_GET_GPA_PAGES_ACCESS_STATES		0x00c9
+#define HVCALL_ACQUIRE_SPARSE_SPA_PAGE_HOST_ACCESS	0x00d7
+#define HVCALL_RELEASE_SPARSE_SPA_PAGE_HOST_ACCESS	0x00d8
 #define HVCALL_MODIFY_SPARSE_GPA_PAGE_HOST_VISIBILITY	0x00db
 #define HVCALL_MAP_VP_STATE_PAGE			0x00e1
 #define HVCALL_UNMAP_VP_STATE_PAGE			0x00e2
 #define HVCALL_GET_VP_STATE				0x00e3
 #define HVCALL_SET_VP_STATE				0x00e4
+#define HVCALL_GET_VP_CPUID_VALUES			0x00f4
+#define HVCALL_GET_PARTITION_PROPERTY_EX		0x0101
 #define HVCALL_MMIO_READ				0x0106
 #define HVCALL_MMIO_WRITE				0x0107
+#define HVCALL_DISABLE_HYP_EX                           0x010f
+#define HVCALL_MAP_STATS_PAGE2				0x0131
 
 /* HV_HYPERCALL_INPUT */
 #define HV_HYPERCALL_RESULT_MASK	GENMASK_ULL(15, 0)
@@ -547,9 +582,12 @@ struct hv_tlb_flush {	 /* HV_INPUT_FLUSH_VIRTUAL_ADDRESS_LIST */
 struct hv_tlb_flush_ex {
 	u64 address_space;
 	u64 flags;
-	struct hv_vpset hv_vp_set;
-	u64 gva_list[];
+	__TRAILING_OVERLAP(struct hv_vpset, hv_vp_set, bank_contents, __packed,
+		u64 gva_list[];
+	);
 } __packed;
+static_assert(offsetof(struct hv_tlb_flush_ex, hv_vp_set.bank_contents) ==
+	      offsetof(struct hv_tlb_flush_ex, gva_list));
 
 struct ms_hyperv_tsc_page {	 /* HV_REFERENCE_TSC_PAGE */
 	volatile u32 tsc_sequence;
@@ -572,8 +610,6 @@ struct ms_hyperv_tsc_page {	 /* HV_REFERENCE_TSC_PAGE */
 #define HV_SYNIC_SINT_MASKED		(1ULL << 16)
 #define HV_SYNIC_SINT_AUTO_EOI		(1ULL << 17)
 #define HV_SYNIC_SINT_VECTOR_MASK	(0xFF)
-
-#
 
 /* Hyper-V defined statically assigned SINTs */
 #define HV_SYNIC_INTERCEPTION_SINT_INDEX 0x00000000
@@ -775,10 +811,10 @@ struct hv_message_page {
 
 /* Define timer message payload structure. */
 struct hv_timer_message_payload {
-	__u32 timer_index;
-	__u32 reserved;
-	__u64 expiration_time;	/* When the timer expired */
-	__u64 delivery_time;	/* When the message was delivered */
+	u32 timer_index;
+	u32 reserved;
+	u64 expiration_time;	/* When the timer expired */
+	u64 delivery_time;	/* When the message was delivered */
 } __packed;
 
 struct hv_x64_segment_register {
@@ -806,6 +842,8 @@ struct hv_x64_table_register {
 	u16 limit;
 	u64 base;
 } __packed;
+
+#define HV_NORMAL_VTL	0
 
 union hv_input_vtl {
 	u8 as_uint8;
@@ -855,6 +893,48 @@ struct hv_get_vp_from_apic_id_in {
 	u8 res[7];
 	u32 apic_ids[];
 } __packed;
+
+union hv_register_vsm_partition_config {
+	u64 as_uint64;
+	struct {
+		u64 enable_vtl_protection : 1;
+		u64 default_vtl_protection_mask : 4;
+		u64 zero_memory_on_reset : 1;
+		u64 deny_lower_vtl_startup : 1;
+		u64 intercept_acceptance : 1;
+		u64 intercept_enable_vtl_protection : 1;
+		u64 intercept_vp_startup : 1;
+		u64 intercept_cpuid_unimplemented : 1;
+		u64 intercept_unrecoverable_exception : 1;
+		u64 intercept_page : 1;
+		u64 mbz : 51;
+	} __packed;
+};
+
+union hv_register_vsm_capabilities {
+	u64 as_uint64;
+	struct {
+		u64 dr6_shared: 1;
+		u64 mbec_vtl_mask: 16;
+		u64 deny_lower_vtl_startup: 1;
+		u64 supervisor_shadow_stack: 1;
+		u64 hardware_hvpt_available: 1;
+		u64 software_hvpt_available: 1;
+		u64 hardware_hvpt_range_bits: 6;
+		u64 intercept_page_available: 1;
+		u64 return_action_available: 1;
+		u64 reserved: 35;
+	} __packed;
+};
+
+union hv_register_vsm_page_offsets {
+	struct {
+		u64 vtl_call_offset : 12;
+		u64 vtl_return_offset : 12;
+		u64 reserved_mbz : 40;
+	} __packed;
+	u64 as_uint64;
+};
 
 struct hv_nested_enlightenments_control {
 	struct {
@@ -978,6 +1058,72 @@ enum hv_register_name {
 
 	/* VSM */
 	HV_REGISTER_VSM_VP_STATUS				= 0x000D0003,
+
+	/* Synthetic VSM registers */
+	HV_REGISTER_VSM_CODE_PAGE_OFFSETS	= 0x000D0002,
+	HV_REGISTER_VSM_CAPABILITIES		= 0x000D0006,
+	HV_REGISTER_VSM_PARTITION_CONFIG	= 0x000D0007,
+
+#if defined(CONFIG_X86)
+	/* X64 Debug Registers */
+	HV_X64_REGISTER_DR0	= 0x00050000,
+	HV_X64_REGISTER_DR1	= 0x00050001,
+	HV_X64_REGISTER_DR2	= 0x00050002,
+	HV_X64_REGISTER_DR3	= 0x00050003,
+	HV_X64_REGISTER_DR6	= 0x00050004,
+	HV_X64_REGISTER_DR7	= 0x00050005,
+
+	/* X64 Cache control MSRs */
+	HV_X64_REGISTER_MSR_MTRR_CAP		= 0x0008000D,
+	HV_X64_REGISTER_MSR_MTRR_DEF_TYPE	= 0x0008000E,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASE0	= 0x00080010,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASE1	= 0x00080011,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASE2	= 0x00080012,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASE3	= 0x00080013,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASE4	= 0x00080014,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASE5	= 0x00080015,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASE6	= 0x00080016,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASE7	= 0x00080017,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASE8	= 0x00080018,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASE9	= 0x00080019,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASEA	= 0x0008001A,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASEB	= 0x0008001B,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASEC	= 0x0008001C,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASED	= 0x0008001D,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASEE	= 0x0008001E,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_BASEF	= 0x0008001F,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASK0	= 0x00080040,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASK1	= 0x00080041,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASK2	= 0x00080042,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASK3	= 0x00080043,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASK4	= 0x00080044,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASK5	= 0x00080045,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASK6	= 0x00080046,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASK7	= 0x00080047,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASK8	= 0x00080048,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASK9	= 0x00080049,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASKA	= 0x0008004A,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASKB	= 0x0008004B,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASKC	= 0x0008004C,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASKD	= 0x0008004D,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASKE	= 0x0008004E,
+	HV_X64_REGISTER_MSR_MTRR_PHYS_MASKF	= 0x0008004F,
+	HV_X64_REGISTER_MSR_MTRR_FIX64K00000	= 0x00080070,
+	HV_X64_REGISTER_MSR_MTRR_FIX16K80000	= 0x00080071,
+	HV_X64_REGISTER_MSR_MTRR_FIX16KA0000	= 0x00080072,
+	HV_X64_REGISTER_MSR_MTRR_FIX4KC0000	= 0x00080073,
+	HV_X64_REGISTER_MSR_MTRR_FIX4KC8000	= 0x00080074,
+	HV_X64_REGISTER_MSR_MTRR_FIX4KD0000	= 0x00080075,
+	HV_X64_REGISTER_MSR_MTRR_FIX4KD8000	= 0x00080076,
+	HV_X64_REGISTER_MSR_MTRR_FIX4KE0000	= 0x00080077,
+	HV_X64_REGISTER_MSR_MTRR_FIX4KE8000	= 0x00080078,
+	HV_X64_REGISTER_MSR_MTRR_FIX4KF0000	= 0x00080079,
+	HV_X64_REGISTER_MSR_MTRR_FIX4KF8000	= 0x0008007A,
+
+	HV_X64_REGISTER_REG_PAGE	= 0x0009001C,
+#elif defined(CONFIG_ARM64)
+	HV_ARM64_REGISTER_SINT_RESERVED_INTERRUPT_ID	= 0x00070001,
+#endif
 };
 
 /*
@@ -987,7 +1133,7 @@ enum hv_register_name {
 
 /*
  * To support arch-generic code calling hv_set/get_register:
- * - On x86, HV_MSR_ indicates an MSR accessed via rdmsrl/wrmsrl
+ * - On x86, HV_MSR_ indicates an MSR accessed via rdmsrq/wrmsrq
  * - On ARM, HV_MSR_ indicates a VP register accessed via hypercall
  */
 #define HV_MSR_CRASH_P0		(HV_X64_MSR_CRASH_P0)
@@ -1202,7 +1348,7 @@ struct hv_send_ipi {	 /* HV_INPUT_SEND_SYNTHETIC_CLUSTER_IPI */
 	u64 cpu_mask;
 } __packed;
 
-#define	HV_X64_VTL_MASK			GENMASK(3, 0)
+#define	HV_VTL_MASK			GENMASK(3, 0)
 
 /* Hyper-V memory host visibility */
 enum hv_mem_host_visibility {
@@ -1325,6 +1471,49 @@ struct hv_retarget_device_interrupt {	 /* HV_INPUT_RETARGET_DEVICE_INTERRUPT */
 	struct hv_device_interrupt_target int_target;
 } __packed __aligned(8);
 
+enum hv_intercept_type {
+#if defined(CONFIG_X86)
+	HV_INTERCEPT_TYPE_X64_IO_PORT			= 0x00000000,
+	HV_INTERCEPT_TYPE_X64_MSR			= 0x00000001,
+	HV_INTERCEPT_TYPE_X64_CPUID			= 0x00000002,
+#endif
+	HV_INTERCEPT_TYPE_EXCEPTION			= 0x00000003,
+	/* Used to be HV_INTERCEPT_TYPE_REGISTER */
+	HV_INTERCEPT_TYPE_RESERVED0			= 0x00000004,
+	HV_INTERCEPT_TYPE_MMIO				= 0x00000005,
+#if defined(CONFIG_X86)
+	HV_INTERCEPT_TYPE_X64_GLOBAL_CPUID		= 0x00000006,
+	HV_INTERCEPT_TYPE_X64_APIC_SMI			= 0x00000007,
+#endif
+	HV_INTERCEPT_TYPE_HYPERCALL			= 0x00000008,
+#if defined(CONFIG_X86)
+	HV_INTERCEPT_TYPE_X64_APIC_INIT_SIPI		= 0x00000009,
+	HV_INTERCEPT_MC_UPDATE_PATCH_LEVEL_MSR_READ	= 0x0000000A,
+	HV_INTERCEPT_TYPE_X64_APIC_WRITE		= 0x0000000B,
+	HV_INTERCEPT_TYPE_X64_MSR_INDEX			= 0x0000000C,
+#endif
+	HV_INTERCEPT_TYPE_MAX,
+	HV_INTERCEPT_TYPE_INVALID			= 0xFFFFFFFF,
+};
+
+union hv_intercept_parameters {
+	/*  HV_INTERCEPT_PARAMETERS is defined to be an 8-byte field. */
+	u64 as_uint64;
+#if defined(CONFIG_X86)
+	/* HV_INTERCEPT_TYPE_X64_IO_PORT */
+	u16 io_port;
+	/* HV_INTERCEPT_TYPE_X64_CPUID */
+	u32 cpuid_index;
+	/* HV_INTERCEPT_TYPE_X64_APIC_WRITE */
+	u32 apic_write_mask;
+	/* HV_INTERCEPT_TYPE_EXCEPTION */
+	u16 exception_vector;
+	/* HV_INTERCEPT_TYPE_X64_MSR_INDEX */
+	u32 msr_index;
+#endif
+	/* N.B. Other intercept types do not have any parameters. */
+};
+
 /* Data structures for HVCALL_MMIO_READ and HVCALL_MMIO_WRITE */
 #define HV_HYPERCALL_MMIO_MAX_DATA_LENGTH 64
 
@@ -1344,5 +1533,11 @@ struct hv_mmio_write_input {
 	u32 reserved;
 	u8 data[HV_HYPERCALL_MMIO_MAX_DATA_LENGTH];
 } __packed;
+
+enum hv_intercept_access_type {
+	HV_INTERCEPT_ACCESS_READ	= 0,
+	HV_INTERCEPT_ACCESS_WRITE	= 1,
+	HV_INTERCEPT_ACCESS_EXECUTE	= 2
+};
 
 #endif /* _HV_HVGDK_MINI_H */

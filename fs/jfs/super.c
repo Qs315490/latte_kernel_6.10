@@ -389,8 +389,8 @@ static int jfs_reconfigure(struct fs_context *fc)
 
 		if (!ctx->newLVSize) {
 			ctx->newLVSize = sb_bdev_nr_blocks(sb);
-				if (ctx->newLVSize == 0)
-					pr_err("JFS: Cannot determine volume size\n");
+			if (ctx->newLVSize == 0)
+				pr_err("JFS: Cannot determine volume size\n");
 		}
 
 		rc = jfs_extendfs(sb, ctx->newLVSize, 0);
@@ -449,7 +449,7 @@ static int jfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	jfs_info("In jfs_read_super: s_flags=0x%lx", sb->s_flags);
 
-	sbi = kzalloc(sizeof(struct jfs_sb_info), GFP_KERNEL);
+	sbi = kzalloc_obj(struct jfs_sb_info);
 	if (!sbi)
 		return -ENOMEM;
 
@@ -491,7 +491,8 @@ static int jfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	/*
 	 * Initialize blocksize to 4K.
 	 */
-	sb_set_blocksize(sb, PSIZE);
+	if (!sb_set_blocksize(sb, PSIZE))
+		goto out_unload;
 
 	/*
 	 * Set method vectors.
@@ -542,7 +543,7 @@ static int jfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_magic = JFS_SUPER_MAGIC;
 
 	if (sbi->mntflag & JFS_OS2)
-		sb->s_d_op = &jfs_ci_dentry_operations;
+		set_default_d_op(sb, &jfs_ci_dentry_operations);
 
 	inode = jfs_iget(sb, ROOT_I);
 	if (IS_ERR(inode)) {
@@ -766,7 +767,7 @@ static ssize_t jfs_quota_write(struct super_block *sb, int type,
 		}
 		lock_buffer(bh);
 		memcpy(bh->b_data+offset, data, tocopy);
-		flush_dcache_page(bh->b_page);
+		flush_dcache_folio(bh->b_folio);
 		set_buffer_uptodate(bh);
 		mark_buffer_dirty(bh);
 		unlock_buffer(bh);
@@ -912,7 +913,7 @@ static int jfs_init_fs_context(struct fs_context *fc)
 {
 	struct jfs_context *ctx;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return -ENOMEM;
 

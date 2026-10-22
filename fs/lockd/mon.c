@@ -16,10 +16,10 @@
 #include <linux/sunrpc/addr.h>
 #include <linux/sunrpc/xprtsock.h>
 #include <linux/sunrpc/svc.h>
-#include <linux/lockd/lockd.h>
 
 #include <linux/unaligned.h>
 
+#include "lockd.h"
 #include "netns.h"
 
 #define NLMDBG_FACILITY		NLMDBG_MONITOR
@@ -377,7 +377,7 @@ retry:
  * error occurred.
  */
 struct nsm_handle *nsm_reboot_lookup(const struct net *net,
-				const struct nlm_reboot *info)
+				const struct lockd_reboot *info)
 {
 	struct nsm_handle *cached;
 	struct lockd_net *ln = net_generic(net, lockd_net_id);

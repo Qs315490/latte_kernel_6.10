@@ -12,6 +12,7 @@
 #include <linux/rbtree.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/sysfs.h>
 #include <linux/vmalloc.h>
 
 #include <asm/cputhreads.h>
@@ -434,24 +435,24 @@ static ssize_t cpumask_show(struct device *dev,
 static ssize_t sockets_show(struct device *dev,
 			    struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", phys_sockets);
+	return sysfs_emit(buf, "%d\n", phys_sockets);
 }
 
 static ssize_t chipspersocket_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", phys_chipspersocket);
+	return sysfs_emit(buf, "%d\n", phys_chipspersocket);
 }
 
 static ssize_t coresperchip_show(struct device *dev,
 				 struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", phys_coresperchip);
+	return sysfs_emit(buf, "%d\n", phys_coresperchip);
 }
 
 static struct attribute *device_str_attr_create_(char *name, char *str)
 {
-	struct dev_ext_attribute *attr = kzalloc(sizeof(*attr), GFP_KERNEL);
+	struct dev_ext_attribute *attr = kzalloc_obj(*attr);
 
 	if (!attr)
 		return NULL;
@@ -647,7 +648,7 @@ static int event_uniq_add(struct rb_root *root, const char *name, int nl,
 		}
 	}
 
-	data = kmalloc(sizeof(*data), GFP_KERNEL);
+	data = kmalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -713,12 +714,12 @@ static ssize_t catalog_event_len_validate(struct hv_24x7_event_data *event,
 	ev_len = be16_to_cpu(event->length);
 
 	if (ev_len % 16)
-		pr_info("event %zu has length %zu not divisible by 16: event=%pK\n",
+		pr_info("event %zu has length %zu not divisible by 16: event=%p\n",
 				event_idx, ev_len, event);
 
 	ev_end = (__u8 *)event + ev_len;
 	if (ev_end > end) {
-		pr_warn("event %zu has .length=%zu, ends after buffer end: ev_end=%pK > end=%pK, offset=%zu\n",
+		pr_warn("event %zu has .length=%zu, ends after buffer end: ev_end=%p > end=%p, offset=%zu\n",
 				event_idx, ev_len, ev_end, end,
 				offset);
 		return -1;
@@ -726,14 +727,14 @@ static ssize_t catalog_event_len_validate(struct hv_24x7_event_data *event,
 
 	calc_ev_end = event_end(event, end);
 	if (!calc_ev_end) {
-		pr_warn("event %zu has a calculated length which exceeds buffer length %zu: event=%pK end=%pK, offset=%zu\n",
+		pr_warn("event %zu has a calculated length which exceeds buffer length %zu: event=%p end=%p, offset=%zu\n",
 			event_idx, event_data_bytes, event, end,
 			offset);
 		return -1;
 	}
 
 	if (calc_ev_end > ev_end) {
-		pr_warn("event %zu exceeds its own length: event=%pK, end=%pK, offset=%zu, calc_ev_end=%pK\n",
+		pr_warn("event %zu exceeds its own length: event=%p, end=%p, offset=%zu, calc_ev_end=%p\n",
 			event_idx, event, ev_end, offset, calc_ev_end);
 		return -1;
 	}
@@ -905,21 +906,19 @@ static int create_events_from_catalog(struct attribute ***events_,
 		pr_warn("event buffer ended before listed # of events were parsed (got %zu, wanted %zu, junk %zu)\n",
 				event_idx_last, event_entry_count, junk_events);
 
-	events = kmalloc_array(attr_max + 1, sizeof(*events), GFP_KERNEL);
+	events = kmalloc_objs(*events, attr_max + 1);
 	if (!events) {
 		ret = -ENOMEM;
 		goto e_event_data;
 	}
 
-	event_descs = kmalloc_array(event_idx + 1, sizeof(*event_descs),
-				GFP_KERNEL);
+	event_descs = kmalloc_objs(*event_descs, event_idx + 1);
 	if (!event_descs) {
 		ret = -ENOMEM;
 		goto e_event_attrs;
 	}
 
-	event_long_descs = kmalloc_array(event_idx + 1,
-			sizeof(*event_long_descs), GFP_KERNEL);
+	event_long_descs = kmalloc_objs(*event_long_descs, event_idx + 1);
 	if (!event_long_descs) {
 		ret = -ENOMEM;
 		goto e_event_descs;
@@ -998,7 +997,7 @@ e_out:
 }
 
 static ssize_t catalog_read(struct file *filp, struct kobject *kobj,
-			    struct bin_attribute *bin_attr, char *buf,
+			    const struct bin_attribute *bin_attr, char *buf,
 			    loff_t offset, size_t count)
 {
 	long hret;
@@ -1063,7 +1062,7 @@ e_free:
 static ssize_t domains_show(struct device *dev, struct device_attribute *attr,
 			    char *page)
 {
-	int d, n, count = 0;
+	int d, count = 0;
 	const char *str;
 
 	for (d = 0; d < HV_PERF_DOMAIN_MAX; d++) {
@@ -1071,12 +1070,7 @@ static ssize_t domains_show(struct device *dev, struct device_attribute *attr,
 		if (!str)
 			continue;
 
-		n = sprintf(page, "%d: %s\n", d, str);
-		if (n < 0)
-			break;
-
-		count += n;
-		page += n;
+		count += sysfs_emit_at(page, count, "%d: %s\n", d, str);
 	}
 	return count;
 }
@@ -1097,7 +1091,7 @@ static ssize_t _name##_show(struct device *dev,			\
 		ret = -EIO;					\
 		goto e_free;					\
 	}							\
-	ret = sprintf(buf, _fmt, _expr);			\
+	ret = sysfs_emit(buf, _fmt, _expr);			\
 e_free:								\
 	kmem_cache_free(hv_page_cache, page);			\
 	return ret;						\
@@ -1108,14 +1102,14 @@ PAGE_0_ATTR(catalog_version, "%lld\n",
 		(unsigned long long)be64_to_cpu(page_0->version));
 PAGE_0_ATTR(catalog_len, "%lld\n",
 		(unsigned long long)be32_to_cpu(page_0->length) * 4096);
-static BIN_ATTR_RO(catalog, 0/* real length varies */);
+static const BIN_ATTR_RO(catalog, 0/* real length varies */);
 static DEVICE_ATTR_RO(domains);
 static DEVICE_ATTR_RO(sockets);
 static DEVICE_ATTR_RO(chipspersocket);
 static DEVICE_ATTR_RO(coresperchip);
 static DEVICE_ATTR_RO(cpumask);
 
-static struct bin_attribute *if_bin_attrs[] = {
+static const struct bin_attribute *const if_bin_attrs[] = {
 	&bin_attr_catalog,
 	NULL,
 };

@@ -332,7 +332,7 @@ static int efa_create_eqs(struct efa_dev *dev)
 
 	neqs = min_t(u32, neqs, dev->num_irq_vectors - EFA_COMP_EQS_VEC_BASE);
 	dev->neqs = neqs;
-	dev->eqs = kcalloc(neqs, sizeof(*dev->eqs), GFP_KERNEL);
+	dev->eqs = kzalloc_objs(*dev->eqs, neqs);
 	if (!dev->eqs)
 		return -ENOMEM;
 
@@ -371,7 +371,7 @@ static const struct ib_device_ops efa_dev_ops = {
 	.alloc_hw_device_stats = efa_alloc_hw_device_stats,
 	.alloc_pd = efa_alloc_pd,
 	.alloc_ucontext = efa_alloc_ucontext,
-	.create_cq = efa_create_cq,
+	.create_user_cq = efa_create_user_cq,
 	.create_qp = efa_create_qp,
 	.create_user_ah = efa_create_ah,
 	.dealloc_pd = efa_dealloc_pd,
@@ -390,6 +390,7 @@ static const struct ib_device_ops efa_dev_ops = {
 	.query_gid = efa_query_gid,
 	.query_pkey = efa_query_pkey,
 	.query_port = efa_query_port,
+	.query_port_speed = efa_query_port_speed,
 	.query_qp = efa_query_qp,
 	.reg_user_mr = efa_reg_mr,
 	.reg_user_mr_dmabuf = efa_reg_user_mr_dmabuf,

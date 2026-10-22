@@ -51,7 +51,7 @@ static bool panfrost_gem_purge(struct drm_gem_object *obj)
 		goto unlock_mappings;
 
 	panfrost_gem_teardown_mappings_locked(bo);
-	drm_gem_shmem_purge(&bo->base);
+	drm_gem_shmem_purge_locked(&bo->base);
 	ret = true;
 
 	dma_resv_unlock(shmem->base.resv);
@@ -97,7 +97,7 @@ panfrost_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
  */
 int panfrost_gem_shrinker_init(struct drm_device *dev)
 {
-	struct panfrost_device *pfdev = dev->dev_private;
+	struct panfrost_device *pfdev = to_panfrost_device(dev);
 
 	pfdev->shrinker = shrinker_alloc(0, "drm-panfrost");
 	if (!pfdev->shrinker)
@@ -120,7 +120,7 @@ int panfrost_gem_shrinker_init(struct drm_device *dev)
  */
 void panfrost_gem_shrinker_cleanup(struct drm_device *dev)
 {
-	struct panfrost_device *pfdev = dev->dev_private;
+	struct panfrost_device *pfdev = to_panfrost_device(dev);
 
 	if (pfdev->shrinker)
 		shrinker_free(pfdev->shrinker);

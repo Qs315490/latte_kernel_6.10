@@ -50,6 +50,7 @@ enum nfs_param {
 	Opt_clientaddr,
 	Opt_cto,
 	Opt_alignwrite,
+	Opt_fatal_neterrors,
 	Opt_fg,
 	Opt_fscache,
 	Opt_fscache_flag,
@@ -72,6 +73,8 @@ enum nfs_param {
 	Opt_posix,
 	Opt_proto,
 	Opt_rdirplus,
+	Opt_rdirplus_none,
+	Opt_rdirplus_force,
 	Opt_rdma,
 	Opt_resvport,
 	Opt_retrans,
@@ -93,6 +96,22 @@ enum nfs_param {
 	Opt_wsize,
 	Opt_write,
 	Opt_xprtsec,
+	Opt_cert_serial,
+	Opt_privkey_serial,
+};
+
+enum {
+	Opt_fatal_neterrors_default,
+	Opt_fatal_neterrors_enetunreach,
+	Opt_fatal_neterrors_none,
+};
+
+static const struct constant_table nfs_param_enums_fatal_neterrors[] = {
+	{ "default",			Opt_fatal_neterrors_default },
+	{ "ENETDOWN:ENETUNREACH",	Opt_fatal_neterrors_enetunreach },
+	{ "ENETUNREACH:ENETDOWN",	Opt_fatal_neterrors_enetunreach },
+	{ "none",			Opt_fatal_neterrors_none },
+	{}
 };
 
 enum {
@@ -151,6 +170,8 @@ static const struct fs_parameter_spec nfs_fs_parameters[] = {
 	fsparam_string("clientaddr",	Opt_clientaddr),
 	fsparam_flag_no("cto",		Opt_cto),
 	fsparam_flag_no("alignwrite",	Opt_alignwrite),
+	fsparam_enum("fatal_neterrors", Opt_fatal_neterrors,
+		     nfs_param_enums_fatal_neterrors),
 	fsparam_flag  ("fg",		Opt_fg),
 	fsparam_flag_no("fsc",		Opt_fscache_flag),
 	fsparam_string("fsc",		Opt_fscache),
@@ -174,7 +195,8 @@ static const struct fs_parameter_spec nfs_fs_parameters[] = {
 	fsparam_u32   ("port",		Opt_port),
 	fsparam_flag_no("posix",	Opt_posix),
 	fsparam_string("proto",		Opt_proto),
-	fsparam_flag_no("rdirplus",	Opt_rdirplus),
+	fsparam_flag_no("rdirplus", Opt_rdirplus), // rdirplus|nordirplus
+	fsparam_string("rdirplus",  Opt_rdirplus), // rdirplus=...
 	fsparam_flag  ("rdma",		Opt_rdma),
 	fsparam_flag_no("resvport",	Opt_resvport),
 	fsparam_u32   ("retrans",	Opt_retrans),
@@ -201,6 +223,8 @@ static const struct fs_parameter_spec nfs_fs_parameters[] = {
 	fsparam_enum  ("write",		Opt_write, nfs_param_enums_write),
 	fsparam_u32   ("wsize",		Opt_wsize),
 	fsparam_string("xprtsec",	Opt_xprtsec),
+	fsparam_s32("cert_serial",	Opt_cert_serial),
+	fsparam_s32("privkey_serial",	Opt_privkey_serial),
 	{}
 };
 
@@ -285,6 +309,12 @@ static const struct constant_table nfs_xprtsec_policies[] = {
 	{ "none",	Opt_xprtsec_none },
 	{ "tls",	Opt_xprtsec_tls },
 	{ "mtls",	Opt_xprtsec_mtls },
+	{}
+};
+
+static const struct constant_table nfs_rdirplus_tokens[] = {
+	{ "none",	Opt_rdirplus_none },
+	{ "force",	Opt_rdirplus_force },
 	{}
 };
 
@@ -525,6 +555,32 @@ static int nfs_parse_version_string(struct fs_context *fc,
 	return 0;
 }
 
+#ifdef CONFIG_KEYS
+static int nfs_tls_key_verify(key_serial_t key_id)
+{
+	struct key *key = key_lookup(key_id);
+	int error = 0;
+
+	if (IS_ERR(key)) {
+		pr_err("key id %08x not found\n", key_id);
+		return PTR_ERR(key);
+	}
+	if (test_bit(KEY_FLAG_REVOKED, &key->flags) ||
+	    test_bit(KEY_FLAG_INVALIDATED, &key->flags)) {
+		pr_err("key id %08x revoked\n", key_id);
+		error = -EKEYREVOKED;
+	}
+
+	key_put(key);
+	return error;
+}
+#else
+static inline int nfs_tls_key_verify(key_serial_t key_id)
+{
+	return -ENOENT;
+}
+#endif /* CONFIG_KEYS */
+
 /*
  * Parse a single mount parameter.
  */
@@ -636,10 +692,25 @@ static int nfs_fs_context_parse_param(struct fs_context *fc,
 			ctx->flags &= ~NFS_MOUNT_NOACL;
 		break;
 	case Opt_rdirplus:
-		if (result.negated)
+		if (result.negated) {
+			ctx->flags &= ~NFS_MOUNT_FORCE_RDIRPLUS;
 			ctx->flags |= NFS_MOUNT_NORDIRPLUS;
-		else
-			ctx->flags &= ~NFS_MOUNT_NORDIRPLUS;
+		} else if (!param->string) {
+			ctx->flags &= ~(NFS_MOUNT_NORDIRPLUS | NFS_MOUNT_FORCE_RDIRPLUS);
+		} else {
+			switch (lookup_constant(nfs_rdirplus_tokens, param->string, -1)) {
+			case Opt_rdirplus_none:
+				ctx->flags &= ~NFS_MOUNT_FORCE_RDIRPLUS;
+				ctx->flags |= NFS_MOUNT_NORDIRPLUS;
+				break;
+			case Opt_rdirplus_force:
+				ctx->flags &= ~NFS_MOUNT_NORDIRPLUS;
+				ctx->flags |= NFS_MOUNT_FORCE_RDIRPLUS;
+				break;
+			default:
+				goto out_invalid_value;
+			}
+		}
 		break;
 	case Opt_sharecache:
 		if (result.negated)
@@ -735,7 +806,8 @@ static int nfs_fs_context_parse_param(struct fs_context *fc,
 		ctx->mount_server.version = result.uint_32;
 		break;
 	case Opt_minorversion:
-		if (result.uint_32 > NFS4_MAX_MINOR_VERSION)
+		if (result.uint_32 < NFS4_MIN_MINOR_VERSION ||
+		    result.uint_32 > NFS4_MAX_MINOR_VERSION)
 			goto out_of_bounds;
 		ctx->minorversion = result.uint_32;
 		break;
@@ -765,6 +837,18 @@ static int nfs_fs_context_parse_param(struct fs_context *fc,
 		ret = nfs_parse_xprtsec_policy(fc, param);
 		if (ret < 0)
 			return ret;
+		break;
+	case Opt_cert_serial:
+		ret = nfs_tls_key_verify(result.int_32);
+		if (ret < 0)
+			return ret;
+		ctx->xprtsec.cert_serial = result.int_32;
+		break;
+	case Opt_privkey_serial:
+		ret = nfs_tls_key_verify(result.int_32);
+		if (ret < 0)
+			return ret;
+		ctx->xprtsec.privkey_serial = result.int_32;
 		break;
 
 	case Opt_proto:
@@ -871,6 +955,25 @@ static int nfs_fs_context_parse_param(struct fs_context *fc,
 		if (result.uint_32 < 1 || result.uint_32 > NFS_MAX_TRANSPORTS)
 			goto out_of_bounds;
 		ctx->nfs_server.max_connect = result.uint_32;
+		break;
+	case Opt_fatal_neterrors:
+		trace_nfs_mount_assign(param->key, param->string);
+		switch (result.uint_32) {
+		case Opt_fatal_neterrors_default:
+			if (fc->net_ns != &init_net)
+				ctx->flags |= NFS_MOUNT_NETUNREACH_FATAL;
+			else
+				ctx->flags &= ~NFS_MOUNT_NETUNREACH_FATAL;
+			break;
+		case Opt_fatal_neterrors_enetunreach:
+			ctx->flags |= NFS_MOUNT_NETUNREACH_FATAL;
+			break;
+		case Opt_fatal_neterrors_none:
+			ctx->flags &= ~NFS_MOUNT_NETUNREACH_FATAL;
+			break;
+		default:
+			goto out_invalid_value;
+		}
 		break;
 	case Opt_lookupcache:
 		trace_nfs_mount_assign(param->key, param->string);
@@ -1167,8 +1270,7 @@ static int nfs23_parse_monolithic(struct fs_context *fc,
 			int ret;
 
 			data->context[NFS_MAX_CONTEXT_LEN] = '\0';
-			ret = vfs_parse_fs_string(fc, "context",
-						  data->context, strlen(data->context));
+			ret = vfs_parse_fs_string(fc, "context", data->context);
 			if (ret < 0)
 				return ret;
 #else
@@ -1590,7 +1692,7 @@ static int nfs_init_fs_context(struct fs_context *fc)
 {
 	struct nfs_fs_context *ctx;
 
-	ctx = kzalloc(sizeof(struct nfs_fs_context), GFP_KERNEL);
+	ctx = kzalloc_obj(struct nfs_fs_context);
 	if (unlikely(!ctx))
 		return -ENOMEM;
 
@@ -1651,6 +1753,9 @@ static int nfs_init_fs_context(struct fs_context *fc)
 		ctx->xprtsec.cert_serial	= TLS_NO_CERT;
 		ctx->xprtsec.privkey_serial	= TLS_NO_PRIVKEY;
 
+		if (fc->net_ns != &init_net)
+			ctx->flags |= NFS_MOUNT_NETUNREACH_FATAL;
+
 		fc->s_iflags		|= SB_I_STABLE_WRITES;
 	}
 	fc->fs_private = ctx;
@@ -1664,7 +1769,9 @@ struct file_system_type nfs_fs_type = {
 	.init_fs_context	= nfs_init_fs_context,
 	.parameters		= nfs_fs_parameters,
 	.kill_sb		= nfs_kill_super,
-	.fs_flags		= FS_RENAME_DOES_D_MOVE|FS_BINARY_MOUNTDATA,
+	.fs_flags		= FS_RENAME_DOES_D_MOVE	|
+				  FS_BINARY_MOUNTDATA	|
+				  FS_USERNS_DELEGATABLE,
 };
 MODULE_ALIAS_FS("nfs");
 EXPORT_SYMBOL_GPL(nfs_fs_type);
@@ -1676,7 +1783,9 @@ struct file_system_type nfs4_fs_type = {
 	.init_fs_context	= nfs_init_fs_context,
 	.parameters		= nfs_fs_parameters,
 	.kill_sb		= nfs_kill_super,
-	.fs_flags		= FS_RENAME_DOES_D_MOVE|FS_BINARY_MOUNTDATA,
+	.fs_flags		= FS_RENAME_DOES_D_MOVE	|
+				  FS_BINARY_MOUNTDATA	|
+				  FS_USERNS_DELEGATABLE,
 };
 MODULE_ALIAS_FS("nfs4");
 MODULE_ALIAS("nfs4");

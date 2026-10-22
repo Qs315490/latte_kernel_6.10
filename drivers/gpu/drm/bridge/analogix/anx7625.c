@@ -3,6 +3,7 @@
  * Copyright(c) 2020, Analogix Semiconductor. All rights reserved.
  *
  */
+#include <linux/cleanup.h>
 #include <linux/gcd.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
@@ -15,6 +16,9 @@
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/types.h>
+#include <linux/usb.h>
+#include <linux/usb/pd.h>
+#include <linux/usb/role.h>
 #include <linux/workqueue.h>
 
 #include <linux/of_graph.h>
@@ -1257,10 +1261,10 @@ static void anx7625_power_on(struct anx7625_data *ctx)
 	usleep_range(11000, 12000);
 
 	/* Power on pin enable */
-	gpiod_set_value(ctx->pdata.gpio_p_on, 1);
+	gpiod_set_value_cansleep(ctx->pdata.gpio_p_on, 1);
 	usleep_range(10000, 11000);
 	/* Power reset pin enable */
-	gpiod_set_value(ctx->pdata.gpio_reset, 1);
+	gpiod_set_value_cansleep(ctx->pdata.gpio_reset, 1);
 	usleep_range(10000, 11000);
 
 	DRM_DEV_DEBUG_DRIVER(dev, "power on !\n");
@@ -1280,9 +1284,9 @@ static void anx7625_power_standby(struct anx7625_data *ctx)
 		return;
 	}
 
-	gpiod_set_value(ctx->pdata.gpio_reset, 0);
+	gpiod_set_value_cansleep(ctx->pdata.gpio_reset, 0);
 	usleep_range(1000, 1100);
-	gpiod_set_value(ctx->pdata.gpio_p_on, 0);
+	gpiod_set_value_cansleep(ctx->pdata.gpio_p_on, 0);
 	usleep_range(1000, 1100);
 
 	ret = regulator_bulk_disable(ARRAY_SIZE(ctx->pdata.supplies),
@@ -1325,7 +1329,7 @@ static int anx7625_read_hpd_gpio_config_status(struct anx7625_data *ctx)
 static void anx7625_disable_pd_protocol(struct anx7625_data *ctx)
 {
 	struct device *dev = ctx->dev;
-	int ret, val;
+	int ret;
 
 	/* Reset main ocm */
 	ret = anx7625_reg_write(ctx, ctx->i2c.rx_p0_client, 0x88, 0x40);
@@ -1339,6 +1343,11 @@ static void anx7625_disable_pd_protocol(struct anx7625_data *ctx)
 		DRM_DEV_DEBUG_DRIVER(dev, "disable PD feature fail.\n");
 	else
 		DRM_DEV_DEBUG_DRIVER(dev, "disable PD feature succeeded.\n");
+}
+
+static void anx7625_configure_hpd(struct anx7625_data *ctx)
+{
+	int val;
 
 	/*
 	 * Make sure the HPD GPIO already be configured after OCM release before
@@ -1352,6 +1361,18 @@ static void anx7625_disable_pd_protocol(struct anx7625_data *ctx)
 
 	/* Set HPD irq detect window to 2ms */
 	anx7625_hpd_timer_config(ctx);
+}
+
+static bool anx7625_need_pd(struct anx7625_data *ctx)
+{
+	struct fwnode_handle *fwnode;
+
+	fwnode = device_get_named_child_node(ctx->dev, "connector");
+	if (!fwnode)
+		return false;
+
+	fwnode_handle_put(fwnode);
+	return true;
 }
 
 static int anx7625_ocm_loading_check(struct anx7625_data *ctx)
@@ -1369,7 +1390,9 @@ static int anx7625_ocm_loading_check(struct anx7625_data *ctx)
 	if ((ret & FLASH_LOAD_STA_CHK) != FLASH_LOAD_STA_CHK)
 		return -ENODEV;
 
-	anx7625_disable_pd_protocol(ctx);
+	if (!anx7625_need_pd(ctx))
+		anx7625_disable_pd_protocol(ctx);
+	anx7625_configure_hpd(ctx);
 
 	DRM_DEV_DEBUG_DRIVER(dev, "Firmware ver %02x%02x,",
 			     anx7625_reg_read(ctx,
@@ -1472,6 +1495,161 @@ static void anx7625_start_dp_work(struct anx7625_data *ctx)
 	DRM_DEV_DEBUG_DRIVER(dev, "Secure OCM version=%02x\n", ret);
 }
 
+static u8 anx7625_checksum(u8 *buf, u8 len)
+{
+	u8 ret = 0;
+	u8 i;
+
+	for (i = 0; i < len; i++)
+		ret += buf[i];
+
+	return ret;
+}
+
+static int anx7625_read_msg_ctrl_status(struct anx7625_data *ctx)
+{
+	return anx7625_reg_read(ctx, ctx->i2c.rx_p0_client, CMD_SEND_BUF);
+}
+
+static int anx7625_wait_msg_empty(struct anx7625_data *ctx)
+{
+	int val;
+
+	return readx_poll_timeout(anx7625_read_msg_ctrl_status, ctx,
+				  val, (val < 0) || (val == 0),
+				  2000, 2000 * 150);
+}
+
+static int anx7625_send_msg(struct anx7625_data *ctx, u8 type, u8 *buf, u8 size)
+{
+	struct fw_msg *msg = &ctx->send_msg;
+	u8 crc;
+	int ret;
+
+	size = min_t(u8, size, (u8)MAX_BUF_LEN);
+	memcpy(msg->buf, buf, size);
+	msg->msg_type = type;
+
+	/* msg len equals buffer length + msg_type */
+	msg->msg_len = size + 1;
+
+	crc = anx7625_checksum((u8 *)msg, size + HEADER_LEN);
+	msg->buf[size] = 0 - crc;
+
+	ret = anx7625_wait_msg_empty(ctx);
+	if (ret)
+		return ret;
+
+	ret = anx7625_reg_block_write(ctx, ctx->i2c.rx_p0_client,
+				      CMD_SEND_BUF + 1, size + HEADER_LEN,
+				      &msg->msg_type);
+	ret |= anx7625_reg_write(ctx, ctx->i2c.rx_p0_client, CMD_SEND_BUF,
+				 msg->msg_len);
+	return ret;
+}
+
+static int anx7625_typec_dr_set(struct typec_port *port, enum typec_data_role role)
+{
+	struct anx7625_data *ctx = typec_get_drvdata(port);
+
+	if (role == ctx->typec_data_role)
+		return 0;
+
+	return anx7625_send_msg(ctx, 0x11, NULL, 0);
+}
+
+static const struct typec_operations anx7625_typec_ops = {
+	.dr_set = anx7625_typec_dr_set,
+};
+
+static void anx7625_typec_set_orientation(struct anx7625_data *ctx)
+{
+	u32 val = anx7625_reg_read(ctx, ctx->i2c.rx_p0_client, SYSTEM_STSTUS);
+
+	if (val & (CC1_RP | CC1_RD))
+		typec_set_orientation(ctx->typec_port, TYPEC_ORIENTATION_NORMAL);
+	else if (val & (CC2_RP | CC2_RD))
+		typec_set_orientation(ctx->typec_port, TYPEC_ORIENTATION_REVERSE);
+	else
+		typec_set_orientation(ctx->typec_port, TYPEC_ORIENTATION_NONE);
+}
+
+static void anx7625_typec_set_status(struct anx7625_data *ctx,
+				     unsigned int intr_status,
+				     unsigned int intr_vector)
+{
+	if (!ctx->typec_port)
+		return;
+
+	if (intr_vector & CC_STATUS)
+		anx7625_typec_set_orientation(ctx);
+	if (intr_vector & DATA_ROLE_STATUS) {
+		enum typec_data_role data_role = (intr_status & DATA_ROLE_STATUS) ?
+			TYPEC_HOST : TYPEC_DEVICE;
+		usb_role_switch_set_role(ctx->role_sw,
+					 (intr_status & DATA_ROLE_STATUS) ?
+					 USB_ROLE_HOST : USB_ROLE_DEVICE);
+		typec_set_data_role(ctx->typec_port, data_role);
+		ctx->typec_data_role = data_role;
+	}
+	if (intr_vector & VBUS_STATUS)
+		typec_set_pwr_role(ctx->typec_port,
+				   (intr_status & VBUS_STATUS) ?
+				   TYPEC_SOURCE : TYPEC_SINK);
+	if (intr_vector & VCONN_STATUS)
+		typec_set_vconn_role(ctx->typec_port,
+				     (intr_status & VCONN_STATUS) ?
+				     TYPEC_SOURCE : TYPEC_SINK);
+}
+
+static int anx7625_typec_register(struct anx7625_data *ctx)
+{
+	struct typec_capability typec_cap = { };
+	struct fwnode_handle *fwnode __free(fwnode_handle) =
+		device_get_named_child_node(ctx->dev, "connector");
+	u32 val;
+	int ret;
+
+	if (!fwnode)
+		return 0;
+
+	ret = typec_get_fw_cap(&typec_cap, fwnode);
+	if (ret < 0)
+		return ret;
+
+	typec_cap.revision = 0x0120;
+	typec_cap.pd_revision = 0x0300;
+	typec_cap.usb_capability = USB_CAPABILITY_USB2 | USB_CAPABILITY_USB3;
+	typec_cap.orientation_aware = true;
+
+	typec_cap.driver_data = ctx;
+	typec_cap.ops = &anx7625_typec_ops;
+
+	ctx->typec_port = typec_register_port(ctx->dev, &typec_cap);
+	if (IS_ERR(ctx->typec_port))
+		return PTR_ERR(ctx->typec_port);
+
+	ctx->role_sw = fwnode_usb_role_switch_get(fwnode);
+	if (IS_ERR(ctx->role_sw)) {
+		typec_unregister_port(ctx->typec_port);
+		return PTR_ERR(ctx->role_sw);
+	}
+
+	val = anx7625_reg_read(ctx, ctx->i2c.rx_p0_client, SYSTEM_STSTUS);
+
+	anx7625_typec_set_status(ctx, val,
+				 CC_STATUS | DATA_ROLE_STATUS |
+				 VBUS_STATUS | VCONN_STATUS);
+
+	return 0;
+}
+
+static void anx7625_typec_unregister(struct anx7625_data *ctx)
+{
+	usb_role_switch_put(ctx->role_sw);
+	typec_unregister_port(ctx->typec_port);
+}
+
 static int anx7625_read_hpd_status_p0(struct anx7625_data *ctx)
 {
 	return anx7625_reg_read(ctx, ctx->i2c.rx_p0_client, SYSTEM_STSTUS);
@@ -1566,7 +1744,7 @@ static void dp_hpd_change_handler(struct anx7625_data *ctx, bool on)
 	}
 }
 
-static int anx7625_hpd_change_detect(struct anx7625_data *ctx)
+static int anx7625_intr_status(struct anx7625_data *ctx)
 {
 	int intr_vector, status;
 	struct device *dev = ctx->dev;
@@ -1593,9 +1771,6 @@ static int anx7625_hpd_change_detect(struct anx7625_data *ctx)
 		return status;
 	}
 
-	if (!(intr_vector & HPD_STATUS_CHANGE))
-		return -ENOENT;
-
 	status = anx7625_reg_read(ctx, ctx->i2c.rx_p0_client,
 				  SYSTEM_STSTUS);
 	if (status < 0) {
@@ -1604,6 +1779,12 @@ static int anx7625_hpd_change_detect(struct anx7625_data *ctx)
 	}
 
 	DRM_DEV_DEBUG_DRIVER(dev, "0x7e:0x45=%x\n", status);
+
+	anx7625_typec_set_status(ctx, status, intr_vector);
+
+	if (!(intr_vector & HPD_STATUS))
+		return -ENOENT;
+
 	dp_hpd_change_handler(ctx, status & HPD_STATUS);
 
 	return 0;
@@ -1622,7 +1803,7 @@ static void anx7625_work_func(struct work_struct *work)
 		return;
 	}
 
-	event = anx7625_hpd_change_detect(ctx);
+	event = anx7625_intr_status(ctx);
 
 	mutex_unlock(&ctx->lock);
 
@@ -1801,7 +1982,7 @@ static const struct drm_edid *anx7625_edid_read(struct anx7625_data *ctx)
 		return NULL;
 	}
 
-	ctx->cached_drm_edid = drm_edid_alloc(edid_buf, FOUR_BLOCK_SIZE);
+	ctx->cached_drm_edid = drm_edid_alloc(edid_buf, edid_num * ONE_BLOCK_SIZE);
 	kfree(edid_buf);
 
 out:
@@ -1813,9 +1994,6 @@ static enum drm_connector_status anx7625_sink_detect(struct anx7625_data *ctx)
 	struct device *dev = ctx->dev;
 
 	DRM_DEV_DEBUG_DRIVER(dev, "sink detect\n");
-
-	if (ctx->pdata.panel_bridge)
-		return connector_status_connected;
 
 	return ctx->hpd_status ? connector_status_connected :
 				     connector_status_disconnected;
@@ -2141,6 +2319,7 @@ static void hdcp_check_work_func(struct work_struct *work)
 }
 
 static int anx7625_bridge_attach(struct drm_bridge *bridge,
+				 struct drm_encoder *encoder,
 				 enum drm_bridge_attach_flags flags)
 {
 	struct anx7625_data *ctx = bridge_to_anx7625(bridge);
@@ -2159,7 +2338,7 @@ static int anx7625_bridge_attach(struct drm_bridge *bridge,
 	}
 
 	if (ctx->pdata.panel_bridge) {
-		err = drm_bridge_attach(bridge->encoder,
+		err = drm_bridge_attach(encoder,
 					ctx->pdata.panel_bridge,
 					&ctx->bridge, flags);
 		if (err)
@@ -2380,7 +2559,7 @@ static int anx7625_bridge_atomic_check(struct drm_bridge *bridge,
 }
 
 static void anx7625_bridge_atomic_enable(struct drm_bridge *bridge,
-					 struct drm_bridge_state *state)
+					 struct drm_atomic_commit *state)
 {
 	struct anx7625_data *ctx = bridge_to_anx7625(bridge);
 	struct device *dev = ctx->dev;
@@ -2389,7 +2568,7 @@ static void anx7625_bridge_atomic_enable(struct drm_bridge *bridge,
 
 	dev_dbg(dev, "drm atomic enable\n");
 
-	connector = drm_atomic_get_new_connector_for_encoder(state->base.state,
+	connector = drm_atomic_get_new_connector_for_encoder(state,
 							     bridge->encoder);
 	if (!connector)
 		return;
@@ -2401,7 +2580,7 @@ static void anx7625_bridge_atomic_enable(struct drm_bridge *bridge,
 
 	anx7625_dp_start(ctx);
 
-	conn_state = drm_atomic_get_new_connector_state(state->base.state, connector);
+	conn_state = drm_atomic_get_new_connector_state(state, connector);
 
 	if (WARN_ON(!conn_state))
 		return;
@@ -2419,7 +2598,7 @@ static void anx7625_bridge_atomic_enable(struct drm_bridge *bridge,
 }
 
 static void anx7625_bridge_atomic_disable(struct drm_bridge *bridge,
-					  struct drm_bridge_state *old)
+					  struct drm_atomic_commit *state)
 {
 	struct anx7625_data *ctx = bridge_to_anx7625(bridge);
 	struct device *dev = ctx->dev;
@@ -2450,7 +2629,7 @@ anx7625_audio_update_connector_status(struct anx7625_data *ctx,
 				      enum drm_connector_status status);
 
 static enum drm_connector_status
-anx7625_bridge_detect(struct drm_bridge *bridge)
+anx7625_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector)
 {
 	struct anx7625_data *ctx = bridge_to_anx7625(bridge);
 	struct device *dev = ctx->dev;
@@ -2474,6 +2653,22 @@ static const struct drm_edid *anx7625_bridge_edid_read(struct drm_bridge *bridge
 	return anx7625_edid_read(ctx);
 }
 
+static void anx7625_bridge_hpd_enable(struct drm_bridge *bridge)
+{
+	struct anx7625_data *ctx = bridge_to_anx7625(bridge);
+	struct device *dev = ctx->dev;
+
+	pm_runtime_get_sync(dev);
+}
+
+static void anx7625_bridge_hpd_disable(struct drm_bridge *bridge)
+{
+	struct anx7625_data *ctx = bridge_to_anx7625(bridge);
+	struct device *dev = ctx->dev;
+
+	pm_runtime_put_sync(dev);
+}
+
 static const struct drm_bridge_funcs anx7625_bridge_funcs = {
 	.attach = anx7625_bridge_attach,
 	.detach = anx7625_bridge_detach,
@@ -2487,6 +2682,8 @@ static const struct drm_bridge_funcs anx7625_bridge_funcs = {
 	.atomic_reset = drm_atomic_helper_bridge_reset,
 	.detect = anx7625_bridge_detect,
 	.edid_read = anx7625_bridge_edid_read,
+	.hpd_enable = anx7625_bridge_hpd_enable,
+	.hpd_disable = anx7625_bridge_hpd_disable,
 };
 
 static int anx7625_register_i2c_dummy_clients(struct anx7625_data *ctx,
@@ -2568,12 +2765,6 @@ static const struct dev_pm_ops anx7625_pm_ops = {
 			   anx7625_runtime_pm_resume, NULL)
 };
 
-static void anx7625_runtime_disable(void *data)
-{
-	pm_runtime_dont_use_autosuspend(data);
-	pm_runtime_disable(data);
-}
-
 static int anx7625_link_bridge(struct drm_dp_aux *aux)
 {
 	struct anx7625_data *platform = container_of(aux, struct anx7625_data, aux);
@@ -2586,16 +2777,15 @@ static int anx7625_link_bridge(struct drm_dp_aux *aux)
 		return ret;
 	}
 
-	platform->bridge.funcs = &anx7625_bridge_funcs;
 	platform->bridge.of_node = dev->of_node;
 	if (!anx7625_of_panel_on_aux_bus(dev))
 		platform->bridge.ops |= DRM_BRIDGE_OP_EDID;
-	if (!platform->pdata.panel_bridge)
-		platform->bridge.ops |= DRM_BRIDGE_OP_HPD |
-					DRM_BRIDGE_OP_DETECT;
+	if (!platform->pdata.panel_bridge || !anx7625_of_panel_on_aux_bus(dev))
+		platform->bridge.ops |= DRM_BRIDGE_OP_HPD | DRM_BRIDGE_OP_DETECT;
 	platform->bridge.type = platform->pdata.panel_bridge ?
 				    DRM_MODE_CONNECTOR_eDP :
 				    DRM_MODE_CONNECTOR_DisplayPort;
+	platform->bridge.support_hdcp = true;
 
 	drm_bridge_add(&platform->bridge);
 
@@ -2621,10 +2811,10 @@ static int anx7625_i2c_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	platform = devm_kzalloc(dev, sizeof(*platform), GFP_KERNEL);
-	if (!platform) {
+	platform = devm_drm_bridge_alloc(dev, struct anx7625_data, bridge, &anx7625_bridge_funcs);
+	if (IS_ERR(platform)) {
 		DRM_DEV_ERROR(dev, "fail to allocate driver data\n");
-		return -ENOMEM;
+		return PTR_ERR(platform);
 	}
 
 	pdata = &platform->pdata;
@@ -2659,7 +2849,8 @@ static int anx7625_i2c_probe(struct i2c_client *client)
 	if (platform->pdata.intp_irq) {
 		INIT_WORK(&platform->work, anx7625_work_func);
 		platform->workqueue = alloc_workqueue("anx7625_work",
-						      WQ_FREEZABLE | WQ_MEM_RECLAIM, 1);
+						      WQ_FREEZABLE | WQ_MEM_RECLAIM | WQ_PERCPU,
+						      1);
 		if (!platform->workqueue) {
 			DRM_DEV_ERROR(dev, "fail to create work queue\n");
 			ret = -ENOMEM;
@@ -2669,7 +2860,7 @@ static int anx7625_i2c_probe(struct i2c_client *client)
 		ret = devm_request_threaded_irq(dev, platform->pdata.intp_irq,
 						NULL, anx7625_intr_hpd_isr,
 						IRQF_TRIGGER_FALLING |
-						IRQF_ONESHOT,
+						IRQF_ONESHOT | IRQF_NO_AUTOEN,
 						"anx7625-intp", platform);
 		if (ret) {
 			DRM_DEV_ERROR(dev, "fail to request irq\n");
@@ -2707,11 +2898,10 @@ static int anx7625_i2c_probe(struct i2c_client *client)
 		goto free_wq;
 	}
 
-	pm_runtime_enable(dev);
 	pm_runtime_set_autosuspend_delay(dev, 1000);
 	pm_runtime_use_autosuspend(dev);
 	pm_suspend_ignore_children(dev, true);
-	ret = devm_add_action_or_reset(dev, anx7625_runtime_disable, dev);
+	ret = devm_pm_runtime_enable(dev);
 	if (ret)
 		goto free_wq;
 
@@ -2733,14 +2923,29 @@ static int anx7625_i2c_probe(struct i2c_client *client)
 	}
 
 	if (!platform->pdata.low_power_mode) {
-		anx7625_disable_pd_protocol(platform);
+		if (!anx7625_need_pd(platform))
+			anx7625_disable_pd_protocol(platform);
+
+		anx7625_configure_hpd(platform);
+
 		pm_runtime_get_sync(dev);
 		_anx7625_hpd_polling(platform, 5000 * 100);
 	}
 
-	/* Add work function */
 	if (platform->pdata.intp_irq)
+		anx7625_reg_write(platform, platform->i2c.rx_p0_client,
+				  INTERFACE_CHANGE_INT_MASK, 0);
+
+	/* After getting runtime handle */
+	ret = anx7625_typec_register(platform);
+	if (ret)
+		goto pm_suspend;
+
+	/* Add work function */
+	if (platform->pdata.intp_irq) {
+		enable_irq(platform->pdata.intp_irq);
 		queue_work(platform->workqueue, &platform->work);
+	}
 
 	if (platform->pdata.audio_en)
 		anx7625_register_audio(dev, platform);
@@ -2748,6 +2953,10 @@ static int anx7625_i2c_probe(struct i2c_client *client)
 	DRM_DEV_DEBUG_DRIVER(dev, "probe done\n");
 
 	return 0;
+
+pm_suspend:
+	if (!platform->pdata.low_power_mode)
+		pm_runtime_put_sync_suspend(&client->dev);
 
 free_wq:
 	if (platform->workqueue)
@@ -2764,6 +2973,8 @@ static void anx7625_i2c_remove(struct i2c_client *client)
 {
 	struct anx7625_data *platform = i2c_get_clientdata(client);
 
+	anx7625_typec_unregister(platform);
+
 	drm_bridge_remove(&platform->bridge);
 
 	if (platform->pdata.intp_irq)
@@ -2771,7 +2982,6 @@ static void anx7625_i2c_remove(struct i2c_client *client)
 
 	if (platform->hdcp_workqueue) {
 		cancel_delayed_work(&platform->hdcp_work);
-		flush_workqueue(platform->hdcp_workqueue);
 		destroy_workqueue(platform->hdcp_workqueue);
 	}
 

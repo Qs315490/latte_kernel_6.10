@@ -589,7 +589,7 @@ static int isofs_fill_super(struct super_block *s, struct fs_context *fc)
 	unsigned int vol_desc_start;
 	int silent = fc->sb_flags & SB_SILENT;
 
-	sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
+	sbi = kzalloc_obj(*sbi);
 	if (!sbi)
 		return -ENOMEM;
 	s->s_fs_info = sbi;
@@ -610,6 +610,11 @@ static int isofs_fill_super(struct super_block *s, struct fs_context *fc)
 		goto out_freesbi;
 	}
 	opt->blocksize = sb_min_blocksize(s, opt->blocksize);
+	if (!opt->blocksize) {
+		printk(KERN_ERR
+		       "ISOFS: unable to set blocksize\n");
+		goto out_freesbi;
+	}
 
 	sbi->s_high_sierra = 0; /* default is iso9660 */
 	sbi->s_session = opt->session;
@@ -813,7 +818,8 @@ root_found:
 	 * entries.  By forcing the blocksize in this way, we ensure
 	 * that we will never be required to do this.
 	 */
-	sb_set_blocksize(s, orig_zonesize);
+	if (!sb_set_blocksize(s, orig_zonesize))
+		goto out_freesbi;
 
 	sbi->s_nls_iocharset = NULL;
 
@@ -939,7 +945,7 @@ root_found:
 	sbi->s_check = opt->check;
 
 	if (table)
-		s->s_d_op = &isofs_dentry_ops[table - 1];
+		set_default_d_op(s, &isofs_dentry_ops[table - 1]);
 
 	/* get the root dentry */
 	s->s_root = d_make_root(inode);
@@ -1256,7 +1262,7 @@ out_noread:
 
 out_toomany:
 	printk(KERN_INFO "%s: More than 100 file sections ?!?, aborting...\n"
-		"isofs_read_level3_size: inode=%lu\n",
+		"isofs_read_level3_size: inode=%llu\n",
 		__func__, inode->i_ino);
 	goto out;
 }
@@ -1275,6 +1281,7 @@ static int isofs_read_inode(struct inode *inode, int relocated)
 	unsigned long offset;
 	struct iso_inode_info *ei = ISOFS_I(inode);
 	int ret = -EIO;
+	struct timespec64 ts;
 
 	block = ei->i_iget5_block;
 	bh = sb_bread(inode->i_sb, block);
@@ -1374,7 +1381,7 @@ static int isofs_read_inode(struct inode *inode, int relocated)
 	/* I have no idea what file_unit_size is used for, so
 	   we will flag it for now */
 	if (de->file_unit_size[0] != 0) {
-		printk(KERN_DEBUG "ISOFS: File unit size != 0 for ISO file (%ld).\n",
+		printk(KERN_DEBUG "ISOFS: File unit size != 0 for ISO file (%llu).\n",
 			inode->i_ino);
 	}
 
@@ -1383,12 +1390,14 @@ static int isofs_read_inode(struct inode *inode, int relocated)
 #ifdef DEBUG
 	if((de->flags[-high_sierra] & ~2)!= 0){
 		printk(KERN_DEBUG "ISOFS: Unusual flag settings for ISO file "
-				"(%ld %x).\n",
+				"(%llu %x).\n",
 			inode->i_ino, de->flags[-high_sierra]);
 	}
 #endif
-	inode_set_mtime_to_ts(inode,
-			      inode_set_atime_to_ts(inode, inode_set_ctime(inode, iso_date(de->date, high_sierra), 0)));
+	ts = iso_date(de->date, high_sierra ? ISO_DATE_HIGH_SIERRA : 0);
+	inode_set_ctime_to_ts(inode, ts);
+	inode_set_atime_to_ts(inode, ts);
+	inode_set_mtime_to_ts(inode, ts);
 
 	ei->i_first_extent = (isonum_733(de->extent) +
 			isonum_711(de->ext_attr_length));
@@ -1437,9 +1446,16 @@ static int isofs_read_inode(struct inode *inode, int relocated)
 		inode->i_op = &page_symlink_inode_operations;
 		inode_nohighmem(inode);
 		inode->i_data.a_ops = &isofs_symlink_aops;
-	} else
+	} else if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode) ||
+		   S_ISFIFO(inode->i_mode) || S_ISSOCK(inode->i_mode)) {
 		/* XXX - parse_rock_ridge_inode() had already set i_rdev. */
 		init_special_inode(inode, inode->i_mode, inode->i_rdev);
+	} else {
+		printk(KERN_DEBUG "ISOFS: Invalid file type 0%04o for inode %llu.\n",
+			inode->i_mode, inode->i_ino);
+		ret = -EIO;
+		goto fail;
+	}
 
 	ret = 0;
 out:
@@ -1505,7 +1521,7 @@ struct inode *__isofs_iget(struct super_block *sb,
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 
-	if (inode->i_state & I_NEW) {
+	if (inode_state_read_once(inode) & I_NEW) {
 		ret = isofs_read_inode(inode, relocated);
 		if (ret < 0) {
 			iget_failed(inode);
@@ -1542,7 +1558,7 @@ static int isofs_init_fs_context(struct fs_context *fc)
 {
 	struct isofs_options *opt;
 
-	opt = kzalloc(sizeof(*opt), GFP_KERNEL);
+	opt = kzalloc_obj(*opt);
 	if (!opt)
 		return -ENOMEM;
 

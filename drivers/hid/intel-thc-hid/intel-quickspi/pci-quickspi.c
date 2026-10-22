@@ -11,8 +11,11 @@
 #include <linux/pci.h>
 #include <linux/pm_runtime.h>
 
+#include <linux/gpio/consumer.h>
+
 #include "intel-thc-dev.h"
 #include "intel-thc-hw.h"
+#include "intel-thc-wot.h"
 
 #include "quickspi-dev.h"
 #include "quickspi-hid.h"
@@ -27,6 +30,14 @@ struct quickspi_driver_data lnl = {
 };
 
 struct quickspi_driver_data ptl = {
+	.max_packet_size_value = MAX_PACKET_SIZE_VALUE_LNL,
+};
+
+struct quickspi_driver_data arl = {
+	.max_packet_size_value = MAX_PACKET_SIZE_VALUE_MTL,
+};
+
+struct quickspi_driver_data nvl = {
 	.max_packet_size_value = MAX_PACKET_SIZE_VALUE_LNL,
 };
 
@@ -45,6 +56,15 @@ static guid_t thc_quickspi_guid =
 static guid_t thc_platform_guid =
 	GUID_INIT(0x84005682, 0x5b71, 0x41a4, 0x8d, 0x66, 0x81, 0x30,
 		  0xf7, 0x87, 0xa1, 0x38);
+
+
+/* QuickSPI Wake-on-Touch GPIO resource */
+static const struct acpi_gpio_params wake_gpio = { 0, 0, true };
+
+static const struct acpi_gpio_mapping quickspi_gpios[] = {
+	{ "wake-on-touch", &wake_gpio, 1 },
+	{ }
+};
 
 /**
  * thc_acpi_get_property - Query device ACPI parameter
@@ -323,7 +343,6 @@ end:
 		if (try_recover(qsdev))
 			qsdev->state = QUICKSPI_DISABLED;
 
-	pm_runtime_mark_last_busy(qsdev->dev);
 	pm_runtime_put_autosuspend(qsdev->dev);
 
 	return IRQ_HANDLED;
@@ -426,7 +445,9 @@ static struct quickspi_device *quickspi_dev_init(struct pci_dev *pdev, void __io
 
 	thc_interrupt_enable(qsdev->thc_hw, true);
 
-	qsdev->state = QUICKSPI_INITED;
+	thc_wot_config(qsdev->thc_hw, &quickspi_gpios[0]);
+
+	qsdev->state = QUICKSPI_INITIATED;
 
 	return qsdev;
 }
@@ -442,6 +463,7 @@ static void quickspi_dev_deinit(struct quickspi_device *qsdev)
 {
 	thc_interrupt_enable(qsdev->thc_hw, false);
 	thc_ltr_unconfig(qsdev->thc_hw);
+	thc_wot_unconfig(qsdev->thc_hw);
 
 	qsdev->state = QUICKSPI_DISABLED;
 }
@@ -575,20 +597,19 @@ static int quickspi_probe(struct pci_dev *pdev,
 
 	pci_set_master(pdev);
 
-	ret = pcim_iomap_regions(pdev, BIT(0), KBUILD_MODNAME);
+	mem_addr = pcim_iomap_region(pdev, 0, KBUILD_MODNAME);
+	ret = PTR_ERR_OR_ZERO(mem_addr);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to get PCI regions, ret = %d.\n", ret);
 		goto disable_pci_device;
 	}
-
-	mem_addr = pcim_iomap_table(pdev)[0];
 
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (ret) {
 		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 		if (ret) {
 			dev_err(&pdev->dev, "No usable DMA configuration %d\n", ret);
-			goto unmap_io_region;
+			goto disable_pci_device;
 		}
 	}
 
@@ -596,7 +617,7 @@ static int quickspi_probe(struct pci_dev *pdev,
 	if (ret < 0) {
 		dev_err(&pdev->dev,
 			"Failed to allocate IRQ vectors. ret = %d\n", ret);
-		goto unmap_io_region;
+		goto disable_pci_device;
 	}
 
 	pdev->irq = pci_irq_vector(pdev, 0);
@@ -605,7 +626,7 @@ static int quickspi_probe(struct pci_dev *pdev,
 	if (IS_ERR(qsdev)) {
 		dev_err(&pdev->dev, "QuickSPI device init failed\n");
 		ret = PTR_ERR(qsdev);
-		goto unmap_io_region;
+		goto disable_pci_device;
 	}
 
 	pci_set_drvdata(pdev, qsdev);
@@ -656,7 +677,6 @@ static int quickspi_probe(struct pci_dev *pdev,
 	/* Enable runtime power management */
 	pm_runtime_use_autosuspend(qsdev->dev);
 	pm_runtime_set_autosuspend_delay(qsdev->dev, DEFAULT_AUTO_SUSPEND_DELAY_MS);
-	pm_runtime_mark_last_busy(qsdev->dev);
 	pm_runtime_put_noidle(qsdev->dev);
 	pm_runtime_put_autosuspend(qsdev->dev);
 
@@ -668,8 +688,6 @@ dma_deinit:
 	quickspi_dma_deinit(qsdev);
 dev_deinit:
 	quickspi_dev_deinit(qsdev);
-unmap_io_region:
-	pcim_iounmap_regions(pdev, BIT(0));
 disable_pci_device:
 	pci_clear_master(pdev);
 
@@ -699,7 +717,6 @@ static void quickspi_remove(struct pci_dev *pdev)
 
 	quickspi_dev_deinit(qsdev);
 
-	pcim_iounmap_regions(pdev, BIT(0));
 	pci_clear_master(pdev);
 }
 
@@ -736,9 +753,11 @@ static int quickspi_suspend(struct device *device)
 	if (!qsdev)
 		return -ENODEV;
 
-	ret = quickspi_set_power(qsdev, HIDSPI_SLEEP);
-	if (ret)
-		return ret;
+	if (!device_may_wakeup(qsdev->dev)) {
+		ret = quickspi_set_power(qsdev, HIDSPI_SLEEP);
+		if (ret)
+			return ret;
+	}
 
 	ret = thc_interrupt_quiesce(qsdev->thc_hw, true);
 	if (ret)
@@ -765,21 +784,72 @@ static int quickspi_resume(struct device *device)
 	if (ret)
 		return ret;
 
+	/*
+	 * A wake-enabled device keeps its power and state across suspend, so
+	 * only restore the THC context. Resetting it here would discard a
+	 * pending wake touch event and break wake-on-touch.
+	 */
+	if (device_may_wakeup(qsdev->dev)) {
+		thc_interrupt_config(qsdev->thc_hw);
+
+		thc_interrupt_enable(qsdev->thc_hw, true);
+
+		ret = thc_dma_configure(qsdev->thc_hw);
+		if (ret)
+			return ret;
+
+		return thc_interrupt_quiesce(qsdev->thc_hw, false);
+	}
+
+	/*
+	 * Otherwise the touch IC may have lost power across suspend. On
+	 * platforms that suspend through s2idle (for example the Surface Pro
+	 * 10, whose firmware exposes s2idle as the only mem_sleep state) the
+	 * IC loses power the same way it does across hibernation. A plain
+	 * HIDSPI_ON is then not acknowledged and the descriptor read fails, so
+	 * re-enumerate the device through the full reset flow already used by
+	 * quickspi_restore().
+	 */
+	thc_spi_input_output_address_config(qsdev->thc_hw,
+					    qsdev->input_report_hdr_addr,
+					    qsdev->input_report_bdy_addr,
+					    qsdev->output_report_addr);
+
+	ret = thc_spi_read_config(qsdev->thc_hw, qsdev->spi_freq_val,
+				  qsdev->spi_read_io_mode,
+				  qsdev->spi_read_opcode,
+				  qsdev->spi_packet_size);
+	if (ret)
+		return ret;
+
+	ret = thc_spi_write_config(qsdev->thc_hw, qsdev->spi_freq_val,
+				   qsdev->spi_write_io_mode,
+				   qsdev->spi_write_opcode,
+				   qsdev->spi_packet_size,
+				   qsdev->performance_limit);
+	if (ret)
+		return ret;
+
 	thc_interrupt_config(qsdev->thc_hw);
 
 	thc_interrupt_enable(qsdev->thc_hw, true);
+
+	/* The touch IC may have lost power, reset it to recover */
+	ret = reset_tic(qsdev);
+	if (ret)
+		return ret;
 
 	ret = thc_dma_configure(qsdev->thc_hw);
 	if (ret)
 		return ret;
 
-	ret = thc_interrupt_quiesce(qsdev->thc_hw, false);
-	if (ret)
-		return ret;
+	thc_ltr_config(qsdev->thc_hw,
+		       qsdev->active_ltr_val,
+		       qsdev->low_power_ltr_val);
 
-	ret = quickspi_set_power(qsdev, HIDSPI_ON);
-	if (ret)
-		return ret;
+	thc_change_ltr_mode(qsdev->thc_hw, THC_LTR_MODE_ACTIVE);
+
+	qsdev->state = QUICKSPI_ENABLED;
 
 	return 0;
 }
@@ -837,6 +907,9 @@ static int quickspi_poweroff(struct device *device)
 	qsdev = pci_get_drvdata(pdev);
 	if (!qsdev)
 		return -ENODEV;
+
+	/* Ignore the return value as platform will be poweroff soon */
+	quickspi_set_power(qsdev, HIDSPI_OFF);
 
 	ret = thc_interrupt_quiesce(qsdev->thc_hw, true);
 	if (ret)
@@ -965,6 +1038,12 @@ static const struct pci_device_id quickspi_pci_tbl[] = {
 	{PCI_DEVICE_DATA(INTEL, THC_PTL_H_DEVICE_ID_SPI_PORT2, &ptl), },
 	{PCI_DEVICE_DATA(INTEL, THC_PTL_U_DEVICE_ID_SPI_PORT1, &ptl), },
 	{PCI_DEVICE_DATA(INTEL, THC_PTL_U_DEVICE_ID_SPI_PORT2, &ptl), },
+	{PCI_DEVICE_DATA(INTEL, THC_WCL_DEVICE_ID_SPI_PORT1, &ptl), },
+	{PCI_DEVICE_DATA(INTEL, THC_WCL_DEVICE_ID_SPI_PORT2, &ptl), },
+	{PCI_DEVICE_DATA(INTEL, THC_ARL_DEVICE_ID_SPI_PORT1, &arl), },
+	{PCI_DEVICE_DATA(INTEL, THC_ARL_DEVICE_ID_SPI_PORT2, &arl), },
+	{PCI_DEVICE_DATA(INTEL, THC_NVL_H_DEVICE_ID_SPI_PORT1, &nvl), },
+	{PCI_DEVICE_DATA(INTEL, THC_NVL_H_DEVICE_ID_SPI_PORT2, &nvl), },
 	{}
 };
 MODULE_DEVICE_TABLE(pci, quickspi_pci_tbl);

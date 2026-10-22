@@ -44,7 +44,6 @@
 
 #define SMU13_TOOL_SIZE			0x19000
 
-#define MAX_DPM_LEVELS 16
 #define MAX_PCIE_CONF 3
 
 #define CTF_OFFSET_EDGE			5
@@ -52,6 +51,11 @@
 #define CTF_OFFSET_MEM			5
 
 #define SMU_13_VCLK_SHIFT		16
+
+#define SMUQ10_TO_UINT(x) ((x) >> 10)
+#define SMUQ10_FRAC(x) ((x) & 0x3ff)
+#define SMUQ10_ROUND(x) ((SMUQ10_TO_UINT(x)) + ((SMUQ10_FRAC(x)) >= 0x200))
+#define SMU_V13_SOFT_FREQ_ROUND(x)	((x) + 1)
 
 extern const int pmfw_decoded_link_speed[5];
 extern const int pmfw_decoded_link_width[7];
@@ -68,39 +72,19 @@ struct smu_13_0_max_sustainable_clocks {
 	uint32_t soc_clock;
 };
 
-struct smu_13_0_dpm_clk_level {
-	bool				enabled;
-	uint32_t			value;
-};
-
-struct smu_13_0_dpm_table {
-	uint32_t			min;        /* MHz */
-	uint32_t			max;        /* MHz */
-	uint32_t			count;
-	bool				is_fine_grained;
-	struct smu_13_0_dpm_clk_level	dpm_levels[MAX_DPM_LEVELS];
-};
-
-struct smu_13_0_pcie_table {
-	uint8_t  pcie_gen[MAX_PCIE_CONF];
-	uint8_t  pcie_lane[MAX_PCIE_CONF];
-	uint16_t clk_freq[MAX_PCIE_CONF];
-	uint32_t num_of_link_levels;
-};
-
 struct smu_13_0_dpm_tables {
-	struct smu_13_0_dpm_table        soc_table;
-	struct smu_13_0_dpm_table        gfx_table;
-	struct smu_13_0_dpm_table        uclk_table;
-	struct smu_13_0_dpm_table        eclk_table;
-	struct smu_13_0_dpm_table        vclk_table;
-	struct smu_13_0_dpm_table        dclk_table;
-	struct smu_13_0_dpm_table        dcef_table;
-	struct smu_13_0_dpm_table        pixel_table;
-	struct smu_13_0_dpm_table        display_table;
-	struct smu_13_0_dpm_table        phy_table;
-	struct smu_13_0_dpm_table        fclk_table;
-	struct smu_13_0_pcie_table       pcie_table;
+	struct smu_dpm_table        soc_table;
+	struct smu_dpm_table        gfx_table;
+	struct smu_dpm_table        uclk_table;
+	struct smu_dpm_table        eclk_table;
+	struct smu_dpm_table        vclk_table;
+	struct smu_dpm_table        dclk_table;
+	struct smu_dpm_table        dcef_table;
+	struct smu_dpm_table        pixel_table;
+	struct smu_dpm_table        display_table;
+	struct smu_dpm_table        phy_table;
+	struct smu_dpm_table        fclk_table;
+	struct smu_pcie_table        pcie_table;
 };
 
 struct smu_13_0_dpm_context {
@@ -108,6 +92,7 @@ struct smu_13_0_dpm_context {
 	uint32_t                    workload_policy_mask;
 	uint32_t                    dcef_min_ds_clk;
 	uint64_t                    caps;
+	uint32_t                    board_volt;
 };
 
 enum smu_13_0_power_state {
@@ -147,8 +132,6 @@ int smu_v13_0_setup_pptable(struct smu_context *smu);
 
 int smu_v13_0_get_vbios_bootup_values(struct smu_context *smu);
 
-int smu_v13_0_check_fw_version(struct smu_context *smu);
-
 int smu_v13_0_set_driver_table_location(struct smu_context *smu);
 
 int smu_v13_0_set_tool_table_location(struct smu_context *smu);
@@ -157,8 +140,6 @@ int smu_v13_0_notify_memory_pool_location(struct smu_context *smu);
 
 int smu_v13_0_system_features_control(struct smu_context *smu,
 				      bool en);
-
-int smu_v13_0_init_display_count(struct smu_context *smu, uint32_t count);
 
 int smu_v13_0_set_allowed_mask(struct smu_context *smu);
 
@@ -178,13 +159,6 @@ int smu_v13_0_enable_thermal_alert(struct smu_context *smu);
 int smu_v13_0_disable_thermal_alert(struct smu_context *smu);
 
 int smu_v13_0_get_gfx_vdd(struct smu_context *smu, uint32_t *value);
-
-int smu_v13_0_set_min_deep_sleep_dcefclk(struct smu_context *smu, uint32_t clk);
-
-int
-smu_v13_0_display_clock_voltage_request(struct smu_context *smu,
-					struct pp_display_clock_request
-					*clock_req);
 
 uint32_t
 smu_v13_0_get_fan_control_mode(struct smu_context *smu);
@@ -222,11 +196,6 @@ int smu_v13_0_get_dpm_ultimate_freq(struct smu_context *smu, enum smu_clk_type c
 int smu_v13_0_set_soft_freq_limited_range(struct smu_context *smu, enum smu_clk_type clk_type,
 					  uint32_t min, uint32_t max, bool automatic);
 
-int smu_v13_0_set_hard_freq_limited_range(struct smu_context *smu,
-					  enum smu_clk_type clk_type,
-					  uint32_t min,
-					  uint32_t max);
-
 int smu_v13_0_set_performance_level(struct smu_context *smu,
 				    enum amd_dpm_forced_level level);
 
@@ -235,7 +204,7 @@ int smu_v13_0_set_power_source(struct smu_context *smu,
 
 int smu_v13_0_set_single_dpm_table(struct smu_context *smu,
 				   enum smu_clk_type clk_type,
-				   struct smu_13_0_dpm_table *single_dpm_table);
+				   struct smu_dpm_table *single_dpm_table);
 
 int smu_v13_0_get_dpm_freq_by_index(struct smu_context *smu,
 				    enum smu_clk_type clk_type, uint16_t level,
@@ -281,7 +250,8 @@ int smu_v13_0_od_edit_dpm_table(struct smu_context *smu,
 
 int smu_v13_0_set_default_dpm_tables(struct smu_context *smu);
 
-void smu_v13_0_set_smu_mailbox_registers(struct smu_context *smu);
+void smu_v13_0_init_msg_ctl(struct smu_context *smu,
+			    const struct cmn2asic_msg_mapping *message_map);
 
 int smu_v13_0_mode1_reset(struct smu_context *smu);
 
@@ -306,5 +276,6 @@ int smu_v13_0_get_boot_freq_by_index(struct smu_context *smu,
 				     uint32_t *value);
 
 void smu_v13_0_interrupt_work(struct smu_context *smu);
+void smu_v13_0_reset_custom_level(struct smu_context *smu);
 #endif
 #endif

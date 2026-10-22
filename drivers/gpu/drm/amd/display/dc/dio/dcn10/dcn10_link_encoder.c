@@ -88,7 +88,10 @@ static const struct link_encoder_funcs dcn10_lnk_enc_funcs = {
 	.get_dig_mode = dcn10_get_dig_mode,
 	.destroy = dcn10_link_encoder_destroy,
 	.get_max_link_cap = dcn10_link_encoder_get_max_link_cap,
+	.get_hpd_state = dcn10_get_hpd_state,
+	.program_hpd_filter = dcn10_program_hpd_filter,
 };
+
 
 static enum bp_result link_transmitter_control(
 	struct dcn10_link_encoder *enc10,
@@ -447,7 +450,7 @@ static uint8_t get_frontend_source(
 unsigned int dcn10_get_dig_frontend(struct link_encoder *enc)
 {
 	struct dcn10_link_encoder *enc10 = TO_DCN10_LINK_ENC(enc);
-	int32_t value;
+	uint32_t value;
 	enum engine_id result;
 
 	REG_GET(DIG_BE_CNTL, DIG_FE_SOURCE_SELECT, &value);
@@ -619,10 +622,11 @@ static bool dcn10_link_encoder_validate_hdmi_output(
 {
 	enum dc_color_depth max_deep_color =
 			enc10->base.features.max_hdmi_deep_color;
+	uint32_t pix_clk_100hz = (uint32_t)adjusted_pix_clk_100hz;
 
 	// check pixel clock against edid specified max TMDS clk
 	if (edid_caps->max_tmds_clk_mhz != 0 &&
-			adjusted_pix_clk_100hz > edid_caps->max_tmds_clk_mhz * 10000)
+			pix_clk_100hz > edid_caps->max_tmds_clk_mhz * 10000)
 		return false;
 
 	if (max_deep_color < crtc_timing->display_color_depth)
@@ -630,11 +634,11 @@ static bool dcn10_link_encoder_validate_hdmi_output(
 
 	if (crtc_timing->display_color_depth < COLOR_DEPTH_888)
 		return false;
-	if (adjusted_pix_clk_100hz < (TMDS_MIN_PIXEL_CLOCK * 10))
+	if (pix_clk_100hz < (TMDS_MIN_PIXEL_CLOCK * 10))
 		return false;
 
-	if ((adjusted_pix_clk_100hz == 0) ||
-		(adjusted_pix_clk_100hz > (enc10->base.features.max_hdmi_pixel_clock * 10)))
+	if ((pix_clk_100hz == 0) ||
+		(pix_clk_100hz > (enc10->base.features.max_hdmi_pixel_clock * 10)))
 		return false;
 
 	/* DCE11 HW does not support 420 */
@@ -644,7 +648,7 @@ static bool dcn10_link_encoder_validate_hdmi_output(
 
 	if ((!enc10->base.features.flags.bits.HDMI_6GB_EN ||
 			enc10->base.ctx->dc->debug.hdmi20_disable) &&
-			adjusted_pix_clk_100hz >= 3000000)
+			pix_clk_100hz >= 3000000)
 		return false;
 	if (enc10->base.ctx->dc->debug.hdmi20_disable &&
 		crtc_timing->pixel_encoding == PIXEL_ENCODING_YCBCR420)
@@ -682,6 +686,7 @@ void dcn10_link_encoder_construct(
 	enc10->base.ctx = init_data->ctx;
 	enc10->base.id = init_data->encoder;
 
+	enc10->base.hpd_gpio = init_data->hpd_gpio;
 	enc10->base.hpd_source = init_data->hpd_source;
 	enc10->base.connector = init_data->connector;
 
@@ -812,7 +817,7 @@ bool dcn10_link_encoder_validate_output_with_stream(
 					enc10, &stream->timing);
 	break;
 	case SIGNAL_TYPE_EDP:
-		is_valid = (stream->timing.pixel_encoding == PIXEL_ENCODING_RGB) ? true : false;
+		is_valid = stream->timing.pixel_encoding == PIXEL_ENCODING_RGB;
 	break;
 	case SIGNAL_TYPE_VIRTUAL:
 		is_valid = true;
@@ -873,6 +878,11 @@ void dcn10_link_encoder_hw_init(
 
 void dcn10_link_encoder_destroy(struct link_encoder **enc)
 {
+	if ((*enc)->hpd_gpio) {
+		dal_gpio_destroy_irq(&(*enc)->hpd_gpio);
+		(*enc)->hpd_gpio = NULL;
+	}
+
 	kfree(TO_DCN10_LINK_ENC(*enc));
 	*enc = NULL;
 }
@@ -1056,7 +1066,8 @@ void dcn10_link_encoder_disable_output(
 	struct bp_transmitter_control cntl = { 0 };
 	enum bp_result result;
 
-	if (enc->funcs->is_dig_enabled && !enc->funcs->is_dig_enabled(enc)) {
+	if (!dc_is_hdmi_frl_signal(signal) &&
+	    (enc->funcs->is_dig_enabled && !enc->funcs->is_dig_enabled(enc))) {
 		/* OF_SKIP_POWER_DOWN_INACTIVE_ENCODER */
 	/*in DP_Alt_No_Connect case, we turn off the dig already,
 	after excuation the PHY w/a sequence, not allow touch PHY any more*/
@@ -1471,4 +1482,38 @@ void dcn10_link_encoder_get_max_link_cap(struct link_encoder *enc,
 		max_link_cap.link_rate = LINK_RATE_UHBR20;
 
 	*link_settings = max_link_cap;
+}
+
+bool dcn10_get_hpd_state(struct link_encoder *enc)
+{
+	uint32_t state = 0;
+
+	if (!enc->hpd_gpio)
+		return false;
+
+	dal_gpio_lock_pin(enc->hpd_gpio);
+	dal_gpio_get_value(enc->hpd_gpio, &state);
+	dal_gpio_unlock_pin(enc->hpd_gpio);
+
+	return state;
+}
+
+bool dcn10_program_hpd_filter(struct link_encoder *enc, int delay_on_connect_in_ms, int delay_on_disconnect_in_ms)
+{
+	/* Setup HPD filtering */
+	if (enc->hpd_gpio && dal_gpio_lock_pin(enc->hpd_gpio) == GPIO_RESULT_OK) {
+		struct gpio_hpd_config config;
+
+		config.delay_on_connect = delay_on_connect_in_ms;
+		config.delay_on_disconnect = delay_on_disconnect_in_ms;
+
+		dal_irq_setup_hpd_filter(enc->hpd_gpio, &config);
+
+		dal_gpio_unlock_pin(enc->hpd_gpio);
+
+		return true;
+	} else {
+		ASSERT(0);
+		return false;
+	}
 }

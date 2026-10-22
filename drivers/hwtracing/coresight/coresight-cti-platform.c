@@ -325,10 +325,11 @@ static int cti_plat_process_filter_sigs(struct cti_drvdata *drvdata,
 	if (nr_filter_sigs > drvdata->config.nr_trig_max)
 		return -EINVAL;
 
-	tg = kzalloc(sizeof(*tg), GFP_KERNEL);
+	tg = kzalloc_obj(*tg);
 	if (!tg)
 		return -ENOMEM;
 
+	tg->nr_sigs = nr_filter_sigs;
 	err = cti_plat_read_trig_group(tg, fwnode, CTI_DT_FILTER_OUT_SIGS);
 	if (!err)
 		drvdata->config.trig_out_filter |= tg->used_mask;

@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
    BlueZ - Bluetooth protocol stack for Linux
 
    Copyright (C) 2015  Intel Corporation
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License version 2 as
-   published by the Free Software Foundation;
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -217,47 +214,47 @@ int mgmt_cmd_complete(struct sock *sk, u16 index, u16 cmd, u8 status,
 struct mgmt_pending_cmd *mgmt_pending_find(unsigned short channel, u16 opcode,
 					   struct hci_dev *hdev)
 {
-	struct mgmt_pending_cmd *cmd;
+	struct mgmt_pending_cmd *cmd, *tmp;
 
-	list_for_each_entry(cmd, &hdev->mgmt_pending, list) {
+	mutex_lock(&hdev->mgmt_pending_lock);
+
+	list_for_each_entry_safe(cmd, tmp, &hdev->mgmt_pending, list) {
 		if (hci_sock_get_channel(cmd->sk) != channel)
 			continue;
-		if (cmd->opcode == opcode)
+
+		if (cmd->opcode == opcode) {
+			mutex_unlock(&hdev->mgmt_pending_lock);
 			return cmd;
+		}
 	}
+
+	mutex_unlock(&hdev->mgmt_pending_lock);
 
 	return NULL;
 }
 
-struct mgmt_pending_cmd *mgmt_pending_find_data(unsigned short channel,
-						u16 opcode,
-						struct hci_dev *hdev,
-						const void *data)
-{
-	struct mgmt_pending_cmd *cmd;
-
-	list_for_each_entry(cmd, &hdev->mgmt_pending, list) {
-		if (cmd->user_data != data)
-			continue;
-		if (cmd->opcode == opcode)
-			return cmd;
-	}
-
-	return NULL;
-}
-
-void mgmt_pending_foreach(u16 opcode, struct hci_dev *hdev,
+void mgmt_pending_foreach(u16 opcode, struct hci_dev *hdev, bool remove,
 			  void (*cb)(struct mgmt_pending_cmd *cmd, void *data),
 			  void *data)
 {
 	struct mgmt_pending_cmd *cmd, *tmp;
 
+	mutex_lock(&hdev->mgmt_pending_lock);
+
 	list_for_each_entry_safe(cmd, tmp, &hdev->mgmt_pending, list) {
 		if (opcode > 0 && cmd->opcode != opcode)
 			continue;
 
+		if (remove)
+			list_del(&cmd->list);
+
 		cb(cmd, data);
+
+		if (remove)
+			mgmt_pending_free(cmd);
 	}
+
+	mutex_unlock(&hdev->mgmt_pending_lock);
 }
 
 struct mgmt_pending_cmd *mgmt_pending_new(struct sock *sk, u16 opcode,
@@ -266,12 +263,12 @@ struct mgmt_pending_cmd *mgmt_pending_new(struct sock *sk, u16 opcode,
 {
 	struct mgmt_pending_cmd *cmd;
 
-	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	cmd = kzalloc_obj(*cmd);
 	if (!cmd)
 		return NULL;
 
 	cmd->opcode = opcode;
-	cmd->index = hdev->id;
+	cmd->hdev = hdev;
 
 	cmd->param = kmemdup(data, len, GFP_KERNEL);
 	if (!cmd->param) {
@@ -297,7 +294,9 @@ struct mgmt_pending_cmd *mgmt_pending_add(struct sock *sk, u16 opcode,
 	if (!cmd)
 		return NULL;
 
+	mutex_lock(&hdev->mgmt_pending_lock);
 	list_add_tail(&cmd->list, &hdev->mgmt_pending);
+	mutex_unlock(&hdev->mgmt_pending_lock);
 
 	return cmd;
 }
@@ -311,8 +310,57 @@ void mgmt_pending_free(struct mgmt_pending_cmd *cmd)
 
 void mgmt_pending_remove(struct mgmt_pending_cmd *cmd)
 {
+	mutex_lock(&cmd->hdev->mgmt_pending_lock);
 	list_del(&cmd->list);
+	mutex_unlock(&cmd->hdev->mgmt_pending_lock);
+
 	mgmt_pending_free(cmd);
+}
+
+bool __mgmt_pending_listed(struct hci_dev *hdev, struct mgmt_pending_cmd *cmd)
+{
+	struct mgmt_pending_cmd *tmp;
+
+	lockdep_assert_held(&hdev->mgmt_pending_lock);
+
+	if (!cmd)
+		return false;
+
+	list_for_each_entry(tmp, &hdev->mgmt_pending, list) {
+		if (cmd == tmp)
+			return true;
+	}
+
+	return false;
+}
+
+bool mgmt_pending_listed(struct hci_dev *hdev, struct mgmt_pending_cmd *cmd)
+{
+	bool listed;
+
+	mutex_lock(&hdev->mgmt_pending_lock);
+	listed = __mgmt_pending_listed(hdev, cmd);
+	mutex_unlock(&hdev->mgmt_pending_lock);
+
+	return listed;
+}
+
+bool mgmt_pending_valid(struct hci_dev *hdev, struct mgmt_pending_cmd *cmd)
+{
+	bool listed;
+
+	if (!cmd)
+		return false;
+
+	mutex_lock(&hdev->mgmt_pending_lock);
+
+	listed = __mgmt_pending_listed(hdev, cmd);
+	if (listed)
+		list_del(&cmd->list);
+
+	mutex_unlock(&hdev->mgmt_pending_lock);
+
+	return listed;
 }
 
 void mgmt_mesh_foreach(struct hci_dev *hdev,
@@ -321,7 +369,7 @@ void mgmt_mesh_foreach(struct hci_dev *hdev,
 {
 	struct mgmt_mesh_tx *mesh_tx, *tmp;
 
-	list_for_each_entry_safe(mesh_tx, tmp, &hdev->mgmt_pending, list) {
+	list_for_each_entry_safe(mesh_tx, tmp, &hdev->mesh_pending, list) {
 		if (!sk || mesh_tx->sk == sk)
 			cb(mesh_tx, data);
 	}
@@ -362,7 +410,7 @@ struct mgmt_mesh_tx *mgmt_mesh_add(struct sock *sk, struct hci_dev *hdev,
 {
 	struct mgmt_mesh_tx *mesh_tx;
 
-	mesh_tx = kzalloc(sizeof(*mesh_tx), GFP_KERNEL);
+	mesh_tx = kzalloc_obj(*mesh_tx);
 	if (!mesh_tx)
 		return NULL;
 

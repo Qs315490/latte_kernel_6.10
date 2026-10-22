@@ -929,7 +929,7 @@ static int falcon_mtd_probe(struct ef4_nic *efx)
 	ASSERT_RTNL();
 
 	/* Allocate space for maximum number of partitions */
-	parts = kcalloc(2, sizeof(*parts), GFP_KERNEL);
+	parts = kzalloc_objs(*parts, 2);
 	if (!parts)
 		return -ENOMEM;
 	n_parts = 0;
@@ -1453,8 +1453,8 @@ static void falcon_stats_complete(struct ef4_nic *efx)
 
 static void falcon_stats_timer_func(struct timer_list *t)
 {
-	struct falcon_nic_data *nic_data = from_timer(nic_data, t,
-						      stats_timer);
+	struct falcon_nic_data *nic_data = timer_container_of(nic_data, t,
+							      stats_timer);
 	struct ef4_nic *efx = nic_data->efx;
 
 	spin_lock(&efx->stats_lock);
@@ -2180,7 +2180,7 @@ static int falcon_probe_nvconfig(struct ef4_nic *efx)
 	struct falcon_nvconfig *nvconfig;
 	int rc;
 
-	nvconfig = kmalloc(sizeof(*nvconfig), GFP_KERNEL);
+	nvconfig = kmalloc_obj(*nvconfig);
 	if (!nvconfig)
 		return -ENOMEM;
 
@@ -2289,7 +2289,7 @@ static int falcon_probe_nic(struct ef4_nic *efx)
 	efx->primary = efx; /* only one usable function per controller */
 
 	/* Allocate storage for hardware specific data */
-	nic_data = kzalloc(sizeof(*nic_data), GFP_KERNEL);
+	nic_data = kzalloc_obj(*nic_data);
 	if (!nic_data)
 		return -ENOMEM;
 	efx->nic_data = nic_data;
@@ -2657,7 +2657,7 @@ void falcon_stop_nic_stats(struct ef4_nic *efx)
 	++nic_data->stats_disable_count;
 	spin_unlock_bh(&efx->stats_lock);
 
-	del_timer_sync(&nic_data->stats_timer);
+	timer_delete_sync(&nic_data->stats_timer);
 
 	/* Wait enough time for the most recent transfer to
 	 * complete. */

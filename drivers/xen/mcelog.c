@@ -54,8 +54,8 @@
 #include <asm/xen/hypervisor.h>
 
 static struct mc_info g_mi;
-static struct mcinfo_logical_cpu *g_physinfo;
-static uint32_t ncpus;
+static struct mcinfo_logical_cpu *g_physinfo __ro_after_init;
+static uint32_t ncpus __ro_after_init;
 
 static DEFINE_MUTEX(mcelog_lock);
 
@@ -165,9 +165,7 @@ static long xen_mce_chrdev_ioctl(struct file *f, unsigned int cmd,
 	case MCE_GETCLEAR_FLAGS: {
 		unsigned flags;
 
-		do {
-			flags = xen_mcelog.flags;
-		} while (cmpxchg(&xen_mcelog.flags, flags, 0) != flags);
+		flags = xchg(&xen_mcelog.flags, 0);
 
 		return put_user(flags, p);
 	}
@@ -184,7 +182,7 @@ static const struct file_operations xen_mce_chrdev_ops = {
 	.unlocked_ioctl		= xen_mce_chrdev_ioctl,
 };
 
-static struct miscdevice xen_mce_chrdev_device = {
+static struct miscdevice xen_mce_chrdev_device __ro_after_init = {
 	MISC_MCELOG_MINOR,
 	"mcelog",
 	&xen_mce_chrdev_ops,
@@ -375,8 +373,7 @@ static int bind_virq_for_mce(void)
 
 	/* Fetch each CPU Physical Info for later reference*/
 	ncpus = mc_op.u.mc_physcpuinfo.ncpus;
-	g_physinfo = kcalloc(ncpus, sizeof(struct mcinfo_logical_cpu),
-			     GFP_KERNEL);
+	g_physinfo = kzalloc_objs(struct mcinfo_logical_cpu, ncpus);
 	if (!g_physinfo)
 		return -ENOMEM;
 	set_xen_guest_handle(mc_op.u.mc_physcpuinfo.info, g_physinfo);

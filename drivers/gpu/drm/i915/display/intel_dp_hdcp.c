@@ -11,9 +11,9 @@
 #include <drm/display/drm_hdcp_helper.h>
 #include <drm/drm_print.h>
 
-#include "i915_reg.h"
 #include "intel_ddi.h"
 #include "intel_de.h"
+#include "intel_display_regs.h"
 #include "intel_display_types.h"
 #include "intel_dp.h"
 #include "intel_dp_hdcp.h"
@@ -705,10 +705,10 @@ int intel_dp_hdcp_get_remote_capability(struct intel_connector *connector,
 
 	*hdcp_capable = false;
 	*hdcp2_capable = false;
-	if (!connector->mst_port)
+	if (!connector->mst.dp)
 		return -EINVAL;
 
-	aux = &connector->port->aux;
+	aux = &connector->mst.port->aux;
 	ret =  _intel_dp_hdcp2_get_capability(aux, hdcp2_capable);
 	if (ret)
 		drm_dbg_kms(display->drm,
@@ -782,9 +782,9 @@ intel_dp_mst_hdcp_stream_encryption(struct intel_connector *connector,
 		return -EINVAL;
 
 	/* Wait for encryption confirmation */
-	if (intel_de_wait(display, HDCP_STATUS(display, cpu_transcoder, port),
-			  stream_enc_status, enable ? stream_enc_status : 0,
-			  HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS)) {
+	if (intel_de_wait_ms(display, HDCP_STATUS(display, cpu_transcoder, port),
+			     stream_enc_status, enable ? stream_enc_status : 0,
+			     HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS, NULL)) {
 		drm_err(display->drm, "Timed out waiting for transcoder: %s stream encryption %s\n",
 			transcoder_name(cpu_transcoder), str_enabled_disabled(enable));
 		return -ETIMEDOUT;
@@ -799,29 +799,43 @@ intel_dp_mst_hdcp2_stream_encryption(struct intel_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct intel_hdcp *hdcp = &connector->hdcp;
 	enum transcoder cpu_transcoder = hdcp->stream_transcoder;
 	enum pipe pipe = (enum pipe)cpu_transcoder;
 	enum port port = dig_port->base.port;
 	int ret;
+	u32 val;
+	u8 stream_type;
 
-	drm_WARN_ON(display->drm, enable &&
-		    !!(intel_de_read(display, HDCP2_AUTH_STREAM(display, cpu_transcoder, port))
-		    & AUTH_STREAM_TYPE) != data->streams[0].stream_type);
+	if (DISPLAY_VER(display) < 30) {
+		val = intel_de_read(display,
+				    HDCP2_AUTH_STREAM(display, cpu_transcoder, port));
+		stream_type = REG_FIELD_GET(AUTH_STREAM_TYPE_MASK, val);
+		drm_WARN_ON(display->drm, enable &&
+			    stream_type != data->streams[0].stream_type);
+	}
 
 	ret = intel_dp_mst_toggle_hdcp_stream_select(connector, enable);
 	if (ret)
 		return ret;
 
 	/* Wait for encryption confirmation */
-	if (intel_de_wait(display, HDCP2_STREAM_STATUS(display, cpu_transcoder, pipe),
-			  STREAM_ENCRYPTION_STATUS,
-			  enable ? STREAM_ENCRYPTION_STATUS : 0,
-			  HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS)) {
+	if (intel_de_wait_ms(display, HDCP2_STREAM_STATUS(display, cpu_transcoder, pipe),
+			     STREAM_ENCRYPTION_STATUS,
+			     enable ? STREAM_ENCRYPTION_STATUS : 0,
+			     HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS, NULL)) {
 		drm_err(display->drm, "Timed out waiting for transcoder: %s stream encryption %s\n",
 			transcoder_name(cpu_transcoder), str_enabled_disabled(enable));
 		return -ETIMEDOUT;
+	}
+
+	if (DISPLAY_VER(display) >= 30) {
+		val = intel_de_read(display,
+				    HDCP2_STREAM_STATUS(display, cpu_transcoder, port));
+		stream_type = REG_FIELD_GET(STREAM_TYPE_STATUS_MASK, val);
+		drm_WARN_ON(display->drm, enable &&
+			    stream_type != data->streams[0].stream_type);
 	}
 
 	return 0;
@@ -883,7 +897,7 @@ int intel_dp_hdcp_init(struct intel_digital_port *dig_port,
 	if (!is_hdcp_supported(display, port))
 		return 0;
 
-	if (intel_connector->mst_port)
+	if (intel_connector->mst.dp)
 		return intel_hdcp_init(intel_connector, dig_port,
 				       &intel_dp_mst_hdcp_shim);
 	else if (!intel_dp_is_edp(intel_dp))

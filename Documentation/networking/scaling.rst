@@ -38,24 +38,35 @@ that is not the focus of these techniques.
 The filter used in RSS is typically a hash function over the network
 and/or transport layer headers-- for example, a 4-tuple hash over
 IP addresses and TCP ports of a packet. The most common hardware
-implementation of RSS uses a 128-entry indirection table where each entry
+implementation of RSS uses an indirection table where each entry
 stores a queue number. The receive queue for a packet is determined
-by masking out the low order seven bits of the computed hash for the
-packet (usually a Toeplitz hash), taking this number as a key into the
-indirection table and reading the corresponding value.
+by indexing the indirection table with the low order bits of the
+computed hash for the packet (usually a Toeplitz hash).
+
+The indirection table helps even out the traffic distribution when queue
+count is not a power of two. NICs should provide an indirection table
+at least 4 times larger than the queue count. 4x table results in ~16%
+imbalance between the queues, which is acceptable for most applications.
 
 Some NICs support symmetric RSS hashing where, if the IP (source address,
 destination address) and TCP/UDP (source port, destination port) tuples
 are swapped, the computed hash is the same. This is beneficial in some
 applications that monitor TCP/IP flows (IDS, firewalls, ...etc) and need
 both directions of the flow to land on the same Rx queue (and CPU). The
-"Symmetric-XOR" is a type of RSS algorithms that achieves this hash
-symmetry by XORing the input source and destination fields of the IP
-and/or L4 protocols. This, however, results in reduced input entropy and
-could potentially be exploited. Specifically, the algorithm XORs the input
+"Symmetric-XOR" and "Symmetric-OR-XOR" are types of RSS algorithms that
+achieve this hash symmetry by XOR/ORing the input source and destination
+fields of the IP and/or L4 protocols. This, however, results in reduced
+input entropy and could potentially be exploited.
+
+Specifically, the "Symmetric-XOR" algorithm XORs the input
 as follows::
 
     # (SRC_IP ^ DST_IP, SRC_IP ^ DST_IP, SRC_PORT ^ DST_PORT, SRC_PORT ^ DST_PORT)
+
+The "Symmetric-OR-XOR" algorithm, on the other hand, transforms the input as
+follows::
+
+    # (SRC_IP | DST_IP, SRC_IP ^ DST_IP, SRC_PORT | DST_PORT, SRC_PORT ^ DST_PORT)
 
 The result is then fed to the underlying RSS algorithm.
 
@@ -392,16 +403,21 @@ Both of these need to be set before RFS is enabled for a receive queue.
 Values for both are rounded up to the nearest power of two. The
 suggested flow count depends on the expected number of active connections
 at any given time, which may be significantly less than the number of open
-connections. We have found that a value of 32768 for rps_sock_flow_entries
-works fairly well on a moderately loaded server.
+connections. We have found that a value of 65536 for rps_sock_flow_entries
+works fairly well on a moderately loaded server. Big servers might
+need 1048576 or even higher values.
+
+On a NUMA host it is advisable to spread rps_sock_flow_entries on all nodes.
+
+numactl --interleave=all bash -c "echo 1048576 >/proc/sys/net/core/rps_sock_flow_entries"
 
 For a single queue device, the rps_flow_cnt value for the single queue
 would normally be configured to the same value as rps_sock_flow_entries.
 For a multi-queue device, the rps_flow_cnt for each queue might be
 configured as rps_sock_flow_entries / N, where N is the number of
-queues. So for instance, if rps_sock_flow_entries is set to 32768 and there
+queues. So for instance, if rps_sock_flow_entries is set to 131072 and there
 are 16 configured receive queues, rps_flow_cnt for each queue might be
-configured as 2048.
+configured as 8192.
 
 
 Accelerated RFS
@@ -427,8 +443,10 @@ rps_dev_flow_table. The stack consults a CPU to hardware queue map which
 is maintained by the NIC driver. This is an auto-generated reverse map of
 the IRQ affinity table shown by /proc/interrupts. Drivers can use
 functions in the cpu_rmap (“CPU affinity reverse map”) kernel library
-to populate the map. For each CPU, the corresponding queue in the map is
-set to be one whose processing CPU is closest in cache locality.
+to populate the map. Alternatively, drivers can delegate the cpu_rmap
+management to the Kernel by calling netif_enable_cpu_rmap(). For each CPU,
+the corresponding queue in the map is set to be one whose processing CPU is
+closest in cache locality.
 
 
 Accelerated RFS Configuration

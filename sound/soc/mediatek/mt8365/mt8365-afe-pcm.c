@@ -1256,8 +1256,7 @@ static int mt8365_afe_cm2_io_input_mux_get(struct snd_kcontrol *kcontrol,
 static int mt8365_afe_cm2_io_input_mux_put(struct snd_kcontrol *kcontrol,
 					   struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_dapm_kcontrol_dapm(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
 	struct snd_soc_component *comp = snd_soc_dapm_to_component(dapm);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(comp);
 	struct mt8365_afe_private *afe_priv = afe->platform_priv;
@@ -1957,7 +1956,7 @@ err_irq:
 	return IRQ_HANDLED;
 }
 
-static int __maybe_unused mt8365_afe_runtime_suspend(struct device *dev)
+static int mt8365_afe_runtime_suspend(struct device *dev)
 {
 	return 0;
 }
@@ -1967,7 +1966,7 @@ static int mt8365_afe_runtime_resume(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused mt8365_afe_suspend(struct device *dev)
+static int mt8365_afe_suspend(struct device *dev)
 {
 	struct mtk_base_afe *afe = dev_get_drvdata(dev);
 	struct regmap *regmap = afe->regmap;
@@ -1975,10 +1974,15 @@ static int __maybe_unused mt8365_afe_suspend(struct device *dev)
 
 	mt8365_afe_enable_main_clk(afe);
 
-	if (!afe->reg_back_up)
+	if (!afe->reg_back_up) {
 		afe->reg_back_up =
 			devm_kcalloc(dev, afe->reg_back_up_list_num,
 				     sizeof(unsigned int), GFP_KERNEL);
+		if (!afe->reg_back_up) {
+			mt8365_afe_disable_main_clk(afe);
+			return -ENOMEM;
+		}
+	}
 
 	for (i = 0; i < afe->reg_back_up_list_num; i++)
 		regmap_read(regmap, afe->reg_back_up_list[i],
@@ -1989,7 +1993,7 @@ static int __maybe_unused mt8365_afe_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused mt8365_afe_resume(struct device *dev)
+static int mt8365_afe_resume(struct device *dev)
 {
 	struct mtk_base_afe *afe = dev_get_drvdata(dev);
 	struct regmap *regmap = afe->regmap;
@@ -2009,19 +2013,23 @@ static int __maybe_unused mt8365_afe_resume(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused mt8365_afe_dev_runtime_suspend(struct device *dev)
+static int mt8365_afe_dev_runtime_suspend(struct device *dev)
 {
 	struct mtk_base_afe *afe = dev_get_drvdata(dev);
+	int ret;
 
 	if (pm_runtime_status_suspended(dev) || afe->suspended)
 		return 0;
 
-	mt8365_afe_suspend(dev);
+	ret = mt8365_afe_suspend(dev);
+	if (ret)
+		return ret;
+
 	afe->suspended = true;
 	return 0;
 }
 
-static int __maybe_unused mt8365_afe_dev_runtime_resume(struct device *dev)
+static int mt8365_afe_dev_runtime_resume(struct device *dev)
 {
 	struct mtk_base_afe *afe = dev_get_drvdata(dev);
 
@@ -2238,7 +2246,6 @@ static void mt8365_afe_pcm_dev_remove(struct platform_device *pdev)
 
 	mt8365_afe_disable_top_cg(afe, MT8365_TOP_CG_AFE);
 
-	pm_runtime_disable(&pdev->dev);
 	if (!pm_runtime_status_suspended(&pdev->dev))
 		mt8365_afe_runtime_suspend(&pdev->dev);
 }
@@ -2250,17 +2257,16 @@ static const struct of_device_id mt8365_afe_pcm_dt_match[] = {
 MODULE_DEVICE_TABLE(of, mt8365_afe_pcm_dt_match);
 
 static const struct dev_pm_ops mt8365_afe_pm_ops = {
-	SET_RUNTIME_PM_OPS(mt8365_afe_dev_runtime_suspend,
-			   mt8365_afe_dev_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(mt8365_afe_suspend,
-				mt8365_afe_resume)
+	RUNTIME_PM_OPS(mt8365_afe_dev_runtime_suspend,
+		       mt8365_afe_dev_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(mt8365_afe_suspend, mt8365_afe_resume)
 };
 
 static struct platform_driver mt8365_afe_pcm_driver = {
 	.driver = {
 		   .name = "mt8365-afe-pcm",
 		   .of_match_table = mt8365_afe_pcm_dt_match,
-		   .pm = &mt8365_afe_pm_ops,
+		   .pm = pm_ptr(&mt8365_afe_pm_ops),
 	},
 	.probe = mt8365_afe_pcm_dev_probe,
 	.remove = mt8365_afe_pcm_dev_remove,

@@ -374,7 +374,6 @@ static int dw9768_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 
 static int dw9768_close(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
-	pm_runtime_mark_last_busy(sd->dev);
 	pm_runtime_put_autosuspend(sd->dev);
 
 	return 0;
@@ -552,6 +551,6 @@ static struct i2c_driver dw9768_i2c_driver = {
 };
 module_i2c_driver(dw9768_i2c_driver);
 
-MODULE_AUTHOR("Dongchun Zhu <dongchun.zhu@mediatek.com>");
+MODULE_AUTHOR("Dongchun Zhu");
 MODULE_DESCRIPTION("DW9768 VCM driver");
 MODULE_LICENSE("GPL v2");

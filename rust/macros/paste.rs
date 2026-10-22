@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use proc_macro::{Delimiter, Group, Ident, Spacing, Span, TokenTree};
+use proc_macro2::{Delimiter, Group, Ident, Spacing, Span, TokenTree};
 
 fn concat_helper(tokens: &[TokenTree]) -> Vec<(String, Span)> {
     let mut tokens = tokens.iter();
@@ -50,7 +50,7 @@ fn concat_helper(tokens: &[TokenTree]) -> Vec<(String, Span)> {
                 let tokens = group.stream().into_iter().collect::<Vec<TokenTree>>();
                 segments.append(&mut concat_helper(tokens.as_slice()));
             }
-            token => panic!("unexpected token in paste segments: {:?}", token),
+            token => panic!("unexpected token in paste segments: {token:?}"),
         };
     }
 

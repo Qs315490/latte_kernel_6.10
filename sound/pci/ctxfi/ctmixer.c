@@ -221,10 +221,6 @@ ct_mixer_recording_select(struct ct_mixer *mixer, enum CT_AMIXER_CTL type);
 static void
 ct_mixer_recording_unselect(struct ct_mixer *mixer, enum CT_AMIXER_CTL type);
 
-/* FIXME: this static looks like it would fail if more than one card was */
-/* installed. */
-static struct snd_kcontrol *kctls[2] = {NULL};
-
 static enum CT_AMIXER_CTL get_amixer_index(enum CTALSA_MIXER_CTL alsa_index)
 {
 	switch (alsa_index) {
@@ -481,17 +477,18 @@ static struct snd_kcontrol_new mic_source_ctl = {
 static void
 do_line_mic_switch(struct ct_atc *atc, enum CTALSA_MIXER_CTL type)
 {
+	struct ct_mixer *mixer = atc->mixer;
 
 	if (MIXER_LINEIN_C_S == type) {
 		atc->select_line_in(atc);
-		set_switch_state(atc->mixer, MIXER_MIC_C_S, 0);
+		set_switch_state(mixer, MIXER_MIC_C_S, 0);
 		snd_ctl_notify(atc->card, SNDRV_CTL_EVENT_MASK_VALUE,
-							&kctls[1]->id);
+			       &mixer->line_mic_kctls[1]->id);
 	} else if (MIXER_MIC_C_S == type) {
 		atc->select_mic_in(atc);
-		set_switch_state(atc->mixer, MIXER_LINEIN_C_S, 0);
+		set_switch_state(mixer, MIXER_LINEIN_C_S, 0);
 		snd_ctl_notify(atc->card, SNDRV_CTL_EVENT_MASK_VALUE,
-							&kctls[0]->id);
+			       &mixer->line_mic_kctls[0]->id);
 	}
 }
 
@@ -547,8 +544,14 @@ static void do_switch(struct ct_atc *atc, enum CTALSA_MIXER_CTL type, int state)
 		atc->mic_unmute(atc, state);
 	else if (MIXER_SPDIFI_C_S == type)
 		atc->spdif_in_unmute(atc, state);
-	else if (MIXER_WAVEF_P_S == type)
-		atc->line_front_unmute(atc, state);
+	else if (MIXER_WAVEF_P_S == type) {
+		if (cap.dedicated_rca) {
+			atc->rca_unmute(atc, atc->rca_state ? 0 : state);
+			atc->line_front_unmute(atc, atc->rca_state ? state : 0);
+		} else {
+			atc->line_front_unmute(atc, state);
+		}
+	}
 	else if (MIXER_WAVES_P_S == type)
 		atc->line_surround_unmute(atc, state);
 	else if (MIXER_WAVEC_P_S == type)
@@ -610,6 +613,57 @@ static struct snd_kcontrol_new swh_ctl = {
 	.info		= ct_alsa_mix_switch_info,
 	.get		= ct_alsa_mix_switch_get,
 	.put		= ct_alsa_mix_switch_put
+};
+
+static int dedicated_rca_info(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_info *info)
+{
+	static const char *const names[2] = {
+	  "RCA", "Front"
+	};
+
+	return snd_ctl_enum_info(info, 1, 2, names);
+}
+
+static int dedicated_rca_get(struct snd_kcontrol *kcontrol,
+			     struct snd_ctl_elem_value *ucontrol)
+{
+	struct ct_atc *atc = snd_kcontrol_chip(kcontrol);
+
+	ucontrol->value.enumerated.item[0] = atc->rca_state;
+	return 0;
+}
+
+static int dedicated_rca_put(struct snd_kcontrol *kcontrol,
+			     struct snd_ctl_elem_value *ucontrol)
+{
+	struct ct_atc *atc = snd_kcontrol_chip(kcontrol);
+	unsigned int rca_state = ucontrol->value.enumerated.item[0];
+	unsigned char state;
+
+	if (rca_state > 1)
+		return -EINVAL;
+
+	if (rca_state == atc->rca_state)
+		return 0;
+
+	state = get_switch_state(atc->mixer, MIXER_WAVEF_P_S);
+	do_switch(atc, MIXER_WAVEF_P_S, 0);
+
+	atc->rca_state = rca_state;
+	atc->dedicated_rca_select(atc);
+
+	do_switch(atc, MIXER_WAVEF_P_S, state);
+
+	return 1;
+}
+
+static struct snd_kcontrol_new rca_ctl = {
+	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+	.name = "Analog Playback Route",
+	.info = dedicated_rca_info,
+	.get = dedicated_rca_get,
+	.put = dedicated_rca_put,
 };
 
 static int ct_spdif_info(struct snd_kcontrol *kcontrol,
@@ -721,9 +775,9 @@ ct_mixer_kcontrol_new(struct ct_mixer *mixer, struct snd_kcontrol_new *new)
 
 	switch (new->private_value) {
 	case MIXER_LINEIN_C_S:
-		kctls[0] = kctl; break;
+		mixer->line_mic_kctls[0] = kctl; break;
 	case MIXER_MIC_C_S:
-		kctls[1] = kctl; break;
+		mixer->line_mic_kctls[1] = kctl; break;
 	default:
 		break;
 	}
@@ -784,7 +838,17 @@ static int ct_mixer_kcontrols_create(struct ct_mixer *mixer)
 		if (err)
 			return err;
 	}
-	atc->line_front_unmute(atc, 1);
+
+	if (cap.dedicated_rca) {
+		err = ct_mixer_kcontrol_new(mixer, &rca_ctl);
+		if (err)
+			return err;
+
+		atc->line_front_unmute(atc, 0);
+		atc->rca_unmute(atc, 1);
+	} else {
+		atc->line_front_unmute(atc, 1);
+	}
 	set_switch_state(mixer, MIXER_WAVEF_P_S, 1);
 	atc->line_surround_unmute(atc, 0);
 	set_switch_state(mixer, MIXER_WAVES_P_S, 0);
@@ -898,35 +962,20 @@ error1:
 static int ct_mixer_get_mem(struct ct_mixer **rmixer)
 {
 	struct ct_mixer *mixer;
-	int err;
+	size_t alloc_size;
 
 	*rmixer = NULL;
 	/* Allocate mem for mixer obj */
-	mixer = kzalloc(sizeof(*mixer), GFP_KERNEL);
+	alloc_size = struct_size(mixer, amixers, NUM_CT_AMIXERS * CHN_NUM);
+	alloc_size += sizeof(*mixer->sums) * NUM_CT_SUMS * CHN_NUM;
+	mixer = kzalloc(alloc_size, GFP_KERNEL);
 	if (!mixer)
 		return -ENOMEM;
 
-	mixer->amixers = kcalloc(NUM_CT_AMIXERS * CHN_NUM, sizeof(void *),
-				 GFP_KERNEL);
-	if (!mixer->amixers) {
-		err = -ENOMEM;
-		goto error1;
-	}
-	mixer->sums = kcalloc(NUM_CT_SUMS * CHN_NUM, sizeof(void *),
-			      GFP_KERNEL);
-	if (!mixer->sums) {
-		err = -ENOMEM;
-		goto error2;
-	}
+	mixer->sums = (struct sum **)(mixer->amixers + (NUM_CT_AMIXERS * CHN_NUM));
 
 	*rmixer = mixer;
 	return 0;
-
-error2:
-	kfree(mixer->amixers);
-error1:
-	kfree(mixer);
-	return err;
 }
 
 static int ct_mixer_topology_build(struct ct_mixer *mixer)
@@ -1161,8 +1210,6 @@ int ct_mixer_destroy(struct ct_mixer *mixer)
 	}
 
 	/* Release mem assigned to mixer object */
-	kfree(mixer->sums);
-	kfree(mixer->amixers);
 	kfree(mixer);
 
 	return 0;
@@ -1219,7 +1266,7 @@ int ct_alsa_mix_create(struct ct_atc *atc,
 	if (err)
 		return err;
 
-	strcpy(atc->card->mixername, device_name);
+	strscpy(atc->card->mixername, device_name);
 
 	return 0;
 }

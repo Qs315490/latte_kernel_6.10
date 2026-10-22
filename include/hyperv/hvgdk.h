@@ -10,18 +10,12 @@
 
 /*
  * The guest OS needs to register the guest ID with the hypervisor.
- * The guest ID is a 64 bit entity and the structure of this ID is
+ * The guest ID is a 64-bit entity and the structure of this ID is
  * specified in the Hyper-V TLFS specification.
- *
- * While the current guideline does not specify how Linux guest ID(s)
- * need to be generated, our plan is to publish the guidelines for
- * Linux and other guest operating systems that currently are hosted
- * on Hyper-V. The implementation here conforms to this yet
- * unpublished guidelines.
  *
  * Bit(s)
  * 63 - Indicates if the OS is Open Source or not; 1 is Open Source
- * 62:56 - Os Type; Linux is 0x100
+ * 62:56 - OS Type; Linux is 0x1
  * 55:48 - Distro specific identification
  * 47:16 - Linux kernel version number
  * 15:0  - Distro specific identification
@@ -281,7 +275,7 @@ struct hv_vmcb_enlightenments {
 #define HV_VMCB_NESTED_ENLIGHTENMENTS		31
 
 /* Synthetic VM-Exit */
-#define HV_SVM_EXITCODE_ENL			0xf0000000
+#define HV_SVM_EXITCODE_ENL			0xf0000000ull
 #define HV_SVM_ENL_EXITCODE_TRAP_AFTER_FLUSH	(1)
 
 /* VM_PARTITION_ASSIST_PAGE */

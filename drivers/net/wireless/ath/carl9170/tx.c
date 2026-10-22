@@ -366,8 +366,7 @@ static void carl9170_tx_shift_bm(struct ar9170 *ar,
 	if (WARN_ON_ONCE(off >= CARL9170_BAW_BITS))
 		return;
 
-	if (!bitmap_empty(tid_info->bitmap, off))
-		off = find_first_bit(tid_info->bitmap, off);
+	off = min(off, find_first_bit(tid_info->bitmap, off));
 
 	tid_info->bsn += off;
 	tid_info->bsn &= 0x0fff;
@@ -693,7 +692,7 @@ void carl9170_tx_process_status(struct ar9170 *ar,
 	unsigned int i;
 
 	for (i = 0;  i < cmd->hdr.ext; i++) {
-		if (WARN_ON(i > ((cmd->hdr.len / 2) + 1))) {
+		if (WARN_ON(i >= (cmd->hdr.len / 2))) {
 			print_hex_dump_bytes("UU:", DUMP_PREFIX_NONE,
 					     (void *) cmd, cmd->hdr.len + 4);
 			break;
@@ -1329,7 +1328,7 @@ static void carl9170_bar_check(struct ar9170 *ar, struct sk_buff *skb)
 		struct carl9170_bar_list_entry *entry;
 		unsigned int queue = skb_get_queue_mapping(skb);
 
-		entry = kmalloc(sizeof(*entry), GFP_ATOMIC);
+		entry = kmalloc_obj(*entry, GFP_ATOMIC);
 		if (!WARN_ON_ONCE(!entry)) {
 			entry->skb = skb;
 			spin_lock_bh(&ar->bar_list_lock[queue]);

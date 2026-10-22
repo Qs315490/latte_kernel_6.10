@@ -42,6 +42,9 @@ properties:
 
   phy_type: true
 
+  iommus:
+    maxItems: 1
+
   itc-setting:
     description:
       interrupt threshold control register control, the setting should be
@@ -94,7 +97,9 @@ properties:
     minItems: 1
     items:
       - description: vbus extcon
+        maxItems: 1
       - description: id extcon
+        maxItems: 1
 
   phy-clkgate-delay-us:
     description:

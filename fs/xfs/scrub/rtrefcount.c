@@ -3,7 +3,7 @@
  * Copyright (c) 2021-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -156,8 +156,7 @@ xchk_rtrefcountbt_rmap_check(
 		 * is healthy each rmap_irec we see will be in agbno order
 		 * so we don't need insertion sort here.
 		 */
-		frag = kmalloc(sizeof(struct xchk_rtrefcnt_frag),
-				XCHK_GFP_FLAGS);
+		frag = kmalloc_obj(struct xchk_rtrefcnt_frag, XCHK_GFP_FLAGS);
 		if (!frag)
 			return -ENOMEM;
 		memcpy(&frag->rm, rec, sizeof(frag->rm));
@@ -556,7 +555,7 @@ xchk_rtrefcountbt(
 	if (error || (sc->sm->sm_flags & XFS_SCRUB_OFLAG_CORRUPT))
 		return error;
 
-	xfs_rmap_ino_bmbt_owner(&btree_oinfo, rtg_refcount(sc->sr.rtg)->i_ino,
+	xfs_rmap_inode_bmbt_owner(&btree_oinfo, rtg_refcount(sc->sr.rtg),
 			XFS_DATA_FORK);
 	error = xchk_btree(sc, sc->sr.refc_cur, xchk_rtrefcountbt_rec,
 			&btree_oinfo, &rrc);
@@ -608,7 +607,7 @@ xchk_xref_is_rt_cow_staging(
 
 	/* CoW lookup returned a shared extent record? */
 	if (rc.rc_domain != XFS_REFC_DOMAIN_COW)
-		xchk_btree_xref_set_corrupt(sc, sc->sa.refc_cur, 0);
+		xchk_btree_xref_set_corrupt(sc, sc->sr.refc_cur, 0);
 
 	/* Must be at least as long as what was passed in */
 	if (rc.rc_blockcount < len)

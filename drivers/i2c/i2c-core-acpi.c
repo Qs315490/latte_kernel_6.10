@@ -84,8 +84,11 @@ static int i2c_acpi_resource_count(struct acpi_resource *ares, void *data)
  * i2c_acpi_client_count - Count the number of I2cSerialBus resources
  * @adev:	ACPI device
  *
- * Returns the number of I2cSerialBus resources in the ACPI-device's
+ * Return:
+ * The number of I2cSerialBus resources in the ACPI-device's
  * resource-list; or a negative error code.
+ *
+ * Specifically returns -ENOENT when no resources found.
  */
 int i2c_acpi_client_count(struct acpi_device *adev)
 {
@@ -97,7 +100,7 @@ int i2c_acpi_client_count(struct acpi_device *adev)
 		return ret;
 
 	acpi_dev_free_resource_list(&r);
-	return count;
+	return count ?: -ENOENT;
 }
 EXPORT_SYMBOL_GPL(i2c_acpi_client_count);
 
@@ -250,7 +253,7 @@ static int i2c_acpi_get_info(struct acpi_device *adev,
 
 	if (adapter) {
 		/* The adapter must match the one in I2cSerialBus() connector */
-		if (ACPI_HANDLE(&adapter->dev) != lookup.adapter_handle)
+		if (!device_match_acpi_handle(&adapter->dev, lookup.adapter_handle))
 			return -ENODEV;
 	} else {
 		struct acpi_device *adapter_adev;
@@ -370,6 +373,8 @@ static const struct acpi_device_id i2c_acpi_force_100khz_device_ids[] = {
 	 * the device works without issues on Windows at what is expected to be
 	 * a 400KHz frequency. The root cause of the issue is not known.
 	 */
+	{ "DLL0945", 0 },
+	{ "ELAN0678", 0 },
 	{ "ELAN06FA", 0 },
 	{}
 };
@@ -682,7 +687,7 @@ i2c_acpi_space_handler(u32 function, acpi_physical_address command,
 	if (ACPI_FAILURE(ret))
 		return ret;
 
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
+	client = kzalloc_obj(*client);
 	if (!client) {
 		ret = AE_NO_MEMORY;
 		goto err;
@@ -792,8 +797,7 @@ int i2c_acpi_install_space_handler(struct i2c_adapter *adapter)
 	if (!handle)
 		return -ENODEV;
 
-	data = kzalloc(sizeof(struct i2c_acpi_handler_data),
-			    GFP_KERNEL);
+	data = kzalloc_obj(struct i2c_acpi_handler_data);
 	if (!data)
 		return -ENOMEM;
 

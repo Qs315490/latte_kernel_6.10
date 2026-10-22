@@ -143,7 +143,7 @@ static struct psample_group *psample_group_create(struct net *net,
 {
 	struct psample_group *group;
 
-	group = kzalloc(sizeof(*group), GFP_ATOMIC);
+	group = kzalloc_obj(*group, GFP_ATOMIC);
 	if (!group)
 		return NULL;
 
@@ -476,15 +476,17 @@ void psample_sample_packet(struct psample_group *group,
 		goto error;
 
 	if (data_len) {
-		int nla_len = nla_total_size(data_len);
+		int nla_len = nla_attr_size(data_len);
 		struct nlattr *nla;
 
 		nla = skb_put(nl_skb, nla_len);
 		nla->nla_type = PSAMPLE_ATTR_DATA;
-		nla->nla_len = nla_attr_size(data_len);
+		nla->nla_len = nla_len;
 
 		if (skb_copy_bits(skb, 0, nla_data(nla), data_len))
 			goto error;
+
+		skb_put_zero(nl_skb, nla_padlen(data_len));
 	}
 
 #ifdef CONFIG_INET

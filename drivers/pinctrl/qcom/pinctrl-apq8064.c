@@ -622,6 +622,7 @@ static const struct of_device_id apq8064_pinctrl_of_match[] = {
 	{ .compatible = "qcom,apq8064-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, apq8064_pinctrl_of_match);
 
 static struct platform_driver apq8064_pinctrl_driver = {
 	.driver = {
@@ -629,7 +630,6 @@ static struct platform_driver apq8064_pinctrl_driver = {
 		.of_match_table = apq8064_pinctrl_of_match,
 	},
 	.probe = apq8064_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init apq8064_pinctrl_init(void)
@@ -647,4 +647,3 @@ module_exit(apq8064_pinctrl_exit);
 MODULE_AUTHOR("Bjorn Andersson <bjorn.andersson@sonymobile.com>");
 MODULE_DESCRIPTION("Qualcomm APQ8064 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, apq8064_pinctrl_of_match);

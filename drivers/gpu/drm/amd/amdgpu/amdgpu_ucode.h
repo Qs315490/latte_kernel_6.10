@@ -25,6 +25,8 @@
 
 #include "amdgpu_socbb.h"
 
+#define RS64_FW_UC_START_ADDR_LO 0x3000
+
 struct common_firmware_header {
 	uint32_t size_bytes; /* size of the entire header+image(s) in bytes */
 	uint32_t header_size_bytes; /* size of just the header in bytes */
@@ -298,6 +300,15 @@ struct rlc_firmware_header_v2_4 {
     uint32_t se3_tap_delays_ucode_offset_bytes;
 };
 
+/* version_major=2, version_minor=5 */
+struct rlc_firmware_header_v2_5 {
+	struct rlc_firmware_header_v2_2 v2_2;
+	uint32_t rlc_1_iram_ucode_size_bytes;
+	uint32_t rlc_1_iram_ucode_offset_bytes;
+	uint32_t rlc_1_dram_ucode_size_bytes;
+	uint32_t rlc_1_dram_ucode_offset_bytes;
+};
+
 /* version_major=1, version_minor=0 */
 struct sdma_firmware_header_v1_0 {
 	struct common_firmware_header header;
@@ -447,6 +458,7 @@ union amdgpu_firmware_header {
 	struct rlc_firmware_header_v2_2 rlc_v2_2;
 	struct rlc_firmware_header_v2_3 rlc_v2_3;
 	struct rlc_firmware_header_v2_4 rlc_v2_4;
+	struct rlc_firmware_header_v2_5 rlc_v2_5;
 	struct sdma_firmware_header_v1_0 sdma;
 	struct sdma_firmware_header_v1_1 sdma_v1_1;
 	struct sdma_firmware_header_v2_0 sdma_v2_0;
@@ -510,6 +522,8 @@ enum AMDGPU_UCODE_ID {
 	AMDGPU_UCODE_ID_RLC_RESTORE_LIST_SRM_MEM,
 	AMDGPU_UCODE_ID_RLC_IRAM,
 	AMDGPU_UCODE_ID_RLC_DRAM,
+	AMDGPU_UCODE_ID_RLC_IRAM_1,
+	AMDGPU_UCODE_ID_RLC_DRAM_1,
 	AMDGPU_UCODE_ID_RLC_P,
 	AMDGPU_UCODE_ID_RLC_V,
 	AMDGPU_UCODE_ID_RLC_G,
@@ -600,6 +614,12 @@ struct amdgpu_firmware {
 
 	void *fw_buf_ptr;
 	uint64_t fw_buf_mc;
+	uint32_t pldm_version;
+};
+
+struct kicker_device{
+	unsigned short device;
+	u8 revision;
 };
 
 void amdgpu_ucode_print_mc_hdr(const struct common_firmware_header *hdr);
@@ -629,5 +649,6 @@ amdgpu_ucode_get_load_type(struct amdgpu_device *adev, int load_type);
 const char *amdgpu_ucode_name(enum AMDGPU_UCODE_ID ucode_id);
 
 void amdgpu_ucode_ip_version_decode(struct amdgpu_device *adev, int block_type, char *ucode_prefix, int len);
+bool amdgpu_is_kicker_fw(struct amdgpu_device *adev);
 
 #endif

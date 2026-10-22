@@ -26,6 +26,7 @@
 #include "reg_helper.h"
 #include "core_types.h"
 #include "dcn31_dccg.h"
+#include "dcn20/dcn20_dccg.h"
 #include "dal_asic_id.h"
 
 #define TO_DCN_DCCG(dccg)\
@@ -164,6 +165,7 @@ void dccg31_set_dpstreamclk(
 		int otg_inst,
 		int dp_hpo_inst)
 {
+	(void)dp_hpo_inst;
 	if (src == REFCLK)
 		dccg31_disable_dpstreamclk(dccg, otg_inst);
 	else
@@ -574,7 +576,7 @@ void dccg31_set_dtbclk_dto(
 
 		// phase / modulo = dtbclk / dtbclk ref
 		modulo = params->ref_dtbclk_khz * 1000;
-		phase = div_u64((((unsigned long long)modulo * req_dtbclk_khz) + params->ref_dtbclk_khz - 1),
+		phase = (uint32_t)div_u64((((unsigned long long)modulo * req_dtbclk_khz) + params->ref_dtbclk_khz - 1),
 				params->ref_dtbclk_khz);
 
 		REG_UPDATE(OTG_PIXEL_RATE_CNTL[params->otg_inst],
@@ -618,7 +620,7 @@ void dccg31_set_audio_dtbclk_dto(
 
 		// phase / modulo = dtbclk / dtbclk ref
 		modulo = params->ref_dtbclk_khz * 1000;
-		phase = div_u64((((unsigned long long)modulo * params->req_audio_dtbclk_khz) + params->ref_dtbclk_khz - 1),
+		phase = (uint32_t)div_u64((((unsigned long long)modulo * params->req_audio_dtbclk_khz) + params->ref_dtbclk_khz - 1),
 			params->ref_dtbclk_khz);
 
 
@@ -643,6 +645,7 @@ void dccg31_get_dccg_ref_freq(struct dccg *dccg,
 		unsigned int xtalin_freq_inKhz,
 		unsigned int *dccg_ref_freq_inKhz)
 {
+	(void)dccg;
 	/*
 	 * Assume refclk is sourced from xtalin
 	 * expect 24MHz
@@ -659,6 +662,87 @@ void dccg31_set_dispclk_change_mode(
 
 	REG_UPDATE(DENTIST_DISPCLK_CNTL, DENTIST_DISPCLK_CHG_MODE,
 		   change_mode == DISPCLK_CHANGE_MODE_RAMPING ? 2 : 0);
+}
+
+void dccg31_set_hdmistreamclk(
+		struct dccg *dccg,
+		enum streamclk_source src,
+		uint32_t otg_inst)
+{
+	(void)otg_inst;
+	struct dcn_dccg *dccg_dcn = TO_DCN_DCCG(dccg);
+
+	if (src == REFCLK) {
+		REG_UPDATE_2(HDMISTREAMCLK_CNTL,
+				HDMISTREAMCLK0_SRC_SEL, 0,        /* SEL_REFCLK0 */
+				HDMISTREAMCLK0_DTO_FORCE_DIS, 1); /* DTO_FORCE_BYPASS */
+	} else {
+		REG_UPDATE_2(HDMISTREAMCLK_CNTL,
+				HDMISTREAMCLK0_SRC_SEL, 1,        /* SEL_DTBCLK0 */
+				HDMISTREAMCLK0_DTO_FORCE_DIS, 1); /* DTO_FORCE_BYPASS */
+	}
+}
+
+static void dccg31_disable_hdmistreamclk(struct dccg *dccg)
+{
+	struct dcn_dccg *dccg_dcn = TO_DCN_DCCG(dccg);
+
+	if (dccg->ctx->dc->debug.root_clock_optimization.bits.hdmistream)
+		REG_UPDATE_2(HDMISTREAMCLK0_DTO_PARAM,
+			HDMISTREAMCLK0_DTO_PHASE, 0,
+			HDMISTREAMCLK0_DTO_MODULO, 1);
+}
+
+void dccg31_enable_hdmicharclk(struct dccg *dccg, int hpo_inst, int phypll_inst)
+{
+	struct dcn_dccg *dccg_dcn = TO_DCN_DCCG(dccg);
+
+	ASSERT(hpo_inst >= 0 && phypll_inst >= 0);
+	if (dccg->ctx->dc->debug.root_clock_optimization.bits.hdmichar) {
+		REG_UPDATE(DCCG_GATE_DISABLE_CNTL4,
+			HDMICHARCLK0_ROOT_GATE_DISABLE, 1);
+		REG_UPDATE(DCCG_GATE_DISABLE_CNTL2,
+			HDMICHARCLK0_GATE_DISABLE, 1);
+	}
+
+	REG_UPDATE_2(HDMICHARCLK_CLOCK_CNTL[hpo_inst],
+			HDMICHARCLK0_EN, 1,
+			HDMICHARCLK0_SRC_SEL, phypll_inst);
+
+	/* Enable FORCE_EN for SYMCLK */
+	switch (phypll_inst) {
+	case 0:
+		REG_UPDATE_2(PHYASYMCLK_CLOCK_CNTL,
+				PHYASYMCLK_FORCE_EN, 1,
+				PHYASYMCLK_FORCE_SRC_SEL, 1);
+		break;
+	case 1:
+		REG_UPDATE_2(PHYBSYMCLK_CLOCK_CNTL,
+				PHYBSYMCLK_FORCE_EN, 1,
+				PHYBSYMCLK_FORCE_SRC_SEL, 1);
+		break;
+	case 2:
+		REG_UPDATE_2(PHYCSYMCLK_CLOCK_CNTL,
+				PHYCSYMCLK_FORCE_EN, 1,
+				PHYCSYMCLK_FORCE_SRC_SEL, 1);
+		break;
+	default:
+		BREAK_TO_DEBUGGER();
+		return;
+	}
+}
+
+void dccg31_disable_hdmicharclk(struct dccg *dccg, int hpo_inst)
+{
+	struct dcn_dccg *dccg_dcn = TO_DCN_DCCG(dccg);
+
+	REG_WRITE(HDMICHARCLK_CLOCK_CNTL[hpo_inst], 0);
+	if (dccg->ctx->dc->debug.root_clock_optimization.bits.hdmichar) {
+		REG_UPDATE(DCCG_GATE_DISABLE_CNTL2,
+			HDMICHARCLK0_GATE_DISABLE, 0);
+		REG_UPDATE(DCCG_GATE_DISABLE_CNTL4,
+			HDMICHARCLK0_ROOT_GATE_DISABLE, 0);
+	}
 }
 
 void dccg31_init(struct dccg *dccg)
@@ -689,6 +773,10 @@ void dccg31_init(struct dccg *dccg)
 		dccg31_set_physymclk(dccg, 3, PHYSYMCLK_FORCE_SRC_SYMCLK, false);
 		dccg31_set_physymclk(dccg, 4, PHYSYMCLK_FORCE_SRC_SYMCLK, false);
 	}
+	dccg31_disable_hdmistreamclk(dccg);
+
+	if (dccg->ctx->dc->debug.root_clock_optimization.bits.hdmichar)
+		dccg31_disable_hdmicharclk(dccg, 0);
 }
 
 void dccg31_otg_add_pixel(struct dccg *dccg,
@@ -709,7 +797,132 @@ void dccg31_otg_drop_pixel(struct dccg *dccg,
 			OTG_DROP_PIXEL[otg_inst], 1);
 }
 
+void dccg31_read_reg_state(struct dccg *dccg, struct dcn_dccg_reg_state *dccg_reg_state)
+{
+	struct dcn_dccg *dccg_dcn = TO_DCN_DCCG(dccg);
+
+	dccg_reg_state->dc_mem_global_pwr_req_cntl = REG_READ(DC_MEM_GLOBAL_PWR_REQ_CNTL);
+	dccg_reg_state->dccg_audio_dtbclk_dto_modulo = REG_READ(DCCG_AUDIO_DTBCLK_DTO_MODULO);
+	dccg_reg_state->dccg_audio_dtbclk_dto_phase = REG_READ(DCCG_AUDIO_DTBCLK_DTO_PHASE);
+	dccg_reg_state->dccg_audio_dto_source = REG_READ(DCCG_AUDIO_DTO_SOURCE);
+	dccg_reg_state->dccg_audio_dto0_module = REG_READ(DCCG_AUDIO_DTO0_MODULE);
+	dccg_reg_state->dccg_audio_dto0_phase = REG_READ(DCCG_AUDIO_DTO0_PHASE);
+	dccg_reg_state->dccg_audio_dto1_module = REG_READ(DCCG_AUDIO_DTO1_MODULE);
+	dccg_reg_state->dccg_audio_dto1_phase = REG_READ(DCCG_AUDIO_DTO1_PHASE);
+	dccg_reg_state->dccg_cac_status = REG_READ(DCCG_CAC_STATUS);
+	dccg_reg_state->dccg_cac_status2 = REG_READ(DCCG_CAC_STATUS2);
+	dccg_reg_state->dccg_disp_cntl_reg = REG_READ(DCCG_DISP_CNTL_REG);
+	dccg_reg_state->dccg_ds_cntl = REG_READ(DCCG_DS_CNTL);
+	dccg_reg_state->dccg_ds_dto_incr = REG_READ(DCCG_DS_DTO_INCR);
+	dccg_reg_state->dccg_ds_dto_modulo = REG_READ(DCCG_DS_DTO_MODULO);
+	dccg_reg_state->dccg_ds_hw_cal_interval = REG_READ(DCCG_DS_HW_CAL_INTERVAL);
+	dccg_reg_state->dccg_gate_disable_cntl = REG_READ(DCCG_GATE_DISABLE_CNTL);
+	dccg_reg_state->dccg_gate_disable_cntl2 = REG_READ(DCCG_GATE_DISABLE_CNTL2);
+	dccg_reg_state->dccg_gate_disable_cntl3 = REG_READ(DCCG_GATE_DISABLE_CNTL3);
+	dccg_reg_state->dccg_gate_disable_cntl4 = REG_READ(DCCG_GATE_DISABLE_CNTL4);
+	dccg_reg_state->dccg_gate_disable_cntl5 = REG_READ(DCCG_GATE_DISABLE_CNTL5);
+	dccg_reg_state->dccg_gate_disable_cntl6 = REG_READ(DCCG_GATE_DISABLE_CNTL6);
+	dccg_reg_state->dccg_global_fgcg_rep_cntl = REG_READ(DCCG_GLOBAL_FGCG_REP_CNTL);
+	dccg_reg_state->dccg_gtc_cntl = REG_READ(DCCG_GTC_CNTL);
+	dccg_reg_state->dccg_gtc_current = REG_READ(DCCG_GTC_CURRENT);
+	dccg_reg_state->dccg_gtc_dto_incr = REG_READ(DCCG_GTC_DTO_INCR);
+	dccg_reg_state->dccg_gtc_dto_modulo = REG_READ(DCCG_GTC_DTO_MODULO);
+	dccg_reg_state->dccg_perfmon_cntl = REG_READ(DCCG_PERFMON_CNTL);
+	dccg_reg_state->dccg_perfmon_cntl2 = REG_READ(DCCG_PERFMON_CNTL2);
+	dccg_reg_state->dccg_soft_reset = REG_READ(DCCG_SOFT_RESET);
+	dccg_reg_state->dccg_test_clk_sel = REG_READ(DCCG_TEST_CLK_SEL);
+	dccg_reg_state->dccg_vsync_cnt_ctrl = REG_READ(DCCG_VSYNC_CNT_CTRL);
+	dccg_reg_state->dccg_vsync_cnt_int_ctrl = REG_READ(DCCG_VSYNC_CNT_INT_CTRL);
+	dccg_reg_state->dccg_vsync_otg0_latch_value = REG_READ(DCCG_VSYNC_OTG0_LATCH_VALUE);
+	dccg_reg_state->dccg_vsync_otg1_latch_value = REG_READ(DCCG_VSYNC_OTG1_LATCH_VALUE);
+	dccg_reg_state->dccg_vsync_otg2_latch_value = REG_READ(DCCG_VSYNC_OTG2_LATCH_VALUE);
+	dccg_reg_state->dccg_vsync_otg3_latch_value = REG_READ(DCCG_VSYNC_OTG3_LATCH_VALUE);
+	dccg_reg_state->dccg_vsync_otg4_latch_value = REG_READ(DCCG_VSYNC_OTG4_LATCH_VALUE);
+	dccg_reg_state->dccg_vsync_otg5_latch_value = REG_READ(DCCG_VSYNC_OTG5_LATCH_VALUE);
+	dccg_reg_state->dispclk_cgtt_blk_ctrl_reg = REG_READ(DISPCLK_CGTT_BLK_CTRL_REG);
+	dccg_reg_state->dispclk_freq_change_cntl = REG_READ(DISPCLK_FREQ_CHANGE_CNTL);
+	dccg_reg_state->dp_dto_dbuf_en = REG_READ(DP_DTO_DBUF_EN);
+	dccg_reg_state->dp_dto0_modulo = REG_READ(DP_DTO_MODULO[0]);
+	dccg_reg_state->dp_dto0_phase = REG_READ(DP_DTO_PHASE[0]);
+	dccg_reg_state->dp_dto1_modulo = REG_READ(DP_DTO_MODULO[1]);
+	dccg_reg_state->dp_dto1_phase = REG_READ(DP_DTO_PHASE[1]);
+	dccg_reg_state->dp_dto2_modulo = REG_READ(DP_DTO_MODULO[2]);
+	dccg_reg_state->dp_dto2_phase = REG_READ(DP_DTO_PHASE[2]);
+	dccg_reg_state->dp_dto3_modulo = REG_READ(DP_DTO_MODULO[3]);
+	dccg_reg_state->dp_dto3_phase = REG_READ(DP_DTO_PHASE[3]);
+	dccg_reg_state->dpiaclk_540m_dto_modulo = REG_READ(DPIACLK_540M_DTO_MODULO);
+	dccg_reg_state->dpiaclk_540m_dto_phase = REG_READ(DPIACLK_540M_DTO_PHASE);
+	dccg_reg_state->dpiaclk_810m_dto_modulo = REG_READ(DPIACLK_810M_DTO_MODULO);
+	dccg_reg_state->dpiaclk_810m_dto_phase = REG_READ(DPIACLK_810M_DTO_PHASE);
+	dccg_reg_state->dpiaclk_dto_cntl = REG_READ(DPIACLK_DTO_CNTL);
+	dccg_reg_state->dpiasymclk_cntl = REG_READ(DPIASYMCLK_CNTL);
+	dccg_reg_state->dppclk_cgtt_blk_ctrl_reg = REG_READ(DPPCLK_CGTT_BLK_CTRL_REG);
+	dccg_reg_state->dppclk_ctrl = REG_READ(DPPCLK_CTRL);
+	dccg_reg_state->dppclk_dto_ctrl = REG_READ(DPPCLK_DTO_CTRL);
+	dccg_reg_state->dppclk0_dto_param = REG_READ(DPPCLK_DTO_PARAM[0]);
+	dccg_reg_state->dppclk1_dto_param = REG_READ(DPPCLK_DTO_PARAM[1]);
+	dccg_reg_state->dppclk2_dto_param = REG_READ(DPPCLK_DTO_PARAM[2]);
+	dccg_reg_state->dppclk3_dto_param = REG_READ(DPPCLK_DTO_PARAM[3]);
+	dccg_reg_state->dprefclk_cgtt_blk_ctrl_reg = REG_READ(DPREFCLK_CGTT_BLK_CTRL_REG);
+	dccg_reg_state->dprefclk_cntl = REG_READ(DPREFCLK_CNTL);
+	dccg_reg_state->dpstreamclk_cntl = REG_READ(DPSTREAMCLK_CNTL);
+	dccg_reg_state->dscclk_dto_ctrl = REG_READ(DSCCLK_DTO_CTRL);
+	dccg_reg_state->dscclk0_dto_param = REG_READ(DSCCLK0_DTO_PARAM);
+	dccg_reg_state->dscclk1_dto_param = REG_READ(DSCCLK1_DTO_PARAM);
+	dccg_reg_state->dscclk2_dto_param = REG_READ(DSCCLK2_DTO_PARAM);
+	dccg_reg_state->dscclk3_dto_param = REG_READ(DSCCLK3_DTO_PARAM);
+	dccg_reg_state->dtbclk_dto_dbuf_en = REG_READ(DTBCLK_DTO_DBUF_EN);
+	dccg_reg_state->dtbclk_dto0_modulo = REG_READ(DTBCLK_DTO_MODULO[0]);
+	dccg_reg_state->dtbclk_dto0_phase = REG_READ(DTBCLK_DTO_PHASE[0]);
+	dccg_reg_state->dtbclk_dto1_modulo = REG_READ(DTBCLK_DTO_MODULO[1]);
+	dccg_reg_state->dtbclk_dto1_phase = REG_READ(DTBCLK_DTO_PHASE[1]);
+	dccg_reg_state->dtbclk_dto2_modulo = REG_READ(DTBCLK_DTO_MODULO[2]);
+	dccg_reg_state->dtbclk_dto2_phase = REG_READ(DTBCLK_DTO_PHASE[2]);
+	dccg_reg_state->dtbclk_dto3_modulo = REG_READ(DTBCLK_DTO_MODULO[3]);
+	dccg_reg_state->dtbclk_dto3_phase = REG_READ(DTBCLK_DTO_PHASE[3]);
+	dccg_reg_state->dtbclk_p_cntl = REG_READ(DTBCLK_P_CNTL);
+	dccg_reg_state->force_symclk_disable = REG_READ(FORCE_SYMCLK_DISABLE);
+	dccg_reg_state->hdmicharclk0_clock_cntl = REG_READ(HDMICHARCLK0_CLOCK_CNTL);
+	dccg_reg_state->hdmistreamclk_cntl = REG_READ(HDMISTREAMCLK_CNTL);
+	dccg_reg_state->hdmistreamclk0_dto_param = REG_READ(HDMISTREAMCLK0_DTO_PARAM);
+	dccg_reg_state->microsecond_time_base_div = REG_READ(MICROSECOND_TIME_BASE_DIV);
+	dccg_reg_state->millisecond_time_base_div = REG_READ(MILLISECOND_TIME_BASE_DIV);
+	dccg_reg_state->otg_pixel_rate_div = REG_READ(OTG_PIXEL_RATE_DIV);
+	dccg_reg_state->otg0_phypll_pixel_rate_cntl = REG_READ(OTG0_PHYPLL_PIXEL_RATE_CNTL);
+	dccg_reg_state->otg0_pixel_rate_cntl = REG_READ(OTG0_PIXEL_RATE_CNTL);
+	dccg_reg_state->otg1_phypll_pixel_rate_cntl = REG_READ(OTG1_PHYPLL_PIXEL_RATE_CNTL);
+	dccg_reg_state->otg1_pixel_rate_cntl = REG_READ(OTG1_PIXEL_RATE_CNTL);
+	dccg_reg_state->otg2_phypll_pixel_rate_cntl = REG_READ(OTG2_PHYPLL_PIXEL_RATE_CNTL);
+	dccg_reg_state->otg2_pixel_rate_cntl = REG_READ(OTG2_PIXEL_RATE_CNTL);
+	dccg_reg_state->otg3_phypll_pixel_rate_cntl = REG_READ(OTG3_PHYPLL_PIXEL_RATE_CNTL);
+	dccg_reg_state->otg3_pixel_rate_cntl = REG_READ(OTG3_PIXEL_RATE_CNTL);
+	dccg_reg_state->phyasymclk_clock_cntl = REG_READ(PHYASYMCLK_CLOCK_CNTL);
+	dccg_reg_state->phybsymclk_clock_cntl = REG_READ(PHYBSYMCLK_CLOCK_CNTL);
+	dccg_reg_state->phycsymclk_clock_cntl = REG_READ(PHYCSYMCLK_CLOCK_CNTL);
+	dccg_reg_state->phydsymclk_clock_cntl = REG_READ(PHYDSYMCLK_CLOCK_CNTL);
+	dccg_reg_state->phyesymclk_clock_cntl = REG_READ(PHYESYMCLK_CLOCK_CNTL);
+	dccg_reg_state->phyplla_pixclk_resync_cntl = REG_READ(PHYPLLA_PIXCLK_RESYNC_CNTL);
+	dccg_reg_state->phypllb_pixclk_resync_cntl = REG_READ(PHYPLLB_PIXCLK_RESYNC_CNTL);
+	dccg_reg_state->phypllc_pixclk_resync_cntl = REG_READ(PHYPLLC_PIXCLK_RESYNC_CNTL);
+	dccg_reg_state->phyplld_pixclk_resync_cntl = REG_READ(PHYPLLD_PIXCLK_RESYNC_CNTL);
+	dccg_reg_state->phyplle_pixclk_resync_cntl = REG_READ(PHYPLLE_PIXCLK_RESYNC_CNTL);
+	dccg_reg_state->refclk_cgtt_blk_ctrl_reg = REG_READ(REFCLK_CGTT_BLK_CTRL_REG);
+	dccg_reg_state->socclk_cgtt_blk_ctrl_reg = REG_READ(SOCCLK_CGTT_BLK_CTRL_REG);
+	dccg_reg_state->symclk_cgtt_blk_ctrl_reg = REG_READ(SYMCLK_CGTT_BLK_CTRL_REG);
+	dccg_reg_state->symclk_psp_cntl = REG_READ(SYMCLK_PSP_CNTL);
+	dccg_reg_state->symclk32_le_cntl = REG_READ(SYMCLK32_LE_CNTL);
+	dccg_reg_state->symclk32_se_cntl = REG_READ(SYMCLK32_SE_CNTL);
+	dccg_reg_state->symclka_clock_enable = REG_READ(SYMCLKA_CLOCK_ENABLE);
+	dccg_reg_state->symclkb_clock_enable = REG_READ(SYMCLKB_CLOCK_ENABLE);
+	dccg_reg_state->symclkc_clock_enable = REG_READ(SYMCLKC_CLOCK_ENABLE);
+	dccg_reg_state->symclkd_clock_enable = REG_READ(SYMCLKD_CLOCK_ENABLE);
+	dccg_reg_state->symclke_clock_enable = REG_READ(SYMCLKE_CLOCK_ENABLE);
+}
+
 static const struct dccg_funcs dccg31_funcs = {
+	.enable_hdmicharclk = dccg31_enable_hdmicharclk,
+	.disable_hdmicharclk = dccg31_disable_hdmicharclk,
+	.set_hdmistreamclk = dccg31_set_hdmistreamclk,
 	.update_dpp_dto = dccg31_update_dpp_dto,
 	.get_dccg_ref_freq = dccg31_get_dccg_ref_freq,
 	.dccg_init = dccg31_init,
@@ -727,6 +940,11 @@ static const struct dccg_funcs dccg31_funcs = {
 	.set_dispclk_change_mode = dccg31_set_dispclk_change_mode,
 	.disable_dsc = dccg31_disable_dscclk,
 	.enable_dsc = dccg31_enable_dscclk,
+	.dccg_read_reg_state = dccg31_read_reg_state,
+	.refclk_setup = dccg2_refclk_setup, /* Deprecated - for backward compatibility only */
+	.allow_clock_gating = dccg2_allow_clock_gating,
+	.enable_memory_low_power = dccg2_enable_memory_low_power,
+	.is_s0i3_golden_init_wa_done = dccg2_is_s0i3_golden_init_wa_done /* Deprecated - for backward compatibility only */
 };
 
 struct dccg *dccg31_create(
@@ -735,7 +953,7 @@ struct dccg *dccg31_create(
 	const struct dccg_shift *dccg_shift,
 	const struct dccg_mask *dccg_mask)
 {
-	struct dcn_dccg *dccg_dcn = kzalloc(sizeof(*dccg_dcn), GFP_KERNEL);
+	struct dcn_dccg *dccg_dcn = kzalloc_obj(*dccg_dcn);
 	struct dccg *base;
 
 	if (dccg_dcn == NULL) {

@@ -21,6 +21,7 @@ extern void *__memcpy(void *to, const void *from, size_t len);
 #define __HAVE_ARCH_MEMSET
 void *memset(void *s, int c, size_t n);
 void *__memset(void *s, int c, size_t n);
+KCFI_REFERENCE(__memset);
 
 /*
  * KMSAN needs to instrument as much code as possible. Use C versions of
@@ -30,7 +31,7 @@ void *__memset(void *s, int c, size_t n);
 #define __HAVE_ARCH_MEMSET16
 static inline void *memset16(uint16_t *s, uint16_t v, size_t n)
 {
-	const __auto_type s0 = s;
+	const auto s0 = s;
 	asm volatile (
 		"rep stosw"
 		: "+D" (s), "+c" (n)
@@ -43,7 +44,7 @@ static inline void *memset16(uint16_t *s, uint16_t v, size_t n)
 #define __HAVE_ARCH_MEMSET32
 static inline void *memset32(uint32_t *s, uint32_t v, size_t n)
 {
-	const __auto_type s0 = s;
+	const auto s0 = s;
 	asm volatile (
 		"rep stosl"
 		: "+D" (s), "+c" (n)
@@ -56,7 +57,7 @@ static inline void *memset32(uint32_t *s, uint32_t v, size_t n)
 #define __HAVE_ARCH_MEMSET64
 static inline void *memset64(uint64_t *s, uint64_t v, size_t n)
 {
-	const __auto_type s0 = s;
+	const auto s0 = s;
 	asm volatile (
 		"rep stosq"
 		: "+D" (s), "+c" (n)
@@ -70,6 +71,7 @@ static inline void *memset64(uint64_t *s, uint64_t v, size_t n)
 #define __HAVE_ARCH_MEMMOVE
 void *memmove(void *dest, const void *src, size_t count);
 void *__memmove(void *dest, const void *src, size_t count);
+KCFI_REFERENCE(__memmove);
 
 int memcmp(const void *cs, const void *ct, size_t count);
 size_t strlen(const char *s);

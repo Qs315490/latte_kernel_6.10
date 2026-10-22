@@ -460,7 +460,7 @@ META_COLLECTOR(int_sk_fwd_alloc)
 		*err = -1;
 		return;
 	}
-	dst->value = sk_forward_alloc_get(sk);
+	dst->value = READ_ONCE(sk->sk_forward_alloc);
 }
 
 META_COLLECTOR(int_sk_sndbuf)
@@ -927,7 +927,7 @@ static int em_meta_change(struct net *net, void *data, int len,
 	    TCF_META_ID(hdr->right.kind) > TCF_META_ID_MAX)
 		goto errout;
 
-	meta = kzalloc(sizeof(*meta), GFP_KERNEL);
+	meta = kzalloc_obj(*meta);
 	if (meta == NULL) {
 		err = -ENOMEM;
 		goto errout;

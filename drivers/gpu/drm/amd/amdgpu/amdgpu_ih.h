@@ -56,14 +56,14 @@ struct amdgpu_ih_ring {
 	bool			use_bus_addr;
 
 	struct amdgpu_bo	*ring_obj;
-	volatile uint32_t	*ring;
+	uint32_t		*ring;
 	uint64_t		gpu_addr;
 
 	uint64_t		wptr_addr;
-	volatile uint32_t	*wptr_cpu;
+	uint32_t		*wptr_cpu;
 
 	uint64_t		rptr_addr;
-	volatile uint32_t	*rptr_cpu;
+	uint32_t		*rptr_cpu;
 
 	bool                    enabled;
 	unsigned		rptr;
@@ -72,11 +72,15 @@ struct amdgpu_ih_ring {
 	/* For waiting on IH processing at checkpoint. */
 	wait_queue_head_t wait_process;
 	uint64_t		processed_timestamp;
+	bool overflow;
 };
 
 /* return true if time stamp t2 is after t1 with 48bit wrap around */
 #define amdgpu_ih_ts_after(t1, t2) \
 		(((int64_t)((t2) << 16) - (int64_t)((t1) << 16)) > 0LL)
+
+#define amdgpu_ih_ts_after_or_equal(t1, t2) \
+		(((int64_t)((t2) << 16) - (int64_t)((t1) << 16)) >= 0LL)
 
 /* provided by the ih block */
 struct amdgpu_ih_funcs {
@@ -87,6 +91,12 @@ struct amdgpu_ih_funcs {
 	uint64_t (*decode_iv_ts)(struct amdgpu_ih_ring *ih, u32 rptr,
 				 signed int offset);
 	void (*set_rptr)(struct amdgpu_device *adev, struct amdgpu_ih_ring *ih);
+	/* Decode IH cookie node_id into a human-readable die name string.
+	 * Returns buf, or NULL if this IH version does not support node_id decoding.
+	 */
+	const char *(*node_id_to_die_name)(struct amdgpu_device *adev,
+					   unsigned int node_id,
+					   char *buf, size_t size);
 };
 
 #define amdgpu_ih_get_wptr(adev, ih) (adev)->irq.ih_funcs->get_wptr((adev), (ih))

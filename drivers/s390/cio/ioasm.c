@@ -22,7 +22,7 @@ static inline int __stsch(struct subchannel_id schid, struct schib *addr)
 	int ccode, exception;
 
 	exception = 1;
-	asm volatile(
+	asm_inline volatile(
 		"	lgr	1,%[r1]\n"
 		"	stsch	%[addr]\n"
 		"0:	lhi	%[exc],0\n"
@@ -52,7 +52,7 @@ static inline int __msch(struct subchannel_id schid, struct schib *addr)
 	int ccode, exception;
 
 	exception = 1;
-	asm volatile(
+	asm_inline volatile(
 		"	lgr	1,%[r1]\n"
 		"	msch	%[addr]\n"
 		"0:	lhi	%[exc],0\n"
@@ -106,7 +106,7 @@ static inline int __ssch(struct subchannel_id schid, union orb *addr)
 	int ccode, exception;
 
 	exception = 1;
-	asm volatile(
+	asm_inline volatile(
 		"	lgr	1,%[r1]\n"
 		"	ssch	%[addr]\n"
 		"0:	lhi	%[exc],0\n"
@@ -178,7 +178,7 @@ int chsc(void *chsc_area)
 	int cc, exception;
 
 	exception = 1;
-	asm volatile(
+	asm_inline volatile(
 		"	.insn	rre,0xb25f0000,%[chsc_area],0\n"
 		"0:	lhi	%[exc],0\n"
 		"1:\n"
@@ -253,11 +253,10 @@ static inline int __xsch(struct subchannel_id schid)
 	asm volatile(
 		"	lgr	1,%[r1]\n"
 		"	xsch\n"
-		"	ipm	%[cc]\n"
-		"	srl	%[cc],28\n"
-		: [cc] "=&d" (ccode)
+		CC_IPM(cc)
+		: CC_OUT(cc, ccode)
 		: [r1] "d" (r1)
-		: "cc", "1");
+		: CC_CLOBBER_LIST("1"));
 	return CC_TRANSFORM(ccode);
 }
 

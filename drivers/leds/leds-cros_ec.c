@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/leds.h>
 #include <linux/led-class-multicolor.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/cros_ec_commands.h>
@@ -60,30 +59,17 @@ static inline struct cros_ec_led_priv *cros_ec_led_cdev_to_priv(struct led_class
 union cros_ec_led_cmd_data {
 	struct ec_params_led_control req;
 	struct ec_response_led_control resp;
-} __packed;
+};
 
 static int cros_ec_led_send_cmd(struct cros_ec_device *cros_ec,
 				union cros_ec_led_cmd_data *arg)
 {
 	int ret;
-	struct {
-		struct cros_ec_command msg;
-		union cros_ec_led_cmd_data data;
-	} __packed buf = {
-		.msg = {
-			.version = 1,
-			.command = EC_CMD_LED_CONTROL,
-			.insize  = sizeof(arg->resp),
-			.outsize = sizeof(arg->req),
-		},
-		.data.req = arg->req
-	};
 
-	ret = cros_ec_cmd_xfer_status(cros_ec, &buf.msg);
+	ret = cros_ec_cmd(cros_ec, 1, EC_CMD_LED_CONTROL, &arg->req,
+			  sizeof(arg->req), &arg->resp, sizeof(arg->resp));
 	if (ret < 0)
 		return ret;
-
-	arg->resp = buf.data.resp;
 
 	return 0;
 }
@@ -155,9 +141,6 @@ static int cros_ec_led_count_subleds(struct device *dev,
 		}
 	}
 
-	if (!num_subleds)
-		return -EINVAL;
-
 	*max_brightness = common_range;
 	return num_subleds;
 }
@@ -202,6 +185,8 @@ static int cros_ec_led_probe_one(struct device *dev, struct cros_ec_device *cros
 						&priv->led_mc_cdev.led_cdev.max_brightness);
 	if (num_subleds < 0)
 		return num_subleds;
+	if (num_subleds == 0)
+		return 0; /* LED without any colors, skip */
 
 	priv->cros_ec = cros_ec;
 	priv->led_id = id;
@@ -263,6 +248,7 @@ static const struct platform_device_id cros_ec_led_id[] = {
 	{ "cros-ec-led", 0 },
 	{}
 };
+MODULE_DEVICE_TABLE(platform, cros_ec_led_id);
 
 static struct platform_driver cros_ec_led_driver = {
 	.driver.name	= "cros-ec-led",
@@ -271,7 +257,6 @@ static struct platform_driver cros_ec_led_driver = {
 };
 module_platform_driver(cros_ec_led_driver);
 
-MODULE_DEVICE_TABLE(platform, cros_ec_led_id);
 MODULE_DESCRIPTION("ChromeOS EC LED Driver");
 MODULE_AUTHOR("Thomas Weißschuh <linux@weissschuh.net");
 MODULE_LICENSE("GPL");

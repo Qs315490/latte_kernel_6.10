@@ -228,7 +228,7 @@ static void pppoatm_push(struct atm_vcc *atmvcc, struct sk_buff *skb)
 
 error:
 	kfree_skb(skb);
-	ppp_input_error(&pvcc->chan, 0);
+	ppp_input_error(&pvcc->chan);
 }
 
 static int pppoatm_may_send(struct pppoatm_vcc *pvcc, int size)
@@ -308,8 +308,7 @@ static int pppoatm_send(struct ppp_channel *chan, struct sk_buff *skb)
 		test_and_set_bit(BLOCKED, &pvcc->blocked);
 		goto nospace;
 	}
-	if (test_bit(ATM_VF_RELEASED, &vcc->flags) ||
-	    test_bit(ATM_VF_CLOSE, &vcc->flags) ||
+	if (test_bit(ATM_VF_CLOSE, &vcc->flags) ||
 	    !test_bit(ATM_VF_READY, &vcc->flags)) {
 		bh_unlock_sock(sk_atm(vcc));
 		kfree_skb(skb);
@@ -397,7 +396,7 @@ static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, void __user *arg)
 	if (be.encaps != PPPOATM_ENCAPS_AUTODETECT &&
 	    be.encaps != PPPOATM_ENCAPS_VC && be.encaps != PPPOATM_ENCAPS_LLC)
 		return -EINVAL;
-	pvcc = kzalloc(sizeof(*pvcc), GFP_KERNEL);
+	pvcc = kzalloc_obj(*pvcc);
 	if (pvcc == NULL)
 		return -ENOMEM;
 	pvcc->atmvcc = atmvcc;

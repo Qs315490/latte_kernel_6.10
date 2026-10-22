@@ -20,7 +20,7 @@
 #include <string.h>
 #include <asm/unistd.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 #include "user_events_selftests.h"
 
 const char *data_file = "/sys/kernel/tracing/user_events_data";
@@ -128,6 +128,33 @@ static int event_delete(void)
 	ret = ioctl(fd, DIAG_IOCSDEL, "__abi_event");
 
 	close(fd);
+
+	return ret;
+}
+
+/*
+ * Deleting an event drops its last reference, but an unregister may defer
+ * that put (and the freeing of the associated enabler) past an RCU grace
+ * period. The delete can therefore transiently fail with -EBUSY while the
+ * previous reference is still being dropped. Retry only on that transient
+ * failure; treat an already-deleted event (-ENOENT) as success and return
+ * any other error immediately rather than spinning for the full timeout.
+ */
+static int wait_for_event_delete(void)
+{
+	int i, ret;
+
+	for (i = 0; i < 10000; ++i) {
+		ret = event_delete();
+
+		if (ret == 0 || errno == ENOENT)
+			return 0;
+
+		if (errno != EBUSY)
+			return ret;
+
+		usleep(1000);
+	}
 
 	return ret;
 }
@@ -262,7 +289,7 @@ TEST_F(user, flags) {
 	ASSERT_TRUE(event_exists());
 
 	/* Ensure we can delete it */
-	ASSERT_EQ(0, event_delete());
+	ASSERT_EQ(0, wait_for_event_delete());
 
 	/* USER_EVENT_REG_MAX or above is not allowed */
 	ASSERT_EQ(-1, reg_enable_flags(&self->check, sizeof(int), 0,

@@ -3,8 +3,11 @@
  * Copyright © 2014-2018 Intel Corporation
  */
 
+#include <drm/intel/intel_gmd_misc_regs.h>
+
 #include "i915_drv.h"
 #include "i915_reg.h"
+#include "i915_mmio_range.h"
 #include "intel_context.h"
 #include "intel_engine_pm.h"
 #include "intel_engine_regs.h"
@@ -156,8 +159,7 @@ static void _wa_add(struct i915_wa_list *wal, const struct i915_wa *wa)
 	if (IS_ALIGNED(wal->count, grow)) { /* Either uninitialized or full. */
 		struct i915_wa *list;
 
-		list = kmalloc_array(ALIGN(wal->count + 1, grow), sizeof(*wa),
-				     GFP_KERNEL);
+		list = kmalloc_objs(*list, ALIGN(wal->count + 1, grow));
 		if (!list) {
 			drm_err(&i915->drm, "No space for workaround init!\n");
 			return;
@@ -298,51 +300,65 @@ wa_mcr_write_clr(struct i915_wa_list *wal, i915_mcr_reg_t reg, u32 clr)
 static void
 wa_masked_en(struct i915_wa_list *wal, i915_reg_t reg, u32 val)
 {
-	wa_add(wal, reg, 0, _MASKED_BIT_ENABLE(val), val, true);
+	wa_add(wal, reg, 0, REG_MASKED_FIELD_ENABLE(val), val, true);
 }
 
 static void
 wa_mcr_masked_en(struct i915_wa_list *wal, i915_mcr_reg_t reg, u32 val)
 {
-	wa_mcr_add(wal, reg, 0, _MASKED_BIT_ENABLE(val), val, true);
+	wa_mcr_add(wal, reg, 0, REG_MASKED_FIELD_ENABLE(val), val, true);
 }
 
 static void
 wa_masked_dis(struct i915_wa_list *wal, i915_reg_t reg, u32 val)
 {
-	wa_add(wal, reg, 0, _MASKED_BIT_DISABLE(val), val, true);
+	wa_add(wal, reg, 0, REG_MASKED_FIELD_DISABLE(val), val, true);
 }
 
 static void
 wa_mcr_masked_dis(struct i915_wa_list *wal, i915_mcr_reg_t reg, u32 val)
 {
-	wa_mcr_add(wal, reg, 0, _MASKED_BIT_DISABLE(val), val, true);
+	wa_mcr_add(wal, reg, 0, REG_MASKED_FIELD_DISABLE(val), val, true);
 }
 
 static void
 wa_masked_field_set(struct i915_wa_list *wal, i915_reg_t reg,
 		    u32 mask, u32 val)
 {
-	wa_add(wal, reg, 0, _MASKED_FIELD(mask, val), mask, true);
+	wa_add(wal, reg, 0, REG_MASKED_FIELD(mask, val), mask, true);
 }
 
 static void
 wa_mcr_masked_field_set(struct i915_wa_list *wal, i915_mcr_reg_t reg,
 			u32 mask, u32 val)
 {
-	wa_mcr_add(wal, reg, 0, _MASKED_FIELD(mask, val), mask, true);
+	wa_mcr_add(wal, reg, 0, REG_MASKED_FIELD(mask, val), mask, true);
 }
 
 static void gen6_ctx_workarounds_init(struct intel_engine_cs *engine,
 				      struct i915_wa_list *wal)
 {
 	wa_masked_en(wal, INSTPM, INSTPM_FORCE_ORDERING);
+
+	/* WaDisable_RenderCache_OperationalFlush:snb */
+	wa_masked_dis(wal, CACHE_MODE_0, RC_OP_FLUSH_ENABLE);
 }
 
 static void gen7_ctx_workarounds_init(struct intel_engine_cs *engine,
 				      struct i915_wa_list *wal)
 {
 	wa_masked_en(wal, INSTPM, INSTPM_FORCE_ORDERING);
+	/* WaDisable_RenderCache_OperationalFlush:ivb,vlv,hsw */
+	wa_masked_dis(wal, CACHE_MODE_0_GEN7, RC_OP_FLUSH_ENABLE);
+
+	/*
+	 * BSpec says this must be set, even though
+	 * WaDisable4x2SubspanOptimization:ivb,hsw
+	 * WaDisable4x2SubspanOptimization isn't listed for VLV.
+	 */
+	wa_masked_en(wal,
+		     CACHE_MODE_1,
+		     PIXEL_SUBSPAN_COLLECT_OPT_DISABLE);
 }
 
 static void gen8_ctx_workarounds_init(struct intel_engine_cs *engine,
@@ -634,6 +650,8 @@ static void cfl_ctx_workarounds_init(struct intel_engine_cs *engine,
 static void icl_ctx_workarounds_init(struct intel_engine_cs *engine,
 				     struct i915_wa_list *wal)
 {
+	struct drm_i915_private *i915 = engine->i915;
+
 	/* Wa_1406697149 (WaDisableBankHangMode:icl) */
 	wa_write(wal, GEN8_L3CNTLREG, GEN8_ERRDETBCTRL);
 
@@ -648,7 +666,7 @@ static void icl_ctx_workarounds_init(struct intel_engine_cs *engine,
 
 	/* WaEnableFloatBlendOptimization:icl */
 	wa_mcr_add(wal, GEN10_CACHE_MODE_SS, 0,
-		   _MASKED_BIT_ENABLE(FLOAT_BLEND_OPTIMIZATION_ENABLE),
+		   REG_MASKED_FIELD_ENABLE(FLOAT_BLEND_OPTIMIZATION_ENABLE),
 		   0 /* write-only, so skip validation */,
 		   true);
 
@@ -669,6 +687,15 @@ static void icl_ctx_workarounds_init(struct intel_engine_cs *engine,
 
 	/* Wa_1406306137:icl,ehl */
 	wa_mcr_masked_en(wal, GEN9_ROW_CHICKEN4, GEN11_DIS_PICK_2ND_EU);
+
+	if (IS_JASPERLAKE(i915) || IS_ELKHARTLAKE(i915)) {
+		/*
+		 * Disable Repacking for Compression (masked R/W access)
+		 * before rendering compressed surfaces for display.
+		 */
+		wa_masked_en(wal, CACHE_MODE_0_GEN7,
+			     DISABLE_REPACKING_FOR_COMPRESSION);
+	}
 }
 
 /*
@@ -691,16 +718,17 @@ static void gen12_ctx_workarounds_init(struct intel_engine_cs *engine,
 	struct drm_i915_private *i915 = engine->i915;
 
 	/*
-	 * Wa_1409142259:tgl,dg1,adl-p
+	 * Wa_1409142259:tgl,dg1,adl-p,adl-n
 	 * Wa_1409347922:tgl,dg1,adl-p
 	 * Wa_1409252684:tgl,dg1,adl-p
 	 * Wa_1409217633:tgl,dg1,adl-p
 	 * Wa_1409207793:tgl,dg1,adl-p
-	 * Wa_1409178076:tgl,dg1,adl-p
-	 * Wa_1408979724:tgl,dg1,adl-p
-	 * Wa_14010443199:tgl,rkl,dg1,adl-p
-	 * Wa_14010698770:tgl,rkl,dg1,adl-s,adl-p
-	 * Wa_1409342910:tgl,rkl,dg1,adl-s,adl-p
+	 * Wa_1409178076:tgl,dg1,adl-p,adl-n
+	 * Wa_1408979724:tgl,dg1,adl-p,adl-n
+	 * Wa_14010443199:tgl,rkl,dg1,adl-p,adl-n
+	 * Wa_14010698770:tgl,rkl,dg1,adl-s,adl-p,adl-n
+	 * Wa_1409342910:tgl,rkl,dg1,adl-s,adl-p,adl-n
+	 * Wa_22010465259:tgl,rkl,dg1,adl-s,adl-p,adl-n
 	 */
 	wa_masked_en(wal, GEN11_COMMON_SLICE_CHICKEN3,
 		     GEN12_DISABLE_CPS_AWARE_COLOR_PIPE);
@@ -741,6 +769,12 @@ static void gen12_ctx_workarounds_init(struct intel_engine_cs *engine,
 		/* Wa_1606376872 */
 		wa_masked_en(wal, COMMON_SLICE_CHICKEN4, DISABLE_TDC_LOAD_BALANCING_CALC);
 	}
+
+	/*
+	 * This bit must be set to enable performance optimization for fast
+	 * clears.
+	 */
+	wa_mcr_write_or(wal, GEN8_WM_CHICKEN2, WAIT_ON_DEPTH_STALL_DONE_DISABLE);
 }
 
 static void dg1_ctx_workarounds_init(struct intel_engine_cs *engine,
@@ -1097,7 +1131,7 @@ hsw_gt_workarounds_init(struct intel_gt *gt, struct i915_wa_list *wal)
 
 	wa_add(wal,
 	       HSW_ROW_CHICKEN3, 0,
-	       _MASKED_BIT_ENABLE(HSW_ROW_CHICKEN3_L3_GLOBAL_ATOMICS_DISABLE),
+	       REG_MASKED_FIELD_ENABLE(HSW_ROW_CHICKEN3_L3_GLOBAL_ATOMICS_DISABLE),
 	       0 /* XXX does this reg exist? */, true);
 
 	/* WaVSRefCountFullforceMissDisable:hsw */
@@ -1318,7 +1352,7 @@ xehp_init_mcr(struct intel_gt *gt, struct i915_wa_list *wal)
 	 * We'll do our default/implicit steering based on GSLICE (in the
 	 * sliceid field) and DSS (in the subsliceid field).  If we can
 	 * find overlap between the valid MSLICE and/or LNCF values with
-	 * a suitable GSLICE, then we can just re-use the default value and
+	 * a suitable GSLICE, then we can just reuse the default value and
 	 * skip and explicit steering at runtime.
 	 *
 	 * We only need to look for overlap between GSLICE/MSLICE/LNCF to find
@@ -2238,7 +2272,7 @@ rcs_engine_wa_init(struct intel_engine_cs *engine, struct i915_wa_list *wal)
 	    IS_DG2(i915)) {
 		/* Wa_14015150844 */
 		wa_mcr_add(wal, XEHP_HDC_CHICKEN0, 0,
-			   _MASKED_BIT_ENABLE(DIS_ATOMIC_CHAINING_TYPED_WRITES),
+			   REG_MASKED_FIELD_ENABLE(DIS_ATOMIC_CHAINING_TYPED_WRITES),
 			   0, true);
 	}
 
@@ -2297,15 +2331,6 @@ rcs_engine_wa_init(struct intel_engine_cs *engine, struct i915_wa_list *wal)
 			     RING_PSMI_CTL(RENDER_RING_BASE),
 			     GEN12_WAIT_FOR_EVENT_POWER_DOWN_DISABLE |
 			     GEN8_RC_SEMA_IDLE_MSG_DISABLE);
-	}
-
-	if (IS_JASPERLAKE(i915) || IS_ELKHARTLAKE(i915)) {
-		/*
-		 * "Disable Repacking for Compression (masked R/W access)
-		 *  before rendering compressed surfaces for display."
-		 */
-		wa_masked_en(wal, CACHE_MODE_0_GEN7,
-			     DISABLE_REPACKING_FOR_COMPRESSION);
 	}
 
 	if (GRAPHICS_VER(i915) == 11) {
@@ -2558,18 +2583,6 @@ rcs_engine_wa_init(struct intel_engine_cs *engine, struct i915_wa_list *wal)
 			     RING_MODE_GEN7(RENDER_RING_BASE),
 			     GFX_TLB_INVALIDATE_EXPLICIT | GFX_REPLAY_MODE);
 
-		/* WaDisable_RenderCache_OperationalFlush:ivb,vlv,hsw */
-		wa_masked_dis(wal, CACHE_MODE_0_GEN7, RC_OP_FLUSH_ENABLE);
-
-		/*
-		 * BSpec says this must be set, even though
-		 * WaDisable4x2SubspanOptimization:ivb,hsw
-		 * WaDisable4x2SubspanOptimization isn't listed for VLV.
-		 */
-		wa_masked_en(wal,
-			     CACHE_MODE_1,
-			     PIXEL_SUBSPAN_COLLECT_OPT_DISABLE);
-
 		/*
 		 * BSpec recommends 8x4 when MSAA is used,
 		 * however in practice 16x4 seems fastest.
@@ -2636,9 +2649,6 @@ rcs_engine_wa_init(struct intel_engine_cs *engine, struct i915_wa_list *wal)
 				    GEN6_WIZ_HASHING_MASK,
 				    GEN6_WIZ_HASHING_16x4);
 
-		/* WaDisable_RenderCache_OperationalFlush:snb */
-		wa_masked_dis(wal, CACHE_MODE_0, RC_OP_FLUSH_ENABLE);
-
 		/*
 		 * From the Sandybridge PRM, volume 1 part 3, page 24:
 		 * "If this bit is set, STCunit will have LRA as replacement
@@ -2653,7 +2663,7 @@ rcs_engine_wa_init(struct intel_engine_cs *engine, struct i915_wa_list *wal)
 	if (IS_GRAPHICS_VER(i915, 4, 6))
 		/* WaTimedSingleVertexDispatch:cl,bw,ctg,elk,ilk,snb */
 		wa_add(wal, RING_MI_MODE(RENDER_RING_BASE),
-		       0, _MASKED_BIT_ENABLE(VS_TIMER_DISPATCH),
+		       0, REG_MASKED_FIELD_ENABLE(VS_TIMER_DISPATCH),
 		       /* XXX bit doesn't stick on Broadwater */
 		       IS_I965G(i915) ? 0 : VS_TIMER_DISPATCH, true);
 
@@ -2669,7 +2679,7 @@ rcs_engine_wa_init(struct intel_engine_cs *engine, struct i915_wa_list *wal)
 		 * enabled.
 		 */
 		wa_add(wal, ECOSKPD(RENDER_RING_BASE),
-		       0, _MASKED_BIT_ENABLE(ECO_CONSTANT_BUFFER_SR_DISABLE),
+		       0, REG_MASKED_FIELD_ENABLE(ECO_CONSTANT_BUFFER_SR_DISABLE),
 		       0 /* XXX bit doesn't stick on Broadwater */,
 		       true);
 }
@@ -2869,7 +2879,7 @@ general_render_compute_wa_init(struct intel_engine_cs *engine, struct i915_wa_li
 		 * we need to explicitly skip the readback.
 		 */
 		wa_mcr_add(wal, GEN10_CACHE_MODE_SS, 0,
-			   _MASKED_BIT_ENABLE(ENABLE_PREFETCH_INTO_IC),
+			   REG_MASKED_FIELD_ENABLE(ENABLE_PREFETCH_INTO_IC),
 			   0 /* write-only, so skip validation */,
 			   true);
 	}
@@ -2915,7 +2925,7 @@ void intel_engine_apply_workarounds(struct intel_engine_cs *engine)
 	wa_list_apply(&engine->wa_list);
 }
 
-static const struct i915_range mcr_ranges_gen8[] = {
+static const struct i915_mmio_range mcr_ranges_gen8[] = {
 	{ .start = 0x5500, .end = 0x55ff },
 	{ .start = 0x7000, .end = 0x7fff },
 	{ .start = 0x9400, .end = 0x97ff },
@@ -2924,7 +2934,7 @@ static const struct i915_range mcr_ranges_gen8[] = {
 	{},
 };
 
-static const struct i915_range mcr_ranges_gen12[] = {
+static const struct i915_mmio_range mcr_ranges_gen12[] = {
 	{ .start =  0x8150, .end =  0x815f },
 	{ .start =  0x9520, .end =  0x955f },
 	{ .start =  0xb100, .end =  0xb3ff },
@@ -2933,7 +2943,7 @@ static const struct i915_range mcr_ranges_gen12[] = {
 	{},
 };
 
-static const struct i915_range mcr_ranges_xehp[] = {
+static const struct i915_mmio_range mcr_ranges_xehp[] = {
 	{ .start =  0x4000, .end =  0x4aff },
 	{ .start =  0x5200, .end =  0x52ff },
 	{ .start =  0x5400, .end =  0x7fff },
@@ -2952,7 +2962,7 @@ static const struct i915_range mcr_ranges_xehp[] = {
 
 static bool mcr_range(struct drm_i915_private *i915, u32 offset)
 {
-	const struct i915_range *mcr_ranges;
+	const struct i915_mmio_range *mcr_ranges;
 	int i;
 
 	if (GRAPHICS_VER_FULL(i915) >= IP_VER(12, 55))

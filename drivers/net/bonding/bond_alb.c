@@ -1035,7 +1035,7 @@ static int alb_set_slave_mac_addr(struct slave *slave, const u8 addr[],
 	 */
 	memcpy(ss.__data, addr, len);
 	ss.ss_family = dev->type;
-	if (dev_set_mac_address(dev, (struct sockaddr *)&ss, NULL)) {
+	if (dev_set_mac_address(dev, &ss, NULL)) {
 		slave_err(slave->bond->dev, dev, "dev_set_mac_address on slave failed! ALB mode requires that the base driver support setting the hw address also when the network device's interface is open\n");
 		return -EOPNOTSUPP;
 	}
@@ -1273,8 +1273,7 @@ unwind:
 			break;
 		bond_hw_addr_copy(tmp_addr, rollback_slave->dev->dev_addr,
 				  rollback_slave->dev->addr_len);
-		dev_set_mac_address(rollback_slave->dev,
-				    (struct sockaddr *)&ss, NULL);
+		dev_set_mac_address(rollback_slave->dev, &ss, NULL);
 		dev_addr_set(rollback_slave->dev, tmp_addr);
 	}
 
@@ -1535,8 +1534,8 @@ void bond_alb_monitor(struct work_struct *work)
 	struct bonding *bond = container_of(work, struct bonding,
 					    alb_work.work);
 	struct alb_bond_info *bond_info = &(BOND_ALB_INFO(bond));
+	struct slave *slave, *curr;
 	struct list_head *iter;
-	struct slave *slave;
 
 	if (!bond_has_slaves(bond)) {
 		atomic_set(&bond_info->tx_rebalance_counter, 0);
@@ -1598,9 +1597,11 @@ void bond_alb_monitor(struct work_struct *work)
 			 * because a slave was disabled then
 			 * it can now leave promiscuous mode.
 			 */
-			dev_set_promiscuity(rtnl_dereference(bond->curr_active_slave)->dev,
-					    -1);
-			bond_info->primary_is_promisc = 0;
+			curr = rtnl_dereference(bond->curr_active_slave);
+			if (bond_info->primary_is_promisc && curr) {
+				dev_set_promiscuity(curr->dev, -1);
+				bond_info->primary_is_promisc = 0;
+			}
 
 			rtnl_unlock();
 			rcu_read_lock();
@@ -1763,8 +1764,7 @@ void bond_alb_handle_active_change(struct bonding *bond, struct slave *new_slave
 				  bond->dev->addr_len);
 		ss.ss_family = bond->dev->type;
 		/* we don't care if it can't change its mac, best effort */
-		dev_set_mac_address(new_slave->dev, (struct sockaddr *)&ss,
-				    NULL);
+		dev_set_mac_address(new_slave->dev, &ss, NULL);
 
 		dev_addr_set(new_slave->dev, tmp_addr);
 	}

@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-17 Advanced Micro Devices, Inc.
+ * Copyright 2012-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -145,7 +145,8 @@
 	uint32_t FLIP_PARAMETERS_2;\
 	uint32_t DCN_CUR1_TTU_CNTL0;\
 	uint32_t DCN_CUR1_TTU_CNTL1;\
-	uint32_t VMID_SETTINGS_0
+	uint32_t VMID_SETTINGS_0;\
+	uint32_t DST_Y_DELTA_DRQ_LIMIT
 
 /*shared with dcn3.x*/
 #define DCN21_HUBP_REG_COMMON_VARIABLE_LIST \
@@ -176,7 +177,10 @@
 	uint32_t HUBP_3DLUT_CONTROL;\
 	uint32_t HUBP_3DLUT_DLG_PARAM;\
 	uint32_t DCSURF_VIEWPORT_MCACHE_SPLIT_COORDINATE;\
-	uint32_t DCHUBP_MCACHEID_CONFIG
+	uint32_t DCHUBP_MCACHEID_CONFIG;\
+	uint32_t DCHUBP_MALL_SUB_VP;\
+	uint32_t DCHUBP_ADDR_CONFIG;\
+	uint32_t HUBP_MALL_STATUS
 
 #define DCN2_HUBP_REG_FIELD_VARIABLE_LIST(type) \
 	DCN_HUBP_REG_FIELD_BASE_LIST(type); \
@@ -264,6 +268,7 @@
 	type HUBP_3DLUT_DONE;\
 	type HUBP_3DLUT_ADDRESSING_MODE;\
 	type HUBP_3DLUT_WIDTH;\
+	type HUBP_3DLUT_MPC_WIDTH;\
 	type HUBP_3DLUT_TMZ;\
 	type HUBP_3DLUT_CROSSBAR_SELECT_Y_G;\
 	type HUBP_3DLUT_CROSSBAR_SELECT_CB_B;\
@@ -280,20 +285,25 @@
 	type MCACHEID_MALL_PREF_1H_P0;\
 	type MCACHEID_MALL_PREF_2H_P0;\
 	type MCACHEID_MALL_PREF_1H_P1;\
-	type MCACHEID_MALL_PREF_2H_P1
+	type MCACHEID_MALL_PREF_2H_P1;\
+	type HUBP_FGCG_REP_DIS
 
-
-
+#define DCN42_HUBP_REG_FIELD_VARIABLE_LIST(type) \
+	type HUBP_3DLUT_CROSSBAR_SEL_G;\
+	type HUBP_3DLUT_CROSSBAR_SEL_B;\
+	type HUBP_3DLUT_CROSSBAR_SEL_R
 struct dcn_hubp2_registers {
 	DCN401_HUBP_REG_COMMON_VARIABLE_LIST;
 };
 
 struct dcn_hubp2_shift {
 	DCN401_HUBP_REG_FIELD_VARIABLE_LIST(uint8_t);
+	DCN42_HUBP_REG_FIELD_VARIABLE_LIST(uint8_t);
 };
 
 struct dcn_hubp2_mask {
 	DCN401_HUBP_REG_FIELD_VARIABLE_LIST(uint32_t);
+	DCN42_HUBP_REG_FIELD_VARIABLE_LIST(uint32_t);
 };
 
 struct dcn20_hubp {

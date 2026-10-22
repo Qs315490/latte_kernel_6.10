@@ -25,7 +25,13 @@ tests="
 	nat_related_v4				ip4-nat-related: ICMP related matches work with SNAT
 	netlink_checks				ovsnl: validate netlink attrs and settings
 	upcall_interfaces			ovs: test the upcall interfaces
+	tunnel_metadata				ovs: test extraction of tunnel metadata
+	tunnel_refcount				ovs: test tunnel vport reference cleanup
 	drop_reason				drop: test drop reasons are emitted
+	pop_vlan				vlan: POP_VLAN action strips tag
+	dec_ttl					ttl: dec_ttl decrements IP TTL
+	flow_set				flow-set: Flow modify
+	action_set				set: SET action rewrites fields
 	psample					psample: Sampling packets with psample"
 
 info() {
@@ -113,13 +119,13 @@ ovs_add_dp () {
 }
 
 ovs_add_if () {
-	info "Adding IF to DP: br:$2 if:$3"
-	if [ "$4" != "-u" ]; then
-		ovs_sbx "$1" python3 $ovs_base/ovs-dpctl.py add-if "$2" "$3" \
-		    || return 1
+	info "Adding IF to DP: br:$3 if:$4 ($2)"
+	if [ "$5" != "-u" ]; then
+		ovs_sbx "$1" python3 $ovs_base/ovs-dpctl.py add-if \
+		    -t "$2" "$3" "$4" || return 1
 	else
 		python3 $ovs_base/ovs-dpctl.py add-if \
-		    -u "$2" "$3" >$ovs_dir/$3.out 2>$ovs_dir/$3.err &
+		    -u -t "$2" "$3" "$4" >$ovs_dir/$4.out 2>$ovs_dir/$4.err &
 		pid=$!
 		on_exit "ovs_sbx $1 kill -TERM $pid 2>/dev/null"
 	fi
@@ -166,9 +172,9 @@ ovs_add_netns_and_veths () {
 	fi
 
 	if [ "$7" != "-u" ]; then
-		ovs_add_if "$1" "$2" "$4" || return 1
+		ovs_add_if "$1" "netdev" "$2" "$4" || return 1
 	else
-		ovs_add_if "$1" "$2" "$4" -u || return 1
+		ovs_add_if "$1" "netdev" "$2" "$4" -u || return 1
 	fi
 
 	if [ $TRACING -eq 1 ]; then
@@ -184,6 +190,23 @@ ovs_add_flow () {
 	ovs_sbx "$1" python3 $ovs_base/ovs-dpctl.py add-flow "$2" "$3" "$4"
 	if [ $? -ne 0 ]; then
 		info "Flow [ $3 : $4 ] failed"
+		return 1
+	fi
+	return 0
+}
+
+ovs_mod_flow () {
+	if [ -n "$4" ]; then
+		info "Modifying flow: sbx:$1 br:$2 flow:$3 act:$4"
+		ovs_sbx "$1" python3 $ovs_base/ovs-dpctl.py \
+			mod-flow "$2" "$3" "$4"
+	else
+		info "Modifying flow (no actions): sbx:$1 br:$2 flow:$3"
+		ovs_sbx "$1" python3 $ovs_base/ovs-dpctl.py \
+			mod-flow "$2" "$3"
+	fi
+	if [ $? -ne 0 ]; then
+		info "Flow modify [ $3 ] failed"
 		return 1
 	fi
 	return 0
@@ -241,6 +264,184 @@ usage() {
 	exit 1
 }
 
+
+test_dec_ttl() {
+	sbx_add "test_dec_ttl" || return $?
+	ovs_add_dp "test_dec_ttl" decttl || return 1
+
+	info "create namespaces"
+	for ns in client server; do
+		ovs_add_netns_and_veths "test_dec_ttl" "decttl" "$ns" \
+			"${ns:0:1}0" "${ns:0:1}1" || return 1
+	done
+
+	ip netns exec client ip addr add 10.0.0.1/24 dev c1
+	ip netns exec client ip link set c1 up
+	ip netns exec server ip addr add 10.0.0.2/24 dev s1
+	ip netns exec server ip link set s1 up
+
+	# Probe: check if kernel supports dec_ttl action.
+	ovs_add_flow "test_dec_ttl" decttl \
+		'in_port(1),eth(),eth_type(0x0800),ipv4()' \
+		'dec_ttl(le_1())' &>/dev/null
+	if [ $? -ne 0 ]; then
+		info "no support for dec_ttl - skipping"
+		ovs_exit_sig
+		return $ksft_skip
+	fi
+
+	ovs_del_flows "test_dec_ttl" decttl
+
+	# ARP flows (bidirectional)
+	ovs_add_flow "test_dec_ttl" decttl \
+		'in_port(1),eth(),eth_type(0x0806),arp()' '2' || return 1
+	ovs_add_flow "test_dec_ttl" decttl \
+		'in_port(2),eth(),eth_type(0x0806),arp()' '1' || return 1
+
+	# IP flows with dec_ttl action
+	ovs_add_flow "test_dec_ttl" decttl \
+		'in_port(1),eth(),eth_type(0x0800),ipv4()' \
+		'dec_ttl(le_1()),2' || return 1
+	ovs_add_flow "test_dec_ttl" decttl \
+		'in_port(2),eth(),eth_type(0x0800),ipv4()' \
+		'dec_ttl(le_1()),1' || return 1
+
+	info "verify connectivity with dec_ttl"
+	ovs_sbx "test_dec_ttl" ip netns exec client ping -c 1 -W 2 \
+		10.0.0.2 || return 1
+
+	info "verify TTL=1 is dropped by dec_ttl"
+	ovs_sbx "test_dec_ttl" ip netns exec client ping -c 1 -W 2 \
+		-t 1 10.0.0.2 >/dev/null 2>&1 \
+		&& { info "FAIL: ping should fail with TTL=1 and dec_ttl"
+		     return 1; }
+
+	return 0
+}
+
+test_flow_set() {
+	sbx_add "test_flow_set" || return $?
+	ovs_add_dp "test_flow_set" flowset || return 1
+
+	info "create namespaces"
+	for ns in client server; do
+		ovs_add_netns_and_veths "test_flow_set" "flowset" "$ns" \
+			"${ns:0:1}0" "${ns:0:1}1" || return 1
+	done
+
+	ip netns exec client ip addr add 10.0.0.1/24 dev c1
+	ip netns exec client ip link set c1 up
+	ip netns exec server ip addr add 10.0.0.2/24 dev s1
+	ip netns exec server ip link set s1 up
+
+	ovs_add_flow "test_flow_set" flowset \
+		'in_port(1),eth(),eth_type(0x0806),arp()' '2' || return 1
+	ovs_add_flow "test_flow_set" flowset \
+		'in_port(2),eth(),eth_type(0x0806),arp()' '1' || return 1
+
+	local fwd_flow="ufid:00000001-0002-0003-0004-000500060007"
+	fwd_flow="$fwd_flow,in_port(1),eth(),eth_type(0x0800),ipv4()"
+
+	ovs_add_flow "test_flow_set" flowset "$fwd_flow" '2' \
+		|| return 1
+	ovs_add_flow "test_flow_set" flowset \
+		'in_port(2),eth(),eth_type(0x0800),ipv4()' '1' || return 1
+
+	info "verify initial forwarding"
+	ovs_sbx "test_flow_set" ip netns exec client ping -c 1 -W 2 \
+		10.0.0.2 || return 1
+
+	info "mod-flow with new actions (change to drop)"
+	ovs_mod_flow "test_flow_set" flowset "$fwd_flow" 'drop' \
+		|| return 1
+
+	info "verify traffic is now dropped"
+	ovs_sbx "test_flow_set" ip netns exec client ping -c 1 -W 2 \
+		10.0.0.2 >/dev/null 2>&1 \
+		&& { info "FAIL: ping should fail after mod-flow to drop"
+		     return 1; }
+
+	info "mod-flow without actions"
+	ovs_mod_flow "test_flow_set" flowset "$fwd_flow" || return 1
+
+	info "verify flow retained drop action via dump"
+	python3 "$ovs_base/ovs-dpctl.py" dump-flows flowset \
+		| grep -q "actions:drop" || \
+		{ info "FAIL: flow not showing drop action"; return 1; }
+
+	info "verify drop actions unchanged"
+	ovs_sbx "test_flow_set" ip netns exec client ping -c 1 -W 2 \
+		10.0.0.2 >/dev/null 2>&1 \
+		&& { info "FAIL: ping should still fail after no-actions set"
+		     return 1; }
+
+	return 0
+}
+
+test_action_set() {
+	sbx_add "test_action_set" || return $?
+	ovs_add_dp "test_action_set" settest || return 1
+
+	info "create namespaces"
+	for ns in client server; do
+		ovs_add_netns_and_veths "test_action_set" "settest" "$ns" \
+			"${ns:0:1}0" "${ns:0:1}1" || return 1
+	done
+
+	ip netns exec client ip addr add 10.0.0.1/24 dev c1
+	ip netns exec client ip link set c1 up
+	ip netns exec server ip addr add 10.0.0.2/24 dev s1
+	ip netns exec server ip link set s1 up
+
+	ovs_add_flow "test_action_set" settest \
+		'in_port(1),eth(),eth_type(0x0806),arp()' '2' || return 1
+	ovs_add_flow "test_action_set" settest \
+		'in_port(2),eth(),eth_type(0x0806),arp()' '1' || return 1
+
+	ovs_add_flow "test_action_set" settest \
+		'in_port(1),eth(),eth_type(0x0800),ipv4()' '2' || return 1
+	ovs_add_flow "test_action_set" settest \
+		'in_port(2),eth(),eth_type(0x0800),ipv4()' '1' || return 1
+
+	info "verify connectivity without SET"
+	ovs_sbx "test_action_set" ip netns exec client ping -c 1 -W 2 \
+		10.0.0.2 || return 1
+
+	ovs_del_flows "test_action_set" settest
+	ovs_add_flow "test_action_set" settest \
+		'in_port(1),eth(),eth_type(0x0806),arp()' '2' || return 1
+	ovs_add_flow "test_action_set" settest \
+		'in_port(2),eth(),eth_type(0x0806),arp()' '1' || return 1
+
+	info "set ipv4 dst to unreachable address"
+	ovs_add_flow "test_action_set" settest \
+		'in_port(1),eth(),eth_type(0x0800),ipv4()' \
+		'set(ipv4(dst=10.0.0.99)),2' || return 1
+	ovs_add_flow "test_action_set" settest \
+		'in_port(2),eth(),eth_type(0x0800),ipv4()' '1' || return 1
+
+	info "verify ping fails with rewritten dst"
+	ovs_sbx "test_action_set" ip netns exec client ping -c 1 -W 2 \
+		10.0.0.2 >/dev/null 2>&1 \
+		&& { info "FAIL: ping should fail with dst rewritten"
+		     return 1; }
+
+	ovs_del_flows "test_action_set" settest
+	ovs_add_flow "test_action_set" settest \
+		'in_port(1),eth(),eth_type(0x0806),arp()' '2' || return 1
+	ovs_add_flow "test_action_set" settest \
+		'in_port(2),eth(),eth_type(0x0806),arp()' '1' || return 1
+	ovs_add_flow "test_action_set" settest \
+		'in_port(1),eth(),eth_type(0x0800),ipv4()' '2' || return 1
+	ovs_add_flow "test_action_set" settest \
+		'in_port(2),eth(),eth_type(0x0800),ipv4()' '1' || return 1
+
+	info "verify connectivity restored without SET"
+	ovs_sbx "test_action_set" ip netns exec client ping -c 1 -W 2 \
+		10.0.0.2 || return 1
+
+	return 0
+}
 
 # psample test
 # - use psample to observe packets
@@ -302,6 +503,8 @@ test_psample() {
 	# sFlow / IPFIX.
 	nlpid=$(grep -E "listening on upcall packet handler" \
             $ovs_dir/s0.out | cut -d ":" -f 2 | tr -d ' ')
+	[ -z "$nlpid" ] && \
+		{ info "failed to get upcall PID"; return 1; }
 
 	ovs_add_flow "test_psample" psample \
             "in_port(2),eth(),eth_type(0x0800),ipv4()" \
@@ -330,6 +533,15 @@ test_psample() {
 # - drop packets and verify the right drop reason is reported
 test_drop_reason() {
 	which perf >/dev/null 2>&1 || return $ksft_skip
+	which pahole >/dev/null 2>&1 || return $ksft_skip
+
+	ovs_drop_subsys=$(pahole -C skb_drop_reason_subsys |
+			      awk '/OPENVSWITCH/ { print $3; }' |
+			      tr -d ,)
+	if [ -z "$ovs_drop_subsys" ]; then
+		info "failed to get OVS drop subsys ID"
+		return $ksft_skip
+	fi
 
 	sbx_add "test_drop_reason" || return $?
 
@@ -373,7 +585,7 @@ test_drop_reason() {
 		"in_port(2),eth(),eth_type(0x0800),ipv4(src=172.31.110.20,proto=1),icmp()" 'drop'
 
 	ovs_drop_record_and_run "test_drop_reason" ip netns exec client ping -c 2 172.31.110.20
-	ovs_drop_reason_count 0x30001 # OVS_DROP_FLOW_ACTION
+	ovs_drop_reason_count 0x${ovs_drop_subsys}0001 # OVS_DROP_FLOW_ACTION
 	if [[ "$?" -ne "2" ]]; then
 		info "Did not detect expected drops: $?"
 		return 1
@@ -390,7 +602,7 @@ test_drop_reason() {
 
 	ovs_drop_record_and_run \
             "test_drop_reason" ip netns exec client nc -i 1 -zuv 172.31.110.20 6000
-	ovs_drop_reason_count 0x30004 # OVS_DROP_EXPLICIT_ACTION_ERROR
+	ovs_drop_reason_count 0x${ovs_drop_subsys}0004 # OVS_DROP_EXPLICIT_ACTION_ERROR
 	if [[ "$?" -ne "1" ]]; then
 		info "Did not detect expected explicit error drops: $?"
 		return 1
@@ -398,7 +610,7 @@ test_drop_reason() {
 
 	ovs_drop_record_and_run \
             "test_drop_reason" ip netns exec client nc -i 1 -zuv 172.31.110.20 7000
-	ovs_drop_reason_count 0x30003 # OVS_DROP_EXPLICIT_ACTION
+	ovs_drop_reason_count 0x${ovs_drop_subsys}0003 # OVS_DROP_EXPLICIT_ACTION
 	if [[ "$?" -ne "1" ]]; then
 		info "Did not detect expected explicit drops: $?"
 		return 1
@@ -428,13 +640,19 @@ test_arp_ping () {
 	# Setup client namespace
 	ip netns exec client ip addr add 172.31.110.10/24 dev c1
 	ip netns exec client ip link set c1 up
-	HW_CLIENT=`ip netns exec client ip link show dev c1 | grep -E 'link/ether [0-9a-f:]+' | awk '{print $2;}'`
+	HW_CLIENT=$(ip netns exec client ip link show dev c1 \
+		| awk '/link\/ether/ {print $2}')
+	[ -z "$HW_CLIENT" ] && \
+		{ info "failed to get client hwaddr"; return 1; }
 	info "Client hwaddr: $HW_CLIENT"
 
 	# Setup server namespace
 	ip netns exec server ip addr add 172.31.110.20/24 dev s1
 	ip netns exec server ip link set s1 up
-	HW_SERVER=`ip netns exec server ip link show dev s1 | grep -E 'link/ether [0-9a-f:]+' | awk '{print $2;}'`
+	HW_SERVER=$(ip netns exec server ip link show dev s1 \
+		| awk '/link\/ether/ {print $2}')
+	[ -z "$HW_SERVER" ] && \
+		{ info "failed to get server hwaddr"; return 1; }
 	info "Server hwaddr: $HW_SERVER"
 
 	ovs_add_flow "test_arp_ping" arpping \
@@ -748,6 +966,192 @@ test_upcall_interfaces() {
 	    >$ovs_dir/arping.stdout 2>$ovs_dir/arping.stderr
 
 	grep -E "MISS upcall\[0/yes\]: .*arp\(sip=172.31.110.1,tip=172.31.110.20,op=1,sha=" $ovs_dir/left0.out >/dev/null 2>&1 || return 1
+	return 0
+}
+
+ovs_add_kernel_tunnel() {
+	local sbxname=$1; shift
+	local ns=$1; shift
+	local tnl_type=$1; shift
+	local name=$1; shift
+	local addr=$1; shift
+
+	info "setting up kernel ${tnl_type} tunnel ${name}"
+	ovs_sbx "${sbxname}" ip -netns ${ns} link add dev ${name} type ${tnl_type} $* || return 1
+	on_exit "ovs_sbx ${sbxname} ip -netns ${ns} link del ${name} >/dev/null 2>&1"
+	ovs_sbx "${sbxname}" ip -netns ${ns} addr add dev ${name} ${addr} || return 1
+	ovs_sbx "${sbxname}" ip -netns ${ns} link set dev ${name} mtu 1450 up || return 1
+}
+
+test_tunnel_metadata() {
+	which arping >/dev/null 2>&1 || return $ksft_skip
+
+	sbxname="test_tunnel_metadata"
+	sbx_add "${sbxname}" || return 1
+
+	info "setting up new DP"
+	ovs_add_dp "${sbxname}" tdp0 -V 2:1 || return 1
+
+	ovs_add_netns_and_veths "${sbxname}" tdp0 tns left0 l0 \
+		172.31.110.1/24 || return 1
+
+	info "removing veth interface from openvswitch and setting IP"
+	ovs_del_if "${sbxname}" tdp0 left0 || return 1
+	ovs_sbx "${sbxname}" ip addr add 172.31.110.2/24 dev left0 || return 1
+	ovs_sbx "${sbxname}" ip link set left0 up || return 1
+
+	info "setting up tunnel port in openvswitch"
+	ovs_add_if "${sbxname}" "vxlan" tdp0 ovs-vxlan0 -u || return 1
+	on_exit "ovs_sbx ${sbxname} ip link del ovs-vxlan0"
+	ovs_wait ip link show ovs-vxlan0 &>/dev/null || return 1
+	ovs_sbx "${sbxname}" ip link set ovs-vxlan0 up || return 1
+
+	configs=$(echo '
+	    1 172.31.221.1/24 1155332 32   set   udpcsum flags\(df\|csum\)
+	    2 172.31.222.1/24 1234567 45   set noudpcsum flags\(df\)
+	    3 172.31.223.1/24 1020304 23 unset   udpcsum flags\(csum\)
+	    4 172.31.224.1/24 1357986 15 unset noudpcsum' | sed '/^$/d')
+
+	while read -r i addr id ttl df csum flags; do
+		ovs_add_kernel_tunnel "${sbxname}" tns vxlan vxlan${i} ${addr} \
+			remote 172.31.110.2 id ${id} dstport 4789 \
+			ttl ${ttl} df ${df} ${csum} || return 1
+	done <<< "${configs}"
+
+	ovs_wait grep -q 'listening on upcall packet handler' \
+		${ovs_dir}/ovs-vxlan0.out || return 1
+
+	info "sending arping"
+	for i in 1 2 3 4; do
+		ovs_sbx "${sbxname}" ip netns exec tns \
+			arping -I vxlan${i} 172.31.22${i}.2 -c 1 \
+			>${ovs_dir}/arping.stdout 2>${ovs_dir}/arping.stderr
+	done
+
+	info "checking that received decapsulated packets carry correct metadata"
+	while read -r i addr id ttl df csum flags; do
+		arp_hdr="arp\\(sip=172.31.22${i}.1,tip=172.31.22${i}.2,op=1,sha="
+		addrs="src=172.31.110.1,dst=172.31.110.2"
+		ports="tp_src=[0-9]*,tp_dst=4789"
+		tnl_md="tunnel\\(tun_id=${id},${addrs},ttl=${ttl},${ports},${flags}\\)"
+
+		ovs_sbx "${sbxname}" grep -qE "MISS upcall.*${tnl_md}.*${arp_hdr}" \
+			${ovs_dir}/ovs-vxlan0.out || return 1
+	done <<< "${configs}"
+
+	return 0
+}
+
+test_tunnel_refcount() {
+	sbxname="test_tunnel_refcount"
+	sbx_add "${sbxname}" || return 1
+
+	ovs_sbx "${sbxname}" ip netns add trefns || return 1
+	on_exit "ovs_sbx ${sbxname} ip netns del trefns"
+
+	for tun_type in gre vxlan geneve; do
+		info "testing ${tun_type} tunnel vport refcount"
+
+		ovs_sbx "${sbxname}" ip netns exec trefns \
+			python3 $ovs_base/ovs-dpctl.py \
+			add-dp dp-${tun_type} || return 1
+
+		ovs_sbx "${sbxname}" ip netns exec trefns \
+			python3 $ovs_base/ovs-dpctl.py \
+			add-if --no-lwt -t ${tun_type} \
+			dp-${tun_type} ovs-${tun_type}0 || return 1
+
+		ovs_wait ip -netns trefns link show \
+			ovs-${tun_type}0 >/dev/null 2>&1 || return 1
+
+		info "deleting dp - may hang if reference counting is broken"
+		ovs_sbx "${sbxname}" ip netns exec trefns \
+			python3 $ovs_base/ovs-dpctl.py \
+			del-dp dp-${tun_type} &
+
+		dev_removed() {
+			! ip -netns trefns link show "$1" >/dev/null 2>&1
+		}
+		ovs_wait dev_removed dp-${tun_type} || return 1
+		ovs_wait dev_removed ovs-${tun_type}0 || return 1
+	done
+
+	return 0
+}
+
+test_pop_vlan() {
+	local sbx="test_pop_vlan"
+	sbx_add "$sbx" || return $?
+	ovs_add_dp "$sbx" vlandp || return 1
+
+	ovs_add_netns_and_veths "$sbx" vlandp \
+		ns1 veth1 ns1veth 192.0.2.1/24 || return 1
+	ovs_add_netns_and_veths "$sbx" vlandp \
+		ns2 veth2 ns2veth 192.0.2.2/24 || return 1
+
+	# Baseline: untagged bidirectional forwarding
+	ovs_add_flow "$sbx" vlandp \
+		'in_port(1),eth(),eth_type(0x0806),arp()' '2' || return 1
+	ovs_add_flow "$sbx" vlandp \
+		'in_port(2),eth(),eth_type(0x0806),arp()' '1' || return 1
+	ovs_add_flow "$sbx" vlandp \
+		'in_port(1),eth(),eth_type(0x0800),ipv4()' '2' || return 1
+	ovs_add_flow "$sbx" vlandp \
+		'in_port(2),eth(),eth_type(0x0800),ipv4()' '1' || return 1
+	ovs_sbx "$sbx" ip netns exec ns1 ping -c 3 -W 2 \
+		192.0.2.2 || return 1
+
+	# VLAN topology: ns1 uses VLAN sub-interface, ns2 is plain
+	ip -n ns1 link add link ns1veth name ns1veth.10 \
+		type vlan id 10 || return 1
+	on_exit "ip -n ns1 link del ns1veth.10 2>/dev/null"
+	ip -n ns1 addr add 198.51.100.1/24 dev ns1veth.10 || return 1
+	ip -n ns1 link set ns1veth.10 up || return 1
+	ip -n ns2 addr add 198.51.100.2/24 dev ns2veth || return 1
+
+	ovs_del_flows "$sbx" vlandp
+
+	# Static ARP: avoids VLAN-tagged ARP complexity
+	local ns1veth10mac ns2mac
+	ns1veth10mac=$(ip -n ns1 link show ns1veth.10 \
+		| awk '/link\/ether/ {print $2}')
+	[ -z "$ns1veth10mac" ] && \
+		{ info "failed to get ns1veth10mac"; return 1; }
+	ns2mac=$(ip -n ns2 link show ns2veth \
+		| awk '/link\/ether/ {print $2}')
+	[ -z "$ns2mac" ] && \
+		{ info "failed to get ns2mac"; return 1; }
+	ip -n ns1 neigh replace 198.51.100.2 lladdr "$ns2mac" \
+		dev ns1veth.10 nud permanent || return 1
+	ip -n ns2 neigh replace 198.51.100.1 \
+		lladdr "$ns1veth10mac" \
+		dev ns2veth nud permanent || return 1
+
+	local vlan_match='in_port(1),eth(),eth_type(0x8100),'
+	vlan_match+='vlan(vid=10),'
+	vlan_match+='encap(eth_type(0x0800),'
+	vlan_match+='ipv4(src=198.51.100.1,proto=1),icmp())'
+
+	# Negative: forward without pop_vlan -- tagged frame
+	# is invisible to ns2 (no VLAN sub-interface), ping fails
+	ovs_add_flow "$sbx" vlandp "$vlan_match" '2' || return 1
+	ovs_sbx "$sbx" ip netns exec ns1 ping -I ns1veth.10 \
+		-c 3 -W 1 198.51.100.2 >/dev/null 2>&1 \
+		&& { info "FAIL: ping should fail without pop_vlan"
+		     return 1; }
+
+	ovs_del_flows "$sbx" vlandp
+
+	# Positive: pop_vlan strips tag on forward path,
+	# push_vlan restores tag on return path -- ping succeeds
+	ovs_add_flow "$sbx" vlandp \
+		"$vlan_match" 'pop_vlan,2' || return 1
+	ovs_add_flow "$sbx" vlandp \
+		'in_port(2),eth(),eth_type(0x0800),ipv4()' \
+		'push_vlan(vid=10,pcp=0,tpid=0x8100),1' || return 1
+	ovs_sbx "$sbx" ip netns exec ns1 ping -I ns1veth.10 \
+		-c 3 -W 2 198.51.100.2 || return 1
+
 	return 0
 }
 

@@ -14,9 +14,9 @@
 #include "adf_4xxx_hw_data.h"
 
 static const struct pci_device_id adf_pci_tbl[] = {
-	{ PCI_VDEVICE(INTEL, ADF_4XXX_PCI_DEVICE_ID), },
-	{ PCI_VDEVICE(INTEL, ADF_401XX_PCI_DEVICE_ID), },
-	{ PCI_VDEVICE(INTEL, ADF_402XX_PCI_DEVICE_ID), },
+	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_QAT_4XXX) },
+	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_QAT_401XX) },
+	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_QAT_402XX) },
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, adf_pci_tbl);
@@ -81,7 +81,7 @@ static int adf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	adf_init_hw_data_4xxx(accel_dev->hw_device, ent->device);
 
 	pci_read_config_byte(pdev, PCI_REVISION_ID, &accel_pci_dev->revid);
-	pci_read_config_dword(pdev, ADF_GEN4_FUSECTL4_OFFSET, &hw_data->fuses);
+	pci_read_config_dword(pdev, ADF_GEN4_FUSECTL4_OFFSET, &hw_data->fuses[ADF_FUSECTL4]);
 
 	/* Get Accelerators and Accelerators Engines masks */
 	hw_data->accel_mask = hw_data->get_accel_mask(hw_data);
@@ -103,7 +103,7 @@ static int adf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* Enable PCI device */
 	ret = pcim_enable_device(pdev);
 	if (ret) {
-		dev_err(&pdev->dev, "Can't enable PCI device.\n");
+		pci_err(pdev, "Can't enable PCI device.\n");
 		goto out_err;
 	}
 
@@ -133,7 +133,7 @@ static int adf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	ret = pcim_request_all_regions(pdev, pci_name(pdev));
 	if (ret) {
-		dev_err(&pdev->dev, "Failed to request PCI regions.\n");
+		pci_err(pdev, "Failed to request PCI regions.\n");
 		goto out_err;
 	}
 
@@ -142,16 +142,14 @@ static int adf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		bar = &accel_pci_dev->pci_bars[i++];
 		bar->virt_addr = pcim_iomap(pdev, bar_nr, 0);
 		if (!bar->virt_addr) {
-			dev_err(&pdev->dev, "Failed to ioremap PCI region.\n");
+			pci_err(pdev, "Failed to ioremap PCI region.\n");
 			ret = -ENOMEM;
 			goto out_err;
 		}
 	}
 
-	pci_set_master(pdev);
-
 	if (pci_save_state(pdev)) {
-		dev_err(&pdev->dev, "Failed to save pci state.\n");
+		pci_err(pdev, "Failed to save pci state.\n");
 		ret = -ENOMEM;
 		goto out_err;
 	}
@@ -188,11 +186,19 @@ static void adf_remove(struct pci_dev *pdev)
 	adf_cleanup_accel(accel_dev);
 }
 
+static void adf_shutdown(struct pci_dev *pdev)
+{
+	struct adf_accel_dev *accel_dev = adf_devmgr_pci_to_accel_dev(pdev);
+
+	adf_dev_down(accel_dev);
+}
+
 static struct pci_driver adf_driver = {
 	.id_table = adf_pci_tbl,
 	.name = ADF_4XXX_DEVICE_NAME,
 	.probe = adf_probe,
 	.remove = adf_remove,
+	.shutdown = adf_shutdown,
 	.sriov_configure = adf_sriov_configure,
 	.err_handler = &adf_err_handler,
 };
@@ -206,6 +212,5 @@ MODULE_FIRMWARE(ADF_402XX_FW);
 MODULE_FIRMWARE(ADF_4XXX_MMP);
 MODULE_FIRMWARE(ADF_402XX_MMP);
 MODULE_DESCRIPTION("Intel(R) QuickAssist Technology");
-MODULE_VERSION(ADF_DRV_VERSION);
 MODULE_SOFTDEP("pre: crypto-intel_qat");
 MODULE_IMPORT_NS("CRYPTO_QAT");

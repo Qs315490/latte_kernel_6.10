@@ -60,21 +60,23 @@ static void gfs2_tune_init(struct gfs2_tune *gt)
 	gt->gt_new_files_jdata = 0;
 	gt->gt_max_readahead = BIT(18);
 	gt->gt_complain_secs = 10;
+	gt->gt_withdraw_helper_timeout = 5;
 }
 
 void free_sbd(struct gfs2_sbd *sdp)
 {
-	if (sdp->sd_lkstats)
-		free_percpu(sdp->sd_lkstats);
+	struct super_block *sb = sdp->sd_vfs;
+
+	free_percpu(sdp->sd_lkstats);
+	sb->s_fs_info = NULL;
 	kfree(sdp);
 }
 
 static struct gfs2_sbd *init_sbd(struct super_block *sb)
 {
 	struct gfs2_sbd *sdp;
-	struct address_space *mapping;
 
-	sdp = kzalloc(sizeof(struct gfs2_sbd), GFP_KERNEL);
+	sdp = kzalloc_obj(struct gfs2_sbd);
 	if (!sdp)
 		return NULL;
 
@@ -91,7 +93,7 @@ static struct gfs2_sbd *init_sbd(struct super_block *sb)
 	init_waitqueue_head(&sdp->sd_async_glock_wait);
 	atomic_set(&sdp->sd_glock_disposal, 0);
 	init_completion(&sdp->sd_locking_init);
-	init_completion(&sdp->sd_wdack);
+	init_completion(&sdp->sd_withdraw_helper);
 	spin_lock_init(&sdp->sd_statfs_spin);
 
 	spin_lock_init(&sdp->sd_rindex_spin);
@@ -108,16 +110,6 @@ static struct gfs2_sbd *init_sbd(struct super_block *sb)
 	spin_lock_init(&sdp->sd_bitmap_lock);
 
 	INIT_LIST_HEAD(&sdp->sd_sc_inodes_list);
-
-	mapping = &sdp->sd_aspace;
-
-	address_space_init_once(mapping);
-	mapping->a_ops = &gfs2_rgrp_aops;
-	mapping->host = sb->s_bdev->bd_mapping->host;
-	mapping->flags = 0;
-	mapping_set_gfp_mask(mapping, GFP_NOFS);
-	mapping->i_private_data = NULL;
-	mapping->writeback_index = 0;
 
 	spin_lock_init(&sdp->sd_log_lock);
 	atomic_set(&sdp->sd_log_pinned, 0);
@@ -172,7 +164,7 @@ static int gfs2_check_sb(struct gfs2_sbd *sdp, int silent)
 		return -EINVAL;
 	}
 
-	if (sb->sb_bsize < 512 || sb->sb_bsize > PAGE_SIZE ||
+	if (sb->sb_bsize < SECTOR_SIZE || sb->sb_bsize > PAGE_SIZE ||
 	    (sb->sb_bsize & (sb->sb_bsize - 1))) {
 		pr_warn("Invalid block size\n");
 		return -EINVAL;
@@ -226,28 +218,22 @@ static void gfs2_sb_in(struct gfs2_sbd *sdp, const struct gfs2_sb *str)
 
 static int gfs2_read_super(struct gfs2_sbd *sdp, sector_t sector, int silent)
 {
-	struct super_block *sb = sdp->sd_vfs;
-	struct page *page;
-	struct bio_vec bvec;
-	struct bio bio;
+	struct gfs2_sb *sb;
 	int err;
 
-	page = alloc_page(GFP_KERNEL);
-	if (unlikely(!page))
+	sb = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (unlikely(!sb))
 		return -ENOMEM;
-
-	bio_init(&bio, sb->s_bdev, &bvec, 1, REQ_OP_READ | REQ_META);
-	bio.bi_iter.bi_sector = sector * (sb->s_blocksize >> 9);
-	__bio_add_page(&bio, page, PAGE_SIZE, 0);
-
-	err = submit_bio_wait(&bio);
+	err = bdev_rw_virt(sdp->sd_vfs->s_bdev,
+			   sector << (sdp->sd_vfs->s_blocksize_bits - SECTOR_SHIFT),
+			   sb, PAGE_SIZE, REQ_OP_READ | REQ_META);
 	if (err) {
 		pr_warn("error %d reading superblock\n", err);
-		__free_page(page);
+		kfree(sb);
 		return err;
 	}
-	gfs2_sb_in(sdp, page_address(page));
-	__free_page(page);
+	gfs2_sb_in(sdp, sb);
+	kfree(sb);
 	return gfs2_check_sb(sdp, silent);
 }
 
@@ -272,7 +258,7 @@ static int gfs2_read_sb(struct gfs2_sbd *sdp, int silent)
 		return error;
 	}
 
-	sdp->sd_fsb2bb_shift = sdp->sd_sb.sb_bsize_shift - 9;
+	sdp->sd_fsb2bb_shift = sdp->sd_sb.sb_bsize_shift - SECTOR_SHIFT;
 	sdp->sd_fsb2bb = BIT(sdp->sd_fsb2bb_shift);
 	sdp->sd_diptrs = (sdp->sd_sb.sb_bsize -
 			  sizeof(struct gfs2_dinode)) / sizeof(u64);
@@ -385,7 +371,7 @@ static int init_locking(struct gfs2_sbd *sdp, struct gfs2_holder *mount_gh,
 	error = gfs2_glock_nq_num(sdp,
 				  GFS2_MOUNT_LOCK, &gfs2_nondisk_glops,
 				  LM_ST_EXCLUSIVE,
-				  LM_FLAG_NOEXP | GL_NOCACHE | GL_NOPID,
+				  LM_FLAG_RECOVER | GL_NOCACHE | GL_NOPID,
 				  mount_gh);
 	if (error) {
 		fs_err(sdp, "can't acquire mount glock: %d\n", error);
@@ -395,7 +381,7 @@ static int init_locking(struct gfs2_sbd *sdp, struct gfs2_holder *mount_gh,
 	error = gfs2_glock_nq_num(sdp,
 				  GFS2_LIVE_LOCK, &gfs2_nondisk_glops,
 				  LM_ST_SHARED,
-				  LM_FLAG_NOEXP | GL_EXACT | GL_NOPID,
+				  LM_FLAG_RECOVER | GL_EXACT | GL_NOPID,
 				  &sdp->sd_live_gh);
 	if (error) {
 		fs_err(sdp, "can't acquire live glock: %d\n", error);
@@ -500,7 +486,9 @@ static int init_sb(struct gfs2_sbd *sdp, int silent)
 		       sdp->sd_sb.sb_bsize, (unsigned int)PAGE_SIZE);
 		goto out;
 	}
-	sb_set_blocksize(sb, sdp->sd_sb.sb_bsize);
+	ret = -EINVAL;
+	if (!sb_set_blocksize(sb, sdp->sd_sb.sb_bsize))
+		goto out;
 
 	/* Get the root inode */
 	no_addr = sdp->sd_sb.sb_root_dir.no_addr;
@@ -555,8 +543,6 @@ static int gfs2_jindex_hold(struct gfs2_sbd *sdp, struct gfs2_holder *ji_gh)
 	mutex_lock(&sdp->sd_jindex_mutex);
 
 	for (;;) {
-		struct gfs2_inode *jip;
-
 		error = gfs2_glock_nq_init(dip->i_gl, LM_ST_SHARED, 0, ji_gh);
 		if (error)
 			break;
@@ -576,7 +562,7 @@ static int gfs2_jindex_hold(struct gfs2_sbd *sdp, struct gfs2_holder *ji_gh)
 			break;
 
 		error = -ENOMEM;
-		jd = kzalloc(sizeof(struct gfs2_jdesc), GFP_KERNEL);
+		jd = kzalloc_obj(struct gfs2_jdesc);
 		if (!jd)
 			break;
 
@@ -597,8 +583,6 @@ static int gfs2_jindex_hold(struct gfs2_sbd *sdp, struct gfs2_holder *ji_gh)
 		d_mark_dontcache(jd->jd_inode);
 		spin_lock(&sdp->sd_jindex_spin);
 		jd->jd_jid = sdp->sd_journals++;
-		jip = GFS2_I(jd->jd_inode);
-		jd->jd_no_addr = jip->i_no_addr;
 		list_add_tail(&jd->jd_list, &sdp->sd_jindex_list);
 		spin_unlock(&sdp->sd_jindex_spin);
 	}
@@ -647,7 +631,7 @@ static int init_statfs(struct gfs2_sbd *sdp)
 	 * per_node metafs directory and save it in the sdp->sd_sc_inodes_list. */
 	list_for_each_entry(jd, &sdp->sd_jindex_list, jd_list) {
 		struct local_statfs_inode *lsi =
-			kmalloc(sizeof(struct local_statfs_inode), GFP_NOFS);
+			kmalloc_obj(struct local_statfs_inode, GFP_NOFS);
 		if (!lsi) {
 			error = -ENOMEM;
 			goto free_local;
@@ -758,7 +742,7 @@ static int init_journal(struct gfs2_sbd *sdp, int undo)
 		error = gfs2_glock_nq_num(sdp, sdp->sd_lockstruct.ls_jid,
 					  &gfs2_journal_glops,
 					  LM_ST_EXCLUSIVE,
-					  LM_FLAG_NOEXP | GL_NOCACHE | GL_NOPID,
+					  LM_FLAG_RECOVER | GL_NOPID,
 					  &sdp->sd_journal_gh);
 		if (error) {
 			fs_err(sdp, "can't acquire journal glock: %d\n", error);
@@ -766,9 +750,8 @@ static int init_journal(struct gfs2_sbd *sdp, int undo)
 		}
 
 		ip = GFS2_I(sdp->sd_jdesc->jd_inode);
-		sdp->sd_jinode_gl = ip->i_gl;
 		error = gfs2_glock_nq_init(ip->i_gl, LM_ST_SHARED,
-					   LM_FLAG_NOEXP | GL_EXACT |
+					   LM_FLAG_RECOVER | GL_EXACT |
 					   GL_NOCACHE | GL_NOPID,
 					   &sdp->sd_jinode_gh);
 		if (error) {
@@ -834,13 +817,10 @@ static int init_journal(struct gfs2_sbd *sdp, int undo)
 fail_statfs:
 	uninit_statfs(sdp);
 fail_jinode_gh:
-	/* A withdraw may have done dq/uninit so now we need to check it */
-	if (!sdp->sd_args.ar_spectator &&
-	    gfs2_holder_initialized(&sdp->sd_jinode_gh))
+	if (!sdp->sd_args.ar_spectator)
 		gfs2_glock_dq_uninit(&sdp->sd_jinode_gh);
 fail_journal_gh:
-	if (!sdp->sd_args.ar_spectator &&
-	    gfs2_holder_initialized(&sdp->sd_journal_gh))
+	if (!sdp->sd_args.ar_spectator)
 		gfs2_glock_dq_uninit(&sdp->sd_journal_gh);
 fail_jindex:
 	gfs2_jindex_free(sdp);
@@ -1053,8 +1033,8 @@ hostdata_error:
 void gfs2_lm_unmount(struct gfs2_sbd *sdp)
 {
 	const struct lm_lockops *lm = sdp->sd_lockstruct.ls_ops;
-	if (!gfs2_withdrawing_or_withdrawn(sdp) && lm->lm_unmount)
-		lm->lm_unmount(sdp);
+	if (!gfs2_withdrawn(sdp) && lm->lm_unmount)
+		lm->lm_unmount(sdp, true);
 }
 
 static int wait_on_journal(struct gfs2_sbd *sdp)
@@ -1135,6 +1115,7 @@ static int gfs2_fill_super(struct super_block *sb, struct fs_context *fc)
 	int silent = fc->sb_flags & SB_SILENT;
 	struct gfs2_sbd *sdp;
 	struct gfs2_holder mount_gh;
+	struct address_space *mapping;
 	int error;
 
 	sdp = init_sbd(sb);
@@ -1156,7 +1137,8 @@ static int gfs2_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_flags |= SB_NOSEC;
 	sb->s_magic = GFS2_MAGIC;
 	sb->s_op = &gfs2_super_ops;
-	sb->s_d_op = &gfs2_dops;
+
+	set_default_d_op(sb, &gfs2_dops);
 	sb->s_export_op = &gfs2_export_ops;
 	sb->s_qcop = &gfs2_quotactl_ops;
 	sb->s_quota_types = QTYPE_MASK_USR | QTYPE_MASK_GRP;
@@ -1166,9 +1148,12 @@ static int gfs2_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	/* Set up the buffer cache and fill in some fake block size values
 	   to allow us to read-in the on-disk superblock. */
-	sdp->sd_sb.sb_bsize = sb_min_blocksize(sb, 512);
+	sdp->sd_sb.sb_bsize = sb_min_blocksize(sb, SECTOR_SIZE);
+	error = -EINVAL;
+	if (!sdp->sd_sb.sb_bsize)
+		goto fail_free;
 	sdp->sd_sb.sb_bsize_shift = sb->s_blocksize_bits;
-	sdp->sd_fsb2bb_shift = sdp->sd_sb.sb_bsize_shift - 9;
+	sdp->sd_fsb2bb_shift = sdp->sd_sb.sb_bsize_shift - SECTOR_SHIFT;
 	sdp->sd_fsb2bb = BIT(sdp->sd_fsb2bb_shift);
 
 	sdp->sd_tune.gt_logd_secs = sdp->sd_args.ar_commit;
@@ -1181,21 +1166,35 @@ static int gfs2_fill_super(struct super_block *sb, struct fs_context *fc)
 		sdp->sd_tune.gt_statfs_quantum = 30;
 	}
 
+	/* Set up an address space for metadata writes */
+	sdp->sd_inode = new_inode(sb);
+	error = -ENOMEM;
+	if (!sdp->sd_inode)
+		goto fail_free;
+	sdp->sd_inode->i_ino = GFS2_BAD_INO;
+	sdp->sd_inode->i_size = OFFSET_MAX;
+
+	mapping = gfs2_aspace(sdp);
+	mapping->a_ops = &gfs2_rgrp_aops;
+	gfs2_setup_inode(sdp->sd_inode);
+
 	error = init_names(sdp, silent);
 	if (error)
-		goto fail_free;
+		goto fail_iput;
 
 	snprintf(sdp->sd_fsname, sizeof(sdp->sd_fsname), "%s", sdp->sd_table_name);
 
 	error = -ENOMEM;
 	sdp->sd_glock_wq = alloc_workqueue("gfs2-glock/%s",
-			WQ_MEM_RECLAIM | WQ_HIGHPRI | WQ_FREEZABLE, 0,
+			WQ_MEM_RECLAIM | WQ_HIGHPRI | WQ_FREEZABLE | WQ_PERCPU,
+			0,
 			sdp->sd_fsname);
 	if (!sdp->sd_glock_wq)
-		goto fail_free;
+		goto fail_iput;
 
 	sdp->sd_delete_wq = alloc_workqueue("gfs2-delete/%s",
-			WQ_MEM_RECLAIM | WQ_FREEZABLE, 0, sdp->sd_fsname);
+			WQ_MEM_RECLAIM | WQ_FREEZABLE | WQ_PERCPU, 0,
+			sdp->sd_fsname);
 	if (!sdp->sd_delete_wq)
 		goto fail_glock_wq;
 
@@ -1208,6 +1207,8 @@ static int gfs2_fill_super(struct super_block *sb, struct fs_context *fc)
 	error = gfs2_lm_mount(sdp, silent);
 	if (error)
 		goto fail_debug;
+
+	INIT_WORK(&sdp->sd_withdraw_work, gfs2_withdraw_func);
 
 	error = init_locking(sdp, &mount_gh, DO);
 	if (error)
@@ -1275,7 +1276,6 @@ static int gfs2_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	if (error) {
 		gfs2_freeze_unlock(sdp);
-		gfs2_destroy_threads(sdp);
 		fs_err(sdp, "can't make FS RW: %d\n", error);
 		goto fail_per_node;
 	}
@@ -1285,6 +1285,7 @@ static int gfs2_fill_super(struct super_block *sb, struct fs_context *fc)
 
 fail_per_node:
 	init_per_node(sdp, UNDO);
+	gfs2_destroy_threads(sdp);
 fail_inodes:
 	init_inodes(sdp, UNDO);
 fail_sb:
@@ -1309,9 +1310,10 @@ fail_delete_wq:
 fail_glock_wq:
 	if (sdp->sd_glock_wq)
 		destroy_workqueue(sdp->sd_glock_wq);
+fail_iput:
+	iput(sdp->sd_inode);
 fail_free:
 	free_sbd(sdp);
-	sb->s_fs_info = NULL;
 	return error;
 }
 
@@ -1394,12 +1396,14 @@ static const struct constant_table gfs2_param_data[] = {
 };
 
 enum opt_errors {
-	Opt_errors_withdraw = GFS2_ERRORS_WITHDRAW,
-	Opt_errors_panic    = GFS2_ERRORS_PANIC,
+	Opt_errors_withdraw   = GFS2_ERRORS_WITHDRAW,
+	Opt_errors_deactivate = GFS2_ERRORS_DEACTIVATE,
+	Opt_errors_panic      = GFS2_ERRORS_PANIC,
 };
 
 static const struct constant_table gfs2_param_errors[] = {
 	{"withdraw",   Opt_errors_withdraw },
+	{"deactivate", Opt_errors_deactivate },
 	{"panic",      Opt_errors_panic },
 	{}
 };
@@ -1633,7 +1637,7 @@ static int gfs2_init_fs_context(struct fs_context *fc)
 {
 	struct gfs2_args *args;
 
-	args = kmalloc(sizeof(*args), GFP_KERNEL);
+	args = kmalloc_obj(*args);
 	if (args == NULL)
 		return -ENOMEM;
 
@@ -1744,12 +1748,12 @@ static void gfs2_evict_inodes(struct super_block *sb)
 	spin_lock(&sb->s_inode_list_lock);
 	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
 		spin_lock(&inode->i_lock);
-		if ((inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW)) &&
+		if ((inode_state_read(inode) & (I_FREEING | I_WILL_FREE | I_NEW)) &&
 		    !need_resched()) {
 			spin_unlock(&inode->i_lock);
 			continue;
 		}
-		atomic_inc(&inode->i_count);
+		__iget(inode);
 		spin_unlock(&inode->i_lock);
 		spin_unlock(&sb->s_inode_list_lock);
 

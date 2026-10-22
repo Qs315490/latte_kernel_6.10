@@ -233,10 +233,11 @@ static void vcap_test_api_init(struct vcap_admin *admin)
 {
 	/* Initialize the shared objects */
 	INIT_LIST_HEAD(&test_vctrl.list);
+	mutex_init(&test_vctrl.lock);
 	INIT_LIST_HEAD(&admin->list);
 	INIT_LIST_HEAD(&admin->rules);
 	INIT_LIST_HEAD(&admin->enabled);
-	mutex_init(&admin->lock);
+	admin->vctrl = &test_vctrl;
 	list_add_tail(&admin->list, &test_vctrl.list);
 	memset(test_updateaddr, 0, sizeof(test_updateaddr));
 	test_updateaddridx = 0;
@@ -2037,7 +2038,7 @@ static void vcap_api_filter_unsupported_keys_test(struct kunit *test)
 	/* Add all keys to the rule */
 	INIT_LIST_HEAD(&ri.data.keyfields);
 	for (idx = 0; idx < ARRAY_SIZE(keylist); idx++) {
-		ckf = kzalloc(sizeof(*ckf), GFP_KERNEL);
+		ckf = kzalloc_obj(*ckf);
 		if (ckf) {
 			ckf->ctrl.key = keylist[idx];
 			list_add_tail(&ckf->ctrl.list, &ri.data.keyfields);
@@ -2161,7 +2162,7 @@ static void vcap_api_filter_keylist_test(struct kunit *test)
 	/* Add all keys to the rule */
 	INIT_LIST_HEAD(&ri.data.keyfields);
 	for (idx = 0; idx < ARRAY_SIZE(keylist); idx++) {
-		ckf = kzalloc(sizeof(*ckf), GFP_KERNEL);
+		ckf = kzalloc_obj(*ckf);
 		if (ckf) {
 			ckf->ctrl.key = keylist[idx];
 			list_add_tail(&ckf->ctrl.list, &ri.data.keyfields);

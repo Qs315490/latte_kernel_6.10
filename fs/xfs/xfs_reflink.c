@@ -3,7 +3,7 @@
  * Copyright (C) 2016 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <darrick.wong@oracle.com>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -235,7 +235,7 @@ xfs_reflink_trim_around_shared(
 	int			error = 0;
 
 	/* Holes, unwritten, and delalloc extents cannot be shared */
-	if (!xfs_is_cow_inode(ip) || !xfs_bmap_is_written_extent(irec)) {
+	if (!xfs_is_reflink_inode(ip) || !xfs_bmap_is_written_extent(irec)) {
 		*shared = false;
 		return 0;
 	}
@@ -293,7 +293,7 @@ xfs_bmap_trim_cow(
 	return xfs_reflink_trim_around_shared(ip, imap, shared);
 }
 
-static int
+int
 xfs_reflink_convert_cow_locked(
 	struct xfs_inode	*ip,
 	xfs_fileoff_t		offset_fsb,
@@ -440,6 +440,7 @@ xfs_reflink_fill_cow_hole(
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_trans	*tp;
 	xfs_filblks_t		resaligned;
+	unsigned int		seq_before = READ_ONCE(ip->i_df.if_seq);
 	unsigned int		dblocks = 0, rblocks = 0;
 	int			nimaps;
 	int			error;
@@ -464,6 +465,22 @@ xfs_reflink_fill_cow_hole(
 		return error;
 
 	*lockmode = XFS_ILOCK_EXCL;
+
+	/*
+	 * The data fork mapping may have changed while we dropped the ILOCK
+	 * (a racing O_DIRECT writer under IOLOCK_SHARED can complete a full
+	 * CoW cycle including xfs_reflink_end_cow(), which remaps this offset
+	 * and drops the refcount of the old shared block).  Re-read it so the
+	 * shared-status recheck below and the caller's in-place iomap both
+	 * operate on the current mapping rather than a stale physical block.
+	 */
+	if (seq_before != READ_ONCE(ip->i_df.if_seq)) {
+		nimaps = 1;
+		error = xfs_bmapi_read(ip, imap->br_startoff,
+				imap->br_blockcount, imap, &nimaps, 0);
+		if (error)
+			goto out_trans_cancel;
+	}
 
 	error = xfs_find_trim_cow_extent(ip, imap, cmap, shared, &found);
 	if (error || !*shared)
@@ -511,6 +528,8 @@ xfs_reflink_fill_delalloc(
 	bool			found;
 
 	do {
+		unsigned int	seq_before = READ_ONCE(ip->i_df.if_seq);
+
 		xfs_iunlock(ip, *lockmode);
 		*lockmode = 0;
 
@@ -520,6 +539,23 @@ xfs_reflink_fill_delalloc(
 			return error;
 
 		*lockmode = XFS_ILOCK_EXCL;
+
+		/*
+		 * The data fork mapping may have changed while we dropped the
+		 * ILOCK (a racing O_DIRECT writer under IOLOCK_SHARED can
+		 * complete a full CoW cycle including xfs_reflink_end_cow(),
+		 * which remaps this offset and drops the refcount of the old
+		 * shared block).  Re-read it so the shared-status recheck
+		 * below and the caller's in-place iomap both operate on the
+		 * current mapping rather than a stale physical block.
+		 */
+		if (seq_before != READ_ONCE(ip->i_df.if_seq)) {
+			nimaps = 1;
+			error = xfs_bmapi_read(ip, imap->br_startoff,
+					imap->br_blockcount, imap, &nimaps, 0);
+			if (error)
+				goto out_trans_cancel;
+		}
 
 		error = xfs_find_trim_cow_extent(ip, imap, cmap, shared,
 				&found);
@@ -651,7 +687,7 @@ xfs_reflink_cancel_cow_blocks(
 
 		if (isnullstartblock(del.br_startblock)) {
 			xfs_bmap_del_extent_delay(ip, XFS_COW_FORK, &icur, &got,
-					&del);
+					&del, 0);
 		} else if (del.br_state == XFS_EXT_UNWRITTEN || cancel_real) {
 			ASSERT((*tpp)->t_highest_agno == NULLAGNUMBER);
 
@@ -786,34 +822,18 @@ xfs_reflink_update_quota(
  * requirements as low as possible.
  */
 STATIC int
-xfs_reflink_end_cow_extent(
+xfs_reflink_end_cow_extent_locked(
+	struct xfs_trans	*tp,
 	struct xfs_inode	*ip,
 	xfs_fileoff_t		*offset_fsb,
 	xfs_fileoff_t		end_fsb)
 {
 	struct xfs_iext_cursor	icur;
 	struct xfs_bmbt_irec	got, del, data;
-	struct xfs_mount	*mp = ip->i_mount;
-	struct xfs_trans	*tp;
 	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, XFS_COW_FORK);
-	unsigned int		resblks;
 	int			nmaps;
 	bool			isrt = XFS_IS_REALTIME_INODE(ip);
 	int			error;
-
-	resblks = XFS_EXTENTADD_SPACE_RES(mp, XFS_DATA_FORK);
-	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_write, resblks, 0,
-			XFS_TRANS_RESERVE, &tp);
-	if (error)
-		return error;
-
-	/*
-	 * Lock the inode.  We have to ijoin without automatic unlock because
-	 * the lead transaction is the refcountbt record deletion; the data
-	 * fork update follows as a deferred log item.
-	 */
-	xfs_ilock(ip, XFS_ILOCK_EXCL);
-	xfs_trans_ijoin(tp, ip, 0);
 
 	/*
 	 * In case of racing, overlapping AIO writes no COW extents might be
@@ -823,7 +843,7 @@ xfs_reflink_end_cow_extent(
 	if (!xfs_iext_lookup_extent(ip, ifp, *offset_fsb, &icur, &got) ||
 	    got.br_startoff >= end_fsb) {
 		*offset_fsb = end_fsb;
-		goto out_cancel;
+		return 0;
 	}
 
 	/*
@@ -837,7 +857,7 @@ xfs_reflink_end_cow_extent(
 		if (!xfs_iext_next_extent(ifp, &icur, &got) ||
 		    got.br_startoff >= end_fsb) {
 			*offset_fsb = end_fsb;
-			goto out_cancel;
+			return 0;
 		}
 	}
 	del = got;
@@ -846,14 +866,14 @@ xfs_reflink_end_cow_extent(
 	error = xfs_iext_count_extend(tp, ip, XFS_DATA_FORK,
 			XFS_IEXT_REFLINK_END_COW_CNT);
 	if (error)
-		goto out_cancel;
+		return error;
 
 	/* Grab the corresponding mapping in the data fork. */
 	nmaps = 1;
 	error = xfs_bmapi_read(ip, del.br_startoff, del.br_blockcount, &data,
 			&nmaps, 0);
 	if (error)
-		goto out_cancel;
+		return error;
 
 	/* We can only remap the smaller of the two extent sizes. */
 	data.br_blockcount = min(data.br_blockcount, del.br_blockcount);
@@ -882,7 +902,7 @@ xfs_reflink_end_cow_extent(
 		error = xfs_bunmapi(NULL, ip, data.br_startoff,
 				data.br_blockcount, 0, 1, &done);
 		if (error)
-			goto out_cancel;
+			return error;
 		ASSERT(done);
 	}
 
@@ -899,17 +919,45 @@ xfs_reflink_end_cow_extent(
 	/* Remove the mapping from the CoW fork. */
 	xfs_bmap_del_extent_cow(ip, &icur, &got, &del);
 
-	error = xfs_trans_commit(tp);
-	xfs_iunlock(ip, XFS_ILOCK_EXCL);
-	if (error)
-		return error;
-
 	/* Update the caller about how much progress we made. */
 	*offset_fsb = del.br_startoff + del.br_blockcount;
 	return 0;
+}
 
-out_cancel:
-	xfs_trans_cancel(tp);
+/*
+ * Remap part of the CoW fork into the data fork.
+ *
+ * We aim to remap the range starting at @offset_fsb and ending at @end_fsb
+ * into the data fork; this function will remap what it can (at the end of the
+ * range) and update @end_fsb appropriately.  Each remap gets its own
+ * transaction because we can end up merging and splitting bmbt blocks for
+ * every remap operation and we'd like to keep the block reservation
+ * requirements as low as possible.
+ */
+STATIC int
+xfs_reflink_end_cow_extent(
+	struct xfs_inode	*ip,
+	xfs_fileoff_t		*offset_fsb,
+	xfs_fileoff_t		end_fsb)
+{
+	struct xfs_mount	*mp = ip->i_mount;
+	struct xfs_trans	*tp;
+	unsigned int		resblks;
+	int			error;
+
+	resblks = XFS_EXTENTADD_SPACE_RES(mp, XFS_DATA_FORK);
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_write, resblks, 0,
+			XFS_TRANS_RESERVE, &tp);
+	if (error)
+		return error;
+	xfs_ilock(ip, XFS_ILOCK_EXCL);
+	xfs_trans_ijoin(tp, ip, 0);
+
+	error = xfs_reflink_end_cow_extent_locked(tp, ip, offset_fsb, end_fsb);
+	if (error)
+		xfs_trans_cancel(tp);
+	else
+		error = xfs_trans_commit(tp);
 	xfs_iunlock(ip, XFS_ILOCK_EXCL);
 	return error;
 }
@@ -937,16 +985,16 @@ xfs_reflink_end_cow(
 	 * repeatedly cycles the ILOCK to allocate one transaction per remapped
 	 * extent.
 	 *
-	 * If we're being called by writeback then the pages will still
-	 * have PageWriteback set, which prevents races with reflink remapping
-	 * and truncate.  Reflink remapping prevents races with writeback by
-	 * taking the iolock and mmaplock before flushing the pages and
-	 * remapping, which means there won't be any further writeback or page
-	 * cache dirtying until the reflink completes.
+	 * If we're being called by writeback then the folios will still
+	 * have the writeback flag set, which prevents races with reflink
+	 * remapping and truncate.  Reflink remapping prevents races with
+	 * writeback by taking the iolock and mmaplock before flushing
+	 * the folios and remapping, which means there won't be any further
+	 * writeback or page cache dirtying until the reflink completes.
 	 *
 	 * We should never have two threads issuing writeback for the same file
 	 * region.  There are also have post-eof checks in the writeback
-	 * preparation code so that we don't bother writing out pages that are
+	 * preparation code so that we don't bother writing out folios that are
 	 * about to be truncated.
 	 *
 	 * If we're being called as part of directio write completion, the dio
@@ -970,6 +1018,78 @@ xfs_reflink_end_cow(
 	if (error)
 		trace_xfs_reflink_end_cow_error(ip, error, _RET_IP_);
 	return error;
+}
+
+/*
+ * Fully remap all of the file's data fork at once, which is the critical part
+ * in achieving atomic behaviour.
+ * The regular CoW end path does not use function as to keep the block
+ * reservation per transaction as low as possible.
+ */
+int
+xfs_reflink_end_atomic_cow(
+	struct xfs_inode		*ip,
+	xfs_off_t			offset,
+	xfs_off_t			count)
+{
+	xfs_fileoff_t			offset_fsb;
+	xfs_fileoff_t			end_fsb;
+	int				error = 0;
+	struct xfs_mount		*mp = ip->i_mount;
+	struct xfs_trans		*tp;
+	unsigned int			resblks;
+
+	trace_xfs_reflink_end_cow(ip, offset, count);
+
+	offset_fsb = XFS_B_TO_FSBT(mp, offset);
+	end_fsb = XFS_B_TO_FSB(mp, offset + count);
+
+	/*
+	 * Each remapping operation could cause a btree split, so in the worst
+	 * case that's one for each block.
+	 */
+	resblks = (end_fsb - offset_fsb) *
+			XFS_NEXTENTADD_SPACE_RES(mp, 1, XFS_DATA_FORK);
+
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_atomic_ioend, resblks, 0,
+			XFS_TRANS_RESERVE, &tp);
+	if (error)
+		return error;
+
+	xfs_ilock(ip, XFS_ILOCK_EXCL);
+	xfs_trans_ijoin(tp, ip, 0);
+
+	while (end_fsb > offset_fsb && !error) {
+		error = xfs_reflink_end_cow_extent_locked(tp, ip, &offset_fsb,
+				end_fsb);
+	}
+	if (error) {
+		trace_xfs_reflink_end_cow_error(ip, error, _RET_IP_);
+		goto out_cancel;
+	}
+	error = xfs_trans_commit(tp);
+	xfs_iunlock(ip, XFS_ILOCK_EXCL);
+	return error;
+out_cancel:
+	xfs_trans_cancel(tp);
+	xfs_iunlock(ip, XFS_ILOCK_EXCL);
+	return error;
+}
+
+/* Compute the largest atomic write that we can complete through software. */
+xfs_extlen_t
+xfs_reflink_max_atomic_cow(
+	struct xfs_mount	*mp)
+{
+	/* We cannot do any atomic writes without out of place writes. */
+	if (!xfs_can_sw_atomic_write(mp))
+		return 0;
+
+	/*
+	 * Atomic write limits must always be a power-of-2, according to
+	 * generic_atomic_write_valid.
+	 */
+	return rounddown_pow_of_two(xfs_calc_max_atomic_write_fsblocks(mp));
 }
 
 /*
@@ -1104,7 +1224,7 @@ xfs_reflink_set_inode_flag(
 		goto out_error;
 
 	/* Lock both files against IO */
-	if (src->i_ino == dest->i_ino)
+	if (I_INO(src) == I_INO(dest))
 		xfs_ilock(src, XFS_ILOCK_EXCL);
 	else
 		xfs_lock_two_inodes(src, XFS_ILOCK_EXCL, dest, XFS_ILOCK_EXCL);
@@ -1118,7 +1238,7 @@ xfs_reflink_set_inode_flag(
 	} else
 		xfs_iunlock(src, XFS_ILOCK_EXCL);
 
-	if (src->i_ino == dest->i_ino)
+	if (I_INO(src) == I_INO(dest))
 		goto commit_flags;
 
 	if (!xfs_is_reflink_inode(dest)) {
@@ -1207,15 +1327,9 @@ xfs_reflink_ag_has_free_space(
 	if (!xfs_has_rmapbt(mp))
 		return 0;
 	if (XFS_IS_REALTIME_INODE(ip)) {
-		struct xfs_rtgroup	*rtg;
-		xfs_rgnumber_t		rgno;
-
-		rgno = xfs_rtb_to_rgno(mp, fsb);
-		rtg = xfs_rtgroup_get(mp, rgno);
-		if (xfs_metafile_resv_critical(rtg_rmap(rtg)))
-			error = -ENOSPC;
-		xfs_rtgroup_put(rtg);
-		return error;
+		if (xfs_metafile_resv_critical(mp))
+			return -ENOSPC;
+		return 0;
 	}
 
 	agno = XFS_FSB_TO_AGNO(mp, fsb);
@@ -1538,7 +1652,7 @@ xfs_reflink_zero_posteof(
 		return 0;
 
 	trace_xfs_zero_eof(ip, isize, pos - isize);
-	return xfs_zero_range(ip, isize, pos - isize, NULL);
+	return xfs_zero_range(ip, isize, pos - isize, NULL, NULL);
 }
 
 /*
@@ -1803,7 +1917,8 @@ xfs_reflink_unshare(
 				&xfs_dax_write_iomap_ops);
 	else
 		error = iomap_file_unshare(inode, offset, len,
-				&xfs_buffered_write_iomap_ops);
+				&xfs_buffered_write_iomap_ops,
+				&xfs_iomap_write_ops);
 	if (error)
 		goto out;
 

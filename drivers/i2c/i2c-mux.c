@@ -241,12 +241,9 @@ struct i2c_mux_core *i2c_mux_alloc(struct i2c_adapter *parent,
 
 	muxc->parent = parent;
 	muxc->dev = dev;
-	if (flags & I2C_MUX_LOCKED)
-		muxc->mux_locked = true;
-	if (flags & I2C_MUX_ARBITRATOR)
-		muxc->arbitrator = true;
-	if (flags & I2C_MUX_GATE)
-		muxc->gate = true;
+	muxc->mux_locked = !!(flags & I2C_MUX_LOCKED);
+	muxc->arbitrator = !!(flags & I2C_MUX_ARBITRATOR);
+	muxc->gate = !!(flags & I2C_MUX_GATE);
 	muxc->select = select;
 	muxc->deselect = deselect;
 	muxc->max_adapters = max_adapters;
@@ -280,7 +277,7 @@ int i2c_mux_add_adapter(struct i2c_mux_core *muxc,
 		return -EINVAL;
 	}
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -293,12 +290,12 @@ int i2c_mux_add_adapter(struct i2c_mux_core *muxc,
 	 */
 	if (parent->algo->master_xfer) {
 		if (muxc->mux_locked)
-			priv->algo.master_xfer = i2c_mux_master_xfer;
+			priv->algo.xfer = i2c_mux_master_xfer;
 		else
-			priv->algo.master_xfer = __i2c_mux_master_xfer;
+			priv->algo.xfer = __i2c_mux_master_xfer;
 	}
 	if (parent->algo->master_xfer_atomic)
-		priv->algo.master_xfer_atomic = priv->algo.master_xfer;
+		priv->algo.xfer_atomic = priv->algo.master_xfer;
 
 	if (parent->algo->smbus_xfer) {
 		if (muxc->mux_locked)

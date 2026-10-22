@@ -341,26 +341,26 @@ static bool dmub_psr_copy_settings(struct dmub_psr *dmub,
 	copy_settings_data->mpcc_inst				= pipe_ctx->plane_res.mpcc_inst;
 
 	if (pipe_ctx->plane_res.dpp)
-		copy_settings_data->dpp_inst			= pipe_ctx->plane_res.dpp->inst;
+		copy_settings_data->dpp_inst			= (uint8_t)pipe_ctx->plane_res.dpp->inst;
 	else
 		copy_settings_data->dpp_inst			= 0;
 	if (pipe_ctx->stream_res.opp)
-		copy_settings_data->opp_inst			= pipe_ctx->stream_res.opp->inst;
+		copy_settings_data->opp_inst			= (uint8_t)pipe_ctx->stream_res.opp->inst;
 	else
 		copy_settings_data->opp_inst			= 0;
 	if (pipe_ctx->stream_res.tg)
-		copy_settings_data->otg_inst			= pipe_ctx->stream_res.tg->inst;
+		copy_settings_data->otg_inst			= (uint8_t)pipe_ctx->stream_res.tg->inst;
 	else
 		copy_settings_data->otg_inst			= 0;
 
 	// Misc
 	copy_settings_data->use_phy_fsm             = link->ctx->dc->debug.psr_power_use_phy_fsm;
-	copy_settings_data->psr_level				= psr_context->psr_level.u32all;
+	copy_settings_data->psr_level				= (uint16_t)psr_context->psr_level.u32all;
 	copy_settings_data->smu_optimizations_en		= psr_context->allow_smu_optimizations;
 	copy_settings_data->multi_disp_optimizations_en	= psr_context->allow_multi_disp_optimizations;
-	copy_settings_data->frame_delay				= psr_context->frame_delay;
+	copy_settings_data->frame_delay				= (uint8_t)psr_context->frame_delay;
 	copy_settings_data->frame_cap_ind			= psr_context->psrFrameCaptureIndicationReq;
-	copy_settings_data->init_sdp_deadline			= psr_context->sdpTransmitLineNumDeadline;
+	copy_settings_data->init_sdp_deadline			= (uint16_t)psr_context->sdpTransmitLineNumDeadline;
 	copy_settings_data->debug.u32All = 0;
 	copy_settings_data->debug.bitfields.visual_confirm	= dc->dc->debug.visual_confirm == VISUAL_CONFIRM_PSR;
 	copy_settings_data->debug.bitfields.use_hw_lock_mgr		= 1;
@@ -391,7 +391,7 @@ static bool dmub_psr_copy_settings(struct dmub_psr *dmub,
 			sizeof(DP_SINK_DEVICE_STR_ID_1)))
 		link->psr_settings.force_ffu_mode = 1;
 
-	copy_settings_data->force_ffu_mode = link->psr_settings.force_ffu_mode;
+	copy_settings_data->force_ffu_mode = link->psr_settings.force_ffu_mode || psr_context->os_request_force_ffu;
 
 	if (((link->dpcd_caps.fec_cap.bits.FEC_CAPABLE &&
 		!link->dc->debug.disable_fec) &&
@@ -418,6 +418,10 @@ static bool dmub_psr_copy_settings(struct dmub_psr *dmub,
 	copy_settings_data->relock_delay_frame_cnt = 0;
 	if (link->dpcd_caps.sink_dev_id == DP_BRANCH_DEVICE_ID_001CF8)
 		copy_settings_data->relock_delay_frame_cnt = 2;
+
+	copy_settings_data->power_down_phy_before_disable_stream =
+		link->psr_settings.power_down_phy_before_disable_stream;
+
 	copy_settings_data->dsc_slice_height = psr_context->dsc_slice_height;
 
 	dc_wake_and_execute_dmub_cmd(dc, &cmd, DM_DMUB_WAIT_TYPE_WAIT);
@@ -484,7 +488,7 @@ static void dmub_psr_construct(struct dmub_psr *psr, struct dc_context *ctx)
  */
 struct dmub_psr *dmub_psr_create(struct dc_context *ctx)
 {
-	struct dmub_psr *psr = kzalloc(sizeof(struct dmub_psr), GFP_KERNEL);
+	struct dmub_psr *psr = kzalloc_obj(struct dmub_psr);
 
 	if (psr == NULL) {
 		BREAK_TO_DEBUGGER();

@@ -88,12 +88,14 @@ static const struct vfio_device_ops virtiovf_vfio_pci_lm_ops = {
 	.open_device = virtiovf_pci_open_device,
 	.close_device = virtiovf_pci_close_device,
 	.ioctl = vfio_pci_core_ioctl,
+	.get_region_info_caps = vfio_pci_ioctl_get_region_info,
 	.device_feature = vfio_pci_core_ioctl_feature,
 	.read = vfio_pci_core_read,
 	.write = vfio_pci_core_write,
 	.mmap = vfio_pci_core_mmap,
 	.request = vfio_pci_core_request,
 	.match = vfio_pci_core_match,
+	.match_token_uuid = vfio_pci_core_match_token_uuid,
 	.bind_iommufd = vfio_iommufd_physical_bind,
 	.unbind_iommufd = vfio_iommufd_physical_unbind,
 	.attach_ioas = vfio_iommufd_physical_attach_ioas,
@@ -107,13 +109,15 @@ static const struct vfio_device_ops virtiovf_vfio_pci_tran_lm_ops = {
 	.release = virtiovf_pci_core_release_dev,
 	.open_device = virtiovf_pci_open_device,
 	.close_device = virtiovf_pci_close_device,
-	.ioctl = virtiovf_vfio_pci_core_ioctl,
+	.ioctl = vfio_pci_core_ioctl,
+	.get_region_info_caps = virtiovf_pci_ioctl_get_region_info,
 	.device_feature = vfio_pci_core_ioctl_feature,
 	.read = virtiovf_pci_core_read,
 	.write = virtiovf_pci_core_write,
 	.mmap = vfio_pci_core_mmap,
 	.request = vfio_pci_core_request,
 	.match = vfio_pci_core_match,
+	.match_token_uuid = vfio_pci_core_match_token_uuid,
 	.bind_iommufd = vfio_iommufd_physical_bind,
 	.unbind_iommufd = vfio_iommufd_physical_unbind,
 	.attach_ioas = vfio_iommufd_physical_attach_ioas,
@@ -128,12 +132,14 @@ static const struct vfio_device_ops virtiovf_vfio_pci_ops = {
 	.open_device = virtiovf_pci_open_device,
 	.close_device = vfio_pci_core_close_device,
 	.ioctl = vfio_pci_core_ioctl,
+	.get_region_info_caps = vfio_pci_ioctl_get_region_info,
 	.device_feature = vfio_pci_core_ioctl_feature,
 	.read = vfio_pci_core_read,
 	.write = vfio_pci_core_write,
 	.mmap = vfio_pci_core_mmap,
 	.request = vfio_pci_core_request,
 	.match = vfio_pci_core_match,
+	.match_token_uuid = vfio_pci_core_match_token_uuid,
 	.bind_iommufd = vfio_iommufd_physical_bind,
 	.unbind_iommufd = vfio_iommufd_physical_unbind,
 	.attach_ioas = vfio_iommufd_physical_attach_ioas,
@@ -187,8 +193,9 @@ static void virtiovf_pci_remove(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id virtiovf_pci_table[] = {
-	/* Only virtio-net is supported/tested so far */
+	/* Only virtio-net and virtio-block are supported/tested so far */
 	{ PCI_DRIVER_OVERRIDE_DEVICE_VFIO(PCI_VENDOR_ID_REDHAT_QUMRANET, 0x1041) },
+	{ PCI_DRIVER_OVERRIDE_DEVICE_VFIO(PCI_VENDOR_ID_REDHAT_QUMRANET, 0x1042) },
 	{}
 };
 
@@ -221,4 +228,4 @@ module_pci_driver(virtiovf_pci_driver);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Yishai Hadas <yishaih@nvidia.com>");
 MODULE_DESCRIPTION(
-	"VIRTIO VFIO PCI - User Level meta-driver for VIRTIO NET devices");
+	"VIRTIO VFIO PCI - User Level meta-driver for VIRTIO NET and BLOCK devices");

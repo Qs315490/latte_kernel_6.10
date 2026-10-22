@@ -28,7 +28,7 @@ const struct kexec_file_ops * const kexec_file_loaders[] = {
 #ifdef CONFIG_KEXEC_SIG
 int s390_verify_sig(const char *kernel, unsigned long kernel_len)
 {
-	const unsigned long marker_len = sizeof(MODULE_SIG_STRING) - 1;
+	const unsigned long marker_len = sizeof(MODULE_SIGNATURE_MARKER) - 1;
 	struct module_signature *ms;
 	unsigned long sig_len;
 	int ret;
@@ -40,7 +40,7 @@ int s390_verify_sig(const char *kernel, unsigned long kernel_len)
 	if (marker_len > kernel_len)
 		return -EKEYREJECTED;
 
-	if (memcmp(kernel + kernel_len - marker_len, MODULE_SIG_STRING,
+	if (memcmp(kernel + kernel_len - marker_len, MODULE_SIGNATURE_MARKER,
 		   marker_len))
 		return -EKEYREJECTED;
 	kernel_len -= marker_len;
@@ -53,7 +53,7 @@ int s390_verify_sig(const char *kernel, unsigned long kernel_len)
 		return -EKEYREJECTED;
 	kernel_len -= sig_len;
 
-	if (ms->id_type != PKEY_ID_PKCS7)
+	if (ms->id_type != MODULE_SIGNATURE_TYPE_PKCS7)
 		return -EKEYREJECTED;
 
 	if (ms->algo != 0 ||
@@ -129,7 +129,7 @@ static int kexec_file_update_purgatory(struct kimage *image,
 static int kexec_file_add_purgatory(struct kimage *image,
 				    struct s390_load_data *data)
 {
-	struct kexec_buf buf;
+	struct kexec_buf buf = {};
 	int ret;
 
 	buf.image = image;
@@ -152,7 +152,7 @@ static int kexec_file_add_purgatory(struct kimage *image,
 static int kexec_file_add_initrd(struct kimage *image,
 				 struct s390_load_data *data)
 {
-	struct kexec_buf buf;
+	struct kexec_buf buf = {};
 	int ret;
 
 	buf.image = image;
@@ -184,7 +184,7 @@ static int kexec_file_add_ipl_report(struct kimage *image,
 {
 	__u32 *lc_ipl_parmblock_ptr;
 	unsigned int len, ncerts;
-	struct kexec_buf buf;
+	struct kexec_buf buf = {};
 	unsigned long addr;
 	void *ptr, *end;
 	int ret;
@@ -270,8 +270,10 @@ void *kexec_file_add_components(struct kimage *image,
 	if (image->kernel_buf_len < minsize + max_command_line_size)
 		goto out;
 
-	if (image->cmdline_buf_len >= max_command_line_size)
+	if (image->cmdline_buf_len >= max_command_line_size) {
+		pr_err("Kernel command line exceeds supported limit of %lu", max_command_line_size);
 		goto out;
+	}
 
 	memcpy(data.parm->command_line, image->cmdline_buf,
 	       image->cmdline_buf_len);

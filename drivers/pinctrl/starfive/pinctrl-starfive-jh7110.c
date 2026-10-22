@@ -10,7 +10,6 @@
 #include <linux/clk.h>
 #include <linux/gpio/driver.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -143,7 +142,7 @@ static int jh7110_dt_node_to_map(struct pinctrl_dev *pctldev,
 	if (!pgnames)
 		return -ENOMEM;
 
-	map = kcalloc(nmaps, sizeof(*map), GFP_KERNEL);
+	map = kzalloc_objs(*map, nmaps);
 	if (!map)
 		return -ENOMEM;
 
@@ -608,8 +607,7 @@ static int jh7110_gpio_get(struct gpio_chip *gc, unsigned int gpio)
 	return !!(readl_relaxed(reg) & BIT(gpio % 32));
 }
 
-static void jh7110_gpio_set(struct gpio_chip *gc,
-			    unsigned int gpio, int value)
+static int jh7110_gpio_set(struct gpio_chip *gc, unsigned int gpio, int value)
 {
 	struct jh7110_pinctrl *sfp = container_of(gc,
 			struct jh7110_pinctrl, gc);
@@ -625,6 +623,8 @@ static void jh7110_gpio_set(struct gpio_chip *gc,
 	dout |= readl_relaxed(reg_dout) & ~mask;
 	writel_relaxed(dout, reg_dout);
 	raw_spin_unlock_irqrestore(&sfp->lock, flags);
+
+	return 0;
 }
 
 static int jh7110_gpio_set_config(struct gpio_chip *gc,
@@ -844,6 +844,7 @@ int jh7110_pinctrl_probe(struct platform_device *pdev)
 	struct jh7110_pinctrl *sfp;
 	struct pinctrl_desc *jh7110_pinctrl_desc;
 	struct reset_control *rst;
+	unsigned int num_saved_regs;
 	struct clk *clk;
 	int ret;
 
@@ -856,16 +857,12 @@ int jh7110_pinctrl_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	sfp = devm_kzalloc(dev, sizeof(*sfp), GFP_KERNEL);
+	num_saved_regs = IS_ENABLED(CONFIG_PM_SLEEP) ? info->nsaved_regs : 0;
+	sfp = devm_kzalloc(dev, struct_size(sfp, saved_regs, num_saved_regs),
+			   GFP_KERNEL);
 	if (!sfp)
 		return -ENOMEM;
-
-#if IS_ENABLED(CONFIG_PM_SLEEP)
-	sfp->saved_regs = devm_kcalloc(dev, info->nsaved_regs,
-				       sizeof(*sfp->saved_regs), GFP_KERNEL);
-	if (!sfp->saved_regs)
-		return -ENOMEM;
-#endif
+	sfp->num_saved_regs = num_saved_regs;
 
 	sfp->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(sfp->base))
@@ -937,7 +934,7 @@ int jh7110_pinctrl_probe(struct platform_device *pdev)
 	sfp->gc.set = jh7110_gpio_set;
 	sfp->gc.set_config = jh7110_gpio_set_config;
 	sfp->gc.add_pin_ranges = jh7110_gpio_add_pin_ranges;
-	sfp->gc.base = info->gc_base;
+	sfp->gc.base = -1;
 	sfp->gc.ngpio = info->ngpios;
 
 	jh7110_irq_chip.name = sfp->gc.label;

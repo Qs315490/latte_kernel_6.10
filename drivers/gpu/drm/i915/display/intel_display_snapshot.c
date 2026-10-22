@@ -7,6 +7,7 @@
 
 #include "intel_display_core.h"
 #include "intel_display_device.h"
+#include "intel_display_irq.h"
 #include "intel_display_params.h"
 #include "intel_display_snapshot.h"
 #include "intel_dmc.h"
@@ -18,15 +19,15 @@ struct intel_display_snapshot {
 	struct intel_display_device_info info;
 	struct intel_display_runtime_info runtime_info;
 	struct intel_display_params params;
-	struct intel_overlay_snapshot *overlay;
 	struct intel_dmc_snapshot *dmc;
+	struct intel_display_irq_snapshot *irq;
 };
 
 struct intel_display_snapshot *intel_display_snapshot_capture(struct intel_display *display)
 {
 	struct intel_display_snapshot *snapshot;
 
-	snapshot = kzalloc(sizeof(*snapshot), GFP_ATOMIC);
+	snapshot = kzalloc_obj(*snapshot, GFP_ATOMIC);
 	if (!snapshot)
 		return NULL;
 
@@ -38,7 +39,7 @@ struct intel_display_snapshot *intel_display_snapshot_capture(struct intel_displ
 
 	intel_display_params_copy(&snapshot->params);
 
-	snapshot->overlay = intel_overlay_snapshot_capture(display);
+	snapshot->irq = intel_display_irq_snapshot_capture(display);
 	snapshot->dmc = intel_dmc_snapshot_capture(display);
 
 	return snapshot;
@@ -57,7 +58,7 @@ void intel_display_snapshot_print(const struct intel_display_snapshot *snapshot,
 	intel_display_device_info_print(&snapshot->info, &snapshot->runtime_info, p);
 	intel_display_params_dump(&snapshot->params, display->drm->driver->name, p);
 
-	intel_overlay_snapshot_print(snapshot->overlay, p);
+	intel_display_irq_snapshot_print(snapshot->irq, p);
 	intel_dmc_snapshot_print(snapshot->dmc, p);
 }
 
@@ -68,7 +69,7 @@ void intel_display_snapshot_free(struct intel_display_snapshot *snapshot)
 
 	intel_display_params_free(&snapshot->params);
 
-	kfree(snapshot->overlay);
+	kfree(snapshot->irq);
 	kfree(snapshot->dmc);
 	kfree(snapshot);
 }

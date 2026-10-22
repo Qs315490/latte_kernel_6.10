@@ -135,9 +135,8 @@ static int img_spdif_out_get_status(struct snd_kcontrol *kcontrol,
 	struct snd_soc_dai *cpu_dai = snd_kcontrol_chip(kcontrol);
 	struct img_spdif_out *spdif = snd_soc_dai_get_drvdata(cpu_dai);
 	u32 reg;
-	unsigned long flags;
 
-	spin_lock_irqsave(&spdif->lock, flags);
+	guard(spinlock_irqsave)(&spdif->lock);
 
 	reg = img_spdif_out_readl(spdif, IMG_SPDIF_OUT_CSL);
 	ucontrol->value.iec958.status[0] = reg & 0xff;
@@ -150,8 +149,6 @@ static int img_spdif_out_get_status(struct snd_kcontrol *kcontrol,
 		(reg & IMG_SPDIF_OUT_CSH_UV_CSH_MASK) >>
 		IMG_SPDIF_OUT_CSH_UV_CSH_SHIFT;
 
-	spin_unlock_irqrestore(&spdif->lock, flags);
-
 	return 0;
 }
 
@@ -161,14 +158,13 @@ static int img_spdif_out_set_status(struct snd_kcontrol *kcontrol,
 	struct snd_soc_dai *cpu_dai = snd_kcontrol_chip(kcontrol);
 	struct img_spdif_out *spdif = snd_soc_dai_get_drvdata(cpu_dai);
 	u32 reg;
-	unsigned long flags;
 
 	reg = ((u32)ucontrol->value.iec958.status[3] << 24);
 	reg |= ((u32)ucontrol->value.iec958.status[2] << 16);
 	reg |= ((u32)ucontrol->value.iec958.status[1] << 8);
 	reg |= (u32)ucontrol->value.iec958.status[0];
 
-	spin_lock_irqsave(&spdif->lock, flags);
+	guard(spinlock_irqsave)(&spdif->lock);
 
 	img_spdif_out_writel(spdif, reg, IMG_SPDIF_OUT_CSL);
 
@@ -177,8 +173,6 @@ static int img_spdif_out_set_status(struct snd_kcontrol *kcontrol,
 	reg |= (u32)ucontrol->value.iec958.status[4] <<
 			IMG_SPDIF_OUT_CSH_UV_CSH_SHIFT;
 	img_spdif_out_writel(spdif, reg, IMG_SPDIF_OUT_CSH_UV);
-
-	spin_unlock_irqrestore(&spdif->lock, flags);
 
 	return 0;
 }
@@ -205,7 +199,6 @@ static int img_spdif_out_trigger(struct snd_pcm_substream *substream, int cmd,
 {
 	struct img_spdif_out *spdif = snd_soc_dai_get_drvdata(dai);
 	u32 reg;
-	unsigned long flags;
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
@@ -218,9 +211,8 @@ static int img_spdif_out_trigger(struct snd_pcm_substream *substream, int cmd,
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		spin_lock_irqsave(&spdif->lock, flags);
-		img_spdif_out_reset(spdif);
-		spin_unlock_irqrestore(&spdif->lock, flags);
+		scoped_guard(spinlock_irqsave, &spdif->lock)
+			img_spdif_out_reset(spdif);
 		break;
 	default:
 		return -EINVAL;
@@ -409,7 +401,6 @@ static void img_spdif_out_dev_remove(struct platform_device *pdev)
 		img_spdif_out_runtime_suspend(&pdev->dev);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int img_spdif_out_suspend(struct device *dev)
 {
 	struct img_spdif_out *spdif = dev_get_drvdata(dev);
@@ -448,7 +439,7 @@ static int img_spdif_out_resume(struct device *dev)
 
 	return 0;
 }
-#endif
+
 static const struct of_device_id img_spdif_out_of_match[] = {
 	{ .compatible = "img,spdif-out" },
 	{}
@@ -456,16 +447,15 @@ static const struct of_device_id img_spdif_out_of_match[] = {
 MODULE_DEVICE_TABLE(of, img_spdif_out_of_match);
 
 static const struct dev_pm_ops img_spdif_out_pm_ops = {
-	SET_RUNTIME_PM_OPS(img_spdif_out_runtime_suspend,
-			   img_spdif_out_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(img_spdif_out_suspend, img_spdif_out_resume)
+	RUNTIME_PM_OPS(img_spdif_out_runtime_suspend, img_spdif_out_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(img_spdif_out_suspend, img_spdif_out_resume)
 };
 
 static struct platform_driver img_spdif_out_driver = {
 	.driver = {
 		.name = "img-spdif-out",
 		.of_match_table = img_spdif_out_of_match,
-		.pm = &img_spdif_out_pm_ops
+		.pm = pm_ptr(&img_spdif_out_pm_ops)
 	},
 	.probe = img_spdif_out_probe,
 	.remove = img_spdif_out_dev_remove

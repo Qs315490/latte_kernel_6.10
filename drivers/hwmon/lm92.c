@@ -32,7 +32,6 @@
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 
@@ -78,7 +77,6 @@ static inline u8 ALARMS_FROM_REG(s16 reg)
 /* Client data (each client gets its own) */
 struct lm92_data {
 	struct regmap *regmap;
-	struct mutex update_lock;
 	int resolution;
 };
 
@@ -199,15 +197,11 @@ static int lm92_temp_write(struct lm92_data *data, u32 attr, long val)
 		break;
 	case hwmon_temp_crit_hyst:
 		val = clamp_val(val, -120000, 220000);
-		mutex_lock(&data->update_lock);
 		err = regmap_read(regmap, LM92_REG_TEMP_CRIT, &temp);
 		if (err)
-			goto unlock;
+			return err;
 		val = TEMP_TO_REG(TEMP_FROM_REG(temp) - val, data->resolution);
-		err = regmap_write(regmap, LM92_REG_TEMP_HYST, val);
-unlock:
-		mutex_unlock(&data->update_lock);
-		return err;
+		return regmap_write(regmap, LM92_REG_TEMP_HYST, val);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -396,7 +390,6 @@ static int lm92_probe(struct i2c_client *client)
 
 	data->regmap = regmap;
 	data->resolution = (unsigned long)i2c_get_match_data(client);
-	mutex_init(&data->update_lock);
 
 	/* Initialize the chipset */
 	err = lm92_init_client(regmap);
@@ -412,10 +405,10 @@ static int lm92_probe(struct i2c_client *client)
  * Module and driver stuff
  */
 
-/* .driver_data is limit register resolution */ 
+/* .driver_data is limit register resolution */
 static const struct i2c_device_id lm92_id[] = {
-	{ "lm92", 13 },
-	{ "max6635", 9 },
+	{ .name = "lm92", .driver_data = 13 },
+	{ .name = "max6635", .driver_data = 9 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lm92_id);

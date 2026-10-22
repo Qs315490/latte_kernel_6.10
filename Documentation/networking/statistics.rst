@@ -143,7 +143,7 @@ reading multiple stats as it internally performs a full dump of
 and reports only the stat corresponding to the accessed file.
 
 Sysfs files are documented in
-`Documentation/ABI/testing/sysfs-class-net-statistics`.
+Documentation/ABI/testing/sysfs-class-net-statistics.
 
 
 netlink
@@ -184,9 +184,11 @@ Protocol-related statistics can be requested in get commands by setting
 the `ETHTOOL_FLAG_STATS` flag in `ETHTOOL_A_HEADER_FLAGS`. Currently
 statistics are supported in the following commands:
 
-  - `ETHTOOL_MSG_PAUSE_GET`
   - `ETHTOOL_MSG_FEC_GET`
+  - `ETHTOOL_MSG_LINKSTATE_GET`
   - `ETHTOOL_MSG_MM_GET`
+  - `ETHTOOL_MSG_PAUSE_GET`
+  - `ETHTOOL_MSG_TSINFO_GET`
 
 debugfs
 -------
@@ -229,8 +231,19 @@ Kernel-internal data structures
 -------------------------------
 
 The following structures are internal to the kernel, their members are
-translated to netlink attributes when dumped. Drivers must not overwrite
-the statistics they don't report with 0.
+translated to netlink attributes when dumped. Fields are pre-initialized
+to ``ETHTOOL_STAT_NOT_SET`` (by ``ethtool_stats_init()``); drivers must
+leave fields they do not report at that value rather than overwriting
+them with 0.
 
-- ethtool_pause_stats()
-- ethtool_fec_stats()
+- ``struct ethtool_eth_ctrl_stats``
+- ``struct ethtool_eth_mac_stats``
+- ``struct ethtool_eth_phy_stats``
+- ``struct ethtool_fec_hist``
+- ``struct ethtool_fec_stats``
+- ``struct ethtool_link_ext_stats``
+- ``struct ethtool_mm_stats``
+- ``struct ethtool_pause_stats``
+- ``struct ethtool_phy_stats``
+- ``struct ethtool_rmon_stats``
+- ``struct ethtool_ts_stats``

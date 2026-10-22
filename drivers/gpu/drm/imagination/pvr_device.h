@@ -7,7 +7,6 @@
 #include "pvr_ccb.h"
 #include "pvr_device_info.h"
 #include "pvr_fw.h"
-#include "pvr_params.h"
 #include "pvr_rogue_fwif_stream.h"
 #include "pvr_stream.h"
 
@@ -18,6 +17,7 @@
 #include <linux/bits.h>
 #include <linux/compiler_attributes.h>
 #include <linux/compiler_types.h>
+#include <linux/device.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
@@ -35,6 +35,12 @@ struct clk;
 
 /* Forward declaration from <linux/firmware.h>. */
 struct firmware;
+
+/* Forward declaration from <linux/pwrseq/consumer.h> */
+struct pwrseq_desc;
+
+#define PVR_GPUID_STRING_MIN_LENGTH 7U
+#define PVR_GPUID_STRING_MAX_LENGTH 32U
 
 /**
  * struct pvr_gpu_id - Hardware GPU ID information for a PowerVR device
@@ -54,6 +60,14 @@ struct pvr_gpu_id {
  */
 struct pvr_fw_version {
 	u16 major, minor;
+};
+
+/**
+ * struct pvr_device_data - Platform specific data associated with a compatible string.
+ * @pwr_ops: Pointer to a structure with platform-specific power functions.
+ */
+struct pvr_device_data {
+	const struct pvr_power_sequence_ops *pwr_ops;
 };
 
 /**
@@ -97,6 +111,9 @@ struct pvr_device {
 	/** @fw_version: Firmware version detected at runtime. */
 	struct pvr_fw_version fw_version;
 
+	/** @device_data: Pointer to platform-specific data. */
+	const struct pvr_device_data *device_data;
+
 	/** @regs_resource: Resource representing device control registers. */
 	struct resource *regs_resource;
 
@@ -131,6 +148,31 @@ struct pvr_device {
 	 */
 	struct clk *mem_clk;
 
+	/**
+	 * @power: Optional power domain devices.
+	 *
+	 * On platforms with more than one power domain for the GPU, they are
+	 * stored here in @domains, along with links between them in
+	 * @domain_links. The size of @domain_links is one less than
+	 * struct dev_pm_domain_list->num_pds in @domains.
+	 */
+	struct pvr_device_power {
+		struct dev_pm_domain_list *domains;
+		struct device_link **domain_links;
+	} power;
+
+	/**
+	 * @reset: Optional reset line.
+	 *
+	 * This may be used on some platforms to provide a reset line that needs to be de-asserted
+	 * after power-up procedure. It would also need to be asserted after the power-down
+	 * procedure.
+	 */
+	struct reset_control *reset;
+
+	/** @pwrseq: Pointer to a power sequencer, if one is used. */
+	struct pwrseq_desc *pwrseq;
+
 	/** @irq: IRQ number. */
 	int irq;
 
@@ -149,15 +191,6 @@ struct pvr_device {
 
 	/** @fw_dev: Firmware related data. */
 	struct pvr_fw_device fw_dev;
-
-	/**
-	 * @params: Device-specific parameters.
-	 *
-	 *          The values of these parameters are initialized from the
-	 *          defaults specified as module parameters. They may be
-	 *          modified at runtime via debugfs (if enabled).
-	 */
-	struct pvr_device_params params;
 
 	/** @stream_musthave_quirks: Bit array of "must-have" quirks for stream commands. */
 	u32 stream_musthave_quirks[PVR_STREAM_TYPE_MAX][PVR_STREAM_EXTHDR_TYPE_MAX];
@@ -300,6 +333,9 @@ struct pvr_device {
 	 *  struct pvr_file.
 	 */
 	spinlock_t ctx_list_lock;
+
+	/** @has_safety_events: Whether this device can raise safety events. */
+	bool has_safety_events;
 };
 
 /**
@@ -481,7 +517,7 @@ struct pvr_file {
  * Return: Packed BVNC.
  */
 static __always_inline u64
-pvr_gpu_id_to_packed_bvnc(struct pvr_gpu_id *gpu_id)
+pvr_gpu_id_to_packed_bvnc(const struct pvr_gpu_id *gpu_id)
 {
 	return PVR_PACKED_BVNC(gpu_id->b, gpu_id->v, gpu_id->n, gpu_id->c);
 }
@@ -506,6 +542,11 @@ pvr_device_has_uapi_enhancement(struct pvr_device *pvr_dev, u32 enhancement);
 bool
 pvr_device_has_feature(struct pvr_device *pvr_dev, u32 feature);
 
+#if IS_ENABLED(CONFIG_KUNIT)
+int pvr_gpuid_decode_string(const struct pvr_device *pvr_dev,
+			    const char *param_bvnc, struct pvr_gpu_id *gpu_id);
+#endif
+
 /**
  * PVR_CR_FIELD_GET() - Extract a single field from a PowerVR control register
  * @val: Value of the target register.
@@ -523,7 +564,7 @@ pvr_device_has_feature(struct pvr_device *pvr_dev, u32 feature);
  * Return: The value of the requested register.
  */
 static __always_inline u32
-pvr_cr_read32(struct pvr_device *pvr_dev, u32 reg)
+pvr_cr_read32(const struct pvr_device *pvr_dev, u32 reg)
 {
 	return ioread32(pvr_dev->regs + reg);
 }
@@ -536,7 +577,7 @@ pvr_cr_read32(struct pvr_device *pvr_dev, u32 reg)
  * Return: The value of the requested register.
  */
 static __always_inline u64
-pvr_cr_read64(struct pvr_device *pvr_dev, u32 reg)
+pvr_cr_read64(const struct pvr_device *pvr_dev, u32 reg)
 {
 	return ioread64(pvr_dev->regs + reg);
 }
@@ -728,8 +769,22 @@ pvr_ioctl_union_padding_check(void *instance, size_t union_offset,
 					      __union_size, __member_size);  \
 	})
 
-#define PVR_FW_PROCESSOR_TYPE_META  0
-#define PVR_FW_PROCESSOR_TYPE_MIPS  1
-#define PVR_FW_PROCESSOR_TYPE_RISCV 2
+/*
+ * These utility functions should more properly be placed in pvr_fw.h, but that
+ * would cause a dependency cycle between that header and this one. Since
+ * they're primarily used in pvr_device.c, let's put them in here for now.
+ */
+
+static __always_inline bool
+pvr_fw_irq_pending(struct pvr_device *pvr_dev)
+{
+	return pvr_dev->fw_dev.defs->irq_pending(pvr_dev);
+}
+
+static __always_inline void
+pvr_fw_irq_clear(struct pvr_device *pvr_dev)
+{
+	pvr_dev->fw_dev.defs->irq_clear(pvr_dev);
+}
 
 #endif /* PVR_DEVICE_H */

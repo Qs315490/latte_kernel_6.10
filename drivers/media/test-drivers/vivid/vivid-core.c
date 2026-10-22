@@ -125,7 +125,9 @@ MODULE_PARM_DESC(node_types, " node types, default is 0xe1d3d. Bitmask with the 
 			     "\t\t    bit 8: Video Output node\n"
 			     "\t\t    bit 10-11: VBI Output node: 0 = none, 1 = raw vbi, 2 = sliced vbi, 3 = both\n"
 			     "\t\t    bit 12: Radio Transmitter node\n"
+#ifdef CONFIG_VIDEO_VIVID_OSD
 			     "\t\t    bit 16: Framebuffer for testing output overlays\n"
+#endif
 			     "\t\t    bit 17: Metadata Capture node\n"
 			     "\t\t    bit 18: Metadata Output node\n"
 			     "\t\t    bit 19: Touch Capture node\n");
@@ -275,49 +277,49 @@ static int vidioc_querycap(struct file *file, void  *priv,
 	return 0;
 }
 
-static int vidioc_s_hw_freq_seek(struct file *file, void *fh, const struct v4l2_hw_freq_seek *a)
+static int vidioc_s_hw_freq_seek(struct file *file, void *priv, const struct v4l2_hw_freq_seek *a)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_type == VFL_TYPE_RADIO)
-		return vivid_radio_rx_s_hw_freq_seek(file, fh, a);
+		return vivid_radio_rx_s_hw_freq_seek(file, priv, a);
 	return -ENOTTY;
 }
 
-static int vidioc_enum_freq_bands(struct file *file, void *fh, struct v4l2_frequency_band *band)
+static int vidioc_enum_freq_bands(struct file *file, void *priv, struct v4l2_frequency_band *band)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_type == VFL_TYPE_RADIO)
-		return vivid_radio_rx_enum_freq_bands(file, fh, band);
+		return vivid_radio_rx_enum_freq_bands(file, priv, band);
 	if (vdev->vfl_type == VFL_TYPE_SDR)
-		return vivid_sdr_enum_freq_bands(file, fh, band);
+		return vivid_sdr_enum_freq_bands(file, priv, band);
 	return -ENOTTY;
 }
 
-static int vidioc_g_tuner(struct file *file, void *fh, struct v4l2_tuner *vt)
+static int vidioc_g_tuner(struct file *file, void *priv, struct v4l2_tuner *vt)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_type == VFL_TYPE_RADIO)
-		return vivid_radio_rx_g_tuner(file, fh, vt);
+		return vivid_radio_rx_g_tuner(file, priv, vt);
 	if (vdev->vfl_type == VFL_TYPE_SDR)
-		return vivid_sdr_g_tuner(file, fh, vt);
-	return vivid_video_g_tuner(file, fh, vt);
+		return vivid_sdr_g_tuner(file, priv, vt);
+	return vivid_video_g_tuner(file, priv, vt);
 }
 
-static int vidioc_s_tuner(struct file *file, void *fh, const struct v4l2_tuner *vt)
+static int vidioc_s_tuner(struct file *file, void *priv, const struct v4l2_tuner *vt)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_type == VFL_TYPE_RADIO)
-		return vivid_radio_rx_s_tuner(file, fh, vt);
+		return vivid_radio_rx_s_tuner(file, priv, vt);
 	if (vdev->vfl_type == VFL_TYPE_SDR)
-		return vivid_sdr_s_tuner(file, fh, vt);
-	return vivid_video_s_tuner(file, fh, vt);
+		return vivid_sdr_s_tuner(file, priv, vt);
+	return vivid_video_s_tuner(file, priv, vt);
 }
 
-static int vidioc_g_frequency(struct file *file, void *fh, struct v4l2_frequency *vf)
+static int vidioc_g_frequency(struct file *file, void *priv, struct v4l2_frequency *vf)
 {
 	struct vivid_dev *dev = video_drvdata(file);
 	struct video_device *vdev = video_devdata(file);
@@ -327,11 +329,11 @@ static int vidioc_g_frequency(struct file *file, void *fh, struct v4l2_frequency
 			vdev->vfl_dir == VFL_DIR_RX ?
 			&dev->radio_rx_freq : &dev->radio_tx_freq, vf);
 	if (vdev->vfl_type == VFL_TYPE_SDR)
-		return vivid_sdr_g_frequency(file, fh, vf);
-	return vivid_video_g_frequency(file, fh, vf);
+		return vivid_sdr_g_frequency(file, priv, vf);
+	return vivid_video_g_frequency(file, priv, vf);
 }
 
-static int vidioc_s_frequency(struct file *file, void *fh, const struct v4l2_frequency *vf)
+static int vidioc_s_frequency(struct file *file, void *priv, const struct v4l2_frequency *vf)
 {
 	struct vivid_dev *dev = video_drvdata(file);
 	struct video_device *vdev = video_devdata(file);
@@ -341,113 +343,113 @@ static int vidioc_s_frequency(struct file *file, void *fh, const struct v4l2_fre
 			vdev->vfl_dir == VFL_DIR_RX ?
 			&dev->radio_rx_freq : &dev->radio_tx_freq, vf);
 	if (vdev->vfl_type == VFL_TYPE_SDR)
-		return vivid_sdr_s_frequency(file, fh, vf);
-	return vivid_video_s_frequency(file, fh, vf);
+		return vivid_sdr_s_frequency(file, priv, vf);
+	return vivid_video_s_frequency(file, priv, vf);
 }
 
-static int vidioc_overlay(struct file *file, void *fh, unsigned i)
+static int vidioc_overlay(struct file *file, void *priv, unsigned i)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_dir == VFL_DIR_RX)
 		return -ENOTTY;
-	return vivid_vid_out_overlay(file, fh, i);
+	return vivid_vid_out_overlay(file, priv, i);
 }
 
-static int vidioc_g_fbuf(struct file *file, void *fh, struct v4l2_framebuffer *a)
+static int vidioc_g_fbuf(struct file *file, void *priv, struct v4l2_framebuffer *a)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_dir == VFL_DIR_RX)
 		return -ENOTTY;
-	return vivid_vid_out_g_fbuf(file, fh, a);
+	return vivid_vid_out_g_fbuf(file, priv, a);
 }
 
-static int vidioc_s_fbuf(struct file *file, void *fh, const struct v4l2_framebuffer *a)
+static int vidioc_s_fbuf(struct file *file, void *priv, const struct v4l2_framebuffer *a)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_dir == VFL_DIR_RX)
 		return -ENOTTY;
-	return vivid_vid_out_s_fbuf(file, fh, a);
+	return vivid_vid_out_s_fbuf(file, priv, a);
 }
 
-static int vidioc_s_std(struct file *file, void *fh, v4l2_std_id id)
+static int vidioc_s_std(struct file *file, void *priv, v4l2_std_id id)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_dir == VFL_DIR_RX)
-		return vivid_vid_cap_s_std(file, fh, id);
-	return vivid_vid_out_s_std(file, fh, id);
+		return vivid_vid_cap_s_std(file, priv, id);
+	return vivid_vid_out_s_std(file, priv, id);
 }
 
-static int vidioc_s_dv_timings(struct file *file, void *fh, struct v4l2_dv_timings *timings)
+static int vidioc_s_dv_timings(struct file *file, void *priv, struct v4l2_dv_timings *timings)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_dir == VFL_DIR_RX)
-		return vivid_vid_cap_s_dv_timings(file, fh, timings);
-	return vivid_vid_out_s_dv_timings(file, fh, timings);
+		return vivid_vid_cap_s_dv_timings(file, priv, timings);
+	return vivid_vid_out_s_dv_timings(file, priv, timings);
 }
 
-static int vidioc_g_pixelaspect(struct file *file, void *fh,
+static int vidioc_g_pixelaspect(struct file *file, void *priv,
 				int type, struct v4l2_fract *f)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_dir == VFL_DIR_RX)
-		return vivid_vid_cap_g_pixelaspect(file, fh, type, f);
-	return vivid_vid_out_g_pixelaspect(file, fh, type, f);
+		return vivid_vid_cap_g_pixelaspect(file, priv, type, f);
+	return vivid_vid_out_g_pixelaspect(file, priv, type, f);
 }
 
-static int vidioc_g_selection(struct file *file, void *fh,
+static int vidioc_g_selection(struct file *file, void *priv,
 			      struct v4l2_selection *sel)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_dir == VFL_DIR_RX)
-		return vivid_vid_cap_g_selection(file, fh, sel);
-	return vivid_vid_out_g_selection(file, fh, sel);
+		return vivid_vid_cap_g_selection(file, priv, sel);
+	return vivid_vid_out_g_selection(file, priv, sel);
 }
 
-static int vidioc_s_selection(struct file *file, void *fh,
+static int vidioc_s_selection(struct file *file, void *priv,
 			      struct v4l2_selection *sel)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_dir == VFL_DIR_RX)
-		return vivid_vid_cap_s_selection(file, fh, sel);
-	return vivid_vid_out_s_selection(file, fh, sel);
+		return vivid_vid_cap_s_selection(file, priv, sel);
+	return vivid_vid_out_s_selection(file, priv, sel);
 }
 
-static int vidioc_g_parm(struct file *file, void *fh,
+static int vidioc_g_parm(struct file *file, void *priv,
 			  struct v4l2_streamparm *parm)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_type == VFL_TYPE_TOUCH)
-		return vivid_g_parm_tch(file, fh, parm);
+		return vivid_g_parm_tch(file, priv, parm);
 	if (vdev->vfl_dir == VFL_DIR_RX)
-		return vivid_vid_cap_g_parm(file, fh, parm);
-	return vivid_vid_out_g_parm(file, fh, parm);
+		return vivid_vid_cap_g_parm(file, priv, parm);
+	return vivid_vid_out_g_parm(file, priv, parm);
 }
 
-static int vidioc_s_parm(struct file *file, void *fh,
+static int vidioc_s_parm(struct file *file, void *priv,
 			  struct v4l2_streamparm *parm)
 {
 	struct video_device *vdev = video_devdata(file);
 
 	if (vdev->vfl_dir == VFL_DIR_RX)
-		return vivid_vid_cap_s_parm(file, fh, parm);
+		return vivid_vid_cap_s_parm(file, priv, parm);
 	return -ENOTTY;
 }
 
-static int vidioc_log_status(struct file *file, void *fh)
+static int vidioc_log_status(struct file *file, void *priv)
 {
 	struct vivid_dev *dev = video_drvdata(file);
 	struct video_device *vdev = video_devdata(file);
 
-	v4l2_ctrl_log_status(file, fh);
+	v4l2_ctrl_log_status(file, priv);
 	if (vdev->vfl_dir == VFL_DIR_RX && vdev->vfl_type == VFL_TYPE_VIDEO)
 		tpg_log_status(&dev->tpg);
 	return 0;
@@ -652,11 +654,11 @@ static int vivid_fop_release(struct file *file)
 		v4l2_info(&dev->v4l2_dev, "reconnect\n");
 		vivid_reconnect(dev);
 	}
-	if (file->private_data == dev->radio_rx_rds_owner) {
+	if (file_to_v4l2_fh(file) == dev->radio_rx_rds_owner) {
 		dev->radio_rx_rds_last_block = 0;
 		dev->radio_rx_rds_owner = NULL;
 	}
-	if (file->private_data == dev->radio_tx_rds_owner) {
+	if (file_to_v4l2_fh(file) == dev->radio_tx_rds_owner) {
 		dev->radio_tx_rds_last_block = 0;
 		dev->radio_tx_rds_owner = NULL;
 	}
@@ -1071,9 +1073,11 @@ static int vivid_detect_feature_set(struct vivid_dev *dev, int inst,
 	/* do we have a modulator? */
 	*has_modulator = dev->has_radio_tx;
 
+#ifdef CONFIG_VIDEO_VIVID_OSD
 	if (dev->has_vid_cap)
 		/* do we have a framebuffer for overlay testing? */
 		dev->has_fb = node_type & 0x10000;
+#endif
 
 	/* can we do crop/compose/scaling while capturing? */
 	if (no_error_inj && *ccs_cap == -1)
@@ -1410,8 +1414,6 @@ static int vivid_create_queues(struct vivid_dev *dev)
 		ret = vivid_fb_init(dev);
 		if (ret)
 			return ret;
-		v4l2_info(&dev->v4l2_dev, "Framebuffer device registered as fb%d\n",
-			  dev->fb_info.node);
 	}
 	return 0;
 }
@@ -1812,7 +1814,7 @@ static int vivid_create_instance(struct platform_device *pdev, int inst)
 	int i;
 
 	/* allocate main vivid state structure */
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return -ENOMEM;
 
@@ -1854,15 +1856,15 @@ static int vivid_create_instance(struct platform_device *pdev, int inst)
 	tpg_init(&dev->tpg, 640, 360);
 	if (tpg_alloc(&dev->tpg, array_size(MAX_WIDTH, MAX_ZOOM)))
 		goto free_dev;
-	dev->scaled_line = vzalloc(array_size(MAX_WIDTH, MAX_ZOOM));
+	dev->scaled_line = vcalloc(MAX_WIDTH, MAX_ZOOM);
 	if (!dev->scaled_line)
 		goto free_dev;
-	dev->blended_line = vzalloc(array_size(MAX_WIDTH, MAX_ZOOM));
+	dev->blended_line = vcalloc(MAX_WIDTH, MAX_ZOOM);
 	if (!dev->blended_line)
 		goto free_dev;
 
 	/* load the edid */
-	dev->edid = vmalloc(array_size(256, 128));
+	dev->edid = vmalloc_array(256, 128);
 	if (!dev->edid)
 		goto free_dev;
 
@@ -2197,12 +2199,8 @@ static void vivid_remove(struct platform_device *pdev)
 				video_device_node_name(&dev->radio_tx_dev));
 			video_unregister_device(&dev->radio_tx_dev);
 		}
-		if (dev->has_fb) {
-			v4l2_info(&dev->v4l2_dev, "unregistering fb%d\n",
-				dev->fb_info.node);
-			unregister_framebuffer(&dev->fb_info);
-			vivid_fb_release_buffers(dev);
-		}
+		if (dev->has_fb)
+			vivid_fb_deinit(dev);
 		if (dev->has_meta_cap) {
 			v4l2_info(&dev->v4l2_dev, "unregistering %s\n",
 				  video_device_node_name(&dev->meta_cap_dev));
@@ -2291,8 +2289,10 @@ static int __init vivid_init(void)
 		}
 	}
 	ret = platform_device_register(&vivid_pdev);
-	if (ret)
+	if (ret) {
+		platform_device_put(&vivid_pdev);
 		goto free_output_strings;
+	}
 	ret = platform_driver_register(&vivid_pdrv);
 	if (ret)
 		goto unreg_device;
@@ -2313,7 +2313,7 @@ static int __init vivid_init(void)
 destroy_hdmi_wq:
 	destroy_workqueue(update_hdmi_ctrls_workqueue);
 unreg_driver:
-	platform_driver_register(&vivid_pdrv);
+	platform_driver_unregister(&vivid_pdrv);
 unreg_device:
 	platform_device_unregister(&vivid_pdev);
 free_output_strings:

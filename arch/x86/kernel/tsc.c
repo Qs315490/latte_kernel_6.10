@@ -11,12 +11,13 @@
 #include <linux/cpufreq.h>
 #include <linux/delay.h>
 #include <linux/clocksource.h>
+#include <linux/kvm_types.h>
 #include <linux/percpu.h>
 #include <linux/timex.h>
 #include <linux/static_key.h>
 #include <linux/static_call.h>
 
-#include <asm/cpuid.h>
+#include <asm/cpuid/api.h>
 #include <asm/hpet.h>
 #include <asm/timer.h>
 #include <asm/vgtod.h>
@@ -29,6 +30,7 @@
 #include <asm/apic.h>
 #include <asm/cpu_device_id.h>
 #include <asm/i8259.h>
+#include <asm/msr.h>
 #include <asm/topology.h>
 #include <asm/uv/uv.h>
 #include <asm/sev.h>
@@ -265,19 +267,27 @@ u64 native_sched_clock_from_tsc(u64 tsc)
 /* We need to define a real function for sched_clock, to override the
    weak default version */
 #ifdef CONFIG_PARAVIRT
+DEFINE_STATIC_CALL(pv_sched_clock, native_sched_clock);
+
 noinstr u64 sched_clock_noinstr(void)
 {
-	return paravirt_sched_clock();
+	return static_call(pv_sched_clock)();
 }
 
 bool using_native_sched_clock(void)
 {
 	return static_call_query(pv_sched_clock) == native_sched_clock;
 }
+
+void paravirt_set_sched_clock(u64 (*func)(void))
+{
+	static_call_update(pv_sched_clock, func);
+}
 #else
 u64 sched_clock_noinstr(void) __attribute__((alias("native_sched_clock")));
 
 bool using_native_sched_clock(void) { return true; }
+void paravirt_set_sched_clock(u64 (*func)(void)) { }
 #endif
 
 notrace u64 sched_clock(void)
@@ -288,36 +298,27 @@ notrace u64 sched_clock(void)
 	preempt_enable_notrace();
 	return now;
 }
-
 int check_tsc_unstable(void)
 {
 	return tsc_unstable;
 }
 EXPORT_SYMBOL_GPL(check_tsc_unstable);
 
-#ifdef CONFIG_X86_TSC
 int __init notsc_setup(char *str)
 {
 	mark_tsc_unstable("boot parameter notsc");
 	return 1;
 }
-#else
-/*
- * disable flag for tsc. Takes effect by clearing the TSC cpu flag
- * in cpu/common.c
- */
-int __init notsc_setup(char *str)
-{
-	setup_clear_cpu_cap(X86_FEATURE_TSC);
-	return 1;
-}
-#endif
-
 __setup("notsc", notsc_setup);
 
+enum {
+	TSC_WATCHDOG_AUTO,
+	TSC_WATCHDOG_OFF,
+	TSC_WATCHDOG_ON,
+};
+
 static int no_sched_irq_time;
-static int no_tsc_watchdog;
-static int tsc_as_watchdog;
+static int tsc_watchdog;
 
 static int __init tsc_setup(char *str)
 {
@@ -327,25 +328,14 @@ static int __init tsc_setup(char *str)
 		no_sched_irq_time = 1;
 	if (!strcmp(str, "unstable"))
 		mark_tsc_unstable("boot parameter");
-	if (!strcmp(str, "nowatchdog")) {
-		no_tsc_watchdog = 1;
-		if (tsc_as_watchdog)
-			pr_alert("%s: Overriding earlier tsc=watchdog with tsc=nowatchdog\n",
-				 __func__);
-		tsc_as_watchdog = 0;
-	}
+	if (!strcmp(str, "nowatchdog"))
+		tsc_watchdog = TSC_WATCHDOG_OFF;
 	if (!strcmp(str, "recalibrate"))
 		tsc_force_recalibrate = 1;
-	if (!strcmp(str, "watchdog")) {
-		if (no_tsc_watchdog)
-			pr_alert("%s: tsc=watchdog overridden by earlier tsc=nowatchdog\n",
-				 __func__);
-		else
-			tsc_as_watchdog = 1;
-	}
+	if (!strcmp(str, "watchdog"))
+		tsc_watchdog = TSC_WATCHDOG_ON;
 	return 1;
 }
-
 __setup("tsc=", tsc_setup);
 
 #define MAX_RETRIES		5
@@ -959,7 +949,7 @@ static unsigned long long cyc2ns_suspend;
 
 void tsc_save_sched_clock_state(void)
 {
-	if (!sched_clock_stable())
+	if (!static_branch_likely(&__use_tsc) && !sched_clock_stable())
 		return;
 
 	cyc2ns_suspend = sched_clock();
@@ -979,7 +969,7 @@ void tsc_restore_sched_clock_state(void)
 	unsigned long flags;
 	int cpu;
 
-	if (!sched_clock_stable())
+	if (!static_branch_likely(&__use_tsc) && !sched_clock_stable())
 		return;
 
 	local_irq_save(flags);
@@ -1098,7 +1088,7 @@ static void __init detect_art(void)
 	if (art_base_clk.denominator < ART_MIN_DENOMINATOR)
 		return;
 
-	rdmsrl(MSR_IA32_TSC_ADJUST, art_base_clk.offset);
+	rdmsrq(MSR_IA32_TSC_ADJUST, art_base_clk.offset);
 
 	/* Make this sticky over multiple CPU init calls */
 	setup_force_cpu_cap(X86_FEATURE_ART);
@@ -1141,7 +1131,6 @@ static void tsc_cs_mark_unstable(struct clocksource *cs)
 	tsc_unstable = 1;
 	if (using_native_sched_clock())
 		clear_sched_clock_stable();
-	disable_sched_clock_irqtime();
 	pr_info("Marking TSC unstable due to clocksource watchdog\n");
 }
 
@@ -1166,7 +1155,6 @@ static int tsc_cs_enable(struct clocksource *cs)
 static struct clocksource clocksource_tsc_early = {
 	.name			= "tsc-early",
 	.rating			= 299,
-	.uncertainty_margin	= 32 * NSEC_PER_MSEC,
 	.read			= read_tsc,
 	.mask			= CLOCKSOURCE_MASK(64),
 	.flags			= CLOCK_SOURCE_IS_CONTINUOUS |
@@ -1191,9 +1179,9 @@ static struct clocksource clocksource_tsc = {
 	.read			= read_tsc,
 	.mask			= CLOCKSOURCE_MASK(64),
 	.flags			= CLOCK_SOURCE_IS_CONTINUOUS |
-				  CLOCK_SOURCE_VALID_FOR_HRES |
+				  CLOCK_SOURCE_CAN_INLINE_READ |
 				  CLOCK_SOURCE_MUST_VERIFY |
-				  CLOCK_SOURCE_VERIFY_PERCPU,
+				  CLOCK_SOURCE_HAS_COUPLED_CLOCK_EVENT,
 	.id			= CSID_X86_TSC,
 	.vdso_clock_mode	= VDSO_CLOCKMODE_TSC,
 	.enable			= tsc_cs_enable,
@@ -1211,7 +1199,6 @@ void mark_tsc_unstable(char *reason)
 	tsc_unstable = 1;
 	if (using_native_sched_clock())
 		clear_sched_clock_stable();
-	disable_sched_clock_irqtime();
 	pr_info("Marking TSC unstable due to %s\n", reason);
 
 	clocksource_mark_unstable(&clocksource_tsc_early);
@@ -1222,14 +1209,10 @@ EXPORT_SYMBOL_GPL(mark_tsc_unstable);
 
 static void __init tsc_disable_clocksource_watchdog(void)
 {
+	if (tsc_watchdog == TSC_WATCHDOG_ON)
+		return;
 	clocksource_tsc_early.flags &= ~CLOCK_SOURCE_MUST_VERIFY;
 	clocksource_tsc.flags &= ~CLOCK_SOURCE_MUST_VERIFY;
-}
-
-bool tsc_clocksource_watchdog_disabled(void)
-{
-	return !(clocksource_tsc.flags & CLOCK_SOURCE_MUST_VERIFY) &&
-	       tsc_as_watchdog && !no_tsc_watchdog;
 }
 
 static void __init check_system_tsc_reliable(void)
@@ -1386,6 +1369,8 @@ restart:
 		(unsigned long)tsc_khz / 1000,
 		(unsigned long)tsc_khz % 1000);
 
+	clocksource_tsc.flags |= CLOCK_SOURCE_CALIBRATED;
+
 	/* Inform the TSC deadline clockevent devices about the recalibration */
 	lapic_update_tsc_freq();
 
@@ -1401,6 +1386,15 @@ out:
 		have_art = true;
 		clocksource_tsc.base = &art_base_clk;
 	}
+
+	/*
+	 * Transfer the valid for high resolution flag if it was set on the
+	 * early TSC already. That guarantees that there is no intermediate
+	 * clocksource selected once the early TSC is unregistered.
+	 */
+	if (clocksource_tsc_early.flags & CLOCK_SOURCE_VALID_FOR_HRES)
+		clocksource_tsc.flags |= CLOCK_SOURCE_VALID_FOR_HRES;
+
 	clocksource_register_khz(&clocksource_tsc, tsc_khz);
 unreg:
 	clocksource_unregister(&clocksource_tsc_early);
@@ -1452,12 +1446,10 @@ static bool __init determine_cpu_tsc_frequencies(bool early)
 
 	if (early) {
 		cpu_khz = x86_platform.calibrate_cpu();
-		if (tsc_early_khz) {
+		if (tsc_early_khz)
 			tsc_khz = tsc_early_khz;
-		} else {
+		else
 			tsc_khz = x86_platform.calibrate_tsc();
-			clocksource_tsc.freq_khz = tsc_khz;
-		}
 	} else {
 		/* We should not be here with non-native cpu calibration */
 		WARN_ON(x86_platform.calibrate_cpu != native_calibrate_cpu);
@@ -1561,7 +1553,7 @@ void __init tsc_init(void)
 		return;
 	}
 
-	if (tsc_clocksource_reliable || no_tsc_watchdog)
+	if (tsc_clocksource_reliable || tsc_watchdog == TSC_WATCHDOG_OFF)
 		tsc_disable_clocksource_watchdog();
 
 	clocksource_register_khz(&clocksource_tsc_early, tsc_khz);

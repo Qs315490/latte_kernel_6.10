@@ -233,6 +233,14 @@ int ui_browser__warning(struct ui_browser *browser, int timeout,
 	return key;
 }
 
+int ui_browser__warn_unhandled_hotkey(struct ui_browser *browser, int key, int timeout, const char *help)
+{
+	char kname[32];
+
+	key_name(key, kname, sizeof(kname));
+	return ui_browser__warning(browser, timeout, "\n'%s' key not associated%s!\n", kname, help ?: "");
+}
+
 int ui_browser__help_window(struct ui_browser *browser, const char *text)
 {
 	int key;
@@ -451,6 +459,8 @@ int ui_browser__run(struct ui_browser *browser, int delay_secs)
 				goto out;
 			if (browser->horiz_scroll != 0)
 				--browser->horiz_scroll;
+			else
+				goto out;
 			break;
 		case K_PGDN:
 		case ' ':
@@ -502,6 +512,9 @@ unsigned int ui_browser__list_head_refresh(struct ui_browser *browser)
 	struct list_head *pos;
 	struct list_head *head = browser->entries;
 	int row = 0;
+
+	if (browser->nr_entries == 0)
+		return 0;
 
 	if (browser->top == NULL || browser->top == browser->entries)
                 browser->top = ui_browser__list_head_filter_entries(browser, head->next);

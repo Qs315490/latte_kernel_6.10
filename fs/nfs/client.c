@@ -150,7 +150,7 @@ struct nfs_client *nfs_alloc_client(const struct nfs_client_initdata *cl_init)
 	struct nfs_client *clp;
 	int err = -ENOMEM;
 
-	if ((clp = kzalloc(sizeof(*clp), GFP_KERNEL)) == NULL)
+	if ((clp = kzalloc_obj(*clp)) == NULL)
 		goto error_0;
 
 	clp->cl_minorversion = cl_init->minorversion;
@@ -180,7 +180,7 @@ struct nfs_client *nfs_alloc_client(const struct nfs_client_initdata *cl_init)
 	clp->cl_proto = cl_init->proto;
 	clp->cl_nconnect = cl_init->nconnect;
 	clp->cl_max_connect = cl_init->max_connect ? cl_init->max_connect : 1;
-	clp->cl_net = get_net(cl_init->net);
+	clp->cl_net = get_net_track(cl_init->net, &clp->cl_ns_tracker, GFP_KERNEL);
 
 #if IS_ENABLED(CONFIG_NFS_LOCALIO)
 	seqlock_init(&clp->cl_boot_lock);
@@ -250,7 +250,7 @@ void nfs_free_client(struct nfs_client *clp)
 	if (!IS_ERR(clp->cl_rpcclient))
 		rpc_shutdown_client(clp->cl_rpcclient);
 
-	put_net(clp->cl_net);
+	put_net_track(clp->cl_net, &clp->cl_ns_tracker);
 	put_nfs_version(clp->cl_nfs_mod);
 	kfree(clp->cl_hostname);
 	kfree(clp->cl_acceptor);
@@ -338,6 +338,14 @@ again:
 		/* Match the xprt security policy */
 		if (clp->cl_xprtsec.policy != data->xprtsec.policy)
 			continue;
+		if (clp->cl_xprtsec.policy == RPC_XPRTSEC_TLS_X509) {
+			if (clp->cl_xprtsec.cert_serial !=
+			    data->xprtsec.cert_serial)
+				continue;
+			if (clp->cl_xprtsec.privkey_serial !=
+			    data->xprtsec.privkey_serial)
+				continue;
+		}
 
 		refcount_inc(&clp->cl_count);
 		return clp;
@@ -439,7 +447,7 @@ struct nfs_client *nfs_get_client(const struct nfs_client_initdata *cl_init)
 			spin_unlock(&nn->nfs_client_lock);
 			new = rpc_ops->init_client(new, cl_init);
 			if (!IS_ERR(new))
-				 nfs_local_probe(new);
+				 nfs_local_probe_async(new);
 			return new;
 		}
 
@@ -546,6 +554,8 @@ int nfs_create_rpc_client(struct nfs_client *clp,
 		args.flags |= RPC_CLNT_CREATE_NOPING;
 	if (test_bit(NFS_CS_REUSEPORT, &clp->cl_flags))
 		args.flags |= RPC_CLNT_CREATE_REUSEPORT;
+	if (test_bit(NFS_CS_NETUNREACH_FATAL, &clp->cl_flags))
+		args.flags |= RPC_CLNT_CREATE_NETUNREACH_FATAL;
 
 	if (!IS_ERR(clp->cl_rpcclient))
 		return 0;
@@ -680,6 +690,44 @@ struct nfs_client *nfs_init_client(struct nfs_client *clp,
 }
 EXPORT_SYMBOL_GPL(nfs_init_client);
 
+static void nfs4_server_set_init_caps(struct nfs_server *server)
+{
+#if IS_ENABLED(CONFIG_NFS_V4)
+	/* Set the basic capabilities */
+	server->caps = server->nfs_client->cl_mvops->init_caps;
+	if (server->flags & NFS_MOUNT_NORDIRPLUS)
+		server->caps &= ~NFS_CAP_READDIRPLUS;
+	if (server->nfs_client->cl_proto == XPRT_TRANSPORT_RDMA)
+		server->caps &= ~NFS_CAP_READ_PLUS;
+
+	/*
+	 * Don't use NFS uid/gid mapping if we're using AUTH_SYS or lower
+	 * authentication.
+	 */
+	if (nfs4_disable_idmapping &&
+	    server->client->cl_auth->au_flavor == RPC_AUTH_UNIX)
+		server->caps |= NFS_CAP_UIDGID_NOMAP;
+#endif
+}
+
+void nfs_server_set_init_caps(struct nfs_server *server)
+{
+	switch (server->nfs_client->rpc_ops->version) {
+	case 2:
+		server->caps = NFS_CAP_HARDLINKS | NFS_CAP_SYMLINKS;
+		break;
+	case 3:
+		server->caps = NFS_CAP_HARDLINKS | NFS_CAP_SYMLINKS;
+		if (!(server->flags & NFS_MOUNT_NORDIRPLUS))
+			server->caps |= NFS_CAP_READDIRPLUS;
+		break;
+	default:
+		nfs4_server_set_init_caps(server);
+		break;
+	}
+}
+EXPORT_SYMBOL_GPL(nfs_server_set_init_caps);
+
 /*
  * Create a version 2 or 3 client
  */
@@ -709,6 +757,9 @@ static int nfs_init_server(struct nfs_server *server,
 	if (ctx->flags & NFS_MOUNT_NORESVPORT)
 		set_bit(NFS_CS_NORESVPORT, &cl_init.init_flags);
 
+	if (ctx->flags & NFS_MOUNT_NETUNREACH_FATAL)
+		__set_bit(NFS_CS_NETUNREACH_FATAL, &cl_init.init_flags);
+
 	/* Allocate or find a client reference we can use */
 	clp = nfs_get_client(&cl_init);
 	if (IS_ERR(clp))
@@ -721,7 +772,6 @@ static int nfs_init_server(struct nfs_server *server,
 	/* Initialise the client representation from the mount data */
 	server->flags = ctx->flags;
 	server->options = ctx->options;
-	server->caps |= NFS_CAP_HARDLINKS | NFS_CAP_SYMLINKS;
 
 	switch (clp->rpc_ops->version) {
 	case 2:
@@ -734,10 +784,18 @@ static int nfs_init_server(struct nfs_server *server,
 		server->fattr_valid = NFS_ATTR_FATTR_V4;
 	}
 
-	if (ctx->rsize)
+	if (ctx->bsize) {
+		server->bsize = ctx->bsize;
+		server->automount_inherit |= NFS_AUTOMOUNT_INHERIT_BSIZE;
+	}
+	if (ctx->rsize) {
 		server->rsize = nfs_io_size(ctx->rsize, clp->cl_proto);
-	if (ctx->wsize)
+		server->automount_inherit |= NFS_AUTOMOUNT_INHERIT_RSIZE;
+	}
+	if (ctx->wsize) {
 		server->wsize = nfs_io_size(ctx->wsize, clp->cl_proto);
+		server->automount_inherit |= NFS_AUTOMOUNT_INHERIT_WSIZE;
+	}
 
 	server->acregmin = ctx->acregmin * HZ;
 	server->acregmax = ctx->acregmax * HZ;
@@ -756,6 +814,8 @@ static int nfs_init_server(struct nfs_server *server,
 					  ctx->selected_flavor);
 	if (error < 0)
 		goto error;
+
+	nfs_server_set_init_caps(server);
 
 	/* Preserve the values of mount_server-related mount options */
 	if (ctx->mount_server.addrlen) {
@@ -809,7 +869,6 @@ static void nfs_server_set_fsinfo(struct nfs_server *server,
 		server->wsize = max_rpc_payload;
 	if (server->wsize > NFS_MAX_FILE_IO_SIZE)
 		server->wsize = NFS_MAX_FILE_IO_SIZE;
-	server->wpages = (server->wsize + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
 	server->wtmult = nfs_block_bits(fsinfo->wtmult, NULL);
 
@@ -826,7 +885,6 @@ static void nfs_server_set_fsinfo(struct nfs_server *server,
 
 	server->maxfilesize = fsinfo->maxfilesize;
 
-	server->time_delta = fsinfo->time_delta;
 	server->change_attr_type = fsinfo->change_attr_type;
 
 	server->clone_blksize = fsinfo->clone_blksize;
@@ -846,6 +904,8 @@ static void nfs_server_set_fsinfo(struct nfs_server *server,
 
 	if (fsinfo->xattr_support)
 		server->caps |= NFS_CAP_XATTR;
+	else
+		server->caps &= ~NFS_CAP_XATTR;
 #endif
 }
 
@@ -854,6 +914,7 @@ static void nfs_server_set_fsinfo(struct nfs_server *server,
  */
 static int nfs_probe_fsinfo(struct nfs_server *server, struct nfs_fh *mntfh, struct nfs_fattr *fattr)
 {
+	struct nfs_pathconf pathinfo = { };
 	struct nfs_fsinfo fsinfo;
 	struct nfs_client *clp = server->nfs_client;
 	int error;
@@ -873,15 +934,28 @@ static int nfs_probe_fsinfo(struct nfs_server *server, struct nfs_fh *mntfh, str
 
 	nfs_server_set_fsinfo(server, &fsinfo);
 
-	/* Get some general file system info */
-	if (server->namelen == 0) {
-		struct nfs_pathconf pathinfo;
+	pathinfo.fattr = fattr;
+	nfs_fattr_init(fattr);
 
-		pathinfo.fattr = fattr;
-		nfs_fattr_init(fattr);
+	if (clp->rpc_ops->version < 4 || server->namelen == 0) {
+		if (clp->rpc_ops->pathconf(server, mntfh, &pathinfo) >= 0) {
+			if (server->namelen == 0)
+				server->namelen = pathinfo.max_namelen;
+			if (clp->rpc_ops->version < 4) {
+				unsigned int caps = server->caps;
 
-		if (clp->rpc_ops->pathconf(server, mntfh, &pathinfo) >= 0)
-			server->namelen = pathinfo.max_namelen;
+				caps &= ~(NFS_CAP_CASE_INSENSITIVE |
+					  NFS_CAP_CASE_NONPRESERVING);
+				if (pathinfo.case_insensitive)
+					caps |= NFS_CAP_CASE_INSENSITIVE;
+				if (!pathinfo.case_preserving)
+					caps |= NFS_CAP_CASE_NONPRESERVING;
+				server->caps = caps;
+			}
+		} else if (clp->rpc_ops->version < 4) {
+			server->caps &= ~(NFS_CAP_CASE_INSENSITIVE |
+					  NFS_CAP_CASE_NONPRESERVING);
+		}
 	}
 
 	if (clp->rpc_ops->discover_trunking != NULL &&
@@ -925,13 +999,17 @@ EXPORT_SYMBOL_GPL(nfs_probe_server);
 void nfs_server_copy_userdata(struct nfs_server *target, struct nfs_server *source)
 {
 	target->flags = source->flags;
-	target->rsize = source->rsize;
-	target->wsize = source->wsize;
+	target->automount_inherit = source->automount_inherit;
+	if (source->automount_inherit & NFS_AUTOMOUNT_INHERIT_BSIZE)
+		target->bsize = source->bsize;
+	if (source->automount_inherit & NFS_AUTOMOUNT_INHERIT_RSIZE)
+		target->rsize = source->rsize;
+	if (source->automount_inherit & NFS_AUTOMOUNT_INHERIT_WSIZE)
+		target->wsize = source->wsize;
 	target->acregmin = source->acregmin;
 	target->acregmax = source->acregmax;
 	target->acdirmin = source->acdirmin;
 	target->acdirmax = source->acdirmax;
-	target->caps = source->caps;
 	target->options = source->options;
 	target->auth_info = source->auth_info;
 	target->port = source->port;
@@ -980,15 +1058,13 @@ struct nfs_server *nfs_alloc_server(void)
 {
 	struct nfs_server *server;
 
-	server = kzalloc(sizeof(struct nfs_server), GFP_KERNEL);
+	server = kzalloc_obj(struct nfs_server);
 	if (!server)
 		return NULL;
 
 	server->s_sysfs_id = ida_alloc(&s_sysfs_ids, GFP_KERNEL);
-	if (server->s_sysfs_id < 0) {
-		kfree(server);
-		return NULL;
-	}
+	if (server->s_sysfs_id < 0)
+		goto free_server;
 
 	server->client = server->client_acl = ERR_PTR(-EINVAL);
 
@@ -996,17 +1072,22 @@ struct nfs_server *nfs_alloc_server(void)
 	INIT_LIST_HEAD(&server->client_link);
 	INIT_LIST_HEAD(&server->master_link);
 	INIT_LIST_HEAD(&server->delegations);
+	spin_lock_init(&server->delegations_lock);
+	INIT_LIST_HEAD(&server->delegations_return);
+	INIT_LIST_HEAD(&server->delegations_lru);
+	INIT_LIST_HEAD(&server->delegations_delayed);
 	INIT_LIST_HEAD(&server->layouts);
 	INIT_LIST_HEAD(&server->state_owners_lru);
 	INIT_LIST_HEAD(&server->ss_copies);
 	INIT_LIST_HEAD(&server->ss_src_copies);
 
 	atomic_set(&server->active, 0);
+	atomic_long_set(&server->nr_active_delegations, 0);
 
 	server->io_stats = nfs_alloc_iostats();
 	if (!server->io_stats) {
-		kfree(server);
-		return NULL;
+		ida_free(&s_sysfs_ids, server->s_sysfs_id);
+		goto free_server;
 	}
 
 	server->change_attr_type = NFS4_CHANGE_TYPE_IS_UNDEFINED;
@@ -1020,6 +1101,10 @@ struct nfs_server *nfs_alloc_server(void)
 	rpc_init_wait_queue(&server->uoc_rpcwaitq, "NFS UOC");
 
 	return server;
+
+free_server:
+	kfree(server);
+	return NULL;
 }
 EXPORT_SYMBOL_GPL(nfs_alloc_server);
 
@@ -1100,6 +1185,8 @@ struct nfs_server *nfs_create_server(struct fs_context *fc)
 		if (server->namelen == 0 || server->namelen > NFS2_MAXNAMLEN)
 			server->namelen = NFS2_MAXNAMLEN;
 	}
+	/* Linux 'subtree_check' borkenness mandates this setting */
+	server->fh_expire_type = NFS_FH_VOL_RENAME;
 
 	if (!(fattr->valid & NFS_ATTR_FATTR)) {
 		error = ctx->nfs_mod->rpc_ops->getattr(server, ctx->mntfh,
@@ -1163,6 +1250,8 @@ struct nfs_server *nfs_clone_server(struct nfs_server *source,
 	if (error < 0)
 		goto out_free_server;
 
+	nfs_server_set_init_caps(server);
+
 	/* probe the filesystem info for this server filesystem */
 	error = nfs_probe_server(server, fh);
 	if (error < 0)
@@ -1194,7 +1283,9 @@ void nfs_clients_init(struct net *net)
 	INIT_LIST_HEAD(&nn->nfs_volume_list);
 #if IS_ENABLED(CONFIG_NFS_V4)
 	idr_init(&nn->cb_ident_idr);
-#endif
+	INIT_LIST_HEAD(&nn->nfs4_data_server_cache);
+	spin_lock_init(&nn->nfs4_data_server_lock);
+#endif /* CONFIG_NFS_V4 */
 	spin_lock_init(&nn->nfs_client_lock);
 	nn->boot_time = ktime_get_real();
 	memset(&nn->rpcstats, 0, sizeof(nn->rpcstats));
@@ -1211,6 +1302,9 @@ void nfs_clients_exit(struct net *net)
 	nfs_cleanup_cb_ident_idr(net);
 	WARN_ON_ONCE(!list_empty(&nn->nfs_client_list));
 	WARN_ON_ONCE(!list_empty(&nn->nfs_volume_list));
+#if IS_ENABLED(CONFIG_NFS_V4)
+	WARN_ON_ONCE(!list_empty(&nn->nfs4_data_server_cache));
+#endif /* CONFIG_NFS_V4 */
 }
 
 #ifdef CONFIG_PROC_FS

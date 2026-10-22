@@ -214,10 +214,14 @@ static void get_lowlevel_driver(void)
 static int port_check(struct device *dev, void *dev_drv)
 {
 	struct parport_driver *drv = dev_drv;
+	struct parport *port;
 
 	/* only send ports, do not send other devices connected to bus */
-	if (is_parport(dev))
-		drv->match_port(to_parport_dev(dev));
+	if (is_parport(dev)) {
+		port = to_parport_dev(dev);
+		if (test_bit(PARPORT_ANNOUNCED, &port->devflags))
+			drv->match_port(port);
+	}
 	return 0;
 }
 
@@ -430,7 +434,7 @@ struct parport *parport_register_port(unsigned long base, int irq, int dma,
 	int device;
 	int ret;
 
-	tmp = kzalloc(sizeof(struct parport), GFP_KERNEL);
+	tmp = kzalloc_obj(struct parport);
 	if (!tmp)
 		return NULL;
 
@@ -532,6 +536,7 @@ void parport_announce_port(struct parport *port)
 		if (slave)
 			attach_driver_chain(slave);
 	}
+	set_bit(PARPORT_ANNOUNCED, &port->devflags);
 	mutex_unlock(&registration_lock);
 }
 EXPORT_SYMBOL(parport_announce_port);
@@ -560,6 +565,8 @@ void parport_remove_port(struct parport *port)
 	int i;
 
 	mutex_lock(&registration_lock);
+
+	clear_bit(PARPORT_ANNOUNCED, &port->devflags);
 
 	/* Spread the word. */
 	detach_driver_chain(port);
@@ -709,11 +716,11 @@ parport_register_dev_model(struct parport *port, const char *name,
 
 	parport_get_port(port);
 
-	par_dev = kzalloc(sizeof(*par_dev), GFP_KERNEL);
+	par_dev = kzalloc_obj(*par_dev);
 	if (!par_dev)
 		goto err_put_port;
 
-	par_dev->state = kzalloc(sizeof(*par_dev->state), GFP_KERNEL);
+	par_dev->state = kzalloc_obj(*par_dev->state);
 	if (!par_dev->state)
 		goto err_put_par_dev;
 

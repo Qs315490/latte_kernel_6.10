@@ -388,6 +388,7 @@ static int max17040_get_property(struct power_supply *psy,
 			    union power_supply_propval *val)
 {
 	struct max17040_chip *chip = power_supply_get_drvdata(psy);
+	int ret;
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_ONLINE:
@@ -404,14 +405,22 @@ static int max17040_get_property(struct power_supply *psy,
 		val->intval = chip->low_soc_alert;
 		break;
 	case POWER_SUPPLY_PROP_STATUS:
-		power_supply_get_property_from_supplier(psy, psp, val);
+		ret = power_supply_get_property_from_supplier(psy, psp, val);
+		if (ret == -ENODEV)
+			val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
+		else if (ret)
+			return ret;
 		break;
 	case POWER_SUPPLY_PROP_TEMP:
 		if (!chip->channel_temp)
 			return -ENODATA;
 
-		iio_read_channel_processed_scale(chip->channel_temp,
-						 &val->intval, 10);
+		ret = iio_read_channel_processed(chip->channel_temp, &val->intval);
+		if (ret)
+			return ret;
+
+		val->intval /= 100; /* Convert from milli- to deci-degree */
+
 		break;
 	default:
 		return -EINVAL;
@@ -593,15 +602,15 @@ static SIMPLE_DEV_PM_OPS(max17040_pm_ops, max17040_suspend, max17040_resume);
 #endif /* CONFIG_PM_SLEEP */
 
 static const struct i2c_device_id max17040_id[] = {
-	{ "max17040", ID_MAX17040 },
-	{ "max17041", ID_MAX17041 },
-	{ "max17043", ID_MAX17043 },
-	{ "max77836-battery", ID_MAX17043 },
-	{ "max17044", ID_MAX17044 },
-	{ "max17048", ID_MAX17048 },
-	{ "max17049", ID_MAX17049 },
-	{ "max17058", ID_MAX17058 },
-	{ "max17059", ID_MAX17059 },
+	{ .name = "max17040", .driver_data = ID_MAX17040 },
+	{ .name = "max17041", .driver_data = ID_MAX17041 },
+	{ .name = "max17043", .driver_data = ID_MAX17043 },
+	{ .name = "max77836-battery", .driver_data = ID_MAX17043 },
+	{ .name = "max17044", .driver_data = ID_MAX17044 },
+	{ .name = "max17048", .driver_data = ID_MAX17048 },
+	{ .name = "max17049", .driver_data = ID_MAX17049 },
+	{ .name = "max17058", .driver_data = ID_MAX17058 },
+	{ .name = "max17059", .driver_data = ID_MAX17059 },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, max17040_id);

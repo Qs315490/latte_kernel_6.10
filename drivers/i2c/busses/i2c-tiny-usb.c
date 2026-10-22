@@ -10,6 +10,7 @@
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 #include <linux/types.h>
 
 /* include interfaces to usb layer */
@@ -54,7 +55,7 @@ static int usb_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs, int num)
 	struct i2c_msg *pmsg;
 	int i, ret;
 
-	pstatus = kmalloc(sizeof(*pstatus), GFP_KERNEL);
+	pstatus = kmalloc_obj(*pstatus);
 	if (!pstatus)
 		return -ENOMEM;
 
@@ -71,7 +72,7 @@ static int usb_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs, int num)
 
 		dev_dbg(&adapter->dev,
 			"  %d: %s (flags %d) %d bytes to 0x%02x\n",
-			i, pmsg->flags & I2C_M_RD ? "read" : "write",
+			i, str_read_write(pmsg->flags & I2C_M_RD),
 			pmsg->flags, pmsg->len, pmsg->addr);
 
 		/* and directly send the message */
@@ -122,7 +123,7 @@ static u32 usb_func(struct i2c_adapter *adapter)
 	__le32 *pfunc;
 	u32 ret;
 
-	pfunc = kmalloc(sizeof(*pfunc), GFP_KERNEL);
+	pfunc = kmalloc_obj(*pfunc);
 
 	/* get functionality from adapter */
 	if (!pfunc || usb_read(adapter, CMD_GET_FUNC, 0, 0, pfunc,
@@ -137,6 +138,11 @@ out:
 	kfree(pfunc);
 	return ret;
 }
+
+/* prevent invalid 0-length usb_control_msg */
+static const struct i2c_adapter_quirks usb_quirks = {
+	.flags = I2C_AQ_NO_ZERO_LEN_READ,
+};
 
 /* This is the actual algorithm we define */
 static const struct i2c_algorithm usb_algorithm = {
@@ -207,12 +213,6 @@ static int usb_write(struct i2c_adapter *adapter, int cmd,
 	return ret;
 }
 
-static void i2c_tiny_usb_free(struct i2c_tiny_usb *dev)
-{
-	usb_put_dev(dev->usb_dev);
-	kfree(dev);
-}
-
 static int i2c_tiny_usb_probe(struct usb_interface *interface,
 			      const struct usb_device_id *id)
 {
@@ -227,11 +227,11 @@ static int i2c_tiny_usb_probe(struct usb_interface *interface,
 	dev_dbg(&interface->dev, "probing usb device\n");
 
 	/* allocate memory for our device state and initialize it */
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		goto error;
 
-	dev->usb_dev = usb_get_dev(interface_to_usbdev(interface));
+	dev->usb_dev = interface_to_usbdev(interface);
 	dev->interface = interface;
 
 	/* save our data pointer in this interface device */
@@ -246,6 +246,7 @@ static int i2c_tiny_usb_probe(struct usb_interface *interface,
 	/* setup i2c adapter description */
 	dev->adapter.owner = THIS_MODULE;
 	dev->adapter.class = I2C_CLASS_HWMON;
+	dev->adapter.quirks = &usb_quirks;
 	dev->adapter.algo = &usb_algorithm;
 	dev->adapter.algo_data = dev;
 	snprintf(dev->adapter.name, sizeof(dev->adapter.name),
@@ -253,9 +254,8 @@ static int i2c_tiny_usb_probe(struct usb_interface *interface,
 		 dev->usb_dev->bus->busnum, dev->usb_dev->devnum);
 
 	if (usb_write(&dev->adapter, CMD_SET_DELAY, delay, 0, NULL, 0) != 0) {
-		dev_err(&dev->adapter.dev,
-			"failure setting delay to %dus\n", delay);
-		retval = -EIO;
+		retval = dev_err_probe(&dev->adapter.dev, -EIO,
+				       "failure setting delay to %dus\n", delay);
 		goto error;
 	}
 
@@ -270,8 +270,7 @@ static int i2c_tiny_usb_probe(struct usb_interface *interface,
 	return 0;
 
  error:
-	if (dev)
-		i2c_tiny_usb_free(dev);
+	kfree(dev);
 
 	return retval;
 }
@@ -282,7 +281,7 @@ static void i2c_tiny_usb_disconnect(struct usb_interface *interface)
 
 	i2c_del_adapter(&dev->adapter);
 	usb_set_intfdata(interface, NULL);
-	i2c_tiny_usb_free(dev);
+	kfree(dev);
 
 	dev_dbg(&interface->dev, "disconnected\n");
 }

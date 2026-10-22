@@ -288,9 +288,6 @@ static void tracing_map_array_clear(struct tracing_map_array *a)
 {
 	unsigned int i;
 
-	if (!a->pages)
-		return;
-
 	for (i = 0; i < a->n_pages; i++)
 		memset(a->pages[i], 0, PAGE_SIZE);
 }
@@ -302,9 +299,6 @@ static void tracing_map_array_free(struct tracing_map_array *a)
 	if (!a)
 		return;
 
-	if (!a->pages)
-		goto free;
-
 	for (i = 0; i < a->n_pages; i++) {
 		if (!a->pages[i])
 			break;
@@ -312,9 +306,6 @@ static void tracing_map_array_free(struct tracing_map_array *a)
 		free_page((unsigned long)a->pages[i]);
 	}
 
-	kfree(a->pages);
-
- free:
 	kfree(a);
 }
 
@@ -322,23 +313,24 @@ static struct tracing_map_array *tracing_map_array_alloc(unsigned int n_elts,
 						  unsigned int entry_size)
 {
 	struct tracing_map_array *a;
+	unsigned int entry_size_shift;
+	unsigned int entries_per_page;
+	unsigned int n_pages;
 	unsigned int i;
 
-	a = kzalloc(sizeof(*a), GFP_KERNEL);
+	entry_size_shift = fls(roundup_pow_of_two(entry_size) - 1);
+	entries_per_page = PAGE_SIZE / (1 << entry_size_shift);
+	n_pages = max(1, n_elts / entries_per_page);
+
+	a = kzalloc_flex(*a, pages, n_pages);
 	if (!a)
 		return NULL;
 
-	a->entry_size_shift = fls(roundup_pow_of_two(entry_size) - 1);
-	a->entries_per_page = PAGE_SIZE / (1 << a->entry_size_shift);
-	a->n_pages = n_elts / a->entries_per_page;
-	if (!a->n_pages)
-		a->n_pages = 1;
+	a->entry_size_shift = entry_size_shift;
+	a->entries_per_page = entries_per_page;
+	a->n_pages = n_pages;
 	a->entry_shift = fls(a->entries_per_page) - 1;
 	a->entry_mask = (1 << a->entry_shift) - 1;
-
-	a->pages = kcalloc(a->n_pages, sizeof(void *), GFP_KERNEL);
-	if (!a->pages)
-		goto free;
 
 	for (i = 0; i < a->n_pages; i++) {
 		a->pages[i] = (void *)get_zeroed_page(GFP_KERNEL);
@@ -386,13 +378,11 @@ static void tracing_map_elt_init_fields(struct tracing_map_elt *elt)
 	}
 }
 
-static void tracing_map_elt_free(struct tracing_map_elt *elt)
+static void __tracing_map_elt_free(struct tracing_map_elt *elt)
 {
 	if (!elt)
 		return;
 
-	if (elt->map->ops && elt->map->ops->elt_free)
-		elt->map->ops->elt_free(elt);
 	kfree(elt->fields);
 	kfree(elt->vars);
 	kfree(elt->var_set);
@@ -400,12 +390,23 @@ static void tracing_map_elt_free(struct tracing_map_elt *elt)
 	kfree(elt);
 }
 
+static void tracing_map_elt_free(struct tracing_map_elt *elt)
+{
+	if (!elt)
+		return;
+
+	/* Only objects initialized with alloc_elt() should be passed to free_elt().*/
+	if (elt->map->ops && elt->map->ops->elt_free)
+		elt->map->ops->elt_free(elt);
+	__tracing_map_elt_free(elt);
+}
+
 static struct tracing_map_elt *tracing_map_elt_alloc(struct tracing_map *map)
 {
 	struct tracing_map_elt *elt;
 	int err = 0;
 
-	elt = kzalloc(sizeof(*elt), GFP_KERNEL);
+	elt = kzalloc_obj(*elt);
 	if (!elt)
 		return ERR_PTR(-ENOMEM);
 
@@ -417,19 +418,19 @@ static struct tracing_map_elt *tracing_map_elt_alloc(struct tracing_map *map)
 		goto free;
 	}
 
-	elt->fields = kcalloc(map->n_fields, sizeof(*elt->fields), GFP_KERNEL);
+	elt->fields = kzalloc_objs(*elt->fields, map->n_fields);
 	if (!elt->fields) {
 		err = -ENOMEM;
 		goto free;
 	}
 
-	elt->vars = kcalloc(map->n_vars, sizeof(*elt->vars), GFP_KERNEL);
+	elt->vars = kzalloc_objs(*elt->vars, map->n_vars);
 	if (!elt->vars) {
 		err = -ENOMEM;
 		goto free;
 	}
 
-	elt->var_set = kcalloc(map->n_vars, sizeof(*elt->var_set), GFP_KERNEL);
+	elt->var_set = kzalloc_objs(*elt->var_set, map->n_vars);
 	if (!elt->var_set) {
 		err = -ENOMEM;
 		goto free;
@@ -444,7 +445,7 @@ static struct tracing_map_elt *tracing_map_elt_alloc(struct tracing_map *map)
 	}
 	return elt;
  free:
-	tracing_map_elt_free(elt);
+	__tracing_map_elt_free(elt);
 
 	return ERR_PTR(err);
 }
@@ -777,7 +778,7 @@ struct tracing_map *tracing_map_create(unsigned int map_bits,
 	    map_bits > TRACING_MAP_BITS_MAX)
 		return ERR_PTR(-EINVAL);
 
-	map = kzalloc(sizeof(*map), GFP_KERNEL);
+	map = kzalloc_obj(*map);
 	if (!map)
 		return ERR_PTR(-ENOMEM);
 
@@ -949,7 +950,7 @@ create_sort_entry(void *key, struct tracing_map_elt *elt)
 {
 	struct tracing_map_sort_entry *sort_entry;
 
-	sort_entry = kzalloc(sizeof(*sort_entry), GFP_KERNEL);
+	sort_entry = kzalloc_obj(*sort_entry);
 	if (!sort_entry)
 		return NULL;
 
@@ -1076,7 +1077,7 @@ int tracing_map_sort_entries(struct tracing_map *map,
 	struct tracing_map_sort_entry *sort_entry, **entries;
 	int i, n_entries, ret;
 
-	entries = vmalloc(array_size(sizeof(sort_entry), map->max_elts));
+	entries = vmalloc_array(map->max_elts, sizeof(sort_entry));
 	if (!entries)
 		return -ENOMEM;
 

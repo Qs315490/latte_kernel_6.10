@@ -12,6 +12,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/cleanup.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
@@ -198,6 +199,8 @@ static int ads7924_get_adc_result(struct ads7924_data *data,
 	if (chan->channel < 0 || chan->channel >= ADS7924_CHANNELS)
 		return -EINVAL;
 
+	guard(mutex)(&data->lock);
+
 	if (data->conv_invalid) {
 		int conv_time;
 
@@ -227,9 +230,7 @@ static int ads7924_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		mutex_lock(&data->lock);
 		ret = ads7924_get_adc_result(data, chan, val);
-		mutex_unlock(&data->lock);
 		if (ret < 0)
 			return ret;
 
@@ -251,11 +252,8 @@ static const struct iio_info ads7924_info = {
 	.read_raw = ads7924_read_raw,
 };
 
-static int ads7924_get_channels_config(struct i2c_client *client,
-				       struct iio_dev *indio_dev)
+static int ads7924_get_channels_config(struct device *dev)
 {
-	struct ads7924_data *priv = iio_priv(indio_dev);
-	struct device *dev = priv->dev;
 	struct fwnode_handle *node;
 	int num_channels = 0;
 
@@ -358,8 +356,7 @@ static int ads7924_probe(struct i2c_client *client)
 
 	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
 	if (!indio_dev)
-		return dev_err_probe(dev, -ENOMEM,
-				     "failed to allocate iio device\n");
+		return -ENOMEM;
 
 	data = iio_priv(indio_dev);
 
@@ -380,7 +377,7 @@ static int ads7924_probe(struct i2c_client *client)
 	indio_dev->num_channels = ARRAY_SIZE(ads7924_channels);
 	indio_dev->info = &ads7924_info;
 
-	ret = ads7924_get_channels_config(client, indio_dev);
+	ret = ads7924_get_channels_config(dev);
 	if (ret < 0)
 		return dev_err_probe(dev, ret,
 				     "failed to get channels configuration\n");
@@ -402,8 +399,7 @@ static int ads7924_probe(struct i2c_client *client)
 
 	ret = devm_add_action_or_reset(dev, ads7924_reg_disable, data->vref_reg);
 	if (ret)
-		return dev_err_probe(dev, ret,
-				     "failed to add regulator disable action\n");
+		return ret;
 
 	ret = ads7924_reset(indio_dev);
 	if (ret < 0)
@@ -417,8 +413,7 @@ static int ads7924_probe(struct i2c_client *client)
 
 	ret = devm_add_action_or_reset(dev, ads7924_set_idle_mode, data);
 	if (ret)
-		return dev_err_probe(dev, ret,
-				     "failed to add idle mode action\n");
+		return ret;
 
 	/* Use minimum signal acquire time. */
 	ret = regmap_update_bits(data->regmap, ADS7924_ACQCONFIG_REG,
@@ -447,7 +442,7 @@ static int ads7924_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ads7924_id[] = {
-	{ "ads7924" },
+	{ .name = "ads7924" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ads7924_id);

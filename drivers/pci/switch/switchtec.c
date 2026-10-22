@@ -86,7 +86,7 @@ static struct switchtec_user *stuser_create(struct switchtec_dev *stdev)
 {
 	struct switchtec_user *stuser;
 
-	stuser = kzalloc(sizeof(*stuser), GFP_KERNEL);
+	stuser = kzalloc_obj(*stuser);
 	if (!stuser)
 		return ERR_PTR(-ENOMEM);
 
@@ -269,10 +269,9 @@ static void mrpc_event_work(struct work_struct *work)
 
 	dev_dbg(&stdev->dev, "%s\n", __func__);
 
-	mutex_lock(&stdev->mrpc_mutex);
+	guard(mutex)(&stdev->mrpc_mutex);
 	cancel_delayed_work(&stdev->mrpc_timeout);
 	mrpc_complete_cmd(stdev);
-	mutex_unlock(&stdev->mrpc_mutex);
 }
 
 static void mrpc_error_complete_cmd(struct switchtec_dev *stdev)
@@ -896,7 +895,7 @@ static int ioctl_event_summary(struct switchtec_dev *stdev,
 	u32 reg;
 	int ret = 0;
 
-	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	s = kzalloc_obj(*s);
 	if (!s)
 		return -ENOMEM;
 
@@ -1322,18 +1321,18 @@ static void stdev_kill(struct switchtec_dev *stdev)
 	cancel_delayed_work_sync(&stdev->mrpc_timeout);
 
 	/* Mark the hardware as unavailable and complete all completions */
-	mutex_lock(&stdev->mrpc_mutex);
-	stdev->alive = false;
+	scoped_guard (mutex, &stdev->mrpc_mutex) {
+		stdev->alive = false;
 
-	/* Wake up and kill any users waiting on an MRPC request */
-	list_for_each_entry_safe(stuser, tmpuser, &stdev->mrpc_queue, list) {
-		stuser->cmd_done = true;
-		wake_up_interruptible(&stuser->cmd_comp);
-		list_del_init(&stuser->list);
-		stuser_put(stuser);
+		/* Wake up and kill any users waiting on an MRPC request */
+		list_for_each_entry_safe(stuser, tmpuser, &stdev->mrpc_queue, list) {
+			stuser->cmd_done = true;
+			wake_up_interruptible(&stuser->cmd_comp);
+			list_del_init(&stuser->list);
+			stuser_put(stuser);
+		}
+
 	}
-
-	mutex_unlock(&stdev->mrpc_mutex);
 
 	/* Wake up any users waiting on event_wq */
 	wake_up_interruptible(&stdev->event_wq);
@@ -1853,6 +1852,22 @@ static const struct pci_device_id switchtec_pci_tbl[] = {
 	SWITCHTEC_PCI_DEVICE(0x5552, SWITCHTEC_GEN5),  /* PAXA 52XG5 */
 	SWITCHTEC_PCI_DEVICE(0x5536, SWITCHTEC_GEN5),  /* PAXA 36XG5 */
 	SWITCHTEC_PCI_DEVICE(0x5528, SWITCHTEC_GEN5),  /* PAXA 28XG5 */
+	SWITCHTEC_PCI_DEVICE(0x6048, SWITCHTEC_GEN6),  /* PFXs 48XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6064, SWITCHTEC_GEN6),  /* PFXs 64XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6044, SWITCHTEC_GEN6),  /* PFXs 144XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6060, SWITCHTEC_GEN6),  /* PFXs 160XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6148, SWITCHTEC_GEN6),  /* PSXs 48XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6164, SWITCHTEC_GEN6),  /* PSXs 64XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6144, SWITCHTEC_GEN6),  /* PSXs 144XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6160, SWITCHTEC_GEN6),  /* PSXs 160XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6248, SWITCHTEC_GEN6),  /* PFX 48XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6264, SWITCHTEC_GEN6),  /* PFX 64XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6244, SWITCHTEC_GEN6),  /* PFX 144XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6260, SWITCHTEC_GEN6),  /* PFX 160XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6348, SWITCHTEC_GEN6),  /* PSX 48XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6364, SWITCHTEC_GEN6),  /* PSX 64XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6344, SWITCHTEC_GEN6),  /* PSX 144XG6 */
+	SWITCHTEC_PCI_DEVICE(0x6360, SWITCHTEC_GEN6),  /* PSX 160XG6 */
 	SWITCHTEC_PCI100X_DEVICE(0x1001, SWITCHTEC_GEN4),  /* PCI1001 16XG4 */
 	SWITCHTEC_PCI100X_DEVICE(0x1002, SWITCHTEC_GEN4),  /* PCI1002 12XG4 */
 	SWITCHTEC_PCI100X_DEVICE(0x1003, SWITCHTEC_GEN4),  /* PCI1003 16XG4 */

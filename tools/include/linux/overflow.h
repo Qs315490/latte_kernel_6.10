@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR MIT */
+#include <stdint.h>
 #ifndef __LINUX_OVERFLOW_H
 #define __LINUX_OVERFLOW_H
 
@@ -67,6 +68,25 @@
 	(void) (&__a == __d);			\
 	__builtin_mul_overflow(__a, __b, __d);	\
 })
+
+/**
+ * size_mul() - Calculate size_t multiplication with saturation at SIZE_MAX
+ * @factor1: first factor
+ * @factor2: second factor
+ *
+ * Returns: calculate @factor1 * @factor2, both promoted to size_t,
+ * with any overflow causing the return value to be SIZE_MAX. The
+ * lvalue must be size_t to avoid implicit type conversion.
+ */
+static inline size_t __must_check size_mul(size_t factor1, size_t factor2)
+{
+	size_t bytes;
+
+	if (check_mul_overflow(factor1, factor2, &bytes))
+		return SIZE_MAX;
+
+	return bytes;
+}
 
 /**
  * array_size() - Calculate size of 2-dimensional array.

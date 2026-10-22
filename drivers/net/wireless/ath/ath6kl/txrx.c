@@ -1623,7 +1623,8 @@ void ath6kl_rx(struct htc_target *target, struct htc_packet *packet)
 static void aggr_timeout(struct timer_list *t)
 {
 	u8 i, j;
-	struct aggr_info_conn *aggr_conn = from_timer(aggr_conn, t, timer);
+	struct aggr_info_conn *aggr_conn = timer_container_of(aggr_conn, t,
+						              timer);
 	struct rxtid *rxtid;
 	struct rxtid_stats *stats;
 
@@ -1722,12 +1723,14 @@ void aggr_recv_addba_req_evt(struct ath6kl_vif *vif, u8 tid_mux, u16 seq_no,
 
 	rxtid = &aggr_conn->rx_tid[tid];
 
-	if (win_sz < AGGR_WIN_SZ_MIN || win_sz > AGGR_WIN_SZ_MAX)
-		ath6kl_dbg(ATH6KL_DBG_WLAN_RX, "%s: win_sz %d, tid %d\n",
-			   __func__, win_sz, tid);
-
 	if (rxtid->aggr)
 		aggr_delete_tid_state(aggr_conn, tid);
+
+	if (win_sz < AGGR_WIN_SZ_MIN || win_sz > AGGR_WIN_SZ_MAX) {
+		ath6kl_dbg(ATH6KL_DBG_WLAN_RX, "%s: win_sz %d, tid %d\n",
+			   __func__, win_sz, tid);
+		return;
+	}
 
 	rxtid->seq_next = seq_no;
 	hold_q_size = TID_WINDOW_SZ(win_sz) * sizeof(struct skb_hold_q);
@@ -1769,13 +1772,13 @@ struct aggr_info *aggr_init(struct ath6kl_vif *vif)
 {
 	struct aggr_info *p_aggr = NULL;
 
-	p_aggr = kzalloc(sizeof(struct aggr_info), GFP_KERNEL);
+	p_aggr = kzalloc_obj(struct aggr_info);
 	if (!p_aggr) {
 		ath6kl_err("failed to alloc memory for aggr_node\n");
 		return NULL;
 	}
 
-	p_aggr->aggr_conn = kzalloc(sizeof(struct aggr_info_conn), GFP_KERNEL);
+	p_aggr->aggr_conn = kzalloc_obj(struct aggr_info_conn);
 	if (!p_aggr->aggr_conn) {
 		ath6kl_err("failed to alloc memory for connection specific aggr info\n");
 		kfree(p_aggr);
@@ -1827,7 +1830,7 @@ void aggr_reset_state(struct aggr_info_conn *aggr_conn)
 		return;
 
 	if (aggr_conn->timer_scheduled) {
-		del_timer(&aggr_conn->timer);
+		timer_delete_sync(&aggr_conn->timer);
 		aggr_conn->timer_scheduled = false;
 	}
 

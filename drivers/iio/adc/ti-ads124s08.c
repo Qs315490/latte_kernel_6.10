@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 
@@ -184,7 +183,7 @@ static int ads124s_reset(struct iio_dev *indio_dev)
 
 	if (priv->reset_gpio) {
 		gpiod_set_value_cansleep(priv->reset_gpio, 0);
-		udelay(200);
+		fsleep(200);
 		gpiod_set_value_cansleep(priv->reset_gpio, 1);
 	} else {
 		return ads124s_write_cmd(indio_dev, ADS124S08_CMD_RESET);
@@ -297,8 +296,8 @@ static irqreturn_t ads124s_trigger_handler(int irq, void *p)
 		j++;
 	}
 
-	iio_push_to_buffers_with_timestamp(indio_dev, priv->buffer,
-			pf->timestamp);
+	iio_push_to_buffers_with_ts(indio_dev, priv->buffer, sizeof(priv->buffer),
+				    pf->timestamp);
 
 	iio_trigger_notify_done(indio_dev->trig);
 
@@ -321,7 +320,8 @@ static int ads124s_probe(struct spi_device *spi)
 	ads124s_priv->reset_gpio = devm_gpiod_get_optional(&spi->dev,
 						   "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(ads124s_priv->reset_gpio))
-		dev_info(&spi->dev, "Reset GPIO not defined\n");
+		return dev_err_probe(&spi->dev, PTR_ERR(ads124s_priv->reset_gpio),
+				     "Failed to get reset GPIO\n");
 
 	ads124s_priv->chip_info = &ads124s_chip_info_tbl[spi_id->driver_data];
 

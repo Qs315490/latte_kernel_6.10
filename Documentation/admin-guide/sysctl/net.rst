@@ -36,10 +36,9 @@ Table : Subdirectories in /proc/sys/net
  ========= =================== = ========== ===================
  802       E802 protocol         mptcp      Multipath TCP
  appletalk Appletalk protocol    netfilter  Network Filter
- ax25      AX25                  netrom     NET/ROM
- bridge    Bridging              rose       X.25 PLP layer
- core      General parameter     tipc       TIPC
- ethernet  Ethernet protocol     unix       Unix domain sockets
+ bridge    Bridging              tipc       TIPC
+ core      General parameter     unix       Unix domain sockets
+ ethernet  Ethernet protocol     vsock      VSOCK sockets
  ipv4      IP version 4          x25        X.25 protocol
  ipv6      IP version 6
  ========= =================== = ========== ===================
@@ -212,6 +211,14 @@ mem_pcpu_rsv
 
 Per-cpu reserved forward alloc cache size in page units. Default 1MB per CPU.
 
+bypass_prot_mem
+---------------
+
+Skip charging socket buffers to the global per-protocol memory
+accounting controlled by net.ipv4.tcp_mem, net.ipv4.udp_mem, etc.
+
+Default: 0 (off)
+
 rmem_default
 ------------
 
@@ -221,6 +228,8 @@ rmem_max
 --------
 
 The maximum receive socket buffer size in bytes.
+
+Default: 4194304
 
 rps_default_mask
 ----------------
@@ -246,6 +255,8 @@ wmem_max
 --------
 
 The maximum send socket buffer size in bytes.
+
+Default: 4194304
 
 message_burst and message_cost
 ------------------------------
@@ -291,24 +302,33 @@ netdev_max_backlog
 Maximum number of packets, queued on the INPUT side, when the interface
 receives packets faster than kernel can process them.
 
+qdisc_max_burst
+------------------
+
+Maximum number of packets that can be temporarily stored before
+reaching qdisc.
+
+Default: 1000
+
 netdev_rss_key
 --------------
 
-RSS (Receive Side Scaling) enabled drivers use a 40 bytes host key that is
-randomly generated.
+RSS (Receive Side Scaling) enabled drivers use a host key that
+is randomly generated.
 Some user space might need to gather its content even if drivers do not
 provide ethtool -x support yet.
 
 ::
 
   myhost:~# cat /proc/sys/net/core/netdev_rss_key
-  84:50:f4:00:a8:15:d1:a7:e9:7f:1d:60:35:c7:47:25:42:97:74:ca:56:bb:b6:a1:d8: ... (52 bytes total)
+  84:50:f4:00:a8:15:d1:a7:e9:7f:1d:60:35:c7:47:25:42:97:74:ca:56:bb:b6:a1:d8: ... (256 bytes total)
 
-File contains nul bytes if no driver ever called netdev_rss_key_fill() function.
+File contains all nul bytes if no driver ever called netdev_rss_key_fill()
+function.
 
 Note:
-  /proc/sys/net/core/netdev_rss_key contains 52 bytes of key,
-  but most drivers only use 40 bytes of it.
+  /proc/sys/net/core/netdev_rss_key contains 256 bytes of key,
+  but many drivers only use 40 or 52 bytes of it.
 
 ::
 
@@ -343,9 +363,9 @@ skb_defer_max
 -------------
 
 Max size (in skbs) of the per-cpu list of skbs being freed
-by the cpu which allocated them. Used by TCP stack so far.
+by the cpu which allocated them.
 
-Default: 64
+Default: 128
 
 optmem_max
 ----------
@@ -402,6 +422,23 @@ to SOCK_TXREHASH_DEFAULT (i. e. not overridden by setsockopt).
 If set to 1 (default), hash rethink is performed on listening socket.
 If set to 0, hash rethink is not performed.
 
+txq_reselection_ms
+------------------
+
+Controls how often (in ms) a busy connected flow can select another tx queue.
+
+A resection is desirable when/if user thread has migrated and XPS
+would select a different queue. Same can occur without XPS
+if the flow hash has changed.
+
+But switching txq can introduce reorders, especially if the
+old queue is under high pressure. Modern TCP stacks deal
+well with reorders if they happen not too often.
+
+To disable this feature, set the value to 0.
+
+Default : 1000
+
 gro_normal_batch
 ----------------
 
@@ -437,51 +474,7 @@ Please see: Documentation/networking/ip-sysctl.rst and
 Documentation/admin-guide/sysctl/net.rst for descriptions of these entries.
 
 
-4. Appletalk
-------------
-
-The /proc/sys/net/appletalk  directory  holds the Appletalk configuration data
-when Appletalk is loaded. The configurable parameters are:
-
-aarp-expiry-time
-----------------
-
-The amount  of  time  we keep an ARP entry before expiring it. Used to age out
-old hosts.
-
-aarp-resolve-time
------------------
-
-The amount of time we will spend trying to resolve an Appletalk address.
-
-aarp-retransmit-limit
----------------------
-
-The number of times we will retransmit a query before giving up.
-
-aarp-tick-time
---------------
-
-Controls the rate at which expires are checked.
-
-The directory  /proc/net/appletalk  holds the list of active Appletalk sockets
-on a machine.
-
-The fields  indicate  the DDP type, the local address (in network:node format)
-the remote  address,  the  size of the transmit pending queue, the size of the
-received queue  (bytes waiting for applications to read) the state and the uid
-owning the socket.
-
-/proc/net/atalk_iface lists  all  the  interfaces  configured for appletalk.It
-shows the  name  of the interface, its Appletalk address, the network range on
-that address  (or  network number for phase 1 networks), and the status of the
-interface.
-
-/proc/net/atalk_route lists  each  known  network  route.  It lists the target
-(network) that the route leads to, the router (may be directly connected), the
-route flags, and the device the route is using.
-
-5. TIPC
+4. TIPC
 -------
 
 tipc_rmem
@@ -513,3 +506,82 @@ originally may have been issued in the correct sequential order.
 If named_timeout is nonzero, failed topology updates will be placed on a defer
 queue until another event arrives that clears the error, or until the timeout
 expires. Value is in milliseconds.
+
+6. /proc/sys/net/vsock - VSOCK sockets
+--------------------------------------
+
+VSOCK sockets (AF_VSOCK) provide communication between virtual machines and
+their hosts. The behavior of VSOCK sockets in a network namespace is determined
+by the namespace's mode (``global`` or ``local``), which controls how CIDs
+(Context IDs) are allocated and how sockets interact across namespaces.
+
+ns_mode
+-------
+
+Read-only. Reports the current namespace's mode, set at namespace creation
+and immutable thereafter.
+
+Values:
+
+	- ``global`` - the namespace shares system-wide CID allocation and
+	  its sockets can reach any VM or socket in any global namespace.
+	  Sockets in this namespace cannot reach sockets in local
+	  namespaces.
+	- ``local`` - the namespace has private CID allocation and its
+	  sockets can only connect to VMs or sockets within the same
+	  namespace.
+
+The init_net mode is always ``global``.
+
+child_ns_mode
+-------------
+
+Controls what mode newly created child namespaces will inherit. At namespace
+creation, ``ns_mode`` is inherited from the parent's ``child_ns_mode``. The
+initial value matches the namespace's own ``ns_mode``.
+
+Values:
+
+	- ``global`` - child namespaces will share system-wide CID allocation
+	  and their sockets will be able to reach any VM or socket in any
+	  global namespace.
+	- ``local`` - child namespaces will have private CID allocation and
+	  their sockets will only be able to connect within their own
+	  namespace.
+
+The first write to ``child_ns_mode`` locks its value. Subsequent writes of the
+same value succeed, but writing a different value returns ``-EBUSY``.
+
+Changing ``child_ns_mode`` only affects namespaces created after the change;
+it does not modify the current namespace or any existing children.
+
+A namespace with ``ns_mode`` set to ``local`` cannot change
+``child_ns_mode`` to ``global`` (returns ``-EPERM``).
+
+g2h_fallback
+------------
+
+Controls whether connections to CIDs not owned by the host-to-guest (H2G)
+transport automatically fall back to the guest-to-host (G2H) transport.
+
+When enabled, if a connect targets a CID that the H2G transport (e.g.
+vhost-vsock) does not serve, or if no H2G transport is loaded at all, the
+connection is routed via the G2H transport (e.g. virtio-vsock) instead. This
+allows a host running both nested VMs (via vhost-vsock) and sibling VMs
+reachable through the hypervisor (e.g. Nitro Enclaves) to address both using
+a single CID space, without requiring applications to set
+``VMADDR_FLAG_TO_HOST``.
+
+When the fallback is taken, ``VMADDR_FLAG_TO_HOST`` is automatically set on
+the remote address so that userspace can determine the path via
+``getpeername()``.
+
+Note: With this sysctl enabled, user space that attempts to talk to a guest
+CID which is not implemented by the H2G transport will create host vsock
+traffic. Environments that rely on H2G-only isolation should set it to 0.
+
+Values:
+
+	- 0 - Connections to CIDs <= 2 or with VMADDR_FLAG_TO_HOST use G2H;
+	  all others use H2G (or fail with ENODEV if H2G is not loaded).
+	- 1 - Connections to CIDs not owned by H2G fall back to G2H. (default)

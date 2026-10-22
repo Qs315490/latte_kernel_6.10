@@ -5,7 +5,6 @@
 #include <linux/clk-provider.h>
 #include <linux/delay.h>
 #include <linux/dmaengine.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
@@ -290,8 +289,7 @@ static int fsl_aud2htx_runtime_resume(struct device *dev)
 static const struct dev_pm_ops fsl_aud2htx_pm_ops = {
 	RUNTIME_PM_OPS(fsl_aud2htx_runtime_suspend, fsl_aud2htx_runtime_resume,
 		       NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver fsl_aud2htx_driver = {

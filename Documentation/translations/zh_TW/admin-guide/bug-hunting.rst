@@ -191,7 +191,7 @@ objdump
 編行。如果沒有調試符號，您將看到所示例程的彙編程序代碼，但是如果內核有調試
 符號，C代碼也將可見（調試符號可以在內核配置菜單的hacking項中啓用）。例如::
 
-    $ objdump -r -S -l --disassemble net/dccp/ipv4.o
+    $ objdump -r -S -l --disassemble net/ipv4/tcp.o
 
 .. note::
 
@@ -242,7 +242,7 @@ objdump
 例如，您在gspca的sonixj.c文件中發現一個缺陷，則可以通過以下方法找到它的維護者::
 
 	$ ./scripts/get_maintainer.pl -f drivers/media/usb/gspca/sonixj.c
-	Hans Verkuil <hverkuil@xs4all.nl> (odd fixer:GSPCA USB WEBCAM DRIVER,commit_signer:1/1=100%)
+	Hans Verkuil <hverkuil@kernel.org> (odd fixer:GSPCA USB WEBCAM DRIVER,commit_signer:1/1=100%)
 	Mauro Carvalho Chehab <mchehab@kernel.org> (maintainer:MEDIA INPUT INFRASTRUCTURE (V4L/DVB),commit_signer:1/1=100%)
 	Tejun Heo <tj@kernel.org> (commit_signer:1/1=100%)
 	Bhaktipriya Shridhar <bhaktipriya96@gmail.com> (commit_signer:1/1=100%,authored:1/1=100%,added_lines:4/4=100%,removed_lines:9/9=100%)

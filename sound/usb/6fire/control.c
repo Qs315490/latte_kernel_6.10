@@ -290,15 +290,17 @@ static int usb6fire_control_input_vol_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
 	struct control_runtime *rt = snd_kcontrol_chip(kcontrol);
+	int vol0 = ucontrol->value.integer.value[0] - 15;
+	int vol1 = ucontrol->value.integer.value[1] - 15;
 	int changed = 0;
 
-	if (rt->input_vol[0] != ucontrol->value.integer.value[0]) {
-		rt->input_vol[0] = ucontrol->value.integer.value[0] - 15;
+	if (rt->input_vol[0] != vol0) {
+		rt->input_vol[0] = vol0;
 		rt->ivol_updated &= ~(1 << 0);
 		changed = 1;
 	}
-	if (rt->input_vol[1] != ucontrol->value.integer.value[1]) {
-		rt->input_vol[1] = ucontrol->value.integer.value[1] - 15;
+	if (rt->input_vol[1] != vol1) {
+		rt->input_vol[1] = vol1;
 		rt->ivol_updated &= ~(1 << 1);
 		changed = 1;
 	}
@@ -551,8 +553,7 @@ int usb6fire_control_init(struct sfire_chip *chip)
 {
 	int i;
 	int ret;
-	struct control_runtime *rt = kzalloc(sizeof(struct control_runtime),
-			GFP_KERNEL);
+	struct control_runtime *rt = kzalloc_obj(struct control_runtime);
 	struct comm_runtime *comm_rt = chip->comm;
 
 	if (!rt)
@@ -581,30 +582,31 @@ int usb6fire_control_init(struct sfire_chip *chip)
 		"Master Playback Volume", vol_elements);
 	if (ret) {
 		dev_err(&chip->dev->dev, "cannot add control.\n");
-		kfree(rt);
-		return ret;
+		goto free_rt;
 	}
 	ret = usb6fire_control_add_virtual(rt, chip->card,
 		"Master Playback Switch", mute_elements);
 	if (ret) {
 		dev_err(&chip->dev->dev, "cannot add control.\n");
-		kfree(rt);
-		return ret;
+		goto free_rt;
 	}
 
 	i = 0;
 	while (elements[i].name) {
 		ret = snd_ctl_add(chip->card, snd_ctl_new1(&elements[i], rt));
 		if (ret < 0) {
-			kfree(rt);
 			dev_err(&chip->dev->dev, "cannot add control.\n");
-			return ret;
+			goto free_rt;
 		}
 		i++;
 	}
 
 	chip->control = rt;
 	return 0;
+
+free_rt:
+	kfree(rt);
+	return ret;
 }
 
 void usb6fire_control_abort(struct sfire_chip *chip)

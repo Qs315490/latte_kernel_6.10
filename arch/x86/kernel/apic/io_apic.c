@@ -1486,7 +1486,7 @@ static void __init delay_with_tsc(void)
 	 * 1 GHz == 40 jiffies
 	 */
 	do {
-		rep_nop();
+		native_pause();
 		now = rdtsc();
 	} while ((now - start) < 40000000000ULL / HZ &&	time_before_eq(jiffies, end));
 }
@@ -1574,8 +1574,6 @@ static unsigned int startup_ioapic_irq(struct irq_data *data)
 	__unmask_ioapic(data->chip_data);
 	return was_pending;
 }
-
-atomic_t irq_mis_count;
 
 #ifdef CONFIG_GENERIC_PENDING_IRQ
 static bool io_apic_level_ack_pending(struct mp_chip_data *data)
@@ -1713,7 +1711,7 @@ static void ioapic_ack_level(struct irq_data *irq_data)
 	 * at the cpu.
 	 */
 	if (!(v & (1 << (i & 0x1f)))) {
-		atomic_inc(&irq_mis_count);
+		irq_stat_inc_and_enable(IRQ_COUNT_IOAPIC_MISROUTED);
 		eoi_ioapic_pin(cfg->vector, irq_data->chip_data);
 	}
 
@@ -2225,7 +2223,7 @@ static int mp_irqdomain_create(int ioapic)
 
 	/* Handle device tree enumerated APICs proper */
 	if (cfg->dev) {
-		fn = of_node_to_fwnode(cfg->dev);
+		fn = of_fwnode_handle(cfg->dev);
 	} else {
 		fn = irq_domain_alloc_named_id_fwnode("IO-APIC", mpc_ioapic_id(ioapic));
 		if (!fn)
@@ -2308,7 +2306,12 @@ static void resume_ioapic_id(int ioapic_idx)
 	}
 }
 
-static void ioapic_resume(void)
+static int ioapic_suspend(void *data)
+{
+	return save_ioapic_entries();
+}
+
+static void ioapic_resume(void *data)
 {
 	int ioapic_idx;
 
@@ -2318,14 +2321,18 @@ static void ioapic_resume(void)
 	restore_ioapic_entries();
 }
 
-static struct syscore_ops ioapic_syscore_ops = {
-	.suspend	= save_ioapic_entries,
+static const struct syscore_ops ioapic_syscore_ops = {
+	.suspend	= ioapic_suspend,
 	.resume		= ioapic_resume,
+};
+
+static struct syscore ioapic_syscore = {
+	.ops = &ioapic_syscore_ops,
 };
 
 static int __init ioapic_init_ops(void)
 {
-	register_syscore_ops(&ioapic_syscore_ops);
+	register_syscore(&ioapic_syscore);
 
 	return 0;
 }
@@ -2864,10 +2871,10 @@ int mp_irqdomain_alloc(struct irq_domain *domain, unsigned int virq,
 
 	ioapic = mp_irqdomain_ioapic_idx(domain);
 	pin = info->ioapic.pin;
-	if (irq_find_mapping(domain, (irq_hw_number_t)pin) > 0)
+	if (irq_resolve_mapping(domain, (irq_hw_number_t)pin))
 		return -EEXIST;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 

@@ -347,7 +347,7 @@ static irqreturn_t kw_i2c_irq(int irq, void *dev_id)
 	unsigned long flags;
 
 	spin_lock_irqsave(&host->lock, flags);
-	del_timer(&host->timeout_timer);
+	timer_delete(&host->timeout_timer);
 	kw_i2c_handle_interrupt(host, kw_read_reg(reg_isr));
 	if (host->state != state_idle) {
 		host->timeout_timer.expires = jiffies + KW_POLL_TIMEOUT;
@@ -359,7 +359,8 @@ static irqreturn_t kw_i2c_irq(int irq, void *dev_id)
 
 static void kw_i2c_timeout(struct timer_list *t)
 {
-	struct pmac_i2c_host_kw *host = from_timer(host, t, timeout_timer);
+	struct pmac_i2c_host_kw *host = timer_container_of(host, t,
+							   timeout_timer);
 	unsigned long flags;
 
 	spin_lock_irqsave(&host->lock, flags);
@@ -488,7 +489,7 @@ static struct pmac_i2c_host_kw *__init kw_i2c_host_init(struct device_node *np)
 	const u32		*psteps, *prate, *addrp;
 	u32			steps;
 
-	host = kzalloc(sizeof(*host), GFP_KERNEL);
+	host = kzalloc_obj(*host);
 	if (host == NULL) {
 		printk(KERN_ERR "low_i2c: Can't allocate host for %pOF\n",
 		       np);
@@ -568,7 +569,7 @@ static void __init kw_i2c_add(struct pmac_i2c_host_kw *host,
 {
 	struct pmac_i2c_bus *bus;
 
-	bus = kzalloc(sizeof(struct pmac_i2c_bus), GFP_KERNEL);
+	bus = kzalloc_obj(struct pmac_i2c_bus);
 	if (bus == NULL)
 		return;
 
@@ -1057,40 +1058,6 @@ int pmac_i2c_match_adapter(struct device_node *dev, struct i2c_adapter *adapter)
 }
 EXPORT_SYMBOL_GPL(pmac_i2c_match_adapter);
 
-int pmac_low_i2c_lock(struct device_node *np)
-{
-	struct pmac_i2c_bus *bus, *found = NULL;
-
-	list_for_each_entry(bus, &pmac_i2c_busses, link) {
-		if (np == bus->controller) {
-			found = bus;
-			break;
-		}
-	}
-	if (!found)
-		return -ENODEV;
-	return pmac_i2c_open(bus, 0);
-}
-EXPORT_SYMBOL_GPL(pmac_low_i2c_lock);
-
-int pmac_low_i2c_unlock(struct device_node *np)
-{
-	struct pmac_i2c_bus *bus, *found = NULL;
-
-	list_for_each_entry(bus, &pmac_i2c_busses, link) {
-		if (np == bus->controller) {
-			found = bus;
-			break;
-		}
-	}
-	if (!found)
-		return -ENODEV;
-	pmac_i2c_close(bus);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(pmac_low_i2c_unlock);
-
-
 int pmac_i2c_open(struct pmac_i2c_bus *bus, int polled)
 {
 	int rc;
@@ -1253,7 +1220,7 @@ static void* pmac_i2c_do_begin(struct pmf_function *func, struct pmf_args *args)
 	 * near OOM that need to be resolved, the allocator itself should
 	 * probably make GFP_NOIO implicit during suspend
 	 */
-	inst = kzalloc(sizeof(struct pmac_i2c_pf_inst), GFP_KERNEL);
+	inst = kzalloc_obj(struct pmac_i2c_pf_inst);
 	if (inst == NULL) {
 		pmac_i2c_close(bus);
 		return NULL;

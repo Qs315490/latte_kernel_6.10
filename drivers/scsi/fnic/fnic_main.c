@@ -40,6 +40,7 @@ static struct kmem_cache *fnic_sgl_cache[FNIC_SGL_NUM_CACHES];
 static struct kmem_cache *fnic_io_req_cache;
 static struct kmem_cache *fdls_frame_cache;
 static struct kmem_cache *fdls_frame_elem_cache;
+static struct kmem_cache *fdls_frame_recv_cache;
 static LIST_HEAD(fnic_list);
 static DEFINE_SPINLOCK(fnic_list_lock);
 static DEFINE_IDA(fnic_ida);
@@ -446,7 +447,7 @@ static int fnic_notify_set(struct fnic *fnic)
 
 static void fnic_notify_timer(struct timer_list *t)
 {
-	struct fnic *fnic = from_timer(fnic, t, notify_timer);
+	struct fnic *fnic = timer_container_of(fnic, t, notify_timer);
 
 	fnic_handle_link_event(fnic);
 	mod_timer(&fnic->notify_timer,
@@ -554,6 +555,7 @@ static int fnic_cleanup(struct fnic *fnic)
 	mempool_destroy(fnic->io_req_pool);
 	mempool_destroy(fnic->frame_pool);
 	mempool_destroy(fnic->frame_elem_pool);
+	mempool_destroy(fnic->frame_recv_pool);
 	for (i = 0; i < FNIC_SGL_NUM_CACHES; i++)
 		mempool_destroy(fnic->io_sgl_pool[i]);
 
@@ -715,7 +717,7 @@ static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/*
 	 * Allocate fnic
 	 */
-	fnic = kzalloc(sizeof(struct fnic), GFP_KERNEL);
+	fnic = kzalloc_obj(struct fnic);
 	if (!fnic) {
 		err = -ENOMEM;
 		goto err_out_fnic_alloc;
@@ -928,6 +930,14 @@ static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 	fnic->frame_elem_pool = pool;
 
+	pool = mempool_create_slab_pool(FDLS_MIN_FRAMES,
+						fdls_frame_recv_cache);
+	if (!pool) {
+		err = -ENOMEM;
+		goto err_out_fdls_frame_recv_pool;
+	}
+	fnic->frame_recv_pool = pool;
+
 	/* setup vlan config, hw inserts vlan header */
 	fnic->vlan_hw_insert = 1;
 	fnic->vlan_id = 0;
@@ -1085,6 +1095,8 @@ err_out_alloc_rq_buf:
 	}
 	vnic_dev_notify_unset(fnic->vdev);
 err_out_fnic_notify_set:
+	mempool_destroy(fnic->frame_recv_pool);
+err_out_fdls_frame_recv_pool:
 	mempool_destroy(fnic->frame_elem_pool);
 err_out_fdls_frame_elem_pool:
 	mempool_destroy(fnic->frame_pool);
@@ -1149,20 +1161,19 @@ static void fnic_remove(struct pci_dev *pdev)
 	fnic_scsi_unload(fnic);
 
 	if (vnic_dev_get_intr_mode(fnic->vdev) == VNIC_DEV_INTR_MODE_MSI)
-		del_timer_sync(&fnic->notify_timer);
+		timer_delete_sync(&fnic->notify_timer);
 
 	if (fnic->config.flags & VFCF_FIP_CAPABLE) {
-		del_timer_sync(&fnic->retry_fip_timer);
-		del_timer_sync(&fnic->fcs_ka_timer);
-		del_timer_sync(&fnic->enode_ka_timer);
-		del_timer_sync(&fnic->vn_ka_timer);
+		timer_delete_sync(&fnic->retry_fip_timer);
+		timer_delete_sync(&fnic->fcs_ka_timer);
+		timer_delete_sync(&fnic->enode_ka_timer);
+		timer_delete_sync(&fnic->vn_ka_timer);
 
-		fnic_free_txq(&fnic->fip_frame_queue);
 		fnic_fcoe_reset_vlans(fnic);
 	}
 
 	if ((fnic_fdmi_support == 1) && (fnic->iport.fabric.fdmi_pending > 0))
-		del_timer_sync(&fnic->iport.fabric.fdmi_timer);
+		timer_delete_sync(&fnic->iport.fabric.fdmi_timer);
 
 	fnic_stats_debugfs_remove(fnic);
 
@@ -1177,8 +1188,8 @@ static void fnic_remove(struct pci_dev *pdev)
 	list_del(&fnic->list);
 	spin_unlock_irqrestore(&fnic_list_lock, flags);
 
-	fnic_free_txq(&fnic->frame_queue);
-	fnic_free_txq(&fnic->tx_queue);
+	fnic_free_rxq(fnic);
+	fnic_free_txq(fnic);
 
 	vnic_dev_notify_unset(fnic->vdev);
 	fnic_free_intr(fnic);
@@ -1287,6 +1298,15 @@ static int __init fnic_init_module(void)
 		goto err_create_fdls_frame_cache_elem;
 	}
 
+	fdls_frame_recv_cache = kmem_cache_create("fdls_frame_recv",
+						  FNIC_FRAME_HT_ROOM,
+						  0, SLAB_HWCACHE_ALIGN, NULL);
+	if (!fdls_frame_recv_cache) {
+		pr_err("fnic fdls frame recv cach create failed\n");
+		err = -ENOMEM;
+		goto err_create_fdls_frame_recv_cache;
+	}
+
 	fnic_event_queue =
 		alloc_ordered_workqueue("%s", WQ_MEM_RECLAIM, "fnic_event_wq");
 	if (!fnic_event_queue) {
@@ -1339,6 +1359,8 @@ err_create_fip_workq:
 	if (pc_rscn_handling_feature_flag == PC_RSCN_HANDLING_FEATURE_ON)
 		destroy_workqueue(reset_fnic_work_queue);
 err_create_reset_fnic_workq:
+	kmem_cache_destroy(fdls_frame_recv_cache);
+err_create_fdls_frame_recv_cache:
 	destroy_workqueue(fnic_event_queue);
 err_create_fnic_workq:
 	kmem_cache_destroy(fdls_frame_elem_cache);
@@ -1365,10 +1387,9 @@ static void __exit fnic_cleanup_module(void)
 	if (pc_rscn_handling_feature_flag == PC_RSCN_HANDLING_FEATURE_ON)
 		destroy_workqueue(reset_fnic_work_queue);
 
-	if (fnic_fip_queue) {
-		flush_workqueue(fnic_fip_queue);
+	if (fnic_fip_queue)
 		destroy_workqueue(fnic_fip_queue);
-	}
+
 	kmem_cache_destroy(fnic_sgl_cache[FNIC_SGL_CACHE_MAX]);
 	kmem_cache_destroy(fnic_sgl_cache[FNIC_SGL_CACHE_DFLT]);
 	kmem_cache_destroy(fnic_io_req_cache);

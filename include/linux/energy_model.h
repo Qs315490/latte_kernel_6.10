@@ -18,7 +18,7 @@
  * @power:	The power consumed at this level (by 1 CPU or by a registered
  *		device). It can be a total power: static and dynamic.
  * @cost:	The cost coefficient associated with this level, used during
- *		energy calculation. Equal to: power * max_frequency / frequency
+ *		energy calculation. Equal to: 10 * power * max_frequency / frequency
  * @flags:	see "em_perf_state flags" description below.
  */
 struct em_perf_state {
@@ -54,6 +54,8 @@ struct em_perf_table {
 /**
  * struct em_perf_domain - Performance domain
  * @em_table:		Pointer to the runtime modifiable em_perf_table
+ * @node:		node in	em_pd_list (in energy_model.c)
+ * @id:			A unique ID number for each performance domain
  * @nr_perf_states:	Number of performance states
  * @min_perf_state:	Minimum allowed Performance State index
  * @max_perf_state:	Maximum allowed Performance State index
@@ -71,6 +73,8 @@ struct em_perf_table {
  */
 struct em_perf_domain {
 	struct em_perf_table __rcu *em_table;
+	struct list_head node;
+	int id;
 	int nr_perf_states;
 	int min_perf_state;
 	int max_perf_state;
@@ -167,18 +171,22 @@ struct em_data_callback {
 struct em_perf_domain *em_cpu_get(int cpu);
 struct em_perf_domain *em_pd_get(struct device *dev);
 int em_dev_update_perf_domain(struct device *dev,
-			      struct em_perf_table __rcu *new_table);
+			      struct em_perf_table *new_table);
 int em_dev_register_perf_domain(struct device *dev, unsigned int nr_states,
-				struct em_data_callback *cb, cpumask_t *span,
-				bool microwatts);
+				const struct em_data_callback *cb,
+				const cpumask_t *cpus, bool microwatts);
+int em_dev_register_pd_no_update(struct device *dev, unsigned int nr_states,
+				 const struct em_data_callback *cb,
+				 const cpumask_t *cpus, bool microwatts);
 void em_dev_unregister_perf_domain(struct device *dev);
-struct em_perf_table __rcu *em_table_alloc(struct em_perf_domain *pd);
-void em_table_free(struct em_perf_table __rcu *table);
+struct em_perf_table *em_table_alloc(struct em_perf_domain *pd);
+void em_table_free(struct em_perf_table *table);
 int em_dev_compute_costs(struct device *dev, struct em_perf_state *table,
 			 int nr_states);
 int em_dev_update_chip_binning(struct device *dev);
 int em_update_performance_limits(struct em_perf_domain *pd,
 		unsigned long freq_min_khz, unsigned long freq_max_khz);
+void em_adjust_cpu_capacity(unsigned int cpu);
 void em_rebuild_sched_domains(void);
 
 /**
@@ -240,9 +248,7 @@ static inline unsigned long em_cpu_energy(struct em_perf_domain *pd,
 	struct em_perf_state *ps;
 	int i;
 
-#ifdef CONFIG_SCHED_DEBUG
-	WARN_ONCE(!rcu_read_lock_held(), "EM: rcu read lock needed\n");
-#endif
+	lockdep_assert(rcu_read_lock_any_held());
 
 	if (!sum_util)
 		return 0;
@@ -261,7 +267,7 @@ static inline unsigned long em_cpu_energy(struct em_perf_domain *pd,
 	 * Find the lowest performance state of the Energy Model above the
 	 * requested performance.
 	 */
-	em_table = rcu_dereference(pd->em_table);
+	em_table = rcu_dereference_all(pd->em_table);
 	i = em_pd_get_efficient_state(em_table->state, pd, max_util);
 	ps = &em_table->state[i];
 
@@ -346,8 +352,15 @@ struct em_data_callback {};
 
 static inline
 int em_dev_register_perf_domain(struct device *dev, unsigned int nr_states,
-				struct em_data_callback *cb, cpumask_t *span,
-				bool microwatts)
+				const struct em_data_callback *cb,
+				const cpumask_t *cpus, bool microwatts)
+{
+	return -EINVAL;
+}
+static inline
+int em_dev_register_pd_no_update(struct device *dev, unsigned int nr_states,
+				 const struct em_data_callback *cb,
+				 const cpumask_t *cpus, bool microwatts)
 {
 	return -EINVAL;
 }
@@ -373,14 +386,14 @@ static inline int em_pd_nr_perf_states(struct em_perf_domain *pd)
 	return 0;
 }
 static inline
-struct em_perf_table __rcu *em_table_alloc(struct em_perf_domain *pd)
+struct em_perf_table *em_table_alloc(struct em_perf_domain *pd)
 {
 	return NULL;
 }
-static inline void em_table_free(struct em_perf_table __rcu *table) {}
+static inline void em_table_free(struct em_perf_table *table) {}
 static inline
 int em_dev_update_perf_domain(struct device *dev,
-			      struct em_perf_table __rcu *new_table)
+			      struct em_perf_table *new_table)
 {
 	return -EINVAL;
 }
@@ -405,6 +418,7 @@ int em_update_performance_limits(struct em_perf_domain *pd,
 {
 	return -EINVAL;
 }
+static inline void em_adjust_cpu_capacity(unsigned int cpu) {}
 static inline void em_rebuild_sched_domains(void) {}
 #endif
 

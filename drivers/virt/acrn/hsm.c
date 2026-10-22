@@ -16,6 +16,7 @@
 #include <linux/slab.h>
 
 #include <asm/acrn.h>
+#include <asm/cpuid/api.h>
 #include <asm/hypervisor.h>
 
 #include "acrn_drv.h"
@@ -30,7 +31,7 @@ static int acrn_dev_open(struct inode *inode, struct file *filp)
 {
 	struct acrn_vm *vm;
 
-	vm = kzalloc(sizeof(*vm), GFP_KERNEL);
+	vm = kzalloc_obj(*vm);
 	if (!vm)
 		return -ENOMEM;
 
@@ -64,7 +65,7 @@ static int pmcmd_ioctl(u64 cmd, void __user *uptr)
 		kfree(pm_info);
 		break;
 	case ACRN_PMCMD_GET_PX_DATA:
-		px_data = kzalloc(sizeof(*px_data), GFP_KERNEL);
+		px_data = kzalloc_obj(*px_data);
 		if (!px_data)
 			return -ENOMEM;
 
@@ -79,7 +80,7 @@ static int pmcmd_ioctl(u64 cmd, void __user *uptr)
 		kfree(px_data);
 		break;
 	case ACRN_PMCMD_GET_CX_DATA:
-		cx_data = kzalloc(sizeof(*cx_data), GFP_KERNEL);
+		cx_data = kzalloc_obj(*cx_data);
 		if (!cx_data)
 			return -ENOMEM;
 

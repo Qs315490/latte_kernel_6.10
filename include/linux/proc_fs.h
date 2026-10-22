@@ -27,6 +27,9 @@ enum {
 
 	PROC_ENTRY_proc_read_iter	= 1U << 1,
 	PROC_ENTRY_proc_compat_ioctl	= 1U << 2,
+	PROC_ENTRY_proc_lseek		= 1U << 3,
+
+	PROC_ENTRY_FORCE_LOOKUP		= 1U << 7,
 };
 
 struct proc_ops {
@@ -63,9 +66,8 @@ enum proc_pidonly {
 
 struct proc_fs_info {
 	struct pid_namespace *pid_ns;
-	struct dentry *proc_self;        /* For /proc/self */
-	struct dentry *proc_thread_self; /* For /proc/thread-self */
 	kgid_t pid_gid;
+	const struct cred *mounter_cred;
 	enum proc_hidepid hide_pid;
 	enum proc_pidonly pidonly;
 	struct rcu_head rcu;
@@ -246,5 +248,17 @@ static inline struct pid_namespace *proc_pid_ns(struct super_block *sb)
 }
 
 bool proc_ns_file(const struct file *file);
+
+#if defined CONFIG_PROC_FS && !defined MODULE
+void impl_proc_make_permanent(struct proc_dir_entry *pde);
+#endif
+
+static inline void proc_make_permanent(struct proc_dir_entry *pde)
+{
+	/* Don't give matches to modules. */
+#if defined CONFIG_PROC_FS && !defined MODULE
+	impl_proc_make_permanent(pde);
+#endif
+}
 
 #endif /* _LINUX_PROC_FS_H */

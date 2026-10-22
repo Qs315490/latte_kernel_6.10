@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/reboot.h>
 #include <linux/rcuwait.h>
+#include <linux/string_choices.h>
 
 #include <asm/firmware.h>
 #include <asm/lv1call.h>
@@ -30,7 +31,7 @@ static int __init ps3_register_lpm_devices(void)
 
 	pr_debug(" -> %s:%d\n", __func__, __LINE__);
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return -ENOMEM;
 
@@ -125,7 +126,7 @@ static int __init ps3_setup_gelic_device(
 	BUG_ON(repo->bus_type != PS3_BUS_TYPE_SB);
 	BUG_ON(repo->dev_type != PS3_DEV_TYPE_SB_GELIC);
 
-	p = kzalloc(sizeof(struct layout), GFP_KERNEL);
+	p = kzalloc_obj(struct layout);
 
 	if (!p) {
 		result = -ENOMEM;
@@ -196,7 +197,7 @@ static int __init ps3_setup_uhc_device(
 	BUG_ON(repo->bus_type != PS3_BUS_TYPE_SB);
 	BUG_ON(repo->dev_type != PS3_DEV_TYPE_SB_USB);
 
-	p = kzalloc(sizeof(struct layout), GFP_KERNEL);
+	p = kzalloc_obj(struct layout);
 
 	if (!p) {
 		result = -ENOMEM;
@@ -293,7 +294,7 @@ static int __init ps3_setup_vuart_device(enum ps3_match_id match_id,
 	pr_debug(" -> %s:%d: match_id %u, port %u\n", __func__, __LINE__,
 		match_id, port_number);
 
-	p = kzalloc(sizeof(struct layout), GFP_KERNEL);
+	p = kzalloc_obj(struct layout);
 
 	if (!p)
 		return -ENOMEM;
@@ -343,7 +344,7 @@ static int ps3_setup_storage_dev(const struct ps3_repository_device *repo,
 		 repo->dev_index, repo->dev_type, port, blk_size, num_blocks,
 		 num_regions);
 
-	p = kzalloc(struct_size(p, regions, num_regions), GFP_KERNEL);
+	p = kzalloc_flex(*p, regions, num_regions);
 	if (!p) {
 		result = -ENOMEM;
 		goto fail_malloc;
@@ -446,7 +447,7 @@ static int __init ps3_register_sound_devices(void)
 
 	pr_debug(" -> %s:%d\n", __func__, __LINE__);
 
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc_obj(*p);
 	if (!p)
 		return -ENOMEM;
 
@@ -480,7 +481,7 @@ static int __init ps3_register_graphics_devices(void)
 
 	pr_debug(" -> %s:%d\n", __func__, __LINE__);
 
-	p = kzalloc(sizeof(struct layout), GFP_KERNEL);
+	p = kzalloc_obj(struct layout);
 
 	if (!p)
 		return -ENOMEM;
@@ -515,7 +516,7 @@ static int __init ps3_register_ramdisk_device(void)
 
 	pr_debug(" -> %s:%d\n", __func__, __LINE__);
 
-	p = kzalloc(sizeof(struct layout), GFP_KERNEL);
+	p = kzalloc_obj(struct layout);
 
 	if (!p)
 		return -ENOMEM;
@@ -724,7 +725,7 @@ static irqreturn_t ps3_notification_interrupt(int irq, void *data)
 static int ps3_notification_read_write(struct ps3_notification_device *dev,
 				       u64 lpar, int write)
 {
-	const char *op = write ? "write" : "read";
+	const char *op = str_write_read(write);
 	unsigned long flags;
 	int res;
 
@@ -782,7 +783,7 @@ static int ps3_probe_thread(void *data)
 
 	pr_debug(" -> %s:%u: kthread started\n", __func__, __LINE__);
 
-	local = kzalloc(sizeof(*local), GFP_KERNEL);
+	local = kzalloc_obj(*local);
 	if (!local)
 		return -ENOMEM;
 
@@ -949,8 +950,6 @@ static int __init ps3_start_probe_thread(enum ps3_bus_type bus_type)
 
 static int __init ps3_register_devices(void)
 {
-	int result;
-
 	if (!firmware_has_feature(FW_FEATURE_PS3_LV1))
 		return -ENODEV;
 
@@ -958,7 +957,7 @@ static int __init ps3_register_devices(void)
 
 	/* ps3_repository_dump_bus_info(); */
 
-	result = ps3_start_probe_thread(PS3_BUS_TYPE_STORAGE);
+	ps3_start_probe_thread(PS3_BUS_TYPE_STORAGE);
 
 	ps3_register_vuart_devices();
 

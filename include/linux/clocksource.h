@@ -25,12 +25,26 @@ struct clocksource_base;
 struct clocksource;
 struct module;
 
-#if defined(CONFIG_ARCH_CLOCKSOURCE_DATA) || \
-    defined(CONFIG_GENERIC_GETTIMEOFDAY)
+#if defined(CONFIG_GENERIC_GETTIMEOFDAY)
 #include <asm/clocksource.h>
 #endif
 
 #include <vdso/clocksource.h>
+
+/**
+ * struct clocksource_hw_snapshot - Snapshot for the underlying hardware counter of derived
+ *				    clocksources like kvmclock or Hyper-V scaled TSC
+ * @hw_cycles:		The hardware counter value
+ * @hw_csid:		Clocksource ID of the hardware counter
+ *
+ * Such clocksources must implement the read_snapshot() callback and fill in the
+ * hardware counter value, the clocksource ID of the hardware counter and derive
+ * the actual clocksource cycles from @hw_cycles to provide an atomic snapshot
+ */
+struct clocksource_hw_snapshot {
+	u64			hw_cycles;
+	enum clocksource_ids	hw_csid;
+};
 
 /**
  * struct clocksource - hardware abstraction for a free running counter
@@ -44,8 +58,6 @@ struct module;
  * @shift:		Cycle to nanosecond divisor (power of two)
  * @max_idle_ns:	Maximum idle time permitted by the clocksource (nsecs)
  * @maxadj:		Maximum adjustment value to mult (~11%)
- * @uncertainty_margin:	Maximum uncertainty in nanoseconds per half second.
- *			Zero says to use default WATCHDOG_THRESHOLD.
  * @archdata:		Optional arch-specific data
  * @max_cycles:		Maximum safe cycle value which won't overflow on
  *			multiplication
@@ -75,6 +87,14 @@ struct module;
  * @flags:		Flags describing special properties
  * @base:		Hardware abstraction for clock on which a clocksource
  *			is based
+ * @read_snapshot:	Extended @read() function for clocksources such as
+ *			kvmclock or the Hyper-V scaled TSC where the actual
+ *			clocksource value for timekeeping is calculated from an
+ *			underlying hardware counter. Returns the timekeeping
+ *			relevant cycle value and stores the raw value of the
+ *			underlying counter from which it was calculated
+ *			including the clocksource ID of that counter in the
+ *			clocksource hardware snapshot.
  * @enable:		Optional function to enable the clocksource
  * @disable:		Optional function to disable the clocksource
  * @suspend:		Optional suspend function for the clocksource
@@ -105,10 +125,6 @@ struct clocksource {
 	u32			shift;
 	u64			max_idle_ns;
 	u32			maxadj;
-	u32			uncertainty_margin;
-#ifdef CONFIG_ARCH_CLOCKSOURCE_DATA
-	struct arch_clocksource_data archdata;
-#endif
 	u64			max_cycles;
 	u64			max_raw_delta;
 	const char		*name;
@@ -120,6 +136,7 @@ struct clocksource {
 	unsigned long		flags;
 	struct clocksource_base *base;
 
+	u64			(*read_snapshot)(struct clocksource *cs, struct clocksource_hw_snapshot *chs);
 	int			(*enable)(struct clocksource *cs);
 	void			(*disable)(struct clocksource *cs);
 	void			(*suspend)(struct clocksource *cs);
@@ -133,6 +150,7 @@ struct clocksource {
 	struct list_head	wd_list;
 	u64			cs_last;
 	u64			wd_last;
+	unsigned int		wd_cpu;
 #endif
 	struct module		*owner;
 };
@@ -142,13 +160,19 @@ struct clocksource {
  */
 #define CLOCK_SOURCE_IS_CONTINUOUS		0x01
 #define CLOCK_SOURCE_MUST_VERIFY		0x02
+#define CLOCK_SOURCE_CALIBRATED			0x04
 
 #define CLOCK_SOURCE_WATCHDOG			0x10
 #define CLOCK_SOURCE_VALID_FOR_HRES		0x20
 #define CLOCK_SOURCE_UNSTABLE			0x40
 #define CLOCK_SOURCE_SUSPEND_NONSTOP		0x80
 #define CLOCK_SOURCE_RESELECT			0x100
-#define CLOCK_SOURCE_VERIFY_PERCPU		0x200
+#define CLOCK_SOURCE_CAN_INLINE_READ		0x200
+#define CLOCK_SOURCE_HAS_COUPLED_CLOCK_EVENT	0x400
+
+#define CLOCK_SOURCE_WDTEST			0x800
+#define CLOCK_SOURCE_WDTEST_PERCPU		0x1000
+
 /* simplify initialization of mask field */
 #define CLOCKSOURCE_MASK(bits) GENMASK_ULL((bits) - 1, 0)
 
@@ -236,8 +260,9 @@ clocks_calc_mult_shift(u32 *mult, u32 *shift, u32 from, u32 to, u32 minsec);
  */
 extern int
 __clocksource_register_scale(struct clocksource *cs, u32 scale, u32 freq);
-extern void
-__clocksource_update_freq_scale(struct clocksource *cs, u32 scale, u32 freq);
+extern int
+__devm_clocksource_register_scale(struct device *dev, struct clocksource *cs,
+				  u32 scale, u32 freq);
 
 /*
  * Don't call this unless you are a default clocksource
@@ -258,14 +283,16 @@ static inline int clocksource_register_khz(struct clocksource *cs, u32 khz)
 	return __clocksource_register_scale(cs, 1000, khz);
 }
 
-static inline void __clocksource_update_freq_hz(struct clocksource *cs, u32 hz)
+static inline int devm_clocksource_register_hz(struct device *dev,
+					       struct clocksource *cs, u32 hz)
 {
-	__clocksource_update_freq_scale(cs, 1, hz);
+	return __devm_clocksource_register_scale(dev, cs, 1, hz);
 }
 
-static inline void __clocksource_update_freq_khz(struct clocksource *cs, u32 khz)
+static inline int devm_clocksource_register_khz(struct device *dev,
+						struct clocksource *cs, u32 khz)
 {
-	__clocksource_update_freq_scale(cs, 1000, khz);
+	return __devm_clocksource_register_scale(dev, cs, 1000, khz);
 }
 
 #ifdef CONFIG_ARCH_CLOCKSOURCE_INIT
@@ -297,21 +324,6 @@ static inline void timer_probe(void) {}
 
 #define TIMER_ACPI_DECLARE(name, table_id, fn)		\
 	ACPI_DECLARE_PROBE_ENTRY(timer, name, table_id, 0, NULL, 0, fn)
-
-static inline unsigned int clocksource_get_max_watchdog_retry(void)
-{
-	/*
-	 * When system is in the boot phase or under heavy workload, there
-	 * can be random big latencies during the clocksource/watchdog
-	 * read, so allow retries to filter the noise latency. As the
-	 * latency's frequency and maximum value goes up with the number of
-	 * CPUs, scale the number of retries with the number of online
-	 * CPUs.
-	 */
-	return (ilog2(num_online_cpus()) / 2) + 1;
-}
-
-void clocksource_verify_percpu(struct clocksource *cs);
 
 /**
  * struct clocksource_base - hardware abstraction for clock on which a clocksource

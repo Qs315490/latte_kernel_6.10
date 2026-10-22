@@ -33,7 +33,7 @@ Linux內核6.x版本 <http://kernel.org/>
 
   雖然Linux最初是爲32位的x86 PC機（386或更高版本）開發的，但今天它也能運行在
   （至少）Compaq Alpha AXP、Sun SPARC與UltraSPARC、Motorola 68000、PowerPC、
-  PowerPC64、ARM、Hitachi SuperH、Cell、IBM S/390、MIPS、HP PA-RISC、Intel 
+  PowerPC64、ARM、Hitachi SuperH、Cell、IBM S/390、MIPS、HP PA-RISC、Intel
   IA-64、DEC VAX、AMD x86-64 Xtensa和ARC架構上。
 
   Linux很容易移植到大多數通用的32位或64位體系架構，只要它們有一個分頁內存管理
@@ -149,7 +149,7 @@ Linux內核6.x版本 <http://kernel.org/>
 
      "make xconfig"     基於Qt的配置工具。
 
-     "make gconfig"     基於GTK+的配置工具。
+     "make gconfig"     基於GTK的配置工具。
 
      "make oldconfig"   基於現有的 ./.config 文件選擇所有選項，並詢問
                         新配置選項。
@@ -291,5 +291,5 @@ Documentation/translations/zh_CN/admin-guide/bug-hunting.rst 。
 
 更多用GDB調試內核的信息，請參閱：
 Documentation/translations/zh_CN/dev-tools/gdb-kernel-debugging.rst
-和 Documentation/dev-tools/kgdb.rst 。
+和 Documentation/process/debugging/kgdb.rst 。
 

@@ -176,10 +176,13 @@ static int scsi_ioctl_get_pci(struct scsi_device *sdev, void __user *arg)
 
 	name = dev_name(dev);
 
-	/* compatibility with old ioctl which only returned
-	 * 20 characters */
-        return copy_to_user(arg, name, min(strlen(name), (size_t)20))
-		? -EFAULT: 0;
+	/*
+	 * Compatibility with old ioctl which only returned 20 characters.
+	 */
+	if (copy_to_user(arg, name, strnlen(name, 20)))
+		return -EFAULT;
+
+	return 0;
 }
 
 static int sg_get_version(int __user *p)
@@ -601,7 +604,7 @@ static int sg_scsi_ioctl(struct request_queue *q, bool open_for_write,
 	}
 
 	if (bytes) {
-		err = blk_rq_map_kern(q, rq, buffer, bytes, GFP_NOIO);
+		err = blk_rq_map_kern(rq, buffer, bytes, GFP_NOIO);
 		if (err)
 			goto error;
 	}

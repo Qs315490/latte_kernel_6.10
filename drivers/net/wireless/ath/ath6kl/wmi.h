@@ -655,7 +655,7 @@ enum wmi_mgmt_frame_type {
 
 enum wmi_ie_field_type {
 	WMI_RSN_IE_CAPB	= 0x1,
-	WMI_IE_FULL	= 0xFF,  /* indicats full IE */
+	WMI_IE_FULL	= 0xFF,  /* indicates full IE */
 };
 
 /* WMI_CONNECT_CMDID  */
@@ -1178,10 +1178,10 @@ struct wmi_create_pstream_cmd {
 	__le32 sba;
 	__le32 medium_time;
 
-	/* in octects */
+	/* in octets */
 	__le16 nominal_msdu;
 
-	/* in octects */
+	/* in octets */
 	__le16 max_msdu;
 
 	u8 traffic_class;
@@ -1630,16 +1630,6 @@ enum wmi_roam_mode {
 	WMI_LOCK_BSS_MODE = 3, /* Lock to the current BSS */
 };
 
-struct bss_bias {
-	u8 bssid[ETH_ALEN];
-	s8 bias;
-} __packed;
-
-struct bss_bias_info {
-	u8 num_bss;
-	struct bss_bias bss_bias[];
-} __packed;
-
 struct low_rssi_scan_params {
 	__le16 lrssi_scan_period;
 	a_sle16 lrssi_scan_threshold;
@@ -1652,7 +1642,6 @@ struct roam_ctrl_cmd {
 	union {
 		u8 bssid[ETH_ALEN]; /* WMI_FORCE_ROAM */
 		u8 roam_mode; /* WMI_SET_ROAM_MODE */
-		struct bss_bias_info bss; /* WMI_SET_HOST_BIAS */
 		struct low_rssi_scan_params params; /* WMI_SET_LRSSI_SCAN_PARAMS
 						     */
 	} __packed info;
@@ -1742,7 +1731,7 @@ struct wmi_scan_complete_event {
 
 /*
  * Special frame receive Event.
- * Mechanism used to inform host of the receiption of the special frames.
+ * Mechanism used to inform host of the reception of the special frames.
  * Consists of special frame info header followed by special frame body.
  * The 802.11 header is not included.
  */
@@ -1860,7 +1849,7 @@ struct wmi_target_stats {
 /*
  * WMI_RSSI_THRESHOLD_EVENTID.
  * Indicate the RSSI events to host. Events are indicated when we breach a
- * thresold value.
+ * threshold value.
  */
 enum wmi_rssi_threshold_val {
 	WMI_RSSI_THRESHOLD1_ABOVE = 0,

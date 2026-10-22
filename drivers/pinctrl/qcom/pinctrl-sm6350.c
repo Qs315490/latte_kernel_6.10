@@ -33,7 +33,6 @@
 		.io_reg = 0x4 + REG_SIZE * id,		\
 		.intr_cfg_reg = 0x8 + REG_SIZE * id,		\
 		.intr_status_reg = 0xc + REG_SIZE * id,	\
-		.intr_target_reg = 0x8 + REG_SIZE * id,	\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
@@ -59,7 +58,6 @@
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -84,7 +82,6 @@
 		.io_reg = offset + 0x4,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
 		.drv_bit = 0,				\
@@ -1048,7 +1045,7 @@ static const struct pinfunction sm6350_functions[] = {
 	MSM_PIN_FUNCTION(gp_pdm0),
 	MSM_PIN_FUNCTION(gp_pdm1),
 	MSM_PIN_FUNCTION(gp_pdm2),
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(gps_tx),
 	MSM_PIN_FUNCTION(ibi_i3c),
 	MSM_PIN_FUNCTION(jitter_bist),
@@ -1366,6 +1363,7 @@ static const struct of_device_id sm6350_tlmm_of_match[] = {
 	{ .compatible = "qcom,sm6350-tlmm" },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, sm6350_tlmm_of_match);
 
 static struct platform_driver sm6350_tlmm_driver = {
 	.driver = {
@@ -1373,7 +1371,6 @@ static struct platform_driver sm6350_tlmm_driver = {
 		.of_match_table = sm6350_tlmm_of_match,
 	},
 	.probe = sm6350_tlmm_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init sm6350_tlmm_init(void)
@@ -1390,4 +1387,3 @@ module_exit(sm6350_tlmm_exit);
 
 MODULE_DESCRIPTION("QTI SM6350 TLMM driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, sm6350_tlmm_of_match);

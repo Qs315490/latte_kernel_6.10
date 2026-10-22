@@ -137,6 +137,7 @@ enum axp20x_variants {
 #define AXP717_IRQ2_STATE		0x4a
 #define AXP717_IRQ3_STATE		0x4b
 #define AXP717_IRQ4_STATE		0x4c
+#define AXP717_TS_PIN_CFG		0x50
 #define AXP717_ICC_CHG_SET		0x62
 #define AXP717_ITERM_CHG_SET		0x63
 #define AXP717_CV_CHG_SET		0x64
@@ -173,6 +174,9 @@ enum axp20x_variants {
 #define AXP717_ADC_DATA_SEL		0xcd
 #define AXP717_ADC_DATA_H		0xce
 #define AXP717_ADC_DATA_L		0xcf
+#define AXP717_TYPEC_CC_AA_EN		0xe1
+#define AXP717_TYPEC_CC_MODE_CONTROL	0xe3
+#define AXP717_TYPEC_CC_STATUS		0xe7
 
 #define AXP806_STARTUP_SRC		0x00
 #define AXP806_CHIP_ID			0x03

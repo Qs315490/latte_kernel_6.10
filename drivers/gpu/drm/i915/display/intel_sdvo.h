@@ -8,25 +8,25 @@
 
 #include <linux/types.h>
 
-#include "i915_reg_defs.h"
+#include "intel_display_reg_defs.h"
 
-struct drm_i915_private;
 enum pipe;
 enum port;
+struct intel_display;
 
 #ifdef I915
-bool intel_sdvo_port_enabled(struct drm_i915_private *dev_priv,
-			     i915_reg_t sdvo_reg, enum pipe *pipe);
-bool intel_sdvo_init(struct drm_i915_private *dev_priv,
-		     i915_reg_t reg, enum port port);
+bool intel_sdvo_port_enabled(struct intel_display *display,
+			     intel_reg_t sdvo_reg, enum pipe *pipe);
+bool intel_sdvo_init(struct intel_display *display,
+		     intel_reg_t reg, enum port port);
 #else
-static inline bool intel_sdvo_port_enabled(struct drm_i915_private *dev_priv,
-					   i915_reg_t sdvo_reg, enum pipe *pipe)
+static inline bool intel_sdvo_port_enabled(struct intel_display *display,
+					   intel_reg_t sdvo_reg, enum pipe *pipe)
 {
 	return false;
 }
-static inline bool intel_sdvo_init(struct drm_i915_private *dev_priv,
-				   i915_reg_t reg, enum port port)
+static inline bool intel_sdvo_init(struct intel_display *display,
+				   intel_reg_t reg, enum port port)
 {
 	return false;
 }

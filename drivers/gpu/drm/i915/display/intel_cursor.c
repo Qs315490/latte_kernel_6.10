@@ -9,20 +9,20 @@
 #include <drm/drm_blend.h>
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_fourcc.h>
+#include <drm/drm_print.h>
 #include <drm/drm_vblank.h>
 
-#include "i915_drv.h"
-#include "i915_reg.h"
 #include "intel_atomic.h"
-#include "intel_atomic_plane.h"
 #include "intel_cursor.h"
 #include "intel_cursor_regs.h"
 #include "intel_de.h"
 #include "intel_display.h"
 #include "intel_display_types.h"
+#include "intel_display_utils.h"
+#include "intel_display_wa.h"
 #include "intel_fb.h"
-#include "intel_fb_pin.h"
 #include "intel_frontbuffer.h"
+#include "intel_plane.h"
 #include "intel_psr.h"
 #include "intel_psr_regs.h"
 #include "intel_vblank.h"
@@ -33,18 +33,9 @@ static const u32 intel_cursor_formats[] = {
 	DRM_FORMAT_ARGB8888,
 };
 
-static u32 intel_cursor_base(const struct intel_plane_state *plane_state)
+static u32 intel_cursor_surf_offset(const struct intel_plane_state *plane_state)
 {
-	struct drm_i915_private *dev_priv =
-		to_i915(plane_state->uapi.plane->dev);
-	u32 base;
-
-	if (DISPLAY_INFO(dev_priv)->cursor_needs_physical)
-		base = plane_state->phys_dma_addr;
-	else
-		base = intel_plane_ggtt_offset(plane_state);
-
-	return base + plane_state->view.color_plane[0].offset;
+	return plane_state->view.color_plane[0].offset;
 }
 
 static u32 intel_cursor_position(const struct intel_crtc_state *crtc_state,
@@ -92,8 +83,8 @@ static bool intel_cursor_size_ok(const struct intel_plane_state *plane_state)
 
 static int intel_cursor_check_surface(struct intel_plane_state *plane_state)
 {
-	struct drm_i915_private *dev_priv =
-		to_i915(plane_state->uapi.plane->dev);
+	struct intel_display *display = to_intel_display(plane_state);
+	struct intel_plane *plane = to_intel_plane(plane_state->uapi.plane);
 	unsigned int rotation = plane_state->hw.rotation;
 	int src_x, src_y;
 	u32 offset;
@@ -114,8 +105,9 @@ static int intel_cursor_check_surface(struct intel_plane_state *plane_state)
 						    plane_state, 0);
 
 	if (src_x != 0 || src_y != 0) {
-		drm_dbg_kms(&dev_priv->drm,
-			    "Arbitrary cursor panning not supported\n");
+		drm_dbg_kms(display->drm,
+			    "[PLANE:%d:%s] arbitrary cursor panning not supported\n",
+			    plane->base.base.id, plane->base.name);
 		return -EINVAL;
 	}
 
@@ -127,7 +119,7 @@ static int intel_cursor_check_surface(struct intel_plane_state *plane_state)
 			      src_x << 16, src_y << 16);
 
 	/* ILK+ do this automagically in hardware */
-	if (HAS_GMCH(dev_priv) && rotation & DRM_MODE_ROTATE_180) {
+	if (HAS_GMCH(display) && rotation & DRM_MODE_ROTATE_180) {
 		const struct drm_framebuffer *fb = plane_state->hw.fb;
 		int src_w = drm_rect_width(&plane_state->uapi.src) >> 16;
 		int src_h = drm_rect_height(&plane_state->uapi.src) >> 16;
@@ -145,21 +137,23 @@ static int intel_cursor_check_surface(struct intel_plane_state *plane_state)
 static int intel_check_cursor(struct intel_crtc_state *crtc_state,
 			      struct intel_plane_state *plane_state)
 {
+	struct intel_display *display = to_intel_display(plane_state);
+	struct intel_plane *plane = to_intel_plane(plane_state->uapi.plane);
 	const struct drm_framebuffer *fb = plane_state->hw.fb;
-	struct drm_i915_private *i915 = to_i915(plane_state->uapi.plane->dev);
 	const struct drm_rect src = plane_state->uapi.src;
 	const struct drm_rect dst = plane_state->uapi.dst;
 	int ret;
 
 	if (fb && fb->modifier != DRM_FORMAT_MOD_LINEAR) {
-		drm_dbg_kms(&i915->drm, "cursor cannot be tiled\n");
+		drm_dbg_kms(display->drm, "[PLANE:%d:%s] cursor cannot be tiled\n",
+			    plane->base.base.id, plane->base.name);
 		return -EINVAL;
 	}
 
-	ret = intel_atomic_plane_check_clipping(plane_state, crtc_state,
-						DRM_PLANE_NO_SCALING,
-						DRM_PLANE_NO_SCALING,
-						true);
+	ret = intel_plane_check_clipping(plane_state, crtc_state,
+					 DRM_PLANE_NO_SCALING,
+					 DRM_PLANE_NO_SCALING,
+					 true);
 	if (ret)
 		return ret;
 
@@ -188,8 +182,8 @@ static int intel_check_cursor(struct intel_crtc_state *crtc_state,
 
 static unsigned int
 i845_cursor_max_stride(struct intel_plane *plane,
-		       u32 pixel_format, u64 modifier,
-		       unsigned int rotation)
+		       const struct drm_format_info *info,
+		       u64 modifier, unsigned int rotation)
 {
 	return 2048;
 }
@@ -211,8 +205,7 @@ static u32 i845_cursor_ctl_crtc(const struct intel_crtc_state *crtc_state)
 	return cntl;
 }
 
-static u32 i845_cursor_ctl(const struct intel_crtc_state *crtc_state,
-			   const struct intel_plane_state *plane_state)
+static u32 i845_cursor_ctl(const struct intel_plane_state *plane_state)
 {
 	return CURSOR_ENABLE |
 		CURSOR_FORMAT_ARGB |
@@ -233,8 +226,9 @@ static bool i845_cursor_size_ok(const struct intel_plane_state *plane_state)
 static int i845_check_cursor(struct intel_crtc_state *crtc_state,
 			     struct intel_plane_state *plane_state)
 {
+	struct intel_display *display = to_intel_display(plane_state);
+	struct intel_plane *plane = to_intel_plane(plane_state->uapi.plane);
 	const struct drm_framebuffer *fb = plane_state->hw.fb;
-	struct drm_i915_private *i915 = to_i915(plane_state->uapi.plane->dev);
 	int ret;
 
 	ret = intel_check_cursor(crtc_state, plane_state);
@@ -247,14 +241,15 @@ static int i845_check_cursor(struct intel_crtc_state *crtc_state,
 
 	/* Check for which cursor types we support */
 	if (!i845_cursor_size_ok(plane_state)) {
-		drm_dbg_kms(&i915->drm,
-			    "Cursor dimension %dx%d not supported\n",
+		drm_dbg_kms(display->drm,
+			    "[PLANE:%d:%s] cursor dimension %dx%d not supported\n",
+			    plane->base.base.id, plane->base.name,
 			    drm_rect_width(&plane_state->uapi.dst),
 			    drm_rect_height(&plane_state->uapi.dst));
 		return -EINVAL;
 	}
 
-	drm_WARN_ON(&i915->drm, plane_state->uapi.visible &&
+	drm_WARN_ON(display->drm, plane_state->uapi.visible &&
 		    plane_state->view.color_plane[0].mapping_stride != fb->pitches[0]);
 
 	switch (fb->pitches[0]) {
@@ -264,12 +259,13 @@ static int i845_check_cursor(struct intel_crtc_state *crtc_state,
 	case 2048:
 		break;
 	default:
-		 drm_dbg_kms(&i915->drm, "Invalid cursor stride (%u)\n",
+		 drm_dbg_kms(display->drm, "[PLANE:%d:%s] invalid cursor stride (%u)\n",
+			     plane->base.base.id, plane->base.name,
 			     fb->pitches[0]);
 		return -EINVAL;
 	}
 
-	plane_state->ctl = i845_cursor_ctl(crtc_state, plane_state);
+	plane_state->ctl = i845_cursor_ctl(plane_state);
 
 	return 0;
 }
@@ -280,7 +276,7 @@ static void i845_cursor_update_arm(struct intel_dsb *dsb,
 				   const struct intel_crtc_state *crtc_state,
 				   const struct intel_plane_state *plane_state)
 {
-	struct drm_i915_private *dev_priv = to_i915(plane->base.dev);
+	struct intel_display *display = to_intel_display(plane);
 	u32 cntl = 0, base = 0, pos = 0, size = 0;
 
 	if (plane_state && plane_state->uapi.visible) {
@@ -292,7 +288,7 @@ static void i845_cursor_update_arm(struct intel_dsb *dsb,
 
 		size = CURSOR_HEIGHT(height) | CURSOR_WIDTH(width);
 
-		base = intel_cursor_base(plane_state);
+		base = plane_state->surf;
 		pos = intel_cursor_position(crtc_state, plane_state, false);
 	}
 
@@ -302,17 +298,17 @@ static void i845_cursor_update_arm(struct intel_dsb *dsb,
 	if (plane->cursor.base != base ||
 	    plane->cursor.size != size ||
 	    plane->cursor.cntl != cntl) {
-		intel_de_write_fw(dev_priv, CURCNTR(dev_priv, PIPE_A), 0);
-		intel_de_write_fw(dev_priv, CURBASE(dev_priv, PIPE_A), base);
-		intel_de_write_fw(dev_priv, CURSIZE(dev_priv, PIPE_A), size);
-		intel_de_write_fw(dev_priv, CURPOS(dev_priv, PIPE_A), pos);
-		intel_de_write_fw(dev_priv, CURCNTR(dev_priv, PIPE_A), cntl);
+		intel_de_write_fw(display, CURCNTR(display, PIPE_A), 0);
+		intel_de_write_fw(display, CURBASE(display, PIPE_A), base);
+		intel_de_write_fw(display, CURSIZE(display, PIPE_A), size);
+		intel_de_write_fw(display, CURPOS(display, PIPE_A), pos);
+		intel_de_write_fw(display, CURCNTR(display, PIPE_A), cntl);
 
 		plane->cursor.base = base;
 		plane->cursor.size = size;
 		plane->cursor.cntl = cntl;
 	} else {
-		intel_de_write_fw(dev_priv, CURPOS(dev_priv, PIPE_A), pos);
+		intel_de_write_fw(display, CURPOS(display, PIPE_A), pos);
 	}
 }
 
@@ -326,29 +322,29 @@ static void i845_cursor_disable_arm(struct intel_dsb *dsb,
 static bool i845_cursor_get_hw_state(struct intel_plane *plane,
 				     enum pipe *pipe)
 {
-	struct drm_i915_private *dev_priv = to_i915(plane->base.dev);
+	struct intel_display *display = to_intel_display(plane);
 	enum intel_display_power_domain power_domain;
-	intel_wakeref_t wakeref;
+	struct ref_tracker *wakeref;
 	bool ret;
 
 	power_domain = POWER_DOMAIN_PIPE(PIPE_A);
-	wakeref = intel_display_power_get_if_enabled(dev_priv, power_domain);
+	wakeref = intel_display_power_get_if_enabled(display, power_domain);
 	if (!wakeref)
 		return false;
 
-	ret = intel_de_read(dev_priv, CURCNTR(dev_priv, PIPE_A)) & CURSOR_ENABLE;
+	ret = intel_de_read(display, CURCNTR(display, PIPE_A)) & CURSOR_ENABLE;
 
 	*pipe = PIPE_A;
 
-	intel_display_power_put(dev_priv, power_domain, wakeref);
+	intel_display_power_put(display, power_domain, wakeref);
 
 	return ret;
 }
 
 static unsigned int
 i9xx_cursor_max_stride(struct intel_plane *plane,
-		       u32 pixel_format, u64 modifier,
-		       unsigned int rotation)
+		       const struct drm_format_info *info,
+		       u64 modifier, unsigned int rotation)
 {
 	return plane->base.dev->mode_config.cursor_width * 4;
 }
@@ -372,16 +368,21 @@ static unsigned int i9xx_cursor_min_alignment(struct intel_plane *plane,
 					      const struct drm_framebuffer *fb,
 					      int color_plane)
 {
+	struct intel_display *display = to_intel_display(plane);
+
+	if (intel_scanout_needs_vtd_wa(display))
+		return 64 * 1024;
+
 	return 4 * 1024; /* physical for i915/i945 */
 }
 
 static u32 i9xx_cursor_ctl_crtc(const struct intel_crtc_state *crtc_state)
 {
+	struct intel_display *display = to_intel_display(crtc_state);
 	struct intel_crtc *crtc = to_intel_crtc(crtc_state->uapi.crtc);
-	struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
 	u32 cntl = 0;
 
-	if (DISPLAY_VER(dev_priv) >= 11)
+	if (DISPLAY_VER(display) >= 11)
 		return cntl;
 
 	if (crtc_state->gamma_enable)
@@ -390,20 +391,18 @@ static u32 i9xx_cursor_ctl_crtc(const struct intel_crtc_state *crtc_state)
 	if (crtc_state->csc_enable)
 		cntl |= MCURSOR_PIPE_CSC_ENABLE;
 
-	if (DISPLAY_VER(dev_priv) < 5 && !IS_G4X(dev_priv))
+	if (DISPLAY_VER(display) < 5 && !display->platform.g4x)
 		cntl |= MCURSOR_PIPE_SEL(crtc->pipe);
 
 	return cntl;
 }
 
-static u32 i9xx_cursor_ctl(const struct intel_crtc_state *crtc_state,
-			   const struct intel_plane_state *plane_state)
+static u32 i9xx_cursor_ctl(const struct intel_plane_state *plane_state)
 {
-	struct drm_i915_private *dev_priv =
-		to_i915(plane_state->uapi.plane->dev);
+	struct intel_display *display = to_intel_display(plane_state);
 	u32 cntl = 0;
 
-	if (IS_SANDYBRIDGE(dev_priv) || IS_IVYBRIDGE(dev_priv))
+	if (display->platform.sandybridge || display->platform.ivybridge)
 		cntl |= MCURSOR_TRICKLE_FEED_DISABLE;
 
 	switch (drm_rect_width(&plane_state->uapi.dst)) {
@@ -425,7 +424,7 @@ static u32 i9xx_cursor_ctl(const struct intel_crtc_state *crtc_state,
 		cntl |= MCURSOR_ROTATE_180;
 
 	/* Wa_22012358565:adl-p */
-	if (DISPLAY_VER(dev_priv) == 13)
+	if (intel_display_wa(display, INTEL_DISPLAY_WA_22012358565))
 		cntl |= MCURSOR_ARB_SLOTS(1);
 
 	return cntl;
@@ -433,8 +432,7 @@ static u32 i9xx_cursor_ctl(const struct intel_crtc_state *crtc_state,
 
 static bool i9xx_cursor_size_ok(const struct intel_plane_state *plane_state)
 {
-	struct drm_i915_private *dev_priv =
-		to_i915(plane_state->uapi.plane->dev);
+	struct intel_display *display = to_intel_display(plane_state);
 	int width = drm_rect_width(&plane_state->uapi.dst);
 	int height = drm_rect_height(&plane_state->uapi.dst);
 
@@ -457,7 +455,7 @@ static bool i9xx_cursor_size_ok(const struct intel_plane_state *plane_state)
 	 * cursor is not rotated. Everything else requires square
 	 * cursors.
 	 */
-	if (HAS_CUR_FBC(dev_priv) &&
+	if (HAS_CUR_FBC(display) &&
 	    plane_state->hw.rotation & DRM_MODE_ROTATE_0) {
 		if (height < 8 || height > width)
 			return false;
@@ -472,8 +470,8 @@ static bool i9xx_cursor_size_ok(const struct intel_plane_state *plane_state)
 static int i9xx_check_cursor(struct intel_crtc_state *crtc_state,
 			     struct intel_plane_state *plane_state)
 {
+	struct intel_display *display = to_intel_display(plane_state);
 	struct intel_plane *plane = to_intel_plane(plane_state->uapi.plane);
-	struct drm_i915_private *dev_priv = to_i915(plane->base.dev);
 	const struct drm_framebuffer *fb = plane_state->hw.fb;
 	enum pipe pipe = plane->pipe;
 	int ret;
@@ -488,22 +486,23 @@ static int i9xx_check_cursor(struct intel_crtc_state *crtc_state,
 
 	/* Check for which cursor types we support */
 	if (!i9xx_cursor_size_ok(plane_state)) {
-		drm_dbg(&dev_priv->drm,
-			"Cursor dimension %dx%d not supported\n",
-			drm_rect_width(&plane_state->uapi.dst),
-			drm_rect_height(&plane_state->uapi.dst));
+		drm_dbg_kms(display->drm,
+			    "[PLANE:%d:%s] cursor dimension %dx%d not supported\n",
+			    plane->base.base.id, plane->base.name,
+			    drm_rect_width(&plane_state->uapi.dst),
+			    drm_rect_height(&plane_state->uapi.dst));
 		return -EINVAL;
 	}
 
-	drm_WARN_ON(&dev_priv->drm, plane_state->uapi.visible &&
+	drm_WARN_ON(display->drm, plane_state->uapi.visible &&
 		    plane_state->view.color_plane[0].mapping_stride != fb->pitches[0]);
 
 	if (fb->pitches[0] !=
 	    drm_rect_width(&plane_state->uapi.dst) * fb->format->cpp[0]) {
-		drm_dbg_kms(&dev_priv->drm,
-			    "Invalid cursor stride (%u) (cursor width %d)\n",
-			    fb->pitches[0],
-			    drm_rect_width(&plane_state->uapi.dst));
+		drm_dbg_kms(display->drm,
+			    "[PLANE:%d:%s] invalid cursor stride (%u) (cursor width %d)\n",
+			    plane->base.base.id, plane->base.name,
+			    fb->pitches[0], drm_rect_width(&plane_state->uapi.dst));
 		return -EINVAL;
 	}
 
@@ -517,14 +516,15 @@ static int i9xx_check_cursor(struct intel_crtc_state *crtc_state,
 	 * display power well must be turned off and on again.
 	 * Refuse the put the cursor into that compromised position.
 	 */
-	if (IS_CHERRYVIEW(dev_priv) && pipe == PIPE_C &&
+	if (display->platform.cherryview && pipe == PIPE_C &&
 	    plane_state->uapi.visible && plane_state->uapi.dst.x1 < 0) {
-		drm_dbg_kms(&dev_priv->drm,
-			    "CHV cursor C not allowed to straddle the left screen edge\n");
+		drm_dbg_kms(display->drm,
+			    "[PLANE:%d:%s] cursor not allowed to straddle the left screen edge\n",
+			    plane->base.base.id, plane->base.name);
 		return -EINVAL;
 	}
 
-	plane_state->ctl = i9xx_cursor_ctl(crtc_state, plane_state);
+	plane_state->ctl = i9xx_cursor_ctl(plane_state);
 
 	return 0;
 }
@@ -533,7 +533,7 @@ static void i9xx_cursor_disable_sel_fetch_arm(struct intel_dsb *dsb,
 					      struct intel_plane *plane,
 					      const struct intel_crtc_state *crtc_state)
 {
-	struct intel_display *display = to_intel_display(plane->base.dev);
+	struct intel_display *display = to_intel_display(plane);
 	enum pipe pipe = plane->pipe;
 
 	if (!crtc_state->enable_psr2_sel_fetch)
@@ -547,8 +547,7 @@ static void wa_16021440873(struct intel_dsb *dsb,
 			   const struct intel_crtc_state *crtc_state,
 			   const struct intel_plane_state *plane_state)
 {
-	struct intel_display *display = to_intel_display(plane->base.dev);
-	struct drm_i915_private *dev_priv = to_i915(plane->base.dev);
+	struct intel_display *display = to_intel_display(plane);
 	u32 ctl = plane_state->ctl;
 	int et_y_position = drm_rect_height(&crtc_state->pipe_src) + 1;
 	enum pipe pipe = plane->pipe;
@@ -558,7 +557,7 @@ static void wa_16021440873(struct intel_dsb *dsb,
 
 	intel_de_write_dsb(display, dsb, SEL_FETCH_CUR_CTL(pipe), ctl);
 
-	intel_de_write_dsb(display, dsb, CURPOS_ERLY_TPT(dev_priv, pipe),
+	intel_de_write_dsb(display, dsb, CURPOS_ERLY_TPT(display, pipe),
 			   CURSOR_POS_Y(et_y_position));
 }
 
@@ -567,8 +566,7 @@ static void i9xx_cursor_update_sel_fetch_arm(struct intel_dsb *dsb,
 					     const struct intel_crtc_state *crtc_state,
 					     const struct intel_plane_state *plane_state)
 {
-	struct intel_display *display = to_intel_display(plane->base.dev);
-	struct drm_i915_private *dev_priv = to_i915(plane->base.dev);
+	struct intel_display *display = to_intel_display(plane);
 	enum pipe pipe = plane->pipe;
 
 	if (!crtc_state->enable_psr2_sel_fetch)
@@ -579,7 +577,7 @@ static void i9xx_cursor_update_sel_fetch_arm(struct intel_dsb *dsb,
 			u32 val = intel_cursor_position(crtc_state, plane_state,
 				true);
 
-			intel_de_write_dsb(display, dsb, CURPOS_ERLY_TPT(dev_priv, pipe), val);
+			intel_de_write_dsb(display, dsb, CURPOS_ERLY_TPT(display, pipe), val);
 		}
 
 		intel_de_write_dsb(display, dsb, SEL_FETCH_CUR_CTL(pipe), plane_state->ctl);
@@ -653,8 +651,7 @@ static void i9xx_cursor_update_arm(struct intel_dsb *dsb,
 				   const struct intel_crtc_state *crtc_state,
 				   const struct intel_plane_state *plane_state)
 {
-	struct intel_display *display = to_intel_display(plane->base.dev);
-	struct drm_i915_private *dev_priv = to_i915(plane->base.dev);
+	struct intel_display *display = to_intel_display(plane);
 	enum pipe pipe = plane->pipe;
 	u32 cntl = 0, base = 0, pos = 0, fbc_ctl = 0;
 
@@ -665,10 +662,10 @@ static void i9xx_cursor_update_arm(struct intel_dsb *dsb,
 		cntl = plane_state->ctl |
 			i9xx_cursor_ctl_crtc(crtc_state);
 
-		if (width != height)
+		if (DISPLAY_VER(display) < 14 && width != height)
 			fbc_ctl = CUR_FBC_EN | CUR_FBC_HEIGHT(height - 1);
 
-		base = intel_cursor_base(plane_state);
+		base = plane_state->surf;
 		pos = intel_cursor_position(crtc_state, plane_state, false);
 	}
 
@@ -680,7 +677,7 @@ static void i9xx_cursor_update_arm(struct intel_dsb *dsb,
 	 * CURPOS.
 	 *
 	 * On other platforms CURPOS always requires the
-	 * CURBASE write to arm the update. Additonally
+	 * CURBASE write to arm the update. Additionally
 	 * a write to any of the cursor register will cancel
 	 * an already armed cursor update. Thus leaving out
 	 * the CURBASE write after CURPOS could lead to a
@@ -692,7 +689,7 @@ static void i9xx_cursor_update_arm(struct intel_dsb *dsb,
 	 * the CURCNTR write arms the update.
 	 */
 
-	if (DISPLAY_VER(dev_priv) >= 9)
+	if (DISPLAY_VER(display) >= 9)
 		skl_write_cursor_wm(dsb, plane, crtc_state);
 
 	if (plane_state)
@@ -703,18 +700,18 @@ static void i9xx_cursor_update_arm(struct intel_dsb *dsb,
 	if (plane->cursor.base != base ||
 	    plane->cursor.size != fbc_ctl ||
 	    plane->cursor.cntl != cntl) {
-		if (HAS_CUR_FBC(dev_priv))
-			intel_de_write_dsb(display, dsb, CUR_FBC_CTL(dev_priv, pipe), fbc_ctl);
-		intel_de_write_dsb(display, dsb, CURCNTR(dev_priv, pipe), cntl);
-		intel_de_write_dsb(display, dsb, CURPOS(dev_priv, pipe), pos);
-		intel_de_write_dsb(display, dsb, CURBASE(dev_priv, pipe), base);
+		if (HAS_CUR_FBC(display))
+			intel_de_write_dsb(display, dsb, CUR_FBC_CTL(display, pipe), fbc_ctl);
+		intel_de_write_dsb(display, dsb, CURCNTR(display, pipe), cntl);
+		intel_de_write_dsb(display, dsb, CURPOS(display, pipe), pos);
+		intel_de_write_dsb(display, dsb, CURBASE(display, pipe), base);
 
 		plane->cursor.base = base;
 		plane->cursor.size = fbc_ctl;
 		plane->cursor.cntl = cntl;
 	} else {
-		intel_de_write_dsb(display, dsb, CURPOS(dev_priv, pipe), pos);
-		intel_de_write_dsb(display, dsb, CURBASE(dev_priv, pipe), base);
+		intel_de_write_dsb(display, dsb, CURPOS(display, pipe), pos);
+		intel_de_write_dsb(display, dsb, CURBASE(display, pipe), base);
 	}
 }
 
@@ -728,9 +725,9 @@ static void i9xx_cursor_disable_arm(struct intel_dsb *dsb,
 static bool i9xx_cursor_get_hw_state(struct intel_plane *plane,
 				     enum pipe *pipe)
 {
-	struct drm_i915_private *dev_priv = to_i915(plane->base.dev);
+	struct intel_display *display = to_intel_display(plane);
 	enum intel_display_power_domain power_domain;
-	intel_wakeref_t wakeref;
+	struct ref_tracker *wakeref;
 	bool ret;
 	u32 val;
 
@@ -740,22 +737,43 @@ static bool i9xx_cursor_get_hw_state(struct intel_plane *plane,
 	 * display power wells.
 	 */
 	power_domain = POWER_DOMAIN_PIPE(plane->pipe);
-	wakeref = intel_display_power_get_if_enabled(dev_priv, power_domain);
+	wakeref = intel_display_power_get_if_enabled(display, power_domain);
 	if (!wakeref)
 		return false;
 
-	val = intel_de_read(dev_priv, CURCNTR(dev_priv, plane->pipe));
+	val = intel_de_read(display, CURCNTR(display, plane->pipe));
 
 	ret = val & MCURSOR_MODE_MASK;
 
-	if (DISPLAY_VER(dev_priv) >= 5 || IS_G4X(dev_priv))
+	if (DISPLAY_VER(display) >= 5 || display->platform.g4x)
 		*pipe = plane->pipe;
 	else
 		*pipe = REG_FIELD_GET(MCURSOR_PIPE_SEL_MASK, val);
 
-	intel_display_power_put(dev_priv, power_domain, wakeref);
+	intel_display_power_put(display, power_domain, wakeref);
 
 	return ret;
+}
+
+static void g4x_cursor_capture_error(struct intel_crtc *crtc,
+				     struct intel_plane *plane,
+				     struct intel_plane_error *error)
+{
+	struct intel_display *display = to_intel_display(plane);
+
+	error->ctl = intel_de_read(display, CURCNTR(display, crtc->pipe));
+	error->surf = intel_de_read(display, CURBASE(display, crtc->pipe));
+	error->surflive = intel_de_read(display, CURSURFLIVE(display, crtc->pipe));
+}
+
+static void i9xx_cursor_capture_error(struct intel_crtc *crtc,
+				      struct intel_plane *plane,
+				      struct intel_plane_error *error)
+{
+	struct intel_display *display = to_intel_display(plane);
+
+	error->ctl = intel_de_read(display, CURCNTR(display, crtc->pipe));
+	error->surf = intel_de_read(display, CURBASE(display, crtc->pipe));
 }
 
 static bool intel_cursor_format_mod_supported(struct drm_plane *_plane,
@@ -790,7 +808,7 @@ intel_legacy_cursor_update(struct drm_plane *_plane,
 {
 	struct intel_plane *plane = to_intel_plane(_plane);
 	struct intel_crtc *crtc = to_intel_crtc(_crtc);
-	struct drm_i915_private *i915 = to_i915(plane->base.dev);
+	struct intel_display *display = to_intel_display(plane);
 	struct intel_plane_state *old_plane_state =
 		to_intel_plane_state(plane->base.state);
 	struct intel_plane_state *new_plane_state;
@@ -865,7 +883,7 @@ intel_legacy_cursor_update(struct drm_plane *_plane,
 	if (ret)
 		goto out_free;
 
-	ret = intel_plane_pin_fb(new_plane_state);
+	ret = intel_plane_pin_fb(new_plane_state, old_plane_state);
 	if (ret)
 		goto out_free;
 
@@ -894,7 +912,7 @@ intel_legacy_cursor_update(struct drm_plane *_plane,
 
 	intel_psr_lock(crtc_state);
 
-	if (!drm_WARN_ON(&i915->drm, drm_crtc_vblank_get(&crtc->base))) {
+	if (!drm_WARN_ON(display->drm, drm_crtc_vblank_get(&crtc->base))) {
 		/*
 		 * TODO: maybe check if we're still in PSR
 		 * and skip the vblank evasion entirely?
@@ -956,12 +974,13 @@ static const struct drm_plane_funcs intel_cursor_plane_funcs = {
 	.atomic_duplicate_state = intel_plane_duplicate_state,
 	.atomic_destroy_state = intel_plane_destroy_state,
 	.format_mod_supported = intel_cursor_format_mod_supported,
+	.format_mod_supported_async = intel_plane_format_mod_supported_async,
 };
 
 static void intel_cursor_add_size_hints_property(struct intel_plane *plane)
 {
-	struct drm_i915_private *i915 = to_i915(plane->base.dev);
-	const struct drm_mode_config *config = &i915->drm.mode_config;
+	struct intel_display *display = to_intel_display(plane);
+	const struct drm_mode_config *config = &display->drm->mode_config;
 	struct drm_plane_size_hint hints[4];
 	int size, max_size, num_hints = 0;
 
@@ -969,7 +988,7 @@ static void intel_cursor_add_size_hints_property(struct intel_plane *plane)
 
 	/* for simplicity only enumerate the supported square+POT sizes */
 	for (size = 64; size <= max_size; size *= 2) {
-		if (drm_WARN_ON(&i915->drm, num_hints >= ARRAY_SIZE(hints)))
+		if (drm_WARN_ON(display->drm, num_hints >= ARRAY_SIZE(hints)))
 			break;
 
 		hints[num_hints].width = size;
@@ -981,7 +1000,7 @@ static void intel_cursor_add_size_hints_property(struct intel_plane *plane)
 }
 
 struct intel_plane *
-intel_cursor_plane_create(struct drm_i915_private *dev_priv,
+intel_cursor_plane_create(struct intel_display *display,
 			  enum pipe pipe)
 {
 	struct intel_plane *cursor;
@@ -997,7 +1016,7 @@ intel_cursor_plane_create(struct drm_i915_private *dev_priv,
 	cursor->id = PLANE_CURSOR;
 	cursor->frontbuffer_bit = INTEL_FRONTBUFFER(pipe, cursor->id);
 
-	if (IS_I845G(dev_priv) || IS_I865G(dev_priv)) {
+	if (display->platform.i845g || display->platform.i865g) {
 		cursor->max_stride = i845_cursor_max_stride;
 		cursor->min_alignment = i845_cursor_min_alignment;
 		cursor->update_arm = i845_cursor_update_arm;
@@ -1007,12 +1026,15 @@ intel_cursor_plane_create(struct drm_i915_private *dev_priv,
 	} else {
 		cursor->max_stride = i9xx_cursor_max_stride;
 
-		if (IS_I830(dev_priv))
+		if (display->platform.i830)
 			cursor->min_alignment = i830_cursor_min_alignment;
-		else if (IS_I85X(dev_priv))
+		else if (display->platform.i85x)
 			cursor->min_alignment = i85x_cursor_min_alignment;
 		else
 			cursor->min_alignment = i9xx_cursor_min_alignment;
+
+		if (intel_scanout_needs_vtd_wa(display))
+			cursor->vtd_guard = 2;
 
 		cursor->update_arm = i9xx_cursor_update_arm;
 		cursor->disable_arm = i9xx_cursor_disable_arm;
@@ -1020,15 +1042,22 @@ intel_cursor_plane_create(struct drm_i915_private *dev_priv,
 		cursor->check_plane = i9xx_check_cursor;
 	}
 
+	cursor->surf_offset = intel_cursor_surf_offset;
+
+	if (DISPLAY_VER(display) >= 5 || display->platform.g4x)
+		cursor->capture_error = g4x_cursor_capture_error;
+	else
+		cursor->capture_error = i9xx_cursor_capture_error;
+
 	cursor->cursor.base = ~0;
 	cursor->cursor.cntl = ~0;
 
-	if (IS_I845G(dev_priv) || IS_I865G(dev_priv) || HAS_CUR_FBC(dev_priv))
+	if (display->platform.i845g || display->platform.i865g || HAS_CUR_FBC(display))
 		cursor->cursor.size = ~0;
 
-	modifiers = intel_fb_plane_get_modifiers(dev_priv, INTEL_PLANE_CAP_NONE);
+	modifiers = intel_fb_plane_get_modifiers(display, INTEL_PLANE_CAP_NONE);
 
-	ret = drm_universal_plane_init(&dev_priv->drm, &cursor->base,
+	ret = drm_universal_plane_init(display->drm, &cursor->base,
 				       0, &intel_cursor_plane_funcs,
 				       intel_cursor_formats,
 				       ARRAY_SIZE(intel_cursor_formats),
@@ -1041,7 +1070,7 @@ intel_cursor_plane_create(struct drm_i915_private *dev_priv,
 	if (ret)
 		goto fail;
 
-	if (DISPLAY_VER(dev_priv) >= 4)
+	if (DISPLAY_VER(display) >= 4)
 		drm_plane_create_rotation_property(&cursor->base,
 						   DRM_MODE_ROTATE_0,
 						   DRM_MODE_ROTATE_0 |
@@ -1049,10 +1078,10 @@ intel_cursor_plane_create(struct drm_i915_private *dev_priv,
 
 	intel_cursor_add_size_hints_property(cursor);
 
-	zpos = DISPLAY_RUNTIME_INFO(dev_priv)->num_sprites[pipe] + 1;
+	zpos = DISPLAY_RUNTIME_INFO(display)->num_sprites[pipe] + 1;
 	drm_plane_create_zpos_immutable_property(&cursor->base, zpos);
 
-	if (DISPLAY_VER(dev_priv) >= 12)
+	if (DISPLAY_VER(display) >= 12)
 		drm_plane_enable_fb_damage_clips(&cursor->base);
 
 	intel_plane_helper_add(cursor);
@@ -1063,4 +1092,24 @@ fail:
 	intel_plane_free(cursor);
 
 	return ERR_PTR(ret);
+}
+
+void intel_cursor_mode_config_init(struct intel_display *display)
+{
+	struct drm_mode_config *mode_config = &display->drm->mode_config;
+
+	if (display->platform.i845g) {
+		mode_config->cursor_width = 64;
+		mode_config->cursor_height = 1023;
+	} else if (display->platform.i865g) {
+		mode_config->cursor_width = 512;
+		mode_config->cursor_height = 1023;
+	} else if (display->platform.i830 || display->platform.i85x ||
+		   display->platform.i915g || display->platform.i915gm) {
+		mode_config->cursor_width = 64;
+		mode_config->cursor_height = 64;
+	} else {
+		mode_config->cursor_width = 256;
+		mode_config->cursor_height = 256;
+	}
 }

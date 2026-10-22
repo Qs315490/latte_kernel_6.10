@@ -88,7 +88,7 @@ static struct acp_card_drvdata sof_nau8821_max98388_data = {
 
 static int acp_sof_probe(struct platform_device *pdev)
 {
-	struct snd_soc_card *card = NULL;
+	struct snd_soc_card *card;
 	struct device *dev = &pdev->dev;
 	struct snd_soc_acpi_mach *mach = dev_get_platdata(&pdev->dev);
 	const struct dmi_system_id *dmi_id;
@@ -110,7 +110,7 @@ static int acp_sof_probe(struct platform_device *pdev)
 
 	acp_card_drvdata = card->drvdata;
 	dmi_id = dmi_first_match(acp_quirk_table);
-	if (dmi_id && dmi_id->driver_data)
+	if (dmi_id && dmi_id->driver_data == (void *)QUIRK_TDM_MODE_ENABLE)
 		acp_card_drvdata->tdm_mode = dmi_id->driver_data;
 
 	acp_card_drvdata->acp_rev = mach->mach_params.subsystem_rev;

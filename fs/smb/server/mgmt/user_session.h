@@ -19,6 +19,7 @@
 struct ksmbd_file_table;
 
 struct channel {
+	char			sess_key[CIFS_KEY_SIZE];
 	__u8			smb3signingkey[SMB3_SIGN_KEY_SIZE];
 	struct ksmbd_conn	*conn;
 };
@@ -41,7 +42,6 @@ struct ksmbd_session {
 
 	bool				sign;
 	bool				enc;
-	bool				is_anonymous;
 
 	int				state;
 	__u8				*Preauth_HashValue;
@@ -49,6 +49,7 @@ struct ksmbd_session {
 	char				sess_key[CIFS_KEY_SIZE];
 
 	struct hlist_node		hlist;
+	struct rw_semaphore		chann_lock;
 	struct xarray			ksmbd_chann_list;
 	struct xarray			tree_conns;
 	struct ida			tree_conn_ida;
@@ -60,9 +61,13 @@ struct ksmbd_session {
 
 	struct ksmbd_file_table		file_table;
 	unsigned long			last_active;
-	rwlock_t			tree_conns_lock;
+	struct rw_semaphore		tree_conns_lock;
 
+#ifdef CONFIG_PROC_FS
+	struct proc_dir_entry		*proc_entry;
+#endif
 	atomic_t			refcnt;
+	struct rw_semaphore		rpc_lock;
 };
 
 static inline int test_session_flag(struct ksmbd_session *sess, int bit)
@@ -87,6 +92,8 @@ void ksmbd_session_destroy(struct ksmbd_session *sess);
 struct ksmbd_session *ksmbd_session_lookup_slowpath(unsigned long long id);
 struct ksmbd_session *ksmbd_session_lookup(struct ksmbd_conn *conn,
 					   unsigned long long id);
+bool is_ksmbd_session_in_connection(struct ksmbd_conn *conn,
+				     unsigned long long id);
 int ksmbd_session_register(struct ksmbd_conn *conn,
 			   struct ksmbd_session *sess);
 void ksmbd_sessions_deregister(struct ksmbd_conn *conn);
@@ -108,4 +115,5 @@ void ksmbd_session_rpc_close(struct ksmbd_session *sess, int id);
 int ksmbd_session_rpc_method(struct ksmbd_session *sess, int id);
 void ksmbd_user_session_get(struct ksmbd_session *sess);
 void ksmbd_user_session_put(struct ksmbd_session *sess);
+int create_proc_sessions(void);
 #endif /* __USER_SESSION_MANAGEMENT_H__ */

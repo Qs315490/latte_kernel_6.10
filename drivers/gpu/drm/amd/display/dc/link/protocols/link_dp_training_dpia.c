@@ -110,6 +110,7 @@ static enum link_training_result dpia_configure_link(
 
 	dp_decide_training_settings(
 		link,
+		link_res,
 		link_setting,
 		lt_settings);
 
@@ -129,11 +130,14 @@ static enum link_training_result dpia_configure_link(
 	if (status != DC_OK && link->is_hpd_pending)
 		return LINK_TRAINING_ABORT;
 
-	if (link->preferred_training_settings.fec_enable != NULL)
-		fec_enable = *link->preferred_training_settings.fec_enable;
-	else
-		fec_enable = true;
-	status = dp_set_fec_ready(link, link_res, fec_enable);
+	if (link_dp_get_encoding_format(link_setting) == DP_8b_10b_ENCODING) {
+		if (link->preferred_training_settings.fec_enable != NULL)
+			fec_enable = *link->preferred_training_settings.fec_enable;
+		else
+			fec_enable = true;
+		status = dp_set_fec_ready(link, link_res, fec_enable);
+	}
+
 	if (status != DC_OK && link->is_hpd_pending)
 		return LINK_TRAINING_ABORT;
 
@@ -168,6 +172,7 @@ static uint8_t dpia_build_set_config_data(
 		struct dc_link *link,
 		struct link_training_settings *lt_settings)
 {
+	(void)link;
 	union dpia_set_config_data data;
 
 	data.raw = 0;
@@ -286,6 +291,7 @@ static enum link_training_result dpia_training_cr_non_transparent(
 		struct link_training_settings *lt_settings,
 		uint32_t hop)
 {
+	(void)link_res;
 	enum link_training_result result = LINK_TRAINING_CR_FAIL_LANE0;
 	uint8_t repeater_cnt = 0; /* Number of hops/repeaters in display path. */
 	enum dc_status status = DC_ERROR_UNEXPECTED;
@@ -453,6 +459,7 @@ static enum link_training_result dpia_training_cr_transparent(
 		const struct link_resource *link_res,
 		struct link_training_settings *lt_settings)
 {
+	(void)link_res;
 	enum link_training_result result = LINK_TRAINING_CR_FAIL_LANE0;
 	enum dc_status status;
 	uint32_t retries_cr = 0; /* Number of consecutive attempts with same VS or PE. */
@@ -581,6 +588,7 @@ static enum link_training_result dpia_training_eq_non_transparent(
 		struct link_training_settings *lt_settings,
 		uint32_t hop)
 {
+	(void)link_res;
 	enum link_training_result result = LINK_TRAINING_EQ_FAIL_EQ;
 	uint8_t repeater_cnt = 0; /* Number of hops/repeaters in display path. */
 	uint32_t retries_eq = 0;
@@ -726,6 +734,7 @@ static enum link_training_result dpia_training_eq_transparent(
 		const struct link_resource *link_res,
 		struct link_training_settings *lt_settings)
 {
+	(void)link_res;
 	enum link_training_result result = LINK_TRAINING_EQ_FAIL_EQ;
 	uint32_t retries_eq = 0;
 	enum dc_status status;
@@ -987,6 +996,7 @@ enum link_training_result dpia_perform_link_training(
 	const struct dc_link_settings *link_setting,
 	bool skip_video_pattern)
 {
+	(void)skip_video_pattern;
 	enum link_training_result result;
 	struct link_training_settings lt_settings = {0};
 	uint8_t repeater_cnt = 0; /* Number of hops/repeaters in display path. */

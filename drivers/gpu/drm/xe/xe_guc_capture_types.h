@@ -3,8 +3,8 @@
  * Copyright © 2021-2024 Intel Corporation
  */
 
-#ifndef _XE_GUC_CAPTURE_TYPES_H
-#define _XE_GUC_CAPTURE_TYPES_H
+#ifndef _XE_GUC_CAPTURE_TYPES_H_
+#define _XE_GUC_CAPTURE_TYPES_H_
 
 #include <linux/types.h>
 #include "regs/xe_reg_defs.h"
@@ -32,13 +32,15 @@ struct __guc_mmio_reg_descr {
 	/**
 	 * @data_type: data type of the register
 	 * Could be 32 bit, low or hi dword of a 64 bit, see enum
-	 * register_data_type
+	 * capture_register_data_type
 	 */
 	enum capture_register_data_type data_type;
 	/** @flags: Flags for the register */
 	u32 flags;
 	/** @mask: The mask to apply */
 	u32 mask;
+	/** @dss_id: Cached index for steered registers */
+	u32 dss_id;
 	/** @regname: Name of the register */
 	const char *regname;
 };

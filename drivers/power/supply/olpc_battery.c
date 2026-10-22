@@ -7,7 +7,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/types.h>
 #include <linux/err.h>
 #include <linux/device.h>
@@ -553,7 +552,7 @@ static const struct bin_attribute olpc_bat_eeprom = {
 		.mode = S_IRUGO,
 	},
 	.size = EEPROM_SIZE,
-	.read_new = olpc_bat_eeprom_read,
+	.read = olpc_bat_eeprom_read,
 };
 
 /* Allow userspace to see the specific error value pulled from the EC */
@@ -591,7 +590,7 @@ static const struct bin_attribute *const olpc_bat_sysfs_bin_attrs[] = {
 
 static const struct attribute_group olpc_bat_sysfs_group = {
 	.attrs = olpc_bat_sysfs_attrs,
-	.bin_attrs_new = olpc_bat_sysfs_bin_attrs,
+	.bin_attrs = olpc_bat_sysfs_bin_attrs,
 };
 
 static const struct attribute_group *olpc_bat_sysfs_groups[] = {
@@ -674,7 +673,7 @@ static int olpc_battery_probe(struct platform_device *pdev)
 
 	/* Ignore the status. It doesn't actually matter */
 
-	ac_psy_cfg.of_node = pdev->dev.of_node;
+	ac_psy_cfg.fwnode = dev_fwnode(&pdev->dev);
 	ac_psy_cfg.drv_data = data;
 
 	data->olpc_ac = devm_power_supply_register(&pdev->dev, &olpc_ac_desc,
@@ -692,7 +691,7 @@ static int olpc_battery_probe(struct platform_device *pdev)
 		olpc_bat_desc.num_properties = ARRAY_SIZE(olpc_xo1_bat_props);
 	}
 
-	bat_psy_cfg.of_node = pdev->dev.of_node;
+	bat_psy_cfg.fwnode = dev_fwnode(&pdev->dev);
 	bat_psy_cfg.drv_data = data;
 	bat_psy_cfg.attr_grp = olpc_bat_sysfs_groups;
 

@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
-#include "../kselftest.h"
+#include "kselftest.h"
 #include "cgroup_util.h"
 
 #define ADDR ((void *)(0x0UL))
@@ -216,6 +216,14 @@ int main(int argc, char **argv)
 
 	if (cg_find_unified_root(root, sizeof(root), NULL))
 		ksft_exit_skip("cgroup v2 isn't mounted\n");
+
+	if (cg_read_strstr(root, "cgroup.controllers", "memory"))
+		ksft_exit_skip("memory controller isn't available\n");
+
+	if (cg_read_strstr(root, "cgroup.subtree_control", "memory")) {
+		if (cg_write(root, "cgroup.subtree_control", "+memory"))
+			ksft_exit_skip("Failed to set memory controller\n");
+	}
 
 	switch (test_hugetlb_memcg(root)) {
 	case KSFT_PASS:

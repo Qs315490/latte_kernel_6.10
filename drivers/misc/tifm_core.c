@@ -31,7 +31,7 @@ static const char *tifm_media_type_name(unsigned char type, unsigned char nt)
 	return card_type_name[nt][type - 1];
 }
 
-static int tifm_dev_match(struct tifm_dev *sock, struct tifm_device_id *id)
+static int tifm_dev_match(struct tifm_dev *sock, const struct tifm_device_id *id)
 {
 	if (sock->type == id->type)
 		return 1;
@@ -43,7 +43,7 @@ static int tifm_bus_match(struct device *dev, const struct device_driver *drv)
 	struct tifm_dev *sock = container_of(dev, struct tifm_dev, dev);
 	const struct tifm_driver *fm_drv = container_of_const(drv, struct tifm_driver,
 							      driver);
-	struct tifm_device_id *ids = fm_drv->id_table;
+	const struct tifm_device_id *ids = fm_drv->id_table;
 
 	if (ids) {
 		while (ids->type) {
@@ -176,7 +176,7 @@ struct tifm_adapter *tifm_alloc_adapter(unsigned int num_sockets,
 {
 	struct tifm_adapter *fm;
 
-	fm = kzalloc(struct_size(fm, sockets, num_sockets), GFP_KERNEL);
+	fm = kzalloc_flex(*fm, sockets, num_sockets);
 	if (fm) {
 		fm->dev.class = &tifm_adapter_class;
 		fm->dev.parent = dev;
@@ -252,7 +252,7 @@ struct tifm_dev *tifm_alloc_device(struct tifm_adapter *fm, unsigned int id,
 	if (!tifm_media_type_name(type, 0))
 		return sock;
 
-	sock = kzalloc(sizeof(struct tifm_dev), GFP_KERNEL);
+	sock = kzalloc_obj(struct tifm_dev);
 	if (sock) {
 		spin_lock_init(&sock->lock);
 		sock->type = type;

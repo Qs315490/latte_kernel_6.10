@@ -27,6 +27,7 @@
 #include <linux/export.h>
 #include <linux/rwsem.h>
 #include <linux/atomic.h>
+#include <linux/hung_task.h>
 #include <trace/events/lock.h>
 
 #ifndef CONFIG_PREEMPT_RT
@@ -71,7 +72,7 @@
 		#c, atomic_long_read(&(sem)->count),		\
 		(unsigned long) sem->magic,			\
 		atomic_long_read(&(sem)->owner), (long)current,	\
-		list_empty(&(sem)->wait_list) ? "" : "not "))	\
+		rwsem_is_contended(sem) ? "" : "not "))		\
 			debug_locks_off();			\
 	} while (0)
 #else
@@ -181,11 +182,11 @@ static inline void rwsem_set_reader_owned(struct rw_semaphore *sem)
 	__rwsem_set_reader_owned(sem, current);
 }
 
-#ifdef CONFIG_DEBUG_RWSEMS
+#if defined(CONFIG_DEBUG_RWSEMS) || defined(CONFIG_DETECT_HUNG_TASK_BLOCKER)
 /*
  * Return just the real task structure pointer of the owner
  */
-static inline struct task_struct *rwsem_owner(struct rw_semaphore *sem)
+struct task_struct *rwsem_owner(struct rw_semaphore *sem)
 {
 	return (struct task_struct *)
 		(atomic_long_read(&sem->owner) & ~RWSEM_OWNER_FLAGS_MASK);
@@ -194,7 +195,7 @@ static inline struct task_struct *rwsem_owner(struct rw_semaphore *sem)
 /*
  * Return true if the rwsem is owned by a reader.
  */
-static inline bool is_rwsem_reader_owned(struct rw_semaphore *sem)
+bool is_rwsem_reader_owned(struct rw_semaphore *sem)
 {
 	/*
 	 * Check the count to see if it is write-locked.
@@ -207,10 +208,10 @@ static inline bool is_rwsem_reader_owned(struct rw_semaphore *sem)
 }
 
 /*
- * With CONFIG_DEBUG_RWSEMS configured, it will make sure that if there
- * is a task pointer in owner of a reader-owned rwsem, it will be the
- * real owner or one of the real owners. The only exception is when the
- * unlock is done by up_read_non_owner().
+ * With CONFIG_DEBUG_RWSEMS or CONFIG_DETECT_HUNG_TASK_BLOCKER configured,
+ * it will make sure that the owner field of a reader-owned rwsem either
+ * points to a real reader-owner(s) or gets cleared. The only exception is
+ * when the unlock is done by up_read_non_owner().
  */
 static inline void rwsem_clear_reader_owned(struct rw_semaphore *sem)
 {
@@ -319,9 +320,10 @@ void __init_rwsem(struct rw_semaphore *sem, const char *name,
 	sem->magic = sem;
 #endif
 	atomic_long_set(&sem->count, RWSEM_UNLOCKED_VALUE);
-	raw_spin_lock_init(&sem->wait_lock);
-	INIT_LIST_HEAD(&sem->wait_list);
 	atomic_long_set(&sem->owner, 0L);
+	scoped_guard (raw_spinlock_init, &sem->wait_lock) {
+		sem->first_waiter = NULL;
+	}
 #ifdef CONFIG_RWSEM_SPIN_ON_OWNER
 	osq_lock_init(&sem->osq);
 #endif
@@ -340,8 +342,6 @@ struct rwsem_waiter {
 	unsigned long timeout;
 	bool handoff_set;
 };
-#define rwsem_first_waiter(sem) \
-	list_first_entry(&sem->wait_list, struct rwsem_waiter, list)
 
 enum rwsem_wake_type {
 	RWSEM_WAKE_ANY,		/* Wake whatever's at head of wait list */
@@ -364,12 +364,22 @@ enum rwsem_wake_type {
  */
 #define MAX_READERS_WAKEUP	0x100
 
-static inline void
-rwsem_add_waiter(struct rw_semaphore *sem, struct rwsem_waiter *waiter)
+static inline
+bool __rwsem_del_waiter(struct rw_semaphore *sem, struct rwsem_waiter *waiter)
+	__must_hold(&sem->wait_lock)
 {
-	lockdep_assert_held(&sem->wait_lock);
-	list_add_tail(&waiter->list, &sem->wait_list);
-	/* caller will set RWSEM_FLAG_WAITERS */
+	if (list_empty(&waiter->list)) {
+		sem->first_waiter = NULL;
+		return false;
+	}
+
+	if (sem->first_waiter == waiter) {
+		sem->first_waiter = list_first_entry(&waiter->list,
+						     struct rwsem_waiter, list);
+	}
+	list_del(&waiter->list);
+
+	return true;
 }
 
 /*
@@ -384,12 +394,22 @@ static inline bool
 rwsem_del_waiter(struct rw_semaphore *sem, struct rwsem_waiter *waiter)
 {
 	lockdep_assert_held(&sem->wait_lock);
-	list_del(&waiter->list);
-	if (likely(!list_empty(&sem->wait_list)))
+	if (__rwsem_del_waiter(sem, waiter))
 		return true;
-
 	atomic_long_andnot(RWSEM_FLAG_HANDOFF | RWSEM_FLAG_WAITERS, &sem->count);
 	return false;
+}
+
+static inline
+struct rwsem_waiter *next_waiter(const struct rw_semaphore *sem,
+				 const struct rwsem_waiter *waiter)
+	__must_hold(&sem->wait_lock)
+{
+	struct rwsem_waiter *next = list_first_entry(&waiter->list,
+						     struct rwsem_waiter, list);
+	if (next == sem->first_waiter)
+		return NULL;
+	return next;
 }
 
 /*
@@ -410,7 +430,7 @@ static void rwsem_mark_wake(struct rw_semaphore *sem,
 			    enum rwsem_wake_type wake_type,
 			    struct wake_q_head *wake_q)
 {
-	struct rwsem_waiter *waiter, *tmp;
+	struct rwsem_waiter *waiter, *next;
 	long oldcount, woken = 0, adjustment = 0;
 	struct list_head wlist;
 
@@ -420,7 +440,7 @@ static void rwsem_mark_wake(struct rw_semaphore *sem,
 	 * Take a peek at the queue head waiter such that we can determine
 	 * the wakeup(s) to perform.
 	 */
-	waiter = rwsem_first_waiter(sem);
+	waiter = sem->first_waiter;
 
 	if (waiter->type == RWSEM_WAITING_FOR_WRITE) {
 		if (wake_type == RWSEM_WAKE_ANY) {
@@ -505,25 +525,28 @@ static void rwsem_mark_wake(struct rw_semaphore *sem,
 	 *    put them into wake_q to be woken up later.
 	 */
 	INIT_LIST_HEAD(&wlist);
-	list_for_each_entry_safe(waiter, tmp, &sem->wait_list, list) {
+	do {
+		next = next_waiter(sem, waiter);
 		if (waiter->type == RWSEM_WAITING_FOR_WRITE)
 			continue;
 
 		woken++;
 		list_move_tail(&waiter->list, &wlist);
+		if (sem->first_waiter == waiter)
+			sem->first_waiter = next;
 
 		/*
 		 * Limit # of readers that can be woken up per wakeup call.
 		 */
 		if (unlikely(woken >= MAX_READERS_WAKEUP))
 			break;
-	}
+	} while ((waiter = next) != NULL);
 
 	adjustment = woken * RWSEM_READER_BIAS - adjustment;
 	lockevent_cond_inc(rwsem_wake_reader, woken);
 
 	oldcount = atomic_long_read(&sem->count);
-	if (list_empty(&sem->wait_list)) {
+	if (!sem->first_waiter) {
 		/*
 		 * Combined with list_move_tail() above, this implies
 		 * rwsem_del_waiter().
@@ -544,7 +567,7 @@ static void rwsem_mark_wake(struct rw_semaphore *sem,
 		atomic_long_add(adjustment, &sem->count);
 
 	/* 2nd pass */
-	list_for_each_entry_safe(waiter, tmp, &wlist, list) {
+	list_for_each_entry_safe(waiter, next, &wlist, list) {
 		struct task_struct *tsk;
 
 		tsk = waiter->task;
@@ -576,7 +599,7 @@ rwsem_del_wake_waiter(struct rw_semaphore *sem, struct rwsem_waiter *waiter,
 		      struct wake_q_head *wake_q)
 		      __releases(&sem->wait_lock)
 {
-	bool first = rwsem_first_waiter(sem) == waiter;
+	bool first = sem->first_waiter == waiter;
 
 	wake_q_init(wake_q);
 
@@ -601,8 +624,9 @@ rwsem_del_wake_waiter(struct rw_semaphore *sem, struct rwsem_waiter *waiter,
  */
 static inline bool rwsem_try_write_lock(struct rw_semaphore *sem,
 					struct rwsem_waiter *waiter)
+	__must_hold(&sem->wait_lock)
 {
-	struct rwsem_waiter *first = rwsem_first_waiter(sem);
+	struct rwsem_waiter *first = sem->first_waiter;
 	long count, new;
 
 	lockdep_assert_held(&sem->wait_lock);
@@ -638,7 +662,7 @@ static inline bool rwsem_try_write_lock(struct rw_semaphore *sem,
 			new |= RWSEM_WRITER_LOCKED;
 			new &= ~RWSEM_FLAG_HANDOFF;
 
-			if (list_is_singular(&sem->wait_list))
+			if (list_empty(&first->list))
 				new &= ~RWSEM_FLAG_WAITERS;
 		}
 	} while (!atomic_long_try_cmpxchg_acquire(&sem->count, &count, new));
@@ -658,7 +682,8 @@ static inline bool rwsem_try_write_lock(struct rw_semaphore *sem,
 	 * Have rwsem_try_write_lock() fully imply rwsem_del_waiter() on
 	 * success.
 	 */
-	list_del(&waiter->list);
+	__rwsem_del_waiter(sem, waiter);
+
 	rwsem_set_owner(sem);
 	return true;
 }
@@ -726,8 +751,6 @@ static inline bool rwsem_can_spin_on_owner(struct rw_semaphore *sem)
 	lockevent_cond_inc(rwsem_opt_fail, !ret);
 	return ret;
 }
-
-#define OWNER_SPINNABLE		(OWNER_NULL | OWNER_WRITER | OWNER_READER)
 
 static inline enum owner_state
 rwsem_owner_state(struct task_struct *owner, unsigned long flags)
@@ -835,7 +858,7 @@ static bool rwsem_optimistic_spin(struct rw_semaphore *sem)
 		enum owner_state owner_state;
 
 		owner_state = rwsem_spin_on_owner(sem);
-		if (!(owner_state & OWNER_SPINNABLE))
+		if (owner_state == OWNER_NONSPINNABLE)
 			break;
 
 		/*
@@ -995,7 +1018,7 @@ rwsem_down_read_slowpath(struct rw_semaphore *sem, long count, unsigned int stat
 {
 	long adjustment = -RWSEM_READER_BIAS;
 	long rcnt = (count >> RWSEM_READER_SHIFT);
-	struct rwsem_waiter waiter;
+	struct rwsem_waiter waiter, *first;
 	DEFINE_WAKE_Q(wake_q);
 
 	/*
@@ -1020,7 +1043,7 @@ rwsem_down_read_slowpath(struct rw_semaphore *sem, long count, unsigned int stat
 		 */
 		if ((rcnt == 1) && (count & RWSEM_FLAG_WAITERS)) {
 			raw_spin_lock_irq(&sem->wait_lock);
-			if (!list_empty(&sem->wait_list))
+			if (sem->first_waiter)
 				rwsem_mark_wake(sem, RWSEM_WAKE_READ_OWNED,
 						&wake_q);
 			raw_spin_unlock_irq(&sem->wait_lock);
@@ -1036,7 +1059,8 @@ queue:
 	waiter.handoff_set = false;
 
 	raw_spin_lock_irq(&sem->wait_lock);
-	if (list_empty(&sem->wait_list)) {
+	first = sem->first_waiter;
+	if (!first) {
 		/*
 		 * In case the wait queue is empty and the lock isn't owned
 		 * by a writer, this reader can exit the slowpath and return
@@ -1052,8 +1076,11 @@ queue:
 			return sem;
 		}
 		adjustment += RWSEM_FLAG_WAITERS;
+		INIT_LIST_HEAD(&waiter.list);
+		sem->first_waiter = &waiter;
+	} else {
+		list_add_tail(&waiter.list, &first->list);
 	}
-	rwsem_add_waiter(sem, &waiter);
 
 	/* we're now waiting on the lock, but no longer actively locking */
 	count = atomic_long_add_return(adjustment, &sem->count);
@@ -1065,10 +1092,13 @@ queue:
 		wake_up_q(&wake_q);
 
 	trace_contention_begin(sem, LCB_F_READ);
+	set_current_state(state);
+
+	if (state == TASK_UNINTERRUPTIBLE)
+		hung_task_set_blocker(sem, BLOCKER_TYPE_RWSEM_READER);
 
 	/* wait to be given the lock */
 	for (;;) {
-		set_current_state(state);
 		if (!smp_load_acquire(&waiter.task)) {
 			/* Matches rwsem_mark_wake()'s smp_store_release(). */
 			break;
@@ -1083,7 +1113,11 @@ queue:
 		}
 		schedule_preempt_disabled();
 		lockevent_inc(rwsem_sleep_reader);
+		set_current_state(state);
 	}
+
+	if (state == TASK_UNINTERRUPTIBLE)
+		hung_task_clear_blocker();
 
 	__set_current_state(TASK_RUNNING);
 	lockevent_inc(rwsem_rlock);
@@ -1104,7 +1138,7 @@ out_nolock:
 static struct rw_semaphore __sched *
 rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 {
-	struct rwsem_waiter waiter;
+	struct rwsem_waiter waiter, *first;
 	DEFINE_WAKE_Q(wake_q);
 
 	/* do optimistic spinning and steal lock if possible */
@@ -1123,10 +1157,10 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 	waiter.handoff_set = false;
 
 	raw_spin_lock_irq(&sem->wait_lock);
-	rwsem_add_waiter(sem, &waiter);
 
-	/* we're now waiting on the lock */
-	if (rwsem_first_waiter(sem) != &waiter) {
+	first = sem->first_waiter;
+	if (first) {
+		list_add_tail(&waiter.list, &first->list);
 		rwsem_cond_wake_waiter(sem, atomic_long_read(&sem->count),
 				       &wake_q);
 		if (!wake_q_empty(&wake_q)) {
@@ -1139,12 +1173,17 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 			raw_spin_lock_irq(&sem->wait_lock);
 		}
 	} else {
+		INIT_LIST_HEAD(&waiter.list);
+		sem->first_waiter = &waiter;
 		atomic_long_or(RWSEM_FLAG_WAITERS, &sem->count);
 	}
 
 	/* wait until we successfully acquire the lock */
 	set_current_state(state);
 	trace_contention_begin(sem, LCB_F_WRITE);
+
+	if (state == TASK_UNINTERRUPTIBLE)
+		hung_task_set_blocker(sem, BLOCKER_TYPE_RWSEM_WRITER);
 
 	for (;;) {
 		if (rwsem_try_write_lock(sem, &waiter)) {
@@ -1179,6 +1218,10 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 trylock_again:
 		raw_spin_lock_irq(&sem->wait_lock);
 	}
+
+	if (state == TASK_UNINTERRUPTIBLE)
+		hung_task_clear_blocker();
+
 	__set_current_state(TASK_RUNNING);
 	raw_spin_unlock_irq(&sem->wait_lock);
 	lockevent_inc(rwsem_wlock);
@@ -1205,7 +1248,7 @@ static struct rw_semaphore *rwsem_wake(struct rw_semaphore *sem)
 
 	raw_spin_lock_irqsave(&sem->wait_lock, flags);
 
-	if (!list_empty(&sem->wait_list))
+	if (sem->first_waiter)
 		rwsem_mark_wake(sem, RWSEM_WAKE_ANY, &wake_q);
 
 	raw_spin_unlock_irqrestore(&sem->wait_lock, flags);
@@ -1226,7 +1269,7 @@ static struct rw_semaphore *rwsem_downgrade_wake(struct rw_semaphore *sem)
 
 	raw_spin_lock_irqsave(&sem->wait_lock, flags);
 
-	if (!list_empty(&sem->wait_list))
+	if (sem->first_waiter)
 		rwsem_mark_wake(sem, RWSEM_WAKE_READ_OWNED, &wake_q);
 
 	raw_spin_unlock_irqrestore(&sem->wait_lock, flags);
@@ -1344,6 +1387,8 @@ static inline void __up_read(struct rw_semaphore *sem)
 	rwsem_clear_reader_owned(sem);
 	tmp = atomic_long_add_return_release(-RWSEM_READER_BIAS, &sem->count);
 	DEBUG_RWSEMS_WARN_ON(tmp < 0, sem);
+	if (trace_contended_release_enabled() && (tmp & RWSEM_FLAG_WAITERS))
+		trace_call__contended_release(sem);
 	if (unlikely((tmp & (RWSEM_LOCK_MASK|RWSEM_FLAG_WAITERS)) ==
 		      RWSEM_FLAG_WAITERS)) {
 		clear_nonspinnable(sem);
@@ -1370,8 +1415,10 @@ static inline void __up_write(struct rw_semaphore *sem)
 	preempt_disable();
 	rwsem_clear_owner(sem);
 	tmp = atomic_long_fetch_add_release(-RWSEM_WRITER_LOCKED, &sem->count);
-	if (unlikely(tmp & RWSEM_FLAG_WAITERS))
+	if (unlikely(tmp & RWSEM_FLAG_WAITERS)) {
+		trace_contended_release(sem);
 		rwsem_wake(sem);
+	}
 	preempt_enable();
 }
 
@@ -1394,8 +1441,10 @@ static inline void __downgrade_write(struct rw_semaphore *sem)
 	tmp = atomic_long_fetch_add_release(
 		-RWSEM_WRITER_LOCKED+RWSEM_READER_BIAS, &sem->count);
 	rwsem_set_reader_owned(sem);
-	if (tmp & RWSEM_FLAG_WAITERS)
+	if (tmp & RWSEM_FLAG_WAITERS) {
+		trace_contended_release(sem);
 		rwsem_downgrade_wake(sem);
+	}
 	preempt_enable();
 }
 
@@ -1519,6 +1568,7 @@ static inline bool is_rwsem_reader_owned(struct rw_semaphore *sem)
  * lock for reading
  */
 void __sched down_read(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	might_sleep();
 	rwsem_acquire_read(&sem->dep_map, 0, 0, _RET_IP_);
@@ -1528,6 +1578,7 @@ void __sched down_read(struct rw_semaphore *sem)
 EXPORT_SYMBOL(down_read);
 
 int __sched down_read_interruptible(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	might_sleep();
 	rwsem_acquire_read(&sem->dep_map, 0, 0, _RET_IP_);
@@ -1542,6 +1593,7 @@ int __sched down_read_interruptible(struct rw_semaphore *sem)
 EXPORT_SYMBOL(down_read_interruptible);
 
 int __sched down_read_killable(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	might_sleep();
 	rwsem_acquire_read(&sem->dep_map, 0, 0, _RET_IP_);
@@ -1559,6 +1611,7 @@ EXPORT_SYMBOL(down_read_killable);
  * trylock for reading -- returns 1 if successful, 0 if contention
  */
 int down_read_trylock(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	int ret = __down_read_trylock(sem);
 
@@ -1572,6 +1625,7 @@ EXPORT_SYMBOL(down_read_trylock);
  * lock for writing
  */
 void __sched down_write(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	might_sleep();
 	rwsem_acquire(&sem->dep_map, 0, 0, _RET_IP_);
@@ -1583,6 +1637,7 @@ EXPORT_SYMBOL(down_write);
  * lock for writing
  */
 int __sched down_write_killable(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	might_sleep();
 	rwsem_acquire(&sem->dep_map, 0, 0, _RET_IP_);
@@ -1601,6 +1656,7 @@ EXPORT_SYMBOL(down_write_killable);
  * trylock for writing -- returns 1 if successful, 0 if contention
  */
 int down_write_trylock(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	int ret = __down_write_trylock(sem);
 
@@ -1615,6 +1671,7 @@ EXPORT_SYMBOL(down_write_trylock);
  * release a read lock
  */
 void up_read(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	rwsem_release(&sem->dep_map, _RET_IP_);
 	__up_read(sem);
@@ -1625,6 +1682,7 @@ EXPORT_SYMBOL(up_read);
  * release a write lock
  */
 void up_write(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	rwsem_release(&sem->dep_map, _RET_IP_);
 	__up_write(sem);
@@ -1635,6 +1693,7 @@ EXPORT_SYMBOL(up_write);
  * downgrade write lock to read lock
  */
 void downgrade_write(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	lock_downgrade(&sem->dep_map, _RET_IP_);
 	__downgrade_write(sem);
@@ -1644,6 +1703,7 @@ EXPORT_SYMBOL(downgrade_write);
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 
 void down_read_nested(struct rw_semaphore *sem, int subclass)
+	__no_context_analysis
 {
 	might_sleep();
 	rwsem_acquire_read(&sem->dep_map, subclass, 0, _RET_IP_);
@@ -1652,6 +1712,7 @@ void down_read_nested(struct rw_semaphore *sem, int subclass)
 EXPORT_SYMBOL(down_read_nested);
 
 int down_read_killable_nested(struct rw_semaphore *sem, int subclass)
+	__no_context_analysis
 {
 	might_sleep();
 	rwsem_acquire_read(&sem->dep_map, subclass, 0, _RET_IP_);
@@ -1666,6 +1727,7 @@ int down_read_killable_nested(struct rw_semaphore *sem, int subclass)
 EXPORT_SYMBOL(down_read_killable_nested);
 
 void _down_write_nest_lock(struct rw_semaphore *sem, struct lockdep_map *nest)
+	__no_context_analysis
 {
 	might_sleep();
 	rwsem_acquire_nest(&sem->dep_map, 0, 0, nest, _RET_IP_);
@@ -1674,6 +1736,7 @@ void _down_write_nest_lock(struct rw_semaphore *sem, struct lockdep_map *nest)
 EXPORT_SYMBOL(_down_write_nest_lock);
 
 void down_read_non_owner(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	might_sleep();
 	__down_read(sem);
@@ -1688,6 +1751,7 @@ void down_read_non_owner(struct rw_semaphore *sem)
 EXPORT_SYMBOL(down_read_non_owner);
 
 void down_write_nested(struct rw_semaphore *sem, int subclass)
+	__no_context_analysis
 {
 	might_sleep();
 	rwsem_acquire(&sem->dep_map, subclass, 0, _RET_IP_);
@@ -1696,6 +1760,7 @@ void down_write_nested(struct rw_semaphore *sem, int subclass)
 EXPORT_SYMBOL(down_write_nested);
 
 int __sched down_write_killable_nested(struct rw_semaphore *sem, int subclass)
+	__no_context_analysis
 {
 	might_sleep();
 	rwsem_acquire(&sem->dep_map, subclass, 0, _RET_IP_);
@@ -1711,6 +1776,7 @@ int __sched down_write_killable_nested(struct rw_semaphore *sem, int subclass)
 EXPORT_SYMBOL(down_write_killable_nested);
 
 void up_read_non_owner(struct rw_semaphore *sem)
+	__no_context_analysis
 {
 	DEBUG_RWSEMS_WARN_ON(!is_rwsem_reader_owned(sem), sem);
 	__up_read(sem);

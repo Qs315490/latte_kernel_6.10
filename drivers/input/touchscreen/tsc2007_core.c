@@ -23,7 +23,7 @@
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
+#include <linux/math64.h>
 #include <linux/property.h>
 #include <linux/platform_data/tsc2007.h>
 #include "tsc2007.h"
@@ -60,15 +60,13 @@ static void tsc2007_read_values(struct tsc2007 *tsc, struct ts_event *tc)
 
 	/* turn y+ off, x- on; we'll use formula #1 */
 	tc->z1 = tsc2007_xfer(tsc, READ_Z1);
-	tc->z2 = tsc2007_xfer(tsc, READ_Z2);
-
-	/* Prepare for next touch reading - power down ADC, enable PENIRQ */
-	tsc2007_xfer(tsc, PWRDOWN);
+	/* Read Z2 and power down ADC after A/D conversion, enable PENIRQ */
+	tc->z2 = tsc2007_xfer(tsc, (TSC2007_POWER_OFF_IRQ_EN | TSC2007_MEASURE_Z2));
 }
 
 u32 tsc2007_calculate_resistance(struct tsc2007 *tsc, struct ts_event *tc)
 {
-	u32 rt = 0;
+	u64 rt = 0;
 
 	/* range filtering */
 	if (tc->x == MAX_12BIT)
@@ -79,11 +77,13 @@ u32 tsc2007_calculate_resistance(struct tsc2007 *tsc, struct ts_event *tc)
 		rt = tc->z2 - tc->z1;
 		rt *= tc->x;
 		rt *= tsc->x_plate_ohms;
-		rt /= tc->z1;
+		rt = div_u64(rt, tc->z1);
 		rt = (rt + 2047) >> 12;
 	}
 
-	return rt;
+	if (rt > U32_MAX)
+		return U32_MAX;
+	return (u32) rt;
 }
 
 bool tsc2007_is_pen_down(struct tsc2007 *ts)
@@ -119,9 +119,10 @@ static irqreturn_t tsc2007_soft_irq(int irq, void *handle)
 
 		/* pen is down, continue with the measurement */
 
-		mutex_lock(&ts->mlock);
-		tsc2007_read_values(ts, &tc);
-		mutex_unlock(&ts->mlock);
+		/* Serialize access between the ISR and IIO reads. */
+		scoped_guard(mutex, &ts->mlock) {
+			tsc2007_read_values(ts, &tc);
+		}
 
 		rt = tsc2007_calculate_resistance(ts, &tc);
 
@@ -142,8 +143,7 @@ static irqreturn_t tsc2007_soft_irq(int irq, void *handle)
 			rt = ts->max_rt - rt;
 
 			input_report_key(input, BTN_TOUCH, 1);
-			input_report_abs(input, ABS_X, tc.x);
-			input_report_abs(input, ABS_Y, tc.y);
+			touchscreen_report_pos(input, &ts->prop, tc.x, tc.y, false);
 			input_report_abs(input, ABS_PRESSURE, rt);
 
 			input_sync(input);
@@ -178,7 +178,8 @@ static void tsc2007_stop(struct tsc2007 *ts)
 	mb();
 	wake_up(&ts->wait);
 
-	disable_irq(ts->irq);
+	if (ts->irq)
+		disable_irq(ts->irq);
 }
 
 static int tsc2007_open(struct input_dev *input_dev)
@@ -189,7 +190,8 @@ static int tsc2007_open(struct input_dev *input_dev)
 	ts->stopped = false;
 	mb();
 
-	enable_irq(ts->irq);
+	if (ts->irq)
+		enable_irq(ts->irq);
 
 	/* Prepare for touch readings - power down ADC and enable PENIRQ */
 	err = tsc2007_xfer(ts, PWRDOWN);
@@ -254,7 +256,7 @@ static int tsc2007_probe_properties(struct device *dev, struct tsc2007 *ts)
 	if (ts->gpiod)
 		ts->get_pendown_state = tsc2007_get_pendown_state_gpio;
 	else
-		dev_warn(dev, "Pen down GPIO is not specified in properties\n");
+		dev_dbg(dev, "Pen down GPIO is not specified in properties\n");
 
 	return 0;
 }
@@ -339,9 +341,9 @@ static int tsc2007_probe(struct i2c_client *client)
 	input_set_drvdata(input_dev, ts);
 
 	input_set_capability(input_dev, EV_KEY, BTN_TOUCH);
-
 	input_set_abs_params(input_dev, ABS_X, 0, MAX_12BIT, ts->fuzzx, 0);
 	input_set_abs_params(input_dev, ABS_Y, 0, MAX_12BIT, ts->fuzzy, 0);
+	touchscreen_parse_properties(input_dev, false, &ts->prop);
 	input_set_abs_params(input_dev, ABS_PRESSURE, 0, MAX_12BIT,
 			     ts->fuzzz, 0);
 
@@ -362,17 +364,19 @@ static int tsc2007_probe(struct i2c_client *client)
 			pdata->init_platform_hw();
 	}
 
-	err = devm_request_threaded_irq(&client->dev, ts->irq,
-					NULL, tsc2007_soft_irq,
-					IRQF_ONESHOT,
-					client->dev.driver->name, ts);
-	if (err) {
-		dev_err(&client->dev, "Failed to request irq %d: %d\n",
-			ts->irq, err);
-		return err;
-	}
+	if (ts->irq) {
+		err = devm_request_threaded_irq(&client->dev, ts->irq,
+						NULL, tsc2007_soft_irq,
+						IRQF_ONESHOT,
+						client->dev.driver->name, ts);
+		if (err) {
+			dev_err(&client->dev, "Failed to request irq %d: %d\n",
+				ts->irq, err);
+			return err;
+		}
 
-	tsc2007_stop(ts);
+		tsc2007_stop(ts);
+	}
 
 	/* power down the chip (TSC2007_SETUP does not ACK on I2C) */
 	err = tsc2007_xfer(ts, PWRDOWN);
@@ -400,7 +404,7 @@ static int tsc2007_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tsc2007_idtable[] = {
-	{ "tsc2007" },
+	{ .name = "tsc2007" },
 	{ }
 };
 

@@ -308,7 +308,7 @@ static int wm8741_set_dai_fmt(struct snd_soc_dai *codec_dai,
 
 	/* check master/slave audio interface */
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
 	default:
 		return -EINVAL;
@@ -606,7 +606,7 @@ static int wm8741_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8741_i2c_id[] = {
-	{ "wm8741" },
+	{ .name = "wm8741" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8741_i2c_id);

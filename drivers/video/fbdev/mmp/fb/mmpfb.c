@@ -476,8 +476,7 @@ static int modes_setup(struct mmpfb_info *fbi)
 		return 0;
 	}
 	/* put videomode list to info structure */
-	videomodes = kcalloc(videomode_num, sizeof(struct fb_videomode),
-			     GFP_KERNEL);
+	videomodes = kzalloc_objs(struct fb_videomode, videomode_num);
 	if (!videomodes)
 		return -ENOMEM;
 
@@ -503,7 +502,7 @@ static int fb_info_setup(struct fb_info *info,
 	info->flags = FBINFO_PARTIAL_PAN_OK |
 		FBINFO_HWACCEL_XPAN | FBINFO_HWACCEL_YPAN;
 	info->node = -1;
-	strcpy(info->fix.id, fbi->name);
+	strscpy(info->fix.id, fbi->name);
 	info->fix.type = FB_TYPE_PACKED_PIXELS;
 	info->fix.type_aux = 0;
 	info->fix.xpanstep = 0;

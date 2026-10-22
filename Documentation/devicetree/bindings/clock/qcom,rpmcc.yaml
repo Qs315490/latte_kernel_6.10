@@ -8,7 +8,7 @@ title: Qualcomm RPM Clock Controller
 
 maintainers:
   - Bjorn Andersson <bjorn.andersson@linaro.org>
-  - Krzysztof Kozlowski <krzysztof.kozlowski@linaro.org>
+  - Krzysztof Kozlowski <krzk@kernel.org>
 
 description: |
   The clock enumerators are defined in <dt-bindings/clock/qcom,rpmcc.h> and
@@ -44,6 +44,7 @@ properties:
           - qcom,rpmcc-msm8998
           - qcom,rpmcc-qcm2290
           - qcom,rpmcc-qcs404
+          - qcom,rpmcc-sdm429
           - qcom,rpmcc-sdm660
           - qcom,rpmcc-sm6115
           - qcom,rpmcc-sm6125
@@ -123,6 +124,7 @@ allOf:
               - qcom,rpmcc-msm8998
               - qcom,rpmcc-qcm2290
               - qcom,rpmcc-qcs404
+              - qcom,rpmcc-sdm429
               - qcom,rpmcc-sdm660
               - qcom,rpmcc-sm6115
               - qcom,rpmcc-sm6125

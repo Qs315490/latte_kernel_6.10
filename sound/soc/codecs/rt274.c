@@ -706,12 +706,12 @@ static int rt274_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	struct rt274_priv *rt274 = snd_soc_component_get_drvdata(component);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		snd_soc_component_update_bits(component,
 			RT274_I2S_CTRL1, RT274_I2S_MODE_MASK, RT274_I2S_MODE_M);
 		rt274->master = true;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		snd_soc_component_update_bits(component,
 			RT274_I2S_CTRL1, RT274_I2S_MODE_MASK, RT274_I2S_MODE_S);
 		rt274->master = false;
@@ -925,10 +925,11 @@ static int rt274_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
 static int rt274_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+
 	switch (level) {
 	case SND_SOC_BIAS_PREPARE:
-		if (SND_SOC_BIAS_STANDBY ==
-			snd_soc_component_get_bias_level(component)) {
+		if (SND_SOC_BIAS_STANDBY == snd_soc_dapm_get_bias_level(dapm)) {
 			snd_soc_component_write(component,
 				RT274_SET_AUDIO_POWER, AC_PWRST_D0);
 		}
@@ -1091,22 +1092,22 @@ static const struct regmap_config rt274_regmap = {
 #ifdef CONFIG_OF
 static const struct of_device_id rt274_of_match[] = {
 	{.compatible = "realtek,rt274"},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, rt274_of_match);
 #endif
 
 static const struct i2c_device_id rt274_i2c_id[] = {
-	{"rt274"},
-	{}
+	{ .name = "rt274" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt274_i2c_id);
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id rt274_acpi_match[] = {
-	{ "10EC0274", 0 },
-	{ "INT34C2", 0 },
-	{},
+	{ "10EC0274" },
+	{ "INT34C2" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, rt274_acpi_match);
 #endif
@@ -1188,7 +1189,7 @@ static int rt274_i2c_probe(struct i2c_client *i2c)
 	regmap_write(rt274->regmap, RT274_UNSOLICITED_MIC, 0x82);
 
 	if (rt274->i2c->irq) {
-		ret = request_threaded_irq(rt274->i2c->irq, NULL, rt274_irq,
+		ret = devm_request_threaded_irq(&rt274->i2c->dev, rt274->i2c->irq, NULL, rt274_irq,
 			IRQF_TRIGGER_HIGH | IRQF_ONESHOT, "rt274", rt274);
 		if (ret != 0) {
 			dev_err(&i2c->dev,
@@ -1204,15 +1205,6 @@ static int rt274_i2c_probe(struct i2c_client *i2c)
 	return ret;
 }
 
-static void rt274_i2c_remove(struct i2c_client *i2c)
-{
-	struct rt274_priv *rt274 = i2c_get_clientdata(i2c);
-
-	if (i2c->irq)
-		free_irq(i2c->irq, rt274);
-}
-
-
 static struct i2c_driver rt274_i2c_driver = {
 	.driver = {
 		   .name = "rt274",
@@ -1222,7 +1214,6 @@ static struct i2c_driver rt274_i2c_driver = {
 #endif
 		   },
 	.probe = rt274_i2c_probe,
-	.remove = rt274_i2c_remove,
 	.id_table = rt274_i2c_id,
 };
 

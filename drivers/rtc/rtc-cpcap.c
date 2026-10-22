@@ -16,7 +16,6 @@
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/init.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
@@ -320,7 +319,6 @@ static struct platform_driver cpcap_rtc_driver = {
 
 module_platform_driver(cpcap_rtc_driver);
 
-MODULE_ALIAS("platform:cpcap-rtc");
 MODULE_DESCRIPTION("CPCAP RTC driver");
 MODULE_AUTHOR("Sebastian Reichel <sre@kernel.org>");
 MODULE_LICENSE("GPL");

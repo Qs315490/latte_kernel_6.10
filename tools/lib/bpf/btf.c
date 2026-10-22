@@ -12,6 +12,7 @@
 #include <sys/utsname.h>
 #include <sys/param.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <linux/kernel.h>
 #include <linux/err.h>
 #include <linux/btf.h>
@@ -22,12 +23,41 @@
 #include "libbpf_internal.h"
 #include "hashmap.h"
 #include "strset.h"
-#include "str_error.h"
 
 #define BTF_MAX_NR_TYPES 0x7fffffffU
 #define BTF_MAX_STR_OFFSET 0x7fffffffU
 
 static struct btf_type btf_void;
+
+/*
+ * Describe how kinds are laid out; some have a singular element following the "struct btf_type",
+ * some have BTF_INFO_VLEN(t->info) elements.  Specify sizes for both.  Flags are currently unused.
+ * Kind layout can be optionally added to the BTF representation in a dedicated section to
+ * facilitate parsing.  New kinds must be added here.
+ */
+static struct btf_layout layouts[NR_BTF_KINDS] = {
+/*				singular element size		vlen element(s) size		flags */
+[BTF_KIND_UNKN] =	{	0,				0,				0 },
+[BTF_KIND_INT] =	{	sizeof(__u32),			0,				0 },
+[BTF_KIND_PTR] =	{	0,				0,				0 },
+[BTF_KIND_ARRAY] =	{	sizeof(struct btf_array),	0,				0 },
+[BTF_KIND_STRUCT] =	{	0,				sizeof(struct btf_member),	0 },
+[BTF_KIND_UNION] =	{	0,				sizeof(struct btf_member),	0 },
+[BTF_KIND_ENUM] =	{	0,				sizeof(struct btf_enum),	0 },
+[BTF_KIND_FWD] =	{	0,				0,				0 },
+[BTF_KIND_TYPEDEF] =	{	0,				0,				0 },
+[BTF_KIND_VOLATILE] =	{	0,				0,				0 },
+[BTF_KIND_CONST] =	{	0,				0,				0 },
+[BTF_KIND_RESTRICT] =	{	0,				0,				0 },
+[BTF_KIND_FUNC] =	{	0,				0,				0 },
+[BTF_KIND_FUNC_PROTO] =	{	0,				sizeof(struct btf_param),	0 },
+[BTF_KIND_VAR] =	{	sizeof(struct btf_var),		0,				0 },
+[BTF_KIND_DATASEC] =	{	0,				sizeof(struct btf_var_secinfo),	0 },
+[BTF_KIND_FLOAT] =	{	0,				0,				0 },
+[BTF_KIND_DECL_TAG] =	{	sizeof(struct btf_decl_tag),	0,				0 },
+[BTF_KIND_TYPE_TAG] =	{	0,				0,				0 },
+[BTF_KIND_ENUM64] =	{	0,				sizeof(struct btf_enum64),	0 },
+};
 
 struct btf {
 	/* raw BTF data in native endianness */
@@ -40,42 +70,53 @@ struct btf {
 
 	/*
 	 * When BTF is loaded from an ELF or raw memory it is stored
-	 * in a contiguous memory block. The hdr, type_data, and, strs_data
+	 * in a contiguous memory block. The type_data, layout and strs_data
 	 * point inside that memory region to their respective parts of BTF
 	 * representation:
 	 *
-	 * +--------------------------------+
-	 * |  Header  |  Types  |  Strings  |
-	 * +--------------------------------+
-	 * ^          ^         ^
-	 * |          |         |
-	 * hdr        |         |
-	 * types_data-+         |
-	 * strs_data------------+
+	 * +----------------------------------------+---------------+
+	 * |  Header  |  Types  |  Optional layout  |  Strings      |
+	 * +--------------------------------------------------------+
+	 * ^          ^         ^                   ^
+	 * |          |         |                   |
+	 * raw_data   |         |                   |
+	 * types_data-+         |                   |
+	 * layout---------------+                   |
+	 * strs_data--------------------------------+
+	 *
+	 * A separate struct btf_header is embedded as btf->hdr,
+	 * and header information is copied into it.  This allows us
+	 * to handle header data for various header formats; the original,
+	 * the extended header with layout info, etc.
 	 *
 	 * If BTF data is later modified, e.g., due to types added or
 	 * removed, BTF deduplication performed, etc, this contiguous
-	 * representation is broken up into three independently allocated
-	 * memory regions to be able to modify them independently.
+	 * representation is broken up into four independent memory
+	 * regions.
+	 *
 	 * raw_data is nulled out at that point, but can be later allocated
 	 * and cached again if user calls btf__raw_data(), at which point
-	 * raw_data will contain a contiguous copy of header, types, and
-	 * strings:
+	 * raw_data will contain a contiguous copy of header, types, optional
+	 * layout and strings.  layout optionally points to a
+	 * btf_layout array - this allows us to encode information about
+	 * the kinds known at encoding time.  If layout is NULL no
+	 * layout information is encoded.
 	 *
-	 * +----------+  +---------+  +-----------+
-	 * |  Header  |  |  Types  |  |  Strings  |
-	 * +----------+  +---------+  +-----------+
-	 * ^             ^            ^
-	 * |             |            |
-	 * hdr           |            |
-	 * types_data----+            |
-	 * strset__data(strs_set)-----+
+	 * +----------+  +---------+  +-----------+   +-----------+
+	 * |  Header  |  |  Types  |  |  Layout   |   |  Strings  |
+	 * +----------+  +---------+  +-----------+   +-----------+
+	 * ^             ^            ^               ^
+	 * |             |            |               |
+	 * hdr           |            |               |
+	 * types_data----+            |               |
+	 * layout---------------------+               |
+	 * strset__data(strs_set)---------------------+
 	 *
-	 *               +----------+---------+-----------+
-	 *               |  Header  |  Types  |  Strings  |
-	 * raw_data----->+----------+---------+-----------+
+	 *               +----------+---------+-------------------+-----------+
+	 *               |  Header  |  Types  |  Optional Layout  |  Strings  |
+	 * raw_data----->+----------+---------+-------------------+-----------+
 	 */
-	struct btf_header *hdr;
+	struct btf_header hdr;
 
 	void *types_data;
 	size_t types_data_cap; /* used size stored in hdr->type_len */
@@ -92,6 +133,8 @@ struct btf {
 	 *   - for split BTF counts number of types added on top of base BTF.
 	 */
 	__u32 nr_types;
+	/* the start IDs of named types in sorted BTF */
+	int named_start_id;
 	/* if not NULL, points to the base BTF on top of which the current
 	 * split BTF is based
 	 */
@@ -119,6 +162,20 @@ struct btf {
 
 	/* whether base_btf should be freed in btf_free for this instance */
 	bool owns_base;
+
+	/* whether raw_data is a (read-only) mmap */
+	bool raw_data_is_mmap;
+
+	/* is BTF modifiable? i.e. is it split into separate sections as described above? */
+	bool modifiable;
+	/* does BTF have header information we do not support?  If so, disallow
+	 * modification.
+	 */
+	bool has_hdr_extra;
+	/* Points either at raw kind layout data in parsed BTF (if present), or
+	 * at an allocated kind layout array when BTF is modifiable.
+	 */
+	void *layout;
 
 	/* BTF object FD, if loaded into kernel */
 	int fd;
@@ -211,7 +268,7 @@ static int btf_add_type_idx_entry(struct btf *btf, __u32 type_off)
 	return 0;
 }
 
-static void btf_bswap_hdr(struct btf_header *h)
+static void btf_bswap_hdr(struct btf_header *h, __u32 hdr_len)
 {
 	h->magic = bswap_16(h->magic);
 	h->hdr_len = bswap_32(h->hdr_len);
@@ -219,66 +276,115 @@ static void btf_bswap_hdr(struct btf_header *h)
 	h->type_len = bswap_32(h->type_len);
 	h->str_off = bswap_32(h->str_off);
 	h->str_len = bswap_32(h->str_len);
+	/* May be operating on raw data with hdr_len that does not include below fields */
+	if (hdr_len >= sizeof(struct btf_header)) {
+		h->layout_off = bswap_32(h->layout_off);
+		h->layout_len = bswap_32(h->layout_len);
+	}
 }
 
 static int btf_parse_hdr(struct btf *btf)
 {
-	struct btf_header *hdr = btf->hdr;
-	__u32 meta_left;
+	struct btf_header *hdr = btf->raw_data;
+	__u32 hdr_len, meta_left;
 
-	if (btf->raw_size < sizeof(struct btf_header)) {
+	if (btf->raw_size < offsetofend(struct btf_header, str_len)) {
 		pr_debug("BTF header not found\n");
 		return -EINVAL;
 	}
 
+	hdr_len = hdr->hdr_len;
+
 	if (hdr->magic == bswap_16(BTF_MAGIC)) {
 		btf->swapped_endian = true;
-		if (bswap_32(hdr->hdr_len) != sizeof(struct btf_header)) {
+		hdr_len = bswap_32(hdr->hdr_len);
+		if (hdr_len < offsetofend(struct btf_header, str_len)) {
 			pr_warn("Can't load BTF with non-native endianness due to unsupported header length %u\n",
-				bswap_32(hdr->hdr_len));
+				hdr_len);
 			return -ENOTSUP;
 		}
-		btf_bswap_hdr(hdr);
 	} else if (hdr->magic != BTF_MAGIC) {
 		pr_debug("Invalid BTF magic: %x\n", hdr->magic);
 		return -EINVAL;
 	}
 
-	if (btf->raw_size < hdr->hdr_len) {
+	if (btf->raw_size < hdr_len) {
 		pr_debug("BTF header len %u larger than data size %u\n",
-			 hdr->hdr_len, btf->raw_size);
+			 hdr_len, btf->raw_size);
 		return -EINVAL;
 	}
 
-	meta_left = btf->raw_size - hdr->hdr_len;
-	if (meta_left < (long long)hdr->str_off + hdr->str_len) {
+	if (btf->swapped_endian)
+		btf_bswap_hdr(hdr, hdr_len);
+
+	memcpy(&btf->hdr, hdr, min((size_t)hdr_len, sizeof(struct btf_header)));
+
+	/* If unknown header data is found, modification is prohibited in
+	 * btf_ensure_modifiable().
+	 */
+	if (hdr_len > sizeof(struct btf_header)) {
+		__u8 *h = (__u8 *)hdr;
+		__u32 i;
+
+		for (i = sizeof(struct btf_header); i < hdr_len; i++) {
+			if (!h[i])
+				continue;
+			btf->has_hdr_extra = true;
+			pr_debug("Unknown BTF header data at offset %u; modification is disallowed\n",
+				 i);
+			break;
+		}
+	}
+
+	meta_left = btf->raw_size - hdr_len;
+	if (meta_left < (long long)btf->hdr.str_off + btf->hdr.str_len) {
 		pr_debug("Invalid BTF total size: %u\n", btf->raw_size);
 		return -EINVAL;
 	}
 
-	if ((long long)hdr->type_off + hdr->type_len > hdr->str_off) {
+	if ((long long)btf->hdr.type_off + btf->hdr.type_len > btf->hdr.str_off) {
 		pr_debug("Invalid BTF data sections layout: type data at %u + %u, strings data at %u + %u\n",
-			 hdr->type_off, hdr->type_len, hdr->str_off, hdr->str_len);
+			 btf->hdr.type_off, btf->hdr.type_len, btf->hdr.str_off,
+			 btf->hdr.str_len);
 		return -EINVAL;
 	}
 
-	if (hdr->type_off % 4) {
+	if (btf->hdr.type_off % 4) {
 		pr_debug("BTF type section is not aligned to 4 bytes\n");
 		return -EINVAL;
 	}
 
+	if (btf->hdr.layout_len == 0)
+		return 0;
+
+	/* optional layout section sits between types and strings */
+	if (btf->hdr.layout_off % 4) {
+		pr_debug("BTF layout section is not aligned to 4 bytes\n");
+		return -EINVAL;
+	}
+	if (btf->hdr.layout_off < (long long)btf->hdr.type_off + btf->hdr.type_len) {
+		pr_debug("Invalid BTF data sections layout: type data at %u + %u,  layout data at %u + %u\n",
+			 btf->hdr.type_off, btf->hdr.type_len,
+			 btf->hdr.layout_off, btf->hdr.layout_len);
+		return -EINVAL;
+	}
+	if ((long long)btf->hdr.layout_off + btf->hdr.layout_len > btf->hdr.str_off ||
+	    btf->hdr.layout_off > btf->hdr.str_off) {
+		pr_debug("Invalid BTF data sections layout: layout data at %u + %u, strings data at %u\n",
+			 btf->hdr.layout_off, btf->hdr.layout_len, btf->hdr.str_off);
+		return -EINVAL;
+	}
 	return 0;
 }
 
 static int btf_parse_str_sec(struct btf *btf)
 {
-	const struct btf_header *hdr = btf->hdr;
 	const char *start = btf->strs_data;
-	const char *end = start + btf->hdr->str_len;
+	const char *end = start + btf->hdr.str_len;
 
-	if (btf->base_btf && hdr->str_len == 0)
+	if (btf->base_btf && btf->hdr.str_len == 0)
 		return 0;
-	if (!hdr->str_len || hdr->str_len - 1 > BTF_MAX_STR_OFFSET || end[-1]) {
+	if (!btf->hdr.str_len || btf->hdr.str_len - 1 > BTF_MAX_STR_OFFSET || end[-1]) {
 		pr_debug("Invalid BTF string section\n");
 		return -EINVAL;
 	}
@@ -289,10 +395,66 @@ static int btf_parse_str_sec(struct btf *btf)
 	return 0;
 }
 
-static int btf_type_size(const struct btf_type *t)
+static int btf_parse_layout_sec(struct btf *btf)
+{
+	if (!btf->hdr.layout_len)
+		return 0;
+
+	if (btf->hdr.layout_len % sizeof(struct btf_layout) != 0) {
+		pr_debug("Invalid BTF kind layout section\n");
+		return -EINVAL;
+	}
+	btf->layout = btf->raw_data + btf->hdr.hdr_len + btf->hdr.layout_off;
+
+	if (btf->swapped_endian) {
+		struct btf_layout *l, *end = btf->layout + btf->hdr.layout_len;
+
+		for (l = btf->layout; l < end; l++)
+			l->flags = bswap_16(l->flags);
+	}
+
+	return 0;
+}
+
+/* for unknown kinds, consult kind layout. */
+static int btf_type_size_unknown(const struct btf *btf, const struct btf_type *t)
+{
+	__u32 l_cnt = btf->hdr.layout_len / sizeof(struct btf_layout);
+	struct btf_layout *l = btf->layout;
+	__u32 vlen = btf_vlen(t);
+	__u32 kind = btf_kind(t);
+
+	/* Fall back to base BTF if needed as they share layout information */
+	if (!l) {
+		struct btf *base_btf = btf->base_btf;
+
+		if (base_btf) {
+			l = base_btf->layout;
+			l_cnt = base_btf->hdr.layout_len / sizeof(struct btf_layout);
+		}
+	}
+	if (!l || kind >= l_cnt) {
+		pr_debug("Unsupported BTF_KIND: %u\n", btf_kind(t));
+		return -EINVAL;
+	}
+	if (l[kind].info_sz % 4) {
+		pr_debug("Unsupported info_sz %u for kind %u\n",
+			  l[kind].info_sz, kind);
+		return -EINVAL;
+	}
+	if (l[kind].elem_sz % 4) {
+		pr_debug("Unsupported elem_sz %u for kind %u\n",
+			 l[kind].elem_sz, kind);
+		return -EINVAL;
+	}
+
+	return sizeof(struct btf_type) + l[kind].info_sz + vlen * l[kind].elem_sz;
+}
+
+static int btf_type_size(const struct btf *btf, const struct btf_type *t)
 {
 	const int base_size = sizeof(struct btf_type);
-	__u16 vlen = btf_vlen(t);
+	__u32 vlen = btf_vlen(t);
 
 	switch (btf_kind(t)) {
 	case BTF_KIND_FWD:
@@ -325,8 +487,7 @@ static int btf_type_size(const struct btf_type *t)
 	case BTF_KIND_DECL_TAG:
 		return base_size + sizeof(struct btf_decl_tag);
 	default:
-		pr_debug("Unsupported BTF_KIND:%u\n", btf_kind(t));
-		return -EINVAL;
+		return btf_type_size_unknown(btf, t);
 	}
 }
 
@@ -345,7 +506,7 @@ static int btf_bswap_type_rest(struct btf_type *t)
 	struct btf_array *a;
 	struct btf_param *p;
 	struct btf_enum *e;
-	__u16 vlen = btf_vlen(t);
+	__u32 vlen = btf_vlen(t);
 	int i;
 
 	switch (btf_kind(t)) {
@@ -416,16 +577,15 @@ static int btf_bswap_type_rest(struct btf_type *t)
 
 static int btf_parse_type_sec(struct btf *btf)
 {
-	struct btf_header *hdr = btf->hdr;
 	void *next_type = btf->types_data;
-	void *end_type = next_type + hdr->type_len;
+	void *end_type = next_type + btf->hdr.type_len;
 	int err, type_size;
 
 	while (next_type + sizeof(struct btf_type) <= end_type) {
 		if (btf->swapped_endian)
 			btf_bswap_type_base(next_type);
 
-		type_size = btf_type_size(next_type);
+		type_size = btf_type_size(btf, next_type);
 		if (type_size < 0)
 			return type_size;
 		if (next_type + type_size > end_type) {
@@ -586,8 +746,12 @@ static int btf_validate_type(const struct btf *btf, const struct btf_type *t, __
 		break;
 	}
 	default:
-		pr_warn("btf: type [%u]: unrecognized kind %u\n", id, kind);
-		return -EINVAL;
+		/* Kind may be represented in kind layout information. */
+		if (btf_type_size_unknown(btf, t) < 0) {
+			pr_warn("btf: type [%u]: unrecognized kind %u\n", id, kind);
+			return -EINVAL;
+		}
+		break;
 	}
 	return 0;
 }
@@ -843,7 +1007,7 @@ int btf__align_of(const struct btf *btf, __u32 id)
 	case BTF_KIND_STRUCT:
 	case BTF_KIND_UNION: {
 		const struct btf_member *m = btf_members(t);
-		__u16 vlen = btf_vlen(t);
+		__u32 vlen = btf_vlen(t);
 		int i, max_align = 1, align;
 
 		for (i = 0; i < vlen; i++, m++) {
@@ -894,44 +1058,103 @@ int btf__resolve_type(const struct btf *btf, __u32 type_id)
 	return type_id;
 }
 
-__s32 btf__find_by_name(const struct btf *btf, const char *type_name)
+static void btf_check_sorted(struct btf *btf)
 {
-	__u32 i, nr_types = btf__type_cnt(btf);
+	__u32 i, n, named_start_id = 0;
 
-	if (!strcmp(type_name, "void"))
+	n = btf__type_cnt(btf);
+	for (i = btf->start_id + 1; i < n; i++) {
+		struct btf_type *ta = btf_type_by_id(btf, i - 1);
+		struct btf_type *tb = btf_type_by_id(btf, i);
+		const char *na = btf__str_by_offset(btf, ta->name_off);
+		const char *nb = btf__str_by_offset(btf, tb->name_off);
+
+		if (strcmp(na, nb) > 0)
+			return;
+
+		if (named_start_id == 0 && na[0] != '\0')
+			named_start_id = i - 1;
+		if (named_start_id == 0 && nb[0] != '\0')
+			named_start_id = i;
+	}
+
+	if (named_start_id)
+		btf->named_start_id = named_start_id;
+}
+
+static __s32 btf_find_type_by_name_bsearch(const struct btf *btf, const char *name,
+					   __s32 start_id)
+{
+	const struct btf_type *t;
+	const char *tname;
+	__s32 l, r, m;
+
+	l = start_id;
+	r = btf__type_cnt(btf) - 1;
+	while (l <= r) {
+		m = l + (r - l) / 2;
+		t = btf_type_by_id(btf, m);
+		tname = btf__str_by_offset(btf, t->name_off);
+		if (strcmp(tname, name) >= 0) {
+			if (l == r)
+				return r;
+			r = m;
+		} else {
+			l = m + 1;
+		}
+	}
+
+	return btf__type_cnt(btf);
+}
+
+static __s32 btf_find_by_name_kind(const struct btf *btf, int start_id,
+				   const char *type_name, __s32 kind)
+{
+	__u32 nr_types = btf__type_cnt(btf);
+	const struct btf_type *t;
+	const char *tname;
+	__s32 id;
+
+	if (start_id < btf->start_id) {
+		id = btf_find_by_name_kind(btf->base_btf, start_id,
+					   type_name, kind);
+		if (id >= 0)
+			return id;
+		start_id = btf->start_id;
+	}
+
+	if (kind == BTF_KIND_UNKN || strcmp(type_name, "void") == 0)
 		return 0;
 
-	for (i = 1; i < nr_types; i++) {
-		const struct btf_type *t = btf__type_by_id(btf, i);
-		const char *name = btf__name_by_offset(btf, t->name_off);
-
-		if (name && !strcmp(type_name, name))
-			return i;
+	if (btf->named_start_id > 0 && type_name[0]) {
+		start_id = max(start_id, btf->named_start_id);
+		id = btf_find_type_by_name_bsearch(btf, type_name, start_id);
+		for (; id < nr_types; id++) {
+			t = btf__type_by_id(btf, id);
+			tname = btf__str_by_offset(btf, t->name_off);
+			if (strcmp(tname, type_name) != 0)
+				return libbpf_err(-ENOENT);
+			if (kind < 0 || btf_kind(t) == kind)
+				return id;
+		}
+	} else {
+		for (id = start_id; id < nr_types; id++) {
+			t = btf_type_by_id(btf, id);
+			if (kind > 0 && btf_kind(t) != kind)
+				continue;
+			tname = btf__str_by_offset(btf, t->name_off);
+			if (strcmp(tname, type_name) == 0)
+				return id;
+		}
 	}
 
 	return libbpf_err(-ENOENT);
 }
 
-static __s32 btf_find_by_name_kind(const struct btf *btf, int start_id,
-				   const char *type_name, __u32 kind)
+/* the kind value of -1 indicates that kind matching should be skipped */
+__s32 btf__find_by_name(const struct btf *btf, const char *type_name)
 {
-	__u32 i, nr_types = btf__type_cnt(btf);
-
-	if (kind == BTF_KIND_UNKN || !strcmp(type_name, "void"))
-		return 0;
-
-	for (i = start_id; i < nr_types; i++) {
-		const struct btf_type *t = btf__type_by_id(btf, i);
-		const char *name;
-
-		if (btf_kind(t) != kind)
-			continue;
-		name = btf__name_by_offset(btf, t->name_off);
-		if (name && !strcmp(type_name, name))
-			return i;
-	}
-
-	return libbpf_err(-ENOENT);
+	return btf_find_by_name_kind(btf, 1, type_name, -1);
 }
 
 __s32 btf__find_by_name_kind_own(const struct btf *btf, const char *type_name,
@@ -948,7 +1171,19 @@ __s32 btf__find_by_name_kind(const struct btf *btf, const char *type_name,
 
 static bool btf_is_modifiable(const struct btf *btf)
 {
-	return (void *)btf->hdr != btf->raw_data;
+	/* BTF is modifiable if split into multiple sections */
+	return btf->modifiable;
+}
+
+static void btf_free_raw_data(struct btf *btf)
+{
+	if (btf->raw_data_is_mmap) {
+		munmap(btf->raw_data, btf->raw_size);
+		btf->raw_data_is_mmap = false;
+	} else {
+		free(btf->raw_data);
+	}
+	btf->raw_data = NULL;
 }
 
 void btf__free(struct btf *btf)
@@ -961,16 +1196,16 @@ void btf__free(struct btf *btf)
 
 	if (btf_is_modifiable(btf)) {
 		/* if BTF was modified after loading, it will have a split
-		 * in-memory representation for header, types, and strings
+		 * in-memory representation for types, strings and layout
 		 * sections, so we need to free all of them individually. It
 		 * might still have a cached contiguous raw data present,
 		 * which will be unconditionally freed below.
 		 */
-		free(btf->hdr);
 		free(btf->types_data);
 		strset__free(btf->strs_set);
+		free(btf->layout);
 	}
-	free(btf->raw_data);
+	btf_free_raw_data(btf);
 	free(btf->raw_data_swapped);
 	free(btf->type_offs);
 	if (btf->owns_base)
@@ -978,8 +1213,11 @@ void btf__free(struct btf *btf)
 	free(btf);
 }
 
-static struct btf *btf_new_empty(struct btf *base_btf)
+static struct btf *btf_new_empty(struct btf_new_opts *opts)
 {
+	bool add_layout = OPTS_GET(opts, add_layout, false);
+	struct btf *base_btf = OPTS_GET(opts, base_btf, NULL);
+	struct btf_header *hdr;
 	struct btf *btf;
 
 	btf = calloc(1, sizeof(*btf));
@@ -992,30 +1230,47 @@ static struct btf *btf_new_empty(struct btf *base_btf)
 	btf->fd = -1;
 	btf->ptr_sz = sizeof(void *);
 	btf->swapped_endian = false;
+	btf->named_start_id = 0;
 
 	if (base_btf) {
 		btf->base_btf = base_btf;
 		btf->start_id = btf__type_cnt(base_btf);
-		btf->start_str_off = base_btf->hdr->str_len;
+		btf->start_str_off = base_btf->hdr.str_len + base_btf->start_str_off;
 		btf->swapped_endian = base_btf->swapped_endian;
 	}
 
 	/* +1 for empty string at offset 0 */
 	btf->raw_size = sizeof(struct btf_header) + (base_btf ? 0 : 1);
+	if (add_layout)
+		btf->raw_size += sizeof(layouts);
 	btf->raw_data = calloc(1, btf->raw_size);
 	if (!btf->raw_data) {
 		free(btf);
 		return ERR_PTR(-ENOMEM);
 	}
 
-	btf->hdr = btf->raw_data;
-	btf->hdr->hdr_len = sizeof(struct btf_header);
-	btf->hdr->magic = BTF_MAGIC;
-	btf->hdr->version = BTF_VERSION;
+	hdr = btf->raw_data;
+	hdr->hdr_len = sizeof(struct btf_header);
+	hdr->magic = BTF_MAGIC;
+	hdr->version = BTF_VERSION;
 
-	btf->types_data = btf->raw_data + btf->hdr->hdr_len;
-	btf->strs_data = btf->raw_data + btf->hdr->hdr_len;
-	btf->hdr->str_len = base_btf ? 0 : 1; /* empty string at offset 0 */
+	btf->types_data = btf->raw_data + hdr->hdr_len;
+	btf->strs_data = btf->raw_data + hdr->hdr_len;
+	hdr->str_len = base_btf ? 0 : 1; /* empty string at offset 0 */
+
+	if (add_layout) {
+		hdr->layout_len = sizeof(layouts);
+		btf->layout = layouts;
+		/*
+		 * No need to swap endianness here as btf_get_raw_data()
+		 * will do this for us if btf->swapped_endian is true.
+		 */
+		memcpy(btf->raw_data + hdr->hdr_len, layouts, sizeof(layouts));
+		btf->strs_data += sizeof(layouts);
+		hdr->str_off += sizeof(layouts);
+	}
+
+	memcpy(&btf->hdr, hdr, sizeof(*hdr));
 
 	return btf;
 }
@@ -1027,10 +1282,22 @@ struct btf *btf__new_empty(void)
 
 struct btf *btf__new_empty_split(struct btf *base_btf)
 {
-	return libbpf_ptr(btf_new_empty(base_btf));
+	LIBBPF_OPTS(btf_new_opts, opts);
+
+	opts.base_btf = base_btf;
+
+	return libbpf_ptr(btf_new_empty(&opts));
 }
 
-static struct btf *btf_new(const void *data, __u32 size, struct btf *base_btf)
+struct btf *btf__new_empty_opts(struct btf_new_opts *opts)
+{
+	if (!OPTS_VALID(opts, btf_new_opts))
+		return libbpf_err_ptr(-EINVAL);
+
+	return libbpf_ptr(btf_new_empty(opts));
+}
+
+static struct btf *btf_new(const void *data, __u32 size, struct btf *base_btf, bool is_mmap)
 {
 	struct btf *btf;
 	int err;
@@ -1043,34 +1310,42 @@ static struct btf *btf_new(const void *data, __u32 size, struct btf *base_btf)
 	btf->start_id = 1;
 	btf->start_str_off = 0;
 	btf->fd = -1;
+	btf->named_start_id = 0;
 
 	if (base_btf) {
 		btf->base_btf = base_btf;
 		btf->start_id = btf__type_cnt(base_btf);
-		btf->start_str_off = base_btf->hdr->str_len;
+		btf->start_str_off = base_btf->hdr.str_len + base_btf->start_str_off;
 	}
 
-	btf->raw_data = malloc(size);
-	if (!btf->raw_data) {
-		err = -ENOMEM;
-		goto done;
+	if (is_mmap) {
+		btf->raw_data = (void *)data;
+		btf->raw_data_is_mmap = true;
+	} else {
+		btf->raw_data = malloc(size);
+		if (!btf->raw_data) {
+			err = -ENOMEM;
+			goto done;
+		}
+		memcpy(btf->raw_data, data, size);
 	}
-	memcpy(btf->raw_data, data, size);
+
 	btf->raw_size = size;
 
-	btf->hdr = btf->raw_data;
 	err = btf_parse_hdr(btf);
 	if (err)
 		goto done;
 
-	btf->strs_data = btf->raw_data + btf->hdr->hdr_len + btf->hdr->str_off;
-	btf->types_data = btf->raw_data + btf->hdr->hdr_len + btf->hdr->type_off;
+	btf->strs_data = btf->raw_data + btf->hdr.hdr_len + btf->hdr.str_off;
+	btf->types_data = btf->raw_data + btf->hdr.hdr_len + btf->hdr.type_off;
 
 	err = btf_parse_str_sec(btf);
+	err = err ?: btf_parse_layout_sec(btf);
 	err = err ?: btf_parse_type_sec(btf);
 	err = err ?: btf_sanity_check(btf);
 	if (err)
 		goto done;
+	btf_check_sorted(btf);
 
 done:
 	if (err) {
@@ -1083,12 +1358,12 @@ done:
 
 struct btf *btf__new(const void *data, __u32 size)
 {
-	return libbpf_ptr(btf_new(data, size, NULL));
+	return libbpf_ptr(btf_new(data, size, NULL, false));
 }
 
 struct btf *btf__new_split(const void *data, __u32 size, struct btf *base_btf)
 {
-	return libbpf_ptr(btf_new(data, size, base_btf));
+	return libbpf_ptr(btf_new(data, size, base_btf, false));
 }
 
 struct btf_elf_secs {
@@ -1148,6 +1423,12 @@ static int btf_find_elf_sections(Elf *elf, const char *path, struct btf_elf_secs
 		else
 			continue;
 
+		if (sh.sh_type != SHT_PROGBITS) {
+			pr_warn("unexpected section type (%d) of section(%d, %s) from %s\n",
+				sh.sh_type, idx, name, path);
+			goto err;
+		}
+
 		data = elf_getdata(scn, 0);
 		if (!data) {
 			pr_warn("failed to get section(%d, %s) data from %s\n",
@@ -1203,7 +1484,7 @@ static struct btf *btf_parse_elf(const char *path, struct btf *base_btf,
 
 	if (secs.btf_base_data) {
 		dist_base_btf = btf_new(secs.btf_base_data->d_buf, secs.btf_base_data->d_size,
-					NULL);
+					NULL, false);
 		if (IS_ERR(dist_base_btf)) {
 			err = PTR_ERR(dist_base_btf);
 			dist_base_btf = NULL;
@@ -1212,7 +1493,7 @@ static struct btf *btf_parse_elf(const char *path, struct btf *base_btf,
 	}
 
 	btf = btf_new(secs.btf_data->d_buf, secs.btf_data->d_size,
-		      dist_base_btf ?: base_btf);
+		      dist_base_btf ?: base_btf, false);
 	if (IS_ERR(btf)) {
 		err = PTR_ERR(btf);
 		goto done;
@@ -1329,7 +1610,7 @@ static struct btf *btf_parse_raw(const char *path, struct btf *base_btf)
 	}
 
 	/* finally parse BTF data */
-	btf = btf_new(data, sz, base_btf);
+	btf = btf_new(data, sz, base_btf, false);
 
 err_out:
 	free(data);
@@ -1346,6 +1627,37 @@ struct btf *btf__parse_raw(const char *path)
 struct btf *btf__parse_raw_split(const char *path, struct btf *base_btf)
 {
 	return libbpf_ptr(btf_parse_raw(path, base_btf));
+}
+
+static struct btf *btf_parse_raw_mmap(const char *path, struct btf *base_btf)
+{
+	struct stat st;
+	void *data;
+	struct btf *btf;
+	int fd, err;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return ERR_PTR(-errno);
+
+	if (fstat(fd, &st) < 0) {
+		err = -errno;
+		close(fd);
+		return ERR_PTR(err);
+	}
+
+	data = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	err = -errno;
+	close(fd);
+
+	if (data == MAP_FAILED)
+		return ERR_PTR(err);
+
+	btf = btf_new(data, st.st_size, base_btf, true);
+	if (IS_ERR(btf))
+		munmap(data, st.st_size);
+
+	return btf;
 }
 
 static struct btf *btf_parse(const char *path, struct btf *base_btf, struct btf_ext **btf_ext)
@@ -1480,7 +1792,7 @@ static const void *btf_strs_data(const struct btf *btf)
 
 static void *btf_get_raw_data(const struct btf *btf, __u32 *size, bool swap_endian)
 {
-	struct btf_header *hdr = btf->hdr;
+	const struct btf_header *hdr = &btf->hdr;
 	struct btf_type *t;
 	void *data, *p;
 	__u32 data_sz;
@@ -1493,14 +1805,17 @@ static void *btf_get_raw_data(const struct btf *btf, __u32 *size, bool swap_endi
 	}
 
 	data_sz = hdr->hdr_len + hdr->type_len + hdr->str_len;
+	if (btf->layout)
+		data_sz += hdr->layout_len;
+
 	data = calloc(1, data_sz);
 	if (!data)
 		return NULL;
 	p = data;
 
-	memcpy(p, hdr, hdr->hdr_len);
+	memcpy(p, hdr, min((__u32)sizeof(struct btf_header), hdr->hdr_len));
 	if (swap_endian)
-		btf_bswap_hdr(p);
+		btf_bswap_hdr(p, hdr->hdr_len);
 	p += hdr->hdr_len;
 
 	memcpy(p, btf->types_data, hdr->type_len);
@@ -1518,8 +1833,18 @@ static void *btf_get_raw_data(const struct btf *btf, __u32 *size, bool swap_endi
 	}
 	p += hdr->type_len;
 
+	if (btf->layout) {
+		memcpy(p, btf->layout, hdr->layout_len);
+		if (swap_endian) {
+			struct btf_layout *l, *end = p + hdr->layout_len;
+
+			for (l = p; l < end ; l++)
+				l->flags = bswap_16(l->flags);
+		}
+		p += hdr->layout_len;
+	}
+
 	memcpy(p, btf_strs_data(btf), hdr->str_len);
-	p += hdr->str_len;
 
 	*size = data_sz;
 	return data;
@@ -1554,7 +1879,7 @@ const char *btf__str_by_offset(const struct btf *btf, __u32 offset)
 {
 	if (offset < btf->start_str_off)
 		return btf__str_by_offset(btf->base_btf, offset);
-	else if (offset - btf->start_str_off < btf->hdr->str_len)
+	else if (offset - btf->start_str_off < btf->hdr.str_len)
 		return btf_strs_data(btf) + (offset - btf->start_str_off);
 	else
 		return errno = EINVAL, NULL;
@@ -1612,19 +1937,25 @@ struct btf *btf_get_from_fd(int btf_fd, struct btf *base_btf)
 		goto exit_free;
 	}
 
-	btf = btf_new(ptr, btf_info.btf_size, base_btf);
+	btf = btf_new(ptr, btf_info.btf_size, base_btf, false);
 
 exit_free:
 	free(ptr);
 	return btf;
 }
 
-struct btf *btf__load_from_kernel_by_id_split(__u32 id, struct btf *base_btf)
+struct btf *btf_load_from_kernel(__u32 id, struct btf *base_btf, int token_fd)
 {
 	struct btf *btf;
 	int btf_fd;
+	LIBBPF_OPTS(bpf_get_fd_by_id_opts, opts);
 
-	btf_fd = bpf_btf_get_fd_by_id(id);
+	if (token_fd) {
+		opts.open_flags |= BPF_F_TOKEN_FD;
+		opts.token_fd = token_fd;
+	}
+
+	btf_fd = bpf_btf_get_fd_by_id_opts(id, &opts);
 	if (btf_fd < 0)
 		return libbpf_err_ptr(-errno);
 
@@ -1634,6 +1965,11 @@ struct btf *btf__load_from_kernel_by_id_split(__u32 id, struct btf *base_btf)
 	return libbpf_ptr(btf);
 }
 
+struct btf *btf__load_from_kernel_by_id_split(__u32 id, struct btf *base_btf)
+{
+	return btf_load_from_kernel(id, base_btf, 0);
+}
+
 struct btf *btf__load_from_kernel_by_id(__u32 id)
 {
 	return btf__load_from_kernel_by_id_split(id, NULL);
@@ -1641,23 +1977,22 @@ struct btf *btf__load_from_kernel_by_id(__u32 id)
 
 static void btf_invalidate_raw_data(struct btf *btf)
 {
-	if (btf->raw_data) {
-		free(btf->raw_data);
-		btf->raw_data = NULL;
-	}
+	if (btf->raw_data)
+		btf_free_raw_data(btf);
 	if (btf->raw_data_swapped) {
 		free(btf->raw_data_swapped);
 		btf->raw_data_swapped = NULL;
 	}
+	btf->named_start_id = 0;
 }
 
 /* Ensure BTF is ready to be modified (by splitting into a three memory
- * regions for header, types, and strings). Also invalidate cached
+ * regions for types, strings and layout. Also invalidate cached
  * raw_data, if any.
  */
 static int btf_ensure_modifiable(struct btf *btf)
 {
-	void *hdr, *types;
+	void *types, *layout = NULL;
 	struct strset *set = NULL;
 	int err = -ENOMEM;
 
@@ -1667,45 +2002,58 @@ static int btf_ensure_modifiable(struct btf *btf)
 		return 0;
 	}
 
-	/* split raw data into three memory regions */
-	hdr = malloc(btf->hdr->hdr_len);
-	types = malloc(btf->hdr->type_len);
-	if (!hdr || !types)
-		goto err_out;
+	if (btf->has_hdr_extra) {
+		/* Additional BTF header data was found; not safe to modify. */
+		return -EOPNOTSUPP;
+	}
 
-	memcpy(hdr, btf->hdr, btf->hdr->hdr_len);
-	memcpy(types, btf->types_data, btf->hdr->type_len);
+	/* split raw data into memory regions; btf->hdr is done already. */
+	types = malloc(btf->hdr.type_len);
+	if (!types)
+		goto err_out;
+	memcpy(types, btf->types_data, btf->hdr.type_len);
+
+	if (btf->hdr.layout_len) {
+		layout = malloc(btf->hdr.layout_len);
+		if (!layout)
+			goto err_out;
+		memcpy(layout, btf->raw_data + btf->hdr.hdr_len + btf->hdr.layout_off,
+		       btf->hdr.layout_len);
+	}
 
 	/* build lookup index for all strings */
-	set = strset__new(BTF_MAX_STR_OFFSET, btf->strs_data, btf->hdr->str_len);
+	set = strset__new(BTF_MAX_STR_OFFSET, btf->strs_data, btf->hdr.str_len);
 	if (IS_ERR(set)) {
 		err = PTR_ERR(set);
 		goto err_out;
 	}
 
 	/* only when everything was successful, update internal state */
-	btf->hdr = hdr;
 	btf->types_data = types;
-	btf->types_data_cap = btf->hdr->type_len;
+	btf->types_data_cap = btf->hdr.type_len;
 	btf->strs_data = NULL;
 	btf->strs_set = set;
+	if (layout)
+		btf->layout = layout;
 	/* if BTF was created from scratch, all strings are guaranteed to be
 	 * unique and deduplicated
 	 */
-	if (btf->hdr->str_len == 0)
+	if (btf->hdr.str_len == 0)
 		btf->strs_deduped = true;
-	if (!btf->base_btf && btf->hdr->str_len == 1)
+	if (!btf->base_btf && btf->hdr.str_len == 1)
 		btf->strs_deduped = true;
 
 	/* invalidate raw_data representation */
 	btf_invalidate_raw_data(btf);
 
+	btf->modifiable = true;
+
 	return 0;
 
 err_out:
 	strset__free(set);
-	free(hdr);
 	free(types);
+	free(layout);
 	return err;
 }
 
@@ -1718,6 +2066,7 @@ err_out:
 int btf__find_str(struct btf *btf, const char *s)
 {
 	int off;
+	int err;
 
 	if (btf->base_btf) {
 		off = btf__find_str(btf->base_btf, s);
@@ -1726,8 +2075,9 @@ int btf__find_str(struct btf *btf, const char *s)
 	}
 
 	/* BTF needs to be in a modifiable state to build string lookup index */
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	off = strset__find_str(btf->strs_set, s);
 	if (off < 0)
@@ -1744,6 +2094,7 @@ int btf__find_str(struct btf *btf, const char *s)
 int btf__add_str(struct btf *btf, const char *s)
 {
 	int off;
+	int err;
 
 	if (btf->base_btf) {
 		off = btf__find_str(btf->base_btf, s);
@@ -1751,14 +2102,15 @@ int btf__add_str(struct btf *btf, const char *s)
 			return off;
 	}
 
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	off = strset__add_str(btf->strs_set, s);
 	if (off < 0)
 		return libbpf_err(off);
 
-	btf->hdr->str_len = strset__data_size(btf->strs_set);
+	btf->hdr.str_len = strset__data_size(btf->strs_set);
 
 	return btf->start_str_off + off;
 }
@@ -1766,24 +2118,42 @@ int btf__add_str(struct btf *btf, const char *s)
 static void *btf_add_type_mem(struct btf *btf, size_t add_sz)
 {
 	return libbpf_add_mem(&btf->types_data, &btf->types_data_cap, 1,
-			      btf->hdr->type_len, UINT_MAX, add_sz);
+			      btf->hdr.type_len, UINT_MAX, add_sz);
 }
 
-static void btf_type_inc_vlen(struct btf_type *t)
+static int btf_type_inc_vlen(struct btf_type *t)
 {
+	if (btf_vlen(t) == BTF_MAX_VLEN)
+		return -ENOSPC;
 	t->info = btf_type_info(btf_kind(t), btf_vlen(t) + 1, btf_kflag(t));
+	return 0;
+}
+
+static void btf_hdr_update_type_len(struct btf *btf, int new_len)
+{
+	btf->hdr.type_len = new_len;
+	if (btf->layout) {
+		btf->hdr.layout_off = btf->hdr.type_off + new_len;
+		btf->hdr.str_off = btf->hdr.layout_off + btf->hdr.layout_len;
+	} else {
+		btf->hdr.str_off = btf->hdr.type_off + new_len;
+	}
+}
+
+static void btf_hdr_update_str_len(struct btf *btf, int new_len)
+{
+	btf->hdr.str_len = new_len;
 }
 
 static int btf_commit_type(struct btf *btf, int data_sz)
 {
 	int err;
 
-	err = btf_add_type_idx_entry(btf, btf->hdr->type_len);
+	err = btf_add_type_idx_entry(btf, btf->hdr.type_len);
 	if (err)
 		return libbpf_err(err);
 
-	btf->hdr->type_len += data_sz;
-	btf->hdr->str_off += data_sz;
+	btf_hdr_update_type_len(btf, btf->hdr.type_len + data_sz);
 	btf->nr_types++;
 	return btf->start_id + btf->nr_types - 1;
 }
@@ -1832,13 +2202,14 @@ static int btf_add_type(struct btf_pipe *p, const struct btf_type *src_type)
 	__u32 *str_off;
 	int sz, err;
 
-	sz = btf_type_size(src_type);
+	sz = btf_type_size(p->src, src_type);
 	if (sz < 0)
 		return libbpf_err(sz);
 
 	/* deconstruct BTF, if necessary, and invalidate raw_data */
-	if (btf_ensure_modifiable(p->dst))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(p->dst);
+	if (err)
+		return libbpf_err(err);
 
 	t = btf_add_type_mem(p->dst, sz);
 	if (!t)
@@ -1873,24 +2244,31 @@ int btf__add_btf(struct btf *btf, const struct btf *src_btf)
 {
 	struct btf_pipe p = { .src = src_btf, .dst = btf };
 	int data_sz, sz, cnt, i, err, old_strs_len;
+	__u32 src_start_id;
 	__u32 *off;
 	void *t;
 
-	/* appending split BTF isn't supported yet */
-	if (src_btf->base_btf)
-		return libbpf_err(-ENOTSUP);
+	/*
+	 * When appending split BTF, the destination must share the same base
+	 * BTF so that base type ID references remain valid.
+	 */
+	if (src_btf->base_btf && src_btf->base_btf != btf->base_btf)
+		return libbpf_err(-EOPNOTSUPP);
+
+	src_start_id = src_btf->base_btf ? btf__type_cnt(src_btf->base_btf) : 1;
 
 	/* deconstruct BTF, if necessary, and invalidate raw_data */
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	/* remember original strings section size if we have to roll back
 	 * partial strings section changes
 	 */
-	old_strs_len = btf->hdr->str_len;
+	old_strs_len = btf->hdr.str_len;
 
-	data_sz = src_btf->hdr->type_len;
-	cnt = btf__type_cnt(src_btf) - 1;
+	data_sz = src_btf->hdr.type_len;
+	cnt = src_btf->nr_types;
 
 	/* pre-allocate enough memory for new types */
 	t = btf_add_type_mem(btf, data_sz);
@@ -1914,7 +2292,7 @@ int btf__add_btf(struct btf *btf, const struct btf *src_btf)
 		struct btf_field_iter it;
 		__u32 *type_id, *str_off;
 
-		sz = btf_type_size(t);
+		sz = btf_type_size(src_btf, t);
 		if (sz < 0) {
 			/* unlikely, has to be corrupted src_btf */
 			err = sz;
@@ -1929,6 +2307,9 @@ int btf__add_btf(struct btf *btf, const struct btf *src_btf)
 		if (err)
 			goto err_out;
 		while ((str_off = btf_field_iter_next(&it))) {
+			/* don't remap strings from shared base BTF */
+			if (*str_off < src_btf->start_str_off)
+				continue;
 			err = btf_rewrite_str(&p, str_off);
 			if (err)
 				goto err_out;
@@ -1943,11 +2324,11 @@ int btf__add_btf(struct btf *btf, const struct btf *src_btf)
 			if (!*type_id) /* nothing to do for VOID references */
 				continue;
 
-			/* we haven't updated btf's type count yet, so
-			 * btf->start_id + btf->nr_types - 1 is the type ID offset we should
-			 * add to all newly added BTF types
-			 */
-			*type_id += btf->start_id + btf->nr_types - 1;
+			/* don't remap types from shared base BTF */
+			if (*type_id < src_start_id)
+				continue;
+
+			*type_id += btf->start_id + btf->nr_types - src_start_id;
 		}
 
 		/* go to next type data and type offset index entry */
@@ -1963,8 +2344,7 @@ int btf__add_btf(struct btf *btf, const struct btf *src_btf)
 	 * update type count and various internal offsets and sizes to
 	 * "commit" the changes and made them visible to the outside world.
 	 */
-	btf->hdr->type_len += data_sz;
-	btf->hdr->str_off += data_sz;
+	btf_hdr_update_type_len(btf, btf->hdr.type_len + data_sz);
 	btf->nr_types += cnt;
 
 	hashmap__free(p.str_off_map);
@@ -1975,13 +2355,14 @@ err_out:
 	/* zero out preallocated memory as if it was just allocated with
 	 * libbpf_add_mem()
 	 */
-	memset(btf->types_data + btf->hdr->type_len, 0, data_sz);
-	memset(btf->strs_data + old_strs_len, 0, btf->hdr->str_len - old_strs_len);
+	memset(btf->types_data + btf->hdr.type_len, 0, data_sz);
+	if (btf->strs_data)
+		memset(btf->strs_data + old_strs_len, 0, btf->hdr.str_len - old_strs_len);
 
 	/* and now restore original strings section size; types data size
 	 * wasn't modified, so doesn't need restoring, see big comment above
 	 */
-	btf->hdr->str_len = old_strs_len;
+	btf_hdr_update_str_len(btf, old_strs_len);
 
 	hashmap__free(p.str_off_map);
 
@@ -2001,9 +2382,10 @@ int btf__add_int(struct btf *btf, const char *name, size_t byte_sz, int encoding
 {
 	struct btf_type *t;
 	int sz, name_off;
+	int err;
 
 	/* non-empty name */
-	if (!name || !name[0])
+	if (str_is_empty(name))
 		return libbpf_err(-EINVAL);
 	/* byte_sz must be power of 2 */
 	if (!byte_sz || (byte_sz & (byte_sz - 1)) || byte_sz > 16)
@@ -2012,8 +2394,9 @@ int btf__add_int(struct btf *btf, const char *name, size_t byte_sz, int encoding
 		return libbpf_err(-EINVAL);
 
 	/* deconstruct BTF, if necessary, and invalidate raw_data */
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_type) + sizeof(int);
 	t = btf_add_type_mem(btf, sz);
@@ -2049,9 +2432,10 @@ int btf__add_float(struct btf *btf, const char *name, size_t byte_sz)
 {
 	struct btf_type *t;
 	int sz, name_off;
+	int err;
 
 	/* non-empty name */
-	if (!name || !name[0])
+	if (str_is_empty(name))
 		return libbpf_err(-EINVAL);
 
 	/* byte_sz must be one of the explicitly allowed values */
@@ -2059,8 +2443,9 @@ int btf__add_float(struct btf *btf, const char *name, size_t byte_sz)
 	    byte_sz != 16)
 		return libbpf_err(-EINVAL);
 
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_type);
 	t = btf_add_type_mem(btf, sz);
@@ -2090,30 +2475,32 @@ static int validate_type_id(int id)
 }
 
 /* generic append function for PTR, TYPEDEF, CONST/VOLATILE/RESTRICT */
-static int btf_add_ref_kind(struct btf *btf, int kind, const char *name, int ref_type_id)
+static int btf_add_ref_kind(struct btf *btf, int kind, const char *name, int ref_type_id, int kflag)
 {
 	struct btf_type *t;
 	int sz, name_off = 0;
+	int err;
 
 	if (validate_type_id(ref_type_id))
 		return libbpf_err(-EINVAL);
 
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_type);
 	t = btf_add_type_mem(btf, sz);
 	if (!t)
 		return libbpf_err(-ENOMEM);
 
-	if (name && name[0]) {
+	if (!str_is_empty(name)) {
 		name_off = btf__add_str(btf, name);
 		if (name_off < 0)
 			return name_off;
 	}
 
 	t->name_off = name_off;
-	t->info = btf_type_info(kind, 0, 0);
+	t->info = btf_type_info(kind, 0, kflag);
 	t->type = ref_type_id;
 
 	return btf_commit_type(btf, sz);
@@ -2128,7 +2515,7 @@ static int btf_add_ref_kind(struct btf *btf, int kind, const char *name, int ref
  */
 int btf__add_ptr(struct btf *btf, int ref_type_id)
 {
-	return btf_add_ref_kind(btf, BTF_KIND_PTR, NULL, ref_type_id);
+	return btf_add_ref_kind(btf, BTF_KIND_PTR, NULL, ref_type_id, 0);
 }
 
 /*
@@ -2144,13 +2531,15 @@ int btf__add_array(struct btf *btf, int index_type_id, int elem_type_id, __u32 n
 {
 	struct btf_type *t;
 	struct btf_array *a;
+	int err;
 	int sz;
 
 	if (validate_type_id(index_type_id) || validate_type_id(elem_type_id))
 		return libbpf_err(-EINVAL);
 
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_type) + sizeof(struct btf_array);
 	t = btf_add_type_mem(btf, sz);
@@ -2174,16 +2563,18 @@ static int btf_add_composite(struct btf *btf, int kind, const char *name, __u32 
 {
 	struct btf_type *t;
 	int sz, name_off = 0;
+	int err;
 
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_type);
 	t = btf_add_type_mem(btf, sz);
 	if (!t)
 		return libbpf_err(-ENOMEM);
 
-	if (name && name[0]) {
+	if (!str_is_empty(name)) {
 		name_off = btf__add_str(btf, name);
 		if (name_off < 0)
 			return name_off;
@@ -2256,6 +2647,7 @@ int btf__add_field(struct btf *btf, const char *name, int type_id,
 	struct btf_member *m;
 	bool is_bitfield;
 	int sz, name_off = 0;
+	int err;
 
 	/* last type should be union/struct */
 	if (btf->nr_types == 0)
@@ -2263,6 +2655,8 @@ int btf__add_field(struct btf *btf, const char *name, int type_id,
 	t = btf_last_type(btf);
 	if (!btf_is_composite(t))
 		return libbpf_err(-EINVAL);
+	if (btf_vlen(t) == BTF_MAX_VLEN)
+		return libbpf_err(-ENOSPC);
 
 	if (validate_type_id(type_id))
 		return libbpf_err(-EINVAL);
@@ -2276,15 +2670,16 @@ int btf__add_field(struct btf *btf, const char *name, int type_id,
 		return libbpf_err(-EINVAL);
 
 	/* decompose and invalidate raw data */
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_member);
 	m = btf_add_type_mem(btf, sz);
 	if (!m)
 		return libbpf_err(-ENOMEM);
 
-	if (name && name[0]) {
+	if (!str_is_empty(name)) {
 		name_off = btf__add_str(btf, name);
 		if (name_off < 0)
 			return name_off;
@@ -2296,11 +2691,11 @@ int btf__add_field(struct btf *btf, const char *name, int type_id,
 
 	/* btf_add_type_mem can invalidate t pointer */
 	t = btf_last_type(btf);
+
 	/* update parent type's vlen and kflag */
 	t->info = btf_type_info(btf_kind(t), btf_vlen(t) + 1, is_bitfield || btf_kflag(t));
 
-	btf->hdr->type_len += sz;
-	btf->hdr->str_off += sz;
+	btf_hdr_update_type_len(btf, btf->hdr.type_len + sz);
 	return 0;
 }
 
@@ -2309,20 +2704,22 @@ static int btf_add_enum_common(struct btf *btf, const char *name, __u32 byte_sz,
 {
 	struct btf_type *t;
 	int sz, name_off = 0;
+	int err;
 
 	/* byte_sz must be power of 2 */
 	if (!byte_sz || (byte_sz & (byte_sz - 1)) || byte_sz > 8)
 		return libbpf_err(-EINVAL);
 
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_type);
 	t = btf_add_type_mem(btf, sz);
 	if (!t)
 		return libbpf_err(-ENOMEM);
 
-	if (name && name[0]) {
+	if (!str_is_empty(name)) {
 		name_off = btf__add_str(btf, name);
 		if (name_off < 0)
 			return name_off;
@@ -2371,6 +2768,7 @@ int btf__add_enum_value(struct btf *btf, const char *name, __s64 value)
 	struct btf_type *t;
 	struct btf_enum *v;
 	int sz, name_off;
+	int err;
 
 	/* last type should be BTF_KIND_ENUM */
 	if (btf->nr_types == 0)
@@ -2380,14 +2778,15 @@ int btf__add_enum_value(struct btf *btf, const char *name, __s64 value)
 		return libbpf_err(-EINVAL);
 
 	/* non-empty name */
-	if (!name || !name[0])
+	if (str_is_empty(name))
 		return libbpf_err(-EINVAL);
 	if (value < INT_MIN || value > UINT_MAX)
 		return libbpf_err(-E2BIG);
 
 	/* decompose and invalidate raw data */
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_enum);
 	v = btf_add_type_mem(btf, sz);
@@ -2403,14 +2802,15 @@ int btf__add_enum_value(struct btf *btf, const char *name, __s64 value)
 
 	/* update parent type's vlen */
 	t = btf_last_type(btf);
-	btf_type_inc_vlen(t);
+	err = btf_type_inc_vlen(t);
+	if (err)
+		return libbpf_err(err);
 
 	/* if negative value, set signedness to signed */
 	if (value < 0)
 		t->info = btf_type_info(btf_kind(t), btf_vlen(t), true);
 
-	btf->hdr->type_len += sz;
-	btf->hdr->str_off += sz;
+	btf_hdr_update_type_len(btf, btf->hdr.type_len + sz);
 	return 0;
 }
 
@@ -2448,6 +2848,7 @@ int btf__add_enum64_value(struct btf *btf, const char *name, __u64 value)
 	struct btf_enum64 *v;
 	struct btf_type *t;
 	int sz, name_off;
+	int err;
 
 	/* last type should be BTF_KIND_ENUM64 */
 	if (btf->nr_types == 0)
@@ -2457,12 +2858,13 @@ int btf__add_enum64_value(struct btf *btf, const char *name, __u64 value)
 		return libbpf_err(-EINVAL);
 
 	/* non-empty name */
-	if (!name || !name[0])
+	if (str_is_empty(name))
 		return libbpf_err(-EINVAL);
 
 	/* decompose and invalidate raw data */
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_enum64);
 	v = btf_add_type_mem(btf, sz);
@@ -2479,10 +2881,11 @@ int btf__add_enum64_value(struct btf *btf, const char *name, __u64 value)
 
 	/* update parent type's vlen */
 	t = btf_last_type(btf);
-	btf_type_inc_vlen(t);
+	err = btf_type_inc_vlen(t);
+	if (err)
+		return libbpf_err(err);
 
-	btf->hdr->type_len += sz;
-	btf->hdr->str_off += sz;
+	btf_hdr_update_type_len(btf, btf->hdr.type_len + sz);
 	return 0;
 }
 
@@ -2497,7 +2900,7 @@ int btf__add_enum64_value(struct btf *btf, const char *name, __u64 value)
  */
 int btf__add_fwd(struct btf *btf, const char *name, enum btf_fwd_kind fwd_kind)
 {
-	if (!name || !name[0])
+	if (str_is_empty(name))
 		return libbpf_err(-EINVAL);
 
 	switch (fwd_kind) {
@@ -2506,7 +2909,7 @@ int btf__add_fwd(struct btf *btf, const char *name, enum btf_fwd_kind fwd_kind)
 		struct btf_type *t;
 		int id;
 
-		id = btf_add_ref_kind(btf, BTF_KIND_FWD, name, 0);
+		id = btf_add_ref_kind(btf, BTF_KIND_FWD, name, 0, 0);
 		if (id <= 0)
 			return id;
 		t = btf_type_by_id(btf, id);
@@ -2533,10 +2936,10 @@ int btf__add_fwd(struct btf *btf, const char *name, enum btf_fwd_kind fwd_kind)
  */
 int btf__add_typedef(struct btf *btf, const char *name, int ref_type_id)
 {
-	if (!name || !name[0])
+	if (str_is_empty(name))
 		return libbpf_err(-EINVAL);
 
-	return btf_add_ref_kind(btf, BTF_KIND_TYPEDEF, name, ref_type_id);
+	return btf_add_ref_kind(btf, BTF_KIND_TYPEDEF, name, ref_type_id, 0);
 }
 
 /*
@@ -2548,7 +2951,7 @@ int btf__add_typedef(struct btf *btf, const char *name, int ref_type_id)
  */
 int btf__add_volatile(struct btf *btf, int ref_type_id)
 {
-	return btf_add_ref_kind(btf, BTF_KIND_VOLATILE, NULL, ref_type_id);
+	return btf_add_ref_kind(btf, BTF_KIND_VOLATILE, NULL, ref_type_id, 0);
 }
 
 /*
@@ -2560,7 +2963,7 @@ int btf__add_volatile(struct btf *btf, int ref_type_id)
  */
 int btf__add_const(struct btf *btf, int ref_type_id)
 {
-	return btf_add_ref_kind(btf, BTF_KIND_CONST, NULL, ref_type_id);
+	return btf_add_ref_kind(btf, BTF_KIND_CONST, NULL, ref_type_id, 0);
 }
 
 /*
@@ -2572,7 +2975,7 @@ int btf__add_const(struct btf *btf, int ref_type_id)
  */
 int btf__add_restrict(struct btf *btf, int ref_type_id)
 {
-	return btf_add_ref_kind(btf, BTF_KIND_RESTRICT, NULL, ref_type_id);
+	return btf_add_ref_kind(btf, BTF_KIND_RESTRICT, NULL, ref_type_id, 0);
 }
 
 /*
@@ -2585,10 +2988,27 @@ int btf__add_restrict(struct btf *btf, int ref_type_id)
  */
 int btf__add_type_tag(struct btf *btf, const char *value, int ref_type_id)
 {
-	if (!value || !value[0])
+	if (str_is_empty(value))
 		return libbpf_err(-EINVAL);
 
-	return btf_add_ref_kind(btf, BTF_KIND_TYPE_TAG, value, ref_type_id);
+	return btf_add_ref_kind(btf, BTF_KIND_TYPE_TAG, value, ref_type_id, 0);
+}
+
+/*
+ * Append new BTF_KIND_TYPE_TAG type with:
+ *   - *value*, non-empty/non-NULL tag value;
+ *   - *ref_type_id* - referenced type ID, it might not exist yet;
+ * Set info->kflag to 1, indicating this tag is an __attribute__
+ * Returns:
+ *   - >0, type ID of newly added BTF type;
+ *   - <0, on error.
+ */
+int btf__add_type_attr(struct btf *btf, const char *value, int ref_type_id)
+{
+	if (str_is_empty(value))
+		return libbpf_err(-EINVAL);
+
+	return btf_add_ref_kind(btf, BTF_KIND_TYPE_TAG, value, ref_type_id, 1);
 }
 
 /*
@@ -2604,13 +3024,13 @@ int btf__add_func(struct btf *btf, const char *name,
 {
 	int id;
 
-	if (!name || !name[0])
+	if (str_is_empty(name))
 		return libbpf_err(-EINVAL);
 	if (linkage != BTF_FUNC_STATIC && linkage != BTF_FUNC_GLOBAL &&
 	    linkage != BTF_FUNC_EXTERN)
 		return libbpf_err(-EINVAL);
 
-	id = btf_add_ref_kind(btf, BTF_KIND_FUNC, name, proto_type_id);
+	id = btf_add_ref_kind(btf, BTF_KIND_FUNC, name, proto_type_id, 0);
 	if (id > 0) {
 		struct btf_type *t = btf_type_by_id(btf, id);
 
@@ -2634,13 +3054,15 @@ int btf__add_func(struct btf *btf, const char *name,
 int btf__add_func_proto(struct btf *btf, int ret_type_id)
 {
 	struct btf_type *t;
+	int err;
 	int sz;
 
 	if (validate_type_id(ret_type_id))
 		return libbpf_err(-EINVAL);
 
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_type);
 	t = btf_add_type_mem(btf, sz);
@@ -2670,6 +3092,7 @@ int btf__add_func_param(struct btf *btf, const char *name, int type_id)
 	struct btf_type *t;
 	struct btf_param *p;
 	int sz, name_off = 0;
+	int err;
 
 	if (validate_type_id(type_id))
 		return libbpf_err(-EINVAL);
@@ -2682,15 +3105,16 @@ int btf__add_func_param(struct btf *btf, const char *name, int type_id)
 		return libbpf_err(-EINVAL);
 
 	/* decompose and invalidate raw data */
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_param);
 	p = btf_add_type_mem(btf, sz);
 	if (!p)
 		return libbpf_err(-ENOMEM);
 
-	if (name && name[0]) {
+	if (!str_is_empty(name)) {
 		name_off = btf__add_str(btf, name);
 		if (name_off < 0)
 			return name_off;
@@ -2701,10 +3125,11 @@ int btf__add_func_param(struct btf *btf, const char *name, int type_id)
 
 	/* update parent type's vlen */
 	t = btf_last_type(btf);
-	btf_type_inc_vlen(t);
+	err = btf_type_inc_vlen(t);
+	if (err)
+		return libbpf_err(err);
 
-	btf->hdr->type_len += sz;
-	btf->hdr->str_off += sz;
+	btf_hdr_update_type_len(btf, btf->hdr.type_len + sz);
 	return 0;
 }
 
@@ -2723,9 +3148,10 @@ int btf__add_var(struct btf *btf, const char *name, int linkage, int type_id)
 	struct btf_type *t;
 	struct btf_var *v;
 	int sz, name_off;
+	int err;
 
 	/* non-empty name */
-	if (!name || !name[0])
+	if (str_is_empty(name))
 		return libbpf_err(-EINVAL);
 	if (linkage != BTF_VAR_STATIC && linkage != BTF_VAR_GLOBAL_ALLOCATED &&
 	    linkage != BTF_VAR_GLOBAL_EXTERN)
@@ -2734,8 +3160,9 @@ int btf__add_var(struct btf *btf, const char *name, int linkage, int type_id)
 		return libbpf_err(-EINVAL);
 
 	/* deconstruct BTF, if necessary, and invalidate raw_data */
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_type) + sizeof(struct btf_var);
 	t = btf_add_type_mem(btf, sz);
@@ -2772,13 +3199,15 @@ int btf__add_datasec(struct btf *btf, const char *name, __u32 byte_sz)
 {
 	struct btf_type *t;
 	int sz, name_off;
+	int err;
 
 	/* non-empty name */
-	if (!name || !name[0])
+	if (str_is_empty(name))
 		return libbpf_err(-EINVAL);
 
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_type);
 	t = btf_add_type_mem(btf, sz);
@@ -2811,6 +3240,7 @@ int btf__add_datasec_var_info(struct btf *btf, int var_type_id, __u32 offset, __
 {
 	struct btf_type *t;
 	struct btf_var_secinfo *v;
+	int err;
 	int sz;
 
 	/* last type should be BTF_KIND_DATASEC */
@@ -2824,8 +3254,9 @@ int btf__add_datasec_var_info(struct btf *btf, int var_type_id, __u32 offset, __
 		return libbpf_err(-EINVAL);
 
 	/* decompose and invalidate raw data */
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
 
 	sz = sizeof(struct btf_var_secinfo);
 	v = btf_add_type_mem(btf, sz);
@@ -2838,11 +3269,46 @@ int btf__add_datasec_var_info(struct btf *btf, int var_type_id, __u32 offset, __
 
 	/* update parent type's vlen */
 	t = btf_last_type(btf);
-	btf_type_inc_vlen(t);
+	err = btf_type_inc_vlen(t);
+	if (err)
+		return libbpf_err(err);
 
-	btf->hdr->type_len += sz;
-	btf->hdr->str_off += sz;
+	btf_hdr_update_type_len(btf, btf->hdr.type_len + sz);
 	return 0;
+}
+
+static int btf_add_decl_tag(struct btf *btf, const char *value, int ref_type_id,
+			    int component_idx, int kflag)
+{
+	struct btf_type *t;
+	int sz, value_off;
+	int err;
+
+	if (str_is_empty(value) || component_idx < -1)
+		return libbpf_err(-EINVAL);
+
+	if (validate_type_id(ref_type_id))
+		return libbpf_err(-EINVAL);
+
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		return libbpf_err(err);
+
+	sz = sizeof(struct btf_type) + sizeof(struct btf_decl_tag);
+	t = btf_add_type_mem(btf, sz);
+	if (!t)
+		return libbpf_err(-ENOMEM);
+
+	value_off = btf__add_str(btf, value);
+	if (value_off < 0)
+		return value_off;
+
+	t->name_off = value_off;
+	t->info = btf_type_info(BTF_KIND_DECL_TAG, 0, kflag);
+	t->type = ref_type_id;
+	btf_decl_tag(t)->component_idx = component_idx;
+
+	return btf_commit_type(btf, sz);
 }
 
 /*
@@ -2856,35 +3322,26 @@ int btf__add_datasec_var_info(struct btf *btf, int var_type_id, __u32 offset, __
  *   - <0, on error.
  */
 int btf__add_decl_tag(struct btf *btf, const char *value, int ref_type_id,
-		 int component_idx)
+		      int component_idx)
 {
-	struct btf_type *t;
-	int sz, value_off;
+	return btf_add_decl_tag(btf, value, ref_type_id, component_idx, 0);
+}
 
-	if (!value || !value[0] || component_idx < -1)
-		return libbpf_err(-EINVAL);
-
-	if (validate_type_id(ref_type_id))
-		return libbpf_err(-EINVAL);
-
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
-
-	sz = sizeof(struct btf_type) + sizeof(struct btf_decl_tag);
-	t = btf_add_type_mem(btf, sz);
-	if (!t)
-		return libbpf_err(-ENOMEM);
-
-	value_off = btf__add_str(btf, value);
-	if (value_off < 0)
-		return value_off;
-
-	t->name_off = value_off;
-	t->info = btf_type_info(BTF_KIND_DECL_TAG, 0, false);
-	t->type = ref_type_id;
-	btf_decl_tag(t)->component_idx = component_idx;
-
-	return btf_commit_type(btf, sz);
+/*
+ * Append new BTF_KIND_DECL_TAG type with:
+ *   - *value* - non-empty/non-NULL string;
+ *   - *ref_type_id* - referenced type ID, it might not exist yet;
+ *   - *component_idx* - -1 for tagging reference type, otherwise struct/union
+ *     member or function argument index;
+ * Set info->kflag to 1, indicating this tag is an __attribute__
+ * Returns:
+ *   - >0, type ID of newly added BTF type;
+ *   - <0, on error.
+ */
+int btf__add_decl_attr(struct btf *btf, const char *value, int ref_type_id,
+		       int component_idx)
+{
+	return btf_add_decl_tag(btf, value, ref_type_id, component_idx, 1);
 }
 
 struct btf_ext_sec_info_param {
@@ -3015,8 +3472,6 @@ static int btf_ext_parse_info(struct btf_ext *btf_ext, bool is_native)
 		.desc = "line_info",
 	};
 	struct btf_ext_sec_info_param core_relo = {
-		.off = btf_ext->hdr->core_relo_off,
-		.len = btf_ext->hdr->core_relo_len,
 		.min_rec_size = sizeof(struct bpf_core_relo),
 		.ext_info = &btf_ext->core_relo_info,
 		.desc = "core_relo",
@@ -3034,6 +3489,8 @@ static int btf_ext_parse_info(struct btf_ext *btf_ext, bool is_native)
 	if (btf_ext->hdr->hdr_len < offsetofend(struct btf_ext_header, core_relo_len))
 		return 0; /* skip core relos parsing */
 
+	core_relo.off = btf_ext->hdr->core_relo_off;
+	core_relo.len = btf_ext->hdr->core_relo_len;
 	err = btf_ext_parse_sec_info(btf_ext, &core_relo, is_native);
 	if (err)
 		return err;
@@ -3459,10 +3916,9 @@ int btf__dedup(struct btf *btf, const struct btf_dedup_opts *opts)
 		return libbpf_err(-EINVAL);
 	}
 
-	if (btf_ensure_modifiable(btf)) {
-		err = -ENOMEM;
+	err = btf_ensure_modifiable(btf);
+	if (err)
 		goto done;
-	}
 
 	err = btf_dedup_prep(d);
 	if (err) {
@@ -3782,7 +4238,7 @@ static int btf_dedup_strings(struct btf_dedup *d)
 
 	/* replace BTF string data and hash with deduped ones */
 	strset__free(d->btf->strs_set);
-	d->btf->hdr->str_len = strset__data_size(d->strs_set);
+	btf_hdr_update_str_len(d->btf, strset__data_size(d->strs_set));
 	d->btf->strs_set = d->strs_set;
 	d->strs_set = NULL;
 	d->btf->strs_deduped = true;
@@ -3793,6 +4249,20 @@ err_out:
 	d->strs_set = NULL;
 
 	return err;
+}
+
+/*
+ * Calculate type signature hash of TYPEDEF, ignoring referenced type IDs,
+ * as referenced type IDs equivalence is established separately during type
+ * graph equivalence check algorithm.
+ */
+static long btf_hash_typedef(struct btf_type *t)
+{
+	long h;
+
+	h = hash_combine(0, t->name_off);
+	h = hash_combine(h, t->info);
+	return h;
 }
 
 static long btf_hash_common(struct btf_type *t)
@@ -3810,6 +4280,13 @@ static bool btf_equal_common(struct btf_type *t1, struct btf_type *t2)
 	return t1->name_off == t2->name_off &&
 	       t1->info == t2->info &&
 	       t1->size == t2->size;
+}
+
+/* Check structural compatibility of two TYPEDEF. */
+static bool btf_equal_typedef(struct btf_type *t1, struct btf_type *t2)
+{
+	return t1->name_off == t2->name_off &&
+	       t1->info == t2->info;
 }
 
 /* Calculate type signature hash of INT or TAG. */
@@ -3848,7 +4325,7 @@ static long btf_hash_enum(struct btf_type *t)
 static bool btf_equal_enum_members(struct btf_type *t1, struct btf_type *t2)
 {
 	const struct btf_enum *m1, *m2;
-	__u16 vlen;
+	__u32 vlen;
 	int i;
 
 	vlen = btf_vlen(t1);
@@ -3866,7 +4343,7 @@ static bool btf_equal_enum_members(struct btf_type *t1, struct btf_type *t2)
 static bool btf_equal_enum64_members(struct btf_type *t1, struct btf_type *t2)
 {
 	const struct btf_enum64 *m1, *m2;
-	__u16 vlen;
+	__u32 vlen;
 	int i;
 
 	vlen = btf_vlen(t1);
@@ -3943,7 +4420,7 @@ static long btf_hash_struct(struct btf_type *t)
 static bool btf_shallow_equal_struct(struct btf_type *t1, struct btf_type *t2)
 {
 	const struct btf_member *m1, *m2;
-	__u16 vlen;
+	__u32 vlen;
 	int i;
 
 	if (!btf_equal_common(t1, t2))
@@ -4019,7 +4496,7 @@ static bool btf_compat_array(struct btf_type *t1, struct btf_type *t2)
 static long btf_hash_fnproto(struct btf_type *t)
 {
 	const struct btf_param *member = btf_params(t);
-	__u16 vlen = btf_vlen(t);
+	__u32 vlen = btf_vlen(t);
 	long h = btf_hash_common(t);
 	int i;
 
@@ -4041,7 +4518,7 @@ static long btf_hash_fnproto(struct btf_type *t)
 static bool btf_equal_fnproto(struct btf_type *t1, struct btf_type *t2)
 {
 	const struct btf_param *m1, *m2;
-	__u16 vlen;
+	__u32 vlen;
 	int i;
 
 	if (!btf_equal_common(t1, t2))
@@ -4067,7 +4544,7 @@ static bool btf_equal_fnproto(struct btf_type *t1, struct btf_type *t2)
 static bool btf_compat_fnproto(struct btf_type *t1, struct btf_type *t2)
 {
 	const struct btf_param *m1, *m2;
-	__u16 vlen;
+	__u32 vlen;
 	int i;
 
 	/* skip return type ID */
@@ -4115,11 +4592,13 @@ static int btf_dedup_prep(struct btf_dedup *d)
 		case BTF_KIND_RESTRICT:
 		case BTF_KIND_PTR:
 		case BTF_KIND_FWD:
-		case BTF_KIND_TYPEDEF:
 		case BTF_KIND_FUNC:
 		case BTF_KIND_FLOAT:
 		case BTF_KIND_TYPE_TAG:
 			h = btf_hash_common(t);
+			break;
+		case BTF_KIND_TYPEDEF:
+			h = btf_hash_typedef(t);
 			break;
 		case BTF_KIND_INT:
 		case BTF_KIND_DECL_TAG:
@@ -4299,45 +4778,119 @@ static inline __u16 btf_fwd_kind(struct btf_type *t)
 	return btf_kflag(t) ? BTF_KIND_UNION : BTF_KIND_STRUCT;
 }
 
-/* Check if given two types are identical ARRAY definitions */
-static bool btf_dedup_identical_arrays(struct btf_dedup *d, __u32 id1, __u32 id2)
+static bool btf_dedup_identical_types(struct btf_dedup *d, __u32 id1, __u32 id2, int depth)
 {
 	struct btf_type *t1, *t2;
-
+	int k1, k2;
+recur:
 	t1 = btf_type_by_id(d->btf, id1);
 	t2 = btf_type_by_id(d->btf, id2);
-	if (!btf_is_array(t1) || !btf_is_array(t2))
+	if (depth <= 0) {
+		pr_debug("Reached depth limit for identical type comparison for '%s'/'%s'\n",
+			 btf__name_by_offset(d->btf, t1->name_off),
+			 btf__name_by_offset(d->btf, t2->name_off));
 		return false;
-
-	return btf_equal_array(t1, t2);
-}
-
-/* Check if given two types are identical STRUCT/UNION definitions */
-static bool btf_dedup_identical_structs(struct btf_dedup *d, __u32 id1, __u32 id2)
-{
-	const struct btf_member *m1, *m2;
-	struct btf_type *t1, *t2;
-	int n, i;
-
-	t1 = btf_type_by_id(d->btf, id1);
-	t2 = btf_type_by_id(d->btf, id2);
-
-	if (!btf_is_composite(t1) || btf_kind(t1) != btf_kind(t2))
-		return false;
-
-	if (!btf_shallow_equal_struct(t1, t2))
-		return false;
-
-	m1 = btf_members(t1);
-	m2 = btf_members(t2);
-	for (i = 0, n = btf_vlen(t1); i < n; i++, m1++, m2++) {
-		if (m1->type != m2->type &&
-		    !btf_dedup_identical_arrays(d, m1->type, m2->type) &&
-		    !btf_dedup_identical_structs(d, m1->type, m2->type))
-			return false;
 	}
-	return true;
+
+	k1 = btf_kind(t1);
+	k2 = btf_kind(t2);
+	if (k1 != k2)
+		return false;
+
+	switch (k1) {
+	case BTF_KIND_UNKN: /* VOID */
+		return true;
+	case BTF_KIND_INT:
+		return btf_equal_int_tag(t1, t2);
+	case BTF_KIND_ENUM:
+	case BTF_KIND_ENUM64:
+		return btf_compat_enum(t1, t2);
+	case BTF_KIND_FWD:
+	case BTF_KIND_FLOAT:
+		return btf_equal_common(t1, t2);
+	case BTF_KIND_CONST:
+	case BTF_KIND_VOLATILE:
+	case BTF_KIND_RESTRICT:
+	case BTF_KIND_PTR:
+	case BTF_KIND_TYPEDEF:
+	case BTF_KIND_FUNC:
+	case BTF_KIND_TYPE_TAG:
+		if (t1->info != t2->info || t1->name_off != t2->name_off)
+			return false;
+		id1 = t1->type;
+		id2 = t2->type;
+		goto recur;
+	case BTF_KIND_ARRAY: {
+		struct btf_array *a1, *a2;
+
+		if (!btf_compat_array(t1, t2))
+			return false;
+
+		a1 = btf_array(t1);
+		a2 = btf_array(t1);
+
+		if (a1->index_type != a2->index_type &&
+		    !btf_dedup_identical_types(d, a1->index_type, a2->index_type, depth - 1))
+			return false;
+
+		if (a1->type != a2->type &&
+		    !btf_dedup_identical_types(d, a1->type, a2->type, depth - 1))
+			return false;
+
+		return true;
+	}
+	case BTF_KIND_STRUCT:
+	case BTF_KIND_UNION: {
+		const struct btf_member *m1, *m2;
+		int i, n;
+
+		if (!btf_shallow_equal_struct(t1, t2))
+			return false;
+
+		m1 = btf_members(t1);
+		m2 = btf_members(t2);
+		for (i = 0, n = btf_vlen(t1); i < n; i++, m1++, m2++) {
+			if (m1->type == m2->type)
+				continue;
+			if (!btf_dedup_identical_types(d, m1->type, m2->type, depth - 1)) {
+				if (t1->name_off) {
+					pr_debug("%s '%s' size=%d vlen=%d id1[%u] id2[%u] shallow-equal but not identical for field#%d '%s'\n",
+						 k1 == BTF_KIND_STRUCT ? "STRUCT" : "UNION",
+						 btf__name_by_offset(d->btf, t1->name_off),
+						 t1->size, btf_vlen(t1), id1, id2, i,
+						 btf__name_by_offset(d->btf, m1->name_off));
+				}
+				return false;
+			}
+		}
+		return true;
+	}
+	case BTF_KIND_FUNC_PROTO: {
+		const struct btf_param *p1, *p2;
+		int i, n;
+
+		if (!btf_compat_fnproto(t1, t2))
+			return false;
+
+		if (t1->type != t2->type &&
+		    !btf_dedup_identical_types(d, t1->type, t2->type, depth - 1))
+			return false;
+
+		p1 = btf_params(t1);
+		p2 = btf_params(t2);
+		for (i = 0, n = btf_vlen(t1); i < n; i++, p1++, p2++) {
+			if (p1->type == p2->type)
+				continue;
+			if (!btf_dedup_identical_types(d, p1->type, p2->type, depth - 1))
+				return false;
+		}
+		return true;
+	}
+	default:
+		return false;
+	}
 }
+
 
 /*
  * Check equivalence of BTF type graph formed by candidate struct/union (we'll
@@ -4457,19 +5010,13 @@ static int btf_dedup_is_equiv(struct btf_dedup *d, __u32 cand_id,
 		 * different fields within the *same* struct. This breaks type
 		 * equivalence check, which makes an assumption that candidate
 		 * types sub-graph has a consistent and deduped-by-compiler
-		 * types within a single CU. So work around that by explicitly
-		 * allowing identical array types here.
+		 * types within a single CU. And similar situation can happen
+		 * with struct/union sometimes, and event with pointers.
+		 * So accommodate cases like this doing a structural
+		 * comparison recursively, but avoiding being stuck in endless
+		 * loops by limiting the depth up to which we check.
 		 */
-		if (btf_dedup_identical_arrays(d, hypot_type_id, cand_id))
-			return 1;
-		/* It turns out that similar situation can happen with
-		 * struct/union sometimes, sigh... Handle the case where
-		 * structs/unions are exactly the same, down to the referenced
-		 * type IDs. Anything more complicated (e.g., if referenced
-		 * types are different, but equivalent) is *way more*
-		 * complicated and requires a many-to-many equivalence mapping.
-		 */
-		if (btf_dedup_identical_structs(d, hypot_type_id, cand_id))
+		if (btf_dedup_identical_types(d, hypot_type_id, cand_id, 16))
 			return 1;
 		return 0;
 	}
@@ -4546,7 +5093,7 @@ static int btf_dedup_is_equiv(struct btf_dedup *d, __u32 cand_id,
 	case BTF_KIND_STRUCT:
 	case BTF_KIND_UNION: {
 		const struct btf_member *cand_m, *canon_m;
-		__u16 vlen;
+		__u32 vlen;
 
 		if (!btf_shallow_equal_struct(cand_type, canon_type))
 			return 0;
@@ -4555,8 +5102,16 @@ static int btf_dedup_is_equiv(struct btf_dedup *d, __u32 cand_id,
 		canon_m = btf_members(canon_type);
 		for (i = 0; i < vlen; i++) {
 			eq = btf_dedup_is_equiv(d, cand_m->type, canon_m->type);
-			if (eq <= 0)
+			if (eq <= 0) {
+				if (cand_type->name_off) {
+					pr_debug("%s '%s' size=%d vlen=%d cand_id[%u] canon_id[%u] shallow-equal but not equiv for field#%d '%s': %d\n",
+						 cand_kind == BTF_KIND_STRUCT ? "STRUCT" : "UNION",
+						 btf__name_by_offset(d->btf, cand_type->name_off),
+						 cand_type->size, vlen, cand_id, canon_id, i,
+						 btf__name_by_offset(d->btf, cand_m->name_off), eq);
+				}
 				return eq;
+			}
 			cand_m++;
 			canon_m++;
 		}
@@ -4566,7 +5121,7 @@ static int btf_dedup_is_equiv(struct btf_dedup *d, __u32 cand_id,
 
 	case BTF_KIND_FUNC_PROTO: {
 		const struct btf_param *cand_p, *canon_p;
-		__u16 vlen;
+		__u32 vlen;
 
 		if (!btf_compat_fnproto(cand_type, canon_type))
 			return 0;
@@ -4681,13 +5236,30 @@ static void btf_dedup_merge_hypot_map(struct btf_dedup *d)
 	}
 }
 
+static inline long btf_hash_by_kind(struct btf_type *t, __u16 kind)
+{
+	if (kind == BTF_KIND_TYPEDEF)
+		return btf_hash_typedef(t);
+	else
+		return btf_hash_struct(t);
+}
+
+static inline bool btf_equal_by_kind(struct btf_type *t1, struct btf_type *t2, __u16 kind)
+{
+	if (kind == BTF_KIND_TYPEDEF)
+		return btf_equal_typedef(t1, t2);
+	else
+		return btf_shallow_equal_struct(t1, t2);
+}
+
 /*
- * Deduplicate struct/union types.
+ * Deduplicate struct/union and typedef types.
  *
  * For each struct/union type its type signature hash is calculated, taking
  * into account type's name, size, number, order and names of fields, but
  * ignoring type ID's referenced from fields, because they might not be deduped
- * completely until after reference types deduplication phase. This type hash
+ * completely until after reference types deduplication phase. For each typedef
+ * type, the hash is computed based on the type’s name and size. This type hash
  * is used to iterate over all potential canonical types, sharing same hash.
  * For each canonical candidate we check whether type graphs that they form
  * (through referenced types in fields and so on) are equivalent using algorithm
@@ -4719,18 +5291,20 @@ static int btf_dedup_struct_type(struct btf_dedup *d, __u32 type_id)
 	t = btf_type_by_id(d->btf, type_id);
 	kind = btf_kind(t);
 
-	if (kind != BTF_KIND_STRUCT && kind != BTF_KIND_UNION)
+	if (kind != BTF_KIND_STRUCT &&
+		kind != BTF_KIND_UNION &&
+		kind != BTF_KIND_TYPEDEF)
 		return 0;
 
-	h = btf_hash_struct(t);
+	h = btf_hash_by_kind(t, kind);
 	for_each_dedup_cand(d, hash_entry, h) {
 		__u32 cand_id = hash_entry->value;
 		int eq;
 
 		/*
 		 * Even though btf_dedup_is_equiv() checks for
-		 * btf_shallow_equal_struct() internally when checking two
-		 * structs (unions) for equivalence, we need to guard here
+		 * btf_equal_by_kind() internally when checking two
+		 * structs (unions) or typedefs for equivalence, we need to guard here
 		 * from picking matching FWD type as a dedup candidate.
 		 * This can happen due to hash collision. In such case just
 		 * relying on btf_dedup_is_equiv() would lead to potentially
@@ -4738,7 +5312,7 @@ static int btf_dedup_struct_type(struct btf_dedup *d, __u32 type_id)
 		 * FWD and compatible STRUCT/UNION are considered equivalent.
 		 */
 		cand_type = btf_type_by_id(d->btf, cand_id);
-		if (!btf_shallow_equal_struct(t, cand_type))
+		if (!btf_equal_by_kind(t, cand_type, kind))
 			continue;
 
 		btf_dedup_clear_hypot_map(d);
@@ -4776,18 +5350,18 @@ static int btf_dedup_struct_types(struct btf_dedup *d)
 /*
  * Deduplicate reference type.
  *
- * Once all primitive and struct/union types got deduplicated, we can easily
+ * Once all primitive, struct/union and typedef types got deduplicated, we can easily
  * deduplicate all other (reference) BTF types. This is done in two steps:
  *
  * 1. Resolve all referenced type IDs into their canonical type IDs. This
- * resolution can be done either immediately for primitive or struct/union types
- * (because they were deduped in previous two phases) or recursively for
+ * resolution can be done either immediately for primitive, struct/union, and typedef
+ * types (because they were deduped in previous two phases) or recursively for
  * reference types. Recursion will always terminate at either primitive or
- * struct/union type, at which point we can "unwind" chain of reference types
- * one by one. There is no danger of encountering cycles because in C type
- * system the only way to form type cycle is through struct/union, so any chain
- * of reference types, even those taking part in a type cycle, will inevitably
- * reach struct/union at some point.
+ * struct/union and typedef types, at which point we can "unwind" chain of reference
+ * types one by one. There is no danger of encountering cycles in C, as the only way to
+ * form a type cycle is through struct or union types. Go can form such cycles through
+ * typedef. Thus, any chain of reference types, even those taking part in a type cycle,
+ * will inevitably reach a struct/union or typedef type at some point.
  *
  * 2. Once all referenced type IDs are resolved into canonical ones, BTF type
  * becomes "stable", in the sense that no further deduplication will cause
@@ -4819,7 +5393,6 @@ static int btf_dedup_ref_type(struct btf_dedup *d, __u32 type_id)
 	case BTF_KIND_VOLATILE:
 	case BTF_KIND_RESTRICT:
 	case BTF_KIND_PTR:
-	case BTF_KIND_TYPEDEF:
 	case BTF_KIND_FUNC:
 	case BTF_KIND_TYPE_TAG:
 		ref_type_id = btf_dedup_ref_type(d, t->type);
@@ -4882,7 +5455,7 @@ static int btf_dedup_ref_type(struct btf_dedup *d, __u32 type_id)
 
 	case BTF_KIND_FUNC_PROTO: {
 		struct btf_param *param;
-		__u16 vlen;
+		__u32 vlen;
 		int i;
 
 		ref_type_id = btf_dedup_ref_type(d, t->type);
@@ -5100,7 +5673,7 @@ static int btf_dedup_compact_types(struct btf_dedup *d)
 			continue;
 
 		t = btf__type_by_id(d->btf, id);
-		len = btf_type_size(t);
+		len = btf_type_size(d->btf, t);
 		if (len < 0)
 			return len;
 
@@ -5114,14 +5687,17 @@ static int btf_dedup_compact_types(struct btf_dedup *d)
 	/* shrink struct btf's internal types index and update btf_header */
 	d->btf->nr_types = next_type_id - d->btf->start_id;
 	d->btf->type_offs_cap = d->btf->nr_types;
-	d->btf->hdr->type_len = p - d->btf->types_data;
+	d->btf->hdr.type_len = p - d->btf->types_data;
 	new_offs = libbpf_reallocarray(d->btf->type_offs, d->btf->type_offs_cap,
 				       sizeof(*new_offs));
 	if (d->btf->type_offs_cap && !new_offs)
 		return -ENOMEM;
 	d->btf->type_offs = new_offs;
-	d->btf->hdr->str_off = d->btf->hdr->type_len;
-	d->btf->raw_size = d->btf->hdr->hdr_len + d->btf->hdr->type_len + d->btf->hdr->str_len;
+	if (d->btf->layout)
+		d->btf->hdr.layout_off = d->btf->hdr.type_off + d->btf->hdr.type_len;
+	d->btf->hdr.str_off = d->btf->hdr.type_off + d->btf->hdr.type_len + d->btf->hdr.layout_len;
+	d->btf->raw_size = d->btf->hdr.hdr_len + d->btf->hdr.type_off + d->btf->hdr.type_len +
+			   d->btf->hdr.layout_len + d->btf->hdr.str_len;
 	return 0;
 }
 
@@ -5217,7 +5793,10 @@ struct btf *btf__load_vmlinux_btf(void)
 		pr_warn("kernel BTF is missing at '%s', was CONFIG_DEBUG_INFO_BTF enabled?\n",
 			sysfs_btf_path);
 	} else {
-		btf = btf__parse(sysfs_btf_path, NULL);
+		btf = btf_parse_raw_mmap(sysfs_btf_path, NULL);
+		if (IS_ERR(btf))
+			btf = btf__parse(sysfs_btf_path, NULL);
+
 		if (!btf) {
 			err = -errno;
 			pr_warn("failed to read kernel BTF from '%s': %s\n",
@@ -5576,7 +6155,7 @@ int btf__distill_base(const struct btf *src_btf, struct btf **new_base_btf,
 		goto done;
 	}
 	dist.split_start_id = btf__type_cnt(old_base);
-	dist.split_start_str = old_base->hdr->str_len;
+	dist.split_start_str = old_base->hdr.str_len;
 
 	/* Pass over src split BTF; generate the list of base BTF type ids it
 	 * references; these will constitute our distilled BTF set to be
@@ -5645,14 +6224,14 @@ done:
 
 const struct btf_header *btf_header(const struct btf *btf)
 {
-	return btf->hdr;
+	return &btf->hdr;
 }
 
 void btf_set_base_btf(struct btf *btf, const struct btf *base_btf)
 {
 	btf->base_btf = (struct btf *)base_btf;
 	btf->start_id = btf__type_cnt(base_btf);
-	btf->start_str_off = base_btf->hdr->str_len;
+	btf->start_str_off = base_btf->hdr.str_len + base_btf->start_str_off;
 }
 
 int btf__relocate(struct btf *btf, const struct btf *base_btf)
@@ -5661,5 +6240,137 @@ int btf__relocate(struct btf *btf, const struct btf *base_btf)
 
 	if (!err)
 		btf->owns_base = false;
+	return libbpf_err(err);
+}
+
+struct btf_permute {
+	struct btf *btf;
+	__u32 *id_map;
+	__u32 start_offs;
+};
+
+/* Callback function to remap individual type ID references */
+static int btf_permute_remap_type_id(__u32 *type_id, void *ctx)
+{
+	struct btf_permute *p = ctx;
+	__u32 new_id = *type_id;
+
+	/* refer to the base BTF or VOID type */
+	if (new_id < p->btf->start_id)
+		return 0;
+
+	if (new_id >= btf__type_cnt(p->btf))
+		return -EINVAL;
+
+	*type_id = p->id_map[new_id - p->btf->start_id + p->start_offs];
+	return 0;
+}
+
+int btf__permute(struct btf *btf, __u32 *id_map, __u32 id_map_cnt,
+		 const struct btf_permute_opts *opts)
+{
+	struct btf_permute p;
+	struct btf_ext *btf_ext;
+	void *nt, *new_types = NULL;
+	__u32 *order_map = NULL;
+	int err = 0, i;
+	__u32 n, id, start_offs = 0;
+
+	if (!OPTS_VALID(opts, btf_permute_opts))
+		return libbpf_err(-EINVAL);
+
+	if (btf__base_btf(btf)) {
+		n = btf->nr_types;
+	} else {
+		if (id_map[0] != 0)
+			return libbpf_err(-EINVAL);
+		n = btf__type_cnt(btf);
+		start_offs = 1;
+	}
+
+	if (id_map_cnt != n)
+		return libbpf_err(-EINVAL);
+
+	/* record the sequence of types */
+	order_map = calloc(id_map_cnt, sizeof(*id_map));
+	if (!order_map) {
+		err = -ENOMEM;
+		goto done;
+	}
+
+	new_types = calloc(btf->hdr.type_len, 1);
+	if (!new_types) {
+		err = -ENOMEM;
+		goto done;
+	}
+
+	err = btf_ensure_modifiable(btf);
+	if (err)
+		goto done;
+
+	for (i = start_offs; i < id_map_cnt; i++) {
+		id = id_map[i];
+		if (id < btf->start_id || id >= btf__type_cnt(btf)) {
+			err = -EINVAL;
+			goto done;
+		}
+		id -= btf->start_id - start_offs;
+		/* cannot be mapped to the same ID */
+		if (order_map[id]) {
+			err = -EINVAL;
+			goto done;
+		}
+		order_map[id] = i + btf->start_id - start_offs;
+	}
+
+	p.btf = btf;
+	p.id_map = id_map;
+	p.start_offs = start_offs;
+	nt = new_types;
+	for (i = start_offs; i < id_map_cnt; i++) {
+		struct btf_field_iter it;
+		const struct btf_type *t;
+		__u32 *type_id;
+		int type_size;
+
+		id = order_map[i];
+		t = btf__type_by_id(btf, id);
+		type_size = btf_type_size(btf, t);
+		memcpy(nt, t, type_size);
+
+		/* fix up referenced IDs for BTF */
+		err = btf_field_iter_init(&it, nt, BTF_FIELD_ITER_IDS);
+		if (err)
+			goto done;
+		while ((type_id = btf_field_iter_next(&it))) {
+			err = btf_permute_remap_type_id(type_id, &p);
+			if (err)
+				goto done;
+		}
+
+		nt += type_size;
+	}
+
+	/* fix up referenced IDs for btf_ext */
+	btf_ext = OPTS_GET(opts, btf_ext, NULL);
+	if (btf_ext) {
+		err = btf_ext_visit_type_ids(btf_ext, btf_permute_remap_type_id, &p);
+		if (err)
+			goto done;
+	}
+
+	for (nt = new_types, i = 0; i < id_map_cnt - start_offs; i++) {
+		btf->type_offs[i] = nt - new_types;
+		nt += btf_type_size(btf, nt);
+	}
+
+	free(order_map);
+	free(btf->types_data);
+	btf->types_data = new_types;
+	return 0;
+
+done:
+	free(order_map);
+	free(new_types);
 	return libbpf_err(err);
 }

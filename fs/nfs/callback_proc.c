@@ -51,12 +51,18 @@ __be32 nfs4_callback_getattr(void *argp, void *resp,
 				-ntohl(res->status));
 		goto out;
 	}
-	rcu_read_lock();
+
 	delegation = nfs4_get_valid_delegation(inode);
-	if (delegation == NULL || (delegation->type & FMODE_WRITE) == 0)
+	if (!delegation)
 		goto out_iput;
-	res->size = i_size_read(inode);
+	if ((delegation->type & FMODE_WRITE) == 0) {
+		nfs_put_delegation(delegation);
+		goto out_iput;
+	}
 	res->change_attr = delegation->change_attr;
+	nfs_put_delegation(delegation);
+
+	res->size = i_size_read(inode);
 	if (nfs_have_writebacks(inode))
 		res->change_attr++;
 	res->atime = inode_get_atime(inode);
@@ -71,7 +77,6 @@ __be32 nfs4_callback_getattr(void *argp, void *resp,
 			  FATTR4_WORD2_TIME_DELEG_MODIFY) & args->bitmap[2];
 	res->status = 0;
 out_iput:
-	rcu_read_unlock();
 	trace_nfs4_cb_getattr(cps->clp, &args->fh, inode, -ntohl(res->status));
 	nfs_iput_and_deactive(inode);
 out:
@@ -120,8 +125,6 @@ out:
 	dprintk("%s: exit with status = %d\n", __func__, ntohl(res));
 	return res;
 }
-
-#if defined(CONFIG_NFS_V4_1)
 
 /*
  * Lookup a layout inode by stateid
@@ -254,6 +257,7 @@ static u32 initiate_file_draining(struct nfs_client *clp,
 	struct pnfs_layout_hdr *lo;
 	u32 rv = NFS4ERR_NOMATCHING_LAYOUT;
 	LIST_HEAD(free_me_list);
+	bool return_range = false;
 
 	ino = nfs_layout_find_inode(clp, &args->cbl_fh, &args->cbl_stateid);
 	if (IS_ERR(ino)) {
@@ -298,13 +302,13 @@ static u32 initiate_file_draining(struct nfs_client *clp,
 		/* Embrace your forgetfulness! */
 		rv = NFS4ERR_NOMATCHING_LAYOUT;
 
-		if (NFS_SERVER(ino)->pnfs_curr_ld->return_range) {
-			NFS_SERVER(ino)->pnfs_curr_ld->return_range(lo,
-				&args->cbl_range);
-		}
+		return_range = true;
 	}
 unlock:
 	spin_unlock(&ino->i_lock);
+	if (return_range && NFS_SERVER(ino)->pnfs_curr_ld->return_range)
+		NFS_SERVER(ino)->pnfs_curr_ld->return_range(lo,
+			&args->cbl_range);
 	pnfs_free_lseg_list(&free_me_list);
 	/* Free all lsegs that are attached to commit buckets */
 	nfs_commit_inode(ino, 0);
@@ -693,7 +697,6 @@ __be32 nfs4_callback_notify_lock(void *argp, void *resp,
 
 	return htonl(NFS4_OK);
 }
-#endif /* CONFIG_NFS_V4_1 */
 #ifdef CONFIG_NFS_V4_2
 static void nfs4_copy_cb_args(struct nfs4_copy_state *cp_state,
 				struct cb_offloadargs *args)
@@ -716,7 +719,7 @@ __be32 nfs4_callback_offload(void *data, void *dummy,
 	struct nfs4_copy_state *copy, *tmp_copy;
 	bool found = false;
 
-	copy = kzalloc(sizeof(struct nfs4_copy_state), GFP_KERNEL);
+	copy = kzalloc_obj(struct nfs4_copy_state);
 	if (!copy)
 		return cpu_to_be32(NFS4ERR_DELAY);
 

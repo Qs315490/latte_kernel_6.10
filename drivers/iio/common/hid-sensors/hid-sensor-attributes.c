@@ -11,7 +11,7 @@
 #include <linux/hid-sensor-hub.h>
 #include <linux/iio/iio.h>
 
-static struct {
+static const struct {
 	u32 usage_id;
 	int unit; /* 0 for default others from HID sensor spec */
 	int scale_val0; /* scale, whole number */
@@ -66,6 +66,10 @@ static struct {
 	{HID_USAGE_SENSOR_HUMIDITY, 0, 1000, 0},
 	{HID_USAGE_SENSOR_HINGE, 0, 0, 17453293},
 	{HID_USAGE_SENSOR_HINGE, HID_USAGE_SENSOR_UNITS_DEGREES, 0, 17453293},
+
+	{HID_USAGE_SENSOR_HUMAN_PRESENCE, 0, 1, 0},
+	{HID_USAGE_SENSOR_HUMAN_PROXIMITY, 0, 1, 0},
+	{HID_USAGE_SENSOR_HUMAN_ATTENTION, 0, 1, 0},
 };
 
 static void simple_div(int dividend, int divisor, int *whole,
@@ -342,7 +346,7 @@ int hid_sensor_write_raw_hyst_rel_value(struct hid_sensor_common *st,
 EXPORT_SYMBOL_NS(hid_sensor_write_raw_hyst_rel_value, "IIO_HID");
 
 /*
- * This fuction applies the unit exponent to the scale.
+ * This function applies the unit exponent to the scale.
  * For example:
  * 9.806650000 ->exp:2-> val0[980]val1[665000000]
  * 9.000806000 ->exp:2-> val0[900]val1[80600000]

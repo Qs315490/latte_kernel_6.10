@@ -2458,7 +2458,7 @@ static void isp1760_stop(struct usb_hcd *hcd)
 {
 	struct isp1760_hcd *priv = hcd_to_priv(hcd);
 
-	del_timer(&errata2_timer);
+	timer_delete(&errata2_timer);
 
 	isp1760_hub_control(hcd, ClearPortFeature, USB_PORT_FEAT_POWER,	1,
 			NULL, 0);
@@ -2572,15 +2572,15 @@ int isp1760_hcd_register(struct isp1760_hcd *priv, struct resource *mem,
 
 	priv->hcd = hcd;
 
-	priv->atl_slots = kcalloc(mem_layout->slot_num,
-				  sizeof(struct isp1760_slotinfo), GFP_KERNEL);
+	priv->atl_slots = kzalloc_objs(struct isp1760_slotinfo,
+				       mem_layout->slot_num);
 	if (!priv->atl_slots) {
 		ret = -ENOMEM;
 		goto put_hcd;
 	}
 
-	priv->int_slots = kcalloc(mem_layout->slot_num,
-				  sizeof(struct isp1760_slotinfo), GFP_KERNEL);
+	priv->int_slots = kzalloc_objs(struct isp1760_slotinfo,
+				       mem_layout->slot_num);
 	if (!priv->int_slots) {
 		ret = -ENOMEM;
 		goto free_atl_slots;

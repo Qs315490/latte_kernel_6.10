@@ -6,6 +6,7 @@
 //
 // Author: Codrin Ciubotariu <codrin.ciubotariu@microchip.com>
 
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/io.h>
 #include <linux/module.h>
@@ -41,6 +42,13 @@
 
 #define SPDIFRX_VERSION			0xFC	/* Version Register */
 
+
+/* 32-bit word byte masks */
+#define SPDIFRX_BYTE_0_MASK         GENMASK(7, 0)
+#define SPDIFRX_BYTE_1_MASK         GENMASK(15, 8)
+#define SPDIFRX_BYTE_2_MASK         GENMASK(23, 16)
+#define SPDIFRX_BYTE_3_MASK         GENMASK(31, 24)
+
 /*
  * ---- Control Register (Write-only) ----
  */
@@ -55,7 +63,7 @@
 #define SPDIFRX_MR_RXEN_ENABLE		(1 << 0)	/* SPDIF Receiver Enabled */
 
 /* Validity Bit Mode */
-#define SPDIFRX_MR_VBMODE_MASK		GENAMSK(1, 1)
+#define SPDIFRX_MR_VBMODE_MASK		GENMASK(1, 1)
 #define SPDIFRX_MR_VBMODE_ALWAYS_LOAD \
 	(0 << 1)	/* Load sample regardless of validity bit value */
 #define SPDIFRX_MR_VBMODE_DISCARD_IF_VB1 \
@@ -74,7 +82,7 @@
 /* Sample Data Width */
 #define SPDIFRX_MR_DATAWIDTH_MASK	GENMASK(5, 4)
 #define SPDIFRX_MR_DATAWIDTH(width) \
-	(((6 - (width) / 4) << 4) & SPDIFRX_MR_DATAWIDTH_MASK)
+	FIELD_PREP(SPDIFRX_MR_DATAWIDTH_MASK, 6 - ((width) / 4))
 
 /* Packed Data Mode in Receive Holding Register */
 #define SPDIFRX_MR_PACK_MASK		GENMASK(7, 7)
@@ -118,15 +126,14 @@
 #define SPDIFRX_RSR_LOWF			BIT(2)
 #define SPDIFRX_RSR_NOSIGNAL			BIT(3)
 #define SPDIFRX_RSR_IFS_MASK			GENMASK(27, 16)
-#define SPDIFRX_RSR_IFS(reg)			\
-	(((reg) & SPDIFRX_RSR_IFS_MASK) >> 16)
+#define SPDIFRX_RSR_IFS(reg)			FIELD_GET(SPDIFRX_RSR_IFS_MASK, reg)
 
 /*
  *  ---- Version Register (Read-only) ----
  */
 #define SPDIFRX_VERSION_MASK		GENMASK(11, 0)
 #define SPDIFRX_VERSION_MFN_MASK	GENMASK(18, 16)
-#define SPDIFRX_VERSION_MFN(reg)	(((reg) & SPDIFRX_VERSION_MFN_MASK) >> 16)
+#define SPDIFRX_VERSION_MFN(reg)	FIELD_GET(SPDIFRX_VERSION_MFN_MASK, reg)
 
 static bool mchp_spdifrx_readable_reg(struct device *dev, unsigned int reg)
 {
@@ -317,10 +324,10 @@ static void mchp_spdifrx_channel_status_read(struct mchp_spdifrx_dev *dev,
 
 	for (i = 0; i < ARRAY_SIZE(ctrl->ch_stat[channel].data) / 4; i++) {
 		regmap_read(dev->regmap, SPDIFRX_CHSR(channel, i), &val);
-		*ch_stat++ = val & 0xFF;
-		*ch_stat++ = (val >> 8) & 0xFF;
-		*ch_stat++ = (val >> 16) & 0xFF;
-		*ch_stat++ = (val >> 24) & 0xFF;
+		*ch_stat++ = FIELD_GET(SPDIFRX_BYTE_0_MASK, val);
+		*ch_stat++ = FIELD_GET(SPDIFRX_BYTE_1_MASK, val);
+		*ch_stat++ = FIELD_GET(SPDIFRX_BYTE_2_MASK, val);
+		*ch_stat++ = FIELD_GET(SPDIFRX_BYTE_3_MASK, val);
 	}
 }
 
@@ -334,10 +341,10 @@ static void mchp_spdifrx_channel_user_data_read(struct mchp_spdifrx_dev *dev,
 
 	for (i = 0; i < ARRAY_SIZE(ctrl->user_data[channel].data) / 4; i++) {
 		regmap_read(dev->regmap, SPDIFRX_CHUD(channel, i), &val);
-		*user_data++ = val & 0xFF;
-		*user_data++ = (val >> 8) & 0xFF;
-		*user_data++ = (val >> 16) & 0xFF;
-		*user_data++ = (val >> 24) & 0xFF;
+		*user_data++ = FIELD_GET(SPDIFRX_BYTE_0_MASK, val);
+		*user_data++ = FIELD_GET(SPDIFRX_BYTE_1_MASK, val);
+		*user_data++ = FIELD_GET(SPDIFRX_BYTE_2_MASK, val);
+		*user_data++ = FIELD_GET(SPDIFRX_BYTE_3_MASK, val);
 	}
 }
 
@@ -577,7 +584,6 @@ static int mchp_spdifrx_cs_get(struct mchp_spdifrx_dev *dev,
 	       sizeof(ch_stat->data));
 
 pm_runtime_put:
-	pm_runtime_mark_last_busy(dev->dev);
 	pm_runtime_put_autosuspend(dev->dev);
 unlock:
 	mutex_unlock(&dev->mlock);
@@ -660,7 +666,6 @@ static int mchp_spdifrx_subcode_ch_get(struct mchp_spdifrx_dev *dev,
 	       sizeof(user_data->data));
 
 pm_runtime_put:
-	pm_runtime_mark_last_busy(dev->dev);
 	pm_runtime_put_autosuspend(dev->dev);
 unlock:
 	mutex_unlock(&dev->mlock);
@@ -726,7 +731,6 @@ static int mchp_spdifrx_ulock_get(struct snd_kcontrol *kcontrol,
 
 	uvalue->value.integer.value[0] = ctrl->ulock;
 
-	pm_runtime_mark_last_busy(dev->dev);
 	pm_runtime_put_autosuspend(dev->dev);
 unlock:
 	mutex_unlock(&dev->mlock);
@@ -762,7 +766,6 @@ static int mchp_spdifrx_badf_get(struct snd_kcontrol *kcontrol,
 		ctrl->badf = 0;
 	}
 
-	pm_runtime_mark_last_busy(dev->dev);
 	pm_runtime_put_autosuspend(dev->dev);
 unlock:
 	mutex_unlock(&dev->mlock);
@@ -811,7 +814,6 @@ static int mchp_spdifrx_signal_get(struct snd_kcontrol *kcontrol,
 		regmap_read(dev->regmap, SPDIFRX_RSR, &val);
 	}
 
-	pm_runtime_mark_last_busy(dev->dev);
 	pm_runtime_put_autosuspend(dev->dev);
 
 unlock:
@@ -875,7 +877,6 @@ static int mchp_spdifrx_rate_get(struct snd_kcontrol *kcontrol,
 	ucontrol->value.integer.value[0] = rate / (32 * SPDIFRX_RSR_IFS(val));
 
 pm_runtime_put:
-	pm_runtime_mark_last_busy(dev->dev);
 	pm_runtime_put_autosuspend(dev->dev);
 unlock:
 	mutex_unlock(&dev->mlock);

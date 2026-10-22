@@ -13,7 +13,6 @@
 #include <linux/i2c.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 
@@ -306,7 +305,7 @@ static int ad7150_write_event_config(struct iio_dev *indio_dev,
 						dir);
 		if (ret)
 			goto error_ret;
-		/* reenable any irq's we disabled whilst changing mode */
+		/* re-enable any IRQs we disabled whilst changing mode */
 		enable_irq(chip->interrupts[0]);
 		enable_irq(chip->interrupts[1]);
 	}
@@ -628,10 +627,10 @@ static int ad7150_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ad7150_id[] = {
-	{ "ad7150", AD7150 },
-	{ "ad7151", AD7151 },
-	{ "ad7156", AD7150 },
-	{}
+	{ .name = "ad7150", .driver_data = AD7150 },
+	{ .name = "ad7151", .driver_data = AD7151 },
+	{ .name = "ad7156", .driver_data = AD7150 },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, ad7150_id);
@@ -640,7 +639,7 @@ static const struct of_device_id ad7150_of_match[] = {
 	{ "adi,ad7150" },
 	{ "adi,ad7151" },
 	{ "adi,ad7156" },
-	{}
+	{ }
 };
 static struct i2c_driver ad7150_driver = {
 	.driver = {

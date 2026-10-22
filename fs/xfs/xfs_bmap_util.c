@@ -4,7 +4,7 @@
  * Copyright (c) 2012 Red Hat, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -30,6 +30,7 @@
 #include "xfs_reflink.h"
 #include "xfs_rtbitmap.h"
 #include "xfs_rtgroup.h"
+#include "xfs_zone_alloc.h"
 
 /* Kernel only BMAP related definitions and functions */
 
@@ -436,7 +437,8 @@ xfs_bmap_punch_delalloc_range(
 	struct xfs_inode	*ip,
 	int			whichfork,
 	xfs_off_t		start_byte,
-	xfs_off_t		end_byte)
+	xfs_off_t		end_byte,
+	struct xfs_zone_alloc_ctx *ac)
 {
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, whichfork);
@@ -467,7 +469,21 @@ xfs_bmap_punch_delalloc_range(
 			continue;
 		}
 
-		xfs_bmap_del_extent_delay(ip, whichfork, &icur, &got, &del);
+		if (xfs_is_zoned_inode(ip) && ac) {
+			/*
+			 * In a zoned buffered write context we need to return
+			 * the punched delalloc allocations to the allocation
+			 * context.  This allows reusing them in the following
+			 * iomap iterations.
+			 */
+			xfs_bmap_del_extent_delay(ip, whichfork, &icur, &got,
+					&del, XFS_BMAPI_REMAP);
+			ac->reserved_blocks += del.br_blockcount;
+		} else {
+			xfs_bmap_del_extent_delay(ip, whichfork, &icur, &got,
+					&del, 0);
+		}
+
 		if (!xfs_iext_get_extent(ifp, &icur, &got))
 			break;
 	}
@@ -498,7 +514,7 @@ xfs_can_free_eofblocks(
 	 * Caller must either hold the exclusive io lock; or be inactivating
 	 * the inode, which guarantees there are no other users of the inode.
 	 */
-	if (!(VFS_I(ip)->i_state & I_FREEING))
+	if (!(inode_state_read_once(VFS_I(ip)) & I_FREEING))
 		xfs_assert_ilocked(ip, XFS_IOLOCK_EXCL);
 
 	/* prealloc/delalloc exists only on regular files */
@@ -582,7 +598,7 @@ xfs_free_eofblocks(
 		if (ip->i_delayed_blks) {
 			xfs_bmap_punch_delalloc_range(ip, XFS_DATA_FORK,
 				round_up(XFS_ISIZE(ip), mp->m_sb.sb_blocksize),
-				LLONG_MAX);
+				LLONG_MAX, NULL);
 		}
 		xfs_inode_clear_eofblocks_tag(ip);
 		return 0;
@@ -825,7 +841,8 @@ int
 xfs_free_file_space(
 	struct xfs_inode	*ip,
 	xfs_off_t		offset,
-	xfs_off_t		len)
+	xfs_off_t		len,
+	struct xfs_zone_alloc_ctx *ac)
 {
 	struct xfs_mount	*mp = ip->i_mount;
 	xfs_fileoff_t		startoffset_fsb;
@@ -880,7 +897,7 @@ xfs_free_file_space(
 		return 0;
 	if (offset + len > XFS_ISIZE(ip))
 		len = XFS_ISIZE(ip) - offset;
-	error = xfs_zero_range(ip, offset, len, NULL);
+	error = xfs_zero_range(ip, offset, len, ac, NULL);
 	if (error)
 		return error;
 
@@ -968,7 +985,8 @@ int
 xfs_collapse_file_space(
 	struct xfs_inode	*ip,
 	xfs_off_t		offset,
-	xfs_off_t		len)
+	xfs_off_t		len,
+	struct xfs_zone_alloc_ctx *ac)
 {
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_trans	*tp;
@@ -981,7 +999,7 @@ xfs_collapse_file_space(
 
 	trace_xfs_collapse_file_space(ip);
 
-	error = xfs_free_file_space(ip, offset, len);
+	error = xfs_free_file_space(ip, offset, len, ac);
 	if (error)
 		return error;
 
@@ -1461,7 +1479,7 @@ xfs_swap_change_owner(
 	struct xfs_trans	*tp = *tpp;
 
 	do {
-		error = xfs_bmbt_change_owner(tp, ip, XFS_DATA_FORK, ip->i_ino,
+		error = xfs_bmbt_change_owner(tp, ip, XFS_DATA_FORK, I_INO(ip),
 					      NULL);
 		/* success or fatal error */
 		if (error != -EAGAIN)
@@ -1613,7 +1631,7 @@ xfs_swap_extents(
 	if (error) {
 		xfs_notice(mp,
 		    "%s: inode 0x%llx format is incompatible for exchanging.",
-				__func__, ip->i_ino);
+				__func__, I_INO(ip));
 		goto out_trans_cancel;
 	}
 
@@ -1725,4 +1743,93 @@ out_unlock:
 out_trans_cancel:
 	xfs_trans_cancel(tp);
 	goto out_unlock_ilock;
+}
+
+/*
+ * Given a CoW fork mapping @got and a replacement mapping @rep, map the space
+ * described by @rep into the cow fork, pushing aside @got as necessary.  @icur
+ * must point to iext tree leaf containing @got.
+ */
+void
+xfs_bmap_replace_cow_mapping(
+	struct xfs_inode	*ip,
+	struct xfs_iext_cursor	*icur,
+	struct xfs_bmbt_irec	*got,
+	struct xfs_bmbt_irec	*rep)
+{
+	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, XFS_COW_FORK);
+	xfs_fileoff_t		rep_endoff =
+			rep->br_startoff + rep->br_blockcount;
+	xfs_fileoff_t		got_endoff =
+			got->br_startoff + got->br_blockcount;
+	uint32_t		state = BMAP_COWFORK;
+
+	ASSERT(rep->br_blockcount > 0);
+	ASSERT(!isnullstartblock(got->br_startblock));
+	ASSERT(got->br_startoff <= rep->br_startoff);
+	ASSERT(got_endoff >= rep_endoff);
+
+	trace_xfs_bmap_replace_cow_mapping(ip, got, rep);
+
+	if (got->br_startoff == rep->br_startoff)
+		state |= BMAP_LEFT_FILLING;
+	if (got_endoff == rep_endoff)
+		state |= BMAP_RIGHT_FILLING;
+
+	switch (state & (BMAP_LEFT_FILLING | BMAP_RIGHT_FILLING)) {
+	case BMAP_LEFT_FILLING | BMAP_RIGHT_FILLING:
+		/*
+		 * Replacement matches the whole mapping, update the record.
+		 */
+		xfs_iext_update_extent(ip, state, icur, rep);
+		break;
+	case BMAP_LEFT_FILLING:
+		/*
+		 * Replace the first part of the mapping: Update the cursor
+		 * position with the new mapping, then add a record with the
+		 * tail of the old mapping.
+		 */
+		got->br_startoff = rep_endoff;
+		got->br_blockcount -= rep->br_blockcount;
+		got->br_startblock += rep->br_blockcount;
+
+		xfs_iext_update_extent(ip, state, icur, rep);
+		xfs_iext_next(ifp, icur);
+		xfs_iext_insert(ip, icur, got, state);
+		break;
+	case BMAP_RIGHT_FILLING:
+		/*
+		 * Replacing the last part of the mapping.  Shorten the current
+		 * mapping then add a record with the new mapping.
+		 */
+		got->br_blockcount -= rep->br_blockcount;
+
+		xfs_iext_update_extent(ip, state, icur, got);
+		xfs_iext_next(ifp, icur);
+		xfs_iext_insert(ip, icur, rep, state);
+		break;
+	case 0:
+		/*
+		 * Replacing the middle of the extent.  Shorten the current
+		 * mapping, add a new record with the new mapping, and add a
+		 * second new record with the tail of the old mapping.
+		 */
+		got->br_blockcount = rep->br_startoff - got->br_startoff;
+
+		struct xfs_bmbt_irec	new = {
+			.br_startoff	= rep_endoff,
+			.br_blockcount	= got_endoff - rep_endoff,
+			.br_state	= got->br_state,
+			.br_startblock	= got->br_startblock +
+						rep->br_blockcount +
+						got->br_blockcount,
+		};
+
+		xfs_iext_update_extent(ip, state, icur, got);
+		xfs_iext_next(ifp, icur);
+		xfs_iext_insert(ip, icur, rep, state);
+		xfs_iext_next(ifp, icur);
+		xfs_iext_insert(ip, icur, &new, state);
+		break;
+	}
 }

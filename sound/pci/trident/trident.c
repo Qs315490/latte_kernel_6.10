@@ -36,12 +36,16 @@ module_param_array(wavetable_size, int, NULL, 0444);
 MODULE_PARM_DESC(wavetable_size, "Maximum memory size in kB for wavetable synth.");
 
 static const struct pci_device_id snd_trident_ids[] = {
-	{PCI_DEVICE(PCI_VENDOR_ID_TRIDENT, PCI_DEVICE_ID_TRIDENT_4DWAVE_DX), 
-		PCI_CLASS_MULTIMEDIA_AUDIO << 8, 0xffff00, 0},
-	{PCI_DEVICE(PCI_VENDOR_ID_TRIDENT, PCI_DEVICE_ID_TRIDENT_4DWAVE_NX), 
-		0, 0, 0},
-	{PCI_DEVICE(PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_7018), 0, 0, 0},
-	{ 0, }
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_TRIDENT, PCI_DEVICE_ID_TRIDENT_4DWAVE_DX),
+		.class = PCI_CLASS_MULTIMEDIA_AUDIO << 8,
+		.class_mask = 0xffff00,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_TRIDENT, PCI_DEVICE_ID_TRIDENT_4DWAVE_NX),
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_7018)
+	},
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_trident_ids);
@@ -88,11 +92,11 @@ static int snd_trident_probe(struct pci_dev *pci,
 	default:
 		str = "Unknown";
 	}
-	strcpy(card->driver, str);
+	strscpy(card->driver, str);
 	if (trident->device == TRIDENT_DEVICE_ID_SI7018) {
-		strcpy(card->shortname, "SiS ");
+		strscpy(card->shortname, "SiS ");
 	} else {
-		strcpy(card->shortname, "Trident ");
+		strscpy(card->shortname, "Trident ");
 	}
 	strcat(card->shortname, str);
 	sprintf(card->longname, "%s PCI Audio at 0x%lx, irq %d",

@@ -3,7 +3,7 @@
  * Copyright (C) 2020 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <darrick.wong@oracle.com>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -309,7 +309,7 @@ xfs_btree_bload_prep_block(
 
 		/* Initialize it and send it out. */
 		xfs_btree_init_block(cur->bc_mp, ifp->if_broot, cur->bc_ops,
-				level, nr_this_block, cur->bc_ino.ip->i_ino);
+				level, nr_this_block, I_INO(cur->bc_ino.ip));
 
 		*bpp = NULL;
 		*blockp = ifp->if_broot;

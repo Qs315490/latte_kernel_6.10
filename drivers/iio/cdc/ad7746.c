@@ -606,7 +606,7 @@ static int ad7746_read_channel(struct iio_dev *indio_dev,
 		return ret;
 
 	/*
-	 * Offset applied internally becaue the _offset userspace interface is
+	 * Offset applied internally because the _offset userspace interface is
 	 * needed for the CAP DACs which apply a controllable offset.
 	 */
 	*val = get_unaligned_be24(data) - 0x800000;
@@ -789,10 +789,10 @@ static int ad7746_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ad7746_id[] = {
-	{ "ad7745", 7745 },
-	{ "ad7746", 7746 },
-	{ "ad7747", 7747 },
-	{}
+	{ .name = "ad7745", .driver_data = 7745 },
+	{ .name = "ad7746", .driver_data = 7746 },
+	{ .name = "ad7747", .driver_data = 7747 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ad7746_id);
 
@@ -800,7 +800,7 @@ static const struct of_device_id ad7746_of_match[] = {
 	{ .compatible = "adi,ad7745" },
 	{ .compatible = "adi,ad7746" },
 	{ .compatible = "adi,ad7747" },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ad7746_of_match);
 

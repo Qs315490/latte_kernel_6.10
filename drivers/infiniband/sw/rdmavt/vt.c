@@ -6,6 +6,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/dma-mapping.h>
+#include <rdma/uverbs_ioctl.h>
 #include "vt.h"
 #include "cq.h"
 #include "trace.h"
@@ -49,11 +50,11 @@ struct rvt_dev_info *rvt_alloc_device(size_t size, int nports)
 {
 	struct rvt_dev_info *rdi;
 
-	rdi = container_of(_ib_alloc_device(size), struct rvt_dev_info, ibdev);
+	rdi = container_of(_ib_alloc_device(size, &init_net), struct rvt_dev_info, ibdev);
 	if (!rdi)
 		return rdi;
 
-	rdi->ports = kcalloc(nports, sizeof(*rdi->ports), GFP_KERNEL);
+	rdi->ports = kzalloc_objs(*rdi->ports, nports);
 	if (!rdi->ports)
 		ib_dealloc_device(&rdi->ibdev);
 
@@ -79,14 +80,16 @@ static int rvt_query_device(struct ib_device *ibdev,
 			    struct ib_udata *uhw)
 {
 	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
+	int err;
 
-	if (uhw->inlen || uhw->outlen)
-		return -EINVAL;
+	err = ib_is_udata_in_empty(uhw);
+	if (err)
+		return err;
 	/*
 	 * Return rvt_dev_info.dparms.props contents
 	 */
 	*props = rdi->dparms.props;
-	return 0;
+	return ib_respond_empty_udata(uhw);
 }
 
 static int rvt_get_numa_node(struct ib_device *ibdev)
@@ -244,6 +247,10 @@ static int rvt_query_gid(struct ib_device *ibdev, u32 port_num,
  */
 static int rvt_alloc_ucontext(struct ib_ucontext *uctx, struct ib_udata *udata)
 {
+	struct rvt_dev_info *rdi = ib_to_rvt(uctx->device);
+
+	if (rdi->driver_f.alloc_ucontext)
+		return rdi->driver_f.alloc_ucontext(uctx, udata);
 	return 0;
 }
 
@@ -253,6 +260,10 @@ static int rvt_alloc_ucontext(struct ib_ucontext *uctx, struct ib_udata *udata)
  */
 static void rvt_dealloc_ucontext(struct ib_ucontext *context)
 {
+	struct rvt_dev_info *rdi = ib_to_rvt(context->device);
+
+	if (rdi->driver_f.dealloc_ucontext)
+		rdi->driver_f.dealloc_ucontext(context);
 	return;
 }
 
@@ -367,7 +378,7 @@ static const struct ib_device_ops rvt_dev_ops = {
 	.query_srq = rvt_query_srq,
 	.reg_user_mr = rvt_reg_user_mr,
 	.req_notify_cq = rvt_req_notify_cq,
-	.resize_cq = rvt_resize_cq,
+	.resize_user_cq = rvt_resize_cq,
 
 	INIT_RDMA_OBJ_SIZE(ib_ah, rvt_ah, ibah),
 	INIT_RDMA_OBJ_SIZE(ib_cq, rvt_cq, ibcq),

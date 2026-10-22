@@ -31,10 +31,14 @@
  *
  */
 
-#include "i915_drv.h"
-#include "gvt.h"
-#include "i915_pvinfo.h"
 #include <linux/vmalloc.h>
+
+#include <drm/drm_print.h>
+
+#include "gvt.h"
+#include "i915_drv.h"
+#include "i915_pvinfo.h"
+#include "sched_policy.h"
 
 void populate_pvinfo_page(struct intel_vgpu *vgpu)
 {
@@ -78,7 +82,7 @@ void populate_pvinfo_page(struct intel_vgpu *vgpu)
  * vGPU type name is defined as GVTg_Vx_y which contains the physical GPU
  * generation type (e.g V4 as BDW server, V5 as SKL server).
  *
- * Depening on the physical SKU resource, we might see vGPU types like
+ * Depending on the physical SKU resource, we might see vGPU types like
  * GVTg_V4_8, GVTg_V4_4, GVTg_V4_2, etc. We can create different types of
  * vGPU on same physical GPU depending on available resource. Each vGPU
  * type will have a different number of avail_instance to indicate how
@@ -109,13 +113,11 @@ int intel_gvt_init_vgpu_types(struct intel_gvt *gvt)
 	unsigned int num_types = ARRAY_SIZE(intel_vgpu_configs);
 	unsigned int i;
 
-	gvt->types = kcalloc(num_types, sizeof(struct intel_vgpu_type),
-			     GFP_KERNEL);
+	gvt->types = kzalloc_objs(struct intel_vgpu_type, num_types);
 	if (!gvt->types)
 		return -ENOMEM;
 
-	gvt->mdev_types = kcalloc(num_types, sizeof(*gvt->mdev_types),
-			     GFP_KERNEL);
+	gvt->mdev_types = kzalloc_objs(*gvt->mdev_types, num_types);
 	if (!gvt->mdev_types)
 		goto out_free_types;
 
@@ -417,7 +419,7 @@ out_unlock:
  * the whole vGPU to default state as when it is created. This vGPU function
  * is required both for functionary and security concerns.The ultimate goal
  * of vGPU FLR is that reuse a vGPU instance by virtual machines. When we
- * assign a vGPU to a virtual machine we must isse such reset first.
+ * assign a vGPU to a virtual machine we must issue such reset first.
  *
  * Full GT Reset and Per-Engine GT Reset are soft reset flow for GPU engines
  * (Render, Blitter, Video, Video Enhancement). It is defined by GPU Spec.
@@ -428,7 +430,7 @@ out_unlock:
  *
  * The parameter dev_level is to identify if we will do DMLR or GT reset.
  * The parameter engine_mask is to specific the engines that need to be
- * resetted. If value ALL_ENGINES is given for engine_mask, it means
+ * reset. If value ALL_ENGINES is given for engine_mask, it means
  * the caller requests a full GT reset that we will reset all virtual
  * GPU engines. For FLR, engine_mask is ignored.
  */

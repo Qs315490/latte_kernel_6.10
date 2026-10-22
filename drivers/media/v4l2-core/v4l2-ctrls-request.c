@@ -2,7 +2,7 @@
 /*
  * V4L2 controls framework Request API implementation.
  *
- * Copyright (C) 2018-2021  Hans Verkuil <hverkuil-cisco@xs4all.nl>
+ * Copyright (C) 2018-2021  Hans Verkuil <hverkuil@kernel.org>
  */
 
 #define pr_fmt(fmt) "v4l2-ctrls: " fmt
@@ -198,7 +198,7 @@ v4l2_ctrls_find_req_obj(struct v4l2_ctrl_handler *hdl,
 	if (!set)
 		return ERR_PTR(-ENOMEM);
 
-	new_hdl = kzalloc(sizeof(*new_hdl), GFP_KERNEL);
+	new_hdl = kzalloc_obj(*new_hdl);
 	if (!new_hdl)
 		return ERR_PTR(-ENOMEM);
 
@@ -341,20 +341,19 @@ void v4l2_ctrl_request_complete(struct media_request *req,
 		int ret;
 
 		/* Create a new request so the driver can return controls */
-		hdl = kzalloc(sizeof(*hdl), GFP_KERNEL);
+		hdl = kzalloc_obj(*hdl);
 		if (!hdl)
 			return;
 
 		ret = v4l2_ctrl_handler_init(hdl, (main_hdl->nr_of_buckets - 1) * 8);
 		if (!ret)
 			ret = v4l2_ctrl_request_bind(req, hdl, main_hdl);
-		if (ret) {
-			v4l2_ctrl_handler_free(hdl);
-			kfree(hdl);
-			return;
-		}
+		if (ret)
+			goto error;
 		hdl->request_is_queued = true;
 		obj = media_request_object_find(req, &req_ops, main_hdl);
+		if (!obj)
+			goto error;
 	}
 	hdl = container_of(obj, struct v4l2_ctrl_handler, req_obj);
 
@@ -389,6 +388,11 @@ void v4l2_ctrl_request_complete(struct media_request *req,
 	mutex_unlock(main_hdl->lock);
 	media_request_object_complete(obj);
 	media_request_object_put(obj);
+	return;
+
+error:
+	v4l2_ctrl_handler_free(hdl);
+	kfree(hdl);
 }
 EXPORT_SYMBOL(v4l2_ctrl_request_complete);
 

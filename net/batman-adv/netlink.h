@@ -11,11 +11,10 @@
 
 #include <linux/netlink.h>
 #include <linux/types.h>
-#include <net/genetlink.h>
 
 void batadv_netlink_register(void);
 void batadv_netlink_unregister(void);
-struct net_device *batadv_netlink_get_softif(struct netlink_callback *cb);
+struct net_device *batadv_netlink_get_meshif(struct netlink_callback *cb);
 struct batadv_hard_iface *
 batadv_netlink_get_hardif(struct batadv_priv *bat_priv,
 			  struct netlink_callback *cb);

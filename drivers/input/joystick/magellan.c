@@ -48,7 +48,7 @@ struct magellan {
 
 static int magellan_crunch_nibbles(unsigned char *data, int count)
 {
-	static unsigned char nibbles[16] = "0AB3D56GH9:K<MN?";
+	static const unsigned char nibbles[16] __nonstring = "0AB3D56GH9:K<MN?";
 
 	do {
 		if (data[count] == nibbles[data[count] & 0xf])
@@ -132,7 +132,7 @@ static int magellan_connect(struct serio *serio, struct serio_driver *drv)
 	int err = -ENOMEM;
 	int i;
 
-	magellan = kzalloc(sizeof(*magellan), GFP_KERNEL);
+	magellan = kzalloc_obj(*magellan);
 	input_dev = input_allocate_device();
 	if (!magellan || !input_dev)
 		goto fail1;

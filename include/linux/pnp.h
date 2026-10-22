@@ -12,7 +12,7 @@
 #include <linux/device.h>
 #include <linux/list.h>
 #include <linux/errno.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/pnp.h>
 #include <linux/console.h>
 
 #define PNP_NAME_LEN		50
@@ -290,7 +290,7 @@ static inline void pnp_set_drvdata(struct pnp_dev *pdev, void *data)
 }
 
 struct pnp_fixup {
-	char id[7];
+	char id[8];
 	void (*quirk_function) (struct pnp_dev *dev);	/* fixup function */
 };
 

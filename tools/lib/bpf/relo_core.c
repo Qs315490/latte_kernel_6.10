@@ -64,7 +64,6 @@ enum libbpf_print_level {
 #include "libbpf.h"
 #include "bpf.h"
 #include "btf.h"
-#include "str_error.h"
 #include "libbpf_internal.h"
 #endif
 
@@ -192,8 +191,8 @@ recur:
 	case BTF_KIND_FUNC_PROTO: {
 		struct btf_param *local_p = btf_params(local_type);
 		struct btf_param *targ_p = btf_params(targ_type);
-		__u16 local_vlen = btf_vlen(local_type);
-		__u16 targ_vlen = btf_vlen(targ_type);
+		__u32 local_vlen = btf_vlen(local_type);
+		__u32 targ_vlen = btf_vlen(targ_type);
 		int i, err;
 
 		if (local_vlen != targ_vlen)
@@ -292,6 +291,8 @@ int bpf_core_parse_spec(const char *prog_name, const struct btf *btf,
 		if (*spec_str == ':')
 			++spec_str;
 		if (sscanf(spec_str, "%d%n", &access_idx, &parsed_len) != 1)
+			return -EINVAL;
+		if (access_idx < 0)
 			return -EINVAL;
 		if (spec->raw_len == BPF_CORE_SPEC_MAX_LEN)
 			return -E2BIG;
@@ -683,7 +684,7 @@ static int bpf_core_calc_field_relo(const char *prog_name,
 {
 	const struct bpf_core_accessor *acc;
 	const struct btf_type *t;
-	__u32 byte_off, byte_sz, bit_off, bit_sz, field_type_id;
+	__u32 byte_off, byte_sz, bit_off, bit_sz, field_type_id, elem_id;
 	const struct btf_member *m;
 	const struct btf_type *mt;
 	bool bitfield;
@@ -706,8 +707,14 @@ static int bpf_core_calc_field_relo(const char *prog_name,
 	if (!acc->name) {
 		if (relo->kind == BPF_CORE_FIELD_BYTE_OFFSET) {
 			*val = spec->bit_offset / 8;
-			/* remember field size for load/store mem size */
-			sz = btf__resolve_size(spec->btf, acc->type_id);
+			/* remember field size for load/store mem size;
+			 * note, for arrays we care about individual element
+			 * sizes, not the overall array size
+			 */
+			t = skip_mods_and_typedefs(spec->btf, acc->type_id, &elem_id);
+			while (btf_is_array(t))
+				t = skip_mods_and_typedefs(spec->btf, btf_array(t)->type, &elem_id);
+			sz = btf__resolve_size(spec->btf, elem_id);
 			if (sz < 0)
 				return -EINVAL;
 			*field_sz = sz;
@@ -767,7 +774,17 @@ static int bpf_core_calc_field_relo(const char *prog_name,
 	case BPF_CORE_FIELD_BYTE_OFFSET:
 		*val = byte_off;
 		if (!bitfield) {
-			*field_sz = byte_sz;
+			/* remember field size for load/store mem size;
+			 * note, for arrays we care about individual element
+			 * sizes, not the overall array size
+			 */
+			t = skip_mods_and_typedefs(spec->btf, field_type_id, &elem_id);
+			while (btf_is_array(t))
+				t = skip_mods_and_typedefs(spec->btf, btf_array(t)->type, &elem_id);
+			sz = btf__resolve_size(spec->btf, elem_id);
+			if (sz < 0)
+				return -EINVAL;
+			*field_sz = sz;
 			*type_id = field_type_id;
 		}
 		break;
@@ -1440,8 +1457,8 @@ static bool bpf_core_names_match(const struct btf *local_btf, size_t local_name_
 static int bpf_core_enums_match(const struct btf *local_btf, const struct btf_type *local_t,
 				const struct btf *targ_btf, const struct btf_type *targ_t)
 {
-	__u16 local_vlen = btf_vlen(local_t);
-	__u16 targ_vlen = btf_vlen(targ_t);
+	__u32 local_vlen = btf_vlen(local_t);
+	__u32 targ_vlen = btf_vlen(targ_t);
 	int i, j;
 
 	if (local_t->size != targ_t->size)
@@ -1481,8 +1498,8 @@ static int bpf_core_composites_match(const struct btf *local_btf, const struct b
 				     bool behind_ptr, int level)
 {
 	const struct btf_member *local_m = btf_members(local_t);
-	__u16 local_vlen = btf_vlen(local_t);
-	__u16 targ_vlen = btf_vlen(targ_t);
+	__u32 local_vlen = btf_vlen(local_t);
+	__u32 targ_vlen = btf_vlen(targ_t);
 	int i, j, err;
 
 	if (local_vlen > targ_vlen)
@@ -1657,8 +1674,8 @@ recur:
 	case BTF_KIND_FUNC_PROTO: {
 		struct btf_param *local_p = btf_params(local_t);
 		struct btf_param *targ_p = btf_params(targ_t);
-		__u16 local_vlen = btf_vlen(local_t);
-		__u16 targ_vlen = btf_vlen(targ_t);
+		__u32 local_vlen = btf_vlen(local_t);
+		__u32 targ_vlen = btf_vlen(targ_t);
 		int i, err;
 
 		if (local_k != targ_k)

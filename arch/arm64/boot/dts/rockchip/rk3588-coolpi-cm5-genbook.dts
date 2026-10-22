@@ -148,9 +148,46 @@
 	};
 };
 
+&edp1 {
+	force-hpd;
+	status = "okay";
+
+	aux-bus {
+		panel {
+			compatible = "edp-panel";
+			hpd-absent-delay-ms = <200>;
+			no-hpd;
+			backlight = <&backlight>;
+			power-supply = <&vcc3v3_lcd>;
+
+			port {
+				panel_in_edp: endpoint {
+					remote-endpoint = <&edp_out_panel>;
+				};
+			};
+		};
+	};
+};
+
+&edp1_in {
+	edp1_in_vp2: endpoint {
+		remote-endpoint = <&vp2_out_edp1>;
+	};
+};
+
+&edp1_out {
+	edp_out_panel: endpoint {
+		remote-endpoint = <&panel_in_edp>;
+	};
+};
+
+
 /* HDMI CEC is not used */
 &hdmi0 {
-	pinctrl-0 = <&hdmim0_tx0_hpd &hdmim0_tx0_scl &hdmim0_tx0_sda>;
+	frl-enable-gpios = <&gpio4 RK_PB0 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&hdmim0_tx0_hpd &hdmim0_tx0_scl &hdmim0_tx0_sda
+		     &hdmi0_tx_on_h>;
+	pinctrl-names = "default";
 	status = "okay";
 };
 
@@ -166,7 +203,11 @@
 	};
 };
 
-&hdptxphy_hdmi0 {
+&hdptxphy0 {
+	status = "okay";
+};
+
+&hdptxphy1 {
 	status = "okay";
 };
 
@@ -239,6 +280,12 @@
 };
 
 &pinctrl {
+	hdmi {
+		hdmi0_tx_on_h: hdmi0-tx-on-h {
+			rockchip,pins = <4 RK_PB0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
 	lcd {
 		lcdpwr_en: lcdpwr-en {
 			rockchip,pins = <0 RK_PC4 RK_FUNC_GPIO &pcfg_pull_down>;
@@ -288,6 +335,7 @@
 
 &pwm6 {
 	pinctrl-0 = <&pwm6m1_pins>;
+	pinctrl-names = "default";
 	status = "okay";
 };
 
@@ -383,6 +431,8 @@
 };
 
 &vop {
+	assigned-clocks = <&cru DCLK_VOP2_SRC>;
+	assigned-clock-parents = <&cru PLL_V0PLL>;
 	status = "okay";
 };
 
@@ -394,5 +444,12 @@
 	vp0_out_hdmi0: endpoint@ROCKCHIP_VOP2_EP_HDMI0 {
 		reg = <ROCKCHIP_VOP2_EP_HDMI0>;
 		remote-endpoint = <&hdmi0_in_vp0>;
+	};
+};
+
+&vp2 {
+	vp2_out_edp1: endpoint@ROCKCHIP_VOP2_EP_EDP1 {
+		reg = <ROCKCHIP_VOP2_EP_EDP1>;
+		remote-endpoint = <&edp1_in_vp2>;
 	};
 };

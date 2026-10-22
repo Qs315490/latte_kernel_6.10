@@ -9,7 +9,7 @@
 #define LINUX_MMC_SDIO_FUNC_H
 
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/sdio.h>
 
 #include <linux/mmc/pm.h>
 
@@ -78,6 +78,7 @@ struct sdio_driver {
 
 	int (*probe)(struct sdio_func *, const struct sdio_device_id *);
 	void (*remove)(struct sdio_func *);
+	void (*shutdown)(struct sdio_func *);
 
 	struct device_driver drv;
 };

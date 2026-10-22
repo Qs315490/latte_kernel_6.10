@@ -87,7 +87,7 @@ static inline u64 get_cpu_idle_time(unsigned int cpu)
 		 kcpustat->cpustat[CPUTIME_IOWAIT];
 
 	if (rackmeter_ignore_nice)
-		retval += kcpustat_field(kcpustat, CPUTIME_NICE, cpu);
+		retval += kcpustat_field(CPUTIME_NICE, cpu);
 
 	return retval;
 }
@@ -396,7 +396,7 @@ static int rackmeter_probe(struct macio_dev* mdev,
 	}
 
 	/* Create and initialize our instance data */
-	rm = kzalloc(sizeof(*rm), GFP_KERNEL);
+	rm = kzalloc_obj(*rm);
 	if (rm == NULL) {
 		printk(KERN_ERR "rackmeter: failed to allocate memory !\n");
 		rc = -ENOMEM;

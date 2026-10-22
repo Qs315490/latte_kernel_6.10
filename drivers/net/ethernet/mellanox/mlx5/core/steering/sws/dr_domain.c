@@ -282,7 +282,7 @@ dr_domain_add_vport_cap(struct mlx5dr_domain *dmn, u16 vport)
 	struct mlx5dr_cmd_vport_cap *vport_caps;
 	int ret;
 
-	vport_caps = kvzalloc(sizeof(*vport_caps), GFP_KERNEL);
+	vport_caps = kvzalloc_obj(*vport_caps);
 	if (!vport_caps)
 		return NULL;
 
@@ -410,7 +410,7 @@ static int dr_domain_caps_init(struct mlx5_core_dev *mdev,
 	switch (dmn->type) {
 	case MLX5DR_DOMAIN_TYPE_NIC_RX:
 		if (!DR_DOMAIN_SW_STEERING_SUPPORTED(dmn, rx))
-			return -ENOTSUPP;
+			return -EOPNOTSUPP;
 
 		dmn->info.supp_sw_steering = true;
 		dmn->info.rx.type = DR_DOMAIN_NIC_TYPE_RX;
@@ -419,7 +419,7 @@ static int dr_domain_caps_init(struct mlx5_core_dev *mdev,
 		break;
 	case MLX5DR_DOMAIN_TYPE_NIC_TX:
 		if (!DR_DOMAIN_SW_STEERING_SUPPORTED(dmn, tx))
-			return -ENOTSUPP;
+			return -EOPNOTSUPP;
 
 		dmn->info.supp_sw_steering = true;
 		dmn->info.tx.type = DR_DOMAIN_NIC_TYPE_TX;
@@ -428,10 +428,10 @@ static int dr_domain_caps_init(struct mlx5_core_dev *mdev,
 		break;
 	case MLX5DR_DOMAIN_TYPE_FDB:
 		if (!dmn->info.caps.eswitch_manager)
-			return -ENOTSUPP;
+			return -EOPNOTSUPP;
 
 		if (!DR_DOMAIN_SW_STEERING_SUPPORTED(dmn, fdb))
-			return -ENOTSUPP;
+			return -EOPNOTSUPP;
 
 		dmn->info.rx.type = DR_DOMAIN_NIC_TYPE_RX;
 		dmn->info.tx.type = DR_DOMAIN_NIC_TYPE_TX;
@@ -467,7 +467,7 @@ mlx5dr_domain_create(struct mlx5_core_dev *mdev, enum mlx5dr_domain_type type)
 	if (type > MLX5DR_DOMAIN_TYPE_FDB)
 		return NULL;
 
-	dmn = kzalloc(sizeof(*dmn), GFP_KERNEL);
+	dmn = kzalloc_obj(*dmn);
 	if (!dmn)
 		return NULL;
 
@@ -514,30 +514,6 @@ def_xa_destroy:
 	xa_destroy(&dmn->definers_xa);
 	kfree(dmn);
 	return NULL;
-}
-
-/* Assure synchronization of the device steering tables with updates made by SW
- * insertion.
- */
-int mlx5dr_domain_sync(struct mlx5dr_domain *dmn, u32 flags)
-{
-	int ret = 0;
-
-	if (flags & MLX5DR_DOMAIN_SYNC_FLAGS_SW) {
-		mlx5dr_domain_lock(dmn);
-		ret = mlx5dr_send_ring_force_drain(dmn);
-		mlx5dr_domain_unlock(dmn);
-		if (ret) {
-			mlx5dr_err(dmn, "Force drain failed flags: %d, ret: %d\n",
-				   flags, ret);
-			return ret;
-		}
-	}
-
-	if (flags & MLX5DR_DOMAIN_SYNC_FLAGS_HW)
-		ret = mlx5dr_cmd_sync_steering(dmn->mdev);
-
-	return ret;
 }
 
 int mlx5dr_domain_destroy(struct mlx5dr_domain *dmn)

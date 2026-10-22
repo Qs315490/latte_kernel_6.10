@@ -1,6 +1,5 @@
+// SPDX-License-Identifier: MIT
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2011-2012 Intel Corporation
  */
 
@@ -69,6 +68,7 @@
 #include <linux/nospec.h>
 
 #include <drm/drm_cache.h>
+#include <drm/drm_print.h>
 #include <drm/drm_syncobj.h>
 
 #include "gt/gen6_ppgtt.h"
@@ -238,7 +238,7 @@ static int proto_context_set_persistence(struct drm_i915_private *i915,
 		 *
 		 * However, if we cannot reset an engine by itself, we cannot
 		 * cleanup a hanging persistent context without causing
-		 * colateral damage, and we should not pretend we can by
+		 * collateral damage, and we should not pretend we can by
 		 * exposing the interface.
 		 */
 		if (!intel_has_reset_engine(to_gt(i915)))
@@ -285,7 +285,7 @@ proto_context_create(struct drm_i915_file_private *fpriv,
 {
 	struct i915_gem_proto_context *pc, *err;
 
-	pc = kzalloc(sizeof(*pc), GFP_KERNEL);
+	pc = kzalloc_obj(*pc);
 	if (!pc)
 		return ERR_PTR(-ENOMEM);
 
@@ -442,7 +442,7 @@ set_proto_ctx_engines_balance(struct i915_user_extension __user *base,
 	if (num_siblings == 0)
 		return 0;
 
-	siblings = kmalloc_array(num_siblings, sizeof(*siblings), GFP_KERNEL);
+	siblings = kmalloc_objs(*siblings, num_siblings);
 	if (!siblings)
 		return -ENOMEM;
 
@@ -613,6 +613,7 @@ set_proto_ctx_engines_parallel_submit(struct i915_user_extension __user *base,
 		return -EINVAL;
 	}
 
+	slot = array_index_nospec(slot, set->num_engines);
 	if (set->engines[slot].type != I915_GEM_ENGINE_TYPE_INVALID) {
 		drm_dbg(&i915->drm,
 			"Invalid placement[%d], already occupied\n", slot);
@@ -644,9 +645,7 @@ set_proto_ctx_engines_parallel_submit(struct i915_user_extension __user *base,
 		return -EINVAL;
 	}
 
-	siblings = kmalloc_array(num_siblings * width,
-				 sizeof(*siblings),
-				 GFP_KERNEL);
+	siblings = kmalloc_objs(*siblings, num_siblings * width);
 	if (!siblings)
 		return -ENOMEM;
 
@@ -761,7 +760,7 @@ static int set_proto_ctx_engines(struct drm_i915_file_private *fpriv,
 	if (set.num_engines > I915_EXEC_RING_MASK + 1)
 		return -EINVAL;
 
-	set.engines = kmalloc_array(set.num_engines, sizeof(*set.engines), GFP_KERNEL);
+	set.engines = kmalloc_objs(*set.engines, set.num_engines);
 	if (!set.engines)
 		return -ENOMEM;
 
@@ -770,8 +769,8 @@ static int set_proto_ctx_engines(struct drm_i915_file_private *fpriv,
 		struct intel_engine_cs *engine;
 
 		if (copy_from_user(&ci, &user->engines[n], sizeof(ci))) {
-			kfree(set.engines);
-			return -EFAULT;
+			err = -EFAULT;
+			goto err;
 		}
 
 		memset(&set.engines[n], 0, sizeof(set.engines[n]));
@@ -787,8 +786,8 @@ static int set_proto_ctx_engines(struct drm_i915_file_private *fpriv,
 			drm_dbg(&i915->drm,
 				"Invalid engine[%d]: { class:%d, instance:%d }\n",
 				n, ci.engine_class, ci.engine_instance);
-			kfree(set.engines);
-			return -ENOENT;
+			err = -ENOENT;
+			goto err;
 		}
 
 		set.engines[n].type = I915_GEM_ENGINE_TYPE_PHYSICAL;
@@ -801,15 +800,21 @@ static int set_proto_ctx_engines(struct drm_i915_file_private *fpriv,
 					   set_proto_ctx_engines_extensions,
 					   ARRAY_SIZE(set_proto_ctx_engines_extensions),
 					   &set);
-	if (err) {
-		kfree(set.engines);
-		return err;
-	}
+	if (err)
+		goto err_extensions;
 
 	pc->num_user_engines = set.num_engines;
 	pc->user_engines = set.engines;
 
 	return 0;
+
+err_extensions:
+	for (n = 0; n < set.num_engines; n++)
+		kfree(set.engines[n].siblings);
+err:
+	kfree(set.engines);
+
+	return err;
 }
 
 static int set_proto_ctx_sseu(struct drm_i915_file_private *fpriv,
@@ -851,7 +856,7 @@ static int set_proto_ctx_sseu(struct drm_i915_file_private *fpriv,
 		pe = &pc->user_engines[idx];
 
 		/* Only render engine supports RPCS configuration. */
-		if (pe->engine->class != RENDER_CLASS)
+		if (!pe->engine || pe->engine->class != RENDER_CLASS)
 			return -EINVAL;
 
 		sseu = &pe->sseu;
@@ -1105,7 +1110,7 @@ static struct i915_gem_engines *alloc_engines(unsigned int count)
 {
 	struct i915_gem_engines *e;
 
-	e = kzalloc(struct_size(e, engines, count), GFP_KERNEL);
+	e = kzalloc_flex(*e, engines, count);
 	if (!e)
 		return NULL;
 
@@ -1589,7 +1594,7 @@ static int __context_set_persistence(struct i915_gem_context *ctx, bool state)
 		 *
 		 * However, if we cannot reset an engine by itself, we cannot
 		 * cleanup a hanging persistent context without causing
-		 * colateral damage, and we should not pretend we can by
+		 * collateral damage, and we should not pretend we can by
 		 * exposing the interface.
 		 */
 		if (!intel_has_reset_engine(to_gt(ctx->i915)))
@@ -1611,7 +1616,7 @@ i915_gem_create_context(struct drm_i915_private *i915,
 	int err;
 	int i;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return ERR_PTR(-ENOMEM);
 
@@ -2159,16 +2164,10 @@ static int set_context_image(struct i915_gem_context *ctx,
 		goto out_ce;
 	}
 
-	state = kmalloc(ce->engine->context_size, GFP_KERNEL);
-	if (!state) {
-		ret = -ENOMEM;
+	state = memdup_user(u64_to_user_ptr(user.image), ce->engine->context_size);
+	if (IS_ERR(state)) {
+		ret = PTR_ERR(state);
 		goto out_ce;
-	}
-
-	if (copy_from_user(state, u64_to_user_ptr(user.image),
-			   ce->engine->context_size)) {
-		ret = -EFAULT;
-		goto out_state;
 	}
 
 	shmem_state = shmem_create_from_data(ce->engine->name,
@@ -2328,7 +2327,7 @@ finalize_create_context_locked(struct drm_i915_file_private *file_priv,
 
 	/*
 	 * One for the xarray and one for the caller.  We need to grab
-	 * the reference *prior* to making the ctx visble to userspace
+	 * the reference *prior* to making the ctx visible to userspace
 	 * in gem_context_register(), as at any point after that
 	 * userspace can try to race us with another thread destroying
 	 * the context under our feet.

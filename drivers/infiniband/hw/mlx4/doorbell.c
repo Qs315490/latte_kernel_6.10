@@ -56,7 +56,7 @@ int mlx4_ib_db_map_user(struct ib_udata *udata, unsigned long virt,
 		if (page->user_virt == (virt & PAGE_MASK))
 			goto found;
 
-	page = kmalloc(sizeof *page, GFP_KERNEL);
+	page = kmalloc_obj(*page);
 	if (!page) {
 		err = -ENOMEM;
 		goto out;
@@ -64,8 +64,8 @@ int mlx4_ib_db_map_user(struct ib_udata *udata, unsigned long virt,
 
 	page->user_virt = (virt & PAGE_MASK);
 	page->refcnt    = 0;
-	page->umem = ib_umem_get(context->ibucontext.device, virt & PAGE_MASK,
-				 PAGE_SIZE, 0);
+	page->umem = ib_umem_get_va(context->ibucontext.device,
+				    virt & PAGE_MASK, PAGE_SIZE, 0);
 	if (IS_ERR(page->umem)) {
 		err = PTR_ERR(page->umem);
 		kfree(page);

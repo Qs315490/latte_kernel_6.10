@@ -83,9 +83,7 @@ int nilfs_gccache_submit_read_data(struct inode *inode, sector_t blkoff,
 	if (!buffer_mapped(bh))
 		set_buffer_mapped(bh);
 	bh->b_blocknr = pbn;
-	bh->b_end_io = end_buffer_read_sync;
-	get_bh(bh);
-	submit_bh(REQ_OP_READ, bh);
+	bh_submit(bh, REQ_OP_READ, bh_end_read);
 	if (vbn)
 		bh->b_blocknr = vbn;
  out:
@@ -137,7 +135,7 @@ int nilfs_gccache_wait_and_mark_dirty(struct buffer_head *bh)
 		struct inode *inode = bh->b_folio->mapping->host;
 
 		nilfs_err(inode->i_sb,
-			  "I/O error reading %s block for GC (ino=%lu, vblocknr=%llu)",
+			  "I/O error reading %s block for GC (ino=%llu, vblocknr=%llu)",
 			  buffer_nilfs_node(bh) ? "node" : "data",
 			  inode->i_ino, (unsigned long long)bh->b_blocknr);
 		return -EIO;

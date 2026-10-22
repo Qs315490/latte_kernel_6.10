@@ -190,7 +190,7 @@ static struct {
 	{"IBM", "2076", NULL, BLIST_NO_VPD_SIZE},
 	{"IBM", "2105", NULL, BLIST_RETRY_HWERROR},
 	{"iomega", "jaz 1GB", "J.86", BLIST_NOTQ | BLIST_NOLUN},
-	{"IOMEGA", "ZIP", NULL, BLIST_NOTQ | BLIST_NOLUN},
+	{"IOMEGA", "ZIP", NULL, BLIST_NOTQ | BLIST_NOLUN | BLIST_SKIP_IO_HINTS},
 	{"IOMEGA", "Io20S         *F", NULL, BLIST_KEY},
 	{"INSITE", "Floptical   F*8I", NULL, BLIST_KEY},
 	{"INSITE", "I325VM", NULL, BLIST_KEY},
@@ -218,7 +218,8 @@ static struct {
 	{"PIONEER", "CD-ROM DRM-602X", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
 	{"PIONEER", "CD-ROM DRM-604X", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
 	{"PIONEER", "CD-ROM DRM-624X", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
-	{"Promise", "VTrak E610f", NULL, BLIST_SPARSELUN | BLIST_NO_RSOC},
+	{"Promise", "VTrak E310", NULL, BLIST_SPARSELUN | BLIST_NO_RSOC},
+	{"Promise", "VTrak E610", NULL, BLIST_SPARSELUN | BLIST_NO_RSOC},
 	{"Promise", "", NULL, BLIST_SPARSELUN},
 	{"QEMU", "QEMU CD-ROM", NULL, BLIST_SKIP_VPD_PAGES},
 	{"QNAP", "iSCSI Storage", NULL, BLIST_MAX_1024},
@@ -269,17 +270,12 @@ static struct {
 static struct scsi_dev_info_list_table *scsi_devinfo_lookup_by_key(int key)
 {
 	struct scsi_dev_info_list_table *devinfo_table;
-	int found = 0;
 
 	list_for_each_entry(devinfo_table, &scsi_dev_info_list, node)
-		if (devinfo_table->key == key) {
-			found = 1;
-			break;
-		}
-	if (!found)
-		return ERR_PTR(-EINVAL);
+		if (devinfo_table->key == key)
+			return devinfo_table;
 
-	return devinfo_table;
+	return ERR_PTR(-EINVAL);
 }
 
 /*
@@ -360,7 +356,7 @@ int scsi_dev_info_list_add_keyed(int compatible, char *vendor, char *model,
 	if (IS_ERR(devinfo_table))
 		return PTR_ERR(devinfo_table);
 
-	devinfo = kmalloc(sizeof(*devinfo), GFP_KERNEL);
+	devinfo = kmalloc_obj(*devinfo);
 	if (!devinfo) {
 		printk(KERN_ERR "%s: no memory\n", __func__);
 		return -ENOMEM;
@@ -484,33 +480,6 @@ static struct scsi_dev_info_list *scsi_dev_info_list_find(const char *vendor,
 
 	return ERR_PTR(-ENOENT);
 }
-
-/**
- * scsi_dev_info_list_del_keyed - remove one dev_info list entry.
- * @vendor:	vendor string
- * @model:	model (product) string
- * @key:	specify list to use
- *
- * Description:
- *	Remove and destroy one dev_info entry for @vendor, @model
- *	in list specified by @key.
- *
- * Returns: 0 OK, -error on failure.
- **/
-int scsi_dev_info_list_del_keyed(char *vendor, char *model,
-				 enum scsi_devinfo_key key)
-{
-	struct scsi_dev_info_list *found;
-
-	found = scsi_dev_info_list_find(vendor, model, key);
-	if (IS_ERR(found))
-		return PTR_ERR(found);
-
-	list_del(&found->dev_info_list);
-	kfree(found);
-	return 0;
-}
-EXPORT_SYMBOL(scsi_dev_info_list_del_keyed);
 
 /**
  * scsi_dev_info_list_add_str - parse dev_list and add to the scsi_dev_info_list.
@@ -647,7 +616,7 @@ static int devinfo_seq_show(struct seq_file *m, void *v)
 
 static void *devinfo_seq_start(struct seq_file *m, loff_t *ppos)
 {
-	struct double_list *dl = kmalloc(sizeof(*dl), GFP_KERNEL);
+	struct double_list *dl = kmalloc_obj(*dl);
 	loff_t pos = *ppos;
 
 	if (!dl)
@@ -791,7 +760,7 @@ int scsi_dev_info_add_list(enum scsi_devinfo_key key, const char *name)
 		/* list already exists */
 		return -EEXIST;
 
-	devinfo_table = kmalloc(sizeof(*devinfo_table), GFP_KERNEL);
+	devinfo_table = kmalloc_obj(*devinfo_table);
 
 	if (!devinfo_table)
 		return -ENOMEM;
@@ -863,7 +832,7 @@ int __init scsi_init_devinfo(void)
 		goto out;
 
 	for (i = 0; scsi_static_device_list[i].vendor; i++) {
-		error = scsi_dev_info_list_add(1 /* compatibile */,
+		error = scsi_dev_info_list_add(1 /* compatible */,
 				scsi_static_device_list[i].vendor,
 				scsi_static_device_list[i].model,
 				NULL,

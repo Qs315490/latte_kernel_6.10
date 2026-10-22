@@ -119,33 +119,20 @@ static struct board {
 };
 
 static const struct pci_device_id tlan_pci_tbl[] = {
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL10,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL100,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1 },
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_NETFLEX3I,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2 },
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_THUNDER,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 3 },
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_NETFLEX3B,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 4 },
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL100PI,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 5 },
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL100D,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 6 },
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL100I,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 7 },
-	{ PCI_VENDOR_ID_OLICOM, PCI_DEVICE_ID_OLICOM_OC2183,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 8 },
-	{ PCI_VENDOR_ID_OLICOM, PCI_DEVICE_ID_OLICOM_OC2325,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 9 },
-	{ PCI_VENDOR_ID_OLICOM, PCI_DEVICE_ID_OLICOM_OC2326,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 10 },
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_NETELLIGENT_10_100_WS_5100,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 11 },
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_NETELLIGENT_10_T2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 12 },
-	{ 0,}
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL10), .driver_data = 0 },
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL100), .driver_data = 1 },
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_COMPAQ_NETFLEX3I), .driver_data = 2 },
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_COMPAQ_THUNDER), .driver_data = 3 },
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_COMPAQ_NETFLEX3B), .driver_data = 4 },
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL100PI), .driver_data = 5 },
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL100D), .driver_data = 6 },
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL100I), .driver_data = 7 },
+	{ PCI_VDEVICE(OLICOM, PCI_DEVICE_ID_OLICOM_OC2183), .driver_data = 8 },
+	{ PCI_VDEVICE(OLICOM, PCI_DEVICE_ID_OLICOM_OC2325), .driver_data = 9 },
+	{ PCI_VDEVICE(OLICOM, PCI_DEVICE_ID_OLICOM_OC2326), .driver_data = 10 },
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_NETELLIGENT_10_100_WS_5100), .driver_data = 11 },
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_NETELLIGENT_10_T2), .driver_data = 12 },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, tlan_pci_tbl);
 
@@ -332,13 +319,13 @@ static void tlan_stop(struct net_device *dev)
 {
 	struct tlan_priv *priv = netdev_priv(dev);
 
-	del_timer_sync(&priv->media_timer);
+	timer_delete_sync(&priv->media_timer);
 	tlan_read_and_clear_stats(dev, TLAN_RECORD);
 	outl(TLAN_HC_AD_RST, dev->base_addr + TLAN_HOST_CMD);
 	/* Reset and power down phy */
 	tlan_reset_adapter(dev);
 	if (priv->timer.function != NULL) {
-		del_timer_sync(&priv->timer);
+		timer_delete_sync(&priv->timer);
 		priv->timer.function = NULL;
 	}
 }
@@ -1815,7 +1802,7 @@ ThunderLAN driver timer function
 
 static void tlan_timer(struct timer_list *t)
 {
-	struct tlan_priv	*priv = from_timer(priv, t, timer);
+	struct tlan_priv	*priv = timer_container_of(priv, t, timer);
 	struct net_device	*dev = priv->dev;
 	u32		elapsed;
 	unsigned long	flags = 0;
@@ -2746,7 +2733,7 @@ static void tlan_phy_finish_auto_neg(struct net_device *dev)
 
 static void tlan_phy_monitor(struct timer_list *t)
 {
-	struct tlan_priv *priv = from_timer(priv, t, media_timer);
+	struct tlan_priv *priv = timer_container_of(priv, t, media_timer);
 	struct net_device *dev = priv->dev;
 	u16     phy;
 	u16     phy_status;

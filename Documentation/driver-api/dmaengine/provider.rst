@@ -172,8 +172,8 @@ Currently, the types available are:
   - It's usually used for copying pixel data between host memory and
     memory-mapped GPU device memory, such as found on modern PCI video graphics
     cards. The most immediate example is the OpenGL API function
-    ``glReadPielx()``, which might require a verbatim copy of a huge framebuffer
-    from local device memory onto host memory.
+    ``glReadPixels()``, which might require a verbatim copy of a huge
+    framebuffer from local device memory onto host memory.
 
 - DMA_XOR
 
@@ -217,10 +217,12 @@ Currently, the types available are:
 
 - DMA_ASYNC_TX
 
-  - Must not be set by the device, and will be set by the framework
-    if needed
+  - The device supports asynchronous memory-to-memory operations,
+    including memcpy, memset, xor, pq, xor_val, and pq_val.
 
-  - TODO: What is it about?
+  - This capability is automatically set by the DMA engine
+    framework and must not be configured manually by device
+    drivers.
 
 - DMA_SLAVE
 
@@ -409,7 +411,7 @@ supported.
   - This structure can be initialized using the function
     ``dma_async_tx_descriptor_init``.
 
-  - You'll also need to set two fields in this structure:
+  - You'll also need to set following fields in this structure:
 
     - flags:
       TODO: Can it be modified by the driver itself, or
@@ -418,6 +420,9 @@ supported.
     - tx_submit: A pointer to a function you have to implement,
       that is supposed to push the current transaction descriptor to a
       pending queue, waiting for issue_pending to be called.
+
+    - phys: Physical address of the descriptor which is used later by
+      the dma engine to read the descriptor and initiate transfer.
 
   - In this structure the function pointer callback_result can be
     initialized in order for the submitter to be notified that a

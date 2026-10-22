@@ -85,12 +85,12 @@ struct flag_table {
 /*
  * RSM instance allocation
  *   0 - User Fecn Handling
- *   1 - Vnic
+ *   1 - Deprecated
  *   2 - AIP
  *   3 - Verbs
  */
 #define RSM_INS_FECN              0
-#define RSM_INS_VNIC              1
+#define RSM_INS_DEPRECATED        1
 #define RSM_INS_AIP               2
 #define RSM_INS_VERBS             3
 
@@ -151,15 +151,6 @@ struct flag_table {
 #define DETH_AIP_SQPN_OFFSET(off) ((DETH_AIP_SQPN_QW << QW_SHIFT) | (off))
 #define DETH_AIP_SQPN_SELECT_OFFSET \
 	DETH_AIP_SQPN_OFFSET(DETH_AIP_SQPN_BIT_OFFSET)
-
-/* RSM fields for Vnic */
-/* L2_TYPE: QW 0, OFFSET 61 - for match */
-#define L2_TYPE_QW             0ull
-#define L2_TYPE_BIT_OFFSET     61ull
-#define L2_TYPE_OFFSET(off)    ((L2_TYPE_QW << QW_SHIFT) | (off))
-#define L2_TYPE_MATCH_OFFSET   L2_TYPE_OFFSET(L2_TYPE_BIT_OFFSET)
-#define L2_TYPE_MASK           3ull
-#define L2_16B_VALUE           2ull
 
 /* L4_TYPE QW 1, OFFSET 0 - for match */
 #define L4_TYPE_QW              1ull
@@ -5548,7 +5539,7 @@ static void handle_cce_err(struct hfi1_devdata *dd, u32 unused, u64 reg)
 #define RCVERR_CHECK_TIME 10
 static void update_rcverr_timer(struct timer_list *t)
 {
-	struct hfi1_devdata *dd = from_timer(dd, t, rcverr_timer);
+	struct hfi1_devdata *dd = timer_container_of(dd, t, rcverr_timer);
 	struct hfi1_pportdata *ppd = dd->pport;
 	u32 cur_ovfl_cnt = read_dev_cntr(dd, C_RCV_OVF, CNTR_INVALID_VL);
 
@@ -5576,7 +5567,7 @@ static int init_rcverr(struct hfi1_devdata *dd)
 static void free_rcverr(struct hfi1_devdata *dd)
 {
 	if (dd->rcverr_timer.function)
-		del_timer_sync(&dd->rcverr_timer);
+		timer_delete_sync(&dd->rcverr_timer);
 }
 
 static void handle_rxe_err(struct hfi1_devdata *dd, u32 unused, u64 reg)
@@ -6844,9 +6835,9 @@ static void rxe_kernel_unfreeze(struct hfi1_devdata *dd)
 	for (i = 0; i < dd->num_rcv_contexts; i++) {
 		rcd = hfi1_rcd_get_by_index(dd, i);
 
-		/* Ensure all non-user contexts(including vnic) are enabled */
+		/* Ensure all non-user contexts are enabled */
 		if (!rcd ||
-		    (i >= dd->first_dyn_alloc_ctxt && !rcd->is_vnic)) {
+		    (i >= dd->first_dyn_alloc_ctxt)) {
 			hfi1_rcd_put(rcd);
 			continue;
 		}
@@ -8467,7 +8458,7 @@ int hfi1_netdev_rx_napi(struct napi_struct *napi, int budget)
 	return work_done;
 }
 
-/* Receive packet napi handler for netdevs VNIC and AIP  */
+/* Receive packet napi handler for netdevs AIP  */
 irqreturn_t receive_context_interrupt_napi(int irq, void *data)
 {
 	struct hfi1_ctxtdata *rcd = data;
@@ -12308,7 +12299,7 @@ static void free_cntrs(struct hfi1_devdata *dd)
 	int i;
 
 	if (dd->synth_stats_timer.function)
-		del_timer_sync(&dd->synth_stats_timer);
+		timer_delete_sync(&dd->synth_stats_timer);
 	cancel_work_sync(&dd->update_cntr_work);
 	ppd = (struct hfi1_pportdata *)(dd + 1);
 	for (i = 0; i < dd->num_pports; i++, ppd++) {
@@ -12587,7 +12578,7 @@ static void do_update_synth_timer(struct work_struct *work)
 
 static void update_synth_timer(struct timer_list *t)
 {
-	struct hfi1_devdata *dd = from_timer(dd, t, synth_stats_timer);
+	struct hfi1_devdata *dd = timer_container_of(dd, t, synth_stats_timer);
 
 	queue_work(dd->update_cntr_wq, &dd->update_cntr_work);
 	mod_timer(&dd->synth_stats_timer, jiffies + HZ * SYNTH_CNT_TIME);
@@ -12882,22 +12873,6 @@ u32 chip_to_opa_pstate(struct hfi1_devdata *dd, u32 chip_pstate)
 	}
 }
 
-/* return the OPA port logical state name */
-const char *opa_lstate_name(u32 lstate)
-{
-	static const char * const port_logical_names[] = {
-		"PORT_NOP",
-		"PORT_DOWN",
-		"PORT_INIT",
-		"PORT_ARMED",
-		"PORT_ACTIVE",
-		"PORT_ACTIVE_DEFER",
-	};
-	if (lstate < ARRAY_SIZE(port_logical_names))
-		return port_logical_names[lstate];
-	return "unknown";
-}
-
 /* return the OPA port physical state name */
 const char *opa_pstate_name(u32 pstate)
 {
@@ -12956,8 +12931,6 @@ static void update_statusp(struct hfi1_pportdata *ppd, u32 state)
 			break;
 		}
 	}
-	dd_dev_info(ppd->dd, "logical state changed to %s (0x%x)\n",
-		    opa_lstate_name(state), state);
 }
 
 /**
@@ -14239,7 +14212,7 @@ static struct rsm_map_table *alloc_rsm_map_table(struct hfi1_devdata *dd)
 	struct rsm_map_table *rmt;
 	u8 rxcontext = is_ax(dd) ? 0 : 0xff;  /* 0 is default if a0 ver. */
 
-	rmt = kmalloc(sizeof(*rmt), GFP_KERNEL);
+	rmt = kmalloc_obj(*rmt);
 	if (rmt) {
 		memset(rmt->map, rxcontext, sizeof(rmt->map));
 		rmt->used = 0;
@@ -14524,7 +14497,7 @@ static bool hfi1_netdev_update_rmt(struct hfi1_devdata *dd)
 	int ctxt_count = hfi1_netdev_ctxt_count(dd);
 
 	/* We already have contexts mapped in RMT */
-	if (has_rsm_rule(dd, RSM_INS_VNIC) || has_rsm_rule(dd, RSM_INS_AIP)) {
+	if (has_rsm_rule(dd, RSM_INS_AIP)) {
 		dd_dev_info(dd, "Contexts are already mapped in RMT\n");
 		return true;
 	}
@@ -14603,37 +14576,6 @@ void hfi1_init_aip_rsm(struct hfi1_devdata *dd)
 
 		hfi1_enable_rsm_rule(dd, RSM_INS_AIP, &rrd);
 	}
-}
-
-/* Initialize RSM for VNIC */
-void hfi1_init_vnic_rsm(struct hfi1_devdata *dd)
-{
-	int rmt_start = hfi1_netdev_get_free_rmt_idx(dd);
-	struct rsm_rule_data rrd = {
-		/* Add rule for vnic */
-		.offset = rmt_start,
-		.pkt_type = 4,
-		/* Match 16B packets */
-		.field1_off = L2_TYPE_MATCH_OFFSET,
-		.mask1 = L2_TYPE_MASK,
-		.value1 = L2_16B_VALUE,
-		/* Match ETH L4 packets */
-		.field2_off = L4_TYPE_MATCH_OFFSET,
-		.mask2 = L4_16B_TYPE_MASK,
-		.value2 = L4_16B_ETH_VALUE,
-		/* Calc context from veswid and entropy */
-		.index1_off = L4_16B_HDR_VESWID_OFFSET,
-		.index1_width = ilog2(NUM_NETDEV_MAP_ENTRIES),
-		.index2_off = L2_16B_ENTROPY_OFFSET,
-		.index2_width = ilog2(NUM_NETDEV_MAP_ENTRIES)
-	};
-
-	hfi1_enable_rsm_rule(dd, RSM_INS_VNIC, &rrd);
-}
-
-void hfi1_deinit_vnic_rsm(struct hfi1_devdata *dd)
-{
-	clear_rsm_rule(dd, RSM_INS_VNIC);
 }
 
 void hfi1_deinit_aip_rsm(struct hfi1_devdata *dd)
@@ -14890,7 +14832,7 @@ static int init_asic_data(struct hfi1_devdata *dd)
 	int ret = 0;
 
 	/* pre-allocate the asic structure in case we are the first device */
-	asic_data = kzalloc(sizeof(*dd->asic_data), GFP_KERNEL);
+	asic_data = kzalloc_obj(*dd->asic_data);
 	if (!asic_data)
 		return -ENOMEM;
 
@@ -15213,7 +15155,7 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 		 (dd->revision >> CCE_REVISION_SW_SHIFT)
 		    & CCE_REVISION_SW_MASK);
 
-	/* alloc VNIC/AIP rx data */
+	/* alloc AIP rx data */
 	ret = hfi1_alloc_rx(dd);
 	if (ret)
 		goto bail_cleanup;

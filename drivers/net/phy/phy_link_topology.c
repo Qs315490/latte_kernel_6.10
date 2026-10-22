@@ -10,12 +10,13 @@
 #include <linux/phy.h>
 #include <linux/rtnetlink.h>
 #include <linux/xarray.h>
+#include <net/netdev_lock.h>
 
 static int netdev_alloc_phy_link_topology(struct net_device *dev)
 {
 	struct phy_link_topology *topo;
 
-	topo = kzalloc(sizeof(*topo), GFP_KERNEL);
+	topo = kzalloc_obj(*topo);
 	if (!topo)
 		return -ENOMEM;
 
@@ -35,6 +36,15 @@ int phy_link_topo_add_phy(struct net_device *dev,
 	struct phy_device_node *pdn;
 	int ret;
 
+	/* ethtool ops may run without rtnl_lock, and rtnl_lock is what
+	 * currently protects the PHY topology. No driver currently mixes
+	 * the two, flag if someone tries. See also:
+	 *  - ethnl_req_get_phydev()
+	 *  - phy_detach()
+	 */
+	if (WARN_ON_ONCE(netdev_need_ops_lock(dev)))
+		return -EOPNOTSUPP;
+
 	if (!topo) {
 		ret = netdev_alloc_phy_link_topology(dev);
 		if (ret)
@@ -43,7 +53,7 @@ int phy_link_topo_add_phy(struct net_device *dev,
 		topo = dev->link_topo;
 	}
 
-	pdn = kzalloc(sizeof(*pdn), GFP_KERNEL);
+	pdn = kzalloc_obj(*pdn);
 	if (!pdn)
 		return -ENOMEM;
 

@@ -4,8 +4,8 @@
 
 struct arch_tlbflush_unmap_batch {
 	/*
-	 * For arm64, HW can do tlb shootdown, so we don't
-	 * need to record cpumask for sending IPI
+	 * For arm64, HW can do TLB shootdown, so we don't need to record a
+	 * cpumask for sending IPIs.
 	 */
 };
 

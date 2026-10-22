@@ -8,13 +8,13 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/mutex.h>
 #include <linux/i2c.h>
 #include <linux/gpio/driver.h>
 #include <linux/slab.h>
+#include <linux/sysfs.h>
 #include <linux/kthread.h>
 #include <linux/property.h>
 #include <linux/reboot.h>
@@ -77,7 +77,7 @@ static ssize_t show_status(struct device *d,
 		return -ENODEV;
 	mcu->reg_ctrl = ret;
 
-	return sprintf(buf, "%02x\n", ret);
+	return sysfs_emit(buf, "%02x\n", ret);
 }
 static DEVICE_ATTR(status, 0444, show_status, NULL);
 
@@ -92,10 +92,11 @@ static void mcu_power_off(void)
 	mutex_unlock(&mcu->lock);
 }
 
-static void mcu_gpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
+static int mcu_gpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
 {
 	struct mcu *mcu = gpiochip_get_data(gc);
 	u8 bit = 1 << (4 + gpio);
+	int ret;
 
 	mutex_lock(&mcu->lock);
 	if (val)
@@ -103,14 +104,16 @@ static void mcu_gpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
 	else
 		mcu->reg_ctrl |= bit;
 
-	i2c_smbus_write_byte_data(mcu->client, MCU_REG_CTRL, mcu->reg_ctrl);
+	ret = i2c_smbus_write_byte_data(mcu->client, MCU_REG_CTRL,
+					mcu->reg_ctrl);
 	mutex_unlock(&mcu->lock);
+
+	return ret;
 }
 
 static int mcu_gpio_dir_out(struct gpio_chip *gc, unsigned int gpio, int val)
 {
-	mcu_gpio_set(gc, gpio, val);
-	return 0;
+	return mcu_gpio_set(gc, gpio, val);
 }
 
 static int mcu_gpiochip_add(struct mcu *mcu)
@@ -120,6 +123,8 @@ static int mcu_gpiochip_add(struct mcu *mcu)
 
 	gc->owner = THIS_MODULE;
 	gc->label = kasprintf(GFP_KERNEL, "%pfw", dev_fwnode(dev));
+	if (!gc->label)
+		return -ENOMEM;
 	gc->can_sleep = 1;
 	gc->ngpio = MCU_NUM_GPIO;
 	gc->base = -1;
@@ -141,7 +146,7 @@ static int mcu_probe(struct i2c_client *client)
 	struct mcu *mcu;
 	int ret;
 
-	mcu = kzalloc(sizeof(*mcu), GFP_KERNEL);
+	mcu = kzalloc_obj(*mcu);
 	if (!mcu)
 		return -ENOMEM;
 

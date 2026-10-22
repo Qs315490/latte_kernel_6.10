@@ -295,9 +295,8 @@ static bool create_input_system_channel(
 	if (!rc)
 		return false;
 
-	if (!acquire_sid(me->stream2mmio_id, &me->stream2mmio_sid_id)) {
+	if (!acquire_sid(me->stream2mmio_id, &me->stream2mmio_sid_id))
 		return false;
-	}
 
 	if (!acquire_ib_buffer(
 		metadata ? cfg->metadata.bits_per_pixel :
@@ -808,7 +807,7 @@ static bool calculate_isys2401_dma_port_cfg(
 
 	cfg->elements	= HIVE_ISP_DDR_WORD_BITS / bits_per_pixel;
 	cfg->cropping	= 0;
-	cfg->width	= CEIL_DIV(cfg->stride, HIVE_ISP_DDR_WORD_BYTES);
+	cfg->width	= DIV_ROUND_UP(cfg->stride, HIVE_ISP_DDR_WORD_BYTES);
 
 	return true;
 }

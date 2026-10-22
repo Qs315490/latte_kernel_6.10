@@ -424,8 +424,7 @@ static enum hrtimer_restart ci_otg_hrtimer_func(struct hrtimer *t)
 /* Initialize timers */
 static int ci_otg_init_timers(struct ci_hdrc *ci)
 {
-	hrtimer_init(&ci->otg_fsm_hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
-	ci->otg_fsm_hrtimer.function = ci_otg_hrtimer_func;
+	hrtimer_setup(&ci->otg_fsm_hrtimer, ci_otg_hrtimer_func, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
 
 	return 0;
 }
@@ -630,7 +629,6 @@ int ci_otg_fsm_work(struct ci_hdrc *ci)
 				ci_otg_queue_work(ci);
 			}
 		} else if (ci->fsm.otg->state == OTG_STATE_A_HOST) {
-			pm_runtime_mark_last_busy(ci->dev);
 			pm_runtime_put_autosuspend(ci->dev);
 			return 0;
 		}

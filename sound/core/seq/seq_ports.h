@@ -96,9 +96,15 @@ struct snd_seq_client_port *snd_seq_port_query_nearest(struct snd_seq_client *cl
 /* unlock the port */
 #define snd_seq_port_unlock(port) snd_use_lock_free(&(port)->use_lock)
 
-/* create a port, port number or a negative error code is returned */
-int snd_seq_create_port(struct snd_seq_client *client, int port_index,
+DEFINE_FREE(snd_seq_port, struct snd_seq_client_port *, if (!IS_ERR_OR_NULL(_T)) snd_seq_port_unlock(_T))
+
+/* create a port, 0 on success or a negative error code is returned */
+int snd_seq_create_port(struct snd_seq_client *client,
 			struct snd_seq_client_port **port_ret);
+
+/* insert the port; return the port address or a negative error code */
+int snd_seq_insert_port(struct snd_seq_client *client, int port,
+			struct snd_seq_client_port *new_port);
 
 /* delete a port */
 int snd_seq_delete_port(struct snd_seq_client *client, int port);

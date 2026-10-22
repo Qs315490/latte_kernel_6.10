@@ -35,7 +35,7 @@
 
 #undef FN
 #define FN(reg_name, field_name) \
-	hpd->shifts->field_name, hpd->masks->field_name
+	gpio_reg_shift(hpd->shifts->field_name), hpd->masks->field_name
 
 #define CTX \
 	hpd->base.base.ctx
@@ -62,7 +62,7 @@ static void dal_hw_hpd_destroy(
 	*ptr = NULL;
 }
 
-static enum gpio_result get_value(
+static enum gpio_result dal_hw_hpd_get_value(
 	const struct hw_gpio_pin *ptr,
 	uint32_t *value)
 {
@@ -85,7 +85,7 @@ static enum gpio_result get_value(
 	return dal_hw_gpio_get_value(ptr, value);
 }
 
-static enum gpio_result set_config(
+static enum gpio_result dal_hw_hpd_set_config(
 	struct hw_gpio_pin *ptr,
 	const struct gpio_config_data *config_data)
 {
@@ -104,9 +104,9 @@ static enum gpio_result set_config(
 static const struct hw_gpio_pin_funcs funcs = {
 	.destroy = dal_hw_hpd_destroy,
 	.open = dal_hw_gpio_open,
-	.get_value = get_value,
+	.get_value = dal_hw_hpd_get_value,
 	.set_value = dal_hw_gpio_set_value,
-	.set_config = set_config,
+	.set_config = dal_hw_hpd_set_config,
 	.change_mode = dal_hw_gpio_change_mode,
 	.close = dal_hw_gpio_close,
 };
@@ -132,7 +132,7 @@ void dal_hw_hpd_init(
 		*hw_hpd = NULL;
 	}
 
-	*hw_hpd = kzalloc(sizeof(struct hw_hpd), GFP_KERNEL);
+	*hw_hpd = kzalloc_obj(struct hw_hpd);
 	if (!*hw_hpd) {
 		ASSERT_CRITICAL(false);
 		return;

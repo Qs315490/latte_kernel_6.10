@@ -43,6 +43,9 @@
 
 #define ENETC_SIPMAR0	0x80
 #define ENETC_SIPMAR1	0x84
+#define ENETC_SICVLANR1	0x90
+#define ENETC_SICVLANR2	0x94
+#define  SICVLANR_ETYPE	GENMASK(15, 0)
 
 /* VF-PF Message passing */
 #define ENETC_DEFAULT_MSG_SIZE	1024	/* and max size */
@@ -53,10 +56,20 @@ static inline u32 enetc_vsi_set_msize(u32 size)
 }
 
 #define ENETC_PSIMSGRR	0x204
-#define ENETC_PSIMSGRR_MR_MASK	GENMASK(2, 1)
-#define ENETC_PSIMSGRR_MR(n) BIT((n) + 1) /* n = VSI index */
 #define ENETC_PSIVMSGRCVAR0(n)	(0x210 + (n) * 0x8) /* n = VSI index */
 #define ENETC_PSIVMSGRCVAR1(n)	(0x214 + (n) * 0x8)
+
+/* Message received mask, n is the active number of VSIs.
+ * It is available for ENETC_PSIMSGRR, ENETC_PSIIER, and
+ * ENETC_PSIIDR registers.
+ */
+#define ENETC_PSIMR_MASK(n)	\
+	({ typeof(n) _n = (n); (_n) ? GENMASK((_n), 1) : 0; })
+
+/* Message received bit, n is VSI index. It is available for
+ * ENETC_PSIMSGRR, ENETC_PSIIER, and ENETC_PSIIDR registers.
+ */
+#define ENETC_PSIMR_BIT(n)	BIT((n) + 1)
 
 #define ENETC_VSIMSGSR	0x204	/* RO */
 #define ENETC_VSIMSGSR_MB	BIT(0)
@@ -91,7 +104,6 @@ static inline u32 enetc_vsi_set_msize(u32 size)
 #define ENETC_SICAPR1	0x904
 
 #define ENETC_PSIIER	0xa00
-#define ENETC_PSIIER_MR_MASK	GENMASK(2, 1)
 #define ENETC_PSIIDR	0xa08
 #define ENETC_SITXIDR	0xa18
 #define ENETC_SIRXIDR	0xa28
@@ -375,6 +387,7 @@ enum enetc_bdr_type {TX, RX};
 #define EIPBRR0_REVISION	GENMASK(15, 0)
 #define ENETC_REV_1_0		0x0100
 #define ENETC_REV_4_1		0X0401
+#define ENETC_REV_4_3		0x0403
 
 #define ENETC_G_EIPBRR1		0x0bfc
 #define ENETC_G_EPFBLPR(n)	(0xd00 + 4 * (n))
@@ -507,7 +520,7 @@ static inline u64 _enetc_rd_reg64(void __iomem *reg)
 		tmp = ioread32(reg + 4);
 	} while (high != tmp);
 
-	return le64_to_cpu((__le64)high << 32 | low);
+	return (u64)high << 32 | low;
 }
 #endif
 
@@ -533,6 +546,7 @@ static inline u64 _enetc_rd_reg64_wa(void __iomem *reg)
 /* port register accessors - PF only */
 #define enetc_port_rd(hw, off)		enetc_rd_reg((hw)->port + (off))
 #define enetc_port_wr(hw, off, val)	enetc_wr_reg((hw)->port + (off), val)
+#define enetc_port_rd64(hw, off)	_enetc_rd_reg64_wa((hw)->port + (off))
 #define enetc_port_rd_mdio(hw, off)	_enetc_rd_mdio_reg_wa((hw)->port + (off))
 #define enetc_port_wr_mdio(hw, off, val)	_enetc_wr_mdio_reg_wa(\
 							(hw)->port + (off), val)
@@ -610,6 +624,7 @@ enum enetc_txbd_flags {
 #define ENETC_TXBD_STATS_WIN	BIT(7)
 #define ENETC_TXBD_TXSTART_MASK GENMASK(24, 0)
 #define ENETC_TXBD_FLAGS_OFFSET 24
+#define ENETC_TXBD_TSTAMP	GENMASK(29, 0)
 
 static inline __le32 enetc_txbd_set_tx_start(u64 tx_start, u8 flags)
 {
@@ -666,7 +681,6 @@ union enetc_rx_bd {
 
 #define ENETC_MAC_ADDR_FILT_CNT	8 /* # of supported entries per port */
 #define EMETC_MAC_ADDR_FILT_RES	3 /* # of reserved entries at the beginning */
-#define ENETC_MAX_NUM_VFS	2
 
 #define ENETC_CBD_FLAGS_SF	BIT(7) /* short format */
 #define ENETC_CBD_STATUS_MASK	0xf
@@ -702,13 +716,24 @@ struct enetc_cmd_rfse {
 #define ENETC_RFSE_EN	BIT(15)
 #define ENETC_RFSE_MODE_BD	2
 
+static inline void enetc_get_primary_mac_addr(struct enetc_hw *hw, u8 *addr)
+{
+	u32 upper;
+	u16 lower;
+
+	upper = __raw_readl(hw->reg + ENETC_SIPMAR0);
+	lower = __raw_readl(hw->reg + ENETC_SIPMAR1);
+
+	put_unaligned_le32(upper, addr);
+	put_unaligned_le16(lower, addr + 4);
+}
+
 static inline void enetc_load_primary_mac_addr(struct enetc_hw *hw,
 					       struct net_device *ndev)
 {
-	u8 addr[ETH_ALEN] __aligned(4);
+	u8 addr[ETH_ALEN];
 
-	*(u32 *)addr = __raw_readl(hw->reg + ENETC_SIPMAR0);
-	*(u16 *)(addr + 4) = __raw_readw(hw->reg + ENETC_SIPMAR1);
+	enetc_get_primary_mac_addr(hw, addr);
 	eth_hw_addr_set(ndev, addr);
 }
 

@@ -5,6 +5,7 @@
 
 #include <linux/prandom.h>
 
+#include <drm/drm_print.h>
 #include <uapi/drm/i915_drm.h>
 
 #include "intel_memory_region.h"
@@ -171,6 +172,17 @@ intel_memory_region_by_type(struct drm_i915_private *i915,
 	return NULL;
 }
 
+bool intel_memory_type_is_local(enum intel_memory_type mem_type)
+{
+	switch (mem_type) {
+	case INTEL_MEMORY_LOCAL:
+	case INTEL_MEMORY_STOLEN_LOCAL:
+		return true;
+	default:
+		return false;
+	}
+}
+
 /**
  * intel_memory_region_reserve - Reserve a memory range
  * @mem: The region for which we want to reserve a range.
@@ -216,7 +228,7 @@ static int intel_memory_region_memtest(struct intel_memory_region *mem,
 	return err;
 }
 
-static const char *region_type_str(u16 type)
+const char *intel_memory_type_str(enum intel_memory_type type)
 {
 	switch (type) {
 	case INTEL_MEMORY_SYSTEM:
@@ -246,7 +258,7 @@ intel_memory_region_create(struct drm_i915_private *i915,
 	struct intel_memory_region *mem;
 	int err;
 
-	mem = kzalloc(sizeof(*mem), GFP_KERNEL);
+	mem = kzalloc_obj(*mem);
 	if (!mem)
 		return ERR_PTR(-ENOMEM);
 
@@ -260,7 +272,7 @@ intel_memory_region_create(struct drm_i915_private *i915,
 	mem->instance = instance;
 
 	snprintf(mem->uabi_name, sizeof(mem->uabi_name), "%s%u",
-		 region_type_str(type), instance);
+		 intel_memory_type_str(type), instance);
 
 	mutex_init(&mem->objects.lock);
 	INIT_LIST_HEAD(&mem->objects.list);

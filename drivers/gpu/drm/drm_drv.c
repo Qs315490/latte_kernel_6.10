@@ -26,18 +26,23 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <linux/bitops.h>
 #include <linux/cgroup_dmem.h>
 #include <linux/debugfs.h>
+#include <linux/export.h>
 #include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/mount.h>
 #include <linux/pseudo_fs.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/sprintf.h>
 #include <linux/srcu.h>
 #include <linux/xarray.h>
 
 #include <drm/drm_accel.h>
+#include <drm/drm_bridge.h>
 #include <drm/drm_cache.h>
 #include <drm/drm_client_event.h>
 #include <drm/drm_color_mgmt.h>
@@ -48,6 +53,7 @@
 #include <drm/drm_panic.h>
 #include <drm/drm_print.h>
 #include <drm/drm_privacy_screen_machine.h>
+#include <drm/drm_ras_genl_family.h>
 
 #include "drm_crtc_internal.h"
 #include "drm_internal.h"
@@ -66,8 +72,6 @@ DEFINE_XARRAY_ALLOC(drm_minors_xa);
  * structure and call drm_dev_init() themselves.
  */
 static bool drm_core_init_complete;
-
-static struct dentry *drm_debugfs_root;
 
 DEFINE_STATIC_SRCU(drm_unplug_srcu);
 
@@ -181,8 +185,7 @@ static int drm_minor_register(struct drm_device *dev, enum drm_minor_type type)
 		return 0;
 
 	if (minor->type != DRM_MINOR_ACCEL) {
-		ret = drm_debugfs_register(minor, minor->index,
-					   drm_debugfs_root);
+		ret = drm_debugfs_register(minor, minor->index);
 		if (ret) {
 			DRM_ERROR("DRM: Failed to initialize /sys/kernel/debug/dri.\n");
 			goto err_debugfs;
@@ -498,6 +501,105 @@ void drm_dev_unplug(struct drm_device *dev)
 }
 EXPORT_SYMBOL(drm_dev_unplug);
 
+/**
+ * drm_dev_set_dma_dev - set the DMA device for a DRM device
+ * @dev: DRM device
+ * @dma_dev: DMA device or NULL
+ *
+ * Sets the DMA device of the given DRM device. Only required if
+ * the DMA device is different from the DRM device's parent. After
+ * calling this function, the DRM device holds a reference on
+ * @dma_dev. Pass NULL to clear the DMA device.
+ */
+void drm_dev_set_dma_dev(struct drm_device *dev, struct device *dma_dev)
+{
+	dma_dev = get_device(dma_dev);
+
+	put_device(dev->dma_dev);
+	dev->dma_dev = dma_dev;
+}
+EXPORT_SYMBOL(drm_dev_set_dma_dev);
+
+/*
+ * Available recovery methods for wedged device. To be sent along with device
+ * wedged uevent.
+ */
+static const char *drm_get_wedge_recovery(unsigned int opt)
+{
+	switch (BIT(opt)) {
+	case DRM_WEDGE_RECOVERY_NONE:
+		return "none";
+	case DRM_WEDGE_RECOVERY_REBIND:
+		return "rebind";
+	case DRM_WEDGE_RECOVERY_BUS_RESET:
+		return "bus-reset";
+	case DRM_WEDGE_RECOVERY_VENDOR:
+		return "vendor-specific";
+	default:
+		return NULL;
+	}
+}
+
+#define WEDGE_STR_LEN	32
+#define PID_STR_LEN	15
+#define COMM_STR_LEN	(TASK_COMM_LEN + 5)
+
+/**
+ * drm_dev_wedged_event - generate a device wedged uevent
+ * @dev: DRM device
+ * @method: method(s) to be used for recovery
+ * @info: optional information about the guilty task
+ *
+ * This generates a device wedged uevent for the DRM device specified by @dev.
+ * Recovery @method\(s) of choice will be sent in the uevent environment as
+ * ``WEDGED=<method1>[,..,<methodN>]`` in order of less to more side-effects.
+ * If caller is unsure about recovery or @method is unknown (0),
+ * ``WEDGED=unknown`` will be sent instead.
+ *
+ * Refer to "Device Wedging" chapter in Documentation/gpu/drm-uapi.rst for more
+ * details.
+ *
+ * Returns: 0 on success, negative error code otherwise.
+ */
+int drm_dev_wedged_event(struct drm_device *dev, unsigned long method,
+			 struct drm_wedge_task_info *info)
+{
+	char event_string[WEDGE_STR_LEN], pid_string[PID_STR_LEN], comm_string[COMM_STR_LEN];
+	char *envp[] = { event_string, NULL, NULL, NULL };
+	const char *recovery = NULL;
+	unsigned int len, opt;
+
+	len = scnprintf(event_string, sizeof(event_string), "%s", "WEDGED=");
+
+	for_each_set_bit(opt, &method, BITS_PER_TYPE(method)) {
+		recovery = drm_get_wedge_recovery(opt);
+		if (drm_WARN_ONCE(dev, !recovery, "invalid recovery method %u\n", opt))
+			break;
+
+		len += scnprintf(event_string + len, sizeof(event_string) - len, "%s,", recovery);
+	}
+
+	if (recovery)
+		/* Get rid of trailing comma */
+		event_string[len - 1] = '\0';
+	else
+		/* Caller is unsure about recovery, do the best we can at this point. */
+		snprintf(event_string, sizeof(event_string), "%s", "WEDGED=unknown");
+
+	drm_info(dev, "device wedged, %s\n", method == DRM_WEDGE_RECOVERY_NONE ?
+		 "but no recovery needed" : "needs recovery");
+
+	if (info && (info->comm[0] != '\0') && (info->pid >= 0)) {
+		snprintf(pid_string, sizeof(pid_string), "PID=%u", info->pid);
+		snprintf(comm_string, sizeof(comm_string), "TASK=%s", info->comm);
+		envp[1] = pid_string;
+		envp[2] = comm_string;
+	}
+
+	return kobject_uevent_env(&dev->primary->kdev->kobj, KOBJ_CHANGE, envp);
+}
+EXPORT_SYMBOL(drm_dev_wedged_event);
+
 /*
  * DRM internal mount
  * We want to be able to allocate our own "struct address_space" to control
@@ -586,6 +688,8 @@ static void drm_dev_init_release(struct drm_device *dev, void *res)
 {
 	drm_fs_inode_free(dev->anon_inode);
 
+	put_device(dev->dma_dev);
+	dev->dma_dev = NULL;
 	put_device(dev->dev);
 	/* Prevent use-after-free in drm_managed_release when debugging is
 	 * enabled. Slightly awkward, but can't really be helped. */
@@ -593,7 +697,7 @@ static void drm_dev_init_release(struct drm_device *dev, void *res)
 	mutex_destroy(&dev->master_mutex);
 	mutex_destroy(&dev->clientlist_mutex);
 	mutex_destroy(&dev->filelist_mutex);
-	mutex_destroy(&dev->struct_mutex);
+	mutex_destroy(&dev->gem_lru_mutex);
 }
 
 static int drm_dev_init(struct drm_device *dev,
@@ -631,10 +735,11 @@ static int drm_dev_init(struct drm_device *dev,
 	INIT_LIST_HEAD(&dev->filelist);
 	INIT_LIST_HEAD(&dev->filelist_internal);
 	INIT_LIST_HEAD(&dev->clientlist);
+	INIT_LIST_HEAD(&dev->client_sysrq_list);
 	INIT_LIST_HEAD(&dev->vblank_event_list);
 
 	spin_lock_init(&dev->event_lock);
-	mutex_init(&dev->struct_mutex);
+	mutex_init(&dev->gem_lru_mutex);
 	mutex_init(&dev->filelist_mutex);
 	mutex_init(&dev->clientlist_mutex);
 	mutex_init(&dev->master_mutex);
@@ -683,10 +788,7 @@ static int drm_dev_init(struct drm_device *dev,
 		goto err;
 	}
 
-	if (drm_core_check_feature(dev, DRIVER_COMPUTE_ACCEL))
-		accel_debugfs_init(dev);
-	else
-		drm_debugfs_dev_init(dev, drm_debugfs_root);
+	drm_debugfs_dev_init(dev);
 
 	return 0;
 
@@ -740,6 +842,47 @@ void *__devm_drm_dev_alloc(struct device *parent,
 EXPORT_SYMBOL(__devm_drm_dev_alloc);
 
 /**
+ * __drm_dev_alloc - Allocation of a &drm_device instance
+ * @parent: Parent device object
+ * @driver: DRM driver
+ * @size: the size of the struct which contains struct drm_device
+ * @offset: the offset of the &drm_device within the container.
+ *
+ * This should *NOT* be by any drivers, but is a dedicated interface for the
+ * corresponding Rust abstraction.
+ *
+ * This is the same as devm_drm_dev_alloc(), but without the corresponding
+ * resource management through the parent device, but not the same as
+ * drm_dev_alloc(), since the latter is the deprecated version, which does not
+ * support subclassing.
+ *
+ * Returns: A pointer to new DRM device, or an ERR_PTR on failure.
+ */
+void *__drm_dev_alloc(struct device *parent,
+		      const struct drm_driver *driver,
+		      size_t size, size_t offset)
+{
+	void *container;
+	struct drm_device *drm;
+	int ret;
+
+	container = kzalloc(size, GFP_KERNEL);
+	if (!container)
+		return ERR_PTR(-ENOMEM);
+
+	drm = container + offset;
+	ret = drm_dev_init(drm, driver, parent);
+	if (ret) {
+		kfree(container);
+		return ERR_PTR(ret);
+	}
+	drmm_add_final_kfree(drm, container);
+
+	return container;
+}
+EXPORT_SYMBOL(__drm_dev_alloc);
+
+/**
  * drm_dev_alloc - Allocate new DRM device
  * @driver: DRM driver to allocate device for
  * @parent: Parent device object
@@ -754,22 +897,7 @@ EXPORT_SYMBOL(__devm_drm_dev_alloc);
 struct drm_device *drm_dev_alloc(const struct drm_driver *driver,
 				 struct device *parent)
 {
-	struct drm_device *dev;
-	int ret;
-
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-	if (!dev)
-		return ERR_PTR(-ENOMEM);
-
-	ret = drm_dev_init(dev, driver, parent);
-	if (ret) {
-		kfree(dev);
-		return ERR_PTR(ret);
-	}
-
-	drmm_add_final_kfree(dev, dev);
-
-	return dev;
+	return __drm_dev_alloc(parent, driver, sizeof(struct drm_device), 0);
 }
 EXPORT_SYMBOL(drm_dev_alloc);
 
@@ -976,6 +1104,7 @@ int drm_dev_register(struct drm_device *dev, unsigned long flags)
 			goto err_unload;
 	}
 	drm_panic_register(dev);
+	drm_client_sysrq_register(dev);
 
 	DRM_INFO("Initialized %s %d.%d.%d for %s on minor %d\n",
 		 driver->name, driver->major, driver->minor,
@@ -1020,6 +1149,7 @@ void drm_dev_unregister(struct drm_device *dev)
 {
 	dev->registered = false;
 
+	drm_client_sysrq_unregister(dev);
 	drm_panic_unregister(dev);
 
 	drm_client_dev_unregister(dev);
@@ -1096,11 +1226,12 @@ static const struct file_operations drm_stub_fops = {
 
 static void drm_core_exit(void)
 {
+	drm_ras_genl_family_unregister();
 	drm_privacy_screen_lookup_exit();
 	drm_panic_exit();
 	accel_core_exit();
 	unregister_chrdev(DRM_MAJOR, "drm");
-	debugfs_remove(drm_debugfs_root);
+	drm_debugfs_remove_root();
 	drm_sysfs_destroy();
 	WARN_ON(!xa_empty(&drm_minors_xa));
 	drm_connector_ida_destroy();
@@ -1119,7 +1250,8 @@ static int __init drm_core_init(void)
 		goto error;
 	}
 
-	drm_debugfs_root = debugfs_create_dir("dri", NULL);
+	drm_debugfs_init_root();
+	drm_debugfs_bridge_params();
 
 	ret = register_chrdev(DRM_MAJOR, "drm", &drm_stub_fops);
 	if (ret < 0)
@@ -1132,6 +1264,10 @@ static int __init drm_core_init(void)
 	drm_panic_init();
 
 	drm_privacy_screen_lookup_init();
+
+	ret = drm_ras_genl_family_register();
+	if (ret < 0)
+		goto error;
 
 	drm_core_init_complete = true;
 

@@ -179,7 +179,7 @@ static int rt2800usb_autorun_detect(struct rt2x00_dev *rt2x00dev)
 	u32 fw_mode;
 	int ret;
 
-	reg = kmalloc(sizeof(*reg), GFP_KERNEL);
+	reg = kmalloc_obj(*reg);
 	if (reg == NULL)
 		return -ENOMEM;
 	/* cannot use rt2x00usb_register_read here as it uses different
@@ -618,7 +618,7 @@ static int rt2800usb_probe_hw(struct rt2x00_dev *rt2x00dev)
 	/*
 	 * Set txstatus timer function.
 	 */
-	rt2x00dev->txstatus_timer.function = rt2800usb_tx_sta_fifo_timeout;
+	hrtimer_update_function(&rt2x00dev->txstatus_timer, rt2800usb_tx_sta_fifo_timeout);
 
 	/*
 	 * Overwrite TX done handler

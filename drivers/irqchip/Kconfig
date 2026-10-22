@@ -28,6 +28,7 @@ config ARM_GIC_V2M
 	select ARM_GIC
 	select IRQ_MSI_LIB
 	select PCI_MSI
+	select IRQ_MSI_IOMMU
 
 config GIC_NON_BANKED
 	bool
@@ -35,21 +36,28 @@ config GIC_NON_BANKED
 config ARM_GIC_V3
 	bool
 	select IRQ_DOMAIN_HIERARCHY
-	select PARTITION_PERCPU
 	select GENERIC_IRQ_EFFECTIVE_AFF_MASK if SMP
 	select HAVE_ARM_SMCCC_DISCOVERY
+	select IRQ_MSI_IOMMU
+
+config ARM_GIC_ITS_PARENT
+	bool
 
 config ARM_GIC_V3_ITS
 	bool
 	select GENERIC_MSI_IRQ
 	select IRQ_MSI_LIB
+	select ARM_GIC_ITS_PARENT
 	default ARM_GIC_V3
+	select IRQ_MSI_IOMMU
 
-config ARM_GIC_V3_ITS_FSL_MC
+config ARM_GIC_V5
 	bool
-	depends on ARM_GIC_V3_ITS
-	depends on FSL_MC_BUS
-	default ARM_GIC_V3_ITS
+	select IRQ_DOMAIN_HIERARCHY
+	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
+	select GENERIC_MSI_IRQ
+	select IRQ_MSI_LIB
+	select ARM_GIC_ITS_PARENT
 
 config ARM_NVIC
 	bool
@@ -71,17 +79,20 @@ config ARM_VIC_NR
 
 config IRQ_MSI_LIB
 	bool
+	select GENERIC_MSI_IRQ
 
 config ARMADA_370_XP_IRQ
 	bool
 	select GENERIC_IRQ_CHIP
 	select PCI_MSI if PCI
+	select IRQ_MSI_LIB if PCI
 	select GENERIC_IRQ_EFFECTIVE_AFF_MASK if SMP
 
 config ALPINE_MSI
 	bool
 	depends on PCI
 	select PCI_MSI
+	select IRQ_MSI_LIB
 	select GENERIC_IRQ_CHIP
 
 config AL_FIC
@@ -92,6 +103,29 @@ config AL_FIC
 	select IRQ_DOMAIN
 	help
 	  Support Amazon's Annapurna Labs Fabric Interrupt Controller.
+
+config ASPEED_AST2700_INTC
+	bool "ASPEED AST2700 Interrupt Controller support"
+	depends on OF
+	depends on ARCH_ASPEED || COMPILE_TEST
+	select IRQ_DOMAIN_HIERARCHY
+	help
+	  Enable support for the ASPEED AST2700 interrupt controller.
+	  This driver handles interrupt, routing and merged interrupt
+	  sources to upstream parent interrupt controllers.
+
+	  If unsure, say N.
+
+config ASPEED_AST2700_INTC_TEST
+	bool "Tests for the ASPEED AST2700 Interrupt Controller"
+	depends on ASPEED_AST2700_INTC && KUNIT=y
+	default KUNIT_ALL_TESTS
+	help
+	  Enable KUnit tests for AST2700 INTC route resolution.
+	  The tests exercise error handling and route selection paths.
+	  This option is intended for test builds.
+
+	  If unsure, say N.
 
 config ATMEL_AIC_IRQ
 	bool
@@ -109,6 +143,22 @@ config I8259
 	bool
 	select IRQ_DOMAIN
 
+config BCM2712_MIP
+	tristate "Broadcom BCM2712 MSI-X Interrupt Peripheral support"
+	depends on ARCH_BRCMSTB || ARCH_BCM2835 || COMPILE_TEST
+	default m if ARCH_BRCMSTB || ARCH_BCM2835
+	depends on ARM_GIC
+	select GENERIC_IRQ_CHIP
+	select IRQ_DOMAIN_HIERARCHY
+	select GENERIC_MSI_IRQ
+	select IRQ_MSI_LIB
+	help
+	  Enable support for the Broadcom BCM2712 MSI-X target peripheral
+	  (MIP) needed by brcmstb PCIe to handle MSI-X interrupts on
+	  Raspberry Pi 5.
+
+	  If unsure say n.
+
 config BCM6345_L1_IRQ
 	bool
 	select GENERIC_IRQ_CHIP
@@ -117,7 +167,7 @@ config BCM6345_L1_IRQ
 
 config BCM7038_L1_IRQ
 	tristate "Broadcom STB 7038-style L1/L2 interrupt controller driver"
-	depends on ARCH_BRCMSTB || BMIPS_GENERIC
+	depends on ARCH_BRCMSTB || BMIPS_GENERIC || COMPILE_TEST
 	default ARCH_BRCMSTB || BMIPS_GENERIC
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN
@@ -125,14 +175,14 @@ config BCM7038_L1_IRQ
 
 config BCM7120_L2_IRQ
 	tristate "Broadcom STB 7120-style L2 interrupt controller driver"
-	depends on ARCH_BRCMSTB || BMIPS_GENERIC
+	depends on ARCH_BRCMSTB || BMIPS_GENERIC || COMPILE_TEST
 	default ARCH_BRCMSTB || BMIPS_GENERIC
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN
 
 config BRCMSTB_L2_IRQ
 	tristate "Broadcom STB generic L2 interrupt controller driver"
-	depends on ARCH_BCM2835 || ARCH_BRCMSTB || BMIPS_GENERIC
+	depends on ARCH_BCM2835 || ARCH_BRCMSTB || BMIPS_GENERIC || COMPILE_TEST
 	default ARCH_BCM2835 || ARCH_BRCMSTB || BMIPS_GENERIC
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN
@@ -146,6 +196,11 @@ config DW_APB_ICTL
 	bool
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN_HIERARCHY
+
+config ECONET_EN751221_INTC
+	bool
+	select GENERIC_IRQ_CHIP
+	select IRQ_DOMAIN
 
 config FARADAY_FTINTC010
 	bool
@@ -214,9 +269,12 @@ config ORION_IRQCHIP
 	select IRQ_DOMAIN
 
 config PIC32_EVIC
-	bool
+	def_bool MACH_PIC32 || COMPILE_TEST
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN
+	help
+	  Enable support for the interrupt controller on the Microchip PIC32
+	  family of platforms.
 
 config JCORE_AIC
 	bool "J-Core integrated AIC" if COMPILE_TEST
@@ -258,6 +316,14 @@ config RENESAS_RZG2L_IRQC
 	help
 	  Enable support for the Renesas RZ/G2L (and alike SoC) Interrupt Controller
 	  for external devices.
+
+config RENESAS_RZT2H_ICU
+	bool "Renesas RZ/{T2H,N2H} ICU support" if COMPILE_TEST
+	select GENERIC_IRQ_CHIP
+	select IRQ_DOMAIN_HIERARCHY
+	help
+	  Enable support for the Renesas RZ/{T2H,N2H} Interrupt Controller
+	  (ICU).
 
 config RENESAS_RZV2H_ICU
 	bool "Renesas RZ/V2H(P) ICU support" if COMPILE_TEST
@@ -408,10 +474,9 @@ config LS_EXTIRQ
 
 config LS_SCFG_MSI
 	def_bool y if SOC_LS1021A || ARCH_LAYERSCAPE
+	select IRQ_MSI_IOMMU
 	depends on PCI_MSI
-
-config PARTITION_PERCPU
-	bool
+	select IRQ_MSI_LIB
 
 config STM32MP_EXTI
 	tristate "STM32MP extended interrupts and event controller"
@@ -428,7 +493,7 @@ config STM32_EXTI
 	select GENERIC_IRQ_CHIP
 
 config QCOM_IRQ_COMBINER
-	bool "QCOM IRQ combiner support"
+	bool "Qualcomm IRQ combiner support"
 	depends on ARCH_QCOM && ACPI
 	select IRQ_DOMAIN_HIERARCHY
 	help
@@ -461,7 +526,7 @@ config GOLDFISH_PIC
          for Goldfish based virtual platforms.
 
 config QCOM_PDC
-	tristate "QCOM PDC"
+	tristate "Qualcomm PDC"
 	depends on ARCH_QCOM
 	select IRQ_DOMAIN_HIERARCHY
 	help
@@ -469,7 +534,7 @@ config QCOM_PDC
 	  IRQs for Qualcomm Technologies Inc (QTI) mobile chips.
 
 config QCOM_MPM
-	tristate "QCOM MPM"
+	tristate "Qualcomm MPM"
 	depends on ARCH_QCOM
 	depends on MAILBOX
 	select IRQ_DOMAIN_HIERARCHY
@@ -496,11 +561,11 @@ config CSKY_APB_INTC
 
 config IMX_IRQSTEER
 	bool "i.MX IRQSTEER support"
-	depends on ARCH_MXC || COMPILE_TEST
-	default ARCH_MXC
+	depends on ARCH_MXC || ARCH_S32 || COMPILE_TEST
+	default y if ARCH_MXC || ARCH_S32
 	select IRQ_DOMAIN
 	help
-	  Support for the i.MX IRQSTEER interrupt multiplexer/remapper.
+	  Support for the i.MX and S32 IRQSTEER interrupt multiplexer/remapper.
 
 config IMX_INTMUX
 	bool "i.MX INTMUX support" if COMPILE_TEST
@@ -513,6 +578,7 @@ config IMX_MU_MSI
 	tristate "i.MX MU used as MSI controller"
 	depends on OF && HAS_IOMEM
 	depends on ARCH_MXC || COMPILE_TEST
+	depends on ARM || ARM64
 	default m if ARCH_MXC
 	select IRQ_DOMAIN
 	select IRQ_DOMAIN_HIERARCHY
@@ -590,13 +656,14 @@ config RISCV_IMSIC
 	select IRQ_DOMAIN_HIERARCHY
 	select GENERIC_IRQ_MATRIX_ALLOCATOR
 	select GENERIC_MSI_IRQ
+	select IRQ_MSI_LIB
 
-config RISCV_IMSIC_PCI
+config RISCV_RPMI_SYSMSI
 	bool
-	depends on RISCV_IMSIC
-	depends on PCI
-	depends on PCI_MSI
-	default RISCV_IMSIC
+	depends on RISCV && MAILBOX
+	select IRQ_DOMAIN_HIERARCHY
+	select GENERIC_MSI_IRQ
+	default RISCV
 
 config SIFIVE_PLIC
 	bool
@@ -604,28 +671,35 @@ config SIFIVE_PLIC
 	select IRQ_DOMAIN_HIERARCHY
 	select GENERIC_IRQ_EFFECTIVE_AFF_MASK if SMP
 
-config STARFIVE_JH8100_INTC
-	bool "StarFive JH8100 External Interrupt Controller"
+config STARFIVE_JHB100_INTC
+	bool "StarFive JHB100 External Interrupt Controller"
 	depends on ARCH_STARFIVE || COMPILE_TEST
 	default ARCH_STARFIVE
 	select IRQ_DOMAIN_HIERARCHY
 	help
-	  This enables support for the INTC chip found in StarFive JH8100
+	  This enables support for the INTC chip found in StarFive JHB100
 	  SoC.
 
 	  If you don't know what to do here, say Y.
 
-config THEAD_C900_ACLINT_SSWI
-	bool "THEAD C9XX ACLINT S-mode IPI Interrupt Controller"
+config ACLINT_SSWI
+	bool "RISC-V ACLINT S-mode IPI Interrupt Controller"
 	depends on RISCV
 	depends on SMP
 	select IRQ_DOMAIN_HIERARCHY
 	select GENERIC_IRQ_IPI_MUX
 	help
-	  This enables support for T-HEAD specific ACLINT SSWI device
-	  support.
+	  This enables support for variants of the RISC-V ACLINT-SSWI device.
+	  Supported variants are:
+	  - T-HEAD, with compatible "thead,c900-aclint-sswi"
+	  - MIPS P8700, with compatible "mips,p8700-aclint-sswi"
 
 	  If you don't know what to do here, say Y.
+
+# Backwards compatibility so oldconfig does not drop it.
+config THEAD_C900_ACLINT_SSWI
+	bool
+	select ACLINT_SSWI
 
 config EXYNOS_IRQ_COMBINER
 	bool "Samsung Exynos IRQ combiner support" if COMPILE_TEST
@@ -652,7 +726,7 @@ config IRQ_LOONGARCH_CPU
 
 config LOONGSON_LIOINTC
 	bool "Loongson Local I/O Interrupt Controller"
-	depends on MACH_LOONGSON64
+	depends on MACH_LOONGSON64 || LOONGARCH
 	default y
 	select IRQ_DOMAIN
 	select GENERIC_IRQ_CHIP
@@ -662,7 +736,6 @@ config LOONGSON_LIOINTC
 config LOONGSON_EIOINTC
 	bool "Loongson Extend I/O Interrupt Controller"
 	depends on LOONGARCH
-	depends on MACH_LOONGSON64
 	default MACH_LOONGSON64
 	select IRQ_DOMAIN_HIERARCHY
 	select GENERIC_IRQ_CHIP
@@ -680,7 +753,7 @@ config LOONGSON_HTPIC
 
 config LOONGSON_HTVEC
 	bool "Loongson HyperTransport Interrupt Vector Controller"
-	depends on MACH_LOONGSON64
+	depends on MACH_LOONGSON64 || LOONGARCH
 	default MACH_LOONGSON64
 	select IRQ_DOMAIN_HIERARCHY
 	help
@@ -688,7 +761,7 @@ config LOONGSON_HTVEC
 
 config LOONGSON_PCH_PIC
 	bool "Loongson PCH PIC Controller"
-	depends on MACH_LOONGSON64
+	depends on MACH_LOONGSON64 || LOONGARCH
 	default MACH_LOONGSON64
 	select IRQ_DOMAIN_HIERARCHY
 	select IRQ_FASTEOI_HIERARCHY_HANDLERS
@@ -697,7 +770,7 @@ config LOONGSON_PCH_PIC
 
 config LOONGSON_PCH_MSI
 	bool "Loongson PCH MSI Controller"
-	depends on MACH_LOONGSON64
+	depends on MACH_LOONGSON64 || LOONGARCH
 	depends on PCI
 	default MACH_LOONGSON64
 	select IRQ_DOMAIN_HIERARCHY
@@ -708,8 +781,7 @@ config LOONGSON_PCH_MSI
 
 config LOONGSON_PCH_LPC
 	bool "Loongson PCH LPC Controller"
-	depends on LOONGARCH
-	depends on MACH_LOONGSON64
+	depends on MACH_LOONGSON64 || LOONGARCH
 	default MACH_LOONGSON64
 	select IRQ_DOMAIN_HIERARCHY
 	help
@@ -751,6 +823,18 @@ config MCHP_EIC
 	select IRQ_DOMAIN_HIERARCHY
 	help
 	  Support for Microchip External Interrupt Controller.
+
+config SOPHGO_SG2042_MSI
+	bool "Sophgo SG2042 MSI Controller"
+	depends on ARCH_SOPHGO || COMPILE_TEST
+	depends on PCI
+	select IRQ_DOMAIN_HIERARCHY
+	select IRQ_MSI_LIB
+	select PCI_MSI
+	help
+	  Support for the Sophgo SG2042 MSI Controller.
+	  This on-chip interrupt controller enables MSI sources to be
+	  routed to the primary PLIC controller on SoC.
 
 config SUNPLUS_SP7021_INTC
 	bool "Sunplus SP7021 interrupt controller" if COMPILE_TEST

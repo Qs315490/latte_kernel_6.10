@@ -21,7 +21,7 @@ struct afs_operation *afs_alloc_operation(struct key *key, struct afs_volume *vo
 
 	_enter("");
 
-	op = kzalloc(sizeof(*op), GFP_KERNEL);
+	op = kzalloc_obj(*op);
 	if (!op)
 		return ERR_PTR(-ENOMEM);
 
@@ -348,7 +348,7 @@ int afs_put_operation(struct afs_operation *op)
 		for (i = 0; i < op->nr_files - 2; i++)
 			if (op->more_files[i].put_vnode)
 				iput(&op->more_files[i].vnode->netfs.inode);
-		kfree(op->more_files);
+		kvfree(op->more_files);
 	}
 
 	if (op->estate) {

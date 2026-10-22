@@ -22,8 +22,10 @@
 
 #define DRV_NAME "cros-ec-typec"
 
-#define DP_PORT_VDO	(DP_CONF_SET_PIN_ASSIGN(BIT(DP_PIN_ASSIGN_C) | BIT(DP_PIN_ASSIGN_D)) | \
-				DP_CAP_DFP_D | DP_CAP_RECEPTACLE)
+#define DP_PORT_VDO	(DP_CAP_DFP_D | DP_CAP_RECEPTACLE | \
+			 DP_CONF_SET_PIN_ASSIGN(BIT(DP_PIN_ASSIGN_C) | \
+						BIT(DP_PIN_ASSIGN_D) | \
+						BIT(DP_PIN_ASSIGN_E)))
 
 static void cros_typec_role_switch_quirk(struct fwnode_handle *fwnode)
 {
@@ -41,6 +43,107 @@ static void cros_typec_role_switch_quirk(struct fwnode_handle *fwnode)
 	}
 #endif
 }
+
+static int cros_typec_enter_usb_mode(struct typec_port *tc_port, enum usb_mode mode)
+{
+	struct cros_typec_port *port = typec_get_drvdata(tc_port);
+	struct ec_params_typec_control req = {
+		.port = port->port_num,
+		.command = (mode == USB_MODE_USB4) ?
+			TYPEC_CONTROL_COMMAND_ENTER_MODE : TYPEC_CONTROL_COMMAND_EXIT_MODES,
+		.mode_to_enter = CROS_EC_ALTMODE_USB4
+	};
+
+	return cros_ec_cmd(port->typec_data->ec, 0, EC_CMD_TYPEC_CONTROL,
+			  &req, sizeof(req), NULL, 0);
+}
+
+static int cros_typec_perform_role_swap(struct typec_port *tc_port, int target_role, u8 swap_type)
+{
+	struct cros_typec_port *port = typec_get_drvdata(tc_port);
+	struct cros_typec_data *data = port->typec_data;
+	struct ec_response_usb_pd_control_v2 resp;
+	struct ec_params_usb_pd_control req;
+	int role, ret;
+
+	/* Must be at least v1 to support role swap. */
+	if (!data->pd_ctrl_ver)
+		return -EOPNOTSUPP;
+
+	/* First query the state */
+	req.port = port->port_num;
+	req.role = USB_PD_CTRL_ROLE_NO_CHANGE;
+	req.mux = USB_PD_CTRL_MUX_NO_CHANGE;
+	req.swap = USB_PD_CTRL_SWAP_NONE;
+
+	ret = cros_ec_cmd(data->ec, data->pd_ctrl_ver, EC_CMD_USB_PD_CONTROL,
+				&req, sizeof(req), &resp, sizeof(resp));
+	if (ret < 0)
+		return ret;
+
+	switch (swap_type) {
+	case USB_PD_CTRL_SWAP_DATA:
+		role = (resp.role & PD_CTRL_RESP_ROLE_DATA) ? TYPEC_HOST :
+						TYPEC_DEVICE;
+		break;
+	case USB_PD_CTRL_SWAP_POWER:
+		role = (resp.role & PD_CTRL_RESP_ROLE_POWER) ? TYPEC_SOURCE :
+						TYPEC_SINK;
+		break;
+	default:
+		dev_warn(data->dev, "Unsupported role swap type %d\n", swap_type);
+		return -EOPNOTSUPP;
+	}
+
+	if (role == target_role)
+		return 0;
+
+	req.swap = swap_type;
+	ret = cros_ec_cmd(data->ec, data->pd_ctrl_ver, EC_CMD_USB_PD_CONTROL,
+				&req, sizeof(req), &resp, sizeof(resp));
+	if (ret < 0)
+		return ret;
+
+	switch (swap_type) {
+	case USB_PD_CTRL_SWAP_DATA:
+		role = resp.role & PD_CTRL_RESP_ROLE_DATA ? TYPEC_HOST : TYPEC_DEVICE;
+		if (role != target_role) {
+			dev_err(data->dev, "Data role swap failed despite EC returning success\n");
+			return -EIO;
+		}
+		typec_set_data_role(tc_port, target_role);
+		break;
+	case USB_PD_CTRL_SWAP_POWER:
+		role = resp.role & PD_CTRL_RESP_ROLE_POWER ? TYPEC_SOURCE : TYPEC_SINK;
+		if (role != target_role) {
+			dev_err(data->dev, "Power role swap failed despite EC returning success\n");
+			return -EIO;
+		}
+		typec_set_pwr_role(tc_port, target_role);
+		break;
+	default:
+		/* Should never execute */
+		break;
+	}
+
+	return 0;
+}
+
+static int cros_typec_dr_swap(struct typec_port *port, enum typec_data_role role)
+{
+	return cros_typec_perform_role_swap(port, role, USB_PD_CTRL_SWAP_DATA);
+}
+
+static int cros_typec_pr_swap(struct typec_port *port, enum typec_role role)
+{
+	return cros_typec_perform_role_swap(port, role, USB_PD_CTRL_SWAP_POWER);
+}
+
+static const struct typec_operations cros_typec_usb_mode_ops = {
+	.enter_usb_mode = cros_typec_enter_usb_mode,
+	.dr_set = cros_typec_dr_swap,
+	.pr_set = cros_typec_pr_swap,
+};
 
 static int cros_typec_parse_port_props(struct typec_capability *cap,
 				       struct fwnode_handle *fwnode,
@@ -83,6 +186,13 @@ static int cros_typec_parse_port_props(struct typec_capability *cap,
 			return ret;
 		cap->prefer_role = ret;
 	}
+
+	if (fwnode_property_present(fwnode, "usb2-port"))
+		cap->usb_capability |= USB_CAPABILITY_USB2;
+	if (fwnode_property_present(fwnode, "usb3-port"))
+		cap->usb_capability |= USB_CAPABILITY_USB3;
+	if (fwnode_property_present(fwnode, "usb4-port"))
+		cap->usb_capability |= USB_CAPABILITY_USB4;
 
 	cros_typec_role_switch_quirk(fwnode);
 
@@ -378,6 +488,10 @@ static int cros_typec_init_ports(struct cros_typec_data *typec)
 		ret = cros_typec_parse_port_props(cap, fwnode, dev);
 		if (ret < 0)
 			goto unregister_ports;
+
+		cap->driver_data = cros_port;
+		cap->ops = &cros_typec_usb_mode_ops;
+		cap->no_mode_control = !typec->ap_driven_altmode;
 
 		cros_port->port = typec_register_port(dev, cap);
 		if (IS_ERR(cros_port->port)) {
@@ -1241,9 +1355,9 @@ static int cros_typec_probe(struct platform_device *pdev)
 	typec->dev = dev;
 
 	typec->ec = dev_get_drvdata(pdev->dev.parent);
-	if (!typec->ec) {
-		dev_err(dev, "couldn't find parent EC device\n");
-		return -ENODEV;
+	if (!typec->ec || !typec->ec->ec) {
+		dev_warn(dev, "couldn't find parent EC device\n");
+		return -EPROBE_DEFER;
 	}
 
 	platform_set_drvdata(pdev, typec);

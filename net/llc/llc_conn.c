@@ -1,15 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * llc_conn.c - Driver routines for connection component.
  *
  * Copyright (c) 1997 by Procom Technology, Inc.
  *		 2001-2003 by Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- * This program can be redistributed or modified under the terms of the
- * GNU General Public License as published by the Free Software Foundation.
- * This program is distributed without any warranty or implied warranty
- * of merchantability or fitness for a particular purpose.
- *
- * See the GNU General Public License for more details.
  */
 
 #include <linux/init.h>
@@ -773,7 +767,6 @@ static struct sock *llc_create_incoming_sock(struct sock *sk,
 	newllc->dev = dev;
 	dev_hold(dev);
 	llc_sap_add_socket(llc->sap, newsk);
-	llc_sap_hold(llc->sap);
 out:
 	return newsk;
 }
@@ -949,15 +942,15 @@ void llc_sk_stop_all_timers(struct sock *sk, bool sync)
 	struct llc_sock *llc = llc_sk(sk);
 
 	if (sync) {
-		del_timer_sync(&llc->pf_cycle_timer.timer);
-		del_timer_sync(&llc->ack_timer.timer);
-		del_timer_sync(&llc->rej_sent_timer.timer);
-		del_timer_sync(&llc->busy_state_timer.timer);
+		timer_delete_sync(&llc->pf_cycle_timer.timer);
+		timer_delete_sync(&llc->ack_timer.timer);
+		timer_delete_sync(&llc->rej_sent_timer.timer);
+		timer_delete_sync(&llc->busy_state_timer.timer);
 	} else {
-		del_timer(&llc->pf_cycle_timer.timer);
-		del_timer(&llc->ack_timer.timer);
-		del_timer(&llc->rej_sent_timer.timer);
-		del_timer(&llc->busy_state_timer.timer);
+		timer_delete(&llc->pf_cycle_timer.timer);
+		timer_delete(&llc->ack_timer.timer);
+		timer_delete(&llc->rej_sent_timer.timer);
+		timer_delete(&llc->busy_state_timer.timer);
 	}
 
 	llc->ack_must_be_send = 0;

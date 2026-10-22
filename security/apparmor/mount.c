@@ -311,8 +311,7 @@ static int match_mnt_path_str(const struct cred *subj_cred,
 {
 	struct aa_perms perms = { };
 	const char *mntpnt = NULL, *info = NULL;
-	struct aa_ruleset *rules = list_first_entry(&profile->rules,
-						    typeof(*rules), list);
+	struct aa_ruleset *rules = profile->label.rules[0];
 	int pos, error;
 
 	AA_BUG(!profile);
@@ -371,8 +370,7 @@ static int match_mnt(const struct cred *subj_cred,
 		     bool binary)
 {
 	const char *devname = NULL, *info = NULL;
-	struct aa_ruleset *rules = list_first_entry(&profile->rules,
-						    typeof(*rules), list);
+	struct aa_ruleset *rules = profile->label.rules[0];
 	int error = -EACCES;
 
 	AA_BUG(!profile);
@@ -604,8 +602,7 @@ static int profile_umount(const struct cred *subj_cred,
 			  struct aa_profile *profile, const struct path *path,
 			  char *buffer)
 {
-	struct aa_ruleset *rules = list_first_entry(&profile->rules,
-						    typeof(*rules), list);
+	struct aa_ruleset *rules = profile->label.rules[0];
 	struct aa_perms perms = { };
 	const char *name = NULL, *info = NULL;
 	aa_state_t state;
@@ -668,8 +665,7 @@ static struct aa_label *build_pivotroot(const struct cred *subj_cred,
 					const struct path *old_path,
 					char *old_buffer)
 {
-	struct aa_ruleset *rules = list_first_entry(&profile->rules,
-						    typeof(*rules), list);
+	struct aa_ruleset *rules = profile->label.rules[0];
 	const char *old_name, *new_name = NULL, *info = NULL;
 	const char *trans_name = NULL;
 	struct aa_perms perms = { };
@@ -739,17 +735,11 @@ int aa_pivotroot(const struct cred *subj_cred, struct aa_label *label,
 			build_pivotroot(subj_cred, profile, new_path,
 					new_buffer,
 					old_path, old_buffer));
-	if (!target) {
-		info = "label build failed";
-		error = -ENOMEM;
-		goto fail;
-	} else if (!IS_ERR(target)) {
+	AA_BUG(!target);
+	if (!IS_ERR(target)) {
 		error = aa_replace_current_label(target);
-		if (error) {
-			/* TODO: audit target */
-			aa_put_label(target);
-			goto out;
-		}
+		if (error)
+			goto fail;
 		aa_put_label(target);
 	} else
 		/* already audited error */
@@ -767,7 +757,8 @@ fail:
 				    NULL /*new_name */,
 				    NULL /* old_name */,
 				    NULL, NULL,
-				    0, NULL, AA_MAY_PIVOTROOT, &nullperms, info,
+				    0, target->hname, AA_MAY_PIVOTROOT, &nullperms, info,
 				    error));
+	aa_put_label(target);
 	goto out;
 }

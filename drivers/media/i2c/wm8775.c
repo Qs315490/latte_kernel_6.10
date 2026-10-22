@@ -6,7 +6,7 @@
  *
  * Based on saa7115 driver
  *
- * Copyright (C) 2005 Hans Verkuil <hverkuil@xs4all.nl>
+ * Copyright (C) 2005 Hans Verkuil <hverkuil@kernel.org>
  * - Cleanup
  * - V4L2 API update
  * - sound fixes
@@ -289,7 +289,7 @@ static void wm8775_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id wm8775_id[] = {
-	{ "wm8775" },
+	{ .name = "wm8775" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8775_id);

@@ -60,44 +60,145 @@ Besides initializing the TDX module, a per-cpu initialization SEAMCALL
 must be done on one cpu before any other SEAMCALLs can be made on that
 cpu.
 
-The kernel provides two functions, tdx_enable() and tdx_cpu_enable() to
-allow the user of TDX to enable the TDX module and enable TDX on local
-cpu respectively.
-
-Making SEAMCALL requires VMXON has been done on that CPU.  Currently only
-KVM implements VMXON.  For now both tdx_enable() and tdx_cpu_enable()
-don't do VMXON internally (not trivial), but depends on the caller to
-guarantee that.
-
-To enable TDX, the caller of TDX should: 1) temporarily disable CPU
-hotplug; 2) do VMXON and tdx_enable_cpu() on all online cpus; 3) call
-tdx_enable().  For example::
-
-        cpus_read_lock();
-        on_each_cpu(vmxon_and_tdx_cpu_enable());
-        ret = tdx_enable();
-        cpus_read_unlock();
-        if (ret)
-                goto no_tdx;
-        // TDX is ready to use
-
-And the caller of TDX must guarantee the tdx_cpu_enable() has been
-successfully done on any cpu before it wants to run any other SEAMCALL.
-A typical usage is do both VMXON and tdx_cpu_enable() in CPU hotplug
-online callback, and refuse to online if tdx_cpu_enable() fails.
-
 User can consult dmesg to see whether the TDX module has been initialized.
 
 If the TDX module is initialized successfully, dmesg shows something
 like below::
 
   [..] virt/tdx: 262668 KBs allocated for PAMT
-  [..] virt/tdx: module initialized
+  [..] virt/tdx: TDX-Module initialized
 
 If the TDX module failed to initialize, dmesg also shows it failed to
 initialize::
 
-  [..] virt/tdx: module initialization failed ...
+  [..] virt/tdx: TDX-Module initialization failed ...
+
+TDX module Runtime Update
+-------------------------
+
+Similar to microcode, the BIOS generally has a copy of the TDX module
+in flash. It loads this module image in to RAM at boot. However, just
+like microcode, the BIOS-loaded TDX module might be out of date either
+because the BIOS is old or the system has been up a long time. The
+kernel can replace the BIOS version in RAM and load a different TDX
+module. Kernel-loaded TDX modules do not affect the BIOS flash and do
+not survive reboots.
+
+The TDX module is normally the only piece of software running in SEAM
+mode with which the kernel interacts. But there is a second piece of
+software which is used to load or update the TDX module: a persistent
+SEAM loader (P-SEAMLDR). It runs in SEAM mode separately from the TDX
+module. The kernel communicates with the P-SEAMLDR to perform TDX
+module runtime updates.
+
+How to update the TDX module
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Updating the TDX module is a complex process. Much of the logic and
+policy is left to userspace. End users should use existing update
+infrastructure provided by their distro. The Intel TDX Module Binaries
+repository has a reference implementation of this logic:
+
+   https://github.com/intel/confidential-computing.tdx.tdx-module.binaries/blob/main/version_select_and_load.py
+
+This section will now lay out roughly what is needed to implement a
+userspace-driven TDX module update. Detailed documentation on the
+tdx_host ABIs is available here::
+
+     Documentation/ABI/testing/sysfs-devices-faux-tdx-host
+
+and is not duplicated in this document.
+
+1. Check whether runtime update is supported at all
+
+   Verify that the TDX module firmware upload interface is available::
+
+     /sys/class/firmware/tdx_module
+
+   Note that this is the generic kernel firmware update ABI. It is
+   separate from the "tdx_host" device ABI itself.
+
+2. Check whether additional updates are possible. Verify that::
+
+     /sys/devices/faux/tdx_host/num_remaining_updates
+
+   has a value greater than 0. If it is 0, the TDX update log might be
+   full. Reboot to reset this to a nonzero value.
+
+3. Choose a compatible TDX module image
+
+   Choosing a compatible TDX module image is not trivial. There are both
+   hard compatibility requirements and policy choices to make.
+
+   Hard compatibility requirements:
+
+   - The update must be compatible with the kernel.
+
+     The update must not change any TDX ABIs in any non-backward-compatible
+     way. It can introduce new features but must not require that the kernel
+     use new ABIs for existing features. It must ensure that the rest of the
+     system is not affected in any way. Software on the system must never
+     notice any behavioral changes. Attestation results should be identical
+     except for version changes.
+
+   - The update must be compatible with the CPU.
+
+     The set of supported CPU FMS values (family, model, stepping) is
+     encoded in the module image itself. In practice, module version series
+     are platform-specific. For example, the 1.5.x series runs on Sapphire
+     Rapids but not Granite Rapids, which needs 2.0.x.
+
+   - The update must be compatible with the P-SEAMLDR.
+
+     This information is provided in a metadata file, typically
+     mapping_file.json, released with the module image. Each module image
+     specifies the minimum required P-SEAMLDR version, and the update is
+     compatible only if the running P-SEAMLDR meets that requirement.
+
+     The current version of the P-SEAMLDR can be read here::
+
+       /sys/devices/faux/tdx_host/seamldr_version
+
+   - The update must be compatible with the running TDX module.
+
+     Like P-SEAMLDR, each module image also specifies a minimum required
+     TDX module version. The running module must satisfy that requirement.
+
+     The update software can read the current TDX module version here::
+
+       /sys/devices/faux/tdx_host/version
+
+   Policy choices:
+
+   - The update software chooses how to optimize its update. For instance,
+     it can optimize for fewer updates or for smaller version steps,
+     for example, 1.2.3 => 1.2.5 versus 1.2.3 => 1.2.4 => 1.2.5.
+
+4. Perform the update
+
+   Run::
+
+     echo 1 > /sys/class/firmware/tdx_module/loading
+     cat <path_to_module_image> > /sys/class/firmware/tdx_module/data
+     echo 0 > /sys/class/firmware/tdx_module/loading
+
+   The files /sys/class/firmware/tdx_module/status and
+   /sys/class/firmware/tdx_module/error report update progress and error
+   information.
+
+   After the update completes, the new module version is visible in
+   /sys/devices/faux/tdx_host/version.
+
+Impact on running TDs
+~~~~~~~~~~~~~~~~~~~~~
+
+TDX module runtime updates must have virtually no visible impact on running
+TDs. Any TD visible impact is a TDX module bug.
+
+The main exception is the TEE_TCB_SVN_2 field in TD quotes, which
+reflects the TCB of the currently running TDX module and therefore
+changes after an update. By contrast, TEE_TCB_SVN reflects the TCB at TD
+launch time and is not affected.
 
 TDX Interaction to Other Kernel Components
 ------------------------------------------
@@ -129,9 +230,9 @@ CPU Hotplug
 ~~~~~~~~~~~
 
 TDX module requires the per-cpu initialization SEAMCALL must be done on
-one cpu before any other SEAMCALLs can be made on that cpu.  The kernel
-provides tdx_cpu_enable() to let the user of TDX to do it when the user
-wants to use a new cpu for TDX task.
+one cpu before any other SEAMCALLs can be made on that cpu.  The kernel,
+via the CPU hotplug framework, performs the necessary initialization when
+a CPU is first brought online.
 
 TDX doesn't support physical (ACPI) CPU hotplug.  During machine boot,
 TDX verifies all boot-time present logical CPUs are TDX compatible before
@@ -141,13 +242,6 @@ but depends on the BIOS to behave correctly.
 
 Note TDX works with CPU logical online/offline, thus the kernel still
 allows to offline logical CPU and online it again.
-
-Kexec()
-~~~~~~~
-
-TDX host support currently lacks the ability to handle kexec.  For
-simplicity only one of them can be enabled in the Kconfig.  This will be
-fixed in the future.
 
 Erratum
 ~~~~~~~

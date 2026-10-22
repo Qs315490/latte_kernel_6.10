@@ -9,7 +9,6 @@
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/slab.h>
@@ -222,20 +221,17 @@ static int hd44780_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	hdc = hd44780_common_alloc();
-	if (!hdc)
+	lcd = hd44780_common_alloc();
+	if (!lcd)
 		return -ENOMEM;
 
-	lcd = charlcd_alloc();
-	if (!lcd)
-		goto fail1;
-
-	hd = kzalloc(sizeof(*hd), GFP_KERNEL);
+	hd = kzalloc_obj(*hd);
 	if (!hd)
 		goto fail2;
 
+	hdc = lcd->drvdata;
 	hdc->hd44780 = hd;
-	lcd->drvdata = hdc;
+
 	for (i = 0; i < ifwidth; i++) {
 		hd->pins[base + i] = devm_gpiod_get_index(dev, "data", i,
 							  GPIOD_OUT_LOW);
@@ -313,9 +309,7 @@ static int hd44780_probe(struct platform_device *pdev)
 fail3:
 	kfree(hd);
 fail2:
-	kfree(lcd);
-fail1:
-	kfree(hdc);
+	hd44780_common_free(lcd);
 	return ret;
 }
 
@@ -326,9 +320,7 @@ static void hd44780_remove(struct platform_device *pdev)
 
 	charlcd_unregister(lcd);
 	kfree(hdc->hd44780);
-	kfree(lcd->drvdata);
-
-	kfree(lcd);
+	hd44780_common_free(lcd);
 }
 
 static const struct of_device_id hd44780_of_match[] = {

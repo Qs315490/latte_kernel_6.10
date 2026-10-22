@@ -194,7 +194,7 @@ void ata_acpi_bind_port(struct ata_port *ap)
 	if (!adev || adev->hp)
 		return;
 
-	context = kzalloc(sizeof(*context), GFP_KERNEL);
+	context = kzalloc_obj(*context);
 	if (!context)
 		return;
 
@@ -236,13 +236,80 @@ void ata_acpi_bind_dev(struct ata_device *dev)
 	if (!adev || adev->hp)
 		return;
 
-	context = kzalloc(sizeof(*context), GFP_KERNEL);
+	context = kzalloc_obj(*context);
 	if (!context)
 		return;
 
 	context->data.dev = dev;
 	acpi_initialize_hp_context(adev, &context->hp, ata_acpi_dev_notify_dock,
 				   ata_acpi_dev_uevent);
+}
+
+/**
+ * ata_acpi_dev_manage_restart - if the disk should be stopped (spun down) on
+ *                               system restart.
+ * @dev: target ATA device
+ *
+ * RETURNS:
+ * true if the disk should be stopped, otherwise false.
+ */
+bool ata_acpi_dev_manage_restart(struct ata_device *dev)
+{
+	struct device *tdev;
+
+	/*
+	 * If ATA_FLAG_ACPI_SATA is set, the acpi fwnode is attached to the
+	 * ata_device instead of the ata_port.
+	 */
+	if (dev->link->ap->flags & ATA_FLAG_ACPI_SATA)
+		tdev = &dev->tdev;
+	else
+		tdev = &dev->link->ap->tdev;
+
+	if (!is_acpi_device_node(tdev->fwnode))
+		return false;
+	return acpi_bus_power_manageable(ACPI_HANDLE(tdev));
+}
+
+/**
+ * ata_acpi_port_power_on - set the power state of the ata port to D0
+ * @ap: target ATA port
+ *
+ * This function is called at the beginning of ata_port_probe().
+ */
+void ata_acpi_port_power_on(struct ata_port *ap)
+{
+	acpi_handle handle;
+	int i;
+
+	/*
+	 * If ATA_FLAG_ACPI_SATA is set, the acpi fwnode is attached to the
+	 * ata_device instead of the ata_port.
+	 */
+	if (ap->flags & ATA_FLAG_ACPI_SATA) {
+		for (i = 0; i < ATA_MAX_DEVICES; i++) {
+			struct ata_device *dev = &ap->link.device[i];
+
+			if (!is_acpi_device_node(dev->tdev.fwnode))
+				continue;
+			handle = ACPI_HANDLE(&dev->tdev);
+			if (!acpi_bus_power_manageable(handle))
+				continue;
+			if (acpi_bus_set_power(handle, ACPI_STATE_D0))
+				ata_dev_err(dev,
+					    "acpi: failed to set power state to D0\n");
+		}
+		return;
+	}
+
+	if (!is_acpi_device_node(ap->tdev.fwnode))
+		return;
+	handle = ACPI_HANDLE(&ap->tdev);
+	if (!acpi_bus_power_manageable(handle))
+		return;
+
+	if (acpi_bus_set_power(handle, ACPI_STATE_D0))
+		ata_port_err(ap, "acpi: failed to set power state to D0\n");
 }
 
 /**
@@ -514,15 +581,19 @@ unsigned int ata_acpi_gtm_xfermask(struct ata_device *dev,
 EXPORT_SYMBOL_GPL(ata_acpi_gtm_xfermask);
 
 /**
- * ata_acpi_cbl_80wire		-	Check for 80 wire cable
+ * ata_acpi_cbl_pata_type - Return PATA cable type
  * @ap: Port to check
- * @gtm: GTM data to use
  *
- * Return 1 if the @gtm indicates the BIOS selected an 80wire mode.
+ * Return ATA_CBL_PATA* according to the transfer mode selected by BIOS
  */
-int ata_acpi_cbl_80wire(struct ata_port *ap, const struct ata_acpi_gtm *gtm)
+int ata_acpi_cbl_pata_type(struct ata_port *ap)
 {
 	struct ata_device *dev;
+	int ret = ATA_CBL_PATA_UNK;
+	const struct ata_acpi_gtm *gtm = ata_acpi_init_gtm(ap);
+
+	if (!gtm)
+		return ATA_CBL_PATA40;
 
 	ata_for_each_dev(dev, &ap->link, ENABLED) {
 		unsigned int xfer_mask, udma_mask;
@@ -530,13 +601,17 @@ int ata_acpi_cbl_80wire(struct ata_port *ap, const struct ata_acpi_gtm *gtm)
 		xfer_mask = ata_acpi_gtm_xfermask(dev, gtm);
 		ata_unpack_xfermask(xfer_mask, NULL, NULL, &udma_mask);
 
-		if (udma_mask & ~ATA_UDMA_MASK_40C)
-			return 1;
+		ret = ATA_CBL_PATA40;
+
+		if (udma_mask & ~ATA_UDMA_MASK_40C) {
+			ret = ATA_CBL_PATA80;
+			break;
+		}
 	}
 
-	return 0;
+	return ret;
 }
-EXPORT_SYMBOL_GPL(ata_acpi_cbl_80wire);
+EXPORT_SYMBOL_GPL(ata_acpi_cbl_pata_type);
 
 static void ata_acpi_gtf_to_tf(struct ata_device *dev,
 			       const struct ata_acpi_gtf *gtf,

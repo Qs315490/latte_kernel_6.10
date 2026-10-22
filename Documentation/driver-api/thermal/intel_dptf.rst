@@ -191,6 +191,36 @@ ABI.
 	User space can specify any one of the available workload type using
 	this interface.
 
+:file:`/sys/bus/pci/devices/0000\:00\:04.0/ptc_0_control`
+:file:`/sys/bus/pci/devices/0000\:00\:04.0/ptc_1_control`
+:file:`/sys/bus/pci/devices/0000\:00\:04.0/ptc_2_control`
+
+All these controls needs admin privilege to update.
+
+``enable`` (RW)
+	1 for enable, 0 for disable. Shows the current enable status of
+	platform temperature control feature. User space can enable/disable
+	hardware controls.
+
+``temperature_target`` (RW)
+	Update a new temperature target in milli degree celsius for hardware to
+	use for the temperature control.
+
+``thermal_tolerance`` (RW)
+	This attribute ranges from 0 to 7, where 0 represents
+	the most aggressive control to avoid any temperature overshoots, and
+	7 represents a more graceful approach, favoring performance even at
+	the expense of temperature overshoots.
+	Note: This level may not scale linearly. For example, a value of 3 does
+	not necessarily imply a 50% improvement in performance compared to a
+	value of 0.
+
+Given that this is platform temperature control, it is expected that a
+single user-level manager owns and manages the controls. If multiple
+user-level software applications attempt to write different targets, it
+can lead to unexpected behavior.
+
+
 DPTF Processor thermal RFIM interface
 --------------------------------------------
 
@@ -345,6 +375,9 @@ based on the processor generation.
 ``workload_hint_enable`` (RW)
 	Enable firmware to send workload type hints to user space.
 
+``workload_slow_hint_enable`` (RW)
+	Enable firmware to send slow workload type hints to user space.
+
 ``notification_delay_ms`` (RW)
 	Minimum delay in milliseconds before firmware will notify OS. This is
 	for the rate control of notifications. This delay is between changing
@@ -379,3 +412,26 @@ based on the processor generation.
 		Limit 1 from being exhausted.
 
 	4 – Unknown: Can't classify.
+
+	On processors starting from Panther Lake additional hints are provided.
+	The hardware analyzes workload residencies over an extended period to
+	determine whether the workload classification tends toward idle/battery
+	life states or sustained/performance states. Based on this long-term
+	analysis, it classifies:
+
+	Power Classification: If the workload exhibits more idle or battery life
+	residencies, it is classified as "power".
+
+	Performance Classification: If the workload exhibits more sustained or
+	performance residencies, it is classified as "performance".
+
+	This approach enables applications to ignore short-term workload
+	fluctuations and instead respond to longer-term power vs. performance
+	trends.
+
+	Residency thresholds for this classification are CPU generation-specific.
+	Classification is reported via bit 4 of the workload_type_index:
+
+	Bit 4 = 1: Power classification
+
+	Bit 4 = 0: Performance classification

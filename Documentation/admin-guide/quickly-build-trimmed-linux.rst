@@ -217,7 +217,7 @@ again.
 
    There is a catch: 'localmodconfig' is likely to disable kernel features you
    did not use since you booted your Linux -- like drivers for currently
-   disconnected peripherals or a virtualization software not haven't used yet.
+   disconnected peripherals or virtualization software not currently in use.
    You can reduce or nearly eliminate that risk with tricks the reference
    section outlines; but when building a kernel just for quick testing purposes
    it is often negligible if such features are missing. But you should keep that
@@ -273,7 +273,7 @@ again.
    does nothing at all; in that case you have to manually install your kernel,
    as outlined in the reference section.
 
-   If you are running a immutable Linux distribution, check its documentation
+   If you are running an immutable Linux distribution, check its documentation
    and the web to find out how to install your own kernel there.
 
    [:ref:`details<install>`]
@@ -347,14 +347,16 @@ again.
 
    [:ref:`details<uninstall>`]
 
-.. _submit_improvements:
+.. _submit_improvements_qbtl:
 
-Did you run into trouble following any of the above steps that is not cleared up
-by the reference section below? Or do you have ideas how to improve the text?
-Then please take a moment of your time and let the maintainer of this document
-know by email (Thorsten Leemhuis <linux@leemhuis.info>), ideally while CCing the
-Linux docs mailing list (linux-doc@vger.kernel.org). Such feedback is vital to
-improve this document further, which is in everybody's interest, as it will
+Did you run into trouble following the step-by-step guide not cleared up by the
+reference section below? Did you spot errors? Or do you have ideas on how to
+improve the guide?
+
+If any of that applies, please let the developers know by sending a short note
+or a patch to Thorsten Leemhuis <linux@leemhuis.info> while ideally CCing the
+public Linux docs mailing list <linux-doc@vger.kernel.org>. Such feedback is
+vital to improve this text further, which is in everybody's interest, as it will
 enable more people to master the task described here.
 
 Reference section for the step-by-step guide
@@ -884,7 +886,7 @@ When a build error occurs, it might be caused by some aspect of your machine's
 setup that often can be fixed quickly; other times though the problem lies in
 the code and can only be fixed by a developer. A close examination of the
 failure messages coupled with some research on the internet will often tell you
-which of the two it is. To perform such a investigation, restart the build
+which of the two it is. To perform such an investigation, restart the build
 process like this::
 
     make V=1
@@ -1070,7 +1072,7 @@ complicated, and harder to follow.
 
 That being said: this of course is a balancing act. Hence, if you think an
 additional use-case is worth describing, suggest it to the maintainers of this
-document, as :ref:`described above <submit_improvements>`.
+document, as :ref:`described above <submit_improvements_qbtl>`.
 
 
 ..

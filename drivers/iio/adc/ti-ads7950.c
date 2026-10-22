@@ -47,8 +47,6 @@
 #define TI_ADS7950_MAX_CHAN	16
 #define TI_ADS7950_NUM_GPIOS	4
 
-#define TI_ADS7950_TIMESTAMP_SIZE (sizeof(int64_t) / sizeof(__be16))
-
 /* val = value, dec = left shift, bits = number of bits of the mask */
 #define TI_ADS7950_EXTRACT(val, dec, bits) \
 	(((val) >> (dec)) & ((1 << (bits)) - 1))
@@ -105,8 +103,7 @@ struct ti_ads7950_state {
 	 * DMA (thus cache coherency maintenance) may require the
 	 * transfer buffers to live in their own cache lines.
 	 */
-	u16 rx_buf[TI_ADS7950_MAX_CHAN + 2 + TI_ADS7950_TIMESTAMP_SIZE]
-		__aligned(IIO_DMA_MINALIGN);
+	u16 rx_buf[TI_ADS7950_MAX_CHAN + 2] __aligned(IIO_DMA_MINALIGN);
 	u16 tx_buf[TI_ADS7950_MAX_CHAN + 2];
 	u16 single_tx;
 	u16 single_rx;
@@ -116,21 +113,6 @@ struct ti_ads7950_state {
 struct ti_ads7950_chip_info {
 	const struct iio_chan_spec *channels;
 	unsigned int num_channels;
-};
-
-enum ti_ads7950_id {
-	TI_ADS7950,
-	TI_ADS7951,
-	TI_ADS7952,
-	TI_ADS7953,
-	TI_ADS7954,
-	TI_ADS7955,
-	TI_ADS7956,
-	TI_ADS7957,
-	TI_ADS7958,
-	TI_ADS7959,
-	TI_ADS7960,
-	TI_ADS7961,
 };
 
 #define TI_ADS7950_V_CHAN(index, bits)				\
@@ -225,81 +207,65 @@ static DECLARE_TI_ADS7950_8_CHANNELS(ti_ads7959, 8);
 static DECLARE_TI_ADS7950_12_CHANNELS(ti_ads7960, 8);
 static DECLARE_TI_ADS7950_16_CHANNELS(ti_ads7961, 8);
 
-static const struct ti_ads7950_chip_info ti_ads7950_chip_info[] = {
-	[TI_ADS7950] = {
-		.channels	= ti_ads7950_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7950_channels),
-	},
-	[TI_ADS7951] = {
-		.channels	= ti_ads7951_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7951_channels),
-	},
-	[TI_ADS7952] = {
-		.channels	= ti_ads7952_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7952_channels),
-	},
-	[TI_ADS7953] = {
-		.channels	= ti_ads7953_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7953_channels),
-	},
-	[TI_ADS7954] = {
-		.channels	= ti_ads7954_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7954_channels),
-	},
-	[TI_ADS7955] = {
-		.channels	= ti_ads7955_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7955_channels),
-	},
-	[TI_ADS7956] = {
-		.channels	= ti_ads7956_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7956_channels),
-	},
-	[TI_ADS7957] = {
-		.channels	= ti_ads7957_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7957_channels),
-	},
-	[TI_ADS7958] = {
-		.channels	= ti_ads7958_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7958_channels),
-	},
-	[TI_ADS7959] = {
-		.channels	= ti_ads7959_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7959_channels),
-	},
-	[TI_ADS7960] = {
-		.channels	= ti_ads7960_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7960_channels),
-	},
-	[TI_ADS7961] = {
-		.channels	= ti_ads7961_channels,
-		.num_channels	= ARRAY_SIZE(ti_ads7961_channels),
-	},
+static const struct ti_ads7950_chip_info ti_ads7950_chip_info = {
+	.channels	= ti_ads7950_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7950_channels),
 };
 
-/*
- * ti_ads7950_update_scan_mode() setup the spi transfer buffer for the new
- * scan mask
- */
-static int ti_ads7950_update_scan_mode(struct iio_dev *indio_dev,
-				       const unsigned long *active_scan_mask)
-{
-	struct ti_ads7950_state *st = iio_priv(indio_dev);
-	int i, cmd, len;
+static const struct ti_ads7950_chip_info ti_ads7951_chip_info = {
+	.channels	= ti_ads7951_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7951_channels),
+};
 
-	len = 0;
-	for_each_set_bit(i, active_scan_mask, indio_dev->num_channels) {
-		cmd = TI_ADS7950_MAN_CMD(TI_ADS7950_CR_CHAN(i));
-		st->tx_buf[len++] = cmd;
-	}
+static const struct ti_ads7950_chip_info ti_ads7952_chip_info = {
+	.channels	= ti_ads7952_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7952_channels),
+};
 
-	/* Data for the 1st channel is not returned until the 3rd transfer */
-	st->tx_buf[len++] = 0;
-	st->tx_buf[len++] = 0;
+static const struct ti_ads7950_chip_info ti_ads7953_chip_info = {
+	.channels	= ti_ads7953_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7953_channels),
+};
 
-	st->ring_xfer.len = len * 2;
+static const struct ti_ads7950_chip_info ti_ads7954_chip_info = {
+	.channels	= ti_ads7954_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7954_channels),
+};
 
-	return 0;
-}
+static const struct ti_ads7950_chip_info ti_ads7955_chip_info = {
+	.channels	= ti_ads7955_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7955_channels),
+};
+
+static const struct ti_ads7950_chip_info ti_ads7956_chip_info = {
+	.channels	= ti_ads7956_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7956_channels),
+};
+
+static const struct ti_ads7950_chip_info ti_ads7957_chip_info = {
+	.channels	= ti_ads7957_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7957_channels),
+};
+
+static const struct ti_ads7950_chip_info ti_ads7958_chip_info = {
+	.channels	= ti_ads7958_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7958_channels),
+};
+
+static const struct ti_ads7950_chip_info ti_ads7959_chip_info = {
+	.channels	= ti_ads7959_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7959_channels),
+};
+
+static const struct ti_ads7950_chip_info ti_ads7960_chip_info = {
+	.channels	= ti_ads7960_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7960_channels),
+};
+
+static const struct ti_ads7950_chip_info ti_ads7961_chip_info = {
+	.channels	= ti_ads7961_channels,
+	.num_channels	= ARRAY_SIZE(ti_ads7961_channels),
+};
 
 static irqreturn_t ti_ads7950_trigger_handler(int irq, void *p)
 {
@@ -308,16 +274,19 @@ static irqreturn_t ti_ads7950_trigger_handler(int irq, void *p)
 	struct ti_ads7950_state *st = iio_priv(indio_dev);
 	int ret;
 
-	mutex_lock(&st->slock);
-	ret = spi_sync(st->spi, &st->ring_msg);
-	if (ret < 0)
-		goto out;
+	do {
+		guard(mutex)(&st->slock);
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &st->rx_buf[2],
-					   iio_get_time_ns(indio_dev));
+		ret = spi_sync(st->spi, &st->ring_msg);
+		if (ret)
+			break;
 
-out:
-	mutex_unlock(&st->slock);
+		iio_push_to_buffers_with_ts_unaligned(indio_dev, &st->rx_buf[2],
+						      sizeof(*st->rx_buf) *
+						      TI_ADS7950_MAX_CHAN,
+						      iio_get_time_ns(indio_dev));
+	} while (0);
+
 	iio_trigger_notify_done(indio_dev->trig);
 
 	return IRQ_HANDLED;
@@ -328,35 +297,21 @@ static int ti_ads7950_scan_direct(struct iio_dev *indio_dev, unsigned int ch)
 	struct ti_ads7950_state *st = iio_priv(indio_dev);
 	int ret, cmd;
 
-	mutex_lock(&st->slock);
+	guard(mutex)(&st->slock);
+
 	cmd = TI_ADS7950_MAN_CMD(TI_ADS7950_CR_CHAN(ch));
 	st->single_tx = cmd;
 
 	ret = spi_sync(st->spi, &st->scan_single_msg);
 	if (ret)
-		goto out;
+		return ret;
 
-	ret = st->single_rx;
-
-out:
-	mutex_unlock(&st->slock);
-
-	return ret;
+	return st->single_rx;
 }
 
-static int ti_ads7950_get_range(struct ti_ads7950_state *st)
+static unsigned int ti_ads7950_get_range(struct ti_ads7950_state *st)
 {
-	int vref;
-
-	if (st->vref_mv) {
-		vref = st->vref_mv;
-	} else {
-		vref = regulator_get_voltage(st->reg);
-		if (vref < 0)
-			return vref;
-
-		vref /= 1000;
-	}
+	unsigned int vref = st->vref_mv;
 
 	if (st->cmd_settings_bitmask & TI_ADS7950_CR_RANGE_5V)
 		vref *= 2;
@@ -385,11 +340,7 @@ static int ti_ads7950_read_raw(struct iio_dev *indio_dev,
 
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
-		ret = ti_ads7950_get_range(st);
-		if (ret < 0)
-			return ret;
-
-		*val = ret;
+		*val = ti_ads7950_get_range(st);
 		*val2 = (1 << chan->scan_type.realbits) - 1;
 
 		return IIO_VAL_FRACTIONAL;
@@ -399,16 +350,50 @@ static int ti_ads7950_read_raw(struct iio_dev *indio_dev,
 }
 
 static const struct iio_info ti_ads7950_info = {
-	.read_raw		= &ti_ads7950_read_raw,
-	.update_scan_mode	= ti_ads7950_update_scan_mode,
+	.read_raw = &ti_ads7950_read_raw,
 };
 
-static void ti_ads7950_set(struct gpio_chip *chip, unsigned int offset,
-			   int value)
+static int ti_ads7950_buffer_preenable(struct iio_dev *indio_dev)
+{
+	struct ti_ads7950_state *st = iio_priv(indio_dev);
+	u32 len = 0;
+	u32 i;
+	u16 cmd;
+
+	for_each_set_bit(i, indio_dev->active_scan_mask, indio_dev->num_channels) {
+		cmd = TI_ADS7950_MAN_CMD(TI_ADS7950_CR_CHAN(i));
+		st->tx_buf[len++] = cmd;
+	}
+
+	/* Data for the 1st channel is not returned until the 3rd transfer */
+	st->tx_buf[len++] = 0;
+	st->tx_buf[len++] = 0;
+
+	st->ring_xfer.len = len * 2;
+
+	return spi_optimize_message(st->spi, &st->ring_msg);
+}
+
+static int ti_ads7950_buffer_postdisable(struct iio_dev *indio_dev)
+{
+	struct ti_ads7950_state *st = iio_priv(indio_dev);
+
+	spi_unoptimize_message(&st->ring_msg);
+
+	return 0;
+}
+
+static const struct iio_buffer_setup_ops ti_ads7950_buffer_setup_ops = {
+	.preenable = ti_ads7950_buffer_preenable,
+	.postdisable = ti_ads7950_buffer_postdisable,
+};
+
+static int ti_ads7950_set(struct gpio_chip *chip, unsigned int offset,
+			  int value)
 {
 	struct ti_ads7950_state *st = gpiochip_get_data(chip);
 
-	mutex_lock(&st->slock);
+	guard(mutex)(&st->slock);
 
 	if (value)
 		st->cmd_settings_bitmask |= BIT(offset);
@@ -416,22 +401,22 @@ static void ti_ads7950_set(struct gpio_chip *chip, unsigned int offset,
 		st->cmd_settings_bitmask &= ~BIT(offset);
 
 	st->single_tx = TI_ADS7950_MAN_CMD_SETTINGS(st);
-	spi_sync(st->spi, &st->scan_single_msg);
 
-	mutex_unlock(&st->slock);
+	return spi_sync(st->spi, &st->scan_single_msg);
 }
 
 static int ti_ads7950_get(struct gpio_chip *chip, unsigned int offset)
 {
 	struct ti_ads7950_state *st = gpiochip_get_data(chip);
+	bool state;
 	int ret;
 
-	mutex_lock(&st->slock);
+	guard(mutex)(&st->slock);
 
 	/* If set as output, return the output */
 	if (st->gpio_cmd_settings_bitmask & BIT(offset)) {
-		ret = st->cmd_settings_bitmask & BIT(offset);
-		goto out;
+		state = st->cmd_settings_bitmask & BIT(offset);
+		return state;
 	}
 
 	/* GPIO data bit sets SDO bits 12-15 to GPIO input */
@@ -439,21 +424,18 @@ static int ti_ads7950_get(struct gpio_chip *chip, unsigned int offset)
 	st->single_tx = TI_ADS7950_MAN_CMD_SETTINGS(st);
 	ret = spi_sync(st->spi, &st->scan_single_msg);
 	if (ret)
-		goto out;
+		return ret;
 
-	ret = ((st->single_rx >> 12) & BIT(offset)) ? 1 : 0;
+	state = (st->single_rx >> 12) & BIT(offset);
 
 	/* Revert back to original settings */
 	st->cmd_settings_bitmask &= ~TI_ADS7950_CR_GPIO_DATA;
 	st->single_tx = TI_ADS7950_MAN_CMD_SETTINGS(st);
 	ret = spi_sync(st->spi, &st->scan_single_msg);
 	if (ret)
-		goto out;
+		return ret;
 
-out:
-	mutex_unlock(&st->slock);
-
-	return ret;
+	return state;
 }
 
 static int ti_ads7950_get_direction(struct gpio_chip *chip,
@@ -469,9 +451,8 @@ static int _ti_ads7950_set_direction(struct gpio_chip *chip, int offset,
 				     int input)
 {
 	struct ti_ads7950_state *st = gpiochip_get_data(chip);
-	int ret = 0;
 
-	mutex_lock(&st->slock);
+	guard(mutex)(&st->slock);
 
 	/* Only change direction if needed */
 	if (input && (st->gpio_cmd_settings_bitmask & BIT(offset)))
@@ -479,15 +460,11 @@ static int _ti_ads7950_set_direction(struct gpio_chip *chip, int offset,
 	else if (!input && !(st->gpio_cmd_settings_bitmask & BIT(offset)))
 		st->gpio_cmd_settings_bitmask |= BIT(offset);
 	else
-		goto out;
+		return 0;
 
 	st->single_tx = TI_ADS7950_GPIO_CMD_SETTINGS(st);
-	ret = spi_sync(st->spi, &st->scan_single_msg);
 
-out:
-	mutex_unlock(&st->slock);
-
-	return ret;
+	return spi_sync(st->spi, &st->scan_single_msg);
 }
 
 static int ti_ads7950_direction_input(struct gpio_chip *chip,
@@ -499,16 +476,20 @@ static int ti_ads7950_direction_input(struct gpio_chip *chip,
 static int ti_ads7950_direction_output(struct gpio_chip *chip,
 				       unsigned int offset, int value)
 {
-	ti_ads7950_set(chip, offset, value);
+	int ret;
+
+	ret = ti_ads7950_set(chip, offset, value);
+	if (ret)
+		return ret;
 
 	return _ti_ads7950_set_direction(chip, offset, 0);
 }
 
 static int ti_ads7950_init_hw(struct ti_ads7950_state *st)
 {
-	int ret = 0;
+	int ret;
 
-	mutex_lock(&st->slock);
+	guard(mutex)(&st->slock);
 
 	/* Settings for Manual/Auto1/Auto2 commands */
 	/* Default to 5v ref */
@@ -516,17 +497,12 @@ static int ti_ads7950_init_hw(struct ti_ads7950_state *st)
 	st->single_tx = TI_ADS7950_MAN_CMD_SETTINGS(st);
 	ret = spi_sync(st->spi, &st->scan_single_msg);
 	if (ret)
-		goto out;
+		return ret;
 
 	/* Settings for GPIO command */
 	st->gpio_cmd_settings_bitmask = 0x0;
 	st->single_tx = TI_ADS7950_GPIO_CMD_SETTINGS(st);
-	ret = spi_sync(st->spi, &st->scan_single_msg);
-
-out:
-	mutex_unlock(&st->slock);
-
-	return ret;
+	return spi_sync(st->spi, &st->scan_single_msg);
 }
 
 static int ti_ads7950_probe(struct spi_device *spi)
@@ -539,10 +515,8 @@ static int ti_ads7950_probe(struct spi_device *spi)
 	spi->bits_per_word = 16;
 	spi->mode |= SPI_CS_WORD;
 	ret = spi_setup(spi);
-	if (ret < 0) {
-		dev_err(&spi->dev, "Error in spi setup\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(&spi->dev, ret, "Error in spi setup\n");
 
 	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
 	if (!indio_dev)
@@ -550,11 +524,9 @@ static int ti_ads7950_probe(struct spi_device *spi)
 
 	st = iio_priv(indio_dev);
 
-	spi_set_drvdata(spi, indio_dev);
-
 	st->spi = spi;
 
-	info = &ti_ads7950_chip_info[spi_get_device_id(spi)->driver_data];
+	info = spi_get_device_match_data(spi);
 
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -592,43 +564,38 @@ static int ti_ads7950_probe(struct spi_device *spi)
 	spi_message_init_with_transfers(&st->scan_single_msg,
 					st->scan_single_xfer, 3);
 
+	ret = devm_mutex_init(&spi->dev, &st->slock);
+	if (ret)
+		return ret;
+
 	/* Use hard coded value for reference voltage in ACPI case */
-	if (ACPI_COMPANION(&spi->dev))
+	if (ACPI_COMPANION(&spi->dev)) {
 		st->vref_mv = TI_ADS7950_VA_MV_ACPI_DEFAULT;
+	} else {
+		ret = devm_regulator_get_enable_read_voltage(&spi->dev, "vref");
+		if (ret < 0)
+			return dev_err_probe(&spi->dev, ret,
+					     "Failed to get regulator \"vref\"\n");
 
-	mutex_init(&st->slock);
-
-	st->reg = devm_regulator_get(&spi->dev, "vref");
-	if (IS_ERR(st->reg)) {
-		ret = dev_err_probe(&spi->dev, PTR_ERR(st->reg),
-				     "Failed to get regulator \"vref\"\n");
-		goto error_destroy_mutex;
+		st->vref_mv = ret / 1000;
 	}
 
-	ret = regulator_enable(st->reg);
-	if (ret) {
-		dev_err(&spi->dev, "Failed to enable regulator \"vref\"\n");
-		goto error_destroy_mutex;
-	}
-
-	ret = iio_triggered_buffer_setup(indio_dev, NULL,
-					 &ti_ads7950_trigger_handler, NULL);
-	if (ret) {
-		dev_err(&spi->dev, "Failed to setup triggered buffer\n");
-		goto error_disable_reg;
-	}
+	ret = devm_iio_triggered_buffer_setup(&spi->dev, indio_dev, NULL,
+					      &ti_ads7950_trigger_handler,
+					      &ti_ads7950_buffer_setup_ops);
+	if (ret)
+		return dev_err_probe(&spi->dev, ret,
+				     "Failed to setup triggered buffer\n");
 
 	ret = ti_ads7950_init_hw(st);
-	if (ret) {
-		dev_err(&spi->dev, "Failed to init adc chip\n");
-		goto error_cleanup_ring;
-	}
+	if (ret)
+		return dev_err_probe(&spi->dev, ret,
+				     "Failed to init adc chip\n");
 
-	ret = iio_device_register(indio_dev);
-	if (ret) {
-		dev_err(&spi->dev, "Failed to register iio device\n");
-		goto error_cleanup_ring;
-	}
+	ret = devm_iio_device_register(&spi->dev, indio_dev);
+	if (ret)
+		return dev_err_probe(&spi->dev, ret,
+				     "Failed to register iio device\n");
 
 	/* Add GPIO chip */
 	st->chip.label = dev_name(&st->spi->dev);
@@ -643,68 +610,44 @@ static int ti_ads7950_probe(struct spi_device *spi)
 	st->chip.get = ti_ads7950_get;
 	st->chip.set = ti_ads7950_set;
 
-	ret = gpiochip_add_data(&st->chip, st);
-	if (ret) {
-		dev_err(&spi->dev, "Failed to init GPIOs\n");
-		goto error_iio_device;
-	}
+	ret = devm_gpiochip_add_data(&spi->dev, &st->chip, st);
+	if (ret)
+		return dev_err_probe(&spi->dev, ret,
+				     "Failed to init GPIOs\n");
 
 	return 0;
-
-error_iio_device:
-	iio_device_unregister(indio_dev);
-error_cleanup_ring:
-	iio_triggered_buffer_cleanup(indio_dev);
-error_disable_reg:
-	regulator_disable(st->reg);
-error_destroy_mutex:
-	mutex_destroy(&st->slock);
-
-	return ret;
-}
-
-static void ti_ads7950_remove(struct spi_device *spi)
-{
-	struct iio_dev *indio_dev = spi_get_drvdata(spi);
-	struct ti_ads7950_state *st = iio_priv(indio_dev);
-
-	gpiochip_remove(&st->chip);
-	iio_device_unregister(indio_dev);
-	iio_triggered_buffer_cleanup(indio_dev);
-	regulator_disable(st->reg);
-	mutex_destroy(&st->slock);
 }
 
 static const struct spi_device_id ti_ads7950_id[] = {
-	{ "ads7950", TI_ADS7950 },
-	{ "ads7951", TI_ADS7951 },
-	{ "ads7952", TI_ADS7952 },
-	{ "ads7953", TI_ADS7953 },
-	{ "ads7954", TI_ADS7954 },
-	{ "ads7955", TI_ADS7955 },
-	{ "ads7956", TI_ADS7956 },
-	{ "ads7957", TI_ADS7957 },
-	{ "ads7958", TI_ADS7958 },
-	{ "ads7959", TI_ADS7959 },
-	{ "ads7960", TI_ADS7960 },
-	{ "ads7961", TI_ADS7961 },
+	{ "ads7950", (kernel_ulong_t)&ti_ads7950_chip_info },
+	{ "ads7951", (kernel_ulong_t)&ti_ads7951_chip_info },
+	{ "ads7952", (kernel_ulong_t)&ti_ads7952_chip_info },
+	{ "ads7953", (kernel_ulong_t)&ti_ads7953_chip_info },
+	{ "ads7954", (kernel_ulong_t)&ti_ads7954_chip_info },
+	{ "ads7955", (kernel_ulong_t)&ti_ads7955_chip_info },
+	{ "ads7956", (kernel_ulong_t)&ti_ads7956_chip_info },
+	{ "ads7957", (kernel_ulong_t)&ti_ads7957_chip_info },
+	{ "ads7958", (kernel_ulong_t)&ti_ads7958_chip_info },
+	{ "ads7959", (kernel_ulong_t)&ti_ads7959_chip_info },
+	{ "ads7960", (kernel_ulong_t)&ti_ads7960_chip_info },
+	{ "ads7961", (kernel_ulong_t)&ti_ads7961_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ti_ads7950_id);
 
 static const struct of_device_id ads7950_of_table[] = {
-	{ .compatible = "ti,ads7950", .data = &ti_ads7950_chip_info[TI_ADS7950] },
-	{ .compatible = "ti,ads7951", .data = &ti_ads7950_chip_info[TI_ADS7951] },
-	{ .compatible = "ti,ads7952", .data = &ti_ads7950_chip_info[TI_ADS7952] },
-	{ .compatible = "ti,ads7953", .data = &ti_ads7950_chip_info[TI_ADS7953] },
-	{ .compatible = "ti,ads7954", .data = &ti_ads7950_chip_info[TI_ADS7954] },
-	{ .compatible = "ti,ads7955", .data = &ti_ads7950_chip_info[TI_ADS7955] },
-	{ .compatible = "ti,ads7956", .data = &ti_ads7950_chip_info[TI_ADS7956] },
-	{ .compatible = "ti,ads7957", .data = &ti_ads7950_chip_info[TI_ADS7957] },
-	{ .compatible = "ti,ads7958", .data = &ti_ads7950_chip_info[TI_ADS7958] },
-	{ .compatible = "ti,ads7959", .data = &ti_ads7950_chip_info[TI_ADS7959] },
-	{ .compatible = "ti,ads7960", .data = &ti_ads7950_chip_info[TI_ADS7960] },
-	{ .compatible = "ti,ads7961", .data = &ti_ads7950_chip_info[TI_ADS7961] },
+	{ .compatible = "ti,ads7950", .data = &ti_ads7950_chip_info },
+	{ .compatible = "ti,ads7951", .data = &ti_ads7951_chip_info },
+	{ .compatible = "ti,ads7952", .data = &ti_ads7952_chip_info },
+	{ .compatible = "ti,ads7953", .data = &ti_ads7953_chip_info },
+	{ .compatible = "ti,ads7954", .data = &ti_ads7954_chip_info },
+	{ .compatible = "ti,ads7955", .data = &ti_ads7955_chip_info },
+	{ .compatible = "ti,ads7956", .data = &ti_ads7956_chip_info },
+	{ .compatible = "ti,ads7957", .data = &ti_ads7957_chip_info },
+	{ .compatible = "ti,ads7958", .data = &ti_ads7958_chip_info },
+	{ .compatible = "ti,ads7959", .data = &ti_ads7959_chip_info },
+	{ .compatible = "ti,ads7960", .data = &ti_ads7960_chip_info },
+	{ .compatible = "ti,ads7961", .data = &ti_ads7961_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, ads7950_of_table);
@@ -715,7 +658,6 @@ static struct spi_driver ti_ads7950_driver = {
 		.of_match_table = ads7950_of_table,
 	},
 	.probe		= ti_ads7950_probe,
-	.remove		= ti_ads7950_remove,
 	.id_table	= ti_ads7950_id,
 };
 module_spi_driver(ti_ads7950_driver);

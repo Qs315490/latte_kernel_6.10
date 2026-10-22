@@ -10,6 +10,7 @@
 #include "pvr_drv.h"
 #include "pvr_job.h"
 #include "pvr_queue.h"
+#include "pvr_trace.h"
 #include "pvr_vm.h"
 
 #include "pvr_rogue_fwif_client.h"
@@ -178,9 +179,34 @@ static const struct dma_fence_ops pvr_queue_job_fence_ops = {
 };
 
 /**
+ * pvr_queue_fence_is_ufo_backed() - Check if a dma_fence is backed by a UFO.
+ * @f: The dma_fence to check.
+ *
+ * Return:
+ * * true if the dma_fence is backed by a UFO, or
+ * * false otherwise.
+ */
+static inline bool
+pvr_queue_fence_is_ufo_backed(struct dma_fence *f)
+{
+	/*
+	 * Currently the only dma_fence backed by a UFO object is the job fence,
+	 * e.g. pvr_job::done_fence, wrapped by a pvr_queue_fence object.
+	 */
+	return f && f->ops == &pvr_queue_job_fence_ops;
+}
+
+/**
  * to_pvr_queue_job_fence() - Return a pvr_queue_fence object if the fence is
- * backed by a UFO.
+ * already backed by a UFO.
  * @f: The dma_fence to turn into a pvr_queue_fence.
+ *
+ * This could be called on:
+ * - a job fence directly, in which case it simply returns the containing pvr_queue_fence;
+ * - a drm_sched_fence's scheduled or finished fence, in which case it will first try to follow
+ *   the parent pointer to find the job fence (note that the parent pointer is initialized
+ *   only after the run_job() callback is called on the drm_sched_fence's owning job);
+ * - any other dma_fence, in which case it will return NULL.
  *
  * Return:
  *  * A non-NULL pvr_queue_fence object if the dma_fence is backed by a UFO, or
@@ -194,7 +220,7 @@ to_pvr_queue_job_fence(struct dma_fence *f)
 	if (sched_fence)
 		f = sched_fence->parent;
 
-	if (f && f->ops == &pvr_queue_job_fence_ops)
+	if (pvr_queue_fence_is_ufo_backed(f))
 		return container_of(f, struct pvr_queue_fence, base);
 
 	return NULL;
@@ -249,7 +275,7 @@ pvr_queue_fence_alloc(void)
 {
 	struct pvr_queue_fence *fence;
 
-	fence = kzalloc(sizeof(*fence), GFP_KERNEL);
+	fence = kzalloc_obj(*fence);
 	if (!fence)
 		return NULL;
 
@@ -349,11 +375,23 @@ static u32 ufo_cmds_size(u32 elem_count)
 
 static u32 job_cmds_size(struct pvr_job *job, u32 ufo_wait_count)
 {
-	/* One UFO cmd for the fence signaling, one UFO cmd per native fence native,
-	 * and a command for the job itself.
+	/*
+	 * One UFO command per native fence this job will be waiting on (unless any are
+	 * signaled by the time the job is submitted), plus a command for the job itself,
+	 * plus one UFO command for the fence signaling.
 	 */
-	return ufo_cmds_size(1) + ufo_cmds_size(ufo_wait_count) +
-	       pvr_cccb_get_size_of_cmd_with_hdr(job->cmd_len);
+	return ufo_cmds_size(ufo_wait_count) +
+	       pvr_cccb_get_size_of_cmd_with_hdr(job->cmd_len) +
+	       ufo_cmds_size(1);
+}
+
+static bool
+is_paired_job_fence(struct dma_fence *fence, struct pvr_job *job)
+{
+	/* This assumes "fence" is one of "job"'s drm_sched_job::dependencies */
+	return job->type == DRM_PVR_JOB_TYPE_FRAGMENT &&
+	       job->paired_job &&
+	       &job->paired_job->base.s_fence->scheduled == fence;
 }
 
 /**
@@ -370,6 +408,17 @@ static unsigned long job_count_remaining_native_deps(struct pvr_job *job)
 
 	xa_for_each(&job->base.dependencies, index, fence) {
 		struct pvr_queue_fence *jfence;
+
+		if (is_paired_job_fence(fence, job)) {
+			/*
+			 * A fence between paired jobs won't resolve to a pvr_queue_fence (i.e.
+			 * be backed by a UFO) until the jobs have been submitted, together.
+			 * The submitting code will insert a partial render fence command for this.
+			 */
+			WARN_ON(dma_fence_is_signaled(fence));
+			remaining_count++;
+			continue;
+		}
 
 		jfence = to_pvr_queue_job_fence(fence);
 		if (!jfence)
@@ -468,29 +517,37 @@ pvr_queue_get_job_kccb_fence(struct pvr_queue *queue, struct pvr_job *job)
 }
 
 static struct dma_fence *
-pvr_queue_get_paired_frag_job_dep(struct pvr_queue *queue, struct pvr_job *job)
+pvr_queue_get_paired_frag_job_dep(struct pvr_job *job)
 {
 	struct pvr_job *frag_job = job->type == DRM_PVR_JOB_TYPE_GEOMETRY ?
 				   job->paired_job : NULL;
+	struct pvr_queue *frag_queue = frag_job ? frag_job->ctx->queues.fragment : NULL;
 	struct dma_fence *f;
 	unsigned long index;
 
 	if (!frag_job)
 		return NULL;
 
+	/* Have the geometry job wait on the paired fragment job's dependencies as well. */
 	xa_for_each(&frag_job->base.dependencies, index, f) {
 		/* Skip already signaled fences. */
 		if (dma_fence_is_signaled(f))
 			continue;
 
-		/* Skip our own fence. */
+		/*
+		 * The paired job fence won't be signaled until both jobs have
+		 * been submitted, so we can't wait on it to schedule them.
+		 */
 		if (f == &job->base.s_fence->scheduled)
 			continue;
 
 		return dma_fence_get(f);
 	}
 
-	return frag_job->base.sched->ops->prepare_job(&frag_job->base, &queue->entity);
+	/* Initialize the paired fragment job's done_fence, so we can signal it. */
+	pvr_queue_job_fence_init(frag_job->done_fence, frag_queue);
+
+	return pvr_queue_get_job_cccb_fence(frag_queue, frag_job);
 }
 
 /**
@@ -509,31 +566,24 @@ pvr_queue_prepare_job(struct drm_sched_job *sched_job,
 	struct pvr_queue *queue = container_of(s_entity, struct pvr_queue, entity);
 	struct dma_fence *internal_dep = NULL;
 
+	if (job->type == DRM_PVR_JOB_TYPE_FRAGMENT && job->paired_job) {
+		/*
+		 * This will be called on a paired fragment job after being submitted
+		 * to the firmware as part of the paired geometry job's submission.
+		 * We can tell if this is the case and bail early from whether run_job()
+		 * has been called on the geometry job, which would issue a pm ref on
+		 * this job as well.
+		 */
+		if (job->has_pm_ref)
+			return NULL;
+	}
+
 	/*
 	 * Initialize the done_fence, so we can signal it. This must be done
 	 * here because otherwise by the time of run_job() the job will end up
 	 * in the pending list without a valid fence.
 	 */
-	if (job->type == DRM_PVR_JOB_TYPE_FRAGMENT && job->paired_job) {
-		/*
-		 * This will be called on a paired fragment job after being
-		 * submitted to firmware. We can tell if this is the case and
-		 * bail early from whether run_job() has been called on the
-		 * geometry job, which would issue a pm ref.
-		 */
-		if (job->paired_job->has_pm_ref)
-			return NULL;
-
-		/*
-		 * In this case we need to use the job's own ctx to initialise
-		 * the done_fence.  The other steps are done in the ctx of the
-		 * paired geometry job.
-		 */
-		pvr_queue_job_fence_init(job->done_fence,
-					 job->ctx->queues.fragment);
-	} else {
-		pvr_queue_job_fence_init(job->done_fence, queue);
-	}
+	pvr_queue_job_fence_init(job->done_fence, queue);
 
 	/* CCCB fence is used to make sure we have enough space in the CCCB to
 	 * submit our commands.
@@ -555,7 +605,7 @@ pvr_queue_prepare_job(struct drm_sched_job *sched_job,
 
 	/* The paired job fence should come last, when everything else is ready. */
 	if (!internal_dep)
-		internal_dep = pvr_queue_get_paired_frag_job_dep(queue, job);
+		internal_dep = pvr_queue_get_paired_frag_job_dep(job);
 
 	return internal_dep;
 }
@@ -630,11 +680,7 @@ static void pvr_queue_submit_job_to_cccb(struct pvr_job *job)
 		if (!jfence)
 			continue;
 
-		/* Skip the partial render fence, we will place it at the end. */
-		if (job->type == DRM_PVR_JOB_TYPE_FRAGMENT && job->paired_job &&
-		    &job->paired_job->base.s_fence->scheduled == fence)
-			continue;
-
+		/* Some dependencies might have been signaled since prepare_job() */
 		if (dma_fence_is_signaled(&jfence->base))
 			continue;
 
@@ -649,8 +695,13 @@ static void pvr_queue_submit_job_to_cccb(struct pvr_job *job)
 		}
 	}
 
-	/* Partial render fence goes last. */
 	if (job->type == DRM_PVR_JOB_TYPE_FRAGMENT && job->paired_job) {
+		/*
+		 * The loop above will only process dependencies backed by a UFO i.e. with
+		 * a valid parent fence assigned, but the paired job dependency won't have
+		 * one until both jobs have been submitted. Access the parent fence directly
+		 * here instead, submitting it last as partial render fence.
+		 */
 		jfence = to_pvr_queue_job_fence(job->paired_job->done_fence);
 		if (!WARN_ON(!jfence)) {
 			pvr_fw_object_get_fw_addr(jfence->queue->timeline_ufo.fw_obj,
@@ -679,7 +730,7 @@ static void pvr_queue_submit_job_to_cccb(struct pvr_job *job)
 	pvr_cccb_write_command_with_header(cccb, job->fw_ccb_cmd_type, job->cmd_len, job->cmd,
 					   job->id, job->id);
 
-	/* Signal the job fence. */
+	/* Update command to signal the job fence. */
 	pvr_fw_object_get_fw_addr(queue->timeline_ufo.fw_obj, &ufos[0].addr);
 	ufos[0].value = job->done_fence->seqno;
 	pvr_cccb_write_command_with_header(cccb, ROGUE_FWIF_CCB_CMD_TYPE_UPDATE,
@@ -709,10 +760,8 @@ static struct dma_fence *pvr_queue_run_job(struct drm_sched_job *sched_job)
 	}
 
 	/* The only kind of jobs that can be paired are geometry and fragment, and
-	 * we bail out early if we see a fragment job that's paired with a geomtry
-	 * job.
-	 * Paired jobs must also target the same context and point to the same
-	 * HWRT.
+	 * we bail out early if we see a fragment job that's paired with a geometry job.
+	 * Paired jobs must also target the same context and point to the same HWRT.
 	 */
 	if (WARN_ON(job->paired_job &&
 		    (job->type != DRM_PVR_JOB_TYPE_GEOMETRY ||
@@ -751,6 +800,9 @@ static struct dma_fence *pvr_queue_run_job(struct drm_sched_job *sched_job)
 						 job->hwrt,
 						 frag_job->fw_ccb_cmd_type ==
 						 ROGUE_FWIF_CCB_CMD_TYPE_FRAG_PR);
+
+		trace_pvr_job_submit_fw(geom_job);
+		trace_pvr_job_submit_fw(frag_job);
 	} else {
 		struct pvr_queue *queue = container_of(job->base.sched,
 						       struct pvr_queue, scheduler);
@@ -758,6 +810,8 @@ static struct dma_fence *pvr_queue_run_job(struct drm_sched_job *sched_job)
 		pvr_cccb_send_kccb_kick(pvr_dev, &queue->cccb,
 					pvr_context_get_fw_addr(job->ctx) + queue->ctx_offset,
 					job->hwrt);
+
+		trace_pvr_job_submit_fw(job);
 	}
 
 	return dma_fence_get(job->done_fence);
@@ -803,7 +857,9 @@ static void pvr_queue_start(struct pvr_queue *queue)
  * the scheduler, and re-assign parent fences in the middle.
  *
  * Return:
- *  * DRM_GPU_SCHED_STAT_NOMINAL.
+ *  *%DRM_GPU_SCHED_STAT_NO_HANG if the job fence has already been
+ *   signaled, or
+ *  *%DRM_GPU_SCHED_STAT_RESET otherwise.
  */
 static enum drm_gpu_sched_stat
 pvr_queue_timedout_job(struct drm_sched_job *s_job)
@@ -813,6 +869,9 @@ pvr_queue_timedout_job(struct drm_sched_job *s_job)
 	struct pvr_device *pvr_dev = queue->ctx->pvr_dev;
 	struct pvr_job *job;
 	u32 job_count = 0;
+
+	if (dma_fence_is_signaled(s_job->s_fence->parent))
+		return DRM_GPU_SCHED_STAT_NO_HANG;
 
 	dev_err(sched->dev, "Job timeout\n");
 
@@ -854,7 +913,7 @@ pvr_queue_timedout_job(struct drm_sched_job *s_job)
 
 	drm_sched_start(sched, 0);
 
-	return DRM_GPU_SCHED_STAT_NOMINAL;
+	return DRM_GPU_SCHED_STAT_RESET;
 }
 
 /**
@@ -866,6 +925,10 @@ static void pvr_queue_free_job(struct drm_sched_job *sched_job)
 	struct pvr_job *job = container_of(sched_job, struct pvr_job, base);
 
 	drm_sched_job_cleanup(sched_job);
+
+	if (job->type == DRM_PVR_JOB_TYPE_FRAGMENT && job->paired_job)
+		pvr_job_put(job->paired_job);
+
 	job->paired_job = NULL;
 	pvr_job_put(job);
 }
@@ -878,16 +941,16 @@ static const struct drm_sched_backend_ops pvr_queue_sched_ops = {
 };
 
 /**
- * pvr_queue_fence_is_ufo_backed() - Check if a dma_fence is backed by a UFO object
+ * pvr_queue_fence_is_native() - Check if a dma_fence is native to this driver.
  * @f: Fence to test.
  *
- * A UFO-backed fence is a fence that can be signaled or waited upon FW-side.
- * pvr_job::done_fence objects are backed by the timeline UFO attached to the queue
- * they are pushed to, but those fences are not directly exposed to the outside
- * world, so we also need to check if the fence we're being passed is a
- * drm_sched_fence that was coming from our driver.
+ * Check if the fence we're being passed is a drm_sched_fence that is coming from this driver.
+ *
+ * It may be a UFO-backed fence i.e. a fence that can be signaled or waited upon FW-side,
+ * such as pvr_job::done_fence objects that are backed by the timeline UFO attached to the queue
+ * they are pushed to.
  */
-bool pvr_queue_fence_is_ufo_backed(struct dma_fence *f)
+bool pvr_queue_fence_is_native(struct dma_fence *f)
 {
 	struct drm_sched_fence *sched_fence = f ? to_drm_sched_fence(f) : NULL;
 
@@ -895,10 +958,7 @@ bool pvr_queue_fence_is_ufo_backed(struct dma_fence *f)
 	    sched_fence->sched->ops == &pvr_queue_sched_ops)
 		return true;
 
-	if (f && f->ops == &pvr_queue_job_fence_ops)
-		return true;
-
-	return false;
+	return pvr_queue_fence_is_ufo_backed(f);
 }
 
 /**
@@ -930,9 +990,8 @@ pvr_queue_signal_done_fences(struct pvr_queue *queue)
 }
 
 /**
- * pvr_queue_check_job_waiting_for_cccb_space() - Check if the job waiting for CCCB space
- * can be unblocked
- * pushed to the CCCB
+ * pvr_queue_check_job_waiting_for_cccb_space() - Check if a job waiting for CCCB space
+ * can be unblocked and pushed to the CCCB.
  * @queue: Queue to check
  *
  * If we have a job waiting for CCCB, and this job now fits in the CCCB, we signal
@@ -1069,6 +1128,7 @@ static int pvr_queue_cleanup_fw_context(struct pvr_queue *queue)
 /**
  * pvr_queue_job_init() - Initialize queue related fields in a pvr_job object.
  * @job: The job to initialize.
+ * @drm_client_id: drm_file.client_id submitting the job
  *
  * Bind the job to a queue and allocate memory to guarantee pvr_queue_job_arm()
  * and pvr_queue_job_push() can't fail. We also make sure the context type is
@@ -1078,7 +1138,7 @@ static int pvr_queue_cleanup_fw_context(struct pvr_queue *queue)
  *  * 0 on success, or
  *  * An error code if something failed.
  */
-int pvr_queue_job_init(struct pvr_job *job)
+int pvr_queue_job_init(struct pvr_job *job, u64 drm_client_id)
 {
 	/* Fragment jobs need at least one native fence wait on the geometry job fence. */
 	u32 min_native_dep_count = job->type == DRM_PVR_JOB_TYPE_FRAGMENT ? 1 : 0;
@@ -1095,7 +1155,7 @@ int pvr_queue_job_init(struct pvr_job *job)
 	if (!pvr_cccb_cmdseq_can_fit(&queue->cccb, job_cmds_size(job, min_native_dep_count)))
 		return -E2BIG;
 
-	err = drm_sched_job_init(&job->base, &queue->entity, 1, THIS_MODULE);
+	err = drm_sched_job_init(&job->base, &queue->entity, 1, THIS_MODULE, drm_client_id);
 	if (err)
 		return err;
 
@@ -1144,6 +1204,8 @@ void pvr_queue_job_cleanup(struct pvr_job *job)
 
 	if (job->base.s_fence)
 		drm_sched_job_cleanup(&job->base);
+
+	trace_pvr_job_done(job);
 }
 
 /**
@@ -1220,6 +1282,17 @@ struct pvr_queue *pvr_queue_create(struct pvr_context *ctx,
 		},
 	};
 	struct pvr_device *pvr_dev = ctx->pvr_dev;
+	const struct drm_sched_init_args sched_args = {
+		.ops = &pvr_queue_sched_ops,
+		.submit_wq = pvr_dev->sched_wq,
+		.num_rqs = 1,
+		.credit_limit = 64 * 1024,
+		.hang_limit = 1,
+		.timeout = msecs_to_jiffies(500),
+		.timeout_wq = pvr_dev->sched_wq,
+		.name = "pvr-queue",
+		.dev = pvr_dev->base.dev,
+	};
 	struct drm_gpu_scheduler *sched;
 	struct pvr_queue *queue;
 	int ctx_state_size, err;
@@ -1250,7 +1323,7 @@ struct pvr_queue *pvr_queue_create(struct pvr_context *ctx,
 	if (ctx_state_size < 0)
 		return ERR_PTR(ctx_state_size);
 
-	queue = kzalloc(sizeof(*queue), GFP_KERNEL);
+	queue = kzalloc_obj(*queue);
 	if (!queue)
 		return ERR_PTR(-ENOMEM);
 
@@ -1292,12 +1365,7 @@ struct pvr_queue *pvr_queue_create(struct pvr_context *ctx,
 
 	queue->timeline_ufo.value = cpu_map;
 
-	err = drm_sched_init(&queue->scheduler,
-			     &pvr_queue_sched_ops,
-			     pvr_dev->sched_wq, 1, 64 * 1024, 1,
-			     msecs_to_jiffies(500),
-			     pvr_dev->sched_wq, NULL, "pvr-queue",
-			     pvr_dev->base.dev);
+	err = drm_sched_init(&queue->scheduler, &sched_args);
 	if (err)
 		goto err_release_ufo;
 
@@ -1375,11 +1443,12 @@ void pvr_queue_kill(struct pvr_queue *queue)
 /**
  * pvr_queue_destroy() - Destroy a queue.
  * @queue: The queue to destroy.
+ * @cleanup_queue_entity: Whether to cleanup the queue entity.
  *
  * Cleanup the queue and free the resources attached to it. Should be
  * called from the context release function.
  */
-void pvr_queue_destroy(struct pvr_queue *queue)
+void pvr_queue_destroy(struct pvr_queue *queue, bool cleanup_queue_entity)
 {
 	if (!queue)
 		return;
@@ -1389,7 +1458,8 @@ void pvr_queue_destroy(struct pvr_queue *queue)
 	mutex_unlock(&queue->ctx->pvr_dev->queues.lock);
 
 	drm_sched_fini(&queue->scheduler);
-	drm_sched_entity_fini(&queue->entity);
+	if (cleanup_queue_entity)
+		drm_sched_entity_fini(&queue->entity);
 
 	if (WARN_ON(queue->last_queued_job_scheduled_fence))
 		dma_fence_put(queue->last_queued_job_scheduled_fence);

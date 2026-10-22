@@ -3,10 +3,21 @@
 all:
 	@echo mk_build_dir="$(shell pwd)" > include.sh
 
-TEST_PROGS := run.sh
+TEST_PROGS := rds_run.sh
 
-TEST_FILES := include.sh test.py
+TEST_GEN_PROGS := getsockopt
 
-EXTRA_CLEAN := /tmp/rds_logs include.sh
+TEST_FILES := \
+	include.sh \
+	settings \
+	test.py \
+# end of TEST_FILES
+
+EXTRA_CLEAN := \
+	include.sh \
+	/tmp/rds_logs \
+# end of EXTRA_CLEAN
+
+CFLAGS += $(KHDR_INCLUDES)
 
 include ../../lib.mk

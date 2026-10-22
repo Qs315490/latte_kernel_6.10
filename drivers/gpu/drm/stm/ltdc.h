@@ -40,10 +40,16 @@ struct fps_info {
 	ktime_t last_timestamp;
 };
 
+struct ltdc_plat_data {
+	int pad_max_freq_hz;	/* max frequency supported by pad */
+};
+
 struct ltdc_device {
 	void __iomem *regs;
 	struct regmap *regmap;
 	struct clk *pixel_clk;	/* lcd pixel clock */
+	struct clk *lvds_clk;	/* lvds pixel clock */
+	struct clk *bus_clk;	/* bus clock */
 	struct mutex err_lock;	/* protecting error_status */
 	struct ltdc_caps caps;
 	u32 irq_status;
@@ -52,7 +58,7 @@ struct ltdc_device {
 	u32 fifo_threshold;	/* fifo underrun threshold */
 	u32 transfer_err;	/* transfer error counter */
 	struct fps_info plane_fpsi[LTDC_MAX_LAYER];
-	struct drm_atomic_state *suspend_state;
+	struct drm_atomic_commit *suspend_state;
 	int crc_skip_count;
 	bool crc_active;
 };

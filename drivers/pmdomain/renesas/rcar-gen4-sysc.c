@@ -251,6 +251,7 @@ static int __init rcar_gen4_sysc_pd_setup(struct rcar_gen4_sysc_pd *pd)
 		genpd->detach_dev = cpg_mssr_detach_dev;
 	}
 
+	genpd->flags |= GENPD_FLAG_NO_STAY_ON;
 	genpd->power_off = rcar_gen4_sysc_pd_power_off;
 	genpd->power_on = rcar_gen4_sysc_pd_power_on;
 
@@ -323,7 +324,7 @@ static int __init rcar_gen4_sysc_pd_init(void)
 
 	rcar_gen4_sysc_base = base;
 
-	domains = kzalloc(sizeof(*domains), GFP_KERNEL);
+	domains = kzalloc_obj(*domains);
 	if (!domains) {
 		error = -ENOMEM;
 		goto out_put;
@@ -337,11 +338,6 @@ static int __init rcar_gen4_sysc_pd_init(void)
 		const struct rcar_gen4_sysc_area *area = &info->areas[i];
 		struct rcar_gen4_sysc_pd *pd;
 		size_t n;
-
-		if (!area->name) {
-			/* Skip NULLified area */
-			continue;
-		}
 
 		n = strlen(area->name) + 1;
 		pd = kzalloc(sizeof(*pd) + n, GFP_KERNEL);
@@ -379,4 +375,4 @@ out_put:
 	of_node_put(np);
 	return error;
 }
-early_initcall(rcar_gen4_sysc_pd_init);
+postcore_initcall(rcar_gen4_sysc_pd_init);

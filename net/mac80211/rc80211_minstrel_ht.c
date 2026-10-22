@@ -1553,7 +1553,7 @@ minstrel_ht_update_rates(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 	int i = 0;
 	int max_rates = min_t(int, mp->hw->max_rates, IEEE80211_TX_RATE_TABLE_SIZE);
 
-	rates = kzalloc(sizeof(*rates), GFP_ATOMIC);
+	rates = kzalloc_obj(*rates, GFP_ATOMIC);
 	if (!rates)
 		return;
 
@@ -1849,20 +1849,7 @@ minstrel_ht_rate_update(void *priv, struct ieee80211_supported_band *sband,
 static void *
 minstrel_ht_alloc_sta(void *priv, struct ieee80211_sta *sta, gfp_t gfp)
 {
-	struct ieee80211_supported_band *sband;
-	struct minstrel_ht_sta *mi;
-	struct minstrel_priv *mp = priv;
-	struct ieee80211_hw *hw = mp->hw;
-	int max_rates = 0;
-	int i;
-
-	for (i = 0; i < NUM_NL80211_BANDS; i++) {
-		sband = hw->wiphy->bands[i];
-		if (sband && sband->n_bitrates > max_rates)
-			max_rates = sband->n_bitrates;
-	}
-
-	return kzalloc(sizeof(*mi), gfp);
+	return kzalloc_obj(struct minstrel_ht_sta, gfp);
 }
 
 static void
@@ -1873,15 +1860,12 @@ minstrel_ht_free_sta(void *priv, struct ieee80211_sta *sta, void *priv_sta)
 
 static void
 minstrel_ht_fill_rate_array(u8 *dest, struct ieee80211_supported_band *sband,
-			    const s16 *bitrates, int n_rates, u32 rate_flags)
+			    const s16 *bitrates, int n_rates)
 {
 	int i, j;
 
 	for (i = 0; i < sband->n_bitrates; i++) {
 		struct ieee80211_rate *rate = &sband->bitrates[i];
-
-		if ((rate_flags & sband->bitrates[i].flags) != rate_flags)
-			continue;
 
 		for (j = 0; j < n_rates; j++) {
 			if (rate->bitrate != bitrates[j])
@@ -1898,7 +1882,6 @@ minstrel_ht_init_cck_rates(struct minstrel_priv *mp)
 {
 	static const s16 bitrates[4] = { 10, 20, 55, 110 };
 	struct ieee80211_supported_band *sband;
-	u32 rate_flags = ieee80211_chandef_rate_flags(&mp->hw->conf.chandef);
 
 	memset(mp->cck_rates, 0xff, sizeof(mp->cck_rates));
 	sband = mp->hw->wiphy->bands[NL80211_BAND_2GHZ];
@@ -1908,8 +1891,7 @@ minstrel_ht_init_cck_rates(struct minstrel_priv *mp)
 	BUILD_BUG_ON(ARRAY_SIZE(mp->cck_rates) != ARRAY_SIZE(bitrates));
 	minstrel_ht_fill_rate_array(mp->cck_rates, sband,
 				    minstrel_cck_bitrates,
-				    ARRAY_SIZE(minstrel_cck_bitrates),
-				    rate_flags);
+				    ARRAY_SIZE(minstrel_cck_bitrates));
 }
 
 static void
@@ -1917,7 +1899,6 @@ minstrel_ht_init_ofdm_rates(struct minstrel_priv *mp, enum nl80211_band band)
 {
 	static const s16 bitrates[8] = { 60, 90, 120, 180, 240, 360, 480, 540 };
 	struct ieee80211_supported_band *sband;
-	u32 rate_flags = ieee80211_chandef_rate_flags(&mp->hw->conf.chandef);
 
 	memset(mp->ofdm_rates[band], 0xff, sizeof(mp->ofdm_rates[band]));
 	sband = mp->hw->wiphy->bands[band];
@@ -1927,8 +1908,7 @@ minstrel_ht_init_ofdm_rates(struct minstrel_priv *mp, enum nl80211_band band)
 	BUILD_BUG_ON(ARRAY_SIZE(mp->ofdm_rates[band]) != ARRAY_SIZE(bitrates));
 	minstrel_ht_fill_rate_array(mp->ofdm_rates[band], sband,
 				    minstrel_ofdm_bitrates,
-				    ARRAY_SIZE(minstrel_ofdm_bitrates),
-				    rate_flags);
+				    ARRAY_SIZE(minstrel_ofdm_bitrates));
 }
 
 static void *
@@ -1937,7 +1917,7 @@ minstrel_ht_alloc(struct ieee80211_hw *hw)
 	struct minstrel_priv *mp;
 	int i;
 
-	mp = kzalloc(sizeof(struct minstrel_priv), GFP_ATOMIC);
+	mp = kzalloc_obj(struct minstrel_priv, GFP_ATOMIC);
 	if (!mp)
 		return NULL;
 

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright (c) 2024 Meta Platforms, Inc. and affiliates. */
 #pragma once
-#include "bpf_arena_common.h"
+#include <bpf_arena_common.h>
 
 struct arena_list_node;
 
@@ -64,14 +64,12 @@ static inline void list_add_head(arena_list_node_t *n, arena_list_head_t *h)
 
 static inline void __list_del(arena_list_node_t *n)
 {
-	arena_list_node_t *next = n->next, *tmp;
+	arena_list_node_t *next = n->next;
 	arena_list_node_t * __arena *pprev = n->pprev;
 
 	cast_user(next);
 	cast_kern(pprev);
-	tmp = *pprev;
-	cast_kern(tmp);
-	WRITE_ONCE(tmp, next);
+	WRITE_ONCE(*pprev, next);
 	if (next) {
 		cast_user(pprev);
 		cast_kern(next);

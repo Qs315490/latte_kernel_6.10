@@ -11,6 +11,7 @@
 #undef CONFIG_PARAVIRT
 #undef CONFIG_PARAVIRT_XXL
 #undef CONFIG_PARAVIRT_SPINLOCKS
+#undef CONFIG_ARCH_HAS_LAZY_MMU_MODE
 #undef CONFIG_KASAN
 #undef CONFIG_KASAN_GENERIC
 
@@ -136,6 +137,9 @@ static inline void console_init(void)
 #endif
 
 #ifdef CONFIG_AMD_MEM_ENCRYPT
+struct es_em_ctxt;
+struct insn;
+
 void sev_enable(struct boot_params *bp);
 void snp_check_features(void);
 void sev_es_shutdown_ghcb(void);
@@ -143,18 +147,12 @@ extern bool sev_es_check_ghcb_fault(unsigned long address);
 void snp_set_page_private(unsigned long paddr);
 void snp_set_page_shared(unsigned long paddr);
 void sev_prep_identity_maps(unsigned long top_level_pgt);
+
+enum es_result vc_decode_insn(struct es_em_ctxt *ctxt);
+bool insn_has_rep_prefix(struct insn *insn);
+void sev_insn_decode_init(void);
+bool early_setup_ghcb(void);
 #else
-static inline void sev_enable(struct boot_params *bp)
-{
-	/*
-	 * bp->cc_blob_address should only be set by boot/compressed kernel.
-	 * Initialize it to 0 unconditionally (thus here in this stub too) to
-	 * ensure that uninitialized values from buggy bootloaders aren't
-	 * propagated.
-	 */
-	if (bp)
-		bp->cc_blob_address = 0;
-}
 static inline void snp_check_features(void) { }
 static inline void sev_es_shutdown_ghcb(void) { }
 static inline bool sev_es_check_ghcb_fault(unsigned long address)

@@ -7,10 +7,8 @@
 #include <linux/bits.h>
 #include <linux/err.h>
 #include <linux/hwmon.h>
-#include <linux/hwmon-sysfs.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 
@@ -351,6 +349,7 @@ static int nct7363_present_pwm_fanin(struct device *dev,
 	if (ret)
 		return ret;
 
+	of_node_put(args.np);
 	if (args.args[0] >= NCT7363_PWM_COUNT)
 		return -EINVAL;
 	data->pwm_mask |= BIT(args.args[0]);
@@ -391,14 +390,13 @@ static const struct regmap_config nct7363_regmap_config = {
 	.val_bits = 8,
 	.use_single_read = true,
 	.use_single_write = true,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 	.volatile_reg = nct7363_regmap_is_volatile,
 };
 
 static int nct7363_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
-	struct device_node *child;
 	struct nct7363_data *data;
 	struct device *hwmon_dev;
 	int ret;
@@ -411,12 +409,10 @@ static int nct7363_probe(struct i2c_client *client)
 	if (IS_ERR(data->regmap))
 		return PTR_ERR(data->regmap);
 
-	for_each_child_of_node(dev->of_node, child) {
+	for_each_child_of_node_scoped(dev->of_node, child) {
 		ret = nct7363_present_pwm_fanin(dev, child, data);
-		if (ret) {
-			of_node_put(child);
+		if (ret)
 			return ret;
-		}
 	}
 
 	/* Initialize the chip */

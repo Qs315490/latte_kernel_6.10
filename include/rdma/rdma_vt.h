@@ -149,6 +149,7 @@ struct rvt_driver_params {
 /* User context */
 struct rvt_ucontext {
 	struct ib_ucontext ibucontext;
+	void *priv;
 };
 
 /* Protection domain */
@@ -359,6 +360,15 @@ struct rvt_driver_provided {
 
 	/* Get and return CPU to pin CQ processing thread */
 	int (*comp_vect_cpu_lookup)(struct rvt_dev_info *rdi, int comp_vect);
+
+	/* allocate a ucontext */
+	int (*alloc_ucontext)(struct ib_ucontext *uctx, struct ib_udata *udata);
+
+	/* deallocate a ucontext */
+	void (*dealloc_ucontext)(struct ib_ucontext *context);
+
+	/* driver mmap */
+	int (*mmap)(struct ib_ucontext *context, struct vm_area_struct *vma);
 };
 
 struct rvt_dev_info {
@@ -427,26 +437,6 @@ struct rvt_dev_info {
 	/* Memory Working Set Size */
 	struct rvt_wss *wss;
 };
-
-/**
- * rvt_set_ibdev_name - Craft an IB device name from client info
- * @rdi: pointer to the client rvt_dev_info structure
- * @name: client specific name
- * @unit: client specific unit number.
- */
-static inline void rvt_set_ibdev_name(struct rvt_dev_info *rdi,
-				      const char *fmt, const char *name,
-				      const int unit)
-{
-	/*
-	 * FIXME: rvt and its users want to touch the ibdev before
-	 * registration and have things like the name work. We don't have the
-	 * infrastructure in the core to support this directly today, hack it
-	 * to work by setting the name manually here.
-	 */
-	dev_set_name(&rdi->ibdev.dev, fmt, name, unit);
-	strscpy(rdi->ibdev.name, dev_name(&rdi->ibdev.dev), IB_DEVICE_NAME_MAX);
-}
 
 /**
  * rvt_get_ibdev_name - return the IB name

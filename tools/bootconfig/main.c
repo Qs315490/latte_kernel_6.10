@@ -11,10 +11,15 @@
 #include <string.h>
 #include <errno.h>
 #include <endian.h>
+#include <assert.h>
 
 #include <linux/bootconfig.h>
 
 #define pr_err(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+
+/* Bootconfig footer is [size][csum][BOOTCONFIG_MAGIC]. */
+#define BOOTCONFIG_FOOTER_SIZE	\
+	(sizeof(uint32_t) * 2 + BOOTCONFIG_MAGIC_LEN)
 
 static int xbc_show_value(struct xbc_node *node, bool semicolon)
 {
@@ -157,8 +162,11 @@ static int load_xbc_file(const char *path, char **buf)
 	if (fd < 0)
 		return -errno;
 	ret = fstat(fd, &stat);
-	if (ret < 0)
-		return -errno;
+	if (ret < 0) {
+		ret = -errno;
+		close(fd);
+		return ret;
+	}
 
 	ret = load_xbc_fd(fd, buf, stat.st_size);
 
@@ -185,10 +193,10 @@ static int load_xbc_from_initrd(int fd, char **buf)
 	if (ret < 0)
 		return -errno;
 
-	if (stat.st_size < 8 + BOOTCONFIG_MAGIC_LEN)
+	if (stat.st_size < BOOTCONFIG_FOOTER_SIZE)
 		return 0;
 
-	if (lseek(fd, -BOOTCONFIG_MAGIC_LEN, SEEK_END) < 0)
+	if (lseek(fd, -(off_t)BOOTCONFIG_MAGIC_LEN, SEEK_END) < 0)
 		return pr_errno("Failed to lseek for magic", -errno);
 
 	if (read(fd, magic, BOOTCONFIG_MAGIC_LEN) < 0)
@@ -198,7 +206,7 @@ static int load_xbc_from_initrd(int fd, char **buf)
 	if (memcmp(magic, BOOTCONFIG_MAGIC, BOOTCONFIG_MAGIC_LEN) != 0)
 		return 0;
 
-	if (lseek(fd, -(8 + BOOTCONFIG_MAGIC_LEN), SEEK_END) < 0)
+	if (lseek(fd, -(off_t)BOOTCONFIG_FOOTER_SIZE, SEEK_END) < 0)
 		return pr_errno("Failed to lseek for size", -errno);
 
 	if (read(fd, &size, sizeof(uint32_t)) < 0)
@@ -210,12 +218,12 @@ static int load_xbc_from_initrd(int fd, char **buf)
 	csum = le32toh(csum);
 
 	/* Wrong size error  */
-	if (stat.st_size < size + 8 + BOOTCONFIG_MAGIC_LEN) {
+	if (stat.st_size < size + BOOTCONFIG_FOOTER_SIZE) {
 		pr_err("bootconfig size is too big\n");
 		return -E2BIG;
 	}
 
-	if (lseek(fd, stat.st_size - (size + 8 + BOOTCONFIG_MAGIC_LEN),
+	if (lseek(fd, stat.st_size - (size + BOOTCONFIG_FOOTER_SIZE),
 		  SEEK_SET) < 0)
 		return pr_errno("Failed to lseek", -errno);
 
@@ -278,7 +286,41 @@ static int init_xbc_with_error(char *buf, int len)
 	return ret;
 }
 
-static int show_xbc(const char *path, bool list)
+static int show_xbc_kernel_cmdline(void)
+{
+	struct xbc_node *root;
+	char *buf = NULL;
+	int len, ret;
+
+	root = xbc_find_node("kernel");
+	if (!root)
+		return 0;	/* no kernel.* keys: emit empty output */
+
+	len = xbc_snprint_cmdline(NULL, 0, root);
+	if (len < 0) {
+		pr_err("Failed to size cmdline output: %d\n", len);
+		return len;
+	}
+	if (len == 0)
+		return 0;
+
+	buf = malloc(len + 1);
+	if (!buf)
+		return -ENOMEM;
+
+	ret = xbc_snprint_cmdline(buf, len + 1, root);
+	if (ret < 0) {
+		pr_err("Failed to render cmdline output: %d\n", ret);
+		free(buf);
+		return ret;
+	}
+
+	fputs(buf, stdout);
+	free(buf);
+	return 0;
+}
+
+static int show_xbc(const char *path, bool list, bool render_cmdline)
 {
 	int ret, fd;
 	char *buf = NULL;
@@ -314,11 +356,14 @@ static int show_xbc(const char *path, bool list)
 		if (init_xbc_with_error(buf, ret) < 0)
 			goto out;
 	}
-	if (list)
+	if (render_cmdline)
+		ret = show_xbc_kernel_cmdline();
+	else if (list)
 		xbc_show_list();
 	else
 		xbc_show_compact_tree();
-	ret = 0;
+	if (ret > 0)
+		ret = 0;
 out:
 	free(buf);
 
@@ -346,7 +391,7 @@ static int delete_xbc(const char *path)
 		ret = fstat(fd, &stat);
 		if (!ret)
 			ret = ftruncate(fd, stat.st_size
-					- size - 8 - BOOTCONFIG_MAGIC_LEN);
+					- size - BOOTCONFIG_FOOTER_SIZE);
 		if (ret)
 			ret = -errno;
 	} /* Ignore if there is no boot config in initrd */
@@ -359,7 +404,12 @@ static int delete_xbc(const char *path)
 
 static int apply_xbc(const char *path, const char *xbc_path)
 {
-	char *buf, *data, *p;
+	struct {
+		uint32_t size;
+		uint32_t csum;
+		char magic[BOOTCONFIG_MAGIC_LEN];
+	} footer;
+	char *buf, *data;
 	size_t total_size;
 	struct stat stat;
 	const char *msg;
@@ -376,10 +426,11 @@ static int apply_xbc(const char *path, const char *xbc_path)
 	csum = xbc_calc_checksum(buf, size);
 
 	/* Backup the bootconfig data */
-	data = calloc(size + BOOTCONFIG_ALIGN +
-		      sizeof(uint32_t) + sizeof(uint32_t) + BOOTCONFIG_MAGIC_LEN, 1);
-	if (!data)
+	data = calloc(size + BOOTCONFIG_ALIGN + BOOTCONFIG_FOOTER_SIZE, 1);
+	if (!data) {
+		free(buf);
 		return -ENOMEM;
+	}
 	memcpy(data, buf, size);
 
 	/* Check the data format */
@@ -425,22 +476,18 @@ static int apply_xbc(const char *path, const char *xbc_path)
 	}
 
 	/* To align up the total size to BOOTCONFIG_ALIGN, get padding size */
-	total_size = stat.st_size + size + sizeof(uint32_t) * 2 + BOOTCONFIG_MAGIC_LEN;
+	total_size = stat.st_size + size + BOOTCONFIG_FOOTER_SIZE;
 	pad = ((total_size + BOOTCONFIG_ALIGN - 1) & (~BOOTCONFIG_ALIGN_MASK)) - total_size;
 	size += pad;
 
 	/* Add a footer */
-	p = data + size;
-	*(uint32_t *)p = htole32(size);
-	p += sizeof(uint32_t);
+	footer.size = htole32(size);
+	footer.csum = htole32(csum);
+	memcpy(footer.magic, BOOTCONFIG_MAGIC, BOOTCONFIG_MAGIC_LEN);
+	static_assert(sizeof(footer) == BOOTCONFIG_FOOTER_SIZE);
+	memcpy(data + size, &footer, BOOTCONFIG_FOOTER_SIZE);
 
-	*(uint32_t *)p = htole32(csum);
-	p += sizeof(uint32_t);
-
-	memcpy(p, BOOTCONFIG_MAGIC, BOOTCONFIG_MAGIC_LEN);
-	p += BOOTCONFIG_MAGIC_LEN;
-
-	total_size = p - data;
+	total_size = size + BOOTCONFIG_FOOTER_SIZE;
 
 	ret = write(fd, data, total_size);
 	if (ret < total_size) {
@@ -478,7 +525,10 @@ static int usage(void)
 		" Options:\n"
 		"		-a <config>: Apply boot config to initrd\n"
 		"		-d : Delete boot config file from initrd\n"
-		"		-l : list boot config in initrd or file\n\n"
+		"		-l : list boot config in initrd or file\n"
+		"		-C : render the kernel.* subtree as a flat cmdline\n"
+		"		     string (suitable for embedding in a kernel image)\n"
+		"		     and print it to stdout\n\n"
 		" If no option is given, show the bootconfig in the given file.\n");
 	return -1;
 }
@@ -487,10 +537,11 @@ int main(int argc, char **argv)
 {
 	char *path = NULL;
 	char *apply = NULL;
+	bool render_cmdline = false;
 	bool delete = false, list = false;
 	int opt;
 
-	while ((opt = getopt(argc, argv, "hda:l")) != -1) {
+	while ((opt = getopt(argc, argv, "hda:lC")) != -1) {
 		switch (opt) {
 		case 'd':
 			delete = true;
@@ -501,14 +552,17 @@ int main(int argc, char **argv)
 		case 'l':
 			list = true;
 			break;
+		case 'C':
+			render_cmdline = true;
+			break;
 		case 'h':
 		default:
 			return usage();
 		}
 	}
 
-	if ((apply && delete) || (delete && list) || (apply && list)) {
-		pr_err("Error: You can give one of -a, -d or -l at once.\n");
+	if ((!!apply + !!delete + !!list + !!render_cmdline) > 1) {
+		pr_err("Error: You can give one of -a, -d, -l or -C at once.\n");
 		return usage();
 	}
 
@@ -524,5 +578,5 @@ int main(int argc, char **argv)
 	else if (delete)
 		return delete_xbc(path);
 
-	return show_xbc(path, list);
+	return show_xbc(path, list, render_cmdline);
 }

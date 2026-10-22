@@ -8,6 +8,8 @@
  * This code is licenced under the GPL.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/mutex.h>
 #include <linux/module.h>
 #include <linux/sched.h>

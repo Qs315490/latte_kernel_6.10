@@ -12,6 +12,8 @@
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/sysfs.h>
 #include <linux/irq.h>
 #include <linux/export.h>
 #include <linux/init.h>
@@ -120,7 +122,7 @@ static ssize_t devspec_show(struct device *dev,
 	else if (!strcmp(vdev->type, "vdc-port"))
 		str = "vdisk";
 
-	return sprintf(buf, "%s\n", str);
+	return sysfs_emit(buf, "%s\n", str);
 }
 static DEVICE_ATTR_RO(devspec);
 
@@ -128,7 +130,7 @@ static ssize_t type_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct vio_dev *vdev = to_vio_dev(dev);
-	return sprintf(buf, "%s\n", vdev->type);
+	return sysfs_emit(buf, "%s\n", vdev->type);
 }
 static DEVICE_ATTR_RO(type);
 
@@ -137,7 +139,7 @@ static ssize_t modalias_show(struct device *dev, struct device_attribute *attr,
 {
 	const struct vio_dev *vdev = to_vio_dev(dev);
 
-	return sprintf(buf, "vio:T%sS%s\n", vdev->type, vdev->compat);
+	return sysfs_emit(buf, "vio:T%sS%s\n", vdev->type, vdev->compat);
 }
 static DEVICE_ATTR_RO(modalias);
 
@@ -191,7 +193,7 @@ show_pciobppath_attr(struct device *dev, struct device_attribute *attr,
 	vdev = to_vio_dev(dev);
 	dp = vdev->dp;
 
-	return scnprintf(buf, PAGE_SIZE, "%pOF\n", dp);
+	return sysfs_emit(buf, "%pOF\n", dp);
 }
 
 static DEVICE_ATTR(obppath, S_IRUSR | S_IRGRP | S_IROTH,
@@ -324,7 +326,7 @@ static struct vio_dev *vio_create_one(struct mdesc_handle *hp, u64 mp,
 		return NULL;
 	}
 
-	vdev = kzalloc(sizeof(*vdev), GFP_KERNEL);
+	vdev = kzalloc_obj(*vdev);
 	if (!vdev) {
 		printk(KERN_ERR "VIO: Could not allocate vio_dev\n");
 		return NULL;
@@ -378,8 +380,7 @@ static struct vio_dev *vio_create_one(struct mdesc_handle *hp, u64 mp,
 	 * the parent doesn't require the MD node info.
 	 */
 	if (node_name != NULL) {
-		(void) snprintf(vdev->node_name, VIO_MAX_NAME_LEN, "%s",
-				node_name);
+		strscpy(vdev->node_name, node_name);
 
 		err = mdesc_get_node_info(hp, mp, node_name,
 					  &vdev->md_node_info);

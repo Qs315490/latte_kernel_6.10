@@ -39,6 +39,8 @@
 
 #include "ast_reg.h"
 
+struct ast_vbios_enhtable;
+
 #define DRIVER_AUTHOR		"Dave Airlie"
 
 #define DRIVER_NAME		"ast"
@@ -96,13 +98,15 @@ enum ast_config_mode {
 	ast_use_defaults
 };
 
-#define AST_DRAM_512Mx16 0
-#define AST_DRAM_1Gx16   1
-#define AST_DRAM_512Mx32 2
-#define AST_DRAM_1Gx32   3
-#define AST_DRAM_2Gx16   6
-#define AST_DRAM_4Gx16   7
-#define AST_DRAM_8Gx16   8
+enum ast_dram_layout {
+	AST_DRAM_512Mx16 = 0,
+	AST_DRAM_1Gx16 = 1,
+	AST_DRAM_512Mx32 = 2,
+	AST_DRAM_1Gx32 = 3,
+	AST_DRAM_2Gx16 = 6,
+	AST_DRAM_4Gx16 = 7,
+	AST_DRAM_8Gx16 = 8,
+};
 
 /*
  * Hardware cursor
@@ -110,18 +114,8 @@ enum ast_config_mode {
 
 #define AST_MAX_HWC_WIDTH	64
 #define AST_MAX_HWC_HEIGHT	64
-
-#define AST_HWC_SIZE		(AST_MAX_HWC_WIDTH * AST_MAX_HWC_HEIGHT * 2)
-#define AST_HWC_SIGNATURE_SIZE	32
-
-/* define for signature structure */
-#define AST_HWC_SIGNATURE_CHECKSUM	0x00
-#define AST_HWC_SIGNATURE_SizeX		0x04
-#define AST_HWC_SIGNATURE_SizeY		0x08
-#define AST_HWC_SIGNATURE_X		0x0C
-#define AST_HWC_SIGNATURE_Y		0x10
-#define AST_HWC_SIGNATURE_HOTSPOTX	0x14
-#define AST_HWC_SIGNATURE_HOTSPOTY	0x18
+#define AST_HWC_PITCH		(AST_MAX_HWC_WIDTH * SZ_2)
+#define AST_HWC_SIZE		(AST_MAX_HWC_HEIGHT * AST_HWC_PITCH)
 
 /*
  * Planes
@@ -130,7 +124,6 @@ enum ast_config_mode {
 struct ast_plane {
 	struct drm_plane base;
 
-	void __iomem *vaddr;
 	u64 offset;
 	unsigned long size;
 };
@@ -138,6 +131,17 @@ struct ast_plane {
 static inline struct ast_plane *to_ast_plane(struct drm_plane *plane)
 {
 	return container_of(plane, struct ast_plane, base);
+}
+
+struct ast_cursor_plane {
+	struct ast_plane base;
+
+	u8 argb4444[AST_HWC_SIZE];
+};
+
+static inline struct ast_cursor_plane *to_ast_cursor_plane(struct drm_plane *plane)
+{
+	return container_of(to_ast_plane(plane), struct ast_cursor_plane, base);
 }
 
 /*
@@ -160,8 +164,30 @@ to_ast_connector(struct drm_connector *connector)
  * Device
  */
 
+struct ast_device_quirks {
+	/*
+	 * CRTC memory request threshold
+	 */
+	unsigned char crtc_mem_req_threshold_low;
+	unsigned char crtc_mem_req_threshold_high;
+
+	/*
+	 * Adjust hsync values to load next scanline early. Signalled
+	 * by AST2500PreCatchCRT in VBIOS mode flags.
+	 */
+	bool crtc_hsync_precatch_needed;
+
+	/*
+	 * Workaround for modes with HSync Time that is not a multiple
+	 * of 8 (e.g., 1920x1080@60Hz, HSync +44 pixels).
+	 */
+	bool crtc_hsync_add4_needed;
+};
+
 struct ast_device {
 	struct drm_device base;
+
+	const struct ast_device_quirks *quirks;
 
 	void __iomem *regs;
 	void __iomem *ioregs;
@@ -170,21 +196,18 @@ struct ast_device {
 	enum ast_config_mode config_mode;
 	enum ast_chip chip;
 
-	uint32_t dram_bus_width;
-	uint32_t dram_type;
-	uint32_t mclk;
+	const struct ast_vbios_dclk_info *dclk_table;
 
 	void __iomem	*vram;
 	unsigned long	vram_base;
 	unsigned long	vram_size;
-	unsigned long	vram_fb_available;
 
 	struct mutex modeset_lock; /* Protects access to modeset I/O registers in ioregs */
 
 	enum ast_tx_chip tx_chip;
 
 	struct ast_plane primary_plane;
-	struct ast_plane cursor_plane;
+	struct ast_cursor_plane cursor_plane;
 	struct drm_crtc crtc;
 	union {
 		struct {
@@ -205,7 +228,9 @@ struct ast_device {
 		} astdp;
 	} output;
 
-	bool support_wide_screen;
+	bool support_wsxga_p; /* 1680x1050 */
+	bool support_fullhd; /* 1920x1080 */
+	bool support_wuxga; /* 1920x1200 */
 
 	u8 *dp501_fw_addr;
 	const struct firmware *dp501_fw;	/* dp501 fw */
@@ -215,14 +240,6 @@ static inline struct ast_device *to_ast_device(struct drm_device *dev)
 {
 	return container_of(dev, struct ast_device, base);
 }
-
-struct drm_device *ast_device_create(struct pci_dev *pdev,
-				     const struct drm_driver *drv,
-				     enum ast_chip chip,
-				     enum ast_config_mode config_mode,
-				     void __iomem *regs,
-				     void __iomem *ioregs,
-				     bool need_post);
 
 static inline unsigned long __ast_gen(struct ast_device *ast)
 {
@@ -242,24 +259,18 @@ static inline bool __ast_gen_is_eq(struct ast_device *ast, unsigned long gen)
 #define IS_AST_GEN6(__ast)	__ast_gen_is_eq(__ast, 6)
 #define IS_AST_GEN7(__ast)	__ast_gen_is_eq(__ast, 7)
 
+/*
+ * MMIO access
+ */
+
 static inline u8 __ast_read8(const void __iomem *addr, u32 reg)
 {
 	return ioread8(addr + reg);
 }
 
-static inline u32 __ast_read32(const void __iomem *addr, u32 reg)
-{
-	return ioread32(addr + reg);
-}
-
 static inline void __ast_write8(void __iomem *addr, u32 reg, u8 val)
 {
 	iowrite8(val, addr + reg);
-}
-
-static inline void __ast_write32(void __iomem *addr, u32 reg, u32 val)
-{
-	iowrite32(val, addr + reg);
 }
 
 static inline u8 __ast_read8_i(void __iomem *addr, u32 reg, u8 index)
@@ -281,23 +292,13 @@ static inline void __ast_write8_i(void __iomem *addr, u32 reg, u8 index, u8 val)
 	__ast_write8(addr, reg + 1, val);
 }
 
-static inline void __ast_write8_i_masked(void __iomem *addr, u32 reg, u8 index, u8 read_mask,
+static inline void __ast_write8_i_masked(void __iomem *addr, u32 reg, u8 index, u8 preserve_mask,
 					 u8 val)
 {
-	u8 tmp = __ast_read8_i_masked(addr, reg, index, read_mask);
+	u8 tmp = __ast_read8_i_masked(addr, reg, index, preserve_mask);
 
-	tmp |= val;
-	__ast_write8_i(addr, reg, index, tmp);
-}
-
-static inline u32 ast_read32(struct ast_device *ast, u32 reg)
-{
-	return __ast_read32(ast->regs, reg);
-}
-
-static inline void ast_write32(struct ast_device *ast, u32 reg, u32 val)
-{
-	__ast_write32(ast->regs, reg, val);
+	val &= ~preserve_mask;
+	__ast_write8_i(addr, reg, index, tmp | val);
 }
 
 static inline u8 ast_io_read8(struct ast_device *ast, u32 reg)
@@ -332,13 +333,39 @@ static inline void ast_set_index_reg_mask(struct ast_device *ast, u32 base, u8 i
 	__ast_write8_i_masked(ast->ioregs, base, index, preserve_mask, val);
 }
 
-#define AST_VIDMEM_SIZE_8M    0x00800000
-#define AST_VIDMEM_SIZE_16M   0x01000000
-#define AST_VIDMEM_SIZE_32M   0x02000000
-#define AST_VIDMEM_SIZE_64M   0x04000000
-#define AST_VIDMEM_SIZE_128M  0x08000000
+/*
+ * Register access
+ */
 
-#define AST_VIDMEM_DEFAULT_SIZE AST_VIDMEM_SIZE_8M
+static inline u32 __ast_read32(const void __iomem *addr, u32 reg)
+{
+	return ioread32(addr + reg);
+}
+
+static inline void __ast_write32(void __iomem *addr, u32 reg, u32 val)
+{
+	iowrite32(val, addr + reg);
+}
+
+static inline u32 ast_read32(struct ast_device *ast, u32 reg)
+{
+	return __ast_read32(ast->regs, reg);
+}
+
+static inline void ast_write32(struct ast_device *ast, u32 reg, u32 val)
+{
+	__ast_write32(ast->regs, reg, val);
+}
+
+u32 __ast_mindwm(void __iomem *regs, u32 r);
+void __ast_moutdwm(void __iomem *regs, u32 r, u32 v);
+u32 ast_mindwm(struct ast_device *ast, u32 r);
+void ast_moutdwm(struct ast_device *ast, u32 r, u32 v);
+void ast_moutdwm_poll(struct ast_device *ast, u32 r, u32 v, u32 res);
+
+/*
+ * VBIOS
+ */
 
 struct ast_vbios_stdtable {
 	u8 misc;
@@ -348,31 +375,10 @@ struct ast_vbios_stdtable {
 	u8 gr[9];
 };
 
-struct ast_vbios_enhtable {
-	u32 ht;
-	u32 hde;
-	u32 hfp;
-	u32 hsync;
-	u32 vt;
-	u32 vde;
-	u32 vfp;
-	u32 vsync;
-	u32 dclk_index;
-	u32 flags;
-	u32 refresh_rate;
-	u32 refresh_rate_index;
-	u32 mode_id;
-};
-
 struct ast_vbios_dclk_info {
 	u8 param1;
 	u8 param2;
 	u8 param3;
-};
-
-struct ast_vbios_mode_info {
-	const struct ast_vbios_stdtable *std_table;
-	const struct ast_vbios_enhtable *enh_table;
 };
 
 struct ast_crtc_state {
@@ -381,12 +387,11 @@ struct ast_crtc_state {
 	/* Last known format of primary plane */
 	const struct drm_format_info *format;
 
-	struct ast_vbios_mode_info vbios_mode_info;
+	const struct ast_vbios_stdtable *std_table;
+	const struct ast_vbios_enhtable *vmode;
 };
 
 #define to_ast_crtc_state(state) container_of(state, struct ast_crtc_state, base)
-
-int ast_mode_config_init(struct ast_device *ast);
 
 #define AST_MM_ALIGN_SHIFT 4
 #define AST_MM_ALIGN_MASK ((1 << AST_MM_ALIGN_SHIFT) - 1)
@@ -444,14 +449,99 @@ int ast_mode_config_init(struct ast_device *ast);
 
 int ast_mm_init(struct ast_device *ast);
 
+/* ast_drv.c */
+void ast_device_init(struct ast_device *ast,
+		     enum ast_chip chip,
+		     enum ast_config_mode config_mode,
+		     void __iomem *regs,
+		     void __iomem *ioregs,
+		     const struct ast_device_quirks *quirks);
+void __ast_device_set_tx_chip(struct ast_device *ast, enum ast_tx_chip tx_chip);
+
+/* ast_2000.c */
+int ast_2000_post(struct ast_device *ast);
+extern const struct ast_vbios_dclk_info ast_2000_dclk_table[];
+void ast_2000_detect_tx_chip(struct ast_device *ast, bool need_post);
+struct drm_device *ast_2000_device_create(struct pci_dev *pdev,
+					  const struct drm_driver *drv,
+					  enum ast_chip chip,
+					  enum ast_config_mode config_mode,
+					  void __iomem *regs,
+					  void __iomem *ioregs,
+					  bool need_post);
+
+/* ast_2100.c */
+int ast_2100_post(struct ast_device *ast);
+bool __ast_2100_detect_wsxga_p(struct ast_device *ast);
+bool __ast_2100_detect_wuxga(struct ast_device *ast);
+struct drm_device *ast_2100_device_create(struct pci_dev *pdev,
+					  const struct drm_driver *drv,
+					  enum ast_chip chip,
+					  enum ast_config_mode config_mode,
+					  void __iomem *regs,
+					  void __iomem *ioregs,
+					  bool need_post);
+
+/* ast_2200.c */
+struct drm_device *ast_2200_device_create(struct pci_dev *pdev,
+					  const struct drm_driver *drv,
+					  enum ast_chip chip,
+					  enum ast_config_mode config_mode,
+					  void __iomem *regs,
+					  void __iomem *ioregs,
+					  bool need_post);
+
+/* ast_2300.c */
+int ast_2300_post(struct ast_device *ast);
+void ast_2300_detect_tx_chip(struct ast_device *ast);
+struct drm_device *ast_2300_device_create(struct pci_dev *pdev,
+					  const struct drm_driver *drv,
+					  enum ast_chip chip,
+					  enum ast_config_mode config_mode,
+					  void __iomem *regs,
+					  void __iomem *ioregs,
+					  bool need_post);
+
+/* ast_2400.c */
+struct drm_device *ast_2400_device_create(struct pci_dev *pdev,
+					  const struct drm_driver *drv,
+					  enum ast_chip chip,
+					  enum ast_config_mode config_mode,
+					  void __iomem *regs,
+					  void __iomem *ioregs,
+					  bool need_post);
+
+/* ast_2500.c */
+void ast_2500_patch_ahb(void __iomem *regs);
+int ast_2500_post(struct ast_device *ast);
+extern const struct ast_vbios_dclk_info ast_2500_dclk_table[];
+struct drm_device *ast_2500_device_create(struct pci_dev *pdev,
+					  const struct drm_driver *drv,
+					  enum ast_chip chip,
+					  enum ast_config_mode config_mode,
+					  void __iomem *regs,
+					  void __iomem *ioregs,
+					  bool need_post);
+
+/* ast_2600.c */
+int ast_2600_post(struct ast_device *ast);
+struct drm_device *ast_2600_device_create(struct pci_dev *pdev,
+					  const struct drm_driver *drv,
+					  enum ast_chip chip,
+					  enum ast_config_mode config_mode,
+					  void __iomem *regs,
+					  void __iomem *ioregs,
+					  bool need_post);
+
 /* ast post */
-void ast_post_gpu(struct ast_device *ast);
-u32 ast_mindwm(struct ast_device *ast, u32 r);
-void ast_moutdwm(struct ast_device *ast, u32 r, u32 v);
-void ast_patch_ahb_2500(void __iomem *regs);
+int ast_post_gpu(struct ast_device *ast);
 
 int ast_vga_output_init(struct ast_device *ast);
 int ast_sil164_output_init(struct ast_device *ast);
+
+/* ast_cursor.c */
+long ast_cursor_vram_offset(struct ast_device *ast);
+int ast_cursor_plane_init(struct ast_device *ast);
 
 /* ast dp501 */
 bool ast_backup_fw(struct ast_device *ast, u8 *addr, u32 size);
@@ -461,5 +551,16 @@ int ast_dp501_output_init(struct ast_device *ast);
 /* aspeed DP */
 int ast_dp_launch(struct ast_device *ast);
 int ast_astdp_output_init(struct ast_device *ast);
+
+/* ast_mode.c */
+int ast_mode_config_init(struct ast_device *ast);
+int ast_plane_init(struct drm_device *dev, struct ast_plane *ast_plane,
+		   u64 offset, unsigned long size,
+		   uint32_t possible_crtcs,
+		   const struct drm_plane_funcs *funcs,
+		   const uint32_t *formats, unsigned int format_count,
+		   const uint64_t *format_modifiers,
+		   enum drm_plane_type type);
+void __iomem *ast_plane_vaddr(struct ast_plane *ast);
 
 #endif

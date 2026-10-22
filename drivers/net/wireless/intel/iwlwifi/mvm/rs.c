@@ -2,6 +2,7 @@
 /******************************************************************************
  *
  * Copyright(c) 2005 - 2014, 2018 - 2023 Intel Corporation. All rights reserved.
+ * Copyright(c) 2025 Intel Corporation
  * Copyright(c) 2013 - 2015 Intel Mobile Communications GmbH
  * Copyright(c) 2016 - 2017 Intel Deutschland GmbH
  *****************************************************************************/
@@ -895,7 +896,7 @@ static int rs_rate_from_ucode_rate(const u32 ucode_rate,
 			WARN_ON_ONCE(1);
 		}
 	} else if (ucode_rate & RATE_MCS_VHT_MSK_V1) {
-		nss = FIELD_GET(RATE_MCS_NSS_MSK, ucode_rate) + 1;
+		nss = FIELD_GET(RATE_VHT_MCS_NSS_MSK, ucode_rate) + 1;
 
 		if (nss == 1) {
 			rate->type = LQ_VHT_SISO;
@@ -909,7 +910,7 @@ static int rs_rate_from_ucode_rate(const u32 ucode_rate,
 			WARN_ON_ONCE(1);
 		}
 	} else if (ucode_rate & RATE_MCS_HE_MSK_V1) {
-		nss = FIELD_GET(RATE_MCS_NSS_MSK, ucode_rate) + 1;
+		nss = FIELD_GET(RATE_VHT_MCS_NSS_MSK, ucode_rate) + 1;
 
 		if (nss == 1) {
 			rate->type = LQ_HE_SISO;
@@ -1783,7 +1784,7 @@ static enum rs_action rs_get_rate_action(struct iwl_mvm *mvm,
 	if ((high_tpt != IWL_INVALID_VALUE) &&
 	    (high_tpt > current_tpt)) {
 		IWL_DEBUG_RATE(mvm,
-			       "Higher rate is better. Increate rate\n");
+			       "Higher rate is better. Increase rate\n");
 		return RS_ACTION_UPSCALE;
 	}
 
@@ -2696,8 +2697,10 @@ static void rs_drv_get_rate(void *mvm_r, struct ieee80211_sta *sta,
 	lq_sta = mvm_sta;
 
 	spin_lock_bh(&lq_sta->pers.lock);
-	iwl_mvm_hwrate_to_tx_rate_v1(lq_sta->last_rate_n_flags,
-				     info->band, &info->control.rates[0]);
+	iwl_mvm_hwrate_to_tx_rate(iwl_mvm_v3_rate_from_fw(
+					cpu_to_le32(lq_sta->last_rate_n_flags),
+					1),
+				  info->band, &info->control.rates[0]);
 	info->control.rates[0].count = 1;
 
 	/* Report the optimal rate based on rssi and STA caps if we haven't
@@ -2707,8 +2710,12 @@ static void rs_drv_get_rate(void *mvm_r, struct ieee80211_sta *sta,
 		optimal_rate = rs_get_optimal_rate(mvm, lq_sta);
 		last_ucode_rate = ucode_rate_from_rs_rate(mvm,
 							  optimal_rate);
-		iwl_mvm_hwrate_to_tx_rate_v1(last_ucode_rate, info->band,
-					     &txrc->reported_rate);
+		last_ucode_rate =
+			iwl_mvm_v3_rate_from_fw(cpu_to_le32(last_ucode_rate),
+						1);
+		iwl_mvm_hwrate_to_tx_rate(last_ucode_rate, info->band,
+					  &txrc->reported_rate);
+		txrc->reported_rate.count = 1;
 	}
 	spin_unlock_bh(&lq_sta->pers.lock);
 }
@@ -2813,11 +2820,11 @@ static void rs_ht_init(struct iwl_mvm *mvm,
 	lq_sta->active_mimo2_rate &= ~((u16)0x2);
 	lq_sta->active_mimo2_rate <<= IWL_FIRST_OFDM_RATE;
 
-	if (mvm->cfg->ht_params->ldpc &&
+	if (mvm->cfg->ht_params.ldpc &&
 	    (ht_cap->cap & IEEE80211_HT_CAP_LDPC_CODING))
 		lq_sta->ldpc = true;
 
-	if (mvm->cfg->ht_params->stbc &&
+	if (mvm->cfg->ht_params.stbc &&
 	    (num_of_ant(iwl_mvm_get_valid_tx_ant(mvm)) > 1) &&
 	    (ht_cap->cap & IEEE80211_HT_CAP_RX_STBC))
 		lq_sta->stbc_capable = true;
@@ -2832,11 +2839,11 @@ static void rs_vht_init(struct iwl_mvm *mvm,
 {
 	rs_vht_set_enabled_rates(sta, vht_cap, lq_sta);
 
-	if (mvm->cfg->ht_params->ldpc &&
+	if (mvm->cfg->ht_params.ldpc &&
 	    (vht_cap->cap & IEEE80211_VHT_CAP_RXLDPC))
 		lq_sta->ldpc = true;
 
-	if (mvm->cfg->ht_params->stbc &&
+	if (mvm->cfg->ht_params.stbc &&
 	    (num_of_ant(iwl_mvm_get_valid_tx_ant(mvm)) > 1) &&
 	    (vht_cap->cap & IEEE80211_VHT_CAP_RXSTBC_MASK))
 		lq_sta->stbc_capable = true;
@@ -2887,10 +2894,10 @@ void iwl_mvm_update_frame_stats(struct iwl_mvm *mvm, u32 rate, bool agg)
 
 	if (rate & RATE_MCS_HT_MSK_V1) {
 		mvm->drv_rx_stats.ht_frames++;
-		nss = ((rate & RATE_HT_MCS_NSS_MSK_V1) >> RATE_HT_MCS_NSS_POS_V1) + 1;
+		nss = FIELD_GET(RATE_HT_MCS_MIMO2_MSK, rate) + 1;
 	} else if (rate & RATE_MCS_VHT_MSK_V1) {
 		mvm->drv_rx_stats.vht_frames++;
-		nss = FIELD_GET(RATE_MCS_NSS_MSK, rate) + 1;
+		nss = FIELD_GET(RATE_VHT_MCS_NSS_MSK, rate) + 1;
 	} else {
 		mvm->drv_rx_stats.legacy_frames++;
 	}
@@ -3304,7 +3311,7 @@ static void rs_build_rates_table_from_fixed(struct iwl_mvm *mvm,
 	if (num_of_ant(ant) == 1)
 		lq_cmd->single_stream_ant_msk = ant;
 
-	if (!mvm->trans->trans_cfg->gen2)
+	if (!mvm->trans->mac_cfg->gen2)
 		lq_cmd->agg_frame_cnt_limit = LINK_QUAL_AGG_FRAME_LIMIT_DEF;
 	else
 		lq_cmd->agg_frame_cnt_limit =
@@ -3673,16 +3680,15 @@ int rs_pretty_print_rate_v1(char *buf, int bufsz, const u32 rate)
 	if (rate & RATE_MCS_VHT_MSK_V1) {
 		type = "VHT";
 		mcs = rate & RATE_VHT_MCS_RATE_CODE_MSK;
-		nss = FIELD_GET(RATE_MCS_NSS_MSK, rate) + 1;
+		nss = FIELD_GET(RATE_VHT_MCS_NSS_MSK, rate) + 1;
 	} else if (rate & RATE_MCS_HT_MSK_V1) {
 		type = "HT";
 		mcs = rate & RATE_HT_MCS_INDEX_MSK_V1;
-		nss = ((rate & RATE_HT_MCS_NSS_MSK_V1)
-		       >> RATE_HT_MCS_NSS_POS_V1) + 1;
+		nss = FIELD_GET(RATE_HT_MCS_MIMO2_MSK, rate) + 1;
 	} else if (rate & RATE_MCS_HE_MSK_V1) {
 		type = "HE";
 		mcs = rate & RATE_VHT_MCS_RATE_CODE_MSK;
-		nss = FIELD_GET(RATE_MCS_NSS_MSK, rate) + 1;
+		nss = FIELD_GET(RATE_VHT_MCS_NSS_MSK, rate) + 1;
 	} else {
 		type = "Unknown"; /* shouldn't happen */
 	}

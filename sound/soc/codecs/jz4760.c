@@ -163,7 +163,6 @@ struct jz_codec {
 	struct device *dev;
 	struct regmap *regmap;
 	void __iomem *base;
-	struct clk *clk;
 };
 
 static int jz4760_codec_set_bias_level(struct snd_soc_component *codec,
@@ -197,7 +196,7 @@ static int jz4760_codec_startup(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
 	struct snd_soc_component *codec = dai->component;
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(codec);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(codec);
 	int ret = 0;
 
 	/*
@@ -214,7 +213,7 @@ static void jz4760_codec_shutdown(struct snd_pcm_substream *substream,
 				  struct snd_soc_dai *dai)
 {
 	struct snd_soc_component *codec = dai->component;
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(codec);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(codec);
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 		snd_soc_dapm_disable_pin(dapm, "SYSCLK");
@@ -225,6 +224,7 @@ static int jz4760_codec_pcm_trigger(struct snd_pcm_substream *substream,
 				    int cmd, struct snd_soc_dai *dai)
 {
 	struct snd_soc_component *codec = dai->component;
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(codec);
 	int ret = 0;
 
 	switch (cmd) {
@@ -232,7 +232,7 @@ static int jz4760_codec_pcm_trigger(struct snd_pcm_substream *substream,
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 		if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK)
-			snd_soc_component_force_bias_level(codec, SND_SOC_BIAS_ON);
+			snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_ON);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
@@ -314,37 +314,13 @@ static const struct snd_kcontrol_new jz4760_codec_snd_controls[] = {
 };
 
 static const struct snd_kcontrol_new jz4760_codec_pcm_playback_controls[] = {
-	{
-		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Volume",
-		.info = snd_soc_info_volsw,
-		.access = SNDRV_CTL_ELEM_ACCESS_TLV_READ
-			| SNDRV_CTL_ELEM_ACCESS_READWRITE,
-		.tlv.p = dac_tlv,
-		.get = snd_soc_dapm_get_volsw,
-		.put = snd_soc_dapm_put_volsw,
-		.private_value = SOC_DOUBLE_R_VALUE(JZ4760_CODEC_REG_GCR6,
-						    JZ4760_CODEC_REG_GCR5,
-						    REG_GCR_GAIN_OFFSET,
-						    REG_GCR_GAIN_MAX, 1),
-	},
+	SOC_DAPM_DOUBLE_R_TLV("Volume", JZ4760_CODEC_REG_GCR6, JZ4760_CODEC_REG_GCR5,
+			      REG_GCR_GAIN_OFFSET, REG_GCR_GAIN_MAX, 1, dac_tlv),
 };
 
 static const struct snd_kcontrol_new jz4760_codec_hp_playback_controls[] = {
-	{
-		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Volume",
-		.info = snd_soc_info_volsw,
-		.access = SNDRV_CTL_ELEM_ACCESS_TLV_READ
-			| SNDRV_CTL_ELEM_ACCESS_READWRITE,
-		.tlv.p = out_tlv,
-		.get = snd_soc_dapm_get_volsw,
-		.put = snd_soc_dapm_put_volsw,
-		.private_value = SOC_DOUBLE_R_VALUE(JZ4760_CODEC_REG_GCR2,
-						    JZ4760_CODEC_REG_GCR1,
-						    REG_GCR_GAIN_OFFSET,
-						    REG_GCR_GAIN_MAX, 1),
-	},
+	SOC_DAPM_DOUBLE_R_TLV("Volume", JZ4760_CODEC_REG_GCR2, JZ4760_CODEC_REG_GCR1,
+			      REG_GCR_GAIN_OFFSET, REG_GCR_GAIN_MAX, 1, out_tlv),
 };
 
 static int hpout_event(struct snd_soc_dapm_widget *w,
@@ -625,25 +601,13 @@ static void jz4760_codec_codec_init_regs(struct snd_soc_component *codec)
 
 static int jz4760_codec_codec_probe(struct snd_soc_component *codec)
 {
-	struct jz_codec *jz_codec = snd_soc_component_get_drvdata(codec);
-
-	clk_prepare_enable(jz_codec->clk);
-
 	jz4760_codec_codec_init_regs(codec);
 
 	return 0;
 }
 
-static void jz4760_codec_codec_remove(struct snd_soc_component *codec)
-{
-	struct jz_codec *jz_codec = snd_soc_component_get_drvdata(codec);
-
-	clk_disable_unprepare(jz_codec->clk);
-}
-
 static const struct snd_soc_component_driver jz4760_codec_soc_codec_dev = {
 	.probe			= jz4760_codec_codec_probe,
-	.remove			= jz4760_codec_codec_remove,
 	.set_bias_level		= jz4760_codec_set_bias_level,
 	.controls		= jz4760_codec_snd_controls,
 	.num_controls		= ARRAY_SIZE(jz4760_codec_snd_controls),
@@ -841,6 +805,7 @@ static int jz4760_codec_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct jz_codec *codec;
+	struct clk *clk;
 	int ret;
 
 	codec = devm_kzalloc(dev, sizeof(*codec), GFP_KERNEL);
@@ -858,9 +823,9 @@ static int jz4760_codec_probe(struct platform_device *pdev)
 	if (IS_ERR(codec->regmap))
 		return PTR_ERR(codec->regmap);
 
-	codec->clk = devm_clk_get(dev, "aic");
-	if (IS_ERR(codec->clk))
-		return PTR_ERR(codec->clk);
+	clk = devm_clk_get_enabled(dev, "aic");
+	if (IS_ERR(clk))
+		return PTR_ERR(clk);
 
 	platform_set_drvdata(pdev, codec);
 

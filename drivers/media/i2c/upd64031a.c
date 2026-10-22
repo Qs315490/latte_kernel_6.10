@@ -4,7 +4,7 @@
  *
  * 2003 by T.Adachi <tadachi@tadachi-net.com>
  * 2003 by Takeru KOMORIYA <komoriya@paken.org>
- * 2006 by Hans Verkuil <hverkuil@xs4all.nl>
+ * 2006 by Hans Verkuil <hverkuil@kernel.org>
  */
 
 
@@ -219,7 +219,7 @@ static void upd64031a_remove(struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id upd64031a_id[] = {
-	{ "upd64031a" },
+	{ .name = "upd64031a" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, upd64031a_id);

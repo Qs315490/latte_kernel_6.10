@@ -2,6 +2,7 @@
 /* Do not edit directly, auto-generated from: */
 /*	Documentation/netlink/specs/netdev.yaml */
 /* YNL-GEN kernel source */
+/* To regenerate run: tools/net/ynl/ynl-regen.sh */
 
 #include <net/netlink.h>
 #include <net/genetlink.h>
@@ -9,7 +10,7 @@
 #include "netdev-genl-gen.h"
 
 #include <uapi/linux/netdev.h>
-#include <linux/list.h>
+#include <net/netdev_netlink.h>
 
 /* Integer value ranges */
 static const struct netlink_range_validation netdev_a_page_pool_id_range = {
@@ -27,6 +28,12 @@ static const struct netlink_range_validation netdev_a_napi_defer_hard_irqs_range
 };
 
 /* Common nested types */
+const struct nla_policy netdev_lease_nl_policy[NETDEV_A_LEASE_NETNS_ID + 1] = {
+	[NETDEV_A_LEASE_IFINDEX] = NLA_POLICY_MIN(NLA_U32, 1),
+	[NETDEV_A_LEASE_QUEUE] = NLA_POLICY_NESTED(netdev_queue_id_nl_policy),
+	[NETDEV_A_LEASE_NETNS_ID] = NLA_POLICY_MIN(NLA_S32, 0),
+};
+
 const struct nla_policy netdev_page_pool_info_nl_policy[NETDEV_A_PAGE_POOL_IFINDEX + 1] = {
 	[NETDEV_A_PAGE_POOL_ID] = NLA_POLICY_FULL_RANGE(NLA_UINT, &netdev_a_page_pool_id_range),
 	[NETDEV_A_PAGE_POOL_IFINDEX] = NLA_POLICY_FULL_RANGE(NLA_U32, &netdev_a_page_pool_ifindex_range),
@@ -44,14 +51,28 @@ static const struct nla_policy netdev_dev_get_nl_policy[NETDEV_A_DEV_IFINDEX + 1
 
 /* NETDEV_CMD_PAGE_POOL_GET - do */
 #ifdef CONFIG_PAGE_POOL
-static const struct nla_policy netdev_page_pool_get_nl_policy[NETDEV_A_PAGE_POOL_ID + 1] = {
+static const struct nla_policy netdev_page_pool_get_do_nl_policy[NETDEV_A_PAGE_POOL_ID + 1] = {
 	[NETDEV_A_PAGE_POOL_ID] = NLA_POLICY_FULL_RANGE(NLA_UINT, &netdev_a_page_pool_id_range),
+};
+#endif /* CONFIG_PAGE_POOL */
+
+/* NETDEV_CMD_PAGE_POOL_GET - dump */
+#ifdef CONFIG_PAGE_POOL
+static const struct nla_policy netdev_page_pool_get_dump_nl_policy[NETDEV_A_PAGE_POOL_IFINDEX + 1] = {
+	[NETDEV_A_PAGE_POOL_IFINDEX] = NLA_POLICY_FULL_RANGE(NLA_U32, &netdev_a_page_pool_ifindex_range),
 };
 #endif /* CONFIG_PAGE_POOL */
 
 /* NETDEV_CMD_PAGE_POOL_STATS_GET - do */
 #ifdef CONFIG_PAGE_POOL_STATS
-static const struct nla_policy netdev_page_pool_stats_get_nl_policy[NETDEV_A_PAGE_POOL_STATS_INFO + 1] = {
+static const struct nla_policy netdev_page_pool_stats_get_do_nl_policy[NETDEV_A_PAGE_POOL_STATS_INFO + 1] = {
+	[NETDEV_A_PAGE_POOL_STATS_INFO] = NLA_POLICY_NESTED(netdev_page_pool_info_nl_policy),
+};
+#endif /* CONFIG_PAGE_POOL_STATS */
+
+/* NETDEV_CMD_PAGE_POOL_STATS_GET - dump */
+#ifdef CONFIG_PAGE_POOL_STATS
+static const struct nla_policy netdev_page_pool_stats_get_dump_nl_policy[NETDEV_A_PAGE_POOL_STATS_INFO + 1] = {
 	[NETDEV_A_PAGE_POOL_STATS_INFO] = NLA_POLICY_NESTED(netdev_page_pool_info_nl_policy),
 };
 #endif /* CONFIG_PAGE_POOL_STATS */
@@ -92,11 +113,25 @@ static const struct nla_policy netdev_bind_rx_nl_policy[NETDEV_A_DMABUF_FD + 1] 
 };
 
 /* NETDEV_CMD_NAPI_SET - do */
-static const struct nla_policy netdev_napi_set_nl_policy[NETDEV_A_NAPI_IRQ_SUSPEND_TIMEOUT + 1] = {
+static const struct nla_policy netdev_napi_set_nl_policy[NETDEV_A_NAPI_THREADED + 1] = {
 	[NETDEV_A_NAPI_ID] = { .type = NLA_U32, },
 	[NETDEV_A_NAPI_DEFER_HARD_IRQS] = NLA_POLICY_FULL_RANGE(NLA_U32, &netdev_a_napi_defer_hard_irqs_range),
 	[NETDEV_A_NAPI_GRO_FLUSH_TIMEOUT] = { .type = NLA_UINT, },
 	[NETDEV_A_NAPI_IRQ_SUSPEND_TIMEOUT] = { .type = NLA_UINT, },
+	[NETDEV_A_NAPI_THREADED] = NLA_POLICY_MAX(NLA_U32, 2),
+};
+
+/* NETDEV_CMD_BIND_TX - do */
+static const struct nla_policy netdev_bind_tx_nl_policy[NETDEV_A_DMABUF_FD + 1] = {
+	[NETDEV_A_DMABUF_IFINDEX] = NLA_POLICY_MIN(NLA_U32, 1),
+	[NETDEV_A_DMABUF_FD] = { .type = NLA_U32, },
+};
+
+/* NETDEV_CMD_QUEUE_CREATE - do */
+static const struct nla_policy netdev_queue_create_nl_policy[NETDEV_A_QUEUE_LEASE + 1] = {
+	[NETDEV_A_QUEUE_IFINDEX] = NLA_POLICY_MIN(NLA_U32, 1),
+	[NETDEV_A_QUEUE_TYPE] = NLA_POLICY_MAX(NLA_U32, 1),
+	[NETDEV_A_QUEUE_LEASE] = NLA_POLICY_NESTED(netdev_lease_nl_policy),
 };
 
 /* Ops table for netdev */
@@ -117,28 +152,32 @@ static const struct genl_split_ops netdev_nl_ops[] = {
 	{
 		.cmd		= NETDEV_CMD_PAGE_POOL_GET,
 		.doit		= netdev_nl_page_pool_get_doit,
-		.policy		= netdev_page_pool_get_nl_policy,
+		.policy		= netdev_page_pool_get_do_nl_policy,
 		.maxattr	= NETDEV_A_PAGE_POOL_ID,
 		.flags		= GENL_CMD_CAP_DO,
 	},
 	{
-		.cmd	= NETDEV_CMD_PAGE_POOL_GET,
-		.dumpit	= netdev_nl_page_pool_get_dumpit,
-		.flags	= GENL_CMD_CAP_DUMP,
+		.cmd		= NETDEV_CMD_PAGE_POOL_GET,
+		.dumpit		= netdev_nl_page_pool_get_dumpit,
+		.policy		= netdev_page_pool_get_dump_nl_policy,
+		.maxattr	= NETDEV_A_PAGE_POOL_IFINDEX,
+		.flags		= GENL_CMD_CAP_DUMP,
 	},
 #endif /* CONFIG_PAGE_POOL */
 #ifdef CONFIG_PAGE_POOL_STATS
 	{
 		.cmd		= NETDEV_CMD_PAGE_POOL_STATS_GET,
 		.doit		= netdev_nl_page_pool_stats_get_doit,
-		.policy		= netdev_page_pool_stats_get_nl_policy,
+		.policy		= netdev_page_pool_stats_get_do_nl_policy,
 		.maxattr	= NETDEV_A_PAGE_POOL_STATS_INFO,
 		.flags		= GENL_CMD_CAP_DO,
 	},
 	{
-		.cmd	= NETDEV_CMD_PAGE_POOL_STATS_GET,
-		.dumpit	= netdev_nl_page_pool_stats_get_dumpit,
-		.flags	= GENL_CMD_CAP_DUMP,
+		.cmd		= NETDEV_CMD_PAGE_POOL_STATS_GET,
+		.dumpit		= netdev_nl_page_pool_stats_get_dumpit,
+		.policy		= netdev_page_pool_stats_get_dump_nl_policy,
+		.maxattr	= NETDEV_A_PAGE_POOL_STATS_INFO,
+		.flags		= GENL_CMD_CAP_DUMP,
 	},
 #endif /* CONFIG_PAGE_POOL_STATS */
 	{
@@ -181,13 +220,27 @@ static const struct genl_split_ops netdev_nl_ops[] = {
 		.doit		= netdev_nl_bind_rx_doit,
 		.policy		= netdev_bind_rx_nl_policy,
 		.maxattr	= NETDEV_A_DMABUF_FD,
-		.flags		= GENL_ADMIN_PERM | GENL_CMD_CAP_DO,
+		.flags		= GENL_UNS_ADMIN_PERM | GENL_CMD_CAP_DO,
 	},
 	{
 		.cmd		= NETDEV_CMD_NAPI_SET,
 		.doit		= netdev_nl_napi_set_doit,
 		.policy		= netdev_napi_set_nl_policy,
-		.maxattr	= NETDEV_A_NAPI_IRQ_SUSPEND_TIMEOUT,
+		.maxattr	= NETDEV_A_NAPI_THREADED,
+		.flags		= GENL_ADMIN_PERM | GENL_CMD_CAP_DO,
+	},
+	{
+		.cmd		= NETDEV_CMD_BIND_TX,
+		.doit		= netdev_nl_bind_tx_doit,
+		.policy		= netdev_bind_tx_nl_policy,
+		.maxattr	= NETDEV_A_DMABUF_FD,
+		.flags		= GENL_CMD_CAP_DO,
+	},
+	{
+		.cmd		= NETDEV_CMD_QUEUE_CREATE,
+		.doit		= netdev_nl_queue_create_doit,
+		.policy		= netdev_queue_create_nl_policy,
+		.maxattr	= NETDEV_A_QUEUE_LEASE,
 		.flags		= GENL_ADMIN_PERM | GENL_CMD_CAP_DO,
 	},
 };
@@ -217,7 +270,7 @@ struct genl_family netdev_nl_family __ro_after_init = {
 	.n_split_ops	= ARRAY_SIZE(netdev_nl_ops),
 	.mcgrps		= netdev_nl_mcgrps,
 	.n_mcgrps	= ARRAY_SIZE(netdev_nl_mcgrps),
-	.sock_priv_size	= sizeof(struct list_head),
+	.sock_priv_size	= sizeof(struct netdev_nl_sock),
 	.sock_priv_init	= __netdev_nl_sock_priv_init,
 	.sock_priv_destroy = __netdev_nl_sock_priv_destroy,
 };

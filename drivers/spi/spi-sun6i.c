@@ -633,7 +633,7 @@ static int sun6i_spi_probe(struct platform_device *pdev)
 	struct resource *mem;
 	int ret = 0, irq;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(struct sun6i_spi));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(struct sun6i_spi));
 	if (!host) {
 		dev_err(&pdev->dev, "Unable to allocate SPI Host\n");
 		return -ENOMEM;
@@ -643,22 +643,18 @@ static int sun6i_spi_probe(struct platform_device *pdev)
 	sspi = spi_controller_get_devdata(host);
 
 	sspi->base_addr = devm_platform_get_and_ioremap_resource(pdev, 0, &mem);
-	if (IS_ERR(sspi->base_addr)) {
-		ret = PTR_ERR(sspi->base_addr);
-		goto err_free_host;
-	}
+	if (IS_ERR(sspi->base_addr))
+		return PTR_ERR(sspi->base_addr);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		ret = -ENXIO;
-		goto err_free_host;
-	}
+	if (irq < 0)
+		return -ENXIO;
 
 	ret = devm_request_irq(&pdev->dev, irq, sun6i_spi_handler,
 			       0, "sun6i-spi", sspi);
 	if (ret) {
 		dev_err(&pdev->dev, "Cannot request IRQ\n");
-		goto err_free_host;
+		return ret;
 	}
 
 	sspi->host = host;
@@ -673,22 +669,19 @@ static int sun6i_spi_probe(struct platform_device *pdev)
 	host->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_LSB_FIRST |
 			  sspi->cfg->mode_bits;
 	host->bits_per_word_mask = SPI_BPW_MASK(8);
-	host->dev.of_node = pdev->dev.of_node;
 	host->auto_runtime_pm = true;
 	host->max_transfer_size = sun6i_spi_max_transfer_size;
 
 	sspi->hclk = devm_clk_get(&pdev->dev, "ahb");
 	if (IS_ERR(sspi->hclk)) {
 		dev_err(&pdev->dev, "Unable to acquire AHB clock\n");
-		ret = PTR_ERR(sspi->hclk);
-		goto err_free_host;
+		return PTR_ERR(sspi->hclk);
 	}
 
 	sspi->mclk = devm_clk_get(&pdev->dev, "mod");
 	if (IS_ERR(sspi->mclk)) {
 		dev_err(&pdev->dev, "Unable to acquire module clock\n");
-		ret = PTR_ERR(sspi->mclk);
-		goto err_free_host;
+		return PTR_ERR(sspi->mclk);
 	}
 
 	init_completion(&sspi->done);
@@ -697,17 +690,14 @@ static int sun6i_spi_probe(struct platform_device *pdev)
 	sspi->rstc = devm_reset_control_get_exclusive(&pdev->dev, NULL);
 	if (IS_ERR(sspi->rstc)) {
 		dev_err(&pdev->dev, "Couldn't get reset controller\n");
-		ret = PTR_ERR(sspi->rstc);
-		goto err_free_host;
+		return PTR_ERR(sspi->rstc);
 	}
 
 	host->dma_tx = dma_request_chan(&pdev->dev, "tx");
 	if (IS_ERR(host->dma_tx)) {
 		/* Check tx to see if we need defer probing driver */
-		if (PTR_ERR(host->dma_tx) == -EPROBE_DEFER) {
-			ret = -EPROBE_DEFER;
-			goto err_free_host;
-		}
+		if (PTR_ERR(host->dma_tx) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
 		dev_warn(&pdev->dev, "Failed to request TX DMA channel\n");
 		host->dma_tx = NULL;
 	}
@@ -743,7 +733,7 @@ static int sun6i_spi_probe(struct platform_device *pdev)
 	pm_runtime_set_active(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret) {
 		dev_err(&pdev->dev, "cannot register SPI host\n");
 		goto err_pm_disable;
@@ -760,14 +750,15 @@ err_free_dma_rx:
 err_free_dma_tx:
 	if (host->dma_tx)
 		dma_release_channel(host->dma_tx);
-err_free_host:
-	spi_controller_put(host);
+
 	return ret;
 }
 
 static void sun6i_spi_remove(struct platform_device *pdev)
 {
 	struct spi_controller *host = platform_get_drvdata(pdev);
+
+	spi_unregister_controller(host);
 
 	pm_runtime_force_suspend(&pdev->dev);
 
@@ -795,10 +786,13 @@ static const struct sun6i_spi_cfg sun50i_r329_spi_cfg = {
 static const struct of_device_id sun6i_spi_match[] = {
 	{ .compatible = "allwinner,sun6i-a31-spi", .data = &sun6i_a31_spi_cfg },
 	{ .compatible = "allwinner,sun8i-h3-spi",  .data = &sun8i_h3_spi_cfg },
-	{
-		.compatible = "allwinner,sun50i-r329-spi",
-		.data = &sun50i_r329_spi_cfg
-	},
+	{ .compatible = "allwinner,sun50i-r329-spi", .data = &sun50i_r329_spi_cfg },
+	/*
+	 * A523's SPI controller has a combined RX buffer + FIFO counter
+	 * at offset 0x400, instead of split buffer count in FIFO status
+	 * register. But in practice we only care about the FIFO level.
+	 */
+	{ .compatible = "allwinner,sun55i-a523-spi", .data = &sun50i_r329_spi_cfg },
 	{}
 };
 MODULE_DEVICE_TABLE(of, sun6i_spi_match);

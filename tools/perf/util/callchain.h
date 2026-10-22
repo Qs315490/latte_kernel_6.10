@@ -8,12 +8,12 @@
 #include "branch.h"
 
 struct addr_location;
-struct evsel;
-struct ip_callchain;
-struct map;
-struct perf_sample;
-struct thread;
+struct hist_entry;
 struct hists;
+struct ip_callchain;
+struct perf_sample;
+struct record_opts;
+struct thread;
 
 #define HELP_PAD "\t\t\t\t"
 
@@ -98,6 +98,7 @@ extern bool dwarf_callchain_users;
 
 struct callchain_param {
 	bool			enabled;
+	bool			defer;
 	enum perf_call_graph_mode record_mode;
 	u32			dump_size;
 	enum chain_mode 	mode;
@@ -236,21 +237,13 @@ struct callchain_cursor *get_tls_callchain_cursor(void);
 int callchain_cursor__copy(struct callchain_cursor *dst,
 			   struct callchain_cursor *src);
 
-struct option;
-struct hist_entry;
-
-int record_parse_callchain_opt(const struct option *opt, const char *arg, int unset);
-int record_callchain_opt(const struct option *opt, const char *arg, int unset);
-
-struct record_opts;
-
 int record_opts__parse_callchain(struct record_opts *record,
 				 struct callchain_param *callchain,
 				 const char *arg, bool unset);
 
 int sample__resolve_callchain(struct perf_sample *sample,
 			      struct callchain_cursor *cursor, struct symbol **parent,
-			      struct evsel *evsel, struct addr_location *al,
+			      struct addr_location *al,
 			      int max_stack);
 int hist_entry__append_callchain(struct hist_entry *he, struct perf_sample *sample);
 int fill_callchain_info(struct addr_location *al, struct callchain_cursor_node *node,
@@ -282,8 +275,6 @@ static inline int arch_skip_callchain_idx(struct thread *thread __maybe_unused,
 }
 #endif
 
-void arch__add_leaf_frame_record_opts(struct record_opts *opts);
-
 char *callchain_list__sym_name(struct callchain_list *cl,
 			       char *bf, size_t bfsize, bool show_dso);
 char *callchain_node__scnprintf_value(struct callchain_node *node,
@@ -295,6 +286,7 @@ int callchain_list_counts__printf_value(struct callchain_list *clist,
 					FILE *fp, char *bf, int bfsize);
 
 void free_callchain(struct callchain_root *root);
+void callchain_cursor_cleanup(struct callchain_cursor *cursor);
 void decay_callchain(struct callchain_root *root);
 int callchain_node__make_parent_list(struct callchain_node *node);
 
@@ -302,7 +294,7 @@ int callchain_branch_counts(struct callchain_root *root,
 			    u64 *branch_count, u64 *predicted_count,
 			    u64 *abort_count, u64 *cycles_count);
 
-void callchain_param_setup(u64 sample_type, const char *arch);
+void callchain_param_setup(u64 sample_type, uint16_t e_machine);
 
 bool callchain_cnode_matched(struct callchain_node *base_cnode,
 			     struct callchain_node *pair_cnode);
@@ -313,8 +305,11 @@ s64 callchain_avg_cycles(struct callchain_node *cnode);
 
 typedef int (*callchain_iter_fn)(struct callchain_cursor_node *node, void *data);
 
-int sample__for_each_callchain_node(struct thread *thread, struct evsel *evsel,
+int sample__for_each_callchain_node(struct thread *thread,
 				    struct perf_sample *sample, int max_stack,
 				    bool symbols, callchain_iter_fn cb, void *data);
+
+int sample__merge_deferred_callchain(struct perf_sample *sample_orig,
+				     struct perf_sample *sample_callchain);
 
 #endif	/* __PERF_CALLCHAIN_H */

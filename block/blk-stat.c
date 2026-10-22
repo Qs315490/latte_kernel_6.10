@@ -76,7 +76,7 @@ void blk_stat_add(struct request *rq, u64 now)
 
 static void blk_stat_timer_fn(struct timer_list *t)
 {
-	struct blk_stat_callback *cb = from_timer(cb, t, timer);
+	struct blk_stat_callback *cb = timer_container_of(cb, t, timer);
 	unsigned int bucket;
 	int cpu;
 
@@ -103,12 +103,11 @@ blk_stat_alloc_callback(void (*timer_fn)(struct blk_stat_callback *),
 {
 	struct blk_stat_callback *cb;
 
-	cb = kmalloc(sizeof(*cb), GFP_KERNEL);
+	cb = kmalloc_obj(*cb);
 	if (!cb)
 		return NULL;
 
-	cb->stat = kmalloc_array(buckets, sizeof(struct blk_rq_stat),
-				 GFP_KERNEL);
+	cb->stat = kmalloc_objs(struct blk_rq_stat, buckets);
 	if (!cb->stat) {
 		kfree(cb);
 		return NULL;
@@ -162,7 +161,7 @@ void blk_stat_remove_callback(struct request_queue *q,
 		blk_queue_flag_clear(QUEUE_FLAG_STATS, q);
 	spin_unlock_irqrestore(&q->stats->lock, flags);
 
-	del_timer_sync(&cb->timer);
+	timer_delete_sync(&cb->timer);
 }
 
 static void blk_stat_free_callback_rcu(struct rcu_head *head)
@@ -207,7 +206,7 @@ struct blk_queue_stats *blk_alloc_queue_stats(void)
 {
 	struct blk_queue_stats *stats;
 
-	stats = kmalloc(sizeof(*stats), GFP_KERNEL);
+	stats = kmalloc_obj(*stats);
 	if (!stats)
 		return NULL;
 

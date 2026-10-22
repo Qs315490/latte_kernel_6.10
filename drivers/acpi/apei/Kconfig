@@ -23,6 +23,7 @@ config ACPI_APEI_GHES
 	select ACPI_HED
 	select IRQ_WORK
 	select GENERIC_ALLOCATOR
+	select ARM_SDE_INTERFACE if ARM64
 	help
 	  Generic Hardware Error Source provides a way to report
 	  platform hardware errors (such as that from chipset). It
@@ -72,6 +73,20 @@ config ACPI_APEI_EINJ_CXL
 	  EINJ documentation for more information.
 
 	  If unsure say 'n'
+
+config ACPI_APEI_GHES_NVIDIA
+	tristate "NVIDIA GHES vendor record handler"
+	depends on ACPI_APEI_GHES
+	help
+	  Support for decoding NVIDIA-specific CPER sections delivered via
+	  the APEI GHES vendor record notifier chain. Registers a handler
+	  for the NVIDIA section GUID and logs error signatures, severity,
+	  socket, and diagnostic register address-value pairs.
+
+	  Enable on NVIDIA server platforms (e.g. DGX, HGX) that expose
+	  ACPI device NVDA2012 in their firmware tables.
+
+	  If unsure, say N.
 
 config ACPI_APEI_ERST_DEBUG
 	tristate "APEI Error Record Serialization Table (ERST) Debug Support"

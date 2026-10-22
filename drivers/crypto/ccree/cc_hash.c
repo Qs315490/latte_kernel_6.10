@@ -3,6 +3,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/string.h>
 #include <crypto/algapi.h>
 #include <crypto/hash.h>
 #include <crypto/md5.h>
@@ -125,7 +126,7 @@ static int cc_map_result(struct device *dev, struct ahash_req_ctx *state,
 			digestsize);
 		return -ENOMEM;
 	}
-	dev_dbg(dev, "Mapped digest result buffer %u B at va=%pK to dma=%pad\n",
+	dev_dbg(dev, "Mapped digest result buffer %u B at va=%p to dma=%pad\n",
 		digestsize, state->digest_result_buff,
 		&state->digest_result_dma_addr);
 
@@ -184,11 +185,11 @@ static int cc_map_req(struct device *dev, struct ahash_req_ctx *state,
 		dma_map_single(dev, state->digest_buff,
 			       ctx->inter_digestsize, DMA_BIDIRECTIONAL);
 	if (dma_mapping_error(dev, state->digest_buff_dma_addr)) {
-		dev_err(dev, "Mapping digest len %d B at va=%pK for DMA failed\n",
+		dev_err(dev, "Mapping digest len %d B at va=%p for DMA failed\n",
 			ctx->inter_digestsize, state->digest_buff);
 		return -EINVAL;
 	}
-	dev_dbg(dev, "Mapped digest %d B at va=%pK to dma=%pad\n",
+	dev_dbg(dev, "Mapped digest %d B at va=%p to dma=%pad\n",
 		ctx->inter_digestsize, state->digest_buff,
 		&state->digest_buff_dma_addr);
 
@@ -197,11 +198,11 @@ static int cc_map_req(struct device *dev, struct ahash_req_ctx *state,
 			dma_map_single(dev, state->digest_bytes_len,
 				       HASH_MAX_LEN_SIZE, DMA_BIDIRECTIONAL);
 		if (dma_mapping_error(dev, state->digest_bytes_len_dma_addr)) {
-			dev_err(dev, "Mapping digest len %u B at va=%pK for DMA failed\n",
+			dev_err(dev, "Mapping digest len %u B at va=%p for DMA failed\n",
 				HASH_MAX_LEN_SIZE, state->digest_bytes_len);
 			goto unmap_digest_buf;
 		}
-		dev_dbg(dev, "Mapped digest len %u B at va=%pK to dma=%pad\n",
+		dev_dbg(dev, "Mapped digest len %u B at va=%p to dma=%pad\n",
 			HASH_MAX_LEN_SIZE, state->digest_bytes_len,
 			&state->digest_bytes_len_dma_addr);
 	}
@@ -212,12 +213,12 @@ static int cc_map_req(struct device *dev, struct ahash_req_ctx *state,
 				       ctx->inter_digestsize,
 				       DMA_BIDIRECTIONAL);
 		if (dma_mapping_error(dev, state->opad_digest_dma_addr)) {
-			dev_err(dev, "Mapping opad digest %d B at va=%pK for DMA failed\n",
+			dev_err(dev, "Mapping opad digest %d B at va=%p for DMA failed\n",
 				ctx->inter_digestsize,
 				state->opad_digest_buff);
 			goto unmap_digest_len;
 		}
-		dev_dbg(dev, "Mapped opad digest %d B at va=%pK to dma=%pad\n",
+		dev_dbg(dev, "Mapped opad digest %d B at va=%p to dma=%pad\n",
 			ctx->inter_digestsize, state->opad_digest_buff,
 			&state->opad_digest_dma_addr);
 	}
@@ -272,7 +273,7 @@ static void cc_unmap_result(struct device *dev, struct ahash_req_ctx *state,
 	if (state->digest_result_dma_addr) {
 		dma_unmap_single(dev, state->digest_result_dma_addr, digestsize,
 				 DMA_BIDIRECTIONAL);
-		dev_dbg(dev, "unmpa digest result buffer va (%pK) pa (%pad) len %u\n",
+		dev_dbg(dev, "unmpa digest result buffer va (%p) pa (%pad) len %u\n",
 			state->digest_result_buff,
 			&state->digest_result_dma_addr, digestsize);
 		memcpy(result, state->digest_result_buff, digestsize);
@@ -287,7 +288,7 @@ static void cc_update_complete(struct device *dev, void *cc_req, int err)
 	struct crypto_ahash *tfm = crypto_ahash_reqtfm(req);
 	struct cc_hash_ctx *ctx = crypto_ahash_ctx_dma(tfm);
 
-	dev_dbg(dev, "req=%pK\n", req);
+	dev_dbg(dev, "req=%p\n", req);
 
 	if (err != -EINPROGRESS) {
 		/* Not a BACKLOG notification */
@@ -306,7 +307,7 @@ static void cc_digest_complete(struct device *dev, void *cc_req, int err)
 	struct cc_hash_ctx *ctx = crypto_ahash_ctx_dma(tfm);
 	u32 digestsize = crypto_ahash_digestsize(tfm);
 
-	dev_dbg(dev, "req=%pK\n", req);
+	dev_dbg(dev, "req=%p\n", req);
 
 	if (err != -EINPROGRESS) {
 		/* Not a BACKLOG notification */
@@ -326,7 +327,7 @@ static void cc_hash_complete(struct device *dev, void *cc_req, int err)
 	struct cc_hash_ctx *ctx = crypto_ahash_ctx_dma(tfm);
 	u32 digestsize = crypto_ahash_digestsize(tfm);
 
-	dev_dbg(dev, "req=%pK\n", req);
+	dev_dbg(dev, "req=%p\n", req);
 
 	if (err != -EINPROGRESS) {
 		/* Not a BACKLOG notification */
@@ -1077,11 +1078,11 @@ static int cc_alloc_ctx(struct cc_hash_ctx *ctx)
 		dma_map_single(dev, ctx->digest_buff, sizeof(ctx->digest_buff),
 			       DMA_BIDIRECTIONAL);
 	if (dma_mapping_error(dev, ctx->digest_buff_dma_addr)) {
-		dev_err(dev, "Mapping digest len %zu B at va=%pK for DMA failed\n",
+		dev_err(dev, "Mapping digest len %zu B at va=%p for DMA failed\n",
 			sizeof(ctx->digest_buff), ctx->digest_buff);
 		goto fail;
 	}
-	dev_dbg(dev, "Mapped digest %zu B at va=%pK to dma=%pad\n",
+	dev_dbg(dev, "Mapped digest %zu B at va=%p to dma=%pad\n",
 		sizeof(ctx->digest_buff), ctx->digest_buff,
 		&ctx->digest_buff_dma_addr);
 
@@ -1090,12 +1091,12 @@ static int cc_alloc_ctx(struct cc_hash_ctx *ctx)
 			       sizeof(ctx->opad_tmp_keys_buff),
 			       DMA_BIDIRECTIONAL);
 	if (dma_mapping_error(dev, ctx->opad_tmp_keys_dma_addr)) {
-		dev_err(dev, "Mapping opad digest %zu B at va=%pK for DMA failed\n",
+		dev_err(dev, "Mapping opad digest %zu B at va=%p for DMA failed\n",
 			sizeof(ctx->opad_tmp_keys_buff),
 			ctx->opad_tmp_keys_buff);
 		goto fail;
 	}
-	dev_dbg(dev, "Mapped opad_tmp_keys %zu B at va=%pK to dma=%pad\n",
+	dev_dbg(dev, "Mapped opad_tmp_keys %zu B at va=%p to dma=%pad\n",
 		sizeof(ctx->opad_tmp_keys_buff), ctx->opad_tmp_keys_buff,
 		&ctx->opad_tmp_keys_dma_addr);
 
@@ -1448,6 +1449,7 @@ static int cc_mac_digest(struct ahash_request *req)
 	if (cc_map_hash_request_final(ctx->drvdata, state, req->src,
 				      req->nbytes, 1, flags)) {
 		dev_err(dev, "map_ahash_request_final() failed\n");
+		cc_unmap_result(dev, state, digestsize, req->result);
 		cc_unmap_req(dev, state, ctx);
 		return -ENOMEM;
 	}
@@ -1834,16 +1836,12 @@ static struct cc_hash_alg *cc_alloc_hash_alg(struct cc_hash_template *template,
 	alg = &halg->halg.base;
 
 	if (keyed) {
-		snprintf(alg->cra_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->mac_name);
-		snprintf(alg->cra_driver_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->mac_driver_name);
+		strscpy(alg->cra_name, template->mac_name);
+		strscpy(alg->cra_driver_name, template->mac_driver_name);
 	} else {
 		halg->setkey = NULL;
-		snprintf(alg->cra_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->name);
-		snprintf(alg->cra_driver_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->driver_name);
+		strscpy(alg->cra_name, template->name);
+		strscpy(alg->cra_driver_name, template->driver_name);
 	}
 	alg->cra_module = THIS_MODULE;
 	alg->cra_ctxsize = sizeof(struct cc_hash_ctx) + crypto_dma_padding();

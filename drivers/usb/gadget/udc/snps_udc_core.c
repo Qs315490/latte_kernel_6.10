@@ -523,7 +523,7 @@ udc_alloc_request(struct usb_ep *usbep, gfp_t gfp)
 	ep = container_of(usbep, struct udc_ep, ep);
 
 	VDBG(ep->dev, "udc_alloc_req(): ep%d\n", ep->num);
-	req = kzalloc(sizeof(struct udc_request), gfp);
+	req = kzalloc_obj(struct udc_request, gfp);
 	if (!req)
 		return NULL;
 
@@ -3035,12 +3035,12 @@ void udc_remove(struct udc *dev)
 	stop_timer++;
 	if (timer_pending(&udc_timer))
 		wait_for_completion(&on_exit);
-	del_timer_sync(&udc_timer);
+	timer_delete_sync(&udc_timer);
 	/* remove pollstall timer */
 	stop_pollstall_timer++;
 	if (timer_pending(&udc_pollstall_timer))
 		wait_for_completion(&on_pollstall_exit);
-	del_timer_sync(&udc_pollstall_timer);
+	timer_delete_sync(&udc_pollstall_timer);
 	udc = NULL;
 }
 EXPORT_SYMBOL_GPL(udc_remove);
@@ -3133,7 +3133,6 @@ int udc_probe(struct udc *dev)
 	/* device struct setup */
 	dev->gadget.ops = &udc_ops;
 
-	dev_set_name(&dev->gadget.dev, "gadget");
 	dev->gadget.name = name;
 	dev->gadget.max_speed = USB_SPEED_HIGH;
 
@@ -3151,7 +3150,7 @@ int udc_probe(struct udc *dev)
 			 tmp, dev->phys_addr, dev->chiprev,
 			 (dev->chiprev == UDC_HSA0_REV) ?
 			 "A0" : "B1");
-		strcpy(tmp, UDC_DRIVER_VERSION_STRING);
+		strscpy(tmp, UDC_DRIVER_VERSION_STRING);
 		if (dev->chiprev == UDC_HSA0_REV) {
 			dev_err(dev->dev, "chip revision is A0; too old\n");
 			retval = -ENODEV;

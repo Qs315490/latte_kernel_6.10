@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (c) 2020 The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/delay.h>
@@ -381,7 +381,7 @@ static int ath11k_vif_wow_set_wakeups(struct ath11k_vif *arvif,
 			struct wmi_pno_scan_req *pno;
 			int ret;
 
-			pno = kzalloc(sizeof(*pno), GFP_KERNEL);
+			pno = kzalloc_obj(*pno);
 			if (!pno)
 				return -ENOMEM;
 
@@ -495,7 +495,7 @@ static int ath11k_vif_wow_clean_nlo(struct ath11k_vif *arvif)
 		if (ar->nlo_enabled) {
 			struct wmi_pno_scan_req *pno;
 
-			pno = kzalloc(sizeof(*pno), GFP_KERNEL);
+			pno = kzalloc_obj(*pno);
 			if (!pno)
 				return -ENOMEM;
 

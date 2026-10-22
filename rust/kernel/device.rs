@@ -6,31 +6,148 @@
 
 use crate::{
     bindings,
-    str::CStr,
-    types::{ARef, Opaque},
+    fmt,
+    prelude::*,
+    sync::aref::ARef,
+    types::{
+        ForeignOwnable,
+        Opaque, //
+    }, //
 };
-use core::{fmt, ptr};
+use core::{
+    marker::PhantomData,
+    ptr, //
+};
 
-#[cfg(CONFIG_PRINTK)]
-use crate::c_str;
+pub mod property;
 
-/// A reference-counted device.
+/// The core representation of a device in the kernel's driver model.
 ///
-/// This structure represents the Rust abstraction for a C `struct device`. This implementation
-/// abstracts the usage of an already existing C `struct device` within Rust code that we get
-/// passed from the C side.
+/// This structure represents the Rust abstraction for a C `struct device`. A [`Device`] can either
+/// exist as temporary reference (see also [`Device::from_raw`]), which is only valid within a
+/// certain scope or as [`ARef<Device>`], owning a dedicated reference count.
 ///
-/// An instance of this abstraction can be obtained temporarily or permanent.
+/// # Device Types
 ///
-/// A temporary one is bound to the lifetime of the C `struct device` pointer used for creation.
-/// A permanent instance is always reference-counted and hence not restricted by any lifetime
-/// boundaries.
+/// A [`Device`] can represent either a bus device or a class device.
 ///
-/// For subsystems it is recommended to create a permanent instance to wrap into a subsystem
-/// specific device structure (e.g. `pci::Device`). This is useful for passing it to drivers in
-/// `T::probe()`, such that a driver can store the `ARef<Device>` (equivalent to storing a
-/// `struct device` pointer in a C driver) for arbitrary purposes, e.g. allocating DMA coherent
-/// memory.
+/// ## Bus Devices
+///
+/// A bus device is a [`Device`] that is associated with a physical or virtual bus. Examples of
+/// buses include PCI, USB, I2C, and SPI. Devices attached to a bus are registered with a specific
+/// bus type, which facilitates matching devices with appropriate drivers based on IDs or other
+/// identifying information. Bus devices are visible in sysfs under `/sys/bus/<bus-name>/devices/`.
+///
+/// ## Class Devices
+///
+/// A class device is a [`Device`] that is associated with a logical category of functionality
+/// rather than a physical bus. Examples of classes include block devices, network interfaces, sound
+/// cards, and input devices. Class devices are grouped under a common class and exposed to
+/// userspace via entries in `/sys/class/<class-name>/`.
+///
+/// # Device Context
+///
+/// [`Device`] references are generic over a [`DeviceContext`], which represents the type state of
+/// a [`Device`].
+///
+/// As the name indicates, this type state represents the context of the scope the [`Device`]
+/// reference is valid in. For instance, the [`Bound`] context guarantees that the [`Device`] is
+/// bound to a driver for the entire duration of the existence of a [`Device<Bound>`] reference.
+///
+/// Other [`DeviceContext`] types besides [`Bound`] are [`Normal`], [`Core`] and [`CoreInternal`].
+///
+/// Unless selected otherwise [`Device`] defaults to the [`Normal`] [`DeviceContext`], which by
+/// itself has no additional requirements.
+///
+/// It is always up to the caller of [`Device::from_raw`] to select the correct [`DeviceContext`]
+/// type for the corresponding scope the [`Device`] reference is created in.
+///
+/// All [`DeviceContext`] types other than [`Normal`] are intended to be used with
+/// [bus devices](#bus-devices) only.
+///
+/// # Implementing Bus Devices
+///
+/// This section provides a guideline to implement bus specific devices, such as:
+#[cfg_attr(CONFIG_PCI, doc = "* [`pci::Device`](kernel::pci::Device)")]
+/// * [`platform::Device`]
+///
+/// A bus specific device should be defined as follows.
+///
+/// ```ignore
+/// #[repr(transparent)]
+/// pub struct Device<Ctx: device::DeviceContext = device::Normal>(
+///     Opaque<bindings::bus_device_type>,
+///     PhantomData<Ctx>,
+/// );
+/// ```
+///
+/// Since devices are reference counted, [`AlwaysRefCounted`] should be implemented for `Device`
+/// (i.e. `Device<Normal>`). Note that [`AlwaysRefCounted`] must not be implemented for any other
+/// [`DeviceContext`], since all other device context types are only valid within a certain scope.
+///
+/// In order to be able to implement the [`DeviceContext`] dereference hierarchy, bus device
+/// implementations should call the [`impl_device_context_deref`] macro as shown below.
+///
+/// ```ignore
+/// // SAFETY: `Device` is a transparent wrapper of a type that doesn't depend on `Device`'s
+/// // generic argument.
+/// kernel::impl_device_context_deref!(unsafe { Device });
+/// ```
+///
+/// In order to convert from a any [`Device<Ctx>`] to [`ARef<Device>`], bus devices can implement
+/// the following macro call.
+///
+/// ```ignore
+/// kernel::impl_device_context_into_aref!(Device);
+/// ```
+///
+/// Bus devices should also implement the following [`AsRef`] implementation, such that users can
+/// easily derive a generic [`Device`] reference.
+///
+/// ```ignore
+/// impl<Ctx: device::DeviceContext> AsRef<device::Device<Ctx>> for Device<Ctx> {
+///     fn as_ref(&self) -> &device::Device<Ctx> {
+///         ...
+///     }
+/// }
+/// ```
+///
+/// # Implementing Class Devices
+///
+/// Class device implementations require less infrastructure and depend slightly more on the
+/// specific subsystem.
+///
+/// An example implementation for a class device could look like this.
+///
+/// ```ignore
+/// #[repr(C)]
+/// pub struct Device<T: class::Driver> {
+///     dev: Opaque<bindings::class_device_type>,
+///     data: T::Data,
+/// }
+/// ```
+///
+/// This class device uses the sub-classing pattern to embed the driver's private data within the
+/// allocation of the class device. For this to be possible the class device is generic over the
+/// class specific `Driver` trait implementation.
+///
+/// Just like any device, class devices are reference counted and should hence implement
+/// [`AlwaysRefCounted`] for `Device`.
+///
+/// Class devices should also implement the following [`AsRef`] implementation, such that users can
+/// easily derive a generic [`Device`] reference.
+///
+/// ```ignore
+/// impl<T: class::Driver> AsRef<device::Device> for Device<T> {
+///     fn as_ref(&self) -> &device::Device {
+///         ...
+///     }
+/// }
+/// ```
+///
+/// An example for a class device implementation is
+#[cfg_attr(CONFIG_DRM = "y", doc = "[`drm::Device`](kernel::drm::Device).")]
+#[cfg_attr(not(CONFIG_DRM = "y"), doc = "`drm::Device`.")]
 ///
 /// # Invariants
 ///
@@ -41,8 +158,12 @@ use crate::c_str;
 ///
 /// `bindings::device::release` is valid to be called from any thread, hence `ARef<Device>` can be
 /// dropped from any thread.
+///
+/// [`AlwaysRefCounted`]: kernel::sync::aref::AlwaysRefCounted
+/// [`impl_device_context_deref`]: kernel::impl_device_context_deref
+/// [`platform::Device`]: kernel::platform::Device
 #[repr(transparent)]
-pub struct Device(Opaque<bindings::device>);
+pub struct Device<Ctx: DeviceContext = Normal>(Opaque<bindings::device>, PhantomData<Ctx>);
 
 impl Device {
     /// Creates a new reference-counted abstraction instance of an existing `struct device` pointer.
@@ -57,12 +178,124 @@ impl Device {
     /// While not officially documented, this should be the case for any `struct device`.
     pub unsafe fn get_device(ptr: *mut bindings::device) -> ARef<Self> {
         // SAFETY: By the safety requirements ptr is valid
-        unsafe { Self::as_ref(ptr) }.into()
+        unsafe { Self::from_raw(ptr) }.into()
     }
 
+    /// Convert a [`&Device`](Device) into a [`&Device<Bound>`](Device<Bound>).
+    ///
+    /// # Safety
+    ///
+    /// The caller is responsible to ensure that the returned [`&Device<Bound>`](Device<Bound>)
+    /// only lives as long as it can be guaranteed that the [`Device`] is actually bound.
+    pub unsafe fn as_bound(&self) -> &Device<Bound> {
+        let ptr = core::ptr::from_ref(self);
+
+        // CAST: By the safety requirements the caller is responsible to guarantee that the
+        // returned reference only lives as long as the device is actually bound.
+        let ptr = ptr.cast();
+
+        // SAFETY:
+        // - `ptr` comes from `from_ref(self)` above, hence it's guaranteed to be valid.
+        // - Any valid `Device` pointer is also a valid pointer for `Device<Bound>`.
+        unsafe { &*ptr }
+    }
+}
+
+impl<'a> Device<CoreInternal<'a>> {
+    /// Store a pointer to the bound driver's private data.
+    pub fn set_drvdata<T>(&self, data: impl PinInit<T, Error>) -> Result {
+        let data = KBox::pin_init(data, GFP_KERNEL)?;
+
+        // SAFETY: By the type invariants, `self.as_raw()` is a valid pointer to a `struct device`.
+        unsafe { bindings::dev_set_drvdata(self.as_raw(), data.into_foreign().cast()) };
+
+        Ok(())
+    }
+
+    /// Take ownership of the private data stored in this [`Device`].
+    ///
+    /// # Safety
+    ///
+    /// - The type `T` must match the type of the `ForeignOwnable` previously stored by
+    ///   [`Device::set_drvdata`].
+    pub(crate) unsafe fn drvdata_obtain<T>(&self) -> Option<Pin<KBox<T>>> {
+        // SAFETY: By the type invariants, `self.as_raw()` is a valid pointer to a `struct device`.
+        let ptr = unsafe { bindings::dev_get_drvdata(self.as_raw()) };
+
+        // SAFETY: By the type invariants, `self.as_raw()` is a valid pointer to a `struct device`.
+        unsafe { bindings::dev_set_drvdata(self.as_raw(), core::ptr::null_mut()) };
+
+        if ptr.is_null() {
+            return None;
+        }
+
+        // SAFETY:
+        // - If `ptr` is not NULL, it comes from a previous call to `into_foreign()`.
+        // - `dev_get_drvdata()` guarantees to return the same pointer given to `dev_set_drvdata()`
+        //   in `into_foreign()`.
+        Some(unsafe { Pin::<KBox<T>>::from_foreign(ptr.cast()) })
+    }
+
+    /// Borrow the driver's private data bound to this [`Device`].
+    ///
+    /// # Safety
+    ///
+    /// - Must only be called after a preceding call to [`Device::set_drvdata`] and before the
+    ///   device is fully unbound.
+    /// - The type `T` must match the type of the `ForeignOwnable` previously stored by
+    ///   [`Device::set_drvdata`].
+    pub unsafe fn drvdata_borrow<T>(&self) -> Pin<&T> {
+        // SAFETY: `drvdata_unchecked()` has the exact same safety requirements as the ones
+        // required by this method.
+        unsafe { self.drvdata_unchecked() }
+    }
+}
+
+impl Device<Bound> {
+    /// Borrow the driver's private data bound to this [`Device`].
+    ///
+    /// # Safety
+    ///
+    /// - Must only be called after a preceding call to [`Device::set_drvdata`] and before
+    ///   the device is fully unbound.
+    /// - The type `T` must match the type of the `ForeignOwnable` previously stored by
+    ///   [`Device::set_drvdata`].
+    unsafe fn drvdata_unchecked<T>(&self) -> Pin<&T> {
+        // SAFETY: By the type invariants, `self.as_raw()` is a valid pointer to a `struct device`.
+        let ptr = unsafe { bindings::dev_get_drvdata(self.as_raw()) };
+
+        // SAFETY:
+        // - By the safety requirements of this function, `ptr` comes from a previous call to
+        //   `into_foreign()`.
+        // - `dev_get_drvdata()` guarantees to return the same pointer given to `dev_set_drvdata()`
+        //   in `into_foreign()`.
+        unsafe { Pin::<KBox<T>>::borrow(ptr.cast()) }
+    }
+}
+
+impl<Ctx: DeviceContext> Device<Ctx> {
     /// Obtain the raw `struct device *`.
     pub(crate) fn as_raw(&self) -> *mut bindings::device {
         self.0.get()
+    }
+
+    /// Returns a reference to the parent device, if any.
+    #[cfg_attr(not(CONFIG_AUXILIARY_BUS), expect(dead_code))]
+    pub(crate) fn parent(&self) -> Option<&Device> {
+        // SAFETY:
+        // - By the type invariant `self.as_raw()` is always valid.
+        // - The parent device is only ever set at device creation.
+        let parent = unsafe { (*self.as_raw()).parent };
+
+        if parent.is_null() {
+            None
+        } else {
+            // SAFETY:
+            // - Since `parent` is not NULL, it must be a valid pointer to a `struct device`.
+            // - `parent` is valid for the lifetime of `self`, since a `struct device` holds a
+            //   reference count of its parent.
+            Some(unsafe { Device::from_raw(parent) })
+        }
     }
 
     /// Convert a raw C `struct device` pointer to a `&'a Device`.
@@ -73,7 +306,7 @@ impl Device {
     /// i.e. it must be ensured that the reference count of the C `struct device` `ptr` points to
     /// can't drop to zero, for the duration of this function call and the entire duration when the
     /// returned reference exists.
-    pub unsafe fn as_ref<'a>(ptr: *mut bindings::device) -> &'a Self {
+    pub unsafe fn from_raw<'a>(ptr: *mut bindings::device) -> &'a Self {
         // SAFETY: Guaranteed by the safety requirements of the function.
         unsafe { &*ptr.cast() }
     }
@@ -174,23 +407,48 @@ impl Device {
         #[cfg(CONFIG_PRINTK)]
         unsafe {
             bindings::_dev_printk(
-                klevel as *const _ as *const crate::ffi::c_char,
+                klevel.as_ptr().cast::<crate::ffi::c_char>(),
                 self.as_raw(),
-                c_str!("%pA").as_char_ptr(),
-                &msg as *const _ as *const crate::ffi::c_void,
+                c"%pA".as_char_ptr(),
+                core::ptr::from_ref(&msg).cast::<crate::ffi::c_void>(),
             )
         };
     }
 
-    /// Checks if property is present or not.
-    pub fn property_present(&self, name: &CStr) -> bool {
-        // SAFETY: By the invariant of `CStr`, `name` is null-terminated.
-        unsafe { bindings::device_property_present(self.as_raw().cast_const(), name.as_char_ptr()) }
+    /// Obtain the [`FwNode`](property::FwNode) corresponding to this [`Device`].
+    pub fn fwnode(&self) -> Option<&property::FwNode> {
+        // SAFETY: `self` is valid.
+        let fwnode_handle = unsafe { bindings::__dev_fwnode(self.as_raw()) };
+        if fwnode_handle.is_null() {
+            return None;
+        }
+        // SAFETY: `fwnode_handle` is valid. Its lifetime is tied to `&self`. We
+        // return a reference instead of an `ARef<FwNode>` because `dev_fwnode()`
+        // doesn't increment the refcount. It is safe to cast from a
+        // `struct fwnode_handle*` to a `*const FwNode` because `FwNode` is
+        // defined as a `#[repr(transparent)]` wrapper around `fwnode_handle`.
+        Some(unsafe { &*fwnode_handle.cast() })
+    }
+
+    /// Returns the name of the device.
+    ///
+    /// This is the kobject name of the device, or its initial name if the kobject is not yet
+    /// available.
+    #[inline]
+    pub fn name(&self) -> &CStr {
+        // SAFETY: By its type invariant `self.as_raw()` is a valid pointer to a `struct device`.
+        // The returned string is valid for the lifetime of the device.
+        unsafe { CStr::from_char_ptr(bindings::dev_name(self.as_raw())) }
     }
 }
 
+// SAFETY: `Device` is a transparent wrapper of a type that doesn't depend on `Device`'s generic
+// argument.
+kernel::impl_device_context_deref!(unsafe { Device });
+kernel::impl_device_context_into_aref!(Device);
+
 // SAFETY: Instances of `Device` are always reference-counted.
-unsafe impl crate::types::AlwaysRefCounted for Device {
+unsafe impl crate::sync::aref::AlwaysRefCounted for Device {
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference guarantees that the refcount is non-zero.
         unsafe { bindings::get_device(self.as_raw()) };
@@ -209,13 +467,248 @@ unsafe impl Send for Device {}
 // synchronization in `struct device`.
 unsafe impl Sync for Device {}
 
+// SAFETY: Same as `Device<Normal>` -- the underlying `struct device` is the same; `Bound` is a
+// zero-sized type-state marker that does not affect thread safety.
+unsafe impl Sync for Device<Bound> {}
+
+/// Marker trait for the context or scope of a bus specific device.
+///
+/// [`DeviceContext`] is a marker trait for types representing the context of a bus specific
+/// [`Device`].
+///
+/// The specific device context types are: [`CoreInternal`], [`Core`], [`Bound`] and [`Normal`].
+///
+/// [`DeviceContext`] types are hierarchical, which means that there is a strict hierarchy that
+/// defines which [`DeviceContext`] type can be derived from another. For instance, any
+/// [`Device<Core>`] can dereference to a [`Device<Bound>`].
+///
+/// The following enumeration illustrates the dereference hierarchy of [`DeviceContext`] types.
+///
+/// - [`CoreInternal`] => [`Core`] => [`Bound`] => [`Normal`]
+///
+/// Bus devices can automatically implement the dereference hierarchy by using
+/// [`impl_device_context_deref`].
+///
+/// Note that the guarantee for a [`Device`] reference to have a certain [`DeviceContext`] comes
+/// from the specific scope the [`Device`] reference is valid in.
+///
+/// [`impl_device_context_deref`]: kernel::impl_device_context_deref
+pub trait DeviceContext: private::Sealed {}
+
+/// The [`Normal`] context is the default [`DeviceContext`] of any [`Device`].
+///
+/// The normal context does not indicate any specific context. Any `Device<Ctx>` is also a valid
+/// [`Device<Normal>`]. It is the only [`DeviceContext`] for which it is valid to implement
+/// [`AlwaysRefCounted`] for.
+///
+/// [`AlwaysRefCounted`]: kernel::sync::aref::AlwaysRefCounted
+pub struct Normal;
+
+/// The [`Core`] context is the context of a bus specific device when it appears as argument of
+/// any bus specific callback, such as `probe()`.
+///
+/// The core context indicates that the [`Device<Core>`] reference's scope is limited to the bus
+/// callback it appears in. It is intended to be used for synchronization purposes. Bus device
+/// implementations can implement methods for [`Device<Core>`], such that they can only be called
+/// from bus callbacks.
+pub struct Core<'a>(PhantomData<&'a ()>);
+
+/// Semantically the same as [`Core`], but reserved for internal usage of the corresponding bus
+/// abstraction.
+///
+/// The internal core context is intended to be used in exactly the same way as the [`Core`]
+/// context, with the difference that this [`DeviceContext`] is internal to the corresponding bus
+/// abstraction.
+///
+/// This context mainly exists to share generic [`Device`] infrastructure that should only be called
+/// from bus callbacks with bus abstractions, but without making them accessible for drivers.
+pub struct CoreInternal<'a>(PhantomData<&'a ()>);
+
+/// The [`Bound`] context is the [`DeviceContext`] of a bus specific device when it is guaranteed to
+/// be bound to a driver.
+///
+/// The bound context indicates that for the entire duration of the lifetime of a [`Device<Bound>`]
+/// reference, the [`Device`] is guaranteed to be bound to a driver.
+///
+/// Some APIs, such as [`dma::Coherent`] or [`Devres`] rely on the [`Device`] to be bound,
+/// which can be proven with the [`Bound`] device context.
+///
+/// Any abstraction that can guarantee a scope where the corresponding bus device is bound, should
+/// provide a [`Device<Bound>`] reference to its users for this scope. This allows users to benefit
+/// from optimizations for accessing device resources, see also [`Devres::access`].
+///
+/// [`Devres`]: kernel::devres::Devres
+/// [`Devres::access`]: kernel::devres::Devres::access
+/// [`dma::Coherent`]: kernel::dma::Coherent
+pub struct Bound;
+
+mod private {
+    pub trait Sealed {}
+
+    impl Sealed for super::Bound {}
+    impl<'a> Sealed for super::Core<'a> {}
+    impl<'a> Sealed for super::CoreInternal<'a> {}
+    impl Sealed for super::Normal {}
+}
+
+impl DeviceContext for Bound {}
+impl<'a> DeviceContext for Core<'a> {}
+impl<'a> DeviceContext for CoreInternal<'a> {}
+impl DeviceContext for Normal {}
+
+impl<Ctx: DeviceContext> AsRef<Device<Ctx>> for Device<Ctx> {
+    #[inline]
+    fn as_ref(&self) -> &Device<Ctx> {
+        self
+    }
+}
+
+/// Convert device references to bus device references.
+///
+/// Bus devices can implement this trait to allow abstractions to provide the bus device in
+/// class device callbacks.
+///
+/// This must not be used by drivers and is intended for bus and class device abstractions only.
+///
+/// # Safety
+///
+/// `AsBusDevice::OFFSET` must be the offset of the embedded base `struct device` field within a
+/// bus device structure.
+pub unsafe trait AsBusDevice<Ctx: DeviceContext>: AsRef<Device<Ctx>> {
+    /// The relative offset to the device field.
+    ///
+    /// Use `offset_of!(bindings, field)` macro to avoid breakage.
+    const OFFSET: usize;
+
+    /// Convert a reference to [`Device`] into `Self`.
+    ///
+    /// # Safety
+    ///
+    /// `dev` must be contained in `Self`.
+    unsafe fn from_device(dev: &Device<Ctx>) -> &Self
+    where
+        Self: Sized,
+    {
+        let raw = dev.as_raw();
+        // SAFETY: `raw - Self::OFFSET` is guaranteed by the safety requirements
+        // to be a valid pointer to `Self`.
+        unsafe { &*raw.byte_sub(Self::OFFSET).cast::<Self>() }
+    }
+}
+
+/// # Safety
+///
+/// The type given as `$device` must be a transparent wrapper of a type that doesn't depend on the
+/// generic argument of `$device`.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_device_context_deref {
+    (unsafe { $device:ident, <$lt:lifetime> $src:ty => $dst:ty }) => {
+        impl<$lt> ::core::ops::Deref for $device<$src> {
+            type Target = $device<$dst>;
+
+            fn deref(&self) -> &Self::Target {
+                let ptr: *const Self = self;
+
+                // CAST: `$device<$src>` and `$device<$dst>` transparently wrap the same type by the
+                // safety requirement of the macro.
+                let ptr = ptr.cast::<Self::Target>();
+
+                // SAFETY: `ptr` was derived from `&self`.
+                unsafe { &*ptr }
+            }
+        }
+    };
+    (unsafe { $device:ident, $src:ty => $dst:ty }) => {
+        impl ::core::ops::Deref for $device<$src> {
+            type Target = $device<$dst>;
+
+            fn deref(&self) -> &Self::Target {
+                let ptr: *const Self = self;
+
+                // CAST: `$device<$src>` and `$device<$dst>` transparently wrap the same type by the
+                // safety requirement of the macro.
+                let ptr = ptr.cast::<Self::Target>();
+
+                // SAFETY: `ptr` was derived from `&self`.
+                unsafe { &*ptr }
+            }
+        }
+    };
+}
+
+/// Implement [`core::ops::Deref`] traits for allowed [`DeviceContext`] conversions of a (bus
+/// specific) device.
+///
+/// # Safety
+///
+/// The type given as `$device` must be a transparent wrapper of a type that doesn't depend on the
+/// generic argument of `$device`.
+#[macro_export]
+macro_rules! impl_device_context_deref {
+    (unsafe { $device:ident }) => {
+        // SAFETY: This macro has the exact same safety requirement as
+        // `__impl_device_context_deref!`.
+        ::kernel::__impl_device_context_deref!(unsafe {
+            $device,
+            <'a> $crate::device::CoreInternal<'a> => $crate::device::Core<'a>
+        });
+
+        // SAFETY: This macro has the exact same safety requirement as
+        // `__impl_device_context_deref!`.
+        ::kernel::__impl_device_context_deref!(unsafe {
+            $device,
+            <'a> $crate::device::Core<'a> => $crate::device::Bound
+        });
+
+        // SAFETY: This macro has the exact same safety requirement as
+        // `__impl_device_context_deref!`.
+        ::kernel::__impl_device_context_deref!(unsafe {
+            $device,
+            $crate::device::Bound => $crate::device::Normal
+        });
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_device_context_into_aref {
+    (<$lt:lifetime> $src:ty, $device:tt) => {
+        impl<$lt> ::core::convert::From<&$device<$src>> for $crate::sync::aref::ARef<$device> {
+            fn from(dev: &$device<$src>) -> Self {
+                (&**dev).into()
+            }
+        }
+    };
+    ($src:ty, $device:tt) => {
+        impl ::core::convert::From<&$device<$src>> for $crate::sync::aref::ARef<$device> {
+            fn from(dev: &$device<$src>) -> Self {
+                (&**dev).into()
+            }
+        }
+    };
+}
+
+/// Implement [`core::convert::From`], such that all `&Device<Ctx>` can be converted to an
+/// `ARef<Device>`.
+#[macro_export]
+macro_rules! impl_device_context_into_aref {
+    ($device:tt) => {
+        ::kernel::__impl_device_context_into_aref!(
+            <'a> $crate::device::CoreInternal<'a>, $device
+        );
+        ::kernel::__impl_device_context_into_aref!(
+            <'a> $crate::device::Core<'a>, $device
+        );
+        ::kernel::__impl_device_context_into_aref!($crate::device::Bound, $device);
+    };
+}
+
 #[doc(hidden)]
 #[macro_export]
 macro_rules! dev_printk {
     ($method:ident, $dev:expr, $($f:tt)*) => {
-        {
-            ($dev).$method(core::format_args!($($f)*));
-        }
+        $crate::device::Device::$method($dev.as_ref(), $crate::prelude::fmt!($($f)*))
     }
 }
 
@@ -226,9 +719,10 @@ macro_rules! dev_printk {
 /// Equivalent to the kernel's `dev_emerg` macro.
 ///
 /// Mimics the interface of [`std::print!`]. More information about the syntax is available from
-/// [`core::fmt`] and `alloc::format!`.
+/// [`core::fmt`] and [`std::format!`].
 ///
 /// [`std::print!`]: https://doc.rust-lang.org/std/macro.print.html
+/// [`std::format!`]: https://doc.rust-lang.org/std/macro.format.html
 ///
 /// # Examples
 ///
@@ -241,7 +735,7 @@ macro_rules! dev_printk {
 /// ```
 #[macro_export]
 macro_rules! dev_emerg {
-    ($($f:tt)*) => { $crate::dev_printk!(pr_emerg, $($f)*); }
+    ($($f:tt)*) => { $crate::dev_printk!(pr_emerg, $($f)*) }
 }
 
 /// Prints an alert-level message (level 1) prefixed with device information.
@@ -251,9 +745,10 @@ macro_rules! dev_emerg {
 /// Equivalent to the kernel's `dev_alert` macro.
 ///
 /// Mimics the interface of [`std::print!`]. More information about the syntax is available from
-/// [`core::fmt`] and `alloc::format!`.
+/// [`core::fmt`] and [`std::format!`].
 ///
 /// [`std::print!`]: https://doc.rust-lang.org/std/macro.print.html
+/// [`std::format!`]: https://doc.rust-lang.org/std/macro.format.html
 ///
 /// # Examples
 ///
@@ -266,7 +761,7 @@ macro_rules! dev_emerg {
 /// ```
 #[macro_export]
 macro_rules! dev_alert {
-    ($($f:tt)*) => { $crate::dev_printk!(pr_alert, $($f)*); }
+    ($($f:tt)*) => { $crate::dev_printk!(pr_alert, $($f)*) }
 }
 
 /// Prints a critical-level message (level 2) prefixed with device information.
@@ -276,9 +771,10 @@ macro_rules! dev_alert {
 /// Equivalent to the kernel's `dev_crit` macro.
 ///
 /// Mimics the interface of [`std::print!`]. More information about the syntax is available from
-/// [`core::fmt`] and `alloc::format!`.
+/// [`core::fmt`] and [`std::format!`].
 ///
 /// [`std::print!`]: https://doc.rust-lang.org/std/macro.print.html
+/// [`std::format!`]: https://doc.rust-lang.org/std/macro.format.html
 ///
 /// # Examples
 ///
@@ -291,7 +787,7 @@ macro_rules! dev_alert {
 /// ```
 #[macro_export]
 macro_rules! dev_crit {
-    ($($f:tt)*) => { $crate::dev_printk!(pr_crit, $($f)*); }
+    ($($f:tt)*) => { $crate::dev_printk!(pr_crit, $($f)*) }
 }
 
 /// Prints an error-level message (level 3) prefixed with device information.
@@ -301,9 +797,10 @@ macro_rules! dev_crit {
 /// Equivalent to the kernel's `dev_err` macro.
 ///
 /// Mimics the interface of [`std::print!`]. More information about the syntax is available from
-/// [`core::fmt`] and `alloc::format!`.
+/// [`core::fmt`] and [`std::format!`].
 ///
 /// [`std::print!`]: https://doc.rust-lang.org/std/macro.print.html
+/// [`std::format!`]: https://doc.rust-lang.org/std/macro.format.html
 ///
 /// # Examples
 ///
@@ -316,7 +813,7 @@ macro_rules! dev_crit {
 /// ```
 #[macro_export]
 macro_rules! dev_err {
-    ($($f:tt)*) => { $crate::dev_printk!(pr_err, $($f)*); }
+    ($($f:tt)*) => { $crate::dev_printk!(pr_err, $($f)*) }
 }
 
 /// Prints a warning-level message (level 4) prefixed with device information.
@@ -326,9 +823,10 @@ macro_rules! dev_err {
 /// Equivalent to the kernel's `dev_warn` macro.
 ///
 /// Mimics the interface of [`std::print!`]. More information about the syntax is available from
-/// [`core::fmt`] and `alloc::format!`.
+/// [`core::fmt`] and [`std::format!`].
 ///
 /// [`std::print!`]: https://doc.rust-lang.org/std/macro.print.html
+/// [`std::format!`]: https://doc.rust-lang.org/std/macro.format.html
 ///
 /// # Examples
 ///
@@ -341,7 +839,7 @@ macro_rules! dev_err {
 /// ```
 #[macro_export]
 macro_rules! dev_warn {
-    ($($f:tt)*) => { $crate::dev_printk!(pr_warn, $($f)*); }
+    ($($f:tt)*) => { $crate::dev_printk!(pr_warn, $($f)*) }
 }
 
 /// Prints a notice-level message (level 5) prefixed with device information.
@@ -351,9 +849,10 @@ macro_rules! dev_warn {
 /// Equivalent to the kernel's `dev_notice` macro.
 ///
 /// Mimics the interface of [`std::print!`]. More information about the syntax is available from
-/// [`core::fmt`] and `alloc::format!`.
+/// [`core::fmt`] and [`std::format!`].
 ///
 /// [`std::print!`]: https://doc.rust-lang.org/std/macro.print.html
+/// [`std::format!`]: https://doc.rust-lang.org/std/macro.format.html
 ///
 /// # Examples
 ///
@@ -366,7 +865,7 @@ macro_rules! dev_warn {
 /// ```
 #[macro_export]
 macro_rules! dev_notice {
-    ($($f:tt)*) => { $crate::dev_printk!(pr_notice, $($f)*); }
+    ($($f:tt)*) => { $crate::dev_printk!(pr_notice, $($f)*) }
 }
 
 /// Prints an info-level message (level 6) prefixed with device information.
@@ -376,9 +875,10 @@ macro_rules! dev_notice {
 /// Equivalent to the kernel's `dev_info` macro.
 ///
 /// Mimics the interface of [`std::print!`]. More information about the syntax is available from
-/// [`core::fmt`] and `alloc::format!`.
+/// [`core::fmt`] and [`std::format!`].
 ///
 /// [`std::print!`]: https://doc.rust-lang.org/std/macro.print.html
+/// [`std::format!`]: https://doc.rust-lang.org/std/macro.format.html
 ///
 /// # Examples
 ///
@@ -391,7 +891,7 @@ macro_rules! dev_notice {
 /// ```
 #[macro_export]
 macro_rules! dev_info {
-    ($($f:tt)*) => { $crate::dev_printk!(pr_info, $($f)*); }
+    ($($f:tt)*) => { $crate::dev_printk!(pr_info, $($f)*) }
 }
 
 /// Prints a debug-level message (level 7) prefixed with device information.
@@ -401,9 +901,10 @@ macro_rules! dev_info {
 /// Equivalent to the kernel's `dev_dbg` macro, except that it doesn't support dynamic debug yet.
 ///
 /// Mimics the interface of [`std::print!`]. More information about the syntax is available from
-/// [`core::fmt`] and `alloc::format!`.
+/// [`core::fmt`] and [`std::format!`].
 ///
 /// [`std::print!`]: https://doc.rust-lang.org/std/macro.print.html
+/// [`std::format!`]: https://doc.rust-lang.org/std/macro.format.html
 ///
 /// # Examples
 ///
@@ -416,5 +917,5 @@ macro_rules! dev_info {
 /// ```
 #[macro_export]
 macro_rules! dev_dbg {
-    ($($f:tt)*) => { $crate::dev_printk!(pr_dbg, $($f)*); }
+    ($($f:tt)*) => { $crate::dev_printk!(pr_dbg, $($f)*) }
 }

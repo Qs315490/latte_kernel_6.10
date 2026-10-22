@@ -1,117 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0-or-later OR BSD-3-Clause)
 /*
- * AMD 10Gb Ethernet driver
- *
- * This file is available to you under your choice of the following two
- * licenses:
- *
- * License 1: GPLv2
- *
- * Copyright (c) 2014-2016 Advanced Micro Devices, Inc.
- *
- * This file is free software; you may copy, redistribute and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 2 of the License, or (at
- * your option) any later version.
- *
- * This file is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * This file incorporates work covered by the following copyright and
- * permission notice:
- *     The Synopsys DWC ETHER XGMAC Software Driver and documentation
- *     (hereinafter "Software") is an unsupported proprietary work of Synopsys,
- *     Inc. unless otherwise expressly agreed to in writing between Synopsys
- *     and you.
- *
- *     The Software IS NOT an item of Licensed Software or Licensed Product
- *     under any End User Software License Agreement or Agreement for Licensed
- *     Product with Synopsys or any supplement thereto.  Permission is hereby
- *     granted, free of charge, to any person obtaining a copy of this software
- *     annotated with this license and the Software, to deal in the Software
- *     without restriction, including without limitation the rights to use,
- *     copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- *     of the Software, and to permit persons to whom the Software is furnished
- *     to do so, subject to the following conditions:
- *
- *     The above copyright notice and this permission notice shall be included
- *     in all copies or substantial portions of the Software.
- *
- *     THIS SOFTWARE IS BEING DISTRIBUTED BY SYNOPSYS SOLELY ON AN "AS IS"
- *     BASIS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- *     TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- *     PARTICULAR PURPOSE ARE HEREBY DISCLAIMED. IN NO EVENT SHALL SYNOPSYS
- *     BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- *     CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- *     SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- *     INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- *     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- *     THE POSSIBILITY OF SUCH DAMAGE.
- *
- *
- * License 2: Modified BSD
- *
- * Copyright (c) 2014-2016 Advanced Micro Devices, Inc.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *     * Neither the name of Advanced Micro Devices, Inc. nor the
- *       names of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * This file incorporates work covered by the following copyright and
- * permission notice:
- *     The Synopsys DWC ETHER XGMAC Software Driver and documentation
- *     (hereinafter "Software") is an unsupported proprietary work of Synopsys,
- *     Inc. unless otherwise expressly agreed to in writing between Synopsys
- *     and you.
- *
- *     The Software IS NOT an item of Licensed Software or Licensed Product
- *     under any End User Software License Agreement or Agreement for Licensed
- *     Product with Synopsys or any supplement thereto.  Permission is hereby
- *     granted, free of charge, to any person obtaining a copy of this software
- *     annotated with this license and the Software, to deal in the Software
- *     without restriction, including without limitation the rights to use,
- *     copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- *     of the Software, and to permit persons to whom the Software is furnished
- *     to do so, subject to the following conditions:
- *
- *     The above copyright notice and this permission notice shall be included
- *     in all copies or substantial portions of the Software.
- *
- *     THIS SOFTWARE IS BEING DISTRIBUTED BY SYNOPSYS SOLELY ON AN "AS IS"
- *     BASIS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- *     TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- *     PARTICULAR PURPOSE ARE HEREBY DISCLAIMED. IN NO EVENT SHALL SYNOPSYS
- *     BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- *     CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- *     SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- *     INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- *     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- *     THE POSSIBILITY OF SUCH DAMAGE.
+ * Copyright (c) 2014-2025, Advanced Micro Devices, Inc.
+ * Copyright (c) 2014, Synopsys, Inc.
+ * All rights reserved
  */
 
 #ifndef __XGBE_H__
@@ -189,11 +80,13 @@
 #define XGBE_IRQ_MODE_EDGE	0
 #define XGBE_IRQ_MODE_LEVEL	1
 
+#define XGBE_ETH_FRAME_HDR	(ETH_HLEN + ETH_FCS_LEN + VLAN_HLEN)
 #define XGMAC_MIN_PACKET	60
 #define XGMAC_STD_PACKET_MTU	1500
 #define XGMAC_MAX_STD_PACKET	1518
 #define XGMAC_JUMBO_PACKET_MTU	9000
 #define XGMAC_MAX_JUMBO_PACKET	9018
+#define XGMAC_GIANT_PACKET_MTU	16368
 #define XGMAC_ETH_PREAMBLE	(12 + 8)	/* Inter-frame gap + preamble */
 
 #define XGMAC_PFC_DATA_LEN	46
@@ -203,7 +96,6 @@
 	min_t(unsigned int, IEEE_8021QAZ_MAX_TCS, (_cnt))
 
 /* Common property names */
-#define XGBE_MAC_ADDR_PROPERTY	"mac-address"
 #define XGBE_PHY_MODE_PROPERTY	"phy-mode"
 #define XGBE_DMA_IRQS_PROPERTY	"amd,per-channel-interrupt"
 #define XGBE_SPEEDSET_PROPERTY	"amd,speed-set"
@@ -226,6 +118,14 @@
 #define XGBE_MSI_BASE_COUNT	4
 #define XGBE_MSI_MIN_COUNT	(XGBE_MSI_BASE_COUNT + 1)
 
+/* Initial PTP register values based on Link Speed. */
+#define MAC_TICNR_1G_INITVAL	0x10
+#define MAC_TECNR_1G_INITVAL	0x28
+
+#define MAC_TICSNR_10G_INITVAL	0x33
+#define MAC_TECNR_10G_INITVAL	0x14
+#define MAC_TECSNR_10G_INITVAL	0xCC
+
 /* PCI clock frequencies */
 #define XGBE_V2_DMA_CLOCK_FREQ	500000000	/* 500 MHz */
 #define XGBE_V2_PTP_CLOCK_FREQ	125000000	/* 125 MHz */
@@ -235,10 +135,15 @@
  */
 #define XGBE_TSTAMP_SSINC	20
 #define XGBE_TSTAMP_SNSINC	0
+#define XGBE_PTP_ACT_CLK_FREQ	(NSEC_PER_SEC / XGBE_TSTAMP_SSINC)
 
-/* Driver PMT macros */
-#define XGMAC_DRIVER_CONTEXT	1
-#define XGMAC_IOCTL_CONTEXT	2
+#define XGBE_V2_TSTAMP_SSINC	0xA
+#define XGBE_V2_TSTAMP_SNSINC	0
+#define XGBE_V2_PTP_ACT_CLK_FREQ	(NSEC_PER_SEC / XGBE_V2_TSTAMP_SSINC)
+
+/* Define maximum supported values */
+#define XGBE_MAX_PPS_OUT	4
+#define XGBE_MAX_AUX_SNAP	4
 
 #define XGMAC_FIFO_MIN_ALLOC	2048
 #define XGMAC_FIFO_UNIT		256
@@ -262,6 +167,7 @@
 /* Default coalescing parameters */
 #define XGMAC_INIT_DMA_TX_USECS		1000
 #define XGMAC_INIT_DMA_TX_FRAMES	25
+#define XGMAC_MAX_COAL_TX_TICK		100000
 
 #define XGMAC_MAX_DMA_RIWT		0xff
 #define XGMAC_INIT_DMA_RX_USECS		30
@@ -292,12 +198,12 @@
 #define XGBE_LINK_TIMEOUT		5
 #define XGBE_KR_TRAINING_WAIT_ITER	50
 
-#define XGBE_SGMII_AN_LINK_STATUS	BIT(1)
+#define XGBE_SGMII_AN_LINK_DUPLEX	BIT(1)
 #define XGBE_SGMII_AN_LINK_SPEED	(BIT(2) | BIT(3))
 #define XGBE_SGMII_AN_LINK_SPEED_10	0x00
 #define XGBE_SGMII_AN_LINK_SPEED_100	0x04
 #define XGBE_SGMII_AN_LINK_SPEED_1000	0x08
-#define XGBE_SGMII_AN_LINK_DUPLEX	BIT(4)
+#define XGBE_SGMII_AN_LINK_STATUS	BIT(4)
 
 /* ECC correctable error notification window (seconds) */
 #define XGBE_ECC_LIMIT			60
@@ -346,6 +252,35 @@
 	bitmap_copy((_dst)->link_modes._dname,		\
 		    (_src)->link_modes._sname,		\
 		    __ETHTOOL_LINK_MODE_MASK_NBITS)
+
+/* XGBE PCI device id */
+#define XGBE_RV_PCI_DEVICE_ID	0x15d0
+#define XGBE_YC_PCI_DEVICE_ID	0x14b5
+#define XGBE_RN_PCI_DEVICE_ID	0x1630
+#define XGBE_P100a_PCI_DEVICE_ID	0x1122
+
+ /* Generic low and high masks */
+#define XGBE_GEN_HI_MASK	GENMASK(31, 16)
+#define XGBE_GEN_LO_MASK	GENMASK(15, 0)
+
+/* MAC hardware version numbers (SNPSVER field in MAC_VR register) */
+#define XGBE_MAC_VER_30		0x30	/* Baseline Rx adaptation support */
+#define XGBE_MAC_VER_33		0x33	/* P100a platform */
+
+/* MAC Speed Select (SS) values for MAC_TCR register
+ * These values are written to the SS field to configure link speed.
+ * Note: P100a uses XGMII mode (0x06) for 2.5G instead of GMII (0x02)
+ */
+/* Note: 100M and 2.5G GMII share the same value (0x02) but are
+ * differentiated by the mode/interface type at the PHY level
+ */
+
+#define XGBE_MAC_SS_10G		0x00	/* 10Gbps - XGMII mode */
+#define XGBE_MAC_SS_2_5G_GMII	0x02	/* 2.5Gbps - GMII mode (YC) */
+#define XGBE_MAC_SS_2_5G_XGMII	0x06	/* 2.5Gbps - XGMII mode (P100a) */
+#define XGBE_MAC_SS_1G		0x03	/* 1Gbps */
+#define XGBE_MAC_SS_100M	0x02	/* 100Mbps */
+#define XGBE_MAC_SS_10M		0x07	/* 10Mbps */
 
 struct xgbe_prv_data;
 
@@ -565,6 +500,7 @@ enum xgbe_speed {
 enum xgbe_xpcs_access {
 	XGBE_XPCS_ACCESS_V1 = 0,
 	XGBE_XPCS_ACCESS_V2,
+	XGBE_XPCS_ACCESS_V3,
 };
 
 enum xgbe_an_mode {
@@ -637,7 +573,10 @@ enum xgbe_mb_subcmd {
 	XGBE_MB_SUBCMD_10MBITS = 0,
 	XGBE_MB_SUBCMD_100MBITS,
 	XGBE_MB_SUBCMD_1G_SGMII,
-	XGBE_MB_SUBCMD_1G_KX
+	XGBE_MB_SUBCMD_1G_KX,
+
+	/* 2.5GbE Mode subcommands */
+	XGBE_MB_SUBCMD_2_5G_KX = 1
 };
 
 struct xgbe_phy {
@@ -738,6 +677,7 @@ struct xgbe_mmc_stats {
 	u64 rxfifooverflow;
 	u64 rxvlanframes_gb;
 	u64 rxwatchdogerror;
+	u64 rxalignmenterror;
 };
 
 struct xgbe_ext_stats {
@@ -754,6 +694,11 @@ struct xgbe_ext_stats {
 	u64 rx_vxlan_packets;
 	u64 rx_csum_errors;
 	u64 rx_vxlan_csum_errors;
+};
+
+struct xgbe_pps_config {
+	struct timespec64 start;
+	struct timespec64 period;
 };
 
 struct xgbe_hw_if {
@@ -838,14 +783,6 @@ struct xgbe_hw_if {
 	void (*tx_mmc_int)(struct xgbe_prv_data *);
 	void (*read_mmc_stats)(struct xgbe_prv_data *);
 
-	/* For Timestamp config */
-	int (*config_tstamp)(struct xgbe_prv_data *, unsigned int);
-	void (*update_tstamp_addend)(struct xgbe_prv_data *, unsigned int);
-	void (*set_tstamp_time)(struct xgbe_prv_data *, unsigned int sec,
-				unsigned int nsec);
-	u64 (*get_tstamp_time)(struct xgbe_prv_data *);
-	u64 (*get_tx_tstamp)(struct xgbe_prv_data *);
-
 	/* For Data Center Bridging config */
 	void (*config_tc)(struct xgbe_prv_data *);
 	void (*config_dcb_tc)(struct xgbe_prv_data *);
@@ -865,6 +802,10 @@ struct xgbe_hw_if {
 	void (*enable_vxlan)(struct xgbe_prv_data *);
 	void (*disable_vxlan)(struct xgbe_prv_data *);
 	void (*set_vxlan_id)(struct xgbe_prv_data *);
+
+	/* For Split Header */
+	void (*enable_sph)(struct xgbe_prv_data *pdata);
+	void (*disable_sph)(struct xgbe_prv_data *pdata);
 };
 
 /* This structure represents implementation specific routines for an
@@ -1039,6 +980,7 @@ struct xgbe_version_data {
 	unsigned int tx_max_fifo_size;
 	unsigned int rx_max_fifo_size;
 	unsigned int tx_tstamp_workaround;
+	unsigned int tstamp_ptp_clock_freq;
 	unsigned int ecc_support;
 	unsigned int i2c_support;
 	unsigned int irq_reissue_support;
@@ -1056,6 +998,7 @@ struct xgbe_prv_data {
 	struct device *dev;
 	struct platform_device *phy_platdev;
 	struct device *phy_dev;
+	unsigned int smn_base;
 
 	/* Version related data */
 	struct xgbe_version_data *vdata;
@@ -1078,9 +1021,6 @@ struct xgbe_prv_data {
 	unsigned int pp2;
 	unsigned int pp3;
 	unsigned int pp4;
-
-	/* Overall device lock */
-	spinlock_t lock;
 
 	/* XPCS indirect addressing lock */
 	spinlock_t xpcs_lock;
@@ -1222,13 +1162,14 @@ struct xgbe_prv_data {
 	spinlock_t tstamp_lock;
 	struct ptp_clock_info ptp_clock_info;
 	struct ptp_clock *ptp_clock;
-	struct hwtstamp_config tstamp_config;
-	struct cyclecounter tstamp_cc;
-	struct timecounter tstamp_tc;
+	struct kernel_hwtstamp_config tstamp_config;
 	unsigned int tstamp_addend;
 	struct work_struct tx_tstamp_work;
 	struct sk_buff *tx_tstamp_skb;
 	u64 tx_tstamp;
+
+	/* Pulse Per Second output */
+	struct xgbe_pps_config pps[XGBE_MAX_PPS_OUT];
 
 	/* DCB support */
 	struct ieee_ets *ets;
@@ -1320,7 +1261,12 @@ struct xgbe_prv_data {
 	bool en_rx_adap;
 	int rx_adapt_retries;
 	bool rx_adapt_done;
+	/* Flag to track if data path (TX/RX) was stopped for RX adaptation.
+	 * This prevents packet corruption during the adaptation window.
+	 */
+	bool data_path_stopped;
 	bool mode_set;
+	bool sph;
 };
 
 /* Function prototypes*/
@@ -1362,12 +1308,50 @@ void xgbe_dump_rx_desc(struct xgbe_prv_data *, struct xgbe_ring *,
 		       unsigned int);
 void xgbe_print_pkt(struct net_device *, struct sk_buff *, bool);
 void xgbe_get_all_hw_features(struct xgbe_prv_data *);
-int xgbe_powerup(struct net_device *, unsigned int);
-int xgbe_powerdown(struct net_device *, unsigned int);
+int xgbe_powerup(struct net_device *netdev);
+int xgbe_powerdown(struct net_device *netdev);
 void xgbe_init_rx_coalesce(struct xgbe_prv_data *);
 void xgbe_init_tx_coalesce(struct xgbe_prv_data *);
 void xgbe_restart_dev(struct xgbe_prv_data *pdata);
 void xgbe_full_restart_dev(struct xgbe_prv_data *pdata);
+
+/* For Timestamp config */
+void xgbe_config_tstamp(struct xgbe_prv_data *pdata, unsigned int mac_tscr);
+u64 xgbe_get_tstamp_time(struct xgbe_prv_data *pdata);
+u64 xgbe_get_tx_tstamp(struct xgbe_prv_data *pdata);
+void xgbe_get_rx_tstamp(struct xgbe_packet_data *packet,
+			struct xgbe_ring_desc *rdesc);
+void xgbe_get_rx_tstamp(struct xgbe_packet_data *packet,
+			struct xgbe_ring_desc *rdesc);
+void xgbe_update_tstamp_addend(struct xgbe_prv_data *pdata,
+			       unsigned int addend);
+void xgbe_set_tstamp_time(struct xgbe_prv_data *pdata, unsigned int sec,
+			  unsigned int nsec);
+void xgbe_tx_tstamp(struct work_struct *work);
+int xgbe_get_hwtstamp_settings(struct net_device *netdev,
+			       struct kernel_hwtstamp_config *config);
+int xgbe_set_hwtstamp_settings(struct net_device *netdev,
+			       struct kernel_hwtstamp_config *config,
+			       struct netlink_ext_ack *extack);
+void xgbe_prep_tx_tstamp(struct xgbe_prv_data *pdata,
+			 struct sk_buff *skb,
+			 struct xgbe_packet_data *packet);
+int xgbe_init_ptp(struct xgbe_prv_data *pdata);
+void xgbe_update_tstamp_time(struct xgbe_prv_data *pdata, unsigned int sec,
+			     unsigned int nsec);
+
+int xgbe_pps_config(struct xgbe_prv_data *pdata, struct xgbe_pps_config *cfg,
+		    int index, bool on);
+
+/* Selftest functions */
+void xgbe_selftest_run(struct net_device *dev,
+		       struct ethtool_test *etest, u64 *buf);
+void xgbe_selftest_get_strings(struct xgbe_prv_data *pdata, u8 *data);
+int xgbe_selftest_get_count(struct xgbe_prv_data *pdata);
+
+/* Loopback control */
+int xgbe_enable_mac_loopback(struct xgbe_prv_data *pdata);
+void xgbe_disable_mac_loopback(struct xgbe_prv_data *pdata);
 
 #ifdef CONFIG_DEBUG_FS
 void xgbe_debugfs_init(struct xgbe_prv_data *);

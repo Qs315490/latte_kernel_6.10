@@ -24,7 +24,7 @@
 
 #include "link_enc_cfg.h"
 #include "resource.h"
-#include "link.h"
+#include "link_service.h"
 
 #define DC_LOGGER dc->ctx->logger
 
@@ -33,7 +33,7 @@ static bool is_dig_link_enc_stream(struct dc_stream_state *stream)
 {
 	bool is_dig_stream = false;
 	struct link_encoder *link_enc = NULL;
-	int i;
+	unsigned int i;
 
 	/* Loop over created link encoder objects. */
 	if (stream) {
@@ -44,20 +44,11 @@ static bool is_dig_link_enc_stream(struct dc_stream_state *stream)
 			 * yet match.
 			 */
 			if (link_enc && ((uint32_t)stream->link->connector_signal & link_enc->output_signals)) {
-				if (dc_is_dp_signal(stream->signal)) {
-					/* DIGs do not support DP2.0 streams with 128b/132b encoding. */
-					struct dc_link_settings link_settings = {0};
-
-					stream->ctx->dc->link_srv->dp_decide_link_settings(stream, &link_settings);
-					if ((link_settings.link_rate >= LINK_RATE_LOW) &&
-							link_settings.link_rate <= LINK_RATE_HIGH3) {
-						is_dig_stream = true;
-						break;
-					}
-				} else {
-					is_dig_stream = true;
-					break;
-				}
+				is_dig_stream = true;
+				/* If stream is HDMI FRL, then it is not a DIG stream. */
+				if (dc_is_hdmi_frl_signal(stream->signal))
+					is_dig_stream = false;
+				break;
 			}
 		}
 	}
@@ -173,7 +164,7 @@ static enum engine_id find_first_avail_link_enc(
 		enum engine_id eng_id_requested)
 {
 	enum engine_id eng_id = ENGINE_ID_UNKNOWN;
-	int i;
+	unsigned int i;
 
 	if (eng_id_requested != ENGINE_ID_UNKNOWN) {
 
@@ -260,7 +251,7 @@ static struct link_encoder *get_link_enc_used_by_link(
 /* Clear all link encoder assignments. */
 static void clear_enc_assignments(const struct dc *dc, struct dc_state *state)
 {
-	int i;
+	unsigned int i;
 
 	for (i = 0; i < MAX_PIPES; i++) {
 		state->res_ctx.link_enc_cfg_ctx.link_enc_assignments[i].valid = false;
@@ -534,10 +525,10 @@ struct link_encoder *link_enc_cfg_get_link_enc_used_by_link(
 struct link_encoder *link_enc_cfg_get_next_avail_link_enc(struct dc *dc)
 {
 	struct link_encoder *link_enc = NULL;
-	enum engine_id encs_assigned[MAX_DIG_LINK_ENCODERS];
-	int i;
+	enum engine_id encs_assigned[MAX_LINK_ENCODERS];
+	unsigned int i;
 
-	for (i = 0; i < MAX_DIG_LINK_ENCODERS; i++)
+	for (i = 0; i < MAX_LINK_ENCODERS; i++)
 		encs_assigned[i] = ENGINE_ID_UNKNOWN;
 
 	/* Add assigned encoders to list. */
@@ -555,17 +546,6 @@ struct link_encoder *link_enc_cfg_get_next_avail_link_enc(struct dc *dc)
 			break;
 		}
 	}
-
-	return link_enc;
-}
-
-struct link_encoder *link_enc_cfg_get_link_enc_used_by_stream(
-		struct dc *dc,
-		const struct dc_stream_state *stream)
-{
-	struct link_encoder *link_enc;
-
-	link_enc = link_enc_cfg_get_link_enc_used_by_link(dc, stream->link);
 
 	return link_enc;
 }
@@ -647,7 +627,8 @@ bool link_enc_cfg_validate(struct dc *dc, struct dc_state *state)
 	bool valid_uniqueness = true;
 	bool valid_avail = true;
 	bool valid_streams = true;
-	int i, j;
+	int i;
+	unsigned int j;
 	uint8_t valid_count = 0;
 	uint8_t dig_stream_count = 0;
 	int eng_ids_per_ep_id[MAX_PIPES] = {0};

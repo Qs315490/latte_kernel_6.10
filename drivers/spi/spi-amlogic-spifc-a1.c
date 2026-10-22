@@ -206,10 +206,9 @@ static int amlogic_spifc_a1_read(struct amlogic_spifc_a1 *spifc, void *buf,
 	u32 val = readl(spifc->base + SPIFC_A1_USER_CTRL3_REG);
 	int ret;
 
-	val &= ~(SPIFC_A1_USER_DIN_MODE | SPIFC_A1_USER_DIN_BYTES);
 	val |= SPIFC_A1_USER_DIN_ENABLE;
-	val |= FIELD_PREP(SPIFC_A1_USER_DIN_MODE, mode);
-	val |= FIELD_PREP(SPIFC_A1_USER_DIN_BYTES, size);
+	FIELD_MODIFY(SPIFC_A1_USER_DIN_MODE, &val, mode);
+	FIELD_MODIFY(SPIFC_A1_USER_DIN_BYTES, &val, size);
 	writel(val, spifc->base + SPIFC_A1_USER_CTRL3_REG);
 
 	ret = amlogic_spifc_a1_request(spifc, true);
@@ -353,10 +352,11 @@ static int amlogic_spifc_a1_probe(struct platform_device *pdev)
 
 	pm_runtime_set_autosuspend_delay(spifc->dev, 500);
 	pm_runtime_use_autosuspend(spifc->dev);
-	devm_pm_runtime_enable(spifc->dev);
+	ret = devm_pm_runtime_enable(spifc->dev);
+	if (ret)
+		return ret;
 
 	ctrl->num_chipselect = 1;
-	ctrl->dev.of_node = pdev->dev.of_node;
 	ctrl->bits_per_word_mask = SPI_BPW_MASK(8);
 	ctrl->auto_runtime_pm = true;
 	ctrl->mem_ops = &amlogic_spifc_a1_mem_ops;

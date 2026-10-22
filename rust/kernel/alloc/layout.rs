@@ -4,7 +4,10 @@
 //!
 //! Custom layout types extending or improving [`Layout`].
 
-use core::{alloc::Layout, marker::PhantomData};
+use core::{
+    alloc::Layout,
+    marker::PhantomData, //
+};
 
 /// Error when constructing an [`ArrayLayout`].
 pub struct LayoutError;
@@ -47,7 +50,10 @@ impl<T> ArrayLayout<T> {
     /// # Examples
     ///
     /// ```
-    /// # use kernel::alloc::layout::{ArrayLayout, LayoutError};
+    /// # use kernel::alloc::layout::{
+    /// #     ArrayLayout,
+    /// #     LayoutError, //
+    /// # };
     /// let layout = ArrayLayout::<i32>::new(15)?;
     /// assert_eq!(layout.len(), 15);
     ///
@@ -80,7 +86,7 @@ impl<T> ArrayLayout<T> {
     /// # Safety
     ///
     /// `len` must be a value, for which `len * size_of::<T>() <= isize::MAX` is true.
-    pub unsafe fn new_unchecked(len: usize) -> Self {
+    pub const unsafe fn new_unchecked(len: usize) -> Self {
         // INVARIANT: By the safety requirements of this function
         // `len * size_of::<T>() <= isize::MAX`.
         Self {
@@ -97,6 +103,11 @@ impl<T> ArrayLayout<T> {
     /// Returns `true` when no array elements are represented by this layout.
     pub const fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Returns the size of the [`ArrayLayout`] in bytes.
+    pub const fn size(&self) -> usize {
+        self.len() * core::mem::size_of::<T>()
     }
 }
 

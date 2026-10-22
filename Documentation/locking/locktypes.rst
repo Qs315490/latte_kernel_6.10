@@ -204,6 +204,27 @@ per-CPU data structures on a non PREEMPT_RT kernel.
 local_lock is not suitable to protect against preemption or interrupts on a
 PREEMPT_RT kernel due to the PREEMPT_RT specific spinlock_t semantics.
 
+CPU local scope and bottom-half
+-------------------------------
+
+Per-CPU variables that are accessed only in softirq context should not rely on
+the assumption that this context is implicitly protected due to being
+non-preemptible. In a PREEMPT_RT kernel, softirq context is preemptible, and
+synchronizing every bottom-half-disabled section via implicit context results
+in an implicit per-CPU "big kernel lock."
+
+A local_lock_t together with local_lock_nested_bh() and
+local_unlock_nested_bh() for locking operations help to identify the locking
+scope.
+
+When lockdep is enabled, these functions verify that data structure access
+occurs within softirq context.
+Unlike local_lock(), local_unlock_nested_bh() does not disable preemption and
+does not add overhead when used without lockdep.
+
+On a PREEMPT_RT kernel, local_lock_t behaves as a real lock and
+local_unlock_nested_bh() serializes access to the data structure, which allows
+removal of serialization via local_bh_disable().
 
 raw_spinlock_t and spinlock_t
 =============================
@@ -477,7 +498,7 @@ allocating memory.  Thus, on a non-PREEMPT_RT kernel the following code
 works perfectly::
 
   raw_spin_lock(&lock);
-  p = kmalloc(sizeof(*p), GFP_ATOMIC);
+  p = kmalloc_obj(*p, GFP_ATOMIC);
 
 But this code fails on PREEMPT_RT kernels because the memory allocator is
 fully preemptible and therefore cannot be invoked from truly atomic
@@ -486,7 +507,7 @@ while holding normal non-raw spinlocks because they do not disable
 preemption on PREEMPT_RT kernels::
 
   spin_lock(&lock);
-  p = kmalloc(sizeof(*p), GFP_ATOMIC);
+  p = kmalloc_obj(*p, GFP_ATOMIC);
 
 
 bit spinlocks

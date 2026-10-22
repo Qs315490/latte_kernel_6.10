@@ -7,6 +7,7 @@
 
 #include <linux/acpi.h>
 #include <linux/sysfs.h>
+#include <linux/string_choices.h>
 
 #include "physical_location.h"
 
@@ -20,8 +21,7 @@ bool dev_add_physical_location(struct device *dev)
 	if (!acpi_get_physical_device_location(ACPI_HANDLE(dev), &pld))
 		return false;
 
-	dev->physical_location =
-		kzalloc(sizeof(*dev->physical_location), GFP_KERNEL);
+	dev->physical_location = kzalloc_obj(*dev->physical_location);
 	if (!dev->physical_location) {
 		ACPI_FREE(pld);
 		return false;
@@ -116,7 +116,7 @@ static ssize_t dock_show(struct device *dev, struct device_attribute *attr,
 	char *buf)
 {
 	return sysfs_emit(buf, "%s\n",
-		dev->physical_location->dock ? "yes" : "no");
+		str_yes_no(dev->physical_location->dock));
 }
 static DEVICE_ATTR_RO(dock);
 
@@ -124,7 +124,7 @@ static ssize_t lid_show(struct device *dev, struct device_attribute *attr,
 	char *buf)
 {
 	return sysfs_emit(buf, "%s\n",
-		dev->physical_location->lid ? "yes" : "no");
+		str_yes_no(dev->physical_location->lid));
 }
 static DEVICE_ATTR_RO(lid);
 

@@ -38,7 +38,7 @@ static int dump_prog_id_as_func_ptr(const struct btf_dumper *d,
 	__u32 info_len = sizeof(info);
 	const char *prog_name = NULL;
 	struct btf *prog_btf = NULL;
-	struct bpf_func_info finfo;
+	struct bpf_func_info finfo = {};
 	__u32 finfo_rec_size;
 	char prog_str[1024];
 	int err;
@@ -150,7 +150,7 @@ static int btf_dumper_enum(const struct btf_dumper *d,
 {
 	const struct btf_enum *enums = btf_enum(t);
 	__s64 value;
-	__u16 i;
+	__u32 i;
 
 	switch (t->size) {
 	case 8:
@@ -189,7 +189,7 @@ static int btf_dumper_enum64(const struct btf_dumper *d,
 	const struct btf_enum64 *enums = btf_enum64(t);
 	__u32 val_lo32, val_hi32;
 	__u64 value;
-	__u16 i;
+	__u32 i;
 
 	value = *(__u64 *)data;
 	val_lo32 = (__u32)value;
@@ -590,7 +590,7 @@ static int btf_dumper_do_type(const struct btf_dumper *d, __u32 type_id,
 	case BTF_KIND_DATASEC:
 		return btf_dumper_datasec(d, type_id, data);
 	default:
-		jsonw_printf(d->jw, "(unsupported-kind");
+		jsonw_printf(d->jw, "(unsupported-kind)");
 		return -EINVAL;
 	}
 }
@@ -653,7 +653,7 @@ static int __btf_dumper_type_only(const struct btf *btf, __u32 type_id,
 	case BTF_KIND_ARRAY:
 		array = (struct btf_array *)(t + 1);
 		BTF_PRINT_TYPE(array->type);
-		BTF_PRINT_ARG("[%d]", array->nelems);
+		BTF_PRINT_ARG("[%u]", array->nelems);
 		break;
 	case BTF_KIND_PTR:
 		BTF_PRINT_TYPE(t->type);

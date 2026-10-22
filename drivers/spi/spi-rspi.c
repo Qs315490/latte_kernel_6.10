@@ -1171,6 +1171,8 @@ static void rspi_remove(struct platform_device *pdev)
 {
 	struct rspi_data *rspi = platform_get_drvdata(pdev);
 
+	spi_unregister_controller(rspi->ctlr);
+
 	rspi_release_dma(rspi->ctlr);
 	pm_runtime_disable(&pdev->dev);
 }
@@ -1220,11 +1222,6 @@ static const struct of_device_id rspi_of_match[] __maybe_unused = {
 MODULE_DEVICE_TABLE(of, rspi_of_match);
 
 #ifdef CONFIG_OF
-static void rspi_reset_control_assert(void *data)
-{
-	reset_control_assert(data);
-}
-
 static int rspi_parse_dt(struct device *dev, struct spi_controller *ctlr)
 {
 	struct reset_control *rstc;
@@ -1240,22 +1237,10 @@ static int rspi_parse_dt(struct device *dev, struct spi_controller *ctlr)
 
 	ctlr->num_chipselect = num_cs;
 
-	rstc = devm_reset_control_get_optional_exclusive(dev, NULL);
+	rstc = devm_reset_control_get_optional_exclusive_deasserted(dev, NULL);
 	if (IS_ERR(rstc))
 		return dev_err_probe(dev, PTR_ERR(rstc),
-					     "failed to get reset ctrl\n");
-
-	error = reset_control_deassert(rstc);
-	if (error) {
-		dev_err(dev, "failed to deassert reset %d\n", error);
-		return error;
-	}
-
-	error = devm_add_action_or_reset(dev, rspi_reset_control_assert, rstc);
-	if (error) {
-		dev_err(dev, "failed to register assert devm action, %d\n", error);
-		return error;
-	}
+				     "failed to get reset ctrl and deassert reset\n");
 
 	return 0;
 }
@@ -1288,7 +1273,7 @@ static int rspi_probe(struct platform_device *pdev)
 	const struct spi_ops *ops;
 	unsigned long clksrc;
 
-	ctlr = spi_alloc_host(&pdev->dev, sizeof(struct rspi_data));
+	ctlr = devm_spi_alloc_host(&pdev->dev, sizeof(struct rspi_data));
 	if (ctlr == NULL)
 		return -ENOMEM;
 
@@ -1296,7 +1281,7 @@ static int rspi_probe(struct platform_device *pdev)
 	if (ops) {
 		ret = rspi_parse_dt(&pdev->dev, ctlr);
 		if (ret)
-			goto error1;
+			return ret;
 	} else {
 		ops = (struct spi_ops *)pdev->id_entry->driver_data;
 		ctlr->num_chipselect = 2; /* default */
@@ -1308,16 +1293,13 @@ static int rspi_probe(struct platform_device *pdev)
 	rspi->ctlr = ctlr;
 
 	rspi->addr = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
-	if (IS_ERR(rspi->addr)) {
-		ret = PTR_ERR(rspi->addr);
-		goto error1;
-	}
+	if (IS_ERR(rspi->addr))
+		return PTR_ERR(rspi->addr);
 
 	rspi->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(rspi->clk)) {
 		dev_err(&pdev->dev, "cannot get clock\n");
-		ret = PTR_ERR(rspi->clk);
-		goto error1;
+		return PTR_ERR(rspi->clk);
 	}
 
 	rspi->pdev = pdev;
@@ -1338,7 +1320,6 @@ static int rspi_probe(struct platform_device *pdev)
 	ctlr->min_speed_hz = DIV_ROUND_UP(clksrc, ops->max_div);
 	ctlr->max_speed_hz = DIV_ROUND_UP(clksrc, ops->min_div);
 	ctlr->flags = ops->flags;
-	ctlr->dev.of_node = pdev->dev.of_node;
 	ctlr->use_gpio_descriptors = true;
 	ctlr->max_native_cs = rspi->ops->num_hw_ss;
 
@@ -1377,9 +1358,9 @@ static int rspi_probe(struct platform_device *pdev)
 	if (ret < 0)
 		dev_warn(&pdev->dev, "DMA not available, using PIO\n");
 
-	ret = devm_spi_register_controller(&pdev->dev, ctlr);
+	ret = spi_register_controller(ctlr);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "devm_spi_register_controller error.\n");
+		dev_err(&pdev->dev, "failed to register controller\n");
 		goto error3;
 	}
 
@@ -1391,20 +1372,17 @@ error3:
 	rspi_release_dma(ctlr);
 error2:
 	pm_runtime_disable(&pdev->dev);
-error1:
-	spi_controller_put(ctlr);
 
 	return ret;
 }
 
 static const struct platform_device_id spi_driver_ids[] = {
-	{ "rspi",	(kernel_ulong_t)&rspi_ops },
-	{},
+	{ .name = "rspi", .driver_data = (kernel_ulong_t)&rspi_ops },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(platform, spi_driver_ids);
 
-#ifdef CONFIG_PM_SLEEP
 static int rspi_suspend(struct device *dev)
 {
 	struct rspi_data *rspi = dev_get_drvdata(dev);
@@ -1419,11 +1397,7 @@ static int rspi_resume(struct device *dev)
 	return spi_controller_resume(rspi->ctlr);
 }
 
-static SIMPLE_DEV_PM_OPS(rspi_pm_ops, rspi_suspend, rspi_resume);
-#define DEV_PM_OPS	&rspi_pm_ops
-#else
-#define DEV_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(rspi_pm_ops, rspi_suspend, rspi_resume);
 
 static struct platform_driver rspi_driver = {
 	.probe =	rspi_probe,
@@ -1431,7 +1405,7 @@ static struct platform_driver rspi_driver = {
 	.id_table =	spi_driver_ids,
 	.driver		= {
 		.name = "renesas_spi",
-		.pm = DEV_PM_OPS,
+		.pm = pm_sleep_ptr(&rspi_pm_ops),
 		.of_match_table = of_match_ptr(rspi_of_match),
 	},
 };

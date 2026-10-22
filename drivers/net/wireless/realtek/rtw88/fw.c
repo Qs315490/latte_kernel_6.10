@@ -279,6 +279,9 @@ static void rtw_fw_adaptivity_result(struct rtw_dev *rtwdev, u8 *payload,
 	const struct rtw_hw_reg_offset *edcca_th = rtwdev->chip->edcca_th;
 	struct rtw_c2h_adaptivity *result = (struct rtw_c2h_adaptivity *)payload;
 
+	if (!edcca_th)
+		return;
+
 	rtw_dbg(rtwdev, RTW_DBG_ADAPTIVITY,
 		"Adaptivity: density %x igi %x l2h_th_init %x l2h %x h2l %x option %x\n",
 		result->density, result->igi, result->l2h_th_init, result->l2h,
@@ -521,7 +524,7 @@ rtw_fw_send_general_info(struct rtw_dev *rtwdev)
 	u8 h2c_pkt[H2C_PKT_SIZE] = {0};
 	u16 total_size = H2C_PKT_HDR_SIZE + 4;
 
-	if (rtw_chip_wcpu_11n(rtwdev))
+	if (rtw_chip_wcpu_8051(rtwdev))
 		return;
 
 	rtw_h2c_pkt_set_header(h2c_pkt, H2C_PKT_GENERAL_INFO);
@@ -544,7 +547,7 @@ rtw_fw_send_phydm_info(struct rtw_dev *rtwdev)
 	u16 total_size = H2C_PKT_HDR_SIZE + 8;
 	u8 fw_rf_type = 0;
 
-	if (rtw_chip_wcpu_11n(rtwdev))
+	if (rtw_chip_wcpu_8051(rtwdev))
 		return;
 
 	if (hal->rf_type == RF_1T1R)
@@ -735,6 +738,7 @@ void rtw_fw_send_ra_info(struct rtw_dev *rtwdev, struct rtw_sta_info *si,
 {
 	u8 h2c_pkt[H2C_PKT_SIZE] = {0};
 	bool disable_pt = true;
+	u32 mask_hi;
 
 	SET_H2C_CMD_ID_CLASS(h2c_pkt, H2C_CMD_RA_INFO);
 
@@ -753,6 +757,20 @@ void rtw_fw_send_ra_info(struct rtw_dev *rtwdev, struct rtw_sta_info *si,
 	SET_RA_INFO_RA_MASK3(h2c_pkt, (si->ra_mask & 0xff000000) >> 24);
 
 	si->init_ra_lv = 0;
+
+	rtw_fw_send_h2c_command(rtwdev, h2c_pkt);
+
+	if (rtwdev->chip->id != RTW_CHIP_TYPE_8814A)
+		return;
+
+	SET_H2C_CMD_ID_CLASS(h2c_pkt, H2C_CMD_RA_INFO_HI);
+
+	mask_hi = si->ra_mask >> 32;
+
+	SET_RA_INFO_RA_MASK0(h2c_pkt, (mask_hi & 0xff));
+	SET_RA_INFO_RA_MASK1(h2c_pkt, (mask_hi & 0xff00) >> 8);
+	SET_RA_INFO_RA_MASK2(h2c_pkt, (mask_hi & 0xff0000) >> 16);
+	SET_RA_INFO_RA_MASK3(h2c_pkt, (mask_hi & 0xff000000) >> 24);
 
 	rtw_fw_send_h2c_command(rtwdev, h2c_pkt);
 }
@@ -1316,7 +1334,7 @@ static struct rtw_rsvd_page *rtw_alloc_rsvd_page(struct rtw_dev *rtwdev,
 {
 	struct rtw_rsvd_page *rsvd_pkt = NULL;
 
-	rsvd_pkt = kzalloc(sizeof(*rsvd_pkt), GFP_KERNEL);
+	rsvd_pkt = kzalloc_obj(*rsvd_pkt);
 
 	if (!rsvd_pkt)
 		return NULL;
@@ -1451,7 +1469,7 @@ void rtw_add_rsvd_page_sta(struct rtw_dev *rtwdev,
 int rtw_fw_write_data_rsvd_page(struct rtw_dev *rtwdev, u16 pg_addr,
 				u8 *buf, u32 size)
 {
-	u8 bckp[2];
+	u8 bckp[3];
 	u8 val;
 	u16 rsvd_pg_head;
 	u32 bcn_valid_addr;
@@ -1463,7 +1481,9 @@ int rtw_fw_write_data_rsvd_page(struct rtw_dev *rtwdev, u16 pg_addr,
 	if (!size)
 		return -EINVAL;
 
-	if (rtw_chip_wcpu_11n(rtwdev)) {
+	bckp[2] = rtw_read8(rtwdev, REG_BCN_CTRL);
+
+	if (rtw_chip_wcpu_8051(rtwdev)) {
 		rtw_write32_set(rtwdev, REG_DWBCN0_CTRL, BIT_BCN_VALID);
 	} else {
 		pg_addr &= BIT_MASK_BCN_HEAD_1_V1;
@@ -1475,6 +1495,9 @@ int rtw_fw_write_data_rsvd_page(struct rtw_dev *rtwdev, u16 pg_addr,
 	bckp[0] = val;
 	val |= BIT_ENSWBCN >> 8;
 	rtw_write8(rtwdev, REG_CR + 1, val);
+
+	rtw_write8(rtwdev, REG_BCN_CTRL,
+		   (bckp[2] & ~BIT_EN_BCN_FUNCTION) | BIT_DIS_TSF_UDT);
 
 	if (rtw_hci_type(rtwdev) == RTW_HCI_TYPE_PCIE) {
 		val = rtw_read8(rtwdev, REG_FWHW_TXQ_CTRL + 2);
@@ -1489,7 +1512,7 @@ int rtw_fw_write_data_rsvd_page(struct rtw_dev *rtwdev, u16 pg_addr,
 		goto restore;
 	}
 
-	if (rtw_chip_wcpu_11n(rtwdev)) {
+	if (rtw_chip_wcpu_8051(rtwdev)) {
 		bcn_valid_addr = REG_DWBCN0_CTRL;
 		bcn_valid_mask = BIT_BCN_VALID;
 	} else {
@@ -1506,6 +1529,7 @@ restore:
 	rsvd_pg_head = rtwdev->fifo.rsvd_boundary;
 	rtw_write16(rtwdev, REG_FIFOPAGE_CTRL_2,
 		    rsvd_pg_head | BIT_BCN_VALID_V1);
+	rtw_write8(rtwdev, REG_BCN_CTRL, bckp[2]);
 	if (rtw_hci_type(rtwdev) == RTW_HCI_TYPE_PCIE)
 		rtw_write8(rtwdev, REG_FWHW_TXQ_CTRL + 2, bckp[1]);
 	rtw_write8(rtwdev, REG_CR + 1, bckp[0]);

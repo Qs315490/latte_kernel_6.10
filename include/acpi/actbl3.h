@@ -3,7 +3,7 @@
  *
  * Name: actbl3.h - ACPI Table Definitions
  *
- * Copyright (C) 2000 - 2023, Intel Corp.
+ * Copyright (C) 2000 - 2026, Intel Corp.
  *
  *****************************************************************************/
 
@@ -238,6 +238,7 @@ struct acpi_srat_mem_affinity {
 #define ACPI_SRAT_MEM_ENABLED       (1)	/* 00: Use affinity structure */
 #define ACPI_SRAT_MEM_HOT_PLUGGABLE (1<<1)	/* 01: Memory region is hot pluggable */
 #define ACPI_SRAT_MEM_NON_VOLATILE  (1<<2)	/* 02: Memory region is non-volatile */
+#define ACPI_SRAT_MEM_SPEC_PURPOSE  (1<<3)	/* 03: Memory is intended for specific-purpose usage */
 
 /* 2: Processor Local X2_APIC Affinity (ACPI 4.0) */
 
@@ -269,7 +270,7 @@ struct acpi_srat_gicc_affinity {
 
 #define ACPI_SRAT_GICC_ENABLED     (1)	/* 00: Use affinity structure */
 
-/* 4: GCC ITS Affinity (ACPI 6.2) */
+/* 4: GIC ITS Affinity (ACPI 6.2) */
 
 struct acpi_srat_gic_its_affinity {
 	struct acpi_subtable_header header;
@@ -466,6 +467,7 @@ struct acpi_tpm2_phy {
 #define ACPI_TPM2_COMMAND_BUFFER_WITH_ARM_SMC       11	/* V1.2 Rev 8 */
 #define ACPI_TPM2_RESERVED                          12
 #define ACPI_TPM2_COMMAND_BUFFER_WITH_PLUTON        13
+#define ACPI_TPM2_CRB_WITH_ARM_FFA                  15
 
 /* Optional trailer appears after any start_method subtables */
 

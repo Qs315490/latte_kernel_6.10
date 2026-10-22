@@ -9,16 +9,11 @@
 config CLOCKSOURCE_WATCHDOG
 	bool
 
-# Architecture has extra clocksource data
-config ARCH_CLOCKSOURCE_DATA
-	bool
-
 # Architecture has extra clocksource init called from registration
 config ARCH_CLOCKSOURCE_INIT
 	bool
 
-# Timekeeping vsyscall support
-config GENERIC_TIME_VSYSCALL
+config ARCH_WANTS_CLOCKSOURCE_READ_INLINE
 	bool
 
 # The generic clock events infrastructure
@@ -44,9 +39,22 @@ config GENERIC_CLOCKEVENTS_BROADCAST_IDLE
 config GENERIC_CLOCKEVENTS_MIN_ADJUST
 	bool
 
+config GENERIC_CLOCKEVENTS_COUPLED
+	bool
+
+config GENERIC_CLOCKEVENTS_COUPLED_INLINE
+	select GENERIC_CLOCKEVENTS_COUPLED
+	bool
+
 # Generic update of CMOS clock
 config GENERIC_CMOS_UPDATE
 	bool
+
+# Deferred rearming of the hrtimer interrupt
+config HRTIMER_REARM_DEFERRED
+       def_bool y
+       depends on GENERIC_ENTRY && HAVE_GENERIC_TIF_BITS
+       depends on HIGH_RES_TIMERS && SCHED_HRTICK
 
 # Select to handle posix CPU timers from task_work
 # and not from the timer interrupt context
@@ -82,9 +90,9 @@ config CONTEXT_TRACKING_IDLE
 	help
 	  Tracks idle state on behalf of RCU.
 
-if GENERIC_CLOCKEVENTS
 menu "Timers subsystem"
 
+if GENERIC_CLOCKEVENTS
 # Core internal switch. Selected by NO_HZ_COMMON / HIGH_RES_TIMERS. This is
 # only related to the tick functionality. Oneshot clockevent devices
 # are supported independent of this.
@@ -196,18 +204,17 @@ config HIGH_RES_TIMERS
 	  hardware is not capable then this option only increases
 	  the size of the kernel image.
 
-config CLOCKSOURCE_WATCHDOG_MAX_SKEW_US
-	int "Clocksource watchdog maximum allowable skew (in microseconds)"
-	depends on CLOCKSOURCE_WATCHDOG
-	range 50 1000
-	default 125
+endif
+
+config POSIX_AUX_CLOCKS
+	bool "Enable auxiliary POSIX clocks"
+	depends on POSIX_TIMERS
 	help
-	  Specify the maximum amount of allowable watchdog skew in
-	  microseconds before reporting the clocksource to be unstable.
-	  The default is based on a half-second clocksource watchdog
-	  interval and NTP's maximum frequency drift of 500 parts
-	  per million.	If the clocksource is good enough for NTP,
-	  it is good enough for the clocksource watchdog!
+	  Auxiliary POSIX clocks are clocks which can be steered
+	  independently of the core timekeeper, which controls the
+	  MONOTONIC, REALTIME, BOOTTIME and TAI clocks.  They are useful to
+	  provide e.g. lockless time accessors to independent PTP clocks
+	  and other clock domains, which are not correlated to the TAI/NTP
+	  notion of time.
 
 endmenu
-endif

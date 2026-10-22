@@ -159,6 +159,9 @@ static int tonga_ih_irq_init(struct amdgpu_device *adev)
 	/* enable interrupts */
 	tonga_ih_enable_interrupts(adev);
 
+	if (adev->irq.ih_soft.ring_size)
+		adev->irq.ih_soft.enabled = true;
+
 	return 0;
 }
 
@@ -195,6 +198,9 @@ static u32 tonga_ih_get_wptr(struct amdgpu_device *adev,
 	u32 wptr, tmp;
 
 	wptr = le32_to_cpu(*ih->wptr_cpu);
+
+	if (ih == &adev->irq.ih_soft)
+		goto out;
 
 	if (!REG_GET_FIELD(wptr, IH_RB_WPTR, RB_OVERFLOW))
 		goto out;
@@ -306,6 +312,10 @@ static int tonga_ih_sw_init(struct amdgpu_ip_block *ip_block)
 	if (r)
 		return r;
 
+	r = amdgpu_ih_ring_init(adev, &adev->irq.ih_soft, IH_SW_RING_SIZE, true);
+	if (r)
+		return r;
+
 	adev->irq.ih.use_doorbell = true;
 	adev->irq.ih.doorbell_index = adev->doorbell_index.ih;
 
@@ -353,9 +363,9 @@ static int tonga_ih_resume(struct amdgpu_ip_block *ip_block)
 	return tonga_ih_hw_init(ip_block);
 }
 
-static bool tonga_ih_is_idle(void *handle)
+static bool tonga_ih_is_idle(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 	u32 tmp = RREG32(mmSRBM_STATUS);
 
 	if (REG_GET_FIELD(tmp, SRBM_STATUS, IH_BUSY))

@@ -65,7 +65,7 @@ Linux内核补丁提交检查单
     :ref:`kernel-doc <kernel_doc_zh>` 并修复任何问题。
 
 12) 通过以下选项同时启用的测试： ``CONFIG_PREEMPT``, ``CONFIG_DEBUG_PREEMPT``,
-    ``CONFIG_DEBUG_SLAB``, ``CONFIG_DEBUG_PAGEALLOC``, ``CONFIG_DEBUG_MUTEXES``,
+    ``CONFIG_SLUB_DEBUG``, ``CONFIG_DEBUG_PAGEALLOC``, ``CONFIG_DEBUG_MUTEXES``,
     ``CONFIG_DEBUG_SPINLOCK``, ``CONFIG_DEBUG_ATOMIC_SLEEP``,
     ``CONFIG_PROVE_RCU`` 和 ``CONFIG_DEBUG_OBJECTS_RCU_HEAD`` 。
 
@@ -82,8 +82,8 @@ Linux内核补丁提交检查单
 17) 所有新的模块参数都记录在 ``MODULE_PARM_DESC()``
 
 18) 所有新的用户空间接口都记录在 ``Documentation/ABI/`` 中。有关详细信息，
-    请参阅 ``Documentation/ABI/README`` 。更改用户空间接口的补丁应该抄送
-    linux-api@vger.kernel.org。
+    请参阅 Documentation/admin-guide/abi.rst (或 ``Documentation/ABI/README``)。
+    更改用户空间接口的补丁应该抄送 linux-api@vger.kernel.org\ 。
 
 19) 已通过至少注入slab和page分配失败进行检查。请参阅 ``Documentation/fault-injection/`` 。
     如果新代码是实质性的，那么添加子系统特定的故障注入可能是合适的。

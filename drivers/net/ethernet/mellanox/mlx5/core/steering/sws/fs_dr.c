@@ -275,22 +275,20 @@ static int mlx5_cmd_dr_create_fte(struct mlx5_flow_root_namespace *ns,
 	if (mlx5_fs_cmd_is_fw_term_table(ft))
 		return mlx5_fs_cmd_get_fw_cmds()->create_fte(ns, ft, group, fte);
 
-	actions = kcalloc(MLX5_FLOW_CONTEXT_ACTION_MAX, sizeof(*actions),
-			  GFP_KERNEL);
+	actions = kzalloc_objs(*actions, MLX5_FLOW_CONTEXT_ACTION_MAX);
 	if (!actions) {
 		err = -ENOMEM;
 		goto out_err;
 	}
 
-	fs_dr_actions = kcalloc(MLX5_FLOW_CONTEXT_ACTION_MAX,
-				sizeof(*fs_dr_actions), GFP_KERNEL);
+	fs_dr_actions = kzalloc_objs(*fs_dr_actions,
+				     MLX5_FLOW_CONTEXT_ACTION_MAX);
 	if (!fs_dr_actions) {
 		err = -ENOMEM;
 		goto free_actions_alloc;
 	}
 
-	term_actions = kcalloc(MLX5_FLOW_CONTEXT_ACTION_MAX,
-			       sizeof(*term_actions), GFP_KERNEL);
+	term_actions = kzalloc_objs(*term_actions, MLX5_FLOW_CONTEXT_ACTION_MAX);
 	if (!term_actions) {
 		err = -ENOMEM;
 		goto free_fs_dr_actions_alloc;
@@ -833,15 +831,21 @@ static u32 mlx5_cmd_dr_get_capabilities(struct mlx5_flow_root_namespace *ns,
 	return steering_caps;
 }
 
-int mlx5_fs_dr_action_get_pkt_reformat_id(struct mlx5_pkt_reformat *pkt_reformat)
+int
+mlx5_fs_dr_action_get_pkt_reformat_id(struct mlx5_pkt_reformat *pkt_reformat,
+				      u32 *reformat_id)
 {
+	struct mlx5dr_action *dr_action;
+
 	switch (pkt_reformat->reformat_type) {
 	case MLX5_REFORMAT_TYPE_L2_TO_VXLAN:
 	case MLX5_REFORMAT_TYPE_L2_TO_NVGRE:
 	case MLX5_REFORMAT_TYPE_L2_TO_L2_TUNNEL:
 	case MLX5_REFORMAT_TYPE_L2_TO_L3_TUNNEL:
 	case MLX5_REFORMAT_TYPE_INSERT_HDR:
-		return mlx5dr_action_get_pkt_reformat_id(pkt_reformat->fs_dr_action.dr_action);
+		dr_action = pkt_reformat->fs_dr_action.dr_action;
+		*reformat_id = mlx5dr_action_get_pkt_reformat_id(dr_action);
+		return 0;
 	}
 	return -EOPNOTSUPP;
 }

@@ -46,7 +46,6 @@
 #define STK8312_ALL_CHANNEL_SIZE	3
 
 #define STK8312_DRIVER_NAME		"stk8312"
-#define STK8312_IRQ_NAME		"stk8312_event"
 
 /*
  * The accelerometer has two measurement ranges:
@@ -460,8 +459,8 @@ static irqreturn_t stk8312_trigger_handler(int irq, void *p)
 	}
 	mutex_unlock(&data->lock);
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan,
-					   pf->timestamp);
+	iio_push_to_buffers_with_ts(indio_dev, &data->scan, sizeof(data->scan),
+				    pf->timestamp);
 err:
 	iio_trigger_notify_done(indio_dev->trig);
 
@@ -505,10 +504,8 @@ static int stk8312_probe(struct i2c_client *client)
 	struct stk8312_data *data;
 
 	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
-	if (!indio_dev) {
-		dev_err(&client->dev, "iio allocation failed!\n");
+	if (!indio_dev)
 		return -ENOMEM;
-	}
 
 	data = iio_priv(indio_dev);
 	data->client = client;
@@ -543,7 +540,7 @@ static int stk8312_probe(struct i2c_client *client)
 						NULL,
 						IRQF_TRIGGER_RISING |
 						IRQF_ONESHOT,
-						STK8312_IRQ_NAME,
+						"stk8312_event",
 						indio_dev);
 		if (ret < 0) {
 			dev_err(&client->dev, "request irq %d failed\n",
@@ -633,9 +630,9 @@ static DEFINE_SIMPLE_DEV_PM_OPS(stk8312_pm_ops, stk8312_suspend,
 
 static const struct i2c_device_id stk8312_i2c_id[] = {
 	/* Deprecated in favour of lowercase form */
-	{ "STK8312" },
-	{ "stk8312" },
-	{}
+	{ .name = "STK8312" },
+	{ .name = "stk8312" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, stk8312_i2c_id);
 

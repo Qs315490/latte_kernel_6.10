@@ -32,6 +32,7 @@
 #include "dce/dce_hwseq.h"
 #include "clk_mgr.h"
 #include "reg_helper.h"
+#include "dcn10/dcn10_hubbub.h"
 #include "abm.h"
 #include "hubp.h"
 #include "dchubbub.h"
@@ -45,13 +46,14 @@
 #include "link_hwss.h"
 #include "dpcd_defs.h"
 #include "dce/dmub_outbox.h"
-#include "link.h"
+#include "link_service.h"
 #include "dcn10/dcn10_hwseq.h"
 #include "dcn21/dcn21_hwseq.h"
 #include "inc/link_enc_cfg.h"
 #include "dcn30/dcn30_vpg.h"
 #include "dce/dce_i2c_hw.h"
 #include "dce/dmub_abm_lcd.h"
+#include "dio/dcn10/dcn10_dio.h"
 
 #define DC_LOGGER_INIT(logger)
 
@@ -70,7 +72,7 @@
 static void enable_memory_low_power(struct dc *dc)
 {
 	struct dce_hwseq *hws = dc->hwseq;
-	int i;
+	unsigned int i;
 
 	if (dc->debug.enable_mem_low_power.bits.dmcu) {
 		// Force ERAM to shutdown if DMCU is not enabled
@@ -102,6 +104,8 @@ static void enable_memory_low_power(struct dc *dc)
 				dc->res_pool->stream_enc[i]->vpg->funcs->vpg_powerdown(dc->res_pool->stream_enc[i]->vpg);
 		for (i = 0; i < dc->res_pool->hpo_dp_stream_enc_count; i++)
 			dc->res_pool->hpo_dp_stream_enc[i]->vpg->funcs->vpg_powerdown(dc->res_pool->hpo_dp_stream_enc[i]->vpg);
+		for (i = 0; i < dc->res_pool->hpo_frl_stream_enc_count; i++)
+			dc->res_pool->hpo_frl_stream_enc[i]->vpg->funcs->vpg_powerdown(dc->res_pool->hpo_frl_stream_enc[i]->vpg);
 	}
 
 }
@@ -114,7 +118,7 @@ void dcn31_init_hw(struct dc *dc)
 	struct resource_pool *res_pool = dc->res_pool;
 	uint32_t backlight = MAX_BACKLIGHT_LEVEL;
 	uint32_t user_level = MAX_BACKLIGHT_LEVEL;
-	int i;
+	unsigned int i;
 
 	if (dc->clk_mgr && dc->clk_mgr->funcs->init_clocks)
 		dc->clk_mgr->funcs->init_clocks(dc->clk_mgr);
@@ -236,21 +240,17 @@ void dcn31_init_hw(struct dc *dc)
 			abms[i]->funcs->abm_init(abms[i], backlight, user_level);
 	}
 
-	/* power AFMT HDMI memory TODO: may move to dis/en output save power*/
-	REG_WRITE(DIO_MEM_PWR_CTRL, 0);
-
-	// Set i2c to light sleep until engine is setup
-	if (dc->debug.enable_mem_low_power.bits.i2c)
-		REG_UPDATE(DIO_MEM_PWR_CTRL, I2C_LIGHT_SLEEP_FORCE, 1);
+	/* Power on DIO memory (AFMT HDMI) and set I2C to light sleep */
+	if (dc->res_pool->dio && dc->res_pool->dio->funcs->mem_pwr_ctrl)
+		dc->res_pool->dio->funcs->mem_pwr_ctrl(dc->res_pool->dio, dc->debug.enable_mem_low_power.bits.i2c);
 
 	if (hws->funcs.setup_hpo_hw_control)
 		hws->funcs.setup_hpo_hw_control(hws, false);
 
 	if (!dc->debug.disable_clock_gate) {
 		/* enable all DCN clock gating */
-		REG_WRITE(DCCG_GATE_DISABLE_CNTL, 0);
-
-		REG_WRITE(DCCG_GATE_DISABLE_CNTL2, 0);
+		if (dc->res_pool->dccg && dc->res_pool->dccg->funcs && dc->res_pool->dccg->funcs->allow_clock_gating)
+			dc->res_pool->dccg->funcs->allow_clock_gating(dc->res_pool->dccg, true);
 
 		REG_UPDATE(DCFCLK_CNTL, DCFCLK_GATE_DIS, 0);
 	}
@@ -379,23 +379,38 @@ void dcn31_update_info_frame(struct pipe_ctx *pipe_ctx)
 {
 	bool is_hdmi_tmds;
 	bool is_dp;
+	bool is_hdmi_frl;
 
 	ASSERT(pipe_ctx->stream);
 
-	if (pipe_ctx->stream_res.stream_enc == NULL)
+	if (pipe_ctx->stream_res.stream_enc == NULL &&
+			pipe_ctx->stream_res.hpo_frl_stream_enc == NULL)
 		return;  /* this is not root pipe */
 
 	is_hdmi_tmds = dc_is_hdmi_tmds_signal(pipe_ctx->stream->signal);
 	is_dp = dc_is_dp_signal(pipe_ctx->stream->signal);
 
-	if (!is_hdmi_tmds && !is_dp)
+	is_hdmi_frl = dc_is_hdmi_frl_signal(pipe_ctx->stream->signal);
+	if (!is_hdmi_tmds && !is_dp && !is_hdmi_frl)
 		return;
 
 	if (is_hdmi_tmds)
 		pipe_ctx->stream_res.stream_enc->funcs->update_hdmi_info_packets(
 			pipe_ctx->stream_res.stream_enc,
 			&pipe_ctx->stream_res.encoder_info_frame);
+	else if (is_hdmi_frl)
+		pipe_ctx->stream_res.hpo_frl_stream_enc->funcs->update_hdmi_info_packets(
+			pipe_ctx->stream_res.hpo_frl_stream_enc,
+			&pipe_ctx->stream_res.encoder_info_frame);
 	else if (pipe_ctx->stream->ctx->dc->link_srv->dp_is_128b_132b_signal(pipe_ctx)) {
+		if (pipe_ctx->stream_res.hpo_dp_stream_enc->funcs->update_dp_info_packets_sdp_line_num)
+			pipe_ctx->stream_res.hpo_dp_stream_enc->funcs->update_dp_info_packets_sdp_line_num(
+				pipe_ctx->stream_res.hpo_dp_stream_enc,
+				&pipe_ctx->stream_res.encoder_info_frame);
+
+		pipe_ctx->stream_res.encoder_info_frame.firmware_controlled_hdr_info_packet
+			= pipe_ctx->stream->firmware_controlled_hdr_info_packet;
+
 		pipe_ctx->stream_res.hpo_dp_stream_enc->funcs->update_dp_info_packets(
 				pipe_ctx->stream_res.hpo_dp_stream_enc,
 				&pipe_ctx->stream_res.encoder_info_frame);
@@ -405,6 +420,9 @@ void dcn31_update_info_frame(struct pipe_ctx *pipe_ctx)
 			pipe_ctx->stream_res.stream_enc->funcs->update_dp_info_packets_sdp_line_num(
 				pipe_ctx->stream_res.stream_enc,
 				&pipe_ctx->stream_res.encoder_info_frame);
+
+		pipe_ctx->stream_res.encoder_info_frame.firmware_controlled_hdr_info_packet
+			= pipe_ctx->stream->firmware_controlled_hdr_info_packet;
 
 		pipe_ctx->stream_res.stream_enc->funcs->update_dp_info_packets(
 			pipe_ctx->stream_res.stream_enc,
@@ -481,6 +499,7 @@ void dcn31_hubp_pg_control(struct dce_hwseq *hws, unsigned int hubp_inst, bool p
 
 int dcn31_init_sys_ctx(struct dce_hwseq *hws, struct dc *dc, struct dc_phy_addr_space_config *pa_config)
 {
+	(void)hws;
 	struct dcn_hubbub_phys_addr_config config = {0};
 
 	config.system_aperture.fb_top = pa_config->system_aperture.fb_top;
@@ -508,9 +527,9 @@ static void dcn31_reset_back_end_for_pipe(
 		struct pipe_ctx *pipe_ctx,
 		struct dc_state *context)
 {
+	(void)context;
 	struct dc_link *link;
 
-	DC_LOGGER_INIT(dc->ctx->logger);
 	if (pipe_ctx->stream_res.stream_enc == NULL) {
 		pipe_ctx->stream = NULL;
 		return;
@@ -521,9 +540,15 @@ static void dcn31_reset_back_end_for_pipe(
 
 	link = pipe_ctx->stream->link;
 
+	if (dc->hwseq)
+		dc->hwseq->wa_state.skip_blank_stream = false;
+
 	if ((!pipe_ctx->stream->dpms_off || link->link_status.link_active) &&
-		(link->connector_signal == SIGNAL_TYPE_EDP))
+		(link->connector_signal == SIGNAL_TYPE_EDP)) {
 		dc->hwss.blank_stream(pipe_ctx);
+		if (dc->hwseq)
+			dc->hwseq->wa_state.skip_blank_stream = true;
+	}
 
 	pipe_ctx->stream_res.tg->funcs->set_dsc_config(
 			pipe_ctx->stream_res.tg,
@@ -535,12 +560,24 @@ static void dcn31_reset_back_end_for_pipe(
 	if (pipe_ctx->stream_res.tg->funcs->set_odm_bypass)
 		pipe_ctx->stream_res.tg->funcs->set_odm_bypass(
 				pipe_ctx->stream_res.tg, &pipe_ctx->stream->timing);
-	if (dc_is_hdmi_tmds_signal(pipe_ctx->stream->signal))
-		pipe_ctx->stream->link->phy_state.symclk_ref_cnts.otg = 0;
+	/*
+	 * TODO - convert symclk_ref_cnts for otg to a bit map to solve
+	 * the case where the same symclk is shared across multiple otg
+	 * instances
+	 */
+	if (dc_is_tmds_signal(pipe_ctx->stream->signal))
+		link->phy_state.symclk_ref_cnts.otg = 0;
 
-	if (pipe_ctx->stream_res.tg->funcs->set_drr)
-		pipe_ctx->stream_res.tg->funcs->set_drr(
-				pipe_ctx->stream_res.tg, NULL);
+	if (pipe_ctx->top_pipe == NULL) {
+		if (link->phy_state.symclk_state == SYMCLK_ON_TX_OFF) {
+			const struct link_hwss *link_hwss = get_link_hwss(link, &pipe_ctx->link_res);
+
+			link_hwss->disable_link_output(link, &pipe_ctx->link_res, pipe_ctx->stream->signal);
+			link->phy_state.symclk_state = SYMCLK_OFF_TX_OFF;
+		}
+	}
+
+	set_drr_and_clear_adjust_pending(pipe_ctx, pipe_ctx->stream, NULL);
 
 	/* DPMS may already disable or */
 	/* dpms_off status is incorrect due to fastboot
@@ -552,6 +589,19 @@ static void dcn31_reset_back_end_for_pipe(
 		dc->link_srv->set_dpms_off(pipe_ctx);
 	else if (pipe_ctx->stream_res.audio)
 		dc->hwss.disable_audio_stream(pipe_ctx);
+
+	/* Temporary workaround to perform DSC programming ahead of pipe reset
+	 * for smartmux/SPRS
+	 * TODO: Remove SmartMux/SPRS checks once movement of DSC programming is generalized
+	 */
+	if (pipe_ctx->stream->timing.flags.DSC) {
+		if ((pipe_ctx->stream->signal == SIGNAL_TYPE_EDP &&
+			((link->dc->config.smart_mux_version && link->dc->is_switch_in_progress_dest)
+			|| link->is_dds || link->skip_implict_edp_power_control)) &&
+			(dc_is_dp_signal(pipe_ctx->stream->signal) ||
+			dc_is_virtual_signal(pipe_ctx->stream->signal)))
+			dc->link_srv->set_dsc_enable(pipe_ctx, false);
+	}
 
 	/* free acquired resources */
 	if (pipe_ctx->stream_res.audio) {
@@ -567,7 +617,8 @@ static void dcn31_reset_back_end_for_pipe(
 			pipe_ctx->stream_res.audio = NULL;
 		}
 	}
-
+	if (dc->hwseq)
+		dc->hwseq->wa_state.skip_blank_stream = false;
 	pipe_ctx->stream = NULL;
 	DC_LOG_DEBUG("Reset back end for pipe %d, tg:%d\n",
 					pipe_ctx->pipe_idx, pipe_ctx->stream_res.tg->inst);
@@ -616,7 +667,8 @@ void dcn31_reset_hw_ctx_wrap(
 	}
 
 	/* New dc_state in the process of being applied to hardware. */
-	link_enc_cfg_set_transient_mode(dc, dc->current_state, context);
+	if (!dc->config.unify_link_enc_assignment)
+		link_enc_cfg_set_transient_mode(dc, dc->current_state, context);
 }
 
 void dcn31_setup_hpo_hw_control(const struct dce_hwseq *hws, bool enable)
@@ -628,7 +680,7 @@ void dcn31_setup_hpo_hw_control(const struct dce_hwseq *hws, bool enable)
 void dcn31_set_static_screen_control(struct pipe_ctx **pipe_ctx,
 		int num_pipes, const struct dc_static_screen_params *params)
 {
-	unsigned int i;
+	int i;
 	unsigned int triggers = 0;
 
 	if (params->triggers.surface_update)
@@ -686,7 +738,8 @@ bool dcn31_set_backlight_level(struct pipe_ctx *pipe_ctx,
 			panel_cntl->inst,
 			panel_cntl->pwrseq_inst);
 
-	dmub_abm_set_backlight(dc, backlight_level_params, panel_cntl->inst);
+	if (backlight_level_params->control_type != BACKLIGHT_CONTROL_AMD_AUX)
+		dmub_abm_set_backlight(dc, backlight_level_params, panel_cntl->inst);
 
 	return true;
 }

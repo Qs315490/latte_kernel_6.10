@@ -2,11 +2,10 @@
 /*
  * Intel PCH pinctrl/GPIO driver
  *
- * Copyright (C) 2021-2023, Intel Corporation
+ * Copyright (C) 2021-2023 Intel Corporation
  * Author: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>

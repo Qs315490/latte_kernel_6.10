@@ -32,12 +32,10 @@
 #include "kfd_priv.h"
 #include "kfd_mqd_manager.h"
 
-
 #define VMID_NUM 16
 
 #define KFD_MES_PROCESS_QUANTUM		100000
 #define KFD_MES_GANG_QUANTUM		10000
-#define USE_DEFAULT_GRACE_PERIOD 0xffffffff
 
 struct device_process_node {
 	struct qcm_process_device *qpd;
@@ -174,7 +172,8 @@ struct device_queue_manager_ops {
 					   enum cache_policy default_policy,
 					   enum cache_policy alternate_policy,
 					   void __user *alternate_aperture_base,
-					   uint64_t alternate_aperture_size);
+					   uint64_t alternate_aperture_size,
+					   u32 misc_process_properties);
 
 	int (*process_termination)(struct device_queue_manager *dqm,
 			struct qcm_process_device *qpd);
@@ -192,7 +191,7 @@ struct device_queue_manager_ops {
 
 	int (*reset_queues)(struct device_queue_manager *dqm,
 					uint16_t pasid);
-	void	(*get_queue_checkpoint_info)(struct device_queue_manager *dqm,
+	int	(*get_queue_checkpoint_info)(struct device_queue_manager *dqm,
 				  const struct queue *q, u32 *mqd_size,
 				  u32 *ctl_stack_size);
 
@@ -200,6 +199,8 @@ struct device_queue_manager_ops {
 				  const struct queue *q,
 				  void *mqd,
 				  void *ctl_stack);
+	void	(*set_perfcount)(struct device_queue_manager *dqm,
+				  int enable);
 };
 
 struct device_queue_manager_asic_ops {
@@ -210,7 +211,8 @@ struct device_queue_manager_asic_ops {
 					   enum cache_policy default_policy,
 					   enum cache_policy alternate_policy,
 					   void __user *alternate_aperture_base,
-					   uint64_t alternate_aperture_size);
+					   uint64_t alternate_aperture_size,
+					   u32 misc_process_properties);
 	void	(*init_sdma_vm)(struct device_queue_manager *dqm,
 				struct queue *q,
 				struct qcm_process_device *qpd);
@@ -269,7 +271,6 @@ struct device_queue_manager {
 	/* hw exception  */
 	bool			is_hws_hang;
 	bool			is_resetting;
-	struct work_struct	hw_exception_work;
 	struct kfd_mem_obj	hiq_sdma_mqd;
 	bool			sched_running;
 	bool			sched_halt;
@@ -285,6 +286,9 @@ struct device_queue_manager {
 	struct dqm_detect_hang_info *detect_hang_info;
 	size_t detect_hang_info_size;
 	int detect_hang_count;
+	/* for per-queue reset with mes */
+	u32 *hung_db_array;
+	struct amdgpu_mes_hung_queue_hqd_info *hqd_info;
 };
 
 void device_queue_manager_init_cik(
@@ -298,6 +302,8 @@ void device_queue_manager_init_v10(
 void device_queue_manager_init_v11(
 		struct device_queue_manager_asic_ops *asic_ops);
 void device_queue_manager_init_v12(
+		struct device_queue_manager_asic_ops *asic_ops);
+void device_queue_manager_init_v12_1(
 		struct device_queue_manager_asic_ops *asic_ops);
 void program_sh_mem_settings(struct device_queue_manager *dqm,
 					struct qcm_process_device *qpd);
@@ -327,6 +333,8 @@ int debug_refresh_runlist(struct device_queue_manager *dqm);
 bool kfd_dqm_is_queue_in_process(struct device_queue_manager *dqm,
 				 struct qcm_process_device *qpd,
 				 int doorbell_off, u32 *queue_format);
+size_t mqd_size_from_queue_type(struct device_queue_manager *dqm,
+				enum kfd_queue_type type);
 
 static inline unsigned int get_sh_mem_bases_32(struct kfd_process_device *pdd)
 {
@@ -359,4 +367,14 @@ static inline int read_sdma_queue_counter(uint64_t __user *q_rptr, uint64_t *val
 	/* SDMA activity counter is stored at queue's RPTR + 0x8 location. */
 	return get_user(*val, q_rptr + 1);
 }
+
+static inline void update_dqm_wait_times(struct device_queue_manager *dqm)
+{
+	if (dqm->dev->kfd2kgd->get_iq_wait_times)
+		dqm->dev->kfd2kgd->get_iq_wait_times(dqm->dev->adev,
+					&dqm->wait_times,
+					ffs(dqm->dev->xcc_mask) - 1);
+}
+
+
 #endif /* KFD_DEVICE_QUEUE_MANAGER_H_ */

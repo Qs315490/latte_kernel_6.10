@@ -192,7 +192,7 @@ static const struct pinmux_ops ns_pinctrl_pmxops = {
  * Controller code
  */
 
-static struct pinctrl_desc ns_pinctrl_desc = {
+static const struct pinctrl_desc ns_pinctrl_desc = {
 	.name = "pinctrl-ns",
 	.pctlops = &ns_pinctrl_ops,
 	.pmxops = &ns_pinctrl_pmxops,
@@ -204,6 +204,7 @@ static const struct of_device_id ns_pinctrl_of_match_table[] = {
 	{ .compatible = "brcm,bcm53012-pinmux", .data = (void *)FLAG_BCM53012, },
 	{ }
 };
+MODULE_DEVICE_TABLE(of, ns_pinctrl_of_match_table);
 
 static int ns_pinctrl_probe(struct platform_device *pdev)
 {
@@ -295,4 +296,3 @@ static struct platform_driver ns_pinctrl_driver = {
 module_platform_driver(ns_pinctrl_driver);
 
 MODULE_AUTHOR("Rafał Miłecki");
-MODULE_DEVICE_TABLE(of, ns_pinctrl_of_match_table);

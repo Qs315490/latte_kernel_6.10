@@ -298,7 +298,7 @@ static struct mlx5_hwmon *mlx5_hwmon_alloc(struct mlx5_core_dev *mdev)
 	u32 sensors_count;
 	int err;
 
-	hwmon = kzalloc(sizeof(*mdev->hwmon), GFP_KERNEL);
+	hwmon = kzalloc_obj(*mdev->hwmon);
 	if (!hwmon)
 		return ERR_PTR(-ENOMEM);
 
@@ -313,8 +313,8 @@ static struct mlx5_hwmon *mlx5_hwmon_alloc(struct mlx5_core_dev *mdev)
 
 	hwmon->module_scount = mon_cap ? 1 : 0;
 	sensors_count = hwmon->asic_platform_scount + hwmon->module_scount;
-	hwmon->temp_channel_desc = kcalloc(sensors_count, sizeof(*hwmon->temp_channel_desc),
-					   GFP_KERNEL);
+	hwmon->temp_channel_desc = kzalloc_objs(*hwmon->temp_channel_desc,
+						sensors_count);
 	if (!hwmon->temp_channel_desc) {
 		err = -ENOMEM;
 		goto err_free_hwmon;
@@ -415,4 +415,9 @@ void mlx5_hwmon_dev_unregister(struct mlx5_core_dev *mdev)
 	hwmon_device_unregister(hwmon->hwmon_dev);
 	mlx5_hwmon_free(hwmon);
 	mdev->hwmon = NULL;
+}
+
+const char *hwmon_get_sensor_name(struct mlx5_hwmon *hwmon, int channel)
+{
+	return hwmon->temp_channel_desc[channel].sensor_name;
 }

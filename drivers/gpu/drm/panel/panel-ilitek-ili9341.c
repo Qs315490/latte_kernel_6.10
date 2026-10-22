@@ -19,7 +19,6 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
@@ -173,7 +172,6 @@ struct ili9341_config {
 };
 
 struct ili9341 {
-	struct device *dev;
 	const struct ili9341_config *conf;
 	struct drm_panel panel;
 	struct gpio_desc *reset_gpio;
@@ -490,9 +488,11 @@ static int ili9341_dpi_probe(struct spi_device *spi, struct gpio_desc *dc,
 	struct ili9341 *ili;
 	int ret;
 
-	ili = devm_kzalloc(dev, sizeof(struct ili9341), GFP_KERNEL);
-	if (!ili)
-		return -ENOMEM;
+	ili = devm_drm_panel_alloc(dev, struct ili9341, panel,
+				   &ili9341_dpi_funcs,
+				   DRM_MODE_CONNECTOR_DPI);
+	if (IS_ERR(ili))
+		return PTR_ERR(ili);
 
 	ili->dbi = devm_kzalloc(dev, sizeof(struct mipi_dbi),
 				GFP_KERNEL);
@@ -526,8 +526,6 @@ static int ili9341_dpi_probe(struct spi_device *spi, struct gpio_desc *dc,
 	}
 
 	ili->max_spi_speed = ili->conf->max_spi_speed;
-	drm_panel_init(&ili->panel, dev, &ili9341_dpi_funcs,
-		       DRM_MODE_CONNECTOR_DPI);
 	drm_panel_add(&ili->panel);
 
 	return 0;

@@ -1,29 +1,41 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
-#include "debug.h"
-#include "evlist.h"
 #include "hwmon_pmu.h"
-#include "parse-events.h"
-#include "tests.h"
+
+#include <errno.h>
+#include <inttypes.h>
+
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <linux/compiler.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <sys/stat.h>
+
+#include "debug.h"
+#include "evlist.h"
+#include "parse-events.h"
+#include "pmus.h"
+#include "tests.h"
 
 static const struct test_event {
 	const char *name;
 	const char *alias;
-	long config;
+	union hwmon_pmu_event_key key;
 } test_events[] = {
 	{
 		"temp_test_hwmon_event1",
 		"temp1",
-		0xA0001,
+		.key = {
+			.num = 1,
+			.type = 10
+		},
 	},
 	{
 		"temp_test_hwmon_event2",
 		"temp2",
-		0xA0002,
+		.key = {
+			.num = 2,
+			.type = 10
+		},
 	},
 };
 
@@ -87,9 +99,10 @@ static struct perf_pmu *test_pmu_get(char *dir, size_t sz)
 		pr_err("Failed to mkdir hwmon directory\n");
 		goto err_out;
 	}
-	hwmon_dirfd = openat(test_dirfd, "hwmon1234", O_DIRECTORY);
+	strncat(dir, "/hwmon1234", sz - strlen(dir));
+	hwmon_dirfd = open(dir, O_PATH|O_DIRECTORY);
 	if (hwmon_dirfd < 0) {
-		pr_err("Failed to open test hwmon directory \"%s/hwmon1234\"\n", dir);
+		pr_err("Failed to open test hwmon directory \"%s\"\n", dir);
 		goto err_out;
 	}
 	file = openat(hwmon_dirfd, "name", O_WRONLY | O_CREAT, 0600);
@@ -124,18 +137,18 @@ static struct perf_pmu *test_pmu_get(char *dir, size_t sz)
 	}
 
 	/* Make the PMU reading the files created above. */
-	hwm = perf_pmus__add_test_hwmon_pmu(hwmon_dirfd, "hwmon1234", test_hwmon_name);
+	hwm = perf_pmus__add_test_hwmon_pmu(dir, "hwmon1234", test_hwmon_name);
 	if (!hwm)
 		pr_err("Test hwmon creation failed\n");
 
 err_out:
 	if (!hwm) {
 		test_pmu_put(dir, hwm);
-		if (hwmon_dirfd >= 0)
-			close(hwmon_dirfd);
 	}
 	if (test_dirfd >= 0)
 		close(test_dirfd);
+	if (hwmon_dirfd >= 0)
+		close(hwmon_dirfd);
 	return hwm;
 }
 
@@ -183,11 +196,11 @@ static int do_test(size_t i, bool with_pmu, bool with_alias)
 		    strcmp(evsel->pmu->name, "hwmon_a_test_hwmon_pmu"))
 			continue;
 
-		if (evsel->core.attr.config != (u64)test_events[i].config) {
-			pr_debug("FAILED %s:%d Unexpected config for '%s', %lld != %ld\n",
+		if (evsel->core.attr.config != (u64)test_events[i].key.type_and_num) {
+			pr_debug("FAILED %s:%d Unexpected config for '%s', %" PRIu64 " != %ld\n",
 				__FILE__, __LINE__, str,
-				evsel->core.attr.config,
-				test_events[i].config);
+				(uint64_t)evsel->core.attr.config,
+				test_events[i].key.type_and_num);
 			ret = TEST_FAIL;
 			goto out;
 		}

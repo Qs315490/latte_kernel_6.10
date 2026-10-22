@@ -23,7 +23,7 @@ const struct file_operations minix_dir_operations = {
 	.llseek		= generic_file_llseek,
 	.read		= generic_read_dir,
 	.iterate_shared	= minix_readdir,
-	.fsync		= generic_file_fsync,
+	.fsync		= minix_fsync,
 };
 
 /*
@@ -45,7 +45,7 @@ static void dir_commit_chunk(struct folio *folio, loff_t pos, unsigned len)
 	struct address_space *mapping = folio->mapping;
 	struct inode *dir = mapping->host;
 
-	block_write_end(NULL, mapping, pos, len, len, folio, NULL);
+	block_write_end(pos, len, len, folio);
 
 	if (pos+len > dir->i_size) {
 		i_size_write(dir, pos+len);

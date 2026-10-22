@@ -32,7 +32,8 @@
 			{ NFS_INO_INVALID_BLOCKS, "INVALID_BLOCKS" }, \
 			{ NFS_INO_INVALID_XATTR, "INVALID_XATTR" }, \
 			{ NFS_INO_INVALID_NLINK, "INVALID_NLINK" }, \
-			{ NFS_INO_INVALID_MODE, "INVALID_MODE" })
+			{ NFS_INO_INVALID_MODE, "INVALID_MODE" }, \
+			{ NFS_INO_INVALID_BTIME, "INVALID_BTIME" })
 
 #define nfs_show_nfsi_flags(v) \
 	__print_flags(v, "|", \
@@ -43,6 +44,23 @@
 			{ BIT(NFS_INO_LAYOUTCOMMITTING), "LAYOUTCOMMIT" }, \
 			{ BIT(NFS_INO_LAYOUTSTATS), "LAYOUTSTATS" }, \
 			{ BIT(NFS_INO_ODIRECT), "ODIRECT" })
+
+#define nfs_show_wb_flags(v) \
+	__print_flags(v, "|", \
+			{ BIT(PG_BUSY), "BUSY" }, \
+			{ BIT(PG_MAPPED), "MAPPED" }, \
+			{ BIT(PG_FOLIO), "FOLIO" }, \
+			{ BIT(PG_CLEAN), "CLEAN" }, \
+			{ BIT(PG_COMMIT_TO_DS), "COMMIT_TO_DS" }, \
+			{ BIT(PG_INODE_REF), "INODE_REF" }, \
+			{ BIT(PG_HEADLOCK), "HEADLOCK" }, \
+			{ BIT(PG_TEARDOWN), "TEARDOWN" }, \
+			{ BIT(PG_UNLOCKPAGE), "UNLOCKPAGE" }, \
+			{ BIT(PG_UPTODATE), "UPTODATE" }, \
+			{ BIT(PG_WB_END), "WB_END" }, \
+			{ BIT(PG_REMOVE), "REMOVE" }, \
+			{ BIT(PG_CONTENDED1), "CONTENDED1" }, \
+			{ BIT(PG_CONTENDED2), "CONTENDED2" })
 
 DECLARE_EVENT_CLASS(nfs_inode_event,
 		TP_PROTO(
@@ -56,22 +74,26 @@ DECLARE_EVENT_CLASS(nfs_inode_event,
 			__field(u32, fhandle)
 			__field(u64, fileid)
 			__field(u64, version)
+			__field(unsigned long, cache_validity)
 		),
 
 		TP_fast_assign(
 			const struct nfs_inode *nfsi = NFS_I(inode);
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->version = inode_peek_iversion_raw(inode);
+			__entry->cache_validity = nfsi->cache_validity;
 		),
 
 		TP_printk(
-			"fileid=%02x:%02x:%llu fhandle=0x%08x version=%llu ",
+			"fileid=%02x:%02x:%llu fhandle=0x%08x version=%llu cache_validity=0x%lx (%s)",
 			MAJOR(__entry->dev), MINOR(__entry->dev),
 			(unsigned long long)__entry->fileid,
 			__entry->fhandle,
-			(unsigned long long)__entry->version
+			(unsigned long long)__entry->version,
+			__entry->cache_validity,
+			nfs_show_cache_validity(__entry->cache_validity)
 		)
 );
 
@@ -99,7 +121,7 @@ DECLARE_EVENT_CLASS(nfs_inode_event_done,
 			const struct nfs_inode *nfsi = NFS_I(inode);
 			__entry->error = error < 0 ? -error : 0;
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->type = nfs_umode_to_dtype(inode->i_mode);
 			__entry->version = inode_peek_iversion_raw(inode);
@@ -189,7 +211,7 @@ TRACE_EVENT(nfs_access_exit,
 			const struct nfs_inode *nfsi = NFS_I(inode);
 			__entry->error = error < 0 ? -error : 0;
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->type = nfs_umode_to_dtype(inode->i_mode);
 			__entry->version = inode_peek_iversion_raw(inode);
@@ -243,7 +265,7 @@ DECLARE_EVENT_CLASS(nfs_update_size_class,
 
 			__entry->dev = inode->i_sb->s_dev;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->version = inode_peek_iversion_raw(inode);
 			__entry->cur_size = i_size_read(inode);
 			__entry->new_size = new_size;
@@ -267,6 +289,7 @@ DECLARE_EVENT_CLASS(nfs_update_size_class,
 			TP_ARGS(inode, new_size))
 
 DEFINE_NFS_UPDATE_SIZE_EVENT(truncate);
+DEFINE_NFS_UPDATE_SIZE_EVENT(truncate_folio);
 DEFINE_NFS_UPDATE_SIZE_EVENT(wcc);
 DEFINE_NFS_UPDATE_SIZE_EVENT(update);
 DEFINE_NFS_UPDATE_SIZE_EVENT(grow);
@@ -294,7 +317,7 @@ DECLARE_EVENT_CLASS(nfs_inode_range_event,
 
 			__entry->dev = inode->i_sb->s_dev;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->version = inode_peek_iversion_raw(inode);
 			__entry->range_start = range_start;
 			__entry->range_end = range_end;
@@ -348,7 +371,7 @@ DECLARE_EVENT_CLASS(nfs_readdir_event,
 			const struct nfs_inode *nfsi = NFS_I(dir);
 
 			__entry->dev = dir->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = dir->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->version = inode_peek_iversion_raw(dir);
 			if (cookie != 0)
@@ -406,9 +429,9 @@ DECLARE_EVENT_CLASS(nfs_lookup_event,
 
 		TP_fast_assign(
 			__entry->dev = dir->i_sb->s_dev;
-			__entry->dir = NFS_FILEID(dir);
+			__entry->dir = dir->i_ino;
 			__entry->flags = flags;
-			__entry->fileid = d_is_negative(dentry) ? 0 : NFS_FILEID(d_inode(dentry));
+			__entry->fileid = d_is_negative(dentry) ? 0 : d_inode(dentry)->i_ino;
 			__assign_str(name);
 		),
 
@@ -453,10 +476,10 @@ DECLARE_EVENT_CLASS(nfs_lookup_event_done,
 
 		TP_fast_assign(
 			__entry->dev = dir->i_sb->s_dev;
-			__entry->dir = NFS_FILEID(dir);
+			__entry->dir = dir->i_ino;
 			__entry->error = error < 0 ? -error : 0;
 			__entry->flags = flags;
-			__entry->fileid = d_is_negative(dentry) ? 0 : NFS_FILEID(d_inode(dentry));
+			__entry->fileid = d_is_negative(dentry) ? 0 : d_inode(dentry)->i_ino;
 			__assign_str(name);
 		),
 
@@ -509,7 +532,7 @@ TRACE_EVENT(nfs_atomic_open_enter,
 
 		TP_fast_assign(
 			__entry->dev = dir->i_sb->s_dev;
-			__entry->dir = NFS_FILEID(dir);
+			__entry->dir = dir->i_ino;
 			__entry->flags = flags;
 			__entry->fmode = (__force unsigned long)ctx->mode;
 			__assign_str(name);
@@ -548,7 +571,7 @@ TRACE_EVENT(nfs_atomic_open_exit,
 		TP_fast_assign(
 			__entry->error = -error;
 			__entry->dev = dir->i_sb->s_dev;
-			__entry->dir = NFS_FILEID(dir);
+			__entry->dir = dir->i_ino;
 			__entry->flags = flags;
 			__entry->fmode = (__force unsigned long)ctx->mode;
 			__assign_str(name);
@@ -585,7 +608,7 @@ TRACE_EVENT(nfs_create_enter,
 
 		TP_fast_assign(
 			__entry->dev = dir->i_sb->s_dev;
-			__entry->dir = NFS_FILEID(dir);
+			__entry->dir = dir->i_ino;
 			__entry->flags = flags;
 			__assign_str(name);
 		),
@@ -621,7 +644,7 @@ TRACE_EVENT(nfs_create_exit,
 		TP_fast_assign(
 			__entry->error = -error;
 			__entry->dev = dir->i_sb->s_dev;
-			__entry->dir = NFS_FILEID(dir);
+			__entry->dir = dir->i_ino;
 			__entry->flags = flags;
 			__assign_str(name);
 		),
@@ -653,7 +676,7 @@ DECLARE_EVENT_CLASS(nfs_directory_event,
 
 		TP_fast_assign(
 			__entry->dev = dir->i_sb->s_dev;
-			__entry->dir = NFS_FILEID(dir);
+			__entry->dir = dir->i_ino;
 			__assign_str(name);
 		),
 
@@ -691,7 +714,7 @@ DECLARE_EVENT_CLASS(nfs_directory_event_done,
 
 		TP_fast_assign(
 			__entry->dev = dir->i_sb->s_dev;
-			__entry->dir = NFS_FILEID(dir);
+			__entry->dir = dir->i_ino;
 			__entry->error = error < 0 ? -error : 0;
 			__assign_str(name);
 		),
@@ -745,8 +768,8 @@ TRACE_EVENT(nfs_link_enter,
 
 		TP_fast_assign(
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = NFS_FILEID(inode);
-			__entry->dir = NFS_FILEID(dir);
+			__entry->fileid = inode->i_ino;
+			__entry->dir = dir->i_ino;
 			__assign_str(name);
 		),
 
@@ -780,8 +803,8 @@ TRACE_EVENT(nfs_link_exit,
 
 		TP_fast_assign(
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = NFS_FILEID(inode);
-			__entry->dir = NFS_FILEID(dir);
+			__entry->fileid = inode->i_ino;
+			__entry->dir = dir->i_ino;
 			__entry->error = error < 0 ? -error : 0;
 			__assign_str(name);
 		),
@@ -817,8 +840,8 @@ DECLARE_EVENT_CLASS(nfs_rename_event,
 
 		TP_fast_assign(
 			__entry->dev = old_dir->i_sb->s_dev;
-			__entry->old_dir = NFS_FILEID(old_dir);
-			__entry->new_dir = NFS_FILEID(new_dir);
+			__entry->old_dir = old_dir->i_ino;
+			__entry->new_dir = new_dir->i_ino;
 			__assign_str(old_name);
 			__assign_str(new_name);
 		),
@@ -866,8 +889,8 @@ DECLARE_EVENT_CLASS(nfs_rename_event_done,
 		TP_fast_assign(
 			__entry->dev = old_dir->i_sb->s_dev;
 			__entry->error = -error;
-			__entry->old_dir = NFS_FILEID(old_dir);
-			__entry->new_dir = NFS_FILEID(new_dir);
+			__entry->old_dir = old_dir->i_ino;
+			__entry->new_dir = new_dir->i_ino;
 			__assign_str(old_name);
 			__assign_str(new_name);
 		),
@@ -920,7 +943,7 @@ TRACE_EVENT(nfs_sillyrename_unlink,
 			struct inode *dir = d_inode(data->dentry->d_parent);
 			size_t len = data->args.name.len;
 			__entry->dev = dir->i_sb->s_dev;
-			__entry->dir = NFS_FILEID(dir);
+			__entry->dir = dir->i_ino;
 			__entry->error = -error;
 			memcpy(__get_str(name),
 				data->args.name.name, len);
@@ -958,10 +981,10 @@ DECLARE_EVENT_CLASS(nfs_folio_event,
 			const struct nfs_inode *nfsi = NFS_I(inode);
 
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->version = inode_peek_iversion_raw(inode);
-			__entry->offset = offset,
+			__entry->offset = offset;
 			__entry->count = count;
 		),
 
@@ -1008,11 +1031,11 @@ DECLARE_EVENT_CLASS(nfs_folio_event_done,
 			const struct nfs_inode *nfsi = NFS_I(inode);
 
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->version = inode_peek_iversion_raw(inode);
-			__entry->offset = offset,
-			__entry->count = count,
+			__entry->offset = offset;
+			__entry->count = count;
 			__entry->ret = ret;
 		),
 
@@ -1039,11 +1062,81 @@ DECLARE_EVENT_CLASS(nfs_folio_event_done,
 DEFINE_NFS_FOLIO_EVENT(nfs_aop_readpage);
 DEFINE_NFS_FOLIO_EVENT_DONE(nfs_aop_readpage_done);
 
+DEFINE_NFS_FOLIO_EVENT(nfs_writeback_folio_reclaim);
+DEFINE_NFS_FOLIO_EVENT_DONE(nfs_writeback_folio_reclaim_done);
+
 DEFINE_NFS_FOLIO_EVENT(nfs_writeback_folio);
 DEFINE_NFS_FOLIO_EVENT_DONE(nfs_writeback_folio_done);
 
 DEFINE_NFS_FOLIO_EVENT(nfs_invalidate_folio);
 DEFINE_NFS_FOLIO_EVENT_DONE(nfs_launder_folio_done);
+
+DEFINE_NFS_FOLIO_EVENT(nfs_try_to_update_request);
+DEFINE_NFS_FOLIO_EVENT_DONE(nfs_try_to_update_request_done);
+
+DEFINE_NFS_FOLIO_EVENT(nfs_update_folio);
+DEFINE_NFS_FOLIO_EVENT_DONE(nfs_update_folio_done);
+
+DEFINE_NFS_FOLIO_EVENT(nfs_write_begin);
+DEFINE_NFS_FOLIO_EVENT_DONE(nfs_write_begin_done);
+
+DEFINE_NFS_FOLIO_EVENT(nfs_write_end);
+DEFINE_NFS_FOLIO_EVENT_DONE(nfs_write_end_done);
+
+DEFINE_NFS_FOLIO_EVENT(nfs_writepages);
+DEFINE_NFS_FOLIO_EVENT_DONE(nfs_writepages_done);
+
+DECLARE_EVENT_CLASS(nfs_kiocb_event,
+		TP_PROTO(
+			const struct kiocb *iocb,
+			const struct iov_iter *iter
+		),
+
+		TP_ARGS(iocb, iter),
+
+		TP_STRUCT__entry(
+			__field(dev_t, dev)
+			__field(u32, fhandle)
+			__field(u64, fileid)
+			__field(u64, version)
+			__field(loff_t, offset)
+			__field(size_t, count)
+			__field(int, flags)
+		),
+
+		TP_fast_assign(
+			const struct inode *inode = file_inode(iocb->ki_filp);
+			const struct nfs_inode *nfsi = NFS_I(inode);
+
+			__entry->dev = inode->i_sb->s_dev;
+			__entry->fileid = inode->i_ino;
+			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
+			__entry->version = inode_peek_iversion_raw(inode);
+			__entry->offset = iocb->ki_pos;
+			__entry->count = iov_iter_count(iter);
+			__entry->flags = iocb->ki_flags;
+		),
+
+		TP_printk(
+			"fileid=%02x:%02x:%llu fhandle=0x%08x version=%llu offset=%lld count=%zu ki_flags=%s",
+			MAJOR(__entry->dev), MINOR(__entry->dev),
+			(unsigned long long)__entry->fileid,
+			__entry->fhandle, __entry->version,
+			__entry->offset, __entry->count,
+			__print_flags(__entry->flags, "|", TRACE_IOCB_STRINGS)
+		)
+);
+
+#define DEFINE_NFS_KIOCB_EVENT(name) \
+	DEFINE_EVENT(nfs_kiocb_event, name, \
+			TP_PROTO( \
+				const struct kiocb *iocb, \
+				const struct iov_iter *iter \
+			), \
+			TP_ARGS(iocb, iter))
+
+DEFINE_NFS_KIOCB_EVENT(nfs_file_read);
+DEFINE_NFS_KIOCB_EVENT(nfs_file_write);
 
 TRACE_EVENT(nfs_aop_readahead,
 		TP_PROTO(
@@ -1067,7 +1160,7 @@ TRACE_EVENT(nfs_aop_readahead,
 			const struct nfs_inode *nfsi = NFS_I(inode);
 
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->version = inode_peek_iversion_raw(inode);
 			__entry->offset = pos;
@@ -1106,7 +1199,7 @@ TRACE_EVENT(nfs_aop_readahead_done,
 			const struct nfs_inode *nfsi = NFS_I(inode);
 
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->version = inode_peek_iversion_raw(inode);
 			__entry->nr_pages = nr_pages;
@@ -1146,7 +1239,7 @@ TRACE_EVENT(nfs_initiate_read,
 			__entry->offset = hdr->args.offset;
 			__entry->count = hdr->args.count;
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(fh);
 		),
 
@@ -1191,7 +1284,7 @@ TRACE_EVENT(nfs_readpage_done,
 			__entry->res_count = hdr->res.count;
 			__entry->eof = hdr->res.eof;
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(fh);
 		),
 
@@ -1237,7 +1330,7 @@ TRACE_EVENT(nfs_readpage_short,
 			__entry->res_count = hdr->res.count;
 			__entry->eof = hdr->res.eof;
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(fh);
 		),
 
@@ -1284,7 +1377,7 @@ TRACE_EVENT(nfs_pgio_error,
 		__entry->arg_count = hdr->args.count;
 		__entry->res_count = hdr->res.count;
 		__entry->dev = inode->i_sb->s_dev;
-		__entry->fileid = nfsi->fileid;
+		__entry->fileid = inode->i_ino;
 		__entry->fhandle = nfs_fhandle_hash(fh);
 	),
 
@@ -1323,7 +1416,7 @@ TRACE_EVENT(nfs_initiate_write,
 			__entry->count = hdr->args.count;
 			__entry->stable = hdr->args.stable;
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(fh);
 		),
 
@@ -1374,7 +1467,7 @@ TRACE_EVENT(nfs_writeback_done,
 				&verf->verifier,
 				NFS4_VERIFIER_SIZE);
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(fh);
 		),
 
@@ -1391,6 +1484,55 @@ TRACE_EVENT(nfs_writeback_done,
 			show_nfs4_verifier(__entry->verifier)
 		)
 );
+
+DECLARE_EVENT_CLASS(nfs_page_class,
+		TP_PROTO(
+			const struct nfs_page *req
+		),
+
+		TP_ARGS(req),
+
+		TP_STRUCT__entry(
+			__field(dev_t, dev)
+			__field(u32, fhandle)
+			__field(u64, fileid)
+			__field(const struct nfs_page *, req)
+			__field(loff_t, offset)
+			__field(unsigned int, count)
+			__field(unsigned long, flags)
+		),
+
+		TP_fast_assign(
+			const struct inode *inode = folio_inode(req->wb_folio);
+			const struct nfs_inode *nfsi = NFS_I(inode);
+
+			__entry->dev = inode->i_sb->s_dev;
+			__entry->fileid = inode->i_ino;
+			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
+			__entry->req = req;
+			__entry->offset = req_offset(req);
+			__entry->count = req->wb_bytes;
+			__entry->flags = req->wb_flags;
+		),
+
+		TP_printk(
+			"fileid=%02x:%02x:%llu fhandle=0x%08x req=%p offset=%lld count=%u flags=%s",
+			MAJOR(__entry->dev), MINOR(__entry->dev),
+			(unsigned long long)__entry->fileid, __entry->fhandle,
+			__entry->req, __entry->offset, __entry->count,
+			nfs_show_wb_flags(__entry->flags)
+		)
+);
+
+#define DEFINE_NFS_PAGE_EVENT(name) \
+	DEFINE_EVENT(nfs_page_class, name, \
+			TP_PROTO( \
+				const struct nfs_page *req \
+			), \
+			TP_ARGS(req))
+
+DEFINE_NFS_PAGE_EVENT(nfs_writepage_setup);
+DEFINE_NFS_PAGE_EVENT(nfs_do_writepage);
 
 DECLARE_EVENT_CLASS(nfs_page_error_class,
 		TP_PROTO(
@@ -1413,7 +1555,7 @@ DECLARE_EVENT_CLASS(nfs_page_error_class,
 		TP_fast_assign(
 			const struct nfs_inode *nfsi = NFS_I(inode);
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->offset = req_offset(req);
 			__entry->count = req->wb_bytes;
@@ -1467,7 +1609,7 @@ TRACE_EVENT(nfs_initiate_commit,
 			__entry->offset = data->args.offset;
 			__entry->count = data->args.count;
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(fh);
 		),
 
@@ -1513,7 +1655,7 @@ TRACE_EVENT(nfs_commit_done,
 				&verf->verifier,
 				NFS4_VERIFIER_SIZE);
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(fh);
 		),
 
@@ -1559,7 +1701,7 @@ DECLARE_EVENT_CLASS(nfs_direct_req_class,
 			const struct nfs_fh *fh = &nfsi->fh;
 
 			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = nfsi->fileid;
+			__entry->fileid = inode->i_ino;
 			__entry->fhandle = nfs_fhandle_hash(fh);
 			__entry->offset = dreq->io_start;
 			__entry->count = dreq->count;
@@ -1592,6 +1734,76 @@ DEFINE_NFS_DIRECT_REQ_EVENT(nfs_direct_write_complete);
 DEFINE_NFS_DIRECT_REQ_EVENT(nfs_direct_write_completion);
 DEFINE_NFS_DIRECT_REQ_EVENT(nfs_direct_write_schedule_iovec);
 DEFINE_NFS_DIRECT_REQ_EVENT(nfs_direct_write_reschedule_io);
+
+#if IS_ENABLED(CONFIG_NFS_LOCALIO)
+
+DECLARE_EVENT_CLASS(nfs_local_dio_class,
+	TP_PROTO(
+		const struct inode *inode,
+		loff_t offset,
+		ssize_t count,
+		const struct nfs_local_dio *local_dio
+	),
+	TP_ARGS(inode, offset, count, local_dio),
+	TP_STRUCT__entry(
+		__field(dev_t, dev)
+		__field(u64, fileid)
+		__field(u32, fhandle)
+		__field(loff_t, offset)
+		__field(ssize_t, count)
+		__field(u32, mem_align)
+		__field(u32, offset_align)
+		__field(loff_t, start)
+		__field(ssize_t, start_len)
+		__field(loff_t, middle)
+		__field(ssize_t, middle_len)
+		__field(loff_t, end)
+		__field(ssize_t, end_len)
+	),
+	TP_fast_assign(
+		const struct nfs_inode *nfsi = NFS_I(inode);
+		const struct nfs_fh *fh = &nfsi->fh;
+
+		__entry->dev = inode->i_sb->s_dev;
+		__entry->fileid = inode->i_ino;
+		__entry->fhandle = nfs_fhandle_hash(fh);
+		__entry->offset = offset;
+		__entry->count = count;
+		__entry->mem_align = local_dio->mem_align;
+		__entry->offset_align = local_dio->offset_align;
+		__entry->start = offset;
+		__entry->start_len = local_dio->start_len;
+		__entry->middle = local_dio->middle_offset;
+		__entry->middle_len = local_dio->middle_len;
+		__entry->end = local_dio->end_offset;
+		__entry->end_len = local_dio->end_len;
+	),
+	TP_printk("fileid=%02x:%02x:%llu fhandle=0x%08x "
+		  "offset=%lld count=%zd "
+		  "mem_align=%u offset_align=%u "
+		  "start=%llu+%zd middle=%llu+%zd end=%llu+%zd",
+		  MAJOR(__entry->dev), MINOR(__entry->dev),
+		  (unsigned long long)__entry->fileid,
+		  __entry->fhandle, __entry->offset, __entry->count,
+		  __entry->mem_align, __entry->offset_align,
+		  __entry->start, __entry->start_len,
+		  __entry->middle, __entry->middle_len,
+		  __entry->end, __entry->end_len)
+)
+
+#define DEFINE_NFS_LOCAL_DIO_EVENT(name)		\
+DEFINE_EVENT(nfs_local_dio_class, nfs_local_dio_##name,	\
+	TP_PROTO(const struct inode *inode,		\
+		 loff_t offset,				\
+		 ssize_t count,				\
+		 const struct nfs_local_dio *local_dio),\
+	TP_ARGS(inode, offset, count, local_dio))
+
+DEFINE_NFS_LOCAL_DIO_EVENT(read);
+DEFINE_NFS_LOCAL_DIO_EVENT(write);
+DEFINE_NFS_LOCAL_DIO_EVENT(misaligned);
+
+#endif /* CONFIG_NFS_LOCALIO */
 
 TRACE_EVENT(nfs_fh_to_dentry,
 		TP_PROTO(
@@ -1707,10 +1919,10 @@ TRACE_EVENT(nfs_local_open_fh,
 		),
 
 		TP_printk(
-			"error=%d fhandle=0x%08x mode=%s",
-			__entry->error,
+			"fhandle=0x%08x mode=%s result=%d",
 			__entry->fhandle,
-			show_fs_fmode_flags(__entry->fmode)
+			show_fs_fmode_flags(__entry->fmode),
+			__entry->error
 		)
 );
 

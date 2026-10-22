@@ -163,6 +163,7 @@ static int snd_acp6x_probe(struct pci_dev *pci,
 	switch (pci->revision) {
 	case 0x60:
 	case 0x6f:
+	case 0x62: /* RPL */
 		break;
 	default:
 		dev_dbg(&pci->dev, "acp6x pci device not found\n");
@@ -208,6 +209,17 @@ static int snd_acp6x_probe(struct pci_dev *pci,
 	case ACP_CONFIG_15:
 		dev_info(&pci->dev, "Audio Mode %d\n", val);
 		break;
+	case ACP_CONFIG_10:
+	case ACP_CONFIG_11:
+	case ACP_CONFIG_12:
+	case ACP_CONFIG_13:
+	case ACP_CONFIG_14:
+		/* PIN 10 to 14 is reserve for RPL */
+		if (pci->revision == 0x62) {
+			dev_info(&pci->dev, "RPL Audio Mode %d\n", val);
+			break;
+		}
+		fallthrough;
 	default:
 		adata->res = devm_kzalloc(&pci->dev,
 					  sizeof(struct resource),
@@ -277,7 +289,7 @@ disable_pci:
 	return ret;
 }
 
-static int __maybe_unused snd_acp6x_suspend(struct device *dev)
+static int snd_acp6x_suspend(struct device *dev)
 {
 	struct acp6x_dev_data *adata;
 	int ret;
@@ -289,7 +301,7 @@ static int __maybe_unused snd_acp6x_suspend(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused snd_acp6x_resume(struct device *dev)
+static int snd_acp6x_resume(struct device *dev)
 {
 	struct acp6x_dev_data *adata;
 	int ret;
@@ -302,8 +314,8 @@ static int __maybe_unused snd_acp6x_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops acp6x_pm = {
-	SET_RUNTIME_PM_OPS(snd_acp6x_suspend, snd_acp6x_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(snd_acp6x_suspend, snd_acp6x_resume)
+	RUNTIME_PM_OPS(snd_acp6x_suspend, snd_acp6x_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(snd_acp6x_suspend, snd_acp6x_resume)
 };
 
 static void snd_acp6x_remove(struct pci_dev *pci)
@@ -339,7 +351,7 @@ static struct pci_driver yc_acp6x_driver  = {
 	.probe = snd_acp6x_probe,
 	.remove = snd_acp6x_remove,
 	.driver = {
-		.pm = &acp6x_pm,
+		.pm = pm_ptr(&acp6x_pm),
 	}
 };
 

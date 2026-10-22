@@ -34,6 +34,7 @@
 #include "dm_helpers.h"
 #include "dc_dmub_srv.h"
 #include "dce/dmub_hw_lock_mgr.h"
+#include "clk_mgr.h"
 
 #define DC_LOGGER \
 	link->ctx->logger
@@ -65,12 +66,24 @@ static void dp_retrain_link_dp_test(struct dc_link *link,
 			struct dc_link_settings *link_setting,
 			bool skip_video_pattern)
 {
+	(void)skip_video_pattern;
 	struct pipe_ctx *pipes[MAX_PIPES];
 	struct dc_state *state = link->dc->current_state;
+	struct dc_stream_update stream_update = { 0 };
+	bool dpms_off = false;
+	bool needs_divider_update = false;
 	bool was_hpo_acquired = resource_is_hpo_acquired(link->dc->current_state);
 	bool is_hpo_acquired;
 	uint8_t count;
 	int i;
+	struct audio_output audio_output[MAX_PIPES];
+	struct dc_stream_state *streams_on_link[MAX_PIPES];
+	int num_streams_on_link = 0;
+	struct dc *dc = (struct dc *)link->dc;
+
+	needs_divider_update = (link->dc->link_srv->dp_get_encoding_format(link_setting) !=
+		link->dc->link_srv->dp_get_encoding_format((const struct dc_link_settings *) &link->cur_link_settings))
+		|| link->ep_type == DISPLAY_ENDPOINT_USB4_DPIA;
 
 	udelay(100);
 
@@ -83,16 +96,68 @@ static void dp_retrain_link_dp_test(struct dc_link *link,
 				link->dc,
 				state,
 				pipes[i]);
+
+		// Disable OTG and re-enable after updating clocks
+		pipes[i]->stream_res.tg->funcs->disable_crtc(pipes[i]->stream_res.tg);
 	}
 
-	if (link->dc->hwss.setup_hpo_hw_control) {
-		is_hpo_acquired = resource_is_hpo_acquired(state);
-		if (was_hpo_acquired != is_hpo_acquired)
-			link->dc->hwss.setup_hpo_hw_control(link->dc->hwseq, is_hpo_acquired);
+	if (needs_divider_update && link->dc->res_pool->funcs->update_dc_state_for_encoder_switch) {
+		link->dc->res_pool->funcs->update_dc_state_for_encoder_switch(link,
+				link_setting, count,
+				*pipes, &audio_output[0]);
+		for (i = 0; i < count; i++) {
+			pipes[i]->clock_source->funcs->program_pix_clk(
+					pipes[i]->clock_source,
+					&pipes[i]->stream_res.pix_clk_params,
+					link->dc->link_srv->dp_get_encoding_format(&pipes[i]->link_config.dp_link_settings),
+					&pipes[i]->pll_settings);
+
+			if (pipes[i]->stream_res.audio != NULL) {
+				const struct link_hwss *link_hwss = get_link_hwss(
+					link, &pipes[i]->link_res);
+
+				link_hwss->setup_audio_output(pipes[i], &audio_output[i],
+						pipes[i]->stream_res.audio->inst);
+
+				pipes[i]->stream_res.audio->funcs->az_configure(
+						pipes[i]->stream_res.audio,
+						pipes[i]->stream->signal,
+						&audio_output[i].crtc_info,
+						&pipes[i]->stream->audio_info,
+						&audio_output[i].dp_link_info);
+
+				if (link->dc->config.disable_hbr_audio_dp2 &&
+						pipes[i]->stream_res.audio->funcs->az_disable_hbr_audio &&
+						link->dc->link_srv->dp_is_128b_132b_signal(pipes[i]))
+					pipes[i]->stream_res.audio->funcs->az_disable_hbr_audio(pipes[i]->stream_res.audio);
+			}
+		}
 	}
 
-	for (i = count-1; i >= 0; i--)
-		link_set_dpms_on(state, pipes[i]);
+	// Toggle on HPO I/O if necessary
+	is_hpo_acquired = resource_is_hpo_acquired(state);
+	if (was_hpo_acquired != is_hpo_acquired && link->dc->hwss.setup_hpo_hw_control)
+		link->dc->hwss.setup_hpo_hw_control(link->dc->hwseq, is_hpo_acquired);
+
+	for (i = 0; i < count; i++)
+		pipes[i]->stream_res.tg->funcs->enable_crtc(pipes[i]->stream_res.tg);
+
+	// Set DPMS on with stream update
+	// Cache all streams on current link since dc_update_planes_and_stream might kill current_state
+	for (i = 0; i < MAX_PIPES; i++) {
+		if (state->streams[i] && state->streams[i]->is_phantom)
+			continue;
+		if (state->streams[i] && state->streams[i]->link && state->streams[i]->link == link)
+			streams_on_link[num_streams_on_link++] = state->streams[i];
+	}
+
+	for (i = 0; i < num_streams_on_link; i++) {
+		if (streams_on_link[i] && streams_on_link[i]->link && streams_on_link[i]->link == link) {
+			stream_update.stream = streams_on_link[i];
+			stream_update.dpms_off = &dpms_off;
+			dc_update_planes_and_stream(dc, NULL, 0, streams_on_link[i], &stream_update);
+		}
+	}
 }
 
 static void dp_test_send_link_training(struct dc_link *link)
@@ -136,7 +201,6 @@ static void dp_test_get_audio_test_data(struct dc_link *link, bool disable_video
 	unsigned int channel_count;
 	unsigned int channel = 0;
 	unsigned int modes = 0;
-	unsigned int sampling_rate_in_hz = 0;
 
 	// get audio test mode and test pattern parameters
 	core_link_read_dpcd(
@@ -169,38 +233,10 @@ static void dp_test_get_audio_test_data(struct dc_link *link, bool disable_video
 		}
 	}
 
-	// translate sampling rate
-	switch (dpcd_test_mode.bits.sampling_rate) {
-	case AUDIO_SAMPLING_RATE_32KHZ:
-		sampling_rate_in_hz = 32000;
-		break;
-	case AUDIO_SAMPLING_RATE_44_1KHZ:
-		sampling_rate_in_hz = 44100;
-		break;
-	case AUDIO_SAMPLING_RATE_48KHZ:
-		sampling_rate_in_hz = 48000;
-		break;
-	case AUDIO_SAMPLING_RATE_88_2KHZ:
-		sampling_rate_in_hz = 88200;
-		break;
-	case AUDIO_SAMPLING_RATE_96KHZ:
-		sampling_rate_in_hz = 96000;
-		break;
-	case AUDIO_SAMPLING_RATE_176_4KHZ:
-		sampling_rate_in_hz = 176400;
-		break;
-	case AUDIO_SAMPLING_RATE_192KHZ:
-		sampling_rate_in_hz = 192000;
-		break;
-	default:
-		sampling_rate_in_hz = 0;
-		break;
-	}
-
 	link->audio_test_data.flags.test_requested = 1;
 	link->audio_test_data.flags.disable_video = disable_video;
-	link->audio_test_data.sampling_rate = sampling_rate_in_hz;
-	link->audio_test_data.channel_count = channel_count;
+	link->audio_test_data.sampling_rate = (uint8_t)dpcd_test_mode.bits.sampling_rate;
+	link->audio_test_data.channel_count = (uint8_t)channel_count;
 	link->audio_test_data.pattern_type = test_pattern;
 
 	if (test_pattern == DP_TEST_PATTERN_AUDIO_SAWTOOTH) {
@@ -421,6 +457,7 @@ static void set_crtc_test_pattern(struct dc_link *link,
 				enum dp_test_pattern test_pattern,
 				enum dp_test_pattern_color_space test_pattern_color_space)
 {
+	(void)test_pattern_color_space;
 	enum controller_dp_test_pattern controller_test_pattern;
 	enum dc_color_depth color_depth = pipe_ctx->
 		stream->timing.display_color_depth;
@@ -816,12 +853,12 @@ bool dp_set_test_pattern(
 			return false;
 
 		if (pipe_ctx->stream_res.tg->funcs->lock_doublebuffer_enable) {
-			if (should_use_dmub_lock(pipe_ctx->stream->link)) {
+			if (should_use_dmub_inbox1_lock(pipe_ctx->stream->link->dc, pipe_ctx->stream->link)) {
 				union dmub_hw_lock_flags hw_locks = { 0 };
 				struct dmub_hw_lock_inst_flags inst_flags = { 0 };
 
 				hw_locks.bits.lock_dig = 1;
-				inst_flags.dig_inst = pipe_ctx->stream_res.tg->inst;
+				inst_flags.dig_inst = (uint8_t)pipe_ctx->stream_res.tg->inst;
 
 				dmub_hw_lock_mgr_cmd(link->ctx->dmub_srv,
 							true,
@@ -864,12 +901,12 @@ bool dp_set_test_pattern(
 				CRTC_STATE_VACTIVE);
 
 		if (pipe_ctx->stream_res.tg->funcs->lock_doublebuffer_disable) {
-			if (should_use_dmub_lock(pipe_ctx->stream->link)) {
+			if (should_use_dmub_inbox1_lock(pipe_ctx->stream->link->dc, pipe_ctx->stream->link)) {
 				union dmub_hw_lock_flags hw_locks = { 0 };
 				struct dmub_hw_lock_inst_flags inst_flags = { 0 };
 
 				hw_locks.bits.lock_dig = 1;
-				inst_flags.dig_inst = pipe_ctx->stream_res.tg->inst;
+				inst_flags.dig_inst = (uint8_t)pipe_ctx->stream_res.tg->inst;
 
 				dmub_hw_lock_mgr_cmd(link->ctx->dmub_srv,
 							false,

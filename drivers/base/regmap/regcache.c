@@ -16,51 +16,61 @@
 #include "internal.h"
 
 static const struct regcache_ops *cache_types[] = {
+	&regcache_flat_sparse_ops,
 	&regcache_rbtree_ops,
 	&regcache_maple_ops,
 	&regcache_flat_ops,
 };
 
-static int regcache_hw_init(struct regmap *map)
+static int regcache_defaults_cmp(const void *a, const void *b)
 {
-	int i, j;
-	int ret;
-	int count;
-	unsigned int reg, val;
-	void *tmp_buf;
+	const struct reg_default *x = a;
+	const struct reg_default *y = b;
 
-	if (!map->num_reg_defaults_raw)
-		return -EINVAL;
+	if (x->reg > y->reg)
+		return 1;
+	else if (x->reg < y->reg)
+		return -1;
+	else
+		return 0;
+}
+
+void regcache_sort_defaults(struct reg_default *defaults, unsigned int ndefaults)
+{
+	sort(defaults, ndefaults, sizeof(*defaults),
+	     regcache_defaults_cmp, NULL);
+}
+EXPORT_SYMBOL_GPL(regcache_sort_defaults);
+
+static int regcache_count_cacheable_registers(struct regmap *map)
+{
+	unsigned int count;
 
 	/* calculate the size of reg_defaults */
-	for (count = 0, i = 0; i < map->num_reg_defaults_raw; i++)
+	count = 0;
+	for (unsigned int i = 0; i < map->num_reg_defaults_raw; i++)
 		if (regmap_readable(map, i * map->reg_stride) &&
 		    !regmap_volatile(map, i * map->reg_stride))
 			count++;
 
-	/* all registers are unreadable or volatile, so just bypass */
-	if (!count) {
-		map->cache_bypass = true;
-		return 0;
-	}
+	return count;
+}
 
-	map->num_reg_defaults = count;
-	map->reg_defaults = kmalloc_array(count, sizeof(struct reg_default),
-					  GFP_KERNEL);
-	if (!map->reg_defaults)
-		return -ENOMEM;
+static int regcache_hw_init(struct regmap *map)
+{
+	int ret;
+	unsigned int reg, val;
+	void *tmp_buf;
 
 	if (!map->reg_defaults_raw) {
 		bool cache_bypass = map->cache_bypass;
-		dev_warn(map->dev, "No cache defaults, reading back from HW\n");
+		dev_dbg(map->dev, "No cache defaults, reading back from HW\n");
 
 		/* Bypass the cache access till data read from HW */
 		map->cache_bypass = true;
 		tmp_buf = kmalloc(map->cache_size_raw, GFP_KERNEL);
-		if (!tmp_buf) {
-			ret = -ENOMEM;
-			goto err_free;
-		}
+		if (!tmp_buf)
+			return -ENOMEM;
 		ret = regmap_raw_read(map, 0, tmp_buf,
 				      map->cache_size_raw);
 		map->cache_bypass = cache_bypass;
@@ -73,7 +83,7 @@ static int regcache_hw_init(struct regmap *map)
 	}
 
 	/* fill the reg_defaults */
-	for (i = 0, j = 0; i < map->num_reg_defaults_raw; i++) {
+	for (unsigned int i = 0, j = 0; i < map->num_reg_defaults_raw; i++) {
 		reg = i * map->reg_stride;
 
 		if (!regmap_readable(map, reg))
@@ -91,9 +101,9 @@ static int regcache_hw_init(struct regmap *map)
 			ret = regmap_read(map, reg, &val);
 			map->cache_bypass = cache_bypass;
 			if (ret != 0) {
-				dev_err(map->dev, "Failed to read %d: %d\n",
+				dev_err(map->dev, "Failed to read %x: %d\n",
 					reg, ret);
-				goto err_free;
+				return ret;
 			}
 		}
 
@@ -103,15 +113,19 @@ static int regcache_hw_init(struct regmap *map)
 	}
 
 	return 0;
+}
 
-err_free:
-	kfree(map->reg_defaults);
-
-	return ret;
+static void regcache_hw_exit(struct regmap *map)
+{
+	if (map->cache_free)
+		kfree(map->reg_defaults_raw);
 }
 
 int regcache_init(struct regmap *map, const struct regmap_config *config)
 {
+	bool sort_defaults = false;
+	unsigned int reg_prev = 0;
+	int count = 0;
 	int ret;
 	int i;
 	void *tmp_buf;
@@ -137,9 +151,15 @@ int regcache_init(struct regmap *map, const struct regmap_config *config)
 		return -EINVAL;
 	}
 
-	for (i = 0; i < config->num_reg_defaults; i++)
+	for (i = 0; i < config->num_reg_defaults; i++) {
 		if (config->reg_defaults[i].reg % map->reg_stride)
 			return -EINVAL;
+
+		if (reg_prev > config->reg_defaults[i].reg)
+			sort_defaults = true;
+
+		reg_prev = config->reg_defaults[i].reg;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(cache_types); i++)
 		if (cache_types[i]->type == map->cache_type)
@@ -174,17 +194,27 @@ int regcache_init(struct regmap *map, const struct regmap_config *config)
 					sizeof(*map->reg_defaults), GFP_KERNEL);
 		if (!tmp_buf)
 			return -ENOMEM;
+
+		/* regcache_lookup_reg() bsearch()es this array */
+		if (sort_defaults) {
+			dev_warn(map->dev,
+				 "Driver needs fixing: Unsorted reg_defaults, sorting the copy\n");
+			regcache_sort_defaults(tmp_buf, map->num_reg_defaults);
+		}
 		map->reg_defaults = tmp_buf;
 	} else if (map->num_reg_defaults_raw) {
-		/* Some devices such as PMICs don't have cache defaults,
-		 * we cope with this by reading back the HW registers and
-		 * crafting the cache defaults by hand.
-		 */
-		ret = regcache_hw_init(map);
-		if (ret < 0)
-			return ret;
+		count = regcache_count_cacheable_registers(map);
+		if (!count)
+			map->cache_bypass = true;
+
+		/* All registers are unreadable or volatile, so just bypass */
 		if (map->cache_bypass)
 			return 0;
+
+		map->num_reg_defaults = count;
+		map->reg_defaults = kmalloc_objs(struct reg_default, count);
+		if (!map->reg_defaults)
+			return -ENOMEM;
 	}
 
 	if (!map->max_register_is_set && map->num_reg_defaults_raw) {
@@ -199,14 +229,42 @@ int regcache_init(struct regmap *map, const struct regmap_config *config)
 		ret = map->cache_ops->init(map);
 		map->unlock(map->lock_arg);
 		if (ret)
+			goto err_free_reg_defaults;
+	}
+
+	/*
+	 * Some devices such as PMICs don't have cache defaults,
+	 * we cope with this by reading back the HW registers and
+	 * crafting the cache defaults by hand.
+	 */
+	if (count) {
+		ret = regcache_hw_init(map);
+		if (ret)
+			goto err_exit;
+	}
+
+	if (map->cache_ops->populate &&
+	    (map->num_reg_defaults || map->reg_default_cb)) {
+		dev_dbg(map->dev, "Populating %s cache\n", map->cache_ops->name);
+		map->lock(map->lock_arg);
+		ret = map->cache_ops->populate(map);
+		map->unlock(map->lock_arg);
+		if (ret)
 			goto err_free;
 	}
 	return 0;
 
 err_free:
+	regcache_hw_exit(map);
+err_exit:
+	if (map->cache_ops->exit) {
+		dev_dbg(map->dev, "Destroying %s cache\n", map->cache_ops->name);
+		map->lock(map->lock_arg);
+		map->cache_ops->exit(map);
+		map->unlock(map->lock_arg);
+	}
+err_free_reg_defaults:
 	kfree(map->reg_defaults);
-	if (map->cache_free)
-		kfree(map->reg_defaults_raw);
 
 	return ret;
 }
@@ -218,9 +276,7 @@ void regcache_exit(struct regmap *map)
 
 	BUG_ON(!map->cache_ops);
 
-	kfree(map->reg_defaults);
-	if (map->cache_free)
-		kfree(map->reg_defaults_raw);
+	regcache_hw_exit(map);
 
 	if (map->cache_ops->exit) {
 		dev_dbg(map->dev, "Destroying %s cache\n",
@@ -229,6 +285,8 @@ void regcache_exit(struct regmap *map)
 		map->cache_ops->exit(map);
 		map->unlock(map->lock_arg);
 	}
+
+	kfree(map->reg_defaults);
 }
 
 /**
@@ -467,7 +525,7 @@ int regcache_sync_region(struct regmap *map, unsigned int min,
 	bypass = map->cache_bypass;
 
 	name = map->cache_ops->name;
-	dev_dbg(map->dev, "Syncing %s cache from %d-%d\n", name, min, max);
+	dev_dbg(map->dev, "Syncing %s cache from %#x-%#x\n", name, min, max);
 
 	trace_regcache_sync(map, name, "start region");
 
@@ -684,14 +742,6 @@ unsigned int regcache_get_val(struct regmap *map, const void *base,
 	return -1;
 }
 
-static int regcache_default_cmp(const void *a, const void *b)
-{
-	const struct reg_default *_a = a;
-	const struct reg_default *_b = b;
-
-	return _a->reg - _b->reg;
-}
-
 int regcache_lookup_reg(struct regmap *map, unsigned int reg)
 {
 	struct reg_default key;
@@ -701,7 +751,7 @@ int regcache_lookup_reg(struct regmap *map, unsigned int reg)
 	key.def = 0;
 
 	r = bsearch(&key, map->reg_defaults, map->num_reg_defaults,
-		    sizeof(struct reg_default), regcache_default_cmp);
+		    sizeof(struct reg_default), regcache_defaults_cmp);
 
 	if (r)
 		return r - map->reg_defaults;
@@ -798,13 +848,13 @@ static int regcache_sync_block_raw(struct regmap *map, void *block,
 			    unsigned int block_base, unsigned int start,
 			    unsigned int end)
 {
-	unsigned int i, val;
 	unsigned int regtmp = 0;
 	unsigned int base = 0;
 	const void *data = NULL;
+	unsigned int val;
 	int ret;
 
-	for (i = start; i < end; i++) {
+	for (unsigned int i = start; i < end; i++) {
 		regtmp = block_base + (i * map->reg_stride);
 
 		if (!regcache_reg_present(cache_present, i) ||

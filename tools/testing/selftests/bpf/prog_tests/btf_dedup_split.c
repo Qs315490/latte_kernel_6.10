@@ -20,18 +20,22 @@ static void test_split_simple() {
 	btf__add_struct(btf1, "s1", 4);			/* [3] struct s1 { */
 	btf__add_field(btf1, "f1", 1, 0, 0);		/*      int f1; */
 							/* } */
+	btf__add_typedef(btf1, "t1", 1);		/* [4] typedef int */
 
 	VALIDATE_RAW_BTF(
 		btf1,
 		"[1] INT 'int' size=4 bits_offset=0 nr_bits=32 encoding=SIGNED",
 		"[2] PTR '(anon)' type_id=1",
 		"[3] STRUCT 's1' size=4 vlen=1\n"
-		"\t'f1' type_id=1 bits_offset=0");
+		"\t'f1' type_id=1 bits_offset=0",
+		"[4] TYPEDEF 't1' type_id=1");
 
 	ASSERT_STREQ(btf_type_c_dump(btf1), "\
 struct s1 {\n\
 	int f1;\n\
-};\n\n", "c_dump");
+};\n\
+\n\
+typedef int t1;\n\n", "c_dump");
 
 	btf2 = btf__new_empty_split(btf1);
 	if (!ASSERT_OK_PTR(btf2, "empty_split_btf"))
@@ -49,19 +53,22 @@ struct s1 {\n\
 	ASSERT_EQ(btf_is_int(t), true, "int_kind");
 	ASSERT_STREQ(btf__str_by_offset(btf2, t->name_off), "int", "int_name");
 
-	btf__add_struct(btf2, "s2", 16);		/* [4] struct s2 {	*/
-	btf__add_field(btf2, "f1", 6, 0, 0);		/*      struct s1 f1;	*/
-	btf__add_field(btf2, "f2", 5, 32, 0);		/*      int f2;		*/
+	btf__add_struct(btf2, "s2", 16);		/* [5] struct s2 {	*/
+	btf__add_field(btf2, "f1", 7, 0, 0);		/*      struct s1 f1;	*/
+	btf__add_field(btf2, "f2", 6, 32, 0);		/*      int f2;		*/
 	btf__add_field(btf2, "f3", 2, 64, 0);		/*      int *f3;	*/
 							/* } */
 
 	/* duplicated int */
-	btf__add_int(btf2, "int", 4, BTF_INT_SIGNED);	/* [5] int */
+	btf__add_int(btf2, "int", 4, BTF_INT_SIGNED);	/* [6] int */
 
 	/* duplicated struct s1 */
-	btf__add_struct(btf2, "s1", 4);			/* [6] struct s1 { */
-	btf__add_field(btf2, "f1", 5, 0, 0);		/*      int f1; */
+	btf__add_struct(btf2, "s1", 4);			/* [7] struct s1 { */
+	btf__add_field(btf2, "f1", 6, 0, 0);		/*      int f1; */
 							/* } */
+
+	/* duplicated typedef t1 */
+	btf__add_typedef(btf2, "t1", 6);		/* [8] typedef int */
 
 	VALIDATE_RAW_BTF(
 		btf2,
@@ -69,18 +76,22 @@ struct s1 {\n\
 		"[2] PTR '(anon)' type_id=1",
 		"[3] STRUCT 's1' size=4 vlen=1\n"
 		"\t'f1' type_id=1 bits_offset=0",
-		"[4] STRUCT 's2' size=16 vlen=3\n"
-		"\t'f1' type_id=6 bits_offset=0\n"
-		"\t'f2' type_id=5 bits_offset=32\n"
+		"[4] TYPEDEF 't1' type_id=1",
+		"[5] STRUCT 's2' size=16 vlen=3\n"
+		"\t'f1' type_id=7 bits_offset=0\n"
+		"\t'f2' type_id=6 bits_offset=32\n"
 		"\t'f3' type_id=2 bits_offset=64",
-		"[5] INT 'int' size=4 bits_offset=0 nr_bits=32 encoding=SIGNED",
-		"[6] STRUCT 's1' size=4 vlen=1\n"
-		"\t'f1' type_id=5 bits_offset=0");
+		"[6] INT 'int' size=4 bits_offset=0 nr_bits=32 encoding=SIGNED",
+		"[7] STRUCT 's1' size=4 vlen=1\n"
+		"\t'f1' type_id=6 bits_offset=0",
+		"[8] TYPEDEF 't1' type_id=6");
 
 	ASSERT_STREQ(btf_type_c_dump(btf2), "\
 struct s1 {\n\
 	int f1;\n\
 };\n\
+\n\
+typedef int t1;\n\
 \n\
 struct s1___2 {\n\
 	int f1;\n\
@@ -90,7 +101,9 @@ struct s2 {\n\
 	struct s1___2 f1;\n\
 	int f2;\n\
 	int *f3;\n\
-};\n\n", "c_dump");
+};\n\
+\n\
+typedef int t1___2;\n\n", "c_dump");
 
 	err = btf__dedup(btf2, NULL);
 	if (!ASSERT_OK(err, "btf_dedup"))
@@ -102,7 +115,8 @@ struct s2 {\n\
 		"[2] PTR '(anon)' type_id=1",
 		"[3] STRUCT 's1' size=4 vlen=1\n"
 		"\t'f1' type_id=1 bits_offset=0",
-		"[4] STRUCT 's2' size=16 vlen=3\n"
+		"[4] TYPEDEF 't1' type_id=1",
+		"[5] STRUCT 's2' size=16 vlen=3\n"
 		"\t'f1' type_id=3 bits_offset=0\n"
 		"\t'f2' type_id=1 bits_offset=32\n"
 		"\t'f3' type_id=2 bits_offset=64");
@@ -111,6 +125,8 @@ struct s2 {\n\
 struct s1 {\n\
 	int f1;\n\
 };\n\
+\n\
+typedef int t1;\n\
 \n\
 struct s2 {\n\
 	struct s1 f1;\n\
@@ -440,6 +456,104 @@ cleanup:
 	btf__free(btf1);
 }
 
+/* Ensure module split BTF dedup worked correctly; when dedup fails badly
+ * core kernel types are in split BTF also, so ensure that references to
+ * such types point at base - not split - BTF.
+ *
+ * bpf_testmod_test_write() has multiple core kernel type parameters;
+ *
+ * ssize_t
+ * bpf_testmod_test_write(struct file *file, struct kobject *kobj,
+ *                        struct bin_attribute *bin_attr,
+ *                        char *buf, loff_t off, size_t len);
+ *
+ * Ensure each of the FUNC_PROTO params is a core kernel type.
+ *
+ * Do the same for
+ *
+ * __bpf_kfunc struct sock *bpf_kfunc_call_test3(struct sock *sk);
+ *
+ * ...and
+ *
+ * __bpf_kfunc void bpf_kfunc_call_test_pass_ctx(struct __sk_buff *skb);
+ *
+ */
+const char *mod_funcs[] = {
+	"bpf_testmod_test_write",
+	"bpf_kfunc_call_test3",
+	"bpf_kfunc_call_test_pass_ctx"
+};
+
+static void test_split_module(void)
+{
+	struct btf *vmlinux_btf, *btf1 = NULL;
+	int i, nr_base_types;
+
+	vmlinux_btf = btf__load_vmlinux_btf();
+	if (!ASSERT_OK_PTR(vmlinux_btf, "vmlinux_btf"))
+		return;
+	nr_base_types = btf__type_cnt(vmlinux_btf);
+	if (!ASSERT_GT(nr_base_types, 0, "nr_base_types"))
+		goto cleanup;
+
+	btf1 = btf__parse_split("/sys/kernel/btf/bpf_testmod", vmlinux_btf);
+	if (!ASSERT_OK_PTR(btf1, "split_btf"))
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(mod_funcs); i++) {
+		const struct btf_param *p;
+		const struct btf_type *t;
+		__u32 vlen, j;
+		__u32 id;
+
+		id = btf__find_by_name_kind(btf1, mod_funcs[i], BTF_KIND_FUNC);
+		if (!ASSERT_GE(id, nr_base_types, "func_id"))
+			goto cleanup;
+		t = btf__type_by_id(btf1, id);
+		if (!ASSERT_OK_PTR(t, "func_id_type"))
+			goto cleanup;
+		t = btf__type_by_id(btf1, t->type);
+		if (!ASSERT_OK_PTR(t, "func_proto_id_type"))
+			goto cleanup;
+		if (!ASSERT_EQ(btf_is_func_proto(t), true, "is_func_proto"))
+			goto cleanup;
+		vlen = btf_vlen(t);
+
+		for (j = 0, p = btf_params(t); j < vlen; j++, p++) {
+			/* bpf_testmod uses resilient split BTF, so any
+			 * reference types will be added to split BTF and their
+			 * associated targets will be base BTF types; for example
+			 * for a "struct sock *" the PTR will be in split BTF
+			 * while the "struct sock" will be in base.
+			 *
+			 * In some cases like loff_t we have to resolve
+			 * multiple typedefs hence the while() loop below.
+			 *
+			 * Note that resilient split BTF generation depends
+			 * on pahole version, so we do not assert that
+			 * reference types are in split BTF, as if pahole
+			 * does not support resilient split BTF they will
+			 * also be base BTF types.
+			 */
+			id = p->type;
+			do {
+				t = btf__type_by_id(btf1, id);
+				if (!ASSERT_OK_PTR(t, "param_ref_type"))
+					goto cleanup;
+				if (!btf_is_mod(t) && !btf_is_ptr(t) && !btf_is_typedef(t))
+					break;
+				id = t->type;
+			} while (true);
+
+			if (!ASSERT_LT(id, nr_base_types, "verify_base_type"))
+				goto cleanup;
+		}
+	}
+cleanup:
+	btf__free(btf1);
+	btf__free(vmlinux_btf);
+}
+
 void test_btf_dedup_split()
 {
 	if (test__start_subtest("split_simple"))
@@ -450,4 +564,6 @@ void test_btf_dedup_split()
 		test_split_fwd_resolve();
 	if (test__start_subtest("split_dup_struct_in_cu"))
 		test_split_dup_struct_in_cu();
+	if (test__start_subtest("split_module"))
+		test_split_module();
 }

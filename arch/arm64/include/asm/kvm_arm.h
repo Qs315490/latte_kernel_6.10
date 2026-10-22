@@ -12,67 +12,70 @@
 #include <asm/sysreg.h>
 #include <asm/types.h>
 
-/* Hyp Configuration Register (HCR) bits */
+/*
+ * Because I'm terribly lazy and that repainting the whole of the KVM
+ * code with the proper names is a pain, use a helper to map the names
+ * inherited from AArch32 with the new fancy nomenclature. One day...
+ */
+#define	__HCR(x)	HCR_EL2_##x
 
-#define HCR_TID5	(UL(1) << 58)
-#define HCR_DCT		(UL(1) << 57)
-#define HCR_ATA_SHIFT	56
-#define HCR_ATA		(UL(1) << HCR_ATA_SHIFT)
-#define HCR_TTLBOS	(UL(1) << 55)
-#define HCR_TTLBIS	(UL(1) << 54)
-#define HCR_ENSCXT	(UL(1) << 53)
-#define HCR_TOCU	(UL(1) << 52)
-#define HCR_AMVOFFEN	(UL(1) << 51)
-#define HCR_TICAB	(UL(1) << 50)
-#define HCR_TID4	(UL(1) << 49)
-#define HCR_FIEN	(UL(1) << 47)
-#define HCR_FWB		(UL(1) << 46)
-#define HCR_NV2		(UL(1) << 45)
-#define HCR_AT		(UL(1) << 44)
-#define HCR_NV1		(UL(1) << 43)
-#define HCR_NV		(UL(1) << 42)
-#define HCR_API		(UL(1) << 41)
-#define HCR_APK		(UL(1) << 40)
-#define HCR_TEA		(UL(1) << 37)
-#define HCR_TERR	(UL(1) << 36)
-#define HCR_TLOR	(UL(1) << 35)
-#define HCR_E2H		(UL(1) << 34)
-#define HCR_ID		(UL(1) << 33)
-#define HCR_CD		(UL(1) << 32)
-#define HCR_RW_SHIFT	31
-#define HCR_RW		(UL(1) << HCR_RW_SHIFT)
-#define HCR_TRVM	(UL(1) << 30)
-#define HCR_HCD		(UL(1) << 29)
-#define HCR_TDZ		(UL(1) << 28)
-#define HCR_TGE		(UL(1) << 27)
-#define HCR_TVM		(UL(1) << 26)
-#define HCR_TTLB	(UL(1) << 25)
-#define HCR_TPU		(UL(1) << 24)
-#define HCR_TPC		(UL(1) << 23) /* HCR_TPCP if FEAT_DPB */
-#define HCR_TSW		(UL(1) << 22)
-#define HCR_TACR	(UL(1) << 21)
-#define HCR_TIDCP	(UL(1) << 20)
-#define HCR_TSC		(UL(1) << 19)
-#define HCR_TID3	(UL(1) << 18)
-#define HCR_TID2	(UL(1) << 17)
-#define HCR_TID1	(UL(1) << 16)
-#define HCR_TID0	(UL(1) << 15)
-#define HCR_TWE		(UL(1) << 14)
-#define HCR_TWI		(UL(1) << 13)
-#define HCR_DC		(UL(1) << 12)
-#define HCR_BSU		(3 << 10)
-#define HCR_BSU_IS	(UL(1) << 10)
-#define HCR_FB		(UL(1) << 9)
-#define HCR_VSE		(UL(1) << 8)
-#define HCR_VI		(UL(1) << 7)
-#define HCR_VF		(UL(1) << 6)
-#define HCR_AMO		(UL(1) << 5)
-#define HCR_IMO		(UL(1) << 4)
-#define HCR_FMO		(UL(1) << 3)
-#define HCR_PTW		(UL(1) << 2)
-#define HCR_SWIO	(UL(1) << 1)
-#define HCR_VM		(UL(1) << 0)
-#define HCR_RES0	((UL(1) << 48) | (UL(1) << 39))
+#define HCR_TID5	__HCR(TID5)
+#define HCR_DCT		__HCR(DCT)
+#define HCR_ATA_SHIFT	__HCR(ATA_SHIFT)
+#define HCR_ATA		__HCR(ATA)
+#define HCR_TTLBOS	__HCR(TTLBOS)
+#define HCR_TTLBIS	__HCR(TTLBIS)
+#define HCR_ENSCXT	__HCR(EnSCXT)
+#define HCR_TOCU	__HCR(TOCU)
+#define HCR_AMVOFFEN	__HCR(AMVOFFEN)
+#define HCR_TICAB	__HCR(TICAB)
+#define HCR_TID4	__HCR(TID4)
+#define HCR_FIEN	__HCR(FIEN)
+#define HCR_FWB		__HCR(FWB)
+#define HCR_NV2		__HCR(NV2)
+#define HCR_AT		__HCR(AT)
+#define HCR_NV1		__HCR(NV1)
+#define HCR_NV		__HCR(NV)
+#define HCR_API		__HCR(API)
+#define HCR_APK		__HCR(APK)
+#define HCR_TEA		__HCR(TEA)
+#define HCR_TERR	__HCR(TERR)
+#define HCR_TLOR	__HCR(TLOR)
+#define HCR_E2H		__HCR(E2H)
+#define HCR_ID		__HCR(ID)
+#define HCR_CD		__HCR(CD)
+#define HCR_RW		__HCR(RW)
+#define HCR_TRVM	__HCR(TRVM)
+#define HCR_HCD		__HCR(HCD)
+#define HCR_TDZ		__HCR(TDZ)
+#define HCR_TGE		__HCR(TGE)
+#define HCR_TVM		__HCR(TVM)
+#define HCR_TTLB	__HCR(TTLB)
+#define HCR_TPU		__HCR(TPU)
+#define HCR_TPC		__HCR(TPCP)
+#define HCR_TSW		__HCR(TSW)
+#define HCR_TACR	__HCR(TACR)
+#define HCR_TIDCP	__HCR(TIDCP)
+#define HCR_TSC		__HCR(TSC)
+#define HCR_TID3	__HCR(TID3)
+#define HCR_TID2	__HCR(TID2)
+#define HCR_TID1	__HCR(TID1)
+#define HCR_TID0	__HCR(TID0)
+#define HCR_TWE		__HCR(TWE)
+#define HCR_TWI		__HCR(TWI)
+#define HCR_DC		__HCR(DC)
+#define HCR_BSU		__HCR(BSU)
+#define HCR_BSU_IS	__HCR(BSU_IS)
+#define HCR_FB		__HCR(FB)
+#define HCR_VSE		__HCR(VSE)
+#define HCR_VI		__HCR(VI)
+#define HCR_VF		__HCR(VF)
+#define HCR_AMO		__HCR(AMO)
+#define HCR_IMO		__HCR(IMO)
+#define HCR_FMO		__HCR(FMO)
+#define HCR_PTW		__HCR(PTW)
+#define HCR_SWIO	__HCR(SWIO)
+#define HCR_VM		__HCR(VM)
 
 /*
  * The bits we set in HCR:
@@ -92,23 +95,23 @@
  * SWIO:	Turn set/way invalidates into set/way clean+invalidate
  * PTW:		Take a stage2 fault if a stage1 walk steps in device memory
  * TID3:	Trap EL1 reads of group 3 ID registers
- * TID2:	Trap CTR_EL0, CCSIDR2_EL1, CLIDR_EL1, and CSSELR_EL1
+ * TID1:	Trap REVIDR_EL1, AIDR_EL1, and SMIDR_EL1
  */
 #define HCR_GUEST_FLAGS (HCR_TSC | HCR_TSW | HCR_TWE | HCR_TWI | HCR_VM | \
 			 HCR_BSU_IS | HCR_FB | HCR_TACR | \
 			 HCR_AMO | HCR_SWIO | HCR_TIDCP | HCR_RW | HCR_TLOR | \
-			 HCR_FMO | HCR_IMO | HCR_PTW | HCR_TID3)
-#define HCR_HOST_NVHE_FLAGS (HCR_RW | HCR_API | HCR_APK | HCR_ATA)
+			 HCR_FMO | HCR_IMO | HCR_PTW | HCR_TID3 | HCR_TID1)
+#define HCR_HOST_NVHE_FLAGS (HCR_RW | HCR_API | HCR_APK)
 #define HCR_HOST_NVHE_PROTECTED_FLAGS (HCR_HOST_NVHE_FLAGS | HCR_TSC)
-#define HCR_HOST_VHE_FLAGS (HCR_RW | HCR_TGE | HCR_E2H)
+#define HCR_HOST_VHE_FLAGS (HCR_RW | HCR_TGE | HCR_E2H | HCR_AMO | HCR_IMO | HCR_FMO)
 
-#define HCRX_HOST_FLAGS (HCRX_EL2_MSCEn | HCRX_EL2_TCR2En | HCRX_EL2_EnFPM)
 #define MPAMHCR_HOST_FLAGS	0
 
 /* TCR_EL2 Registers bits */
 #define TCR_EL2_DS		(1UL << 32)
 #define TCR_EL2_RES1		((1U << 31) | (1 << 23))
 #define TCR_EL2_HPD		(1 << 24)
+#define TCR_EL2_HA		(1 << 21)
 #define TCR_EL2_TBI		(1 << 20)
 #define TCR_EL2_PS_SHIFT	16
 #define TCR_EL2_PS_MASK		(7 << TCR_EL2_PS_SHIFT)
@@ -121,46 +124,13 @@
 #define TCR_EL2_MASK	(TCR_EL2_TG0_MASK | TCR_EL2_SH0_MASK | \
 			 TCR_EL2_ORGN0_MASK | TCR_EL2_IRGN0_MASK)
 
-/* VTCR_EL2 Registers bits */
-#define VTCR_EL2_DS		TCR_EL2_DS
-#define VTCR_EL2_RES1		(1U << 31)
-#define VTCR_EL2_HD		(1 << 22)
-#define VTCR_EL2_HA		(1 << 21)
-#define VTCR_EL2_PS_SHIFT	TCR_EL2_PS_SHIFT
-#define VTCR_EL2_PS_MASK	TCR_EL2_PS_MASK
-#define VTCR_EL2_TG0_MASK	TCR_TG0_MASK
-#define VTCR_EL2_TG0_4K		TCR_TG0_4K
-#define VTCR_EL2_TG0_16K	TCR_TG0_16K
-#define VTCR_EL2_TG0_64K	TCR_TG0_64K
-#define VTCR_EL2_SH0_MASK	TCR_SH0_MASK
-#define VTCR_EL2_SH0_INNER	TCR_SH0_INNER
-#define VTCR_EL2_ORGN0_MASK	TCR_ORGN0_MASK
-#define VTCR_EL2_ORGN0_WBWA	TCR_ORGN0_WBWA
-#define VTCR_EL2_IRGN0_MASK	TCR_IRGN0_MASK
-#define VTCR_EL2_IRGN0_WBWA	TCR_IRGN0_WBWA
-#define VTCR_EL2_SL0_SHIFT	6
-#define VTCR_EL2_SL0_MASK	(3 << VTCR_EL2_SL0_SHIFT)
-#define VTCR_EL2_T0SZ_MASK	0x3f
-#define VTCR_EL2_VS_SHIFT	19
-#define VTCR_EL2_VS_8BIT	(0 << VTCR_EL2_VS_SHIFT)
-#define VTCR_EL2_VS_16BIT	(1 << VTCR_EL2_VS_SHIFT)
-
-#define VTCR_EL2_T0SZ(x)	TCR_T0SZ(x)
-
 /*
- * We configure the Stage-2 page tables to always restrict the IPA space to be
- * 40 bits wide (T0SZ = 24).  Systems with a PARange smaller than 40 bits are
- * not known to exist and will break with this configuration.
- *
  * The VTCR_EL2 is configured per VM and is initialised in kvm_init_stage2_mmu.
  *
  * Note that when using 4K pages, we concatenate two first level page tables
  * together. With 16K pages, we concatenate 16 first level page tables.
  *
  */
-
-#define VTCR_EL2_COMMON_BITS	(VTCR_EL2_SH0_INNER | VTCR_EL2_ORGN0_WBWA | \
-				 VTCR_EL2_IRGN0_WBWA | VTCR_EL2_RES1)
 
 /*
  * VTCR_EL2:SL0 indicates the entry level for Stage2 translation.
@@ -193,30 +163,35 @@
  */
 #ifdef CONFIG_ARM64_64K_PAGES
 
-#define VTCR_EL2_TGRAN			VTCR_EL2_TG0_64K
+#define VTCR_EL2_TGRAN			64K
 #define VTCR_EL2_TGRAN_SL0_BASE		3UL
 
 #elif defined(CONFIG_ARM64_16K_PAGES)
 
-#define VTCR_EL2_TGRAN			VTCR_EL2_TG0_16K
+#define VTCR_EL2_TGRAN			16K
 #define VTCR_EL2_TGRAN_SL0_BASE		3UL
 
 #else	/* 4K */
 
-#define VTCR_EL2_TGRAN			VTCR_EL2_TG0_4K
+#define VTCR_EL2_TGRAN			4K
 #define VTCR_EL2_TGRAN_SL0_BASE		2UL
 
 #endif
 
 #define VTCR_EL2_LVLS_TO_SL0(levels)	\
-	((VTCR_EL2_TGRAN_SL0_BASE - (4 - (levels))) << VTCR_EL2_SL0_SHIFT)
+	FIELD_PREP(VTCR_EL2_SL0, (VTCR_EL2_TGRAN_SL0_BASE - (4 - (levels))))
 #define VTCR_EL2_SL0_TO_LVLS(sl0)	\
 	((sl0) + 4 - VTCR_EL2_TGRAN_SL0_BASE)
 #define VTCR_EL2_LVLS(vtcr)		\
-	VTCR_EL2_SL0_TO_LVLS(((vtcr) & VTCR_EL2_SL0_MASK) >> VTCR_EL2_SL0_SHIFT)
+	VTCR_EL2_SL0_TO_LVLS(FIELD_GET(VTCR_EL2_SL0, (vtcr)))
 
-#define VTCR_EL2_FLAGS			(VTCR_EL2_COMMON_BITS | VTCR_EL2_TGRAN)
-#define VTCR_EL2_IPA(vtcr)		(64 - ((vtcr) & VTCR_EL2_T0SZ_MASK))
+#define VTCR_EL2_FLAGS	(SYS_FIELD_PREP_ENUM(VTCR_EL2, SH0, INNER)	    | \
+			 SYS_FIELD_PREP_ENUM(VTCR_EL2, ORGN0, WBWA)	    | \
+			 SYS_FIELD_PREP_ENUM(VTCR_EL2, IRGN0, WBWA)	    | \
+			 SYS_FIELD_PREP_ENUM(VTCR_EL2, TG0, VTCR_EL2_TGRAN) | \
+			 VTCR_EL2_RES1)
+
+#define VTCR_EL2_IPA(vtcr)		(64 - FIELD_GET(VTCR_EL2_T0SZ, (vtcr)))
 
 /*
  * ARM VMSAv8-64 defines an algorithm for finding the translation table
@@ -313,56 +288,19 @@
 				 GENMASK(15, 0))
 
 /*
- * FGT register definitions
- *
- * RES0 and polarity masks as of DDI0487J.a, to be updated as needed.
- * We're not using the generated masks as they are usually ahead of
- * the published ARM ARM, which we use as a reference.
- *
- * Once we get to a point where the two describe the same thing, we'll
- * merge the definitions. One day.
+ * Polarity masks for HCRX_EL2, limited to the bits that we know about
+ * at this point in time. It doesn't mean that we actually *handle*
+ * them, but that at least those that are not advertised to a guest
+ * will be RES0 for that guest.
  */
-#define __HFGRTR_EL2_RES0	HFGxTR_EL2_RES0
-#define __HFGRTR_EL2_MASK	GENMASK(49, 0)
-#define __HFGRTR_EL2_nMASK	~(__HFGRTR_EL2_RES0 | __HFGRTR_EL2_MASK)
-
-/*
- * The HFGWTR bits are a subset of HFGRTR bits. To ensure we don't miss any
- * future additions, define __HFGWTR* macros relative to __HFGRTR* ones.
- */
-#define __HFGRTR_ONLY_MASK	(BIT(46) | BIT(42) | BIT(40) | BIT(28) | \
-				 GENMASK(26, 25) | BIT(21) | BIT(18) | \
-				 GENMASK(15, 14) | GENMASK(10, 9) | BIT(2))
-#define __HFGWTR_EL2_RES0	(__HFGRTR_EL2_RES0 | __HFGRTR_ONLY_MASK)
-#define __HFGWTR_EL2_MASK	(__HFGRTR_EL2_MASK & ~__HFGRTR_ONLY_MASK)
-#define __HFGWTR_EL2_nMASK	~(__HFGWTR_EL2_RES0 | __HFGWTR_EL2_MASK)
-
-#define __HFGITR_EL2_RES0	HFGITR_EL2_RES0
-#define __HFGITR_EL2_MASK	(BIT(62) | BIT(60) | GENMASK(54, 0))
-#define __HFGITR_EL2_nMASK	~(__HFGITR_EL2_RES0 | __HFGITR_EL2_MASK)
-
-#define __HDFGRTR_EL2_RES0	HDFGRTR_EL2_RES0
-#define __HDFGRTR_EL2_MASK	(BIT(63) | GENMASK(58, 50) | GENMASK(48, 43) | \
-				 GENMASK(41, 40) | GENMASK(37, 22) | \
-				 GENMASK(19, 9) | GENMASK(7, 0))
-#define __HDFGRTR_EL2_nMASK	~(__HDFGRTR_EL2_RES0 | __HDFGRTR_EL2_MASK)
-
-#define __HDFGWTR_EL2_RES0	HDFGWTR_EL2_RES0
-#define __HDFGWTR_EL2_MASK	(GENMASK(57, 52) | GENMASK(50, 48) | \
-				 GENMASK(46, 44) | GENMASK(42, 41) | \
-				 GENMASK(37, 35) | GENMASK(33, 31) | \
-				 GENMASK(29, 23) | GENMASK(21, 10) | \
-				 GENMASK(8, 7) | GENMASK(5, 0))
-#define __HDFGWTR_EL2_nMASK	~(__HDFGWTR_EL2_RES0 | __HDFGWTR_EL2_MASK)
-
-#define __HAFGRTR_EL2_RES0	HAFGRTR_EL2_RES0
-#define __HAFGRTR_EL2_MASK	(GENMASK(49, 17) | GENMASK(4, 0))
-#define __HAFGRTR_EL2_nMASK	~(__HAFGRTR_EL2_RES0 | __HAFGRTR_EL2_MASK)
-
-/* Similar definitions for HCRX_EL2 */
-#define __HCRX_EL2_RES0         HCRX_EL2_RES0
-#define __HCRX_EL2_MASK		(BIT(6))
-#define __HCRX_EL2_nMASK	~(__HCRX_EL2_RES0 | __HCRX_EL2_MASK)
+#define __HCRX_EL2_MASK		(BIT_ULL(6))
+#define __HCRX_EL2_nMASK	(GENMASK_ULL(24, 14) | \
+				 GENMASK_ULL(11, 7)  | \
+				 GENMASK_ULL(5, 0))
+#define __HCRX_EL2_RES0		~(__HCRX_EL2_nMASK | __HCRX_EL2_MASK)
+#define __HCRX_EL2_RES1		~(__HCRX_EL2_nMASK | \
+				  __HCRX_EL2_MASK  | \
+				  __HCRX_EL2_RES0)
 
 /* Hyp Prefetch Fault Address Register (HPFAR/HDFAR) */
 #define HPFAR_MASK	(~UL(0xf))
@@ -377,6 +315,8 @@
  */
 #define PAR_TO_HPFAR(par)		\
 	(((par) & GENMASK_ULL(52 - 1, 12)) >> 8)
+
+#define FAR_TO_FIPA_OFFSET(far) ((far) & GENMASK_ULL(11, 0))
 
 #define ECN(x) { ESR_ELx_EC_##x, #x }
 

@@ -54,7 +54,8 @@ static struct sk_buff *mtk_tag_xmit(struct sk_buff *skb,
 	 * whether that's a combined special tag with 802.1Q header.
 	 */
 	mtk_tag[0] = xmit_tpid;
-	mtk_tag[1] = (1 << dp->index) & MTK_HDR_XMIT_DP_BIT_MASK;
+	mtk_tag[1] = FIELD_PREP(MTK_HDR_XMIT_DP_BIT_MASK,
+				dsa_xmit_port_mask(skb, dev));
 
 	/* Tag control information is kept for 802.1Q */
 	if (xmit_tpid == MTK_HDR_XMIT_UNTAGGED) {
@@ -71,8 +72,10 @@ static struct sk_buff *mtk_tag_rcv(struct sk_buff *skb, struct net_device *dev)
 	int port;
 	__be16 *phdr;
 
-	if (unlikely(!pskb_may_pull(skb, MTK_HDR_LEN)))
+	if (unlikely(!pskb_may_pull(skb, MTK_HDR_LEN))) {
+		kfree_skb(skb);
 		return NULL;
+	}
 
 	phdr = dsa_etype_header_pos_rx(skb);
 	hdr = ntohs(*phdr);
@@ -86,8 +89,10 @@ static struct sk_buff *mtk_tag_rcv(struct sk_buff *skb, struct net_device *dev)
 	port = (hdr & MTK_HDR_RECV_SOURCE_PORT_MASK);
 
 	skb->dev = dsa_conduit_find_user(dev, 0, port);
-	if (!skb->dev)
+	if (!skb->dev) {
+		kfree_skb(skb);
 		return NULL;
+	}
 
 	dsa_default_offload_fwd_mark(skb);
 

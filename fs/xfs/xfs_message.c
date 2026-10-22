@@ -3,7 +3,7 @@
  * Copyright (c) 2011 Red Hat, Inc.  All Rights Reserved.
  */
 
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_error.h"
 #include "xfs_shared.h"
@@ -141,14 +141,6 @@ xfs_warn_experimental(
 		const char		*name;
 		long			opstate;
 	} features[] = {
-		[XFS_EXPERIMENTAL_PNFS] = {
-			.opstate	= XFS_OPSTATE_WARNED_PNFS,
-			.name		= "pNFS",
-		},
-		[XFS_EXPERIMENTAL_SCRUB] = {
-			.opstate	= XFS_OPSTATE_WARNED_SCRUB,
-			.name		= "online scrub",
-		},
 		[XFS_EXPERIMENTAL_SHRINK] = {
 			.opstate	= XFS_OPSTATE_WARNED_SHRINK,
 			.name		= "online shrink",
@@ -156,22 +148,6 @@ xfs_warn_experimental(
 		[XFS_EXPERIMENTAL_LARP] = {
 			.opstate	= XFS_OPSTATE_WARNED_LARP,
 			.name		= "logged extended attributes",
-		},
-		[XFS_EXPERIMENTAL_LBS] = {
-			.opstate	= XFS_OPSTATE_WARNED_LBS,
-			.name		= "large block size",
-		},
-		[XFS_EXPERIMENTAL_EXCHRANGE] = {
-			.opstate	= XFS_OPSTATE_WARNED_EXCHRANGE,
-			.name		= "exchange range",
-		},
-		[XFS_EXPERIMENTAL_PPTR] = {
-			.opstate	= XFS_OPSTATE_WARNED_PPTR,
-			.name		= "parent pointer",
-		},
-		[XFS_EXPERIMENTAL_METADIR] = {
-			.opstate	= XFS_OPSTATE_WARNED_METADIR,
-			.name		= "metadata directory tree",
 		},
 	};
 	ASSERT(feat >= 0 && feat < XFS_EXPERIMENTAL_MAX);

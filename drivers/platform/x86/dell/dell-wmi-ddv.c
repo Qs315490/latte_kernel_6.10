@@ -7,7 +7,9 @@
 
 #define pr_format(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/acpi.h>
+#include <linux/bitfield.h>
+#include <linux/cleanup.h>
+#include <linux/compiler_attributes.h>
 #include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/device/driver.h>
@@ -38,6 +40,33 @@
 #define DELL_DDV_SUPPORTED_VERSION_MIN	2
 #define DELL_DDV_SUPPORTED_VERSION_MAX	3
 #define DELL_DDV_GUID	"8A42EA14-4F2A-FD45-6422-0087F7A7E608"
+
+/* Battery indices 1, 2 and 3 */
+#define DELL_DDV_NUM_BATTERIES		3
+
+#define SBS_MANUFACTURE_YEAR_MASK	GENMASK(15, 9)
+#define SBS_MANUFACTURE_MONTH_MASK	GENMASK(8, 5)
+#define SBS_MANUFACTURE_DAY_MASK	GENMASK(4, 0)
+
+#define MA_FAILURE_MODE_MASK			GENMASK(11, 8)
+#define MA_FAILURE_MODE_PERMANENT		0x9
+#define MA_FAILURE_MODE_OVERHEAT		0xA
+#define MA_FAILURE_MODE_OVERCURRENT		0xB
+
+#define MA_PERMANENT_FAILURE_CODE_MASK		GENMASK(13, 12)
+#define MA_PERMANENT_FAILURE_FUSE_BLOWN		0x0
+#define MA_PERMANENT_FAILURE_CELL_IMBALANCE	0x1
+#define MA_PERMANENT_FAILURE_OVERVOLTAGE	0x2
+#define MA_PERMANENT_FAILURE_FET_FAILURE	0x3
+
+#define MA_OVERHEAT_FAILURE_CODE_MASK		GENMASK(15, 12)
+#define MA_OVERHEAT_FAILURE_START		0x5
+#define MA_OVERHEAT_FAILURE_CHARGING		0x7
+#define MA_OVERHEAT_FAILURE_DISCHARGING		0x8
+
+#define MA_OVERCURRENT_FAILURE_CODE_MASK	GENMASK(15, 12)
+#define MA_OVERCURRENT_FAILURE_CHARGING		0x6
+#define MA_OVERCURRENT_FAILURE_DISCHARGING	0xB
 
 #define DELL_EPPID_LENGTH	20
 #define DELL_EPPID_EXT_LENGTH	23
@@ -71,6 +100,11 @@ enum dell_ddv_method {
 	DELL_DDV_THERMAL_SENSOR_INFORMATION	= 0x22,
 };
 
+struct dell_wmi_buffer {
+	__le32 raw_size;
+	u8 raw_data[];
+} __packed;
+
 struct fan_sensor_entry {
 	u8 type;
 	__le16 rpm;
@@ -98,14 +132,15 @@ struct dell_wmi_ddv_sensors {
 	bool active;
 	struct mutex lock;	/* protect caching */
 	unsigned long timestamp;
-	union acpi_object *obj;
+	struct dell_wmi_buffer *buffer;
 	u64 entries;
 };
 
 struct dell_wmi_ddv_data {
 	struct acpi_battery_hook hook;
-	struct device_attribute temp_attr;
 	struct device_attribute eppid_attr;
+	struct mutex translation_cache_lock;	/* Protects the translation cache */
+	struct power_supply *translation_cache[DELL_DDV_NUM_BATTERIES];
 	struct dell_wmi_ddv_sensors fans;
 	struct dell_wmi_ddv_sensors temps;
 	struct wmi_device *wdev;
@@ -129,105 +164,96 @@ static const char * const fan_dock_labels[] = {
 	"Docking Chipset Fan",
 };
 
-static int dell_wmi_ddv_query_type(struct wmi_device *wdev, enum dell_ddv_method method, u32 arg,
-				   union acpi_object **result, acpi_object_type type)
+static int dell_wmi_ddv_query(struct wmi_device *wdev, enum dell_ddv_method method, u32 arg,
+			      struct wmi_buffer *output, size_t min_size)
 {
-	struct acpi_buffer out = { ACPI_ALLOCATE_BUFFER, NULL };
-	const struct acpi_buffer in = {
-		.length = sizeof(arg),
-		.pointer = &arg,
+	__le32 arg2 = cpu_to_le32(arg);
+	const struct wmi_buffer input = {
+		.length = sizeof(arg2),
+		.data = &arg2,
 	};
-	union acpi_object *obj;
-	acpi_status ret;
 
-	ret = wmidev_evaluate_method(wdev, 0x0, method, &in, &out);
-	if (ACPI_FAILURE(ret))
-		return -EIO;
-
-	obj = out.pointer;
-	if (!obj)
-		return -ENODATA;
-
-	if (obj->type != type) {
-		kfree(obj);
-		return -ENOMSG;
-	}
-
-	*result = obj;
-
-	return 0;
+	return wmidev_invoke_method(wdev, 0x0, method, &input, output, min_size);
 }
 
 static int dell_wmi_ddv_query_integer(struct wmi_device *wdev, enum dell_ddv_method method,
 				      u32 arg, u32 *res)
 {
-	union acpi_object *obj;
+	struct wmi_buffer output;
 	int ret;
 
-	ret = dell_wmi_ddv_query_type(wdev, method, arg, &obj, ACPI_TYPE_INTEGER);
+	ret = dell_wmi_ddv_query(wdev, method, arg, &output, sizeof(__le32));
 	if (ret < 0)
 		return ret;
 
-	if (obj->integer.value <= U32_MAX)
-		*res = (u32)obj->integer.value;
-	else
-		ret = -ERANGE;
+	__le32 *argr __free(kfree) = output.data;
 
-	kfree(obj);
+	*res = le32_to_cpu(*argr);
 
-	return ret;
+	return 0;
 }
 
 static int dell_wmi_ddv_query_buffer(struct wmi_device *wdev, enum dell_ddv_method method,
-				     u32 arg, union acpi_object **result)
+				     u32 arg, struct dell_wmi_buffer **result)
 {
-	union acpi_object *obj;
-	u64 buffer_size;
+	struct dell_wmi_buffer *buffer;
+	struct wmi_buffer output;
+	size_t buffer_size;
 	int ret;
 
-	ret = dell_wmi_ddv_query_type(wdev, method, arg, &obj, ACPI_TYPE_PACKAGE);
+	ret = dell_wmi_ddv_query(wdev, method, arg, &output, sizeof(*buffer));
 	if (ret < 0)
 		return ret;
 
-	if (obj->package.count != 2 ||
-	    obj->package.elements[0].type != ACPI_TYPE_INTEGER ||
-	    obj->package.elements[1].type != ACPI_TYPE_BUFFER) {
-		ret = -ENOMSG;
-
-		goto err_free;
-	}
-
-	buffer_size = obj->package.elements[0].integer.value;
-
-	if (!buffer_size) {
+	buffer = output.data;
+	if (!le32_to_cpu(buffer->raw_size)) {
 		ret = -ENODATA;
 
 		goto err_free;
 	}
 
-	if (buffer_size > obj->package.elements[1].buffer.length) {
+	buffer_size = struct_size(buffer, raw_data, le32_to_cpu(buffer->raw_size));
+	if (buffer_size > output.length) {
 		dev_warn(&wdev->dev,
-			 FW_WARN "WMI buffer size (%llu) exceeds ACPI buffer size (%d)\n",
-			 buffer_size, obj->package.elements[1].buffer.length);
+			 FW_WARN "Dell WMI buffer size (%zu) exceeds WMI buffer size (%zu)\n",
+			 buffer_size, output.length);
 		ret = -EMSGSIZE;
 
 		goto err_free;
 	}
 
-	*result = obj;
+	*result = buffer;
 
 	return 0;
 
 err_free:
-	kfree(obj);
+	kfree(output.data);
 
 	return ret;
 }
 
-static int dell_wmi_ddv_query_string(struct wmi_device *wdev, enum dell_ddv_method method,
-				     u32 arg, union acpi_object **result)
+static ssize_t dell_wmi_ddv_query_string(struct wmi_device *wdev, enum dell_ddv_method method,
+					 u32 arg, char *buf, size_t length)
 {
-	return dell_wmi_ddv_query_type(wdev, method, arg, result, ACPI_TYPE_STRING);
+	struct wmi_buffer output;
+	size_t str_size;
+	int ret;
+
+	ret = dell_wmi_ddv_query(wdev, method, arg, &output, sizeof(struct wmi_string));
+	if (ret < 0)
+		return ret;
+
+	struct wmi_string *str __free(kfree) = output.data;
+
+	str_size = sizeof(*str) + le16_to_cpu(str->length);
+	if (str_size > output.length) {
+		dev_warn(&wdev->dev,
+			 FW_WARN "WMI string size (%zu) exceeds WMI buffer size (%zu)\n",
+			 str_size, output.length);
+		return -EMSGSIZE;
+	}
+
+	return wmi_string_to_utf8s(str, buf, length);
 }
 
 /*
@@ -236,28 +262,26 @@ static int dell_wmi_ddv_query_string(struct wmi_device *wdev, enum dell_ddv_meth
 static int dell_wmi_ddv_update_sensors(struct wmi_device *wdev, enum dell_ddv_method method,
 				       struct dell_wmi_ddv_sensors *sensors, size_t entry_size)
 {
+	struct dell_wmi_buffer *buffer;
 	u64 buffer_size, rem, entries;
-	union acpi_object *obj;
-	u8 *buffer;
 	int ret;
 
-	if (sensors->obj) {
+	if (sensors->buffer) {
 		if (time_before(jiffies, sensors->timestamp + HZ))
 			return 0;
 
-		kfree(sensors->obj);
-		sensors->obj = NULL;
+		kfree(sensors->buffer);
+		sensors->buffer = NULL;
 	}
 
-	ret = dell_wmi_ddv_query_buffer(wdev, method, 0, &obj);
+	ret = dell_wmi_ddv_query_buffer(wdev, method, 0, &buffer);
 	if (ret < 0)
 		return ret;
 
 	/* buffer format sanity check */
-	buffer_size = obj->package.elements[0].integer.value;
-	buffer = obj->package.elements[1].buffer.pointer;
+	buffer_size = le32_to_cpu(buffer->raw_size);
 	entries = div64_u64_rem(buffer_size, entry_size, &rem);
-	if (rem != 1 || buffer[buffer_size - 1] != 0xff) {
+	if (rem != 1 || buffer->raw_data[buffer_size - 1] != 0xff) {
 		ret = -ENOMSG;
 		goto err_free;
 	}
@@ -267,14 +291,14 @@ static int dell_wmi_ddv_update_sensors(struct wmi_device *wdev, enum dell_ddv_me
 		goto err_free;
 	}
 
-	sensors->obj = obj;
+	sensors->buffer = buffer;
 	sensors->entries = entries;
 	sensors->timestamp = jiffies;
 
 	return 0;
 
 err_free:
-	kfree(obj);
+	kfree(buffer);
 
 	return ret;
 }
@@ -299,7 +323,7 @@ static int dell_wmi_ddv_fan_read_channel(struct dell_wmi_ddv_data *data, u32 att
 	if (channel >= data->fans.entries)
 		return -ENXIO;
 
-	entry = (struct fan_sensor_entry *)data->fans.obj->package.elements[1].buffer.pointer;
+	entry = (struct fan_sensor_entry *)data->fans.buffer->raw_data;
 	switch (attr) {
 	case hwmon_fan_input:
 		*val = get_unaligned_le16(&entry[channel].rpm);
@@ -325,7 +349,7 @@ static int dell_wmi_ddv_temp_read_channel(struct dell_wmi_ddv_data *data, u32 at
 	if (channel >= data->temps.entries)
 		return -ENXIO;
 
-	entry = (struct thermal_sensor_entry *)data->temps.obj->package.elements[1].buffer.pointer;
+	entry = (struct thermal_sensor_entry *)data->temps.buffer->raw_data;
 	switch (attr) {
 	case hwmon_temp_input:
 		*val = entry[channel].now * 1000;
@@ -382,7 +406,7 @@ static int dell_wmi_ddv_fan_read_string(struct dell_wmi_ddv_data *data, int chan
 	if (channel >= data->fans.entries)
 		return -ENXIO;
 
-	entry = (struct fan_sensor_entry *)data->fans.obj->package.elements[1].buffer.pointer;
+	entry = (struct fan_sensor_entry *)data->fans.buffer->raw_data;
 	type = entry[channel].type;
 	switch (type) {
 	case 0x00 ... 0x07:
@@ -413,7 +437,7 @@ static int dell_wmi_ddv_temp_read_string(struct dell_wmi_ddv_data *data, int cha
 	if (channel >= data->temps.entries)
 		return -ENXIO;
 
-	entry = (struct thermal_sensor_entry *)data->temps.obj->package.elements[1].buffer.pointer;
+	entry = (struct thermal_sensor_entry *)data->temps.buffer->raw_data;
 	switch (entry[channel].type) {
 	case 0x00:
 		*str = "CPU";
@@ -524,8 +548,8 @@ static void dell_wmi_ddv_hwmon_cache_invalidate(struct dell_wmi_ddv_sensors *sen
 		return;
 
 	mutex_lock(&sensors->lock);
-	kfree(sensors->obj);
-	sensors->obj = NULL;
+	kfree(sensors->buffer);
+	sensors->buffer = NULL;
 	mutex_unlock(&sensors->lock);
 }
 
@@ -535,7 +559,7 @@ static void dell_wmi_ddv_hwmon_cache_destroy(void *data)
 
 	sensors->active = false;
 	mutex_destroy(&sensors->lock);
-	kfree(sensors->obj);
+	kfree(sensors->buffer);
 }
 
 static struct hwmon_channel_info *dell_wmi_ddv_channel_init(struct wmi_device *wdev,
@@ -640,79 +664,288 @@ err_release:
 	return ret;
 }
 
-static int dell_wmi_ddv_battery_index(struct acpi_device *acpi_dev, u32 *index)
+static int dell_wmi_ddv_battery_translate(struct dell_wmi_ddv_data *data,
+					  struct power_supply *battery, u32 *index)
 {
-	const char *uid_str;
-
-	uid_str = acpi_device_uid(acpi_dev);
-	if (!uid_str)
-		return -ENODEV;
-
-	return kstrtou32(uid_str, 10, index);
-}
-
-static ssize_t temp_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct dell_wmi_ddv_data *data = container_of(attr, struct dell_wmi_ddv_data, temp_attr);
-	u32 index, value;
+	u32 serial_dec, serial_hex, serial;
+	union power_supply_propval val;
 	int ret;
 
-	ret = dell_wmi_ddv_battery_index(to_acpi_device(dev->parent), &index);
+	guard(mutex)(&data->translation_cache_lock);
+
+	for (int i = 0; i < ARRAY_SIZE(data->translation_cache); i++) {
+		if (data->translation_cache[i] == battery) {
+			dev_dbg(&data->wdev->dev, "Translation cache hit for battery index %u\n",
+				i + 1);
+			*index = i + 1;
+			return 0;
+		}
+	}
+
+	dev_dbg(&data->wdev->dev, "Translation cache miss\n");
+
+	/*
+	 * Perform a translation between a ACPI battery and a battery index.
+	 * We have to use power_supply_get_property_direct() here because this
+	 * function will also get called from the callbacks of the power supply
+	 * extension.
+	 */
+	ret = power_supply_get_property_direct(battery, POWER_SUPPLY_PROP_SERIAL_NUMBER, &val);
 	if (ret < 0)
 		return ret;
 
-	ret = dell_wmi_ddv_query_integer(data->wdev, DELL_DDV_BATTERY_TEMPERATURE, index, &value);
+	/*
+	 * Some devices display the serial number of the ACPI battery (string!) as a decimal
+	 * number while other devices display it as a hexadecimal number. Because of this we
+	 * have to check both cases.
+	 */
+	ret = kstrtou32(val.strval, 16, &serial_hex);
 	if (ret < 0)
-		return ret;
+		return ret;	/* Should never fail */
 
-	/* Use 2731 instead of 2731.5 to avoid unnecessary rounding */
-	return sysfs_emit(buf, "%d\n", value - 2731);
+	ret = kstrtou32(val.strval, 10, &serial_dec);
+	if (ret < 0)
+		serial_dec = 0; /* Can fail, thus we only mark serial_dec as invalid */
+
+	for (int i = 0; i < ARRAY_SIZE(data->translation_cache); i++) {
+		ret = dell_wmi_ddv_query_integer(data->wdev, DELL_DDV_BATTERY_SERIAL_NUMBER, i + 1,
+						 &serial);
+		if (ret < 0)
+			return ret;
+
+		/* A serial number of 0 signals that this index is not associated with a battery */
+		if (!serial)
+			continue;
+
+		if (serial == serial_dec || serial == serial_hex) {
+			dev_dbg(&data->wdev->dev, "Translation cache update for battery index %u\n",
+				i + 1);
+			data->translation_cache[i] = battery;
+			*index = i + 1;
+			return 0;
+		}
+	}
+
+	return -ENODEV;
+}
+
+static void dell_wmi_battery_invalidate(struct dell_wmi_ddv_data *data,
+					struct power_supply *battery)
+{
+	guard(mutex)(&data->translation_cache_lock);
+
+	for (int i = 0; i < ARRAY_SIZE(data->translation_cache); i++) {
+		if (data->translation_cache[i] == battery) {
+			data->translation_cache[i] = NULL;
+			return;
+		}
+	}
 }
 
 static ssize_t eppid_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct dell_wmi_ddv_data *data = container_of(attr, struct dell_wmi_ddv_data, eppid_attr);
-	union acpi_object *obj;
+	ssize_t count;
 	u32 index;
 	int ret;
 
-	ret = dell_wmi_ddv_battery_index(to_acpi_device(dev->parent), &index);
+	ret = dell_wmi_ddv_battery_translate(data, to_power_supply(dev), &index);
 	if (ret < 0)
 		return ret;
 
-	ret = dell_wmi_ddv_query_string(data->wdev, DELL_DDV_BATTERY_EPPID, index, &obj);
+	count = dell_wmi_ddv_query_string(data->wdev, DELL_DDV_BATTERY_EPPID, index, buf,
+					  PAGE_SIZE);
+	if (count < 0)
+		return count;
+
+	if (count != DELL_EPPID_LENGTH && count != DELL_EPPID_EXT_LENGTH)
+		dev_info_once(&data->wdev->dev, FW_INFO "Suspicious ePPID length (%zd)\n", count);
+
+	ret = sysfs_emit_at(buf, count, "\n");
 	if (ret < 0)
 		return ret;
 
-	if (obj->string.length != DELL_EPPID_LENGTH && obj->string.length != DELL_EPPID_EXT_LENGTH)
-		dev_info_once(&data->wdev->dev, FW_INFO "Suspicious ePPID length (%d)\n",
-			      obj->string.length);
-
-	ret = sysfs_emit(buf, "%s\n", obj->string.pointer);
-
-	kfree(obj);
-
-	return ret;
+	return count + ret;
 }
+
+static int dell_wmi_ddv_get_health(struct dell_wmi_ddv_data *data, u32 index,
+				   union power_supply_propval *val)
+{
+	u32 value, code;
+	int ret;
+
+	ret = dell_wmi_ddv_query_integer(data->wdev, DELL_DDV_BATTERY_MANUFACTURER_ACCESS, index,
+					 &value);
+	if (ret < 0)
+		return ret;
+
+	switch (FIELD_GET(MA_FAILURE_MODE_MASK, value)) {
+	case MA_FAILURE_MODE_PERMANENT:
+		code = FIELD_GET(MA_PERMANENT_FAILURE_CODE_MASK, value);
+		switch (code) {
+		case MA_PERMANENT_FAILURE_FUSE_BLOWN:
+			val->intval = POWER_SUPPLY_HEALTH_BLOWN_FUSE;
+			return 0;
+		case MA_PERMANENT_FAILURE_CELL_IMBALANCE:
+			val->intval = POWER_SUPPLY_HEALTH_CELL_IMBALANCE;
+			return 0;
+		case MA_PERMANENT_FAILURE_OVERVOLTAGE:
+			val->intval = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
+			return 0;
+		case MA_PERMANENT_FAILURE_FET_FAILURE:
+			val->intval = POWER_SUPPLY_HEALTH_DEAD;
+			return 0;
+		default:
+			dev_notice_once(&data->wdev->dev, "Unknown permanent failure code %u\n",
+					code);
+			val->intval = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+			return 0;
+		}
+	case MA_FAILURE_MODE_OVERHEAT:
+		code = FIELD_GET(MA_OVERHEAT_FAILURE_CODE_MASK, value);
+		switch (code) {
+		case MA_OVERHEAT_FAILURE_START:
+		case MA_OVERHEAT_FAILURE_CHARGING:
+		case MA_OVERHEAT_FAILURE_DISCHARGING:
+			val->intval = POWER_SUPPLY_HEALTH_OVERHEAT;
+			return 0;
+		default:
+			dev_notice_once(&data->wdev->dev, "Unknown overheat failure code %u\n",
+					code);
+			val->intval = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+			return 0;
+		}
+	case MA_FAILURE_MODE_OVERCURRENT:
+		code = FIELD_GET(MA_OVERCURRENT_FAILURE_CODE_MASK, value);
+		switch (code) {
+		case MA_OVERCURRENT_FAILURE_CHARGING:
+		case MA_OVERCURRENT_FAILURE_DISCHARGING:
+			val->intval = POWER_SUPPLY_HEALTH_OVERCURRENT;
+			return 0;
+		default:
+			dev_notice_once(&data->wdev->dev, "Unknown overcurrent failure code %u\n",
+					code);
+			val->intval = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+			return 0;
+		}
+	default:
+		val->intval = POWER_SUPPLY_HEALTH_GOOD;
+		return 0;
+	}
+}
+
+static int dell_wmi_ddv_get_manufacture_date(struct dell_wmi_ddv_data *data, u32 index,
+					     enum power_supply_property psp,
+					     union power_supply_propval *val)
+{
+	u16 year, month, day;
+	u32 value;
+	int ret;
+
+	ret = dell_wmi_ddv_query_integer(data->wdev, DELL_DDV_BATTERY_MANUFACTURE_DATE,
+					 index, &value);
+	if (ret < 0)
+		return ret;
+	if (value > U16_MAX)
+		return -ENXIO;
+
+	/*
+	 * Some devices report a invalid manufacture date value
+	 * like 0.0.1980. Because of this we have to check the
+	 * whole value before exposing parts of it to user space.
+	 */
+	year = FIELD_GET(SBS_MANUFACTURE_YEAR_MASK, value) + 1980;
+	month = FIELD_GET(SBS_MANUFACTURE_MONTH_MASK, value);
+	if (month < 1 || month > 12)
+		return -ENODATA;
+
+	day = FIELD_GET(SBS_MANUFACTURE_DAY_MASK, value);
+	if (day < 1 || day > 31)
+		return -ENODATA;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_MANUFACTURE_YEAR:
+		val->intval = year;
+		return 0;
+	case POWER_SUPPLY_PROP_MANUFACTURE_MONTH:
+		val->intval = month;
+		return 0;
+	case POWER_SUPPLY_PROP_MANUFACTURE_DAY:
+		val->intval = day;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+static int dell_wmi_ddv_get_property(struct power_supply *psy, const struct power_supply_ext *ext,
+				     void *drvdata, enum power_supply_property psp,
+				     union power_supply_propval *val)
+{
+	struct dell_wmi_ddv_data *data = drvdata;
+	u32 index, value;
+	int ret;
+
+	ret = dell_wmi_ddv_battery_translate(data, psy, &index);
+	if (ret < 0)
+		return ret;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_HEALTH:
+		return dell_wmi_ddv_get_health(data, index, val);
+	case POWER_SUPPLY_PROP_TEMP:
+		ret = dell_wmi_ddv_query_integer(data->wdev, DELL_DDV_BATTERY_TEMPERATURE, index,
+						 &value);
+		if (ret < 0)
+			return ret;
+
+		/* Use 2732 instead of 2731.5 to avoid unnecessary rounding and to emulate
+		 * the behaviour of the OEM application which seems to round down the result.
+		 */
+		val->intval = value - 2732;
+		return 0;
+	case POWER_SUPPLY_PROP_MANUFACTURE_YEAR:
+	case POWER_SUPPLY_PROP_MANUFACTURE_MONTH:
+	case POWER_SUPPLY_PROP_MANUFACTURE_DAY:
+		return dell_wmi_ddv_get_manufacture_date(data, index, psp, val);
+	default:
+		return -EINVAL;
+	}
+}
+
+static const enum power_supply_property dell_wmi_ddv_properties[] = {
+	POWER_SUPPLY_PROP_HEALTH,
+	POWER_SUPPLY_PROP_TEMP,
+	POWER_SUPPLY_PROP_MANUFACTURE_YEAR,
+	POWER_SUPPLY_PROP_MANUFACTURE_MONTH,
+	POWER_SUPPLY_PROP_MANUFACTURE_DAY,
+};
+
+static const struct power_supply_ext dell_wmi_ddv_extension = {
+	.name = DRIVER_NAME,
+	.properties = dell_wmi_ddv_properties,
+	.num_properties = ARRAY_SIZE(dell_wmi_ddv_properties),
+	.get_property = dell_wmi_ddv_get_property,
+};
 
 static int dell_wmi_ddv_add_battery(struct power_supply *battery, struct acpi_battery_hook *hook)
 {
 	struct dell_wmi_ddv_data *data = container_of(hook, struct dell_wmi_ddv_data, hook);
-	u32 index;
 	int ret;
 
-	/* Return 0 instead of error to avoid being unloaded */
-	ret = dell_wmi_ddv_battery_index(to_acpi_device(battery->dev.parent), &index);
-	if (ret < 0)
-		return 0;
+	/*
+	 * We cannot do the battery matching here since the battery might be absent, preventing
+	 * us from reading the serial number.
+	 */
 
-	ret = device_create_file(&battery->dev, &data->temp_attr);
+	ret = device_create_file(&battery->dev, &data->eppid_attr);
 	if (ret < 0)
 		return ret;
 
-	ret = device_create_file(&battery->dev, &data->eppid_attr);
+	ret = power_supply_register_extension(battery, &dell_wmi_ddv_extension, &data->wdev->dev,
+					      data);
 	if (ret < 0) {
-		device_remove_file(&battery->dev, &data->temp_attr);
+		device_remove_file(&battery->dev, &data->eppid_attr);
 
 		return ret;
 	}
@@ -724,57 +957,47 @@ static int dell_wmi_ddv_remove_battery(struct power_supply *battery, struct acpi
 {
 	struct dell_wmi_ddv_data *data = container_of(hook, struct dell_wmi_ddv_data, hook);
 
-	device_remove_file(&battery->dev, &data->temp_attr);
 	device_remove_file(&battery->dev, &data->eppid_attr);
+	power_supply_unregister_extension(battery, &dell_wmi_ddv_extension);
+
+	dell_wmi_battery_invalidate(data, battery);
 
 	return 0;
 }
 
-static void dell_wmi_ddv_battery_remove(void *data)
-{
-	struct acpi_battery_hook *hook = data;
-
-	battery_hook_unregister(hook);
-}
-
 static int dell_wmi_ddv_battery_add(struct dell_wmi_ddv_data *data)
 {
+	int ret;
+
+	ret = devm_mutex_init(&data->wdev->dev, &data->translation_cache_lock);
+	if (ret < 0)
+		return ret;
+
 	data->hook.name = "Dell DDV Battery Extension";
 	data->hook.add_battery = dell_wmi_ddv_add_battery;
 	data->hook.remove_battery = dell_wmi_ddv_remove_battery;
-
-	sysfs_attr_init(&data->temp_attr.attr);
-	data->temp_attr.attr.name = "temp";
-	data->temp_attr.attr.mode = 0444;
-	data->temp_attr.show = temp_show;
 
 	sysfs_attr_init(&data->eppid_attr.attr);
 	data->eppid_attr.attr.name = "eppid";
 	data->eppid_attr.attr.mode = 0444;
 	data->eppid_attr.show = eppid_show;
 
-	battery_hook_register(&data->hook);
-
-	return devm_add_action_or_reset(&data->wdev->dev, dell_wmi_ddv_battery_remove, &data->hook);
+	return devm_battery_hook_register(&data->wdev->dev, &data->hook);
 }
 
 static int dell_wmi_ddv_buffer_read(struct seq_file *seq, enum dell_ddv_method method)
 {
 	struct device *dev = seq->private;
 	struct dell_wmi_ddv_data *data = dev_get_drvdata(dev);
-	union acpi_object *obj;
-	u64 size;
-	u8 *buf;
+	struct dell_wmi_buffer *buffer;
 	int ret;
 
-	ret = dell_wmi_ddv_query_buffer(data->wdev, method, 0, &obj);
+	ret = dell_wmi_ddv_query_buffer(data->wdev, method, 0, &buffer);
 	if (ret < 0)
 		return ret;
 
-	size = obj->package.elements[0].integer.value;
-	buf = obj->package.elements[1].buffer.pointer;
-	ret = seq_write(seq, buf, size);
-	kfree(obj);
+	ret = seq_write(seq, buffer->raw_data, le32_to_cpu(buffer->raw_size));
+	kfree(buffer);
 
 	return ret;
 }

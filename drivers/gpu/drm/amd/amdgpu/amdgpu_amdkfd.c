@@ -36,6 +36,9 @@
 #include "amdgpu_ras.h"
 #include "amdgpu_umc.h"
 #include "amdgpu_reset.h"
+#if IS_ENABLED(CONFIG_HSA_AMD)
+#include "kfd_priv.h"
+#endif
 
 /* Total memory size in system memory and all GPU VRAM. Used to
  * estimate worst case amount of memory to reserve for page tables
@@ -248,18 +251,47 @@ void amdgpu_amdkfd_interrupt(struct amdgpu_device *adev,
 		kgd2kfd_interrupt(adev->kfd.dev, ih_ring_entry);
 }
 
-void amdgpu_amdkfd_suspend(struct amdgpu_device *adev, bool run_pm)
+void amdgpu_amdkfd_teardown_processes(struct amdgpu_device *adev)
 {
-	if (adev->kfd.dev)
-		kgd2kfd_suspend(adev->kfd.dev, run_pm);
+	kgd2kfd_teardown_processes(adev);
 }
 
-int amdgpu_amdkfd_resume(struct amdgpu_device *adev, bool run_pm)
+void amdgpu_amdkfd_suspend(struct amdgpu_device *adev, bool suspend_proc)
+{
+	if (adev->kfd.dev) {
+		if (adev->in_s0ix)
+			kgd2kfd_stop_sched_all_nodes(adev->kfd.dev);
+		else
+			kgd2kfd_suspend(adev->kfd.dev, suspend_proc);
+	}
+}
+
+int amdgpu_amdkfd_resume(struct amdgpu_device *adev, bool resume_proc)
+{
+	int r = 0;
+
+	if (adev->kfd.dev) {
+		if (adev->in_s0ix)
+			r = kgd2kfd_start_sched_all_nodes(adev->kfd.dev);
+		else
+			r = kgd2kfd_resume(adev->kfd.dev, resume_proc);
+	}
+
+	return r;
+}
+
+void amdgpu_amdkfd_suspend_process(struct amdgpu_device *adev)
+{
+	if (adev->kfd.dev)
+		kgd2kfd_suspend_process(adev->kfd.dev);
+}
+
+int amdgpu_amdkfd_resume_process(struct amdgpu_device *adev)
 {
 	int r = 0;
 
 	if (adev->kfd.dev)
-		r = kgd2kfd_resume(adev->kfd.dev, run_pm);
+		r = kgd2kfd_resume_process(adev->kfd.dev);
 
 	return r;
 }
@@ -288,12 +320,33 @@ int amdgpu_amdkfd_post_reset(struct amdgpu_device *adev)
 void amdgpu_amdkfd_gpu_reset(struct amdgpu_device *adev)
 {
 	if (amdgpu_device_should_recover_gpu(adev))
-		amdgpu_reset_domain_schedule(adev->reset_domain,
-					     &adev->kfd.reset_work);
+		(void)amdgpu_reset_domain_schedule(adev->reset_domain, &adev->kfd.reset_work);
 }
 
-int amdgpu_amdkfd_alloc_gtt_mem(struct amdgpu_device *adev, size_t size,
-				void **mem_obj, uint64_t *gpu_addr,
+void amdgpu_amdkfd_clear_kfd_mapping(struct amdgpu_device *adev)
+{
+#if IS_ENABLED(CONFIG_HSA_AMD)
+	struct kfd_dev *kfd = adev->kfd.dev;
+	unsigned int i;
+
+	if (!kfd)
+		return;
+
+	for (i = 0; i < kfd->num_nodes; i++) {
+		struct kfd_node *node = kfd->nodes[i];
+
+		kfd_dev_unmap_mapping_range(KFD_MMAP_TYPE_DOORBELL |
+					    KFD_MMAP_GPU_ID(node->id),
+					    kfd_doorbell_process_slice(kfd));
+		kfd_dev_unmap_mapping_range(KFD_MMAP_TYPE_MMIO |
+					    KFD_MMAP_GPU_ID(node->id),
+					    PAGE_SIZE);
+	}
+#endif
+}
+
+int amdgpu_amdkfd_alloc_kernel_mem(struct amdgpu_device *adev, size_t size,
+				u32 domain, void **mem_obj, uint64_t *gpu_addr,
 				void **cpu_ptr, bool cp_mqd_gfx9)
 {
 	struct amdgpu_bo *bo = NULL;
@@ -304,8 +357,9 @@ int amdgpu_amdkfd_alloc_gtt_mem(struct amdgpu_device *adev, size_t size,
 	memset(&bp, 0, sizeof(bp));
 	bp.size = size;
 	bp.byte_align = PAGE_SIZE;
-	bp.domain = AMDGPU_GEM_DOMAIN_GTT;
-	bp.flags = AMDGPU_GEM_CREATE_CPU_GTT_USWC;
+	bp.domain = domain;
+	bp.flags = AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS |
+		   AMDGPU_GEM_CREATE_CPU_GTT_USWC;
 	bp.type = ttm_bo_type_kernel;
 	bp.resv = NULL;
 	bp.bo_ptr_size = sizeof(struct amdgpu_bo);
@@ -327,7 +381,7 @@ int amdgpu_amdkfd_alloc_gtt_mem(struct amdgpu_device *adev, size_t size,
 		goto allocate_mem_reserve_bo_failed;
 	}
 
-	r = amdgpu_bo_pin(bo, AMDGPU_GEM_DOMAIN_GTT);
+	r = amdgpu_bo_pin(bo, domain);
 	if (r) {
 		dev_err(adev->dev, "(%d) failed to pin bo for amdkfd\n", r);
 		goto allocate_mem_pin_bo_failed;
@@ -364,9 +418,12 @@ allocate_mem_reserve_bo_failed:
 	return r;
 }
 
-void amdgpu_amdkfd_free_gtt_mem(struct amdgpu_device *adev, void **mem_obj)
+void amdgpu_amdkfd_free_kernel_mem(struct amdgpu_device *adev, void **mem_obj)
 {
 	struct amdgpu_bo **bo = (struct amdgpu_bo **) mem_obj;
+
+	if (!bo || !*bo)
+		return;
 
 	(void)amdgpu_bo_reserve(*bo, true);
 	amdgpu_bo_kunmap(*bo);
@@ -459,7 +516,7 @@ void amdgpu_amdkfd_get_local_mem_info(struct amdgpu_device *adev,
 		else
 			mem_info->local_mem_size_private =
 					KFD_XCP_MEMORY_SIZE(adev, xcp->id);
-	} else if (adev->flags & AMD_IS_APU) {
+	} else if (adev->apu_prefer_gtt) {
 		mem_info->local_mem_size_public = (ttm_tt_pages_limit() << PAGE_SHIFT);
 		mem_info->local_mem_size_private = 0;
 	} else {
@@ -501,7 +558,7 @@ uint32_t amdgpu_amdkfd_get_max_engine_clock_in_mhz(struct amdgpu_device *adev)
 
 int amdgpu_amdkfd_get_dmabuf_info(struct amdgpu_device *adev, int dma_buf_fd,
 				  struct amdgpu_device **dmabuf_adev,
-				  uint64_t *bo_size, void *metadata_buffer,
+				  uint64_t *bo_size, void **metadata_buffer,
 				  size_t buffer_size, uint32_t *metadata_size,
 				  uint32_t *flags, int8_t *xcp_id)
 {
@@ -536,9 +593,24 @@ int amdgpu_amdkfd_get_dmabuf_info(struct amdgpu_device *adev, int dma_buf_fd,
 		*dmabuf_adev = adev;
 	if (bo_size)
 		*bo_size = amdgpu_bo_size(bo);
-	if (metadata_buffer)
-		r = amdgpu_bo_get_metadata(bo, metadata_buffer, buffer_size,
-					   metadata_size, &metadata_flags);
+	if (metadata_buffer) {
+		/* first get metadata_size by buffer = NULL */
+		r = amdgpu_bo_get_metadata(bo, NULL, 0,
+					   metadata_size, NULL);
+
+		/* user buf_size is bigger than bo metadata_size
+		 * allocate a buf at kernel space and copy */
+		if (*metadata_size <= buffer_size) {
+			*metadata_buffer = kzalloc(*metadata_size, GFP_KERNEL);
+
+			if (!*metadata_buffer)
+				return -ENOMEM;
+
+			r = amdgpu_bo_get_metadata(bo, *metadata_buffer, *metadata_size,
+						   NULL, &metadata_flags);
+		} else
+			r = -EINVAL;
+	}
 	if (flags) {
 		*flags = (bo->preferred_domains & AMDGPU_GEM_DOMAIN_VRAM) ?
 				KFD_IOC_ALLOC_MEM_FLAGS_VRAM
@@ -553,48 +625,6 @@ int amdgpu_amdkfd_get_dmabuf_info(struct amdgpu_device *adev, int dma_buf_fd,
 out_put:
 	dma_buf_put(dma_buf);
 	return r;
-}
-
-uint8_t amdgpu_amdkfd_get_xgmi_hops_count(struct amdgpu_device *dst,
-					  struct amdgpu_device *src)
-{
-	struct amdgpu_device *peer_adev = src;
-	struct amdgpu_device *adev = dst;
-	int ret = amdgpu_xgmi_get_hops_count(adev, peer_adev);
-
-	if (ret < 0) {
-		DRM_ERROR("amdgpu: failed to get  xgmi hops count between node %d and %d. ret = %d\n",
-			adev->gmc.xgmi.physical_node_id,
-			peer_adev->gmc.xgmi.physical_node_id, ret);
-		ret = 0;
-	}
-	return  (uint8_t)ret;
-}
-
-int amdgpu_amdkfd_get_xgmi_bandwidth_mbytes(struct amdgpu_device *dst,
-					    struct amdgpu_device *src,
-					    bool is_min)
-{
-	struct amdgpu_device *adev = dst, *peer_adev;
-	int num_links;
-
-	if (amdgpu_ip_version(adev, GC_HWIP, 0) < IP_VERSION(9, 4, 2))
-		return 0;
-
-	if (src)
-		peer_adev = src;
-
-	/* num links returns 0 for indirect peers since indirect route is unknown. */
-	num_links = is_min ? 1 : amdgpu_xgmi_get_num_links(adev, peer_adev);
-	if (num_links < 0) {
-		DRM_ERROR("amdgpu: failed to get xgmi num links between node %d and %d. ret = %d\n",
-			adev->gmc.xgmi.physical_node_id,
-			peer_adev->gmc.xgmi.physical_node_id, num_links);
-		num_links = 0;
-	}
-
-	/* Aldebaran xGMI DPM is defeatured so assume x16 x 25Gbps for bandwidth. */
-	return (num_links * 16 * 25000)/BITS_PER_BYTE;
 }
 
 int amdgpu_amdkfd_get_pcie_bandwidth_mbytes(struct amdgpu_device *adev, bool is_min)
@@ -681,7 +711,7 @@ int amdgpu_amdkfd_submit_ib(struct amdgpu_device *adev,
 		goto err;
 	}
 
-	ret = amdgpu_job_alloc(adev, NULL, NULL, NULL, 1, &job);
+	ret = amdgpu_job_alloc(adev, NULL, NULL, NULL, 1, &job, 0);
 	if (ret)
 		goto err;
 
@@ -698,13 +728,13 @@ int amdgpu_amdkfd_submit_ib(struct amdgpu_device *adev,
 	ret = amdgpu_ib_schedule(ring, 1, ib, job, &f);
 
 	if (ret) {
-		DRM_ERROR("amdgpu: failed to schedule IB.\n");
+		drm_err(adev_to_drm(adev), "failed to schedule IB.\n");
 		goto err_ib_sched;
 	}
 
-	/* Drop the initial kref_init count (see drm_sched_main as example) */
-	dma_fence_put(f);
 	ret = dma_fence_wait(f, false);
+	/* Drop the returned fence reference after the wait completes */
+	dma_fence_put(f);
 
 err_ib_sched:
 	amdgpu_job_free(job);
@@ -729,9 +759,8 @@ void amdgpu_amdkfd_set_compute_idle(struct amdgpu_device *adev, bool idle)
 		if (gfx_block != NULL)
 			gfx_block->version->funcs->set_powergating_state((void *)gfx_block, state);
 	}
-	amdgpu_dpm_switch_power_profile(adev,
-					PP_SMC_POWER_PROFILE_COMPUTE,
-					!idle);
+	(void)amdgpu_dpm_switch_power_profile(adev, PP_SMC_POWER_PROFILE_COMPUTE, !idle);
+
 }
 
 bool amdgpu_amdkfd_is_kfd_vmid(struct amdgpu_device *adev, u32 vmid)
@@ -788,12 +817,12 @@ int amdgpu_amdkfd_send_close_event_drain_irq(struct amdgpu_device *adev,
 
 int amdgpu_amdkfd_check_and_lock_kfd(struct amdgpu_device *adev)
 {
-	return kgd2kfd_check_and_lock_kfd();
+	return kgd2kfd_check_and_lock_kfd(adev->kfd.dev);
 }
 
 void amdgpu_amdkfd_unlock_kfd(struct amdgpu_device *adev)
 {
-	kgd2kfd_unlock_kfd();
+	kgd2kfd_unlock_kfd(adev->kfd.dev);
 }
 
 
@@ -816,9 +845,12 @@ u64 amdgpu_amdkfd_xcp_memory_size(struct amdgpu_device *adev, int xcp_id)
 		} else {
 			tmp = adev->gmc.mem_partitions[mem_id].size;
 		}
-		do_div(tmp, adev->xcp_mgr->num_xcp_per_mem_partition);
+
+		if (adev->xcp_mgr->mem_alloc_mode == AMDGPU_PARTITION_MEM_CAPPING_EVEN)
+			do_div(tmp, adev->xcp_mgr->num_xcp_per_mem_partition);
+
 		return ALIGN_DOWN(tmp, PAGE_SIZE);
-	} else if (adev->flags & AMD_IS_APU) {
+	} else if (adev->apu_prefer_gtt) {
 		return (ttm_tt_pages_limit() << PAGE_SHIFT);
 	} else {
 		return adev->gmc.real_vram_size;
@@ -840,11 +872,11 @@ int amdgpu_amdkfd_unmap_hiq(struct amdgpu_device *adev, u32 doorbell_off,
 	if (!kiq_ring->sched.ready || amdgpu_in_reset(adev))
 		return 0;
 
-	ring_funcs = kzalloc(sizeof(*ring_funcs), GFP_KERNEL);
+	ring_funcs = kzalloc_obj(*ring_funcs);
 	if (!ring_funcs)
 		return -ENOMEM;
 
-	ring = kzalloc(sizeof(*ring), GFP_KERNEL);
+	ring = kzalloc_obj(*ring);
 	if (!ring) {
 		r = -ENOMEM;
 		goto free_ring_funcs;

@@ -503,7 +503,7 @@ static void fc_fcp_recv_data(struct fc_fcp_pkt *fsp, struct fc_frame *fp)
 		host_bcode = FC_ERROR;
 		goto err;
 	}
-	if (offset + len > fsp->data_len) {
+	if (size_add(offset, len) > fsp->data_len) {
 		/* this should never happen */
 		if ((fr_flags(fp) & FCPHF_CRC_UNCHECKED) &&
 		    fc_frame_crc_check(fp))
@@ -1283,7 +1283,7 @@ static int fc_fcp_pkt_abort(struct fc_fcp_pkt *fsp)
  */
 static void fc_lun_reset_send(struct timer_list *t)
 {
-	struct fc_fcp_pkt *fsp = from_timer(fsp, t, timer);
+	struct fc_fcp_pkt *fsp = timer_container_of(fsp, t, timer);
 	struct fc_lport *lport = fsp->lp;
 
 	if (lport->tt.fcp_cmd_send(lport, fsp, fc_tm_done)) {
@@ -1329,7 +1329,7 @@ static int fc_lun_reset(struct fc_lport *lport, struct fc_fcp_pkt *fsp,
 	fsp->state |= FC_SRB_COMPL;
 	spin_unlock_bh(&fsp->scsi_pkt_lock);
 
-	del_timer_sync(&fsp->timer);
+	timer_delete_sync(&fsp->timer);
 
 	spin_lock_bh(&fsp->scsi_pkt_lock);
 	if (fsp->seq_ptr) {
@@ -1416,7 +1416,7 @@ static void fc_fcp_cleanup(struct fc_lport *lport)
  */
 static void fc_fcp_timeout(struct timer_list *t)
 {
-	struct fc_fcp_pkt *fsp = from_timer(fsp, t, timer);
+	struct fc_fcp_pkt *fsp = timer_container_of(fsp, t, timer);
 	struct fc_rport *rport = fsp->rport;
 	struct fc_rport_libfc_priv *rpriv = rport->dd_data;
 
@@ -1854,7 +1854,8 @@ static inline int fc_fcp_lport_queue_ready(struct fc_lport *lport)
  *
  * This is the i/o strategy routine, called by the SCSI layer.
  */
-int fc_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *sc_cmd)
+enum scsi_qc_status fc_queuecommand(struct Scsi_Host *shost,
+				    struct scsi_cmnd *sc_cmd)
 {
 	struct fc_lport *lport = shost_priv(shost);
 	struct fc_rport *rport = starget_to_rport(scsi_target(sc_cmd->device));
@@ -1961,7 +1962,7 @@ static void fc_io_compl(struct fc_fcp_pkt *fsp)
 	fsp->state |= FC_SRB_COMPL;
 	if (!(fsp->state & FC_SRB_FCP_PROCESSING_TMO)) {
 		spin_unlock_bh(&fsp->scsi_pkt_lock);
-		del_timer_sync(&fsp->timer);
+		timer_delete_sync(&fsp->timer);
 		spin_lock_bh(&fsp->scsi_pkt_lock);
 	}
 
@@ -2297,7 +2298,7 @@ int fc_fcp_init(struct fc_lport *lport)
 	if (!lport->tt.fcp_abort_io)
 		lport->tt.fcp_abort_io = fc_fcp_abort_io;
 
-	si = kzalloc(sizeof(struct fc_fcp_internal), GFP_KERNEL);
+	si = kzalloc_obj(struct fc_fcp_internal);
 	if (!si)
 		return -ENOMEM;
 	lport->scsi_priv = si;

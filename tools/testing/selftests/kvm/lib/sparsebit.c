@@ -76,11 +76,11 @@
  * the use of a binary-search tree, where each node contains at least
  * the following members:
  *
- *   typedef uint64_t sparsebit_idx_t;
- *   typedef uint64_t sparsebit_num_t;
+ *   typedef u64 sparsebit_idx_t;
+ *   typedef u64 sparsebit_num_t;
  *
  *   sparsebit_idx_t idx;
- *   uint32_t mask;
+ *   u32 mask;
  *   sparsebit_num_t num_after;
  *
  * The idx member contains the bit index of the first bit described by this
@@ -116,7 +116,7 @@
  *
  *   + A node with all mask bits set only occurs when the last bit
  *     described by the previous node is not equal to this nodes
- *     starting index - 1.  All such occurences of this condition are
+ *     starting index - 1.  All such occurrences of this condition are
  *     avoided by moving the setting of the nodes mask bits into
  *     the previous nodes num_after setting.
  *
@@ -162,7 +162,7 @@
 
 #define DUMP_LINE_MAX 100 /* Does not include indent amount */
 
-typedef uint32_t mask_t;
+typedef u32 mask_t;
 #define MASK_BITS (sizeof(mask_t) * CHAR_BIT)
 
 struct node {
@@ -592,7 +592,7 @@ static struct node *node_split(struct sparsebit *s, sparsebit_idx_t idx)
  *
  *   + A node with all mask bits set only occurs when the last bit
  *     described by the previous node is not equal to this nodes
- *     starting index - 1.  All such occurences of this condition are
+ *     starting index - 1.  All such occurrences of this condition are
  *     avoided by moving the setting of the nodes mask bits into
  *     the previous nodes num_after setting.
  */
@@ -2056,9 +2056,9 @@ unsigned char get8(void)
 	return ch;
 }
 
-uint64_t get64(void)
+u64 get64(void)
 {
-	uint64_t x;
+	u64 x;
 
 	x = get8();
 	x = (x << 8) | get8();
@@ -2074,9 +2074,9 @@ int main(void)
 {
 	s = sparsebit_alloc();
 	for (;;) {
-		uint8_t op = get8() & 0xf;
-		uint64_t first = get64();
-		uint64_t last = get64();
+		u8 op = get8() & 0xf;
+		u64 first = get64();
+		u64 last = get64();
 
 		operate(op, first, last);
 	}

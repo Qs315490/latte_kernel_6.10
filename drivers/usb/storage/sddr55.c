@@ -469,6 +469,12 @@ static int sddr55_write_data(struct us_data *us,
 		new_pba = (status[3] + (status[4] << 8) + (status[5] << 16))
 						  >> info->blockshift;
 
+		/* check if device-reported new_pba is out of range */
+		if (new_pba >= (info->capacity >> (info->blockshift + info->pageshift))) {
+			result = USB_STOR_TRANSPORT_FAILED;
+			goto leave;
+		}
+
 		/* check status for error */
 		if (status[0] == 0xff && status[1] == 0x4) {
 			info->pba_to_lba[new_pba] = BAD_BLOCK;
@@ -685,8 +691,8 @@ static int sddr55_read_map(struct us_data *us) {
 
 	kfree(info->lba_to_pba);
 	kfree(info->pba_to_lba);
-	info->lba_to_pba = kmalloc_array(numblocks, sizeof(int), GFP_NOIO);
-	info->pba_to_lba = kmalloc_array(numblocks, sizeof(int), GFP_NOIO);
+	info->lba_to_pba = kmalloc_objs(int, numblocks, GFP_NOIO);
+	info->pba_to_lba = kmalloc_objs(int, numblocks, GFP_NOIO);
 
 	if (info->lba_to_pba == NULL || info->pba_to_lba == NULL) {
 		kfree(info->lba_to_pba);
@@ -775,11 +781,11 @@ static void sddr55_card_info_destructor(void *extra) {
 static int sddr55_transport(struct scsi_cmnd *srb, struct us_data *us)
 {
 	int result;
-	static unsigned char inquiry_response[8] = {
+	static const unsigned char inquiry_response[8] = {
 		0x00, 0x80, 0x00, 0x02, 0x1F, 0x00, 0x00, 0x00
 	};
  	// write-protected for now, no block descriptor support
-	static unsigned char mode_page_01[20] = {
+	static const unsigned char mode_page_01[20] = {
 		0x0, 0x12, 0x00, 0x80, 0x0, 0x0, 0x0, 0x0,
 		0x01, 0x0A,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -793,8 +799,7 @@ static int sddr55_transport(struct scsi_cmnd *srb, struct us_data *us)
 	struct sddr55_card_info *info;
 
 	if (!us->extra) {
-		us->extra = kzalloc(
-			sizeof(struct sddr55_card_info), GFP_NOIO);
+		us->extra = kzalloc_obj(struct sddr55_card_info, GFP_NOIO);
 		if (!us->extra)
 			return USB_STOR_TRANSPORT_ERROR;
 		us->extra_destructor = sddr55_card_info_destructor;

@@ -67,7 +67,7 @@ mv88e639x_pcs_alloc(struct device *dev, struct mii_bus *bus, unsigned int addr,
 {
 	struct mv88e639x_pcs *mpcs;
 
-	mpcs = kzalloc(sizeof(*mpcs), GFP_KERNEL);
+	mpcs = kzalloc_obj(*mpcs);
 	if (!mpcs)
 		return NULL;
 
@@ -565,9 +565,7 @@ static int mv88e6390_pcs_init(struct mv88e6xxx_chip *chip, int port)
 		return -ENOMEM;
 
 	mpcs->sgmii_pcs.ops = &mv88e639x_sgmii_pcs_ops;
-	mpcs->sgmii_pcs.neg_mode = true;
 	mpcs->xg_pcs.ops = &mv88e6390_xg_pcs_ops;
-	mpcs->xg_pcs.neg_mode = true;
 
 	if (chip->info->prod_num == MV88E6XXX_PORT_SWITCH_ID_PROD_6190X ||
 	    chip->info->prod_num == MV88E6XXX_PORT_SWITCH_ID_PROD_6390X)
@@ -945,9 +943,7 @@ static int mv88e6393x_pcs_init(struct mv88e6xxx_chip *chip, int port)
 		return -ENOMEM;
 
 	mpcs->sgmii_pcs.ops = &mv88e6393x_sgmii_pcs_ops;
-	mpcs->sgmii_pcs.neg_mode = true;
 	mpcs->xg_pcs.ops = &mv88e6393x_xg_pcs_ops;
-	mpcs->xg_pcs.neg_mode = true;
 	mpcs->supports_5g = true;
 
 	err = mv88e6393x_erratum_4_6(mpcs);

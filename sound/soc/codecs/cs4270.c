@@ -1,12 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * CS4270 ALSA SoC (ASoC) codec driver
  *
  * Author: Timur Tabi <timur@freescale.com>
  *
- * Copyright 2007-2009 Freescale Semiconductor, Inc.  This file is licensed
- * under the terms of the GNU General Public License version 2.  This
- * program is licensed "as is" without any warranty of any kind, whether
- * express or implied.
+ * Copyright 2007-2009 Freescale Semiconductor, Inc.
  *
  * This is an ASoC device driver for the Cirrus Logic CS4270 codec.
  *
@@ -21,7 +19,6 @@
  * - Power management is supported
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <sound/core.h>
@@ -287,10 +284,10 @@ static int cs4270_set_dai_fmt(struct snd_soc_dai *codec_dai,
 
 	/* set master/slave audio interface */
 	switch (format & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		cs4270->slave_mode = 1;
 		break;
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		cs4270->slave_mode = 0;
 		break;
 	default:
@@ -433,7 +430,7 @@ static int cs4270_dai_mute(struct snd_soc_dai *dai, int mute, int direction)
 static int cs4270_soc_put_mute(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct cs4270_private *cs4270 = snd_soc_component_get_drvdata(component);
 	int left = !ucontrol->value.integer.value[0];
 	int right = !ucontrol->value.integer.value[1];
@@ -734,8 +731,8 @@ static int cs4270_i2c_probe(struct i2c_client *i2c_client)
  * cs4270_id - I2C device IDs supported by this driver
  */
 static const struct i2c_device_id cs4270_id[] = {
-	{"cs4270"},
-	{}
+	{ .name = "cs4270" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cs4270_id);
 

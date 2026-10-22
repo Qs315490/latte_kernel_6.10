@@ -108,12 +108,30 @@ Kernel objects manipulation
 .. kernel-doc:: lib/kobject.c
    :export:
 
+.. kernel-doc:: lib/kobject_uevent.c
+   :export:
+
 Kernel utility functions
 ------------------------
 
-.. kernel-doc:: include/linux/kernel.h
+.. kernel-doc:: include/linux/array_size.h
+   :internal:
+
+.. kernel-doc:: include/linux/container_of.h
+   :internal:
+
+.. kernel-doc:: include/linux/kstrtox.h
    :internal:
    :no-identifiers: kstrtol kstrtoul
+
+.. kernel-doc:: include/linux/stddef.h
+   :internal:
+
+.. kernel-doc:: include/linux/util_macros.h
+   :internal:
+
+.. kernel-doc:: include/linux/wordpart.h
+   :internal:
 
 .. kernel-doc:: kernel/printk/printk.c
    :export:

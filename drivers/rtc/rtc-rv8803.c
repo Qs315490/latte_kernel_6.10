@@ -631,10 +631,10 @@ static int rv8803_suspend(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(rv8803_pm_ops, rv8803_suspend, rv8803_resume);
 
 static const struct i2c_device_id rv8803_id[] = {
-	{ "rv8803", rv_8803 },
-	{ "rv8804", rx_8804 },
-	{ "rx8803", rx_8803 },
-	{ "rx8900", rx_8900 },
+	{ .name = "rv8803", .driver_data = rv_8803 },
+	{ .name = "rv8804", .driver_data = rx_8804 },
+	{ .name = "rx8803", .driver_data = rx_8803 },
+	{ .name = "rx8900", .driver_data = rx_8900 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rv8803_id);
@@ -667,13 +667,7 @@ static int rv8803_probe(struct i2c_client *client)
 
 	mutex_init(&rv8803->flags_lock);
 	rv8803->client = client;
-	if (client->dev.of_node) {
-		rv8803->type = (uintptr_t)of_device_get_match_data(&client->dev);
-	} else {
-		const struct i2c_device_id *id = i2c_match_id(rv8803_id, client);
-
-		rv8803->type = id->driver_data;
-	}
+	rv8803->type = (uintptr_t)i2c_get_match_data(client);
 	i2c_set_clientdata(client, rv8803);
 
 	flags = rv8803_read_reg(client, RV8803_FLAG);
@@ -737,8 +731,6 @@ static int rv8803_probe(struct i2c_client *client)
 		return err;
 
 	devm_rtc_nvmem_register(rv8803->rtc, &nvmem_cfg);
-
-	rv8803->rtc->max_user_freq = 1;
 
 	return 0;
 }

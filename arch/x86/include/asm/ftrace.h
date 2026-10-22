@@ -22,7 +22,7 @@
 #define ARCH_SUPPORTS_FTRACE_OPS 1
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 extern void __fentry__(void);
 
 static inline unsigned long ftrace_call_adjust(unsigned long addr)
@@ -36,21 +36,9 @@ static inline unsigned long ftrace_call_adjust(unsigned long addr)
 
 static inline unsigned long arch_ftrace_get_symaddr(unsigned long fentry_ip)
 {
-#ifdef CONFIG_X86_KERNEL_IBT
-	u32 instr;
-
-	/* We want to be extra safe in case entry ip is on the page edge,
-	 * but otherwise we need to avoid get_kernel_nofault()'s overhead.
-	 */
-	if ((fentry_ip & ~PAGE_MASK) < ENDBR_INSN_SIZE) {
-		if (get_kernel_nofault(instr, (u32 *)(fentry_ip - ENDBR_INSN_SIZE)))
-			return fentry_ip;
-	} else {
-		instr = *(u32 *)(fentry_ip - ENDBR_INSN_SIZE);
-	}
-	if (is_endbr(instr))
+	if (is_endbr((void*)(fentry_ip - ENDBR_INSN_SIZE)))
 		fentry_ip -= ENDBR_INSN_SIZE;
-#endif
+
 	return fentry_ip;
 }
 #define ftrace_get_symaddr(fentry_ip)	arch_ftrace_get_symaddr(fentry_ip)
@@ -67,6 +55,11 @@ arch_ftrace_get_regs(struct ftrace_regs *fregs)
 		return NULL;
 	return &arch_ftrace_regs(fregs)->regs;
 }
+
+#define arch_ftrace_partial_regs(regs) do {	\
+	regs->flags |= X86_EFLAGS_FIXED;	\
+	regs->cs = __KERNEL_CS;			\
+} while (0)
 
 #define arch_ftrace_fill_perf_regs(fregs, _regs) do {	\
 		(_regs)->ip = arch_ftrace_regs(fregs)->regs.ip;		\
@@ -118,11 +111,11 @@ struct dyn_arch_ftrace {
 };
 
 #endif /*  CONFIG_DYNAMIC_FTRACE */
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* CONFIG_FUNCTION_TRACER */
 
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 void prepare_ftrace_return(unsigned long ip, unsigned long *parent,
 			   unsigned long frame_pointer);
@@ -166,6 +159,6 @@ static inline bool arch_trace_is_compat_syscall(struct pt_regs *regs)
 }
 #endif /* CONFIG_FTRACE_SYSCALLS && CONFIG_IA32_EMULATION */
 #endif /* !COMPILE_OFFSETS */
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* _ASM_X86_FTRACE_H */

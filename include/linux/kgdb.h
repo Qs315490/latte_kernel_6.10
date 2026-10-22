@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This provides the callbacks and functions that KGDB needs to share between
  * the core, I/O and arch-specific portions.
@@ -6,9 +7,6 @@
  *         Tom Rini <trini@kernel.crashing.org>
  *
  * 2001-2004 (c) Amit S. Kale and 2003-2005 (c) MontaVista Software, Inc.
- * This file is licensed under the terms of the GNU General Public License
- * version 2. This program is licensed "as is" without any warranty of any
- * kind, whether express or implied.
  */
 #ifndef _KGDB_H_
 #define _KGDB_H_
@@ -204,9 +202,10 @@ extern void kgdb_call_nmi_hook(void *ignored);
  *
  *	On SMP systems, we need to get the attention of the other CPUs
  *	and get them into a known state.  This should do what is needed
- *	to get the other CPUs to call kgdb_wait(). Note that on some arches,
- *	the NMI approach is not used for rounding up all the CPUs.  Normally
- *	those architectures can just not implement this and get the default.
+ *	to get the other CPUs to call kgdb_handle_exception().  Note that
+ *	on some arches, the NMI approach is not used for rounding up all
+ *	the CPUs.  Normally those architectures can just not implement
+ *	this and get the default.
  *
  *	On non-SMP systems, this is not called.
  */
@@ -257,7 +256,6 @@ extern void kgdb_arch_late(void);
  * hardware breakpoints.
  * @correct_hw_break: Allow an architecture to specify how to correct the
  * hardware debug registers.
- * @enable_nmi: Manage NMI-triggered entry to KGDB
  */
 struct kgdb_arch {
 	unsigned char		gdb_bpt_instr[BREAK_INSTR_SIZE];
@@ -270,8 +268,6 @@ struct kgdb_arch {
 	void	(*disable_hw_break)(struct pt_regs *regs);
 	void	(*remove_all_hw_break)(void);
 	void	(*correct_hw_break)(void);
-
-	void	(*enable_nmi)(bool on);
 };
 
 /**
@@ -305,14 +301,6 @@ struct kgdb_io {
 extern const struct kgdb_arch		arch_kgdb_ops;
 
 extern unsigned long kgdb_arch_pc(int exception, struct pt_regs *regs);
-
-#ifdef CONFIG_SERIAL_KGDB_NMI
-extern int kgdb_register_nmi_console(void);
-extern int kgdb_unregister_nmi_console(void);
-#else
-static inline int kgdb_register_nmi_console(void) { return 0; }
-static inline int kgdb_unregister_nmi_console(void) { return 0; }
-#endif
 
 extern int kgdb_register_io_module(struct kgdb_io *local_kgdb_io_ops);
 extern void kgdb_unregister_io_module(struct kgdb_io *local_kgdb_io_ops);

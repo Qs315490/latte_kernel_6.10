@@ -431,9 +431,10 @@ static struct dac_ops ics5342_ops = {
 
 static struct dac_info * ics5342_init(dac_read_regs_t drr, dac_write_regs_t dwr, void *data)
 {
-	struct dac_info *info = kzalloc(sizeof(struct ics5342_info), GFP_KERNEL);
+	struct ics5342_info *ics_info = kzalloc_obj(struct ics5342_info);
+	struct dac_info *info = &ics_info->dac;
 
-	if (! info)
+	if (!ics_info)
 		return NULL;
 
 	info->dacops = &ics5342_ops;
@@ -1166,8 +1167,8 @@ static const struct dev_pm_ops ark_pci_pm_ops = {
 /* List of boards that we are trying to support */
 
 static const struct pci_device_id ark_devices[] = {
-	{PCI_DEVICE(0xEDD8, 0xA099)},
-	{0, 0, 0, 0, 0, 0, 0}
+	{ PCI_DEVICE(0xEDD8, 0xA099) },
+	{ }
 };
 
 

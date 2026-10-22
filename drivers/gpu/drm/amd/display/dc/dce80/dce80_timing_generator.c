@@ -98,14 +98,14 @@ static void program_pix_dur(struct timing_generator *tg, uint32_t pix_clk_100hz)
 
 	set_reg_field_value(
 		value,
-		pix_dur,
+		(uint32_t)pix_dur,
 		DPG_PIPE_ARBITRATION_CONTROL1,
 		PIXEL_DURATION);
 
 	dm_write_reg(tg->ctx, addr, value);
 }
 
-static void program_timing(struct timing_generator *tg,
+static void dce80_timing_generator_program_timing(struct timing_generator *tg,
 	const struct dc_crtc_timing *timing,
 	int vready_offset,
 	int vstartup_start,
@@ -115,6 +115,12 @@ static void program_timing(struct timing_generator *tg,
 	const enum signal_type signal,
 	bool use_vbios)
 {
+	(void)vready_offset;
+	(void)vstartup_start;
+	(void)vupdate_offset;
+	(void)vupdate_width;
+	(void)pstate_keepout;
+	(void)signal;
 	if (!use_vbios)
 		program_pix_dur(tg, timing->pix_clk_100hz);
 
@@ -185,7 +191,7 @@ static void dce80_timing_generator_enable_advanced_request(
 
 static const struct timing_generator_funcs dce80_tg_funcs = {
 		.validate_timing = dce110_tg_validate_timing,
-		.program_timing = program_timing,
+		.program_timing = dce80_timing_generator_program_timing,
 		.enable_crtc = dce110_timing_generator_enable_crtc,
 		.disable_crtc = dce110_timing_generator_disable_crtc,
 		.is_counter_moving = dce110_timing_generator_is_counter_moving,

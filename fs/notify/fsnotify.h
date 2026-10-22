@@ -33,6 +33,12 @@ static inline struct super_block *fsnotify_conn_sb(
 	return conn->obj;
 }
 
+static inline struct mnt_namespace *fsnotify_conn_mntns(
+				struct fsnotify_mark_connector *conn)
+{
+	return conn->obj;
+}
+
 static inline struct super_block *fsnotify_object_sb(void *obj,
 			enum fsnotify_obj_type obj_type)
 {
@@ -71,6 +77,9 @@ extern struct srcu_struct fsnotify_mark_srcu;
 extern int fsnotify_compare_groups(struct fsnotify_group *a,
 				   struct fsnotify_group *b);
 
+/* Destroy all inode marks for given superblock */
+void fsnotify_unmount_inodes(struct fsnotify_sb_info *sbinfo);
+
 /* Destroy all marks attached to an object via connector */
 extern void fsnotify_destroy_marks(fsnotify_connp_t *connp);
 /* run the list of all marks associated with inode and destroy them */
@@ -89,12 +98,17 @@ static inline void fsnotify_clear_marks_by_sb(struct super_block *sb)
 	fsnotify_destroy_marks(fsnotify_sb_marks(sb));
 }
 
+static inline void fsnotify_clear_marks_by_mntns(struct mnt_namespace *mntns)
+{
+	fsnotify_destroy_marks(&mntns->n_fsnotify_marks);
+}
+
 /*
  * update the dentry->d_flags of all of inode's children to indicate if inode cares
  * about events that happen to its children.
  */
 extern void fsnotify_set_children_dentry_flags(struct inode *inode);
 
-extern struct kmem_cache *fsnotify_mark_connector_cachep;
+void fsnotify_init_connector_caches(void);
 
 #endif	/* __FS_NOTIFY_FSNOTIFY_H_ */

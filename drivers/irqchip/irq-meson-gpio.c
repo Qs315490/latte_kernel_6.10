@@ -26,8 +26,10 @@
 
 /* use for A1 like chips */
 #define REG_PIN_A1_SEL	0x04
-/* Used for s4 chips */
-#define REG_EDGE_POL_S4	0x1c
+
+/* use for A9 like chips */
+#define REG_A9_AO_POL	0x00
+#define REG_A9_AO_EDGE	0x30
 
 /*
  * Note: The S905X3 datasheet reports that BOTH_EDGE is controlled by
@@ -55,6 +57,8 @@ static void meson_a1_gpio_irq_sel_pin(struct meson_gpio_irq_controller *ctl,
 static void meson_a1_gpio_irq_init(struct meson_gpio_irq_controller *ctl);
 static int meson8_gpio_irq_set_type(struct meson_gpio_irq_controller *ctl,
 				    unsigned int type, u32 *channel_hwirq);
+static int meson_a9_ao_gpio_irq_set_type(struct meson_gpio_irq_controller *ctl,
+					 unsigned int type, u32 *channel_hwirq);
 static int meson_s4_gpio_irq_set_type(struct meson_gpio_irq_controller *ctl,
 				      unsigned int type, u32 *channel_hwirq);
 
@@ -72,6 +76,7 @@ struct meson_gpio_irq_params {
 	bool support_edge_both;
 	unsigned int edge_both_offset;
 	unsigned int edge_single_offset;
+	unsigned int edge_pol_reg;
 	unsigned int pol_low_offset;
 	unsigned int pin_sel_mask;
 	struct irq_ctl_ops ops;
@@ -105,6 +110,30 @@ struct meson_gpio_irq_params {
 	.pin_sel_mask = 0x7f,					\
 	.nr_channels = 8,					\
 
+#define INIT_MESON_A4_AO_COMMON_DATA(irqs)			\
+	INIT_MESON_COMMON(irqs, meson_a1_gpio_irq_init,		\
+			  meson_a1_gpio_irq_sel_pin,		\
+			  meson_s4_gpio_irq_set_type)		\
+	.support_edge_both = true,				\
+	.edge_both_offset = 0,					\
+	.edge_single_offset = 12,				\
+	.edge_pol_reg = 0x8,					\
+	.pol_low_offset = 0,					\
+	.pin_sel_mask = 0xff,					\
+	.nr_channels = 2,					\
+
+#define INIT_MESON_A9_AO_COMMON_DATA(irqs)			\
+	INIT_MESON_COMMON(irqs, meson_a1_gpio_irq_init,		\
+			  meson_a1_gpio_irq_sel_pin,		\
+			  meson_a9_ao_gpio_irq_set_type)	\
+	.support_edge_both = true,				\
+	.edge_both_offset = 0,					\
+	.edge_single_offset = 0,				\
+	.edge_pol_reg = 0x2c,					\
+	.pol_low_offset = 0,					\
+	.pin_sel_mask = 0xff,					\
+	.nr_channels = 20,					\
+
 #define INIT_MESON_S4_COMMON_DATA(irqs)				\
 	INIT_MESON_COMMON(irqs, meson_a1_gpio_irq_init,		\
 			  meson_a1_gpio_irq_sel_pin,		\
@@ -112,6 +141,7 @@ struct meson_gpio_irq_params {
 	.support_edge_both = true,				\
 	.edge_both_offset = 0,					\
 	.edge_single_offset = 12,				\
+	.edge_pol_reg = 0x1c,					\
 	.pol_low_offset = 0,					\
 	.pin_sel_mask = 0xff,					\
 	.nr_channels = 12,					\
@@ -146,8 +176,36 @@ static const struct meson_gpio_irq_params a1_params = {
 	INIT_MESON_A1_COMMON_DATA(62)
 };
 
+static const struct meson_gpio_irq_params a4_params = {
+	INIT_MESON_S4_COMMON_DATA(81)
+};
+
+static const struct meson_gpio_irq_params a4_ao_params = {
+	INIT_MESON_A4_AO_COMMON_DATA(8)
+};
+
+static const struct meson_gpio_irq_params a5_params = {
+	INIT_MESON_S4_COMMON_DATA(99)
+};
+
+static const struct meson_gpio_irq_params a9_params = {
+	INIT_MESON_S4_COMMON_DATA(96)
+};
+
+static const struct meson_gpio_irq_params a9_ao_params = {
+	INIT_MESON_A9_AO_COMMON_DATA(39)
+};
+
 static const struct meson_gpio_irq_params s4_params = {
 	INIT_MESON_S4_COMMON_DATA(82)
+};
+
+static const struct meson_gpio_irq_params s6_params = {
+	INIT_MESON_S4_COMMON_DATA(100)
+};
+
+static const struct meson_gpio_irq_params s7_params = {
+	INIT_MESON_S4_COMMON_DATA(84)
 };
 
 static const struct meson_gpio_irq_params c3_params = {
@@ -168,6 +226,14 @@ static const struct of_device_id meson_irq_gpio_matches[] __maybe_unused = {
 	{ .compatible = "amlogic,meson-sm1-gpio-intc", .data = &sm1_params },
 	{ .compatible = "amlogic,meson-a1-gpio-intc", .data = &a1_params },
 	{ .compatible = "amlogic,meson-s4-gpio-intc", .data = &s4_params },
+	{ .compatible = "amlogic,a4-gpio-ao-intc", .data = &a4_ao_params },
+	{ .compatible = "amlogic,a4-gpio-intc", .data = &a4_params },
+	{ .compatible = "amlogic,a5-gpio-intc", .data = &a5_params },
+	{ .compatible = "amlogic,a9-gpio-ao-intc", .data = &a9_ao_params },
+	{ .compatible = "amlogic,a9-gpio-intc", .data = &a9_params },
+	{ .compatible = "amlogic,s6-gpio-intc", .data = &s6_params },
+	{ .compatible = "amlogic,s7-gpio-intc", .data = &s7_params },
+	{ .compatible = "amlogic,s7d-gpio-intc", .data = &s7_params },
 	{ .compatible = "amlogic,c3-gpio-intc", .data = &c3_params },
 	{ .compatible = "amlogic,t7-gpio-intc", .data = &t7_params },
 	{ }
@@ -299,11 +365,10 @@ meson_gpio_irq_release_channel(struct meson_gpio_irq_controller *ctl,
 static int meson8_gpio_irq_set_type(struct meson_gpio_irq_controller *ctl,
 				    unsigned int type, u32 *channel_hwirq)
 {
-	u32 val = 0;
+	const struct meson_gpio_irq_params *params = ctl->params;
 	unsigned int idx;
-	const struct meson_gpio_irq_params *params;
+	u32 val = 0;
 
-	params = ctl->params;
 	idx = meson_gpio_irq_get_channel_idx(ctl, channel_hwirq);
 
 	/*
@@ -339,6 +404,55 @@ static int meson8_gpio_irq_set_type(struct meson_gpio_irq_controller *ctl,
 }
 
 /*
+ * gpio irq relative registers for a9_ao
+ * -PADCTRL_GPIO_IRQ_CTRL0
+ * bit[31]:    enable/disable all the irq lines
+ * bit[0-19]:  polarity trigger
+ *
+ * -PADCTRL_GPIO_IRQ_CTRL[X]
+ * bit[0-5]: 6 bits to choose gpio source for irq line 2*[X] - 2
+ * bit[16-21]:6 bits to choose gpio source for irq line 2*[X] - 1
+ * where X = 1-10
+ *
+ * -PADCTRL_GPIO_IRQ_CTRL[11]
+ * bit[0-19]: both edge trigger
+ *
+ * -PADCTRL_GPIO_IRQ_CTRL[12]
+ * bit[0-19]: single edge trigger
+ */
+static int meson_a9_ao_gpio_irq_set_type(struct meson_gpio_irq_controller *ctl,
+					 unsigned int type, u32 *channel_hwirq)
+{
+	const struct meson_gpio_irq_params *params = ctl->params;
+	unsigned int idx;
+	u32 val;
+
+	idx = meson_gpio_irq_get_channel_idx(ctl, channel_hwirq);
+
+	type &= IRQ_TYPE_SENSE_MASK;
+
+	meson_gpio_irq_update_bits(ctl, params->edge_pol_reg, BIT(idx), 0);
+
+	if (type == IRQ_TYPE_EDGE_BOTH) {
+		val = BIT(ctl->params->edge_both_offset + idx);
+		meson_gpio_irq_update_bits(ctl, params->edge_pol_reg, val, val);
+		return 0;
+	}
+
+	val = 0;
+	if (type & (IRQ_TYPE_LEVEL_LOW | IRQ_TYPE_EDGE_FALLING))
+		val = BIT(idx);
+	meson_gpio_irq_update_bits(ctl, REG_A9_AO_POL, BIT(idx), val);
+
+	val = 0;
+	if (type & (IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING))
+		val = BIT(idx);
+	meson_gpio_irq_update_bits(ctl, REG_A9_AO_EDGE, BIT(idx), val);
+
+	return 0;
+};
+
+/*
  * gpio irq relative registers for s4
  * -PADCTRL_GPIO_IRQ_CTRL0
  * bit[31]:    enable/disable all the irq lines
@@ -356,19 +470,19 @@ static int meson8_gpio_irq_set_type(struct meson_gpio_irq_controller *ctl,
 static int meson_s4_gpio_irq_set_type(struct meson_gpio_irq_controller *ctl,
 				      unsigned int type, u32 *channel_hwirq)
 {
-	u32 val = 0;
+	const struct meson_gpio_irq_params *params = ctl->params;
 	unsigned int idx;
+	u32 val = 0;
 
 	idx = meson_gpio_irq_get_channel_idx(ctl, channel_hwirq);
 
 	type &= IRQ_TYPE_SENSE_MASK;
 
-	meson_gpio_irq_update_bits(ctl, REG_EDGE_POL_S4, BIT(idx), 0);
+	meson_gpio_irq_update_bits(ctl, params->edge_pol_reg, BIT(idx), 0);
 
 	if (type == IRQ_TYPE_EDGE_BOTH) {
-		val |= BIT(ctl->params->edge_both_offset + idx);
-		meson_gpio_irq_update_bits(ctl, REG_EDGE_POL_S4,
-					   BIT(ctl->params->edge_both_offset + idx), val);
+		val = BIT(ctl->params->edge_both_offset + idx);
+		meson_gpio_irq_update_bits(ctl, params->edge_pol_reg, val, val);
 		return 0;
 	}
 
@@ -378,8 +492,7 @@ static int meson_s4_gpio_irq_set_type(struct meson_gpio_irq_controller *ctl,
 	if (type & (IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING))
 		val |= BIT(ctl->params->edge_single_offset + idx);
 
-	meson_gpio_irq_update_bits(ctl, REG_EDGE_POL,
-				   BIT(idx) | BIT(12 + idx), val);
+	meson_gpio_irq_update_bits(ctl, REG_EDGE_POL, BIT(idx) | BIT(12 + idx), val);
 	return 0;
 };
 
@@ -546,8 +659,9 @@ static int meson_gpio_irq_parse_dt(struct device_node *node, struct meson_gpio_i
 	return 0;
 }
 
-static int meson_gpio_irq_of_init(struct device_node *node, struct device_node *parent)
+static int meson_gpio_irq_probe(struct platform_device *pdev, struct device_node *parent)
 {
+	struct device_node *node = pdev->dev.of_node;
 	struct irq_domain *domain, *parent_domain;
 	struct meson_gpio_irq_controller *ctl;
 	int ret;
@@ -563,7 +677,7 @@ static int meson_gpio_irq_of_init(struct device_node *node, struct device_node *
 		return -ENXIO;
 	}
 
-	ctl = kzalloc(sizeof(*ctl), GFP_KERNEL);
+	ctl = kzalloc_obj(*ctl);
 	if (!ctl)
 		return -ENOMEM;
 
@@ -581,7 +695,7 @@ static int meson_gpio_irq_of_init(struct device_node *node, struct device_node *
 
 	domain = irq_domain_create_hierarchy(parent_domain, 0,
 					     ctl->params->nr_hwirq,
-					     of_node_to_fwnode(node),
+					     of_fwnode_handle(node),
 					     &meson_gpio_irq_domain_ops,
 					     ctl);
 	if (!domain) {
@@ -604,10 +718,9 @@ free_ctl:
 }
 
 IRQCHIP_PLATFORM_DRIVER_BEGIN(meson_gpio_intc)
-IRQCHIP_MATCH("amlogic,meson-gpio-intc", meson_gpio_irq_of_init)
+IRQCHIP_MATCH("amlogic,meson-gpio-intc", meson_gpio_irq_probe)
 IRQCHIP_PLATFORM_DRIVER_END(meson_gpio_intc)
 
 MODULE_AUTHOR("Jerome Brunet <jbrunet@baylibre.com>");
 MODULE_DESCRIPTION("Meson GPIO Interrupt Multiplexer driver");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:meson-gpio-intc");

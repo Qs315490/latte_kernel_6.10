@@ -264,12 +264,10 @@ static int __maybe_unused crypto_lskcipher_report(
 	struct sk_buff *skb, struct crypto_alg *alg)
 {
 	struct lskcipher_alg *skcipher = __crypto_lskcipher_alg(alg);
-	struct crypto_report_blkcipher rblkcipher;
-
-	memset(&rblkcipher, 0, sizeof(rblkcipher));
-
-	strscpy(rblkcipher.type, "lskcipher", sizeof(rblkcipher.type));
-	strscpy(rblkcipher.geniv, "<none>", sizeof(rblkcipher.geniv));
+	struct crypto_report_blkcipher rblkcipher = {
+		.type = "lskcipher",
+		.geniv = "<none>",
+	};
 
 	rblkcipher.blocksize = alg->cra_blocksize;
 	rblkcipher.min_keysize = skcipher->co.min_keysize;
@@ -294,6 +292,7 @@ static const struct crypto_type crypto_lskcipher_type = {
 	.maskset = CRYPTO_ALG_TYPE_MASK,
 	.type = CRYPTO_ALG_TYPE_LSKCIPHER,
 	.tfmsize = offsetof(struct crypto_lskcipher, base),
+	.algsize = offsetof(struct lskcipher_alg, co.base),
 };
 
 static void crypto_lskcipher_exit_tfm_sg(struct crypto_tfm *tfm)
@@ -383,17 +382,13 @@ int crypto_register_lskciphers(struct lskcipher_alg *algs, int count)
 
 	for (i = 0; i < count; i++) {
 		ret = crypto_register_lskcipher(&algs[i]);
-		if (ret)
-			goto err;
+		if (ret) {
+			crypto_unregister_lskciphers(algs, i);
+			return ret;
+		}
 	}
 
 	return 0;
-
-err:
-	for (--i; i >= 0; --i)
-		crypto_unregister_lskcipher(&algs[i]);
-
-	return ret;
 }
 EXPORT_SYMBOL_GPL(crypto_register_lskciphers);
 

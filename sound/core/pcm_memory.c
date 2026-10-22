@@ -448,7 +448,7 @@ int snd_pcm_lib_malloc_pages(struct snd_pcm_substream *substream, size_t size)
 		/* dma_max=0 means the fixed size preallocation */
 		if (substream->dma_buffer.area && !substream->dma_max)
 			return -ENOMEM;
-		dmab = kzalloc(sizeof(*dmab), GFP_KERNEL);
+		dmab = kzalloc_obj(*dmab);
 		if (! dmab)
 			return -ENOMEM;
 		dmab->dev = substream->dma_buffer.dev;
@@ -458,7 +458,7 @@ int snd_pcm_lib_malloc_pages(struct snd_pcm_substream *substream, size_t size)
 				   substream->stream,
 				   size, dmab) < 0) {
 			kfree(dmab);
-			pr_debug("ALSA pcmC%dD%d%c,%d:%s: cannot preallocate for size %zu\n",
+			pr_debug("ALSA pcmC%dD%d%c,%d:%s: cannot allocate for size %zu\n",
 				 substream->pcm->card->number, substream->pcm->device,
 				 substream->stream ? 'c' : 'p', substream->number,
 				 substream->pcm->name, size);

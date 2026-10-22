@@ -7,10 +7,10 @@ Firmware
 Firmware Layout
 ===============
 
-.. kernel-doc:: drivers/gpu/drm/xe/xe_uc_fw_abi.h
+.. kernel-doc:: drivers/gpu/drm/xe/abi/uc_fw_abi.h
    :doc: CSS-based Firmware Layout
 
-.. kernel-doc:: drivers/gpu/drm/xe/xe_uc_fw_abi.h
+.. kernel-doc:: drivers/gpu/drm/xe/abi/uc_fw_abi.h
    :doc: GSC-based Firmware Layout
 
 Write Once Protected Content Memory (WOPCM) Layout
@@ -30,6 +30,15 @@ GuC Power Conservation (PC)
 
 .. kernel-doc:: drivers/gpu/drm/xe/xe_guc_pc.c
    :doc: GuC Power Conservation (PC)
+
+.. kernel-doc:: drivers/gpu/drm/xe/xe_guc_rc.c
+   :doc: GuC Render C-states (GuC RC)
+
+PCIe Gen5 Limitations
+=====================
+
+.. kernel-doc:: drivers/gpu/drm/xe/xe_device_sysfs.c
+   :doc: PCIe Gen5 Limitations
 
 Internal API
 ============

@@ -333,6 +333,47 @@ done:
 	return map_header;
 }
 
+u32 rmnet_map_validate_packet_len(struct sk_buff *skb, struct rmnet_port *port)
+{
+	struct rmnet_map_v5_csum_header *next_hdr = NULL;
+	struct rmnet_map_header *maph;
+	void *data = skb->data;
+	u32 packet_len;
+
+	if (skb->len < sizeof(*maph))
+		return 0;
+
+	maph = (struct rmnet_map_header *)skb->data;
+
+	/* Some hardware can send us empty frames. Catch them */
+	if (!maph->pkt_len)
+		return 0;
+
+	packet_len = ntohs(maph->pkt_len) + sizeof(*maph);
+
+	if (port->data_format & RMNET_FLAGS_INGRESS_MAP_CKSUMV4) {
+		packet_len += sizeof(struct rmnet_map_dl_csum_trailer);
+	} else if ((port->data_format & RMNET_FLAGS_INGRESS_MAP_CKSUMV5) &&
+		   !(maph->flags & MAP_CMD_FLAG)) {
+		/* Mapv5 data pkt without csum hdr is invalid */
+		if (!(maph->flags & MAP_NEXT_HEADER_FLAG))
+			return 0;
+
+		packet_len += sizeof(*next_hdr);
+		next_hdr = data + sizeof(*maph);
+	}
+
+	if (skb->len < packet_len)
+		return 0;
+
+	if (next_hdr &&
+	    u8_get_bits(next_hdr->header_info, MAPV5_HDRINFO_HDR_TYPE_FMASK) !=
+	    RMNET_MAP_HEADER_TYPE_CSUM_OFFLOAD)
+		return 0;
+
+	return packet_len;
+}
+
 /* Deaggregates a single packet
  * A whole new buffer is allocated for each portion of an aggregated frame.
  * Caller should keep calling deaggregate() on the source skb until 0 is
@@ -342,45 +383,12 @@ done:
 struct sk_buff *rmnet_map_deaggregate(struct sk_buff *skb,
 				      struct rmnet_port *port)
 {
-	struct rmnet_map_v5_csum_header *next_hdr = NULL;
-	struct rmnet_map_header *maph;
-	void *data = skb->data;
 	struct sk_buff *skbn;
-	u8 nexthdr_type;
 	u32 packet_len;
 
-	if (skb->len == 0)
+	packet_len = rmnet_map_validate_packet_len(skb, port);
+	if (!packet_len)
 		return NULL;
-
-	maph = (struct rmnet_map_header *)skb->data;
-	packet_len = ntohs(maph->pkt_len) + sizeof(*maph);
-
-	if (port->data_format & RMNET_FLAGS_INGRESS_MAP_CKSUMV4) {
-		packet_len += sizeof(struct rmnet_map_dl_csum_trailer);
-	} else if (port->data_format & RMNET_FLAGS_INGRESS_MAP_CKSUMV5) {
-		if (!(maph->flags & MAP_CMD_FLAG)) {
-			packet_len += sizeof(*next_hdr);
-			if (maph->flags & MAP_NEXT_HEADER_FLAG)
-				next_hdr = data + sizeof(*maph);
-			else
-				/* Mapv5 data pkt without csum hdr is invalid */
-				return NULL;
-		}
-	}
-
-	if (((int)skb->len - (int)packet_len) < 0)
-		return NULL;
-
-	/* Some hardware can send us empty frames. Catch them */
-	if (!maph->pkt_len)
-		return NULL;
-
-	if (next_hdr) {
-		nexthdr_type = u8_get_bits(next_hdr->header_info,
-					   MAPV5_HDRINFO_HDR_TYPE_FMASK);
-		if (nexthdr_type != RMNET_MAP_HEADER_TYPE_CSUM_OFFLOAD)
-			return NULL;
-	}
 
 	skbn = alloc_skb(packet_len + RMNET_MAP_DEAGGR_SPACING, GFP_ATOMIC);
 	if (!skbn)
@@ -686,8 +694,8 @@ void rmnet_map_update_ul_agg_config(struct rmnet_port *port, u32 size,
 
 void rmnet_map_tx_aggregate_init(struct rmnet_port *port)
 {
-	hrtimer_init(&port->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	port->hrtimer.function = rmnet_map_flush_tx_packet_queue;
+	hrtimer_setup(&port->hrtimer, rmnet_map_flush_tx_packet_queue, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL);
 	spin_lock_init(&port->agg_lock);
 	rmnet_map_update_ul_agg_config(port, 4096, 1, 800);
 	INIT_WORK(&port->agg_wq, rmnet_map_flush_tx_packet_work);

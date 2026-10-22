@@ -116,9 +116,8 @@ static int liointc_set_type(struct irq_data *data, unsigned int type)
 {
 	struct irq_chip_generic *gc = irq_data_get_irq_chip_data(data);
 	u32 mask = data->mask;
-	unsigned long flags;
 
-	irq_gc_lock_irqsave(gc, flags);
+	guard(raw_spinlock)(&gc->lock);
 	switch (type) {
 	case IRQ_TYPE_LEVEL_HIGH:
 		liointc_set_bit(gc, LIOINTC_REG_INTC_EDGE, mask, false);
@@ -137,10 +136,8 @@ static int liointc_set_type(struct irq_data *data, unsigned int type)
 		liointc_set_bit(gc, LIOINTC_REG_INTC_POL, mask, true);
 		break;
 	default:
-		irq_gc_unlock_irqrestore(gc, flags);
 		return -EINVAL;
 	}
-	irq_gc_unlock_irqrestore(gc, flags);
 
 	irqd_set_trigger_type(data, type);
 	return 0;
@@ -157,10 +154,9 @@ static void liointc_suspend(struct irq_chip_generic *gc)
 static void liointc_resume(struct irq_chip_generic *gc)
 {
 	struct liointc_priv *priv = gc->private;
-	unsigned long flags;
 	int i;
 
-	irq_gc_lock_irqsave(gc, flags);
+	guard(raw_spinlock_irqsave)(&gc->lock);
 	/* Disable all at first */
 	writel(0xffffffff, gc->reg_base + LIOINTC_REG_INTC_DISABLE);
 	/* Restore map cache */
@@ -170,7 +166,6 @@ static void liointc_resume(struct irq_chip_generic *gc)
 	writel(priv->int_edge, gc->reg_base + LIOINTC_REG_INTC_EDGE);
 	/* Restore mask cache */
 	writel(gc->mask_cache, gc->reg_base + LIOINTC_REG_INTC_ENABLE);
-	irq_gc_unlock_irqrestore(gc, flags);
 }
 
 static int parent_irq[LIOINTC_NUM_PARENT];
@@ -210,7 +205,7 @@ static int liointc_init(phys_addr_t addr, unsigned long size, int revision,
 	struct irq_domain *domain;
 	struct liointc_priv *priv;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -363,7 +358,7 @@ static int __init liointc_of_init(struct device_node *node,
 	}
 
 	err = liointc_init(res.start, resource_size(&res),
-			revision, of_node_to_fwnode(node), node);
+			revision, of_fwnode_handle(node), node);
 	if (err < 0)
 		return err;
 
@@ -399,8 +394,9 @@ static int __init acpi_cascade_irqdomain_init(void)
 
 int __init liointc_acpi_init(struct irq_domain *parent, struct acpi_madt_lio_pic *acpi_liointc)
 {
-	int ret;
+	phys_addr_t addr = (phys_addr_t)acpi_liointc->address;
 	struct fwnode_handle *domain_handle;
+	int ret;
 
 	parent_int_map[0] = acpi_liointc->cascade_map[0];
 	parent_int_map[1] = acpi_liointc->cascade_map[1];
@@ -408,14 +404,13 @@ int __init liointc_acpi_init(struct irq_domain *parent, struct acpi_madt_lio_pic
 	parent_irq[0] = irq_create_mapping(parent, acpi_liointc->cascade[0]);
 	parent_irq[1] = irq_create_mapping(parent, acpi_liointc->cascade[1]);
 
-	domain_handle = irq_domain_alloc_fwnode(&acpi_liointc->address);
+	domain_handle = irq_domain_alloc_fwnode(&addr);
 	if (!domain_handle) {
 		pr_err("Unable to allocate domain handle\n");
 		return -ENOMEM;
 	}
 
-	ret = liointc_init(acpi_liointc->address, acpi_liointc->size,
-			   1, domain_handle, NULL);
+	ret = liointc_init(addr, acpi_liointc->size, 1, domain_handle, NULL);
 	if (ret == 0)
 		ret = acpi_cascade_irqdomain_init();
 	else

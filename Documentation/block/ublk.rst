@@ -115,15 +115,15 @@ managing and controlling ublk devices with help of several control commands:
 
 - ``UBLK_CMD_START_DEV``
 
-  After the server prepares userspace resources (such as creating per-queue
-  pthread & io_uring for handling ublk IO), this command is sent to the
+  After the server prepares userspace resources (such as creating I/O handler
+  threads & io_uring for handling ublk IO), this command is sent to the
   driver for allocating & exposing ``/dev/ublkb*``. Parameters set via
   ``UBLK_CMD_SET_PARAMS`` are applied for creating the device.
 
 - ``UBLK_CMD_STOP_DEV``
 
   Halt IO on ``/dev/ublkb*`` and remove the device. When this command returns,
-  ublk server will release resources (such as destroying per-queue pthread &
+  ublk server will release resources (such as destroying I/O handler threads &
   io_uring).
 
 - ``UBLK_CMD_DEL_DEV``
@@ -208,15 +208,15 @@ managing and controlling ublk devices with help of several control commands:
   modify how I/O is handled while the ublk server is dying/dead (this is called
   the ``nosrv`` case in the driver code).
 
-  With just ``UBLK_F_USER_RECOVERY`` set, after one ubq_daemon(ublk server's io
-  handler) is dying, ublk does not delete ``/dev/ublkb*`` during the whole
+  With just ``UBLK_F_USER_RECOVERY`` set, after the ublk server exits,
+  ublk does not delete ``/dev/ublkb*`` during the whole
   recovery stage and ublk device ID is kept. It is ublk server's
   responsibility to recover the device context by its own knowledge.
   Requests which have not been issued to userspace are requeued. Requests
   which have been issued to userspace are aborted.
 
-  With ``UBLK_F_USER_RECOVERY_REISSUE`` additionally set, after one ubq_daemon
-  (ublk server's io handler) is dying, contrary to ``UBLK_F_USER_RECOVERY``,
+  With ``UBLK_F_USER_RECOVERY_REISSUE`` additionally set, after the ublk server
+  exits, contrary to ``UBLK_F_USER_RECOVERY``,
   requests which have been issued to userspace are requeued and will be
   re-issued to the new process after handling ``UBLK_CMD_END_USER_RECOVERY``.
   ``UBLK_F_USER_RECOVERY_REISSUE`` is designed for backends who tolerate
@@ -241,10 +241,11 @@ can be controlled/accessed just inside this container.
 Data plane
 ----------
 
-ublk server needs to create per-queue IO pthread & io_uring for handling IO
-commands via io_uring passthrough. The per-queue IO pthread
-focuses on IO handling and shouldn't handle any control & management
-tasks.
+The ublk server should create dedicated threads for handling I/O. Each
+thread should have its own io_uring through which it is notified of new
+I/O, and through which it can complete I/O. These dedicated threads
+should focus on IO handling and shouldn't handle any control &
+management tasks.
 
 The's IO is assigned by a unique tag, which is 1:1 mapping with IO
 request of ``/dev/ublkb*``.
@@ -259,13 +260,28 @@ The following IO commands are communicated via io_uring passthrough command,
 and each command is only for forwarding the IO and committing the result
 with specified IO tag in the command data:
 
-- ``UBLK_IO_FETCH_REQ``
+Traditional Per-I/O Commands
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-  Sent from the server IO pthread for fetching future incoming IO requests
+- ``UBLK_U_IO_FETCH_REQ``
+
+  Sent from the server I/O pthread for fetching future incoming I/O requests
   destined to ``/dev/ublkb*``. This command is sent only once from the server
   IO pthread for ublk driver to setup IO forward environment.
 
-- ``UBLK_IO_COMMIT_AND_FETCH_REQ``
+  Once a thread issues this command against a given (qid,tag) pair, the thread
+  registers itself as that I/O's daemon. In the future, only that I/O's daemon
+  is allowed to issue commands against the I/O. If any other thread attempts
+  to issue a command against a (qid,tag) pair for which the thread is not the
+  daemon, the command will fail. Daemons can be reset only be going through
+  recovery.
+
+  The ability for every (qid,tag) pair to have its own independent daemon task
+  is indicated by the ``UBLK_F_PER_IO_DAEMON`` feature. If this feature is not
+  supported by the driver, daemons must be per-queue instead - i.e. all I/Os
+  associated to a single qid must be handled by the same task.
+
+- ``UBLK_U_IO_COMMIT_AND_FETCH_REQ``
 
   When an IO request is destined to ``/dev/ublkb*``, the driver stores
   the IO's ``ublksrv_io_desc`` to the specified mapped area; then the
@@ -280,7 +296,7 @@ with specified IO tag in the command data:
   requests with the same IO tag. That is, ``UBLK_IO_COMMIT_AND_FETCH_REQ``
   is reused for both fetching request and committing back IO result.
 
-- ``UBLK_IO_NEED_GET_DATA``
+- ``UBLK_U_IO_NEED_GET_DATA``
 
   With ``UBLK_F_NEED_GET_DATA`` enabled, the WRITE request will be firstly
   issued to ublk server without data copy. Then, IO backend of ublk server
@@ -309,18 +325,284 @@ with specified IO tag in the command data:
   ``UBLK_IO_COMMIT_AND_FETCH_REQ`` to the server, ublkdrv needs to copy
   the server buffer (pages) read to the IO request pages.
 
-Future development
-==================
+Batch I/O Commands (UBLK_F_BATCH_IO)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``UBLK_F_BATCH_IO`` feature provides an alternative high-performance
+I/O handling model that replaces the traditional per-I/O commands with
+per-queue batch commands. This significantly reduces communication overhead
+and enables better load balancing across multiple server tasks.
+
+Key differences from traditional mode:
+
+- **Per-queue vs Per-I/O**: Commands operate on queues rather than individual I/Os
+- **Batch processing**: Multiple I/Os are handled in single operations
+- **Multishot commands**: Use io_uring multishot for reduced submission overhead
+- **Flexible task assignment**: Any task can handle any I/O (no per-I/O daemons)
+- **Better load balancing**: Tasks can adjust their workload dynamically
+
+Batch I/O Commands:
+
+- ``UBLK_U_IO_PREP_IO_CMDS``
+
+  Prepares multiple I/O commands in batch. The server provides a buffer
+  containing multiple I/O descriptors that will be processed together.
+  This reduces the number of individual command submissions required.
+
+- ``UBLK_U_IO_COMMIT_IO_CMDS``
+
+  Commits results for multiple I/O operations in batch, and prepares the
+  I/O descriptors to accept new requests. The server provides a buffer
+  containing the results of multiple completed I/Os, allowing efficient
+  bulk completion of requests.
+
+- ``UBLK_U_IO_FETCH_IO_CMDS``
+
+  **Multishot command** for fetching I/O commands in batch. This is the key
+  command that enables high-performance batch processing:
+
+  * Uses io_uring multishot capability for reduced submission overhead
+  * Single command can fetch multiple I/O requests over time
+  * Buffer size determines maximum batch size per operation
+  * Multiple fetch commands can be submitted for load balancing
+  * Only one fetch command is active at any time per queue
+  * Supports dynamic load balancing across multiple server tasks
+
+  It is one typical multishot io_uring request with provided buffer, and it
+  won't be completed until any failure is triggered.
+
+  Each task can submit ``UBLK_U_IO_FETCH_IO_CMDS`` with different buffer
+  sizes to control how much work it handles. This enables sophisticated
+  load balancing strategies in multi-threaded servers.
+
+Migration: Applications using traditional commands (``UBLK_U_IO_FETCH_REQ``,
+``UBLK_U_IO_COMMIT_AND_FETCH_REQ``) cannot use batch mode simultaneously.
 
 Zero copy
 ---------
 
-Zero copy is a generic requirement for nbd, fuse or similar drivers. A
-problem [#xiaoguang]_ Xiaoguang mentioned is that pages mapped to userspace
-can't be remapped any more in kernel with existing mm interfaces. This can
-occurs when destining direct IO to ``/dev/ublkb*``. Also, he reported that
-big requests (IO size >= 256 KB) may benefit a lot from zero copy.
+ublk zero copy relies on io_uring's fixed kernel buffer, which provides
+two APIs: `io_buffer_register_bvec()` and `io_buffer_unregister_bvec`.
 
+ublk adds IO command of `UBLK_IO_REGISTER_IO_BUF` to call
+`io_buffer_register_bvec()` for ublk server to register client request
+buffer into io_uring buffer table, then ublk server can submit io_uring
+IOs with the registered buffer index. IO command of `UBLK_IO_UNREGISTER_IO_BUF`
+calls `io_buffer_unregister_bvec()` to unregister the buffer, which is
+guaranteed to be live between calling `io_buffer_register_bvec()` and
+`io_buffer_unregister_bvec()`. Any io_uring operation which supports this
+kind of kernel buffer will grab one reference of the buffer until the
+operation is completed.
+
+ublk server implementing zero copy or user copy has to be CAP_SYS_ADMIN and
+be trusted, because it is ublk server's responsibility to make sure IO buffer
+filled with data for handling read command, and ublk server has to return
+correct result to ublk driver when handling READ command, and the result
+has to match with how many bytes filled to the IO buffer. Otherwise,
+uninitialized kernel IO buffer will be exposed to client application.
+
+ublk server needs to align the parameter of `struct ublk_param_dma_align`
+with backend for zero copy to work correctly.
+
+For reaching best IO performance, ublk server should align its segment
+parameter of `struct ublk_param_segment` with backend for avoiding
+unnecessary IO split, which usually hurts io_uring performance.
+
+Auto Buffer Registration
+------------------------
+
+The ``UBLK_F_AUTO_BUF_REG`` feature automatically handles buffer registration
+and unregistration for I/O requests, which simplifies the buffer management
+process and reduces overhead in the ublk server implementation.
+
+This is another feature flag for using zero copy, and it is compatible with
+``UBLK_F_SUPPORT_ZERO_COPY``.
+
+Feature Overview
+~~~~~~~~~~~~~~~~
+
+This feature automatically registers request buffers to the io_uring context
+before delivering I/O commands to the ublk server and unregisters them when
+completing I/O commands. This eliminates the need for manual buffer
+registration/unregistration via ``UBLK_IO_REGISTER_IO_BUF`` and
+``UBLK_IO_UNREGISTER_IO_BUF`` commands, then IO handling in ublk server
+can avoid dependency on the two uring_cmd operations.
+
+IOs can't be issued concurrently to io_uring if there is any dependency
+among these IOs. So this way not only simplifies ublk server implementation,
+but also makes concurrent IO handling becomes possible by removing the
+dependency on buffer registration & unregistration commands.
+
+Usage Requirements
+~~~~~~~~~~~~~~~~~~
+
+1. The ublk server must create a sparse buffer table on the same ``io_ring_ctx``
+   used for ``UBLK_IO_FETCH_REQ`` and ``UBLK_IO_COMMIT_AND_FETCH_REQ``. If
+   uring_cmd is issued on a different ``io_ring_ctx``, manual buffer
+   unregistration is required.
+
+2. Buffer registration data must be passed via uring_cmd's ``sqe->addr`` with the
+   following structure::
+
+    struct ublk_auto_buf_reg {
+        __u16 index;      /* Buffer index for registration */
+        __u8 flags;       /* Registration flags */
+        __u8 reserved0;   /* Reserved for future use */
+        __u32 reserved1;  /* Reserved for future use */
+    };
+
+   ublk_auto_buf_reg_to_sqe_addr() is for converting the above structure into
+   ``sqe->addr``.
+
+3. All reserved fields in ``ublk_auto_buf_reg`` must be zeroed.
+
+4. Optional flags can be passed via ``ublk_auto_buf_reg.flags``.
+
+Fallback Behavior
+~~~~~~~~~~~~~~~~~
+
+If auto buffer registration fails:
+
+1. When ``UBLK_AUTO_BUF_REG_FALLBACK`` is enabled:
+
+   - The uring_cmd is completed
+   - ``UBLK_IO_F_NEED_REG_BUF`` is set in ``ublksrv_io_desc.op_flags``
+   - The ublk server must manually deal with the failure, such as, register
+     the buffer manually, or using user copy feature for retrieving the data
+     for handling ublk IO
+
+2. If fallback is not enabled:
+
+   - The ublk I/O request fails silently
+   - The uring_cmd won't be completed
+
+Limitations
+~~~~~~~~~~~
+
+- Requires same ``io_ring_ctx`` for all operations
+- May require manual buffer management in fallback cases
+- io_ring_ctx buffer table has a max size of 16K, which may not be enough
+  in case that too many ublk devices are handled by this single io_ring_ctx
+  and each one has very large queue depth
+
+Shared Memory Zero Copy (UBLK_F_SHMEM_ZC)
+------------------------------------------
+
+The ``UBLK_F_SHMEM_ZC`` feature provides an alternative zero-copy path
+that works by sharing physical memory pages between the client application
+and the ublk server. Unlike the io_uring fixed buffer approach above,
+shared memory zero copy does not require io_uring buffer registration
+per I/O — instead, it relies on the kernel matching physical pages
+at I/O time. This allows the ublk server to access the shared
+buffer directly, which is unlikely for the io_uring fixed buffer
+approach.
+
+Motivation
+~~~~~~~~~~
+
+Shared memory zero copy takes a different approach: if the client
+application and the ublk server both map the same physical memory, there is
+nothing to copy. The kernel detects the shared pages automatically and
+tells the server where the data already lives.
+
+``UBLK_F_SHMEM_ZC`` can be thought of as a supplement for optimized client
+applications — when the client is willing to allocate I/O buffers from
+shared memory, the entire data path becomes zero-copy.
+
+Use Cases
+~~~~~~~~~
+
+This feature is useful when the client application can be configured to
+use a specific shared memory region for its I/O buffers:
+
+- **Custom storage clients** that allocate I/O buffers from shared memory
+  (memfd, hugetlbfs) and issue direct I/O to the ublk device
+- **Database engines** that use pre-allocated buffer pools with O_DIRECT
+
+How It Works
+~~~~~~~~~~~~
+
+1. The ublk server and client both ``mmap()`` the same file (memfd or
+   hugetlbfs) with ``MAP_SHARED``. This gives both processes access to the
+   same physical pages.
+
+2. The ublk server registers its mapping with the kernel::
+
+     struct ublk_shmem_buf_reg buf = { .addr = mmap_va, .len = size };
+     ublk_ctrl_cmd(UBLK_U_CMD_REG_BUF, .addr = &buf);
+
+   The kernel pins the pages and builds a PFN lookup tree.
+
+3. When the client issues direct I/O (``O_DIRECT``) to ``/dev/ublkb*``,
+   the kernel checks whether the I/O buffer pages match any registered
+   pages by comparing PFNs.
+
+4. On a match, the kernel sets ``UBLK_IO_F_SHMEM_ZC`` in the I/O
+   descriptor and encodes the buffer index and offset in ``addr``::
+
+     if (iod->op_flags & UBLK_IO_F_SHMEM_ZC) {
+         /* Data is already in our shared mapping — zero copy */
+         index  = ublk_shmem_zc_index(iod->addr);
+         offset = ublk_shmem_zc_offset(iod->addr);
+         buf = shmem_table[index].mmap_base + offset;
+     }
+
+5. If pages do not match (e.g., the client used a non-shared buffer),
+   the I/O falls back to the normal copy path silently.
+
+The shared memory can be set up via two methods:
+
+- **Socket-based**: the client sends a memfd to the ublk server via
+  ``SCM_RIGHTS`` on a unix socket. The server mmaps and registers it.
+- **Hugetlbfs-based**: both processes ``mmap(MAP_SHARED)`` the same
+  hugetlbfs file. No IPC needed — same file gives same physical pages.
+
+Advantages
+~~~~~~~~~~
+
+- **Simple**: no per-I/O buffer registration or unregistration commands.
+  Once the shared buffer is registered, all matching I/O is zero-copy
+  automatically.
+- **Direct buffer access**: the ublk server can read and write the shared
+  buffer directly via its own mmap, without going through io_uring fixed
+  buffer operations. This is more friendly for server implementations.
+- **Fast**: PFN matching is a single maple tree lookup per bvec. No
+  io_uring command round-trips for buffer management.
+- **Compatible**: non-matching I/O silently falls back to the copy path.
+  The device works normally for any client, with zero-copy as an
+  optimization when shared memory is available.
+
+Limitations
+~~~~~~~~~~~
+
+- **Requires client cooperation**: the client must allocate its I/O
+  buffers from the shared memory region. This requires a custom or
+  configured client — standard applications using their own buffers
+  will not benefit.
+- **Direct I/O only**: buffered I/O (without ``O_DIRECT``) goes through
+  the page cache, which allocates its own pages. These kernel-allocated
+  pages will never match the registered shared buffer. Only ``O_DIRECT``
+  puts the client's buffer pages directly into the block I/O.
+- **Contiguous data only**: each I/O request's data must be contiguous
+  within a single registered buffer. Scatter/gather I/O that spans
+  multiple non-adjacent registered buffers cannot use the zero-copy path.
+
+Control Commands
+~~~~~~~~~~~~~~~~
+
+- ``UBLK_U_CMD_REG_BUF``
+
+  Register a shared memory buffer. ``ctrl_cmd.addr`` points to a
+  ``struct ublk_shmem_buf_reg`` containing the buffer virtual address and size.
+  Returns the assigned buffer index (>= 0) on success. The kernel pins
+  pages and builds the PFN lookup tree. Queue freeze is handled
+  internally.
+
+- ``UBLK_U_CMD_UNREG_BUF``
+
+  Unregister a previously registered buffer. ``ctrl_cmd.data[0]`` is the
+  buffer index. Unpins pages and removes PFN entries from the lookup
+  tree.
 
 References
 ==========
@@ -332,5 +614,3 @@ References
 .. [#userspace_nbdublk] https://gitlab.com/rwmjones/libnbd/-/tree/nbdublk
 
 .. [#userspace_readme] https://github.com/ming1/ubdsrv/blob/master/README
-
-.. [#xiaoguang] https://lore.kernel.org/linux-block/YoOr6jBfgVm8GvWg@stefanha-x1.localdomain/

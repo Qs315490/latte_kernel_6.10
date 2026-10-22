@@ -158,7 +158,7 @@ static void sdhci_set_card_detection(struct sdhci_host *host, bool enable)
 	u32 present;
 
 	if ((host->quirks & SDHCI_QUIRK_BROKEN_CARD_DETECTION) ||
-	    !mmc_card_is_removable(host->mmc) || mmc_can_gpio_cd(host->mmc))
+	    !mmc_card_is_removable(host->mmc) || mmc_host_can_gpio_cd(host->mmc))
 		return;
 
 	if (enable) {
@@ -517,9 +517,9 @@ EXPORT_SYMBOL_GPL(sdhci_mod_timer);
 static void sdhci_del_timer(struct sdhci_host *host, struct mmc_request *mrq)
 {
 	if (sdhci_data_line_cmd(mrq->cmd))
-		del_timer(&host->data_timer);
+		timer_delete(&host->data_timer);
 	else
-		del_timer(&host->timer);
+		timer_delete(&host->timer);
 }
 
 static inline bool sdhci_has_requests(struct sdhci_host *host)
@@ -2367,23 +2367,6 @@ void sdhci_set_ios_common(struct mmc_host *mmc, struct mmc_ios *ios)
 		(ios->power_mode == MMC_POWER_UP) &&
 		!(host->quirks2 & SDHCI_QUIRK2_PRESET_VALUE_BROKEN))
 		sdhci_enable_preset_value(host, false);
-
-	if (!ios->clock || ios->clock != host->clock) {
-		host->ops->set_clock(host, ios->clock);
-		host->clock = ios->clock;
-
-		if (host->quirks & SDHCI_QUIRK_DATA_TIMEOUT_USES_SDCLK &&
-		    host->clock) {
-			host->timeout_clk = mmc->actual_clock ?
-						mmc->actual_clock / 1000 :
-						host->clock / 1000;
-			mmc->max_busy_timeout =
-				host->ops->get_max_timeout_count ?
-				host->ops->get_max_timeout_count(host) :
-				1 << 27;
-			mmc->max_busy_timeout /= host->timeout_clk;
-		}
-	}
 }
 EXPORT_SYMBOL_GPL(sdhci_set_ios_common);
 
@@ -2409,6 +2392,23 @@ void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	turning_on_clk = ios->clock != host->clock && ios->clock && !host->clock;
 
 	sdhci_set_ios_common(mmc, ios);
+
+	if (!ios->clock || ios->clock != host->clock) {
+		host->ops->set_clock(host, ios->clock);
+		host->clock = ios->clock;
+
+		if (host->quirks & SDHCI_QUIRK_DATA_TIMEOUT_USES_SDCLK &&
+		    host->clock) {
+			host->timeout_clk = mmc->actual_clock ?
+						mmc->actual_clock / 1000 :
+						host->clock / 1000;
+			mmc->max_busy_timeout =
+				host->ops->get_max_timeout_count ?
+				host->ops->get_max_timeout_count(host) :
+				1 << 27;
+			mmc->max_busy_timeout /= host->timeout_clk;
+		}
+	}
 
 	if (host->ops->set_power)
 		host->ops->set_power(host, ios->power_mode, ios->vdd);
@@ -2566,7 +2566,7 @@ int sdhci_get_ro(struct mmc_host *mmc)
 		is_readonly = 0;
 	} else if (host->ops->get_ro) {
 		is_readonly = host->ops->get_ro(host);
-	} else if (mmc_can_gpio_ro(mmc)) {
+	} else if (mmc_host_can_gpio_ro(mmc)) {
 		is_readonly = mmc_gpio_get_ro(mmc);
 		/* Do not invert twice */
 		allow_invert = !(mmc->caps2 & MMC_CAP2_RO_ACTIVE_HIGH);
@@ -3240,7 +3240,7 @@ static void sdhci_timeout_timer(struct timer_list *t)
 	struct sdhci_host *host;
 	unsigned long flags;
 
-	host = from_timer(host, t, timer);
+	host = timer_container_of(host, t, timer);
 
 	spin_lock_irqsave(&host->lock, flags);
 
@@ -3262,7 +3262,7 @@ static void sdhci_timeout_data_timer(struct timer_list *t)
 	struct sdhci_host *host;
 	unsigned long flags;
 
-	host = from_timer(host, t, data_timer);
+	host = timer_container_of(host, t, data_timer);
 
 	spin_lock_irqsave(&host->lock, flags);
 
@@ -3739,7 +3739,7 @@ static bool sdhci_cd_irq_can_wakeup(struct sdhci_host *host)
 {
 	return mmc_card_is_removable(host->mmc) &&
 	       !(host->quirks & SDHCI_QUIRK_BROKEN_CARD_DETECTION) &&
-	       !mmc_can_gpio_cd(host->mmc);
+	       !mmc_host_can_gpio_cd(host->mmc);
 }
 
 /*
@@ -3750,7 +3750,7 @@ static bool sdhci_cd_irq_can_wakeup(struct sdhci_host *host)
  * sdhci_disable_irq_wakeups() since it will be set by
  * sdhci_enable_card_detection() or sdhci_init().
  */
-static bool sdhci_enable_irq_wakeups(struct sdhci_host *host)
+bool sdhci_enable_irq_wakeups(struct sdhci_host *host)
 {
 	u8 mask = SDHCI_WAKE_ON_INSERT | SDHCI_WAKE_ON_REMOVE |
 		  SDHCI_WAKE_ON_INT;
@@ -3782,8 +3782,9 @@ static bool sdhci_enable_irq_wakeups(struct sdhci_host *host)
 
 	return host->irq_wake_enabled;
 }
+EXPORT_SYMBOL_GPL(sdhci_enable_irq_wakeups);
 
-static void sdhci_disable_irq_wakeups(struct sdhci_host *host)
+void sdhci_disable_irq_wakeups(struct sdhci_host *host)
 {
 	u8 val;
 	u8 mask = SDHCI_WAKE_ON_INSERT | SDHCI_WAKE_ON_REMOVE
@@ -3797,6 +3798,7 @@ static void sdhci_disable_irq_wakeups(struct sdhci_host *host)
 
 	host->irq_wake_enabled = false;
 }
+EXPORT_SYMBOL_GPL(sdhci_disable_irq_wakeups);
 
 int sdhci_suspend_host(struct sdhci_host *host)
 {
@@ -3834,6 +3836,7 @@ int sdhci_resume_host(struct sdhci_host *host)
 		host->pwr = 0;
 		host->clock = 0;
 		host->reinit_uhs = true;
+		mmc->ops->start_signal_voltage_switch(mmc, &mmc->ios);
 		mmc->ops->set_ios(mmc, &mmc->ios);
 	} else {
 		sdhci_init(host, (mmc->pm_flags & MMC_PM_KEEP_POWER));
@@ -3856,7 +3859,7 @@ int sdhci_resume_host(struct sdhci_host *host)
 
 EXPORT_SYMBOL_GPL(sdhci_resume_host);
 
-int sdhci_runtime_suspend_host(struct sdhci_host *host)
+void sdhci_runtime_suspend_host(struct sdhci_host *host)
 {
 	unsigned long flags;
 
@@ -3873,12 +3876,10 @@ int sdhci_runtime_suspend_host(struct sdhci_host *host)
 	spin_lock_irqsave(&host->lock, flags);
 	host->runtime_suspended = true;
 	spin_unlock_irqrestore(&host->lock, flags);
-
-	return 0;
 }
 EXPORT_SYMBOL_GPL(sdhci_runtime_suspend_host);
 
-int sdhci_runtime_resume_host(struct sdhci_host *host, int soft_reset)
+void sdhci_runtime_resume_host(struct sdhci_host *host, int soft_reset)
 {
 	struct mmc_host *mmc = host->mmc;
 	unsigned long flags;
@@ -3924,8 +3925,6 @@ int sdhci_runtime_resume_host(struct sdhci_host *host, int soft_reset)
 	sdhci_enable_card_detection(host);
 
 	spin_unlock_irqrestore(&host->lock, flags);
-
-	return 0;
 }
 EXPORT_SYMBOL_GPL(sdhci_runtime_resume_host);
 
@@ -4069,7 +4068,7 @@ struct sdhci_host *sdhci_alloc_host(struct device *dev,
 
 	WARN_ON(dev == NULL);
 
-	mmc = mmc_alloc_host(sizeof(struct sdhci_host) + priv_size, dev);
+	mmc = devm_mmc_alloc_host(dev, sizeof(struct sdhci_host) + priv_size);
 	if (!mmc)
 		return ERR_PTR(-ENOMEM);
 
@@ -4188,6 +4187,14 @@ void __sdhci_read_caps(struct sdhci_host *host, const u16 *ver,
 }
 EXPORT_SYMBOL_GPL(__sdhci_read_caps);
 
+static void sdhci_unmap_bounce_buffer(void *data)
+{
+	struct sdhci_host *host = data;
+
+	dma_unmap_single(mmc_dev(host->mmc), host->bounce_addr,
+			 host->bounce_buffer_size, DMA_BIDIRECTIONAL);
+}
+
 static void sdhci_allocate_bounce_buffer(struct sdhci_host *host)
 {
 	struct mmc_host *mmc = host->mmc;
@@ -4195,6 +4202,12 @@ static void sdhci_allocate_bounce_buffer(struct sdhci_host *host)
 	unsigned int bounce_size;
 	int ret;
 
+	/* Drivers may have already allocated the buffer */
+	if (host->bounce_buffer) {
+		bounce_size = host->bounce_buffer_size;
+		max_blocks = bounce_size / 512;
+		goto out;
+	}
 	/*
 	 * Cap the bounce buffer at 64KB. Using a bigger bounce buffer
 	 * has diminishing returns, this is probably because SD/MMC
@@ -4242,7 +4255,16 @@ static void sdhci_allocate_bounce_buffer(struct sdhci_host *host)
 	}
 
 	host->bounce_buffer_size = bounce_size;
+	ret = devm_add_action_or_reset(mmc_dev(mmc),
+				       sdhci_unmap_bounce_buffer, host);
+	if (ret) {
+		devm_kfree(mmc_dev(mmc), host->bounce_buffer);
+		host->bounce_buffer = NULL;
+		host->bounce_buffer_size = 0;
+		return;
+	}
 
+out:
 	/* Lie about this since we're bouncing */
 	mmc->max_segs = max_blocks;
 	mmc->max_seg_size = bounce_size;
@@ -4534,8 +4556,15 @@ int sdhci_setup_host(struct sdhci_host *host)
 	 * their platform code before calling sdhci_add_host(), and we
 	 * won't assume 8-bit width for hosts without that CAP.
 	 */
-	if (!(host->quirks & SDHCI_QUIRK_FORCE_1_BIT_DATA))
+	if (host->quirks & SDHCI_QUIRK_FORCE_1_BIT_DATA) {
+		host->caps1 &= ~(SDHCI_SUPPORT_SDR104 | SDHCI_SUPPORT_SDR50 | SDHCI_SUPPORT_DDR50);
+		if (host->quirks2 & SDHCI_QUIRK2_CAPS_BIT63_FOR_HS400)
+			host->caps1 &= ~SDHCI_SUPPORT_HS400;
+		mmc->caps2 &= ~(MMC_CAP2_HS200 | MMC_CAP2_HS400 | MMC_CAP2_HS400_ES);
+		mmc->caps &= ~(MMC_CAP_DDR | MMC_CAP_UHS);
+	} else {
 		mmc->caps |= MMC_CAP_4_BIT_DATA;
+	}
 
 	if (host->quirks2 & SDHCI_QUIRK2_HOST_NO_CMD23)
 		mmc->caps &= ~MMC_CAP_CMD23;
@@ -4971,8 +5000,8 @@ void sdhci_remove_host(struct sdhci_host *host, int dead)
 	sdhci_writel(host, 0, SDHCI_SIGNAL_ENABLE);
 	free_irq(host->irq, host);
 
-	del_timer_sync(&host->timer);
-	del_timer_sync(&host->data_timer);
+	timer_delete_sync(&host->timer);
+	timer_delete_sync(&host->data_timer);
 
 	destroy_workqueue(host->complete_wq);
 
@@ -4993,34 +5022,11 @@ void sdhci_remove_host(struct sdhci_host *host, int dead)
 
 EXPORT_SYMBOL_GPL(sdhci_remove_host);
 
-void sdhci_free_host(struct sdhci_host *host)
-{
-	mmc_free_host(host->mmc);
-}
-
-EXPORT_SYMBOL_GPL(sdhci_free_host);
-
 /*****************************************************************************\
  *                                                                           *
  * Driver init/exit                                                          *
  *                                                                           *
 \*****************************************************************************/
-
-static int __init sdhci_drv_init(void)
-{
-	pr_info(DRIVER_NAME
-		": Secure Digital Host Controller Interface driver\n");
-	pr_info(DRIVER_NAME ": Copyright(c) Pierre Ossman\n");
-
-	return 0;
-}
-
-static void __exit sdhci_drv_exit(void)
-{
-}
-
-module_init(sdhci_drv_init);
-module_exit(sdhci_drv_exit);
 
 module_param(debug_quirks, uint, 0444);
 module_param(debug_quirks2, uint, 0444);

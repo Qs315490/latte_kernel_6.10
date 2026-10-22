@@ -42,12 +42,24 @@ config NET_DSA_TAG_BRCM
 	  Broadcom switches which place the tag after the MAC source address.
 
 config NET_DSA_TAG_BRCM_LEGACY
-	tristate "Tag driver for Broadcom legacy switches using in-frame headers"
+	tristate "Tag driver for BCM63xx legacy switches using in-frame headers"
 	select NET_DSA_TAG_BRCM_COMMON
 	help
 	  Say Y if you want to enable support for tagging frames for the
-	  Broadcom legacy switches which place the tag after the MAC source
+	  BCM63xx legacy switches which place the tag after the MAC source
 	  address.
+	  This tag is used in BCM63xx legacy switches which work without the
+	  original FCS and length before the tag insertion.
+
+config NET_DSA_TAG_BRCM_LEGACY_FCS
+	tristate "Tag driver for BCM53xx legacy switches using in-frame headers"
+	select NET_DSA_TAG_BRCM_COMMON
+	help
+	  Say Y if you want to enable support for tagging frames for the
+	  BCM53xx legacy switches which place the tag after the MAC source
+	  address.
+	  This tag is used in BCM53xx legacy switches which expect original
+	  FCS and length before the tag insertion to be present.
 
 config NET_DSA_TAG_BRCM_PREPEND
 	tristate "Tag driver for Broadcom switches using prepended headers"
@@ -92,11 +104,36 @@ config NET_DSA_TAG_MTK
 	  Say Y or M if you want to enable support for tagging frames for
 	  Mediatek switches.
 
+config NET_DSA_TAG_MXL_862XX
+	tristate "Tag driver for MaxLinear MxL862xx switches"
+	help
+	  Say Y or M if you want to enable support for tagging frames for the
+	  MaxLinear MxL86252 and MxL86282 switches using their native 8-byte
+	  tagging protocol.
+
+config NET_DSA_TAG_MXL_GSW1XX
+	tristate "Tag driver for MaxLinear GSW1xx switches"
+	help
+	  The GSW1xx family of switches supports an 8-byte special tag which
+	  can be used on the CPU port of the switch.
+	  Say Y or M if you want to enable support for tagging frames for
+	  MaxLinear GSW1xx switches.
+
 config NET_DSA_TAG_KSZ
 	tristate "Tag driver for Microchip 8795/937x/9477/9893 families of switches"
 	help
 	  Say Y if you want to enable support for tagging frames for the
 	  Microchip 8795/937x/9477/9893 families of switches.
+
+config NET_DSA_TAG_NETC
+	tristate "Tag driver for NXP NETC switches"
+	help
+	  Say Y or M if you want to enable support for the NXP Switch Tag (NST),
+	  as implemented by NXP NETC switches having version 4.3 or later. The
+	  switch tag is a proprietary header added to frames after the source
+	  MAC address, it has 3 types and each type has different subtypes, so
+	  its length depends on the type and subtype of the tag, the maximum
+	  length is 14 bytes.
 
 config NET_DSA_TAG_OCELOT
 	tristate "Tag driver for Ocelot family of switches, using NPI port"
@@ -177,5 +214,11 @@ config NET_DSA_TAG_XRS700X
 	help
 	  Say Y or M if you want to enable support for tagging frames for
 	  Arrow SpeedChips XRS700x switches that use a single byte tag trailer.
+
+config NET_DSA_TAG_YT921X
+	tristate "Tag driver for Motorcomm YT921x switches"
+	help
+	  Say Y or M if you want to enable support for tagging frames for
+	  Motorcomm YT921x switches.
 
 endif

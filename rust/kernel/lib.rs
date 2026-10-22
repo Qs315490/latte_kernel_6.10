@@ -12,18 +12,23 @@
 //! do so first instead of bypassing this crate.
 
 #![no_std]
+//
+// Please see https://github.com/Rust-for-Linux/linux/issues/2 for details on
+// the unstable features in use.
+//
+// Stable since Rust 1.89.0.
+#![feature(generic_arg_infer)]
+//
+// Expected to become stable.
 #![feature(arbitrary_self_types)]
-#![cfg_attr(CONFIG_RUSTC_HAS_COERCE_POINTEE, feature(derive_coerce_pointee))]
-#![cfg_attr(not(CONFIG_RUSTC_HAS_COERCE_POINTEE), feature(coerce_unsized))]
-#![cfg_attr(not(CONFIG_RUSTC_HAS_COERCE_POINTEE), feature(dispatch_from_dyn))]
-#![cfg_attr(not(CONFIG_RUSTC_HAS_COERCE_POINTEE), feature(unsize))]
-#![feature(inline_const)]
-#![feature(lint_reasons)]
-// Stable in Rust 1.83
-#![feature(const_maybe_uninit_as_mut_ptr)]
-#![feature(const_mut_refs)]
-#![feature(const_ptr_write)]
-#![feature(const_refs_to_cell)]
+#![feature(derive_coerce_pointee)]
+//
+// To be determined.
+#![feature(used_with_arg)]
+//
+// `feature(file_with_nul)` is stable since Rust 1.92.0. Before Rust 1.89.0, it did not exist, so
+// enable it conditionally.
+#![cfg_attr(CONFIG_RUSTC_HAS_FILE_WITH_NUL, feature(file_with_nul))]
 
 // Ensure conditional compilation based on the kernel configuration works;
 // otherwise we may silently break things like initcall handling.
@@ -35,32 +40,67 @@ extern crate self as kernel;
 
 pub use ffi;
 
+pub mod acpi;
 pub mod alloc;
+#[cfg(CONFIG_AUXILIARY_BUS)]
+pub mod auxiliary;
+pub mod bitfield;
+pub mod bitmap;
+pub mod bits;
 #[cfg(CONFIG_BLOCK)]
 pub mod block;
-#[doc(hidden)]
+pub mod bug;
 pub mod build_assert;
+pub mod clk;
+#[cfg(CONFIG_CONFIGFS_FS)]
+pub mod configfs;
+pub mod cpu;
+#[cfg(CONFIG_CPU_FREQ)]
+pub mod cpufreq;
+pub mod cpumask;
 pub mod cred;
+pub mod debugfs;
 pub mod device;
 pub mod device_id;
 pub mod devres;
+pub mod dma;
 pub mod driver;
+#[cfg(CONFIG_DRM = "y")]
+pub mod drm;
 pub mod error;
 pub mod faux;
 #[cfg(CONFIG_RUST_FW_LOADER_ABSTRACTIONS)]
 pub mod firmware;
+pub mod fmt;
 pub mod fs;
+#[cfg(CONFIG_GPU_BUDDY = "y")]
+pub mod gpu;
+#[cfg(CONFIG_I2C = "y")]
+pub mod i2c;
+pub mod id_pool;
+#[doc(hidden)]
+pub mod impl_flags;
 pub mod init;
+pub mod interop;
 pub mod io;
 pub mod ioctl;
+pub mod iommu;
+pub mod iov;
+pub mod irq;
 pub mod jump_label;
 #[cfg(CONFIG_KUNIT)]
 pub mod kunit;
 pub mod list;
+pub mod maple_tree;
 pub mod miscdevice;
+pub mod mm;
+pub mod module_param;
 #[cfg(CONFIG_NET)]
 pub mod net;
+pub mod num;
 pub mod of;
+#[cfg(CONFIG_PM_OPP)]
+pub mod opp;
 pub mod page;
 #[cfg(CONFIG_PCI)]
 pub mod pci;
@@ -68,12 +108,20 @@ pub mod pid_namespace;
 pub mod platform;
 pub mod prelude;
 pub mod print;
+pub mod processor;
+pub mod ptr;
+#[cfg(CONFIG_RUST_PWM_ABSTRACTIONS)]
+pub mod pwm;
 pub mod rbtree;
+pub mod regulator;
 pub mod revocable;
+pub mod safety;
+pub mod scatterlist;
 pub mod security;
 pub mod seq_file;
 pub mod sizes;
-mod static_assert;
+#[cfg(CONFIG_SOC_BUS)]
+pub mod soc;
 #[doc(hidden)]
 pub mod std_vendor;
 pub mod str;
@@ -84,7 +132,10 @@ pub mod tracepoint;
 pub mod transmute;
 pub mod types;
 pub mod uaccess;
+#[cfg(CONFIG_USB = "y")]
+pub mod usb;
 pub mod workqueue;
+pub mod xarray;
 
 #[doc(hidden)]
 pub use bindings;
@@ -112,11 +163,11 @@ pub trait InPlaceModule: Sync + Send {
     /// Creates an initialiser for the module.
     ///
     /// It is called when the module is loaded.
-    fn init(module: &'static ThisModule) -> impl init::PinInit<Self, error::Error>;
+    fn init(module: &'static ThisModule) -> impl pin_init::PinInit<Self, error::Error>;
 }
 
 impl<T: Module> InPlaceModule for T {
-    fn init(module: &'static ThisModule) -> impl init::PinInit<Self, error::Error> {
+    fn init(module: &'static ThisModule) -> impl pin_init::PinInit<Self, error::Error> {
         let initer = move |slot: *mut Self| {
             let m = <Self as Module>::init(module)?;
 
@@ -126,7 +177,7 @@ impl<T: Module> InPlaceModule for T {
         };
 
         // SAFETY: On success, `initer` always fully initialises an instance of `Self`.
-        unsafe { init::pin_init_from_closure(initer) }
+        unsafe { pin_init::pin_init_from_closure(initer) }
     }
 }
 
@@ -162,7 +213,7 @@ impl ThisModule {
     }
 }
 
-#[cfg(not(any(testlib, test)))]
+#[cfg(not(testlib))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     pr_emerg!("{}\n", info);
@@ -171,6 +222,13 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 /// Produces a pointer to an object from a pointer to one of its fields.
+///
+/// If you encounter a type mismatch due to the [`Opaque`] type, then use [`Opaque::cast_into`] or
+/// [`Opaque::cast_from`] to resolve the mismatch.
+///
+/// [`Opaque`]: crate::types::Opaque
+/// [`Opaque::cast_into`]: crate::types::Opaque::cast_into
+/// [`Opaque::cast_from`]: crate::types::Opaque::cast_from
 ///
 /// # Safety
 ///
@@ -187,7 +245,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 /// }
 ///
 /// let test = Test { a: 10, b: 20 };
-/// let b_ptr = &test.b;
+/// let b_ptr: *const _ = &test.b;
 /// // SAFETY: The pointer points at the `b` field of a `Test`, so the resulting pointer will be
 /// // in-bounds of the same allocation as `b_ptr`.
 /// let test_alias = unsafe { container_of!(b_ptr, Test, b) };
@@ -195,12 +253,18 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 /// ```
 #[macro_export]
 macro_rules! container_of {
-    ($ptr:expr, $type:ty, $($f:tt)*) => {{
-        let ptr = $ptr as *const _ as *const u8;
-        let offset: usize = ::core::mem::offset_of!($type, $($f)*);
-        ptr.sub(offset) as *const $type
+    ($field_ptr:expr, $Container:ty, $($fields:tt)*) => {{
+        let offset: usize = ::core::mem::offset_of!($Container, $($fields)*);
+        let field_ptr = $field_ptr;
+        let container_ptr = field_ptr.byte_sub(offset).cast::<$Container>();
+        $crate::assert_same_type(field_ptr, (&raw const (*container_ptr).$($fields)*).cast_mut());
+        container_ptr
     }}
 }
+
+/// Helper for [`container_of!`].
+#[doc(hidden)]
+pub fn assert_same_type<T>(_: T, _: T) {}
 
 /// Helper for `.rs.S` files.
 #[doc(hidden)]
@@ -235,4 +299,53 @@ macro_rules! asm {
     ($($asm:expr),* ; $($rest:tt)*) => {
         ::core::arch::asm!( $($asm)*, $($rest)* )
     };
+}
+
+/// Gets the C string file name of a [`Location`].
+///
+/// If `Location::file_as_c_str()` is not available, returns a string that warns about it.
+///
+/// [`Location`]: core::panic::Location
+///
+/// # Examples
+///
+/// ```
+/// # use kernel::file_from_location;
+///
+/// #[track_caller]
+/// fn foo() {
+///     let caller = core::panic::Location::caller();
+///
+///     // Output:
+///     // - A path like "rust/kernel/example.rs" if `file_as_c_str()` is available.
+///     // - "<Location::file_as_c_str() not supported>" otherwise.
+///     let caller_file = file_from_location(caller);
+///
+///     // Prints out the message with caller's file name.
+///     pr_info!("foo() called in file {caller_file:?}\n");
+///
+///     # if cfg!(CONFIG_RUSTC_HAS_FILE_WITH_NUL) {
+///     #     assert_eq!(Ok(caller.file()), caller_file.to_str());
+///     # }
+/// }
+///
+/// # foo();
+/// ```
+#[inline]
+pub fn file_from_location<'a>(loc: &'a core::panic::Location<'a>) -> &'a core::ffi::CStr {
+    #[cfg(CONFIG_RUSTC_HAS_FILE_AS_C_STR)]
+    {
+        loc.file_as_c_str()
+    }
+
+    #[cfg(all(CONFIG_RUSTC_HAS_FILE_WITH_NUL, not(CONFIG_RUSTC_HAS_FILE_AS_C_STR)))]
+    {
+        loc.file_with_nul()
+    }
+
+    #[cfg(not(CONFIG_RUSTC_HAS_FILE_WITH_NUL))]
+    {
+        let _ = loc;
+        c"<Location::file_as_c_str() not supported>"
+    }
 }

@@ -20,6 +20,7 @@
 #include <asm/setup.h>
 #include <asm/idtentry.h>
 #include <asm/hypervisor.h>
+#include <asm/cpuid/api.h>
 #include <asm/e820/api.h>
 #include <asm/early_ioremap.h>
 
@@ -125,7 +126,7 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_xen_hvm_callback)
 	if (xen_percpu_upcall)
 		apic_eoi();
 
-	inc_irq_stat(irq_hv_callback_count);
+	inc_irq_stat(HYPERVISOR_CALLBACK);
 
 	xen_evtchn_do_upcall();
 
@@ -151,6 +152,7 @@ static void xen_hvm_crash_shutdown(struct pt_regs *regs)
 
 static int xen_cpu_up_prepare_hvm(unsigned int cpu)
 {
+	u32 cpu_uid;
 	int rc = 0;
 
 	/*
@@ -161,8 +163,8 @@ static int xen_cpu_up_prepare_hvm(unsigned int cpu)
 	 */
 	xen_uninit_lock_cpu(cpu);
 
-	if (cpu_acpi_id(cpu) != CPU_ACPIID_INVALID)
-		per_cpu(xen_vcpu_id, cpu) = cpu_acpi_id(cpu);
+	if (acpi_get_cpu_uid(cpu, &cpu_uid) == 0)
+		per_cpu(xen_vcpu_id, cpu) = cpu_uid;
 	else
 		per_cpu(xen_vcpu_id, cpu) = cpu;
 	xen_vcpu_setup(cpu);

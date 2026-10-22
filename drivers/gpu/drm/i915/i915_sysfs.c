@@ -30,6 +30,8 @@
 #include <linux/stat.h>
 #include <linux/sysfs.h>
 
+#include <drm/drm_print.h>
+
 #include "gt/intel_gt_regs.h"
 #include "gt/intel_rc6.h"
 #include "gt/intel_rps.h"
@@ -60,7 +62,7 @@ static int l3_access_valid(struct drm_i915_private *i915, loff_t offset)
 
 static ssize_t
 i915_l3_read(struct file *filp, struct kobject *kobj,
-	     struct bin_attribute *attr, char *buf,
+	     const struct bin_attribute *attr, char *buf,
 	     loff_t offset, size_t count)
 {
 	struct device *kdev = kobj_to_dev(kobj);
@@ -88,7 +90,7 @@ i915_l3_read(struct file *filp, struct kobject *kobj,
 
 static ssize_t
 i915_l3_write(struct file *filp, struct kobject *kobj,
-	      struct bin_attribute *attr, char *buf,
+	      const struct bin_attribute *attr, char *buf,
 	      loff_t offset, size_t count)
 {
 	struct device *kdev = kobj_to_dev(kobj);

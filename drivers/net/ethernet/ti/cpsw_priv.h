@@ -391,6 +391,7 @@ struct cpsw_priv {
 	u32 tx_packet_min;
 	struct cpsw_ale_ratelimit ale_bc_ratelimit;
 	struct cpsw_ale_ratelimit ale_mc_ratelimit;
+	struct work_struct rx_mode_work;
 };
 
 #define ndev_to_cpsw(ndev) (((struct cpsw_priv *)netdev_priv(ndev))->cpsw)
@@ -457,11 +458,10 @@ int cpsw_tx_poll(struct napi_struct *napi_tx, int budget);
 int cpsw_rx_mq_poll(struct napi_struct *napi_rx, int budget);
 int cpsw_rx_poll(struct napi_struct *napi_rx, int budget);
 void cpsw_rx_vlan_encap(struct sk_buff *skb);
-void soft_reset(const char *module, void __iomem *reg);
+void cpsw_soft_reset(const char *module, void __iomem *reg);
 void cpsw_set_slave_mac(struct cpsw_slave *slave, struct cpsw_priv *priv);
 void cpsw_ndo_tx_timeout(struct net_device *ndev, unsigned int txqueue);
 int cpsw_need_resplit(struct cpsw_common *cpsw);
-int cpsw_ndo_ioctl(struct net_device *dev, struct ifreq *req, int cmd);
 int cpsw_ndo_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate);
 int cpsw_ndo_setup_tc(struct net_device *ndev, enum tc_setup_type type,
 		      void *type_data);
@@ -469,6 +469,11 @@ bool cpsw_shp_is_off(struct cpsw_priv *priv);
 void cpsw_cbs_resume(struct cpsw_slave *slave, struct cpsw_priv *priv);
 void cpsw_mqprio_resume(struct cpsw_slave *slave, struct cpsw_priv *priv);
 void cpsw_qos_clsflower_resume(struct cpsw_priv *priv);
+int cpsw_hwtstamp_get(struct net_device *dev,
+		      struct kernel_hwtstamp_config *cfg);
+int cpsw_hwtstamp_set(struct net_device *dev,
+		      struct kernel_hwtstamp_config *cfg,
+		      struct netlink_ext_ack *extack);
 
 /* ethtool */
 u32 cpsw_get_msglevel(struct net_device *ndev);

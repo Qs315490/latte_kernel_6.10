@@ -76,7 +76,7 @@ Don't use commas to avoid using braces:
 	if (condition)
 		do_this(), do_that();
 
-Always uses braces for multiple statements:
+Always use braces for multiple statements:
 
 .. code-block:: c
 
@@ -614,7 +614,10 @@ it.
 
 When commenting the kernel API functions, please use the kernel-doc format.
 See the files at :ref:`Documentation/doc-guide/ <doc_guide>` and
-``scripts/kernel-doc`` for details.
+``tools/docs/kernel-doc`` for details. Note that the danger of over-commenting
+applies to kernel-doc comments all the same. Do not add boilerplate
+kernel-doc which simply reiterates what's obvious from the signature
+of the function.
 
 The preferred style for long (multi-line) comments is:
 
@@ -933,7 +936,7 @@ used.
 ---------------------
 
 The kernel provides the following general purpose memory allocators:
-kmalloc(), kzalloc(), kmalloc_array(), kcalloc(), vmalloc(), and
+kmalloc(), kzalloc(), kmalloc_objs(), kzalloc_objs(), vmalloc(), and
 vzalloc().  Please refer to the API documentation for further information
 about them.  :ref:`Documentation/core-api/memory-allocation.rst
 <memory_allocation>`
@@ -942,7 +945,7 @@ The preferred form for passing a size of a struct is the following:
 
 .. code-block:: c
 
-	p = kmalloc(sizeof(*p), ...);
+	p = kmalloc_obj(*p, ...);
 
 The alternative form where struct name is spelled out hurts readability and
 introduces an opportunity for a bug when the pointer variable type is changed
@@ -956,13 +959,13 @@ The preferred form for allocating an array is the following:
 
 .. code-block:: c
 
-	p = kmalloc_array(n, sizeof(...), ...);
+	p = kmalloc_objs(*p, n, ...);
 
 The preferred form for allocating a zeroed array is the following:
 
 .. code-block:: c
 
-	p = kcalloc(n, sizeof(...), ...);
+	p = kzalloc_objs(*p, n, ...);
 
 Both forms check for overflow on the allocation size n * sizeof(...),
 and return NULL if that occurred.
@@ -1067,7 +1070,7 @@ readability.
 18) Don't re-invent the kernel macros
 -------------------------------------
 
-The header file include/linux/kernel.h contains a number of macros that
+There are many header files in include/linux/ that contain a number of macros that
 you should use, rather than explicitly coding some variant of them yourself.
 For example, if you need to calculate the length of an array, take advantage
 of the macro
@@ -1076,14 +1079,18 @@ of the macro
 
 	#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
+which is defined in array_size.h.
+
 Similarly, if you need to calculate the size of some structure member, use
 
 .. code-block:: c
 
 	#define sizeof_field(t, f) (sizeof(((t*)0)->f))
 
-There are also min() and max() macros that do strict type checking if you
-need them.  Feel free to peruse that header file to see what else is already
+which is defined in stddef.h.
+
+There are also min() and max() macros defined in minmax.h that do strict type checking
+if you need them. Feel free to peruse the header files to see what else is already
 defined that you shouldn't reproduce in your code.
 
 

@@ -64,7 +64,7 @@
 
 #include <asm/acpi.h>
 #include <asm/cacheinfo.h>
-#include <asm/cpuid.h>
+#include <asm/cpuid/api.h>
 #include <asm/desc.h>
 #include <asm/nmi.h>
 #include <asm/irq.h>
@@ -102,9 +102,6 @@ EXPORT_PER_CPU_SYMBOL(cpu_core_map);
 /* representing HT, core, and die siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_die_map);
 EXPORT_PER_CPU_SYMBOL(cpu_die_map);
-
-/* CPUs which are the primary SMT threads */
-struct cpumask __cpu_primary_thread_mask __read_mostly;
 
 /* Representing CPUs for which sibling maps can be computed */
 static cpumask_var_t cpu_sibling_setup_mask;
@@ -190,7 +187,7 @@ static void ap_starting(void)
 	apic_ap_setup();
 
 	/* Save the processor parameters. */
-	smp_store_cpu_info(cpuid);
+	identify_secondary_cpu(cpuid);
 
 	/*
 	 * The topology information must be up to date before
@@ -215,7 +212,7 @@ static void ap_calibrate_delay(void)
 {
 	/*
 	 * Calibrate the delay loop and update loops_per_jiffy in cpu_data.
-	 * smp_store_cpu_info() stored a value that is close but not as
+	 * identify_secondary_cpu() stored a value that is close but not as
 	 * accurate as the value just calculated.
 	 *
 	 * As this is invoked after the TSC synchronization check,
@@ -229,7 +226,7 @@ static void ap_calibrate_delay(void)
 /*
  * Activate a secondary processor.
  */
-static void notrace start_secondary(void *unused)
+static void notrace __noendbr start_secondary(void *unused)
 {
 	/*
 	 * Don't put *anything* except direct CPU state initialization
@@ -314,26 +311,7 @@ static void notrace start_secondary(void *unused)
 	wmb();
 	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
 }
-
-/*
- * The bootstrap kernel entry code has set these up. Save them for
- * a given CPU
- */
-void smp_store_cpu_info(int id)
-{
-	struct cpuinfo_x86 *c = &cpu_data(id);
-
-	/* Copy boot_cpu_data only on the first bringup */
-	if (!c->initialized)
-		*c = boot_cpu_data;
-	c->cpu_index = id;
-	/*
-	 * During boot time, CPU0 has this setup already. Save the info when
-	 * bringing up an AP.
-	 */
-	identify_secondary_cpu(c);
-	c->initialized = true;
-}
+ANNOTATE_NOENDBR_SYM(start_secondary);
 
 static bool
 topology_same_node(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
@@ -446,6 +424,21 @@ static const struct x86_cpu_id intel_cod_cpu[] = {
 	{}
 };
 
+/*
+ * Allows splitting the LLC by matching 'core_id % split_llc'.
+ *
+ * This is mostly a debug hack to emulate systems with multiple LLCs per node
+ * on systems that do not naturally have this.
+ */
+static unsigned int split_llc = 0;
+
+static int __init split_llc_setup(char *str)
+{
+	get_option(&str, &split_llc);
+	return 0;
+}
+early_param("split_llc", split_llc_setup);
+
 static bool match_llc(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 {
 	const struct x86_cpu_id *id = x86_match_cpu(intel_cod_cpu);
@@ -458,6 +451,11 @@ static bool match_llc(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 
 	/* Do not match if LLC id does not match: */
 	if (per_cpu_llc_id(cpu1) != per_cpu_llc_id(cpu2))
+		return false;
+
+	if (split_llc &&
+	    (per_cpu_core_id(cpu1) % split_llc) !=
+	    (per_cpu_core_id(cpu2) % split_llc))
 		return false;
 
 	/*
@@ -490,52 +488,208 @@ static int x86_cluster_flags(void)
 }
 #endif
 
-/*
- * Set if a package/die has multiple NUMA nodes inside.
- * AMD Magny-Cours, Intel Cluster-on-Die, and Intel
- * Sub-NUMA Clustering have this.
- */
-static bool x86_has_numa_in_package;
-
-static struct sched_domain_topology_level x86_topology[6];
+static struct sched_domain_topology_level x86_topology[] = {
+	SDTL_INIT(tl_smt_mask, cpu_smt_flags, SMT),
+#ifdef CONFIG_SCHED_CLUSTER
+	SDTL_INIT(tl_cls_mask, x86_cluster_flags, CLS),
+#endif
+#ifdef CONFIG_SCHED_MC
+	SDTL_INIT(tl_mc_mask, x86_core_flags, MC),
+#endif
+	SDTL_INIT(tl_pkg_mask, x86_sched_itmt_flags, PKG),
+	{ NULL },
+};
 
 static void __init build_sched_topology(void)
 {
-	int i = 0;
+	struct sched_domain_topology_level *topology = x86_topology;
 
-#ifdef CONFIG_SCHED_SMT
-	x86_topology[i++] = (struct sched_domain_topology_level){
-		cpu_smt_mask, cpu_smt_flags, SD_INIT_NAME(SMT)
-	};
-#endif
-#ifdef CONFIG_SCHED_CLUSTER
-	x86_topology[i++] = (struct sched_domain_topology_level){
-		cpu_clustergroup_mask, x86_cluster_flags, SD_INIT_NAME(CLS)
-	};
-#endif
-#ifdef CONFIG_SCHED_MC
-	x86_topology[i++] = (struct sched_domain_topology_level){
-		cpu_coregroup_mask, x86_core_flags, SD_INIT_NAME(MC)
-	};
-#endif
 	/*
-	 * When there is NUMA topology inside the package skip the PKG domain
-	 * since the NUMA domains will auto-magically create the right spanning
-	 * domains based on the SLIT.
+	 * When there is NUMA topology inside the package invalidate the
+	 * PKG domain since the NUMA domains will auto-magically create the
+	 * right spanning domains based on the SLIT.
 	 */
-	if (!x86_has_numa_in_package) {
-		x86_topology[i++] = (struct sched_domain_topology_level){
-			cpu_cpu_mask, x86_sched_itmt_flags, SD_INIT_NAME(PKG)
-		};
+	if (topology_num_nodes_per_package() > 1) {
+		unsigned int pkgdom = ARRAY_SIZE(x86_topology) - 2;
+
+		memset(&x86_topology[pkgdom], 0, sizeof(x86_topology[pkgdom]));
 	}
 
 	/*
-	 * There must be one trailing NULL entry left.
+	 * Drop the SMT domains if there is only one thread per-core
+	 * since it'll get degenerated by the scheduler anyways.
 	 */
-	BUG_ON(i >= ARRAY_SIZE(x86_topology)-1);
+	if (cpu_smt_num_threads <= 1)
+		++topology;
 
-	set_sched_topology(x86_topology);
+	set_sched_topology(topology);
 }
+
+#ifdef CONFIG_NUMA
+/*
+ * Test if the on-trace cluster at (N,N) is symmetric.
+ * Uses upper triangle iteration to avoid obvious duplicates.
+ */
+static bool slit_cluster_symmetric(int N)
+{
+	int u = topology_num_nodes_per_package();
+
+	for (int k = 0; k < u; k++) {
+		for (int l = k; l < u; l++) {
+			if (node_distance(N + k, N + l) !=
+			    node_distance(N + l, N + k))
+				return false;
+		}
+	}
+
+	return true;
+}
+
+/*
+ * Return the package-id of the cluster, or ~0 if indeterminate.
+ * Each node in the on-trace cluster should have the same package-id.
+ */
+static u32 slit_cluster_package(int N)
+{
+	int u = topology_num_nodes_per_package();
+	u32 pkg_id = ~0;
+
+	for (int n = 0; n < u; n++) {
+		const struct cpumask *cpus = cpumask_of_node(N + n);
+		int cpu;
+
+		for_each_cpu(cpu, cpus) {
+			u32 id = topology_logical_package_id(cpu);
+
+			if (pkg_id == ~0)
+				pkg_id = id;
+			if (pkg_id != id)
+				return ~0;
+		}
+	}
+
+	return pkg_id;
+}
+
+/*
+ * Validate the SLIT table is of the form expected for SNC, specifically:
+ *
+ *  - each on-trace cluster should be symmetric,
+ *  - each on-trace cluster should have a unique package-id.
+ *
+ * If you NUMA_EMU on top of SNC, you get to keep the pieces.
+ */
+static bool slit_validate(void)
+{
+	int u = topology_num_nodes_per_package();
+	u32 pkg_id, prev_pkg_id = ~0;
+
+	for (int pkg = 0; pkg < topology_max_packages(); pkg++) {
+		int n = pkg * u;
+
+		/*
+		 * Ensure the on-trace cluster is symmetric and each cluster
+		 * has a different package id.
+		 */
+		if (!slit_cluster_symmetric(n))
+			return false;
+		pkg_id = slit_cluster_package(n);
+		if (pkg_id == ~0)
+			return false;
+		if (pkg && pkg_id == prev_pkg_id)
+			return false;
+
+		prev_pkg_id = pkg_id;
+	}
+
+	return true;
+}
+
+/*
+ * Compute a sanitized SLIT table for SNC; notably SNC-3 can end up with
+ * asymmetric off-trace clusters, reflecting physical assymmetries. However
+ * this leads to 'unfortunate' sched_domain configurations.
+ *
+ * For example dual socket GNR with SNC-3:
+ *
+ * node distances:
+ * node     0    1    2    3    4    5
+ *     0:   10   15   17   21   28   26
+ *     1:   15   10   15   23   26   23
+ *     2:   17   15   10   26   23   21
+ *     3:   21   28   26   10   15   17
+ *     4:   23   26   23   15   10   15
+ *     5:   26   23   21   17   15   10
+ *
+ * Fix things up by averaging out the off-trace clusters; resulting in:
+ *
+ * node     0    1    2    3    4    5
+ *     0:   10   15   17   24   24   24
+ *     1:   15   10   15   24   24   24
+ *     2:   17   15   10   24   24   24
+ *     3:   24   24   24   10   15   17
+ *     4:   24   24   24   15   10   15
+ *     5:   24   24   24   17   15   10
+ */
+static int slit_cluster_distance(int i, int j)
+{
+	static int slit_valid = -1;
+	int u = topology_num_nodes_per_package();
+	long d = 0;
+	int x, y;
+
+	if (slit_valid < 0) {
+		slit_valid = slit_validate();
+		if (!slit_valid)
+			pr_err(FW_BUG "SLIT table doesn't have the expected form for SNC -- fixup disabled!\n");
+		else
+			pr_info("Fixing up SNC SLIT table.\n");
+	}
+
+	/*
+	 * Is this a unit cluster on the trace?
+	 */
+	if ((i / u) == (j / u) || !slit_valid)
+		return node_distance(i, j);
+
+	/*
+	 * Off-trace cluster.
+	 *
+	 * Notably average out the symmetric pair of off-trace clusters to
+	 * ensure the resulting SLIT table is symmetric.
+	 */
+	x = i - (i % u);
+	y = j - (j % u);
+
+	for (i = x; i < x + u; i++) {
+		for (j = y; j < y + u; j++) {
+			d += node_distance(i, j);
+			d += node_distance(j, i);
+		}
+	}
+
+	return d / (2*u*u);
+}
+
+int arch_sched_node_distance(int from, int to)
+{
+	int d = node_distance(from, to);
+
+	switch (boot_cpu_data.x86_vfm) {
+	case INTEL_GRANITERAPIDS_X:
+	case INTEL_ATOM_DARKMONT_X:
+		if (topology_max_packages() == 1 ||
+		    topology_num_nodes_per_package() < 3)
+			return d;
+
+		/*
+		 * Handle SNC-3 asymmetries.
+		 */
+		return slit_cluster_distance(from, to);
+	}
+	return d;
+}
+#endif /* CONFIG_NUMA */
 
 void set_cpu_sibling_map(int cpu)
 {
@@ -561,7 +715,7 @@ void set_cpu_sibling_map(int cpu)
 		o = &cpu_data(i);
 
 		if (match_pkg(c, o) && !topology_same_node(c, o))
-			x86_has_numa_in_package = true;
+			WARN_ON_ONCE(topology_num_nodes_per_package() == 1);
 
 		if ((i == cpu) || (has_smt && match_smt(c, o)))
 			link_mask(topology_sibling_cpumask, cpu, i);
@@ -654,10 +808,9 @@ static void impress_friends(void)
  * But that slows boot and resume on modern processors, which include
  * many cores and don't require that delay.
  *
- * Cmdline "init_cpu_udelay=" is available to over-ride this delay.
- * Modern processor families are quirked to remove the delay entirely.
+ * Cmdline "cpu_init_udelay=" is available to override this delay.
  */
-#define UDELAY_10MS_DEFAULT 10000
+#define UDELAY_10MS_LEGACY 10000
 
 static unsigned int init_udelay = UINT_MAX;
 
@@ -669,21 +822,21 @@ static int __init cpu_init_udelay(char *str)
 }
 early_param("cpu_init_udelay", cpu_init_udelay);
 
-static void __init smp_quirk_init_udelay(void)
+static void __init smp_set_init_udelay(void)
 {
 	/* if cmdline changed it from default, leave it alone */
 	if (init_udelay != UINT_MAX)
 		return;
 
 	/* if modern processor, use no delay */
-	if (((boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) && (boot_cpu_data.x86 == 6)) ||
-	    ((boot_cpu_data.x86_vendor == X86_VENDOR_HYGON) && (boot_cpu_data.x86 >= 0x18)) ||
-	    ((boot_cpu_data.x86_vendor == X86_VENDOR_AMD) && (boot_cpu_data.x86 >= 0xF))) {
+	if ((boot_cpu_data.x86_vendor == X86_VENDOR_INTEL && boot_cpu_data.x86_vfm >= INTEL_PENTIUM_PRO) ||
+	    (boot_cpu_data.x86_vendor == X86_VENDOR_HYGON && boot_cpu_data.x86 >= 0x18) ||
+	    (boot_cpu_data.x86_vendor == X86_VENDOR_AMD   && boot_cpu_data.x86 >= 0xF)) {
 		init_udelay = 0;
 		return;
 	}
 	/* else, use legacy delay */
-	init_udelay = UDELAY_10MS_DEFAULT;
+	init_udelay = UDELAY_10MS_LEGACY;
 }
 
 /*
@@ -715,7 +868,7 @@ static void send_init_sequence(u32 phys_apicid)
 /*
  * Wake up AP by INIT, INIT, STARTUP sequence.
  */
-static int wakeup_secondary_cpu_via_init(u32 phys_apicid, unsigned long start_eip)
+static int wakeup_secondary_cpu_via_init(u32 phys_apicid, unsigned long start_eip, unsigned int cpu)
 {
 	unsigned long send_status = 0, accept_status = 0;
 	int num_starts, j, maxlvt;
@@ -841,7 +994,7 @@ int common_cpu_up(unsigned int cpu, struct task_struct *idle)
 	/* Just in case we booted with a single CPU. */
 	alternatives_enable_smp();
 
-	per_cpu(pcpu_hot.current_task, cpu) = idle;
+	per_cpu(current_task, cpu) = idle;
 	cpu_init_stack_canary(cpu, idle);
 
 	/* Initialize the interrupt stack(s) */
@@ -851,7 +1004,7 @@ int common_cpu_up(unsigned int cpu, struct task_struct *idle)
 
 #ifdef CONFIG_X86_32
 	/* Stack for startup_32 can be just as for start_secondary onwards */
-	per_cpu(pcpu_hot.top_of_stack, cpu) = task_top_of_stack(idle);
+	per_cpu(cpu_current_top_of_stack, cpu) = task_top_of_stack(idle);
 #endif
 	return 0;
 }
@@ -862,7 +1015,7 @@ int common_cpu_up(unsigned int cpu, struct task_struct *idle)
  * Returns zero if startup was successfully sent, else error code from
  * ->wakeup_secondary_cpu.
  */
-static int do_boot_cpu(u32 apicid, int cpu, struct task_struct *idle)
+static int do_boot_cpu(u32 apicid, unsigned int cpu, struct task_struct *idle)
 {
 	unsigned long start_ip = real_mode_header->trampoline_start;
 	int ret;
@@ -916,11 +1069,11 @@ static int do_boot_cpu(u32 apicid, int cpu, struct task_struct *idle)
 	 * - Use an INIT boot APIC message
 	 */
 	if (apic->wakeup_secondary_cpu_64)
-		ret = apic->wakeup_secondary_cpu_64(apicid, start_ip);
+		ret = apic->wakeup_secondary_cpu_64(apicid, start_ip, cpu);
 	else if (apic->wakeup_secondary_cpu)
-		ret = apic->wakeup_secondary_cpu(apicid, start_ip);
+		ret = apic->wakeup_secondary_cpu(apicid, start_ip, cpu);
 	else
-		ret = wakeup_secondary_cpu_via_init(apicid, start_ip);
+		ret = wakeup_secondary_cpu_via_init(apicid, start_ip, cpu);
 
 	/* If the wakeup mechanism failed, cleanup the warm reset vector */
 	if (ret)
@@ -1094,7 +1247,7 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 
 	uv_system_init();
 
-	smp_quirk_init_udelay();
+	smp_set_init_udelay();
 
 	speculative_store_bypass_ht_init();
 
@@ -1208,6 +1361,12 @@ void cpu_disable_common(void)
 
 	remove_siblinginfo(cpu);
 
+	/*
+	 * Stop allowing kernel-mode FPU. This is needed so that if the CPU is
+	 * brought online again, the initial state is not allowed:
+	 */
+	this_cpu_write(kernel_fpu_allowed, false);
+
 	/* It's now safe to remove this processor from the online map */
 	lock_vector_lock();
 	remove_cpu_from_maps(cpu);
@@ -1262,43 +1421,9 @@ void play_dead_common(void)
  * We need to flush the caches before going to sleep, lest we have
  * dirty data in our caches when we come back up.
  */
-static inline void mwait_play_dead(void)
+void __noreturn mwait_play_dead(unsigned int eax_hint)
 {
 	struct mwait_cpu_dead *md = this_cpu_ptr(&mwait_cpu_dead);
-	unsigned int eax, ebx, ecx, edx;
-	unsigned int highest_cstate = 0;
-	unsigned int highest_subcstate = 0;
-	int i;
-
-	if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD ||
-	    boot_cpu_data.x86_vendor == X86_VENDOR_HYGON)
-		return;
-	if (!this_cpu_has(X86_FEATURE_MWAIT))
-		return;
-	if (!this_cpu_has(X86_FEATURE_CLFLUSH))
-		return;
-
-	eax = CPUID_LEAF_MWAIT;
-	ecx = 0;
-	native_cpuid(&eax, &ebx, &ecx, &edx);
-
-	/*
-	 * eax will be 0 if EDX enumeration is not valid.
-	 * Initialized below to cstate, sub_cstate value when EDX is valid.
-	 */
-	if (!(ecx & CPUID5_ECX_EXTENSIONS_SUPPORTED)) {
-		eax = 0;
-	} else {
-		edx >>= MWAIT_SUBSTATE_SIZE;
-		for (i = 0; i < 7 && edx; i++, edx >>= MWAIT_SUBSTATE_SIZE) {
-			if (edx & MWAIT_SUBSTATE_MASK) {
-				highest_cstate = i;
-				highest_subcstate = edx & MWAIT_SUBSTATE_MASK;
-			}
-		}
-		eax = (highest_cstate << MWAIT_SUBSTATE_SIZE) |
-			(highest_subcstate - 1);
-	}
 
 	/* Set up state for the kexec() hack below */
 	md->status = CPUDEAD_MWAIT_WAIT;
@@ -1319,7 +1444,7 @@ static inline void mwait_play_dead(void)
 		mb();
 		__monitor(md, 0, 0);
 		mb();
-		__mwait(eax, 0);
+		__mwait(eax_hint, 0);
 
 		if (READ_ONCE(md->control) == CPUDEAD_MWAIT_KEXEC_HLT) {
 			/*
@@ -1379,11 +1504,7 @@ void __noreturn hlt_play_dead(void)
 		native_halt();
 }
 
-/*
- * native_play_dead() is essentially a __noreturn function, but it can't
- * be marked as such as the compiler may complain about it.
- */
-void native_play_dead(void)
+void __noreturn native_play_dead(void)
 {
 	if (cpu_feature_enabled(X86_FEATURE_KERNEL_IBRS))
 		__update_spec_ctrl(0);
@@ -1391,9 +1512,9 @@ void native_play_dead(void)
 	play_dead_common();
 	tboot_shutdown(TB_SHUTDOWN_WFS);
 
-	mwait_play_dead();
-	if (cpuidle_play_dead())
-		hlt_play_dead();
+	/* Below returns only on error. */
+	cpuidle_play_dead();
+	hlt_play_dead();
 }
 
 #else /* ... !CONFIG_HOTPLUG_CPU */
@@ -1402,7 +1523,7 @@ int native_cpu_disable(void)
 	return -ENOSYS;
 }
 
-void native_play_dead(void)
+void __noreturn native_play_dead(void)
 {
 	BUG();
 }

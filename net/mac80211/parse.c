@@ -6,7 +6,7 @@
  * Copyright 2007	Johannes Berg <johannes@sipsolutions.net>
  * Copyright 2013-2014  Intel Mobile Communications GmbH
  * Copyright (C) 2015-2017	Intel Deutschland GmbH
- * Copyright (C) 2018-2024 Intel Corporation
+ * Copyright (C) 2018-2026 Intel Corporation
  *
  * element parsing for mac80211
  */
@@ -34,20 +34,29 @@
 #include "led.h"
 #include "wep.h"
 
+static const u8 empty_non_inheritance[] = {
+	WLAN_EID_EXTENSION, 1, WLAN_EID_EXT_NON_INHERITANCE,
+	/*
+	 * cfg80211_is_element_inherited() hardcodes elements that
+	 * cannot be inherited, so we just need an empty one to be
+	 * calling it at all.
+	 */
+};
+
+struct ieee80211_elem_defrag {
+	const struct element *elem;
+	/* container start/len */
+	const u8 *start;
+	size_t len;
+};
+
 struct ieee80211_elems_parse {
 	/* must be first for kfree to work */
 	struct ieee802_11_elems elems;
 
-	/* The basic Multi-Link element in the original elements */
-	const struct element *ml_basic_elem;
+	struct ieee80211_elem_defrag ml_reconf, ml_epcs, ml_basic;
 
-	/* The reconfiguration Multi-Link element in the original elements */
-	const struct element *ml_reconf_elem;
-
-	/* The EPCS Multi-Link element in the original elements */
-	const struct element *ml_epcs_elem;
-
-	bool multi_link_inner;
+	bool inside_multilink;
 	bool skip_vendor;
 
 	/*
@@ -155,17 +164,24 @@ ieee80211_parse_extension_element(u32 *crc,
 			switch (le16_get_bits(mle->control,
 					      IEEE80211_ML_CONTROL_TYPE)) {
 			case IEEE80211_ML_CONTROL_TYPE_BASIC:
-				if (elems_parse->multi_link_inner) {
+				if (elems_parse->inside_multilink) {
 					elems->parse_error |=
 						IEEE80211_PARSE_ERR_DUP_NEST_ML_BASIC;
 					break;
 				}
+				elems_parse->ml_basic.elem = elem;
+				elems_parse->ml_basic.start = params->start;
+				elems_parse->ml_basic.len = params->len;
 				break;
 			case IEEE80211_ML_CONTROL_TYPE_RECONF:
-				elems_parse->ml_reconf_elem = elem;
+				elems_parse->ml_reconf.elem = elem;
+				elems_parse->ml_reconf.start = params->start;
+				elems_parse->ml_reconf.len = params->len;
 				break;
 			case IEEE80211_ML_CONTROL_TYPE_PRIO_ACCESS:
-				elems_parse->ml_epcs_elem = elem;
+				elems_parse->ml_epcs.elem = elem;
+				elems_parse->ml_epcs.start = params->start;
+				elems_parse->ml_epcs.len = params->len;
 				break;
 			default:
 				break;
@@ -187,6 +203,26 @@ ieee80211_parse_extension_element(u32 *crc,
 		    elems->ttlm_num < ARRAY_SIZE(elems->ttlm)) {
 			elems->ttlm[elems->ttlm_num] = (void *)data;
 			elems->ttlm_num++;
+		}
+		break;
+	case WLAN_EID_EXT_UHR_OPER:
+		if (params->mode < IEEE80211_CONN_MODE_UHR)
+			break;
+		calc_crc = true;
+		if (ieee80211_uhr_oper_size_ok(data, len,
+					       params->type == (IEEE80211_FTYPE_MGMT |
+								IEEE80211_STYPE_BEACON))) {
+			elems->uhr_operation = data;
+			elems->uhr_operation_len = len;
+		}
+		break;
+	case WLAN_EID_EXT_UHR_CAPA:
+		if (params->mode < IEEE80211_CONN_MODE_UHR)
+			break;
+		calc_crc = true;
+		if (ieee80211_uhr_capa_size_ok(data, len, true)) {
+			elems->uhr_cap = data;
+			elems->uhr_cap_len = len;
 		}
 		break;
 	}
@@ -285,6 +321,24 @@ _ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params,
 	u32 crc = params->crc;
 
 	bitmap_zero(seen_elems, 256);
+
+	switch (params->type) {
+	/* we don't need to parse assoc request, luckily (it's value 0) */
+	case IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ:
+	case IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_REASSOC_REQ:
+	default:
+		WARN(1, "invalid frame type 0x%x for element parsing\n",
+		     params->type);
+		break;
+	case IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_RESP:
+	case IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_REASSOC_RESP:
+	case IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_REQ:
+	case IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_RESP:
+	case IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_BEACON:
+	case IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ACTION:
+	case IEEE80211_FTYPE_EXT | IEEE80211_STYPE_S1G_BEACON:
+		break;
+	}
 
 	for_each_element(elem, params->start, params->len) {
 		const struct element *subelem;
@@ -509,16 +563,31 @@ _ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params,
 				elems->awake_window = (void *)pos;
 			break;
 		case WLAN_EID_PREQ:
-			elems->preq = pos;
-			elems->preq_len = elen;
+			if (ieee80211_mesh_preq_size_ok(pos, elen)) {
+				elems->preq = pos;
+				elems->preq_len = elen;
+			} else {
+				elem_parse_failed =
+					IEEE80211_PARSE_ERR_BAD_ELEM_SIZE;
+			}
 			break;
 		case WLAN_EID_PREP:
-			elems->prep = pos;
-			elems->prep_len = elen;
+			if (ieee80211_mesh_prep_size_ok(pos, elen)) {
+				elems->prep = pos;
+				elems->prep_len = elen;
+			} else {
+				elem_parse_failed =
+					IEEE80211_PARSE_ERR_BAD_ELEM_SIZE;
+			}
 			break;
 		case WLAN_EID_PERR:
-			elems->perr = pos;
-			elems->perr_len = elen;
+			if (ieee80211_mesh_perr_size_ok(pos, elen)) {
+				elems->perr = pos;
+				elems->perr_len = elen;
+			} else {
+				elem_parse_failed =
+					IEEE80211_PARSE_ERR_BAD_ELEM_SIZE;
+			}
 			break;
 		case WLAN_EID_RANN:
 			if (elen >= sizeof(struct ieee80211_rann_ie))
@@ -566,7 +635,8 @@ _ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params,
 			if (params->mode < IEEE80211_CONN_MODE_VHT)
 				break;
 
-			if (!params->action) {
+			if (params->type != (IEEE80211_FTYPE_MGMT |
+					     IEEE80211_STYPE_ACTION)) {
 				elem_parse_failed =
 					IEEE80211_PARSE_ERR_UNEXPECTED_ELEM;
 				break;
@@ -582,7 +652,8 @@ _ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params,
 		case WLAN_EID_CHANNEL_SWITCH_WRAPPER:
 			if (params->mode < IEEE80211_CONN_MODE_VHT)
 				break;
-			if (params->action) {
+			if (params->type == (IEEE80211_FTYPE_MGMT |
+					     IEEE80211_STYPE_ACTION)) {
 				elem_parse_failed =
 					IEEE80211_PARSE_ERR_UNEXPECTED_ELEM;
 				break;
@@ -757,11 +828,9 @@ static size_t ieee802_11_find_bssid_profile(const u8 *start, size_t len,
 					    u8 *nontransmitted_profile)
 {
 	const struct element *elem, *sub;
-	size_t profile_len = 0;
-	bool found = false;
 
 	if (!bss || !bss->transmitted_bss)
-		return profile_len;
+		return 0;
 
 	for_each_element_id(elem, WLAN_EID_MULTIPLE_BSSID, start, len) {
 		if (elem->datalen < 2)
@@ -771,6 +840,7 @@ static size_t ieee802_11_find_bssid_profile(const u8 *start, size_t len,
 
 		for_each_element(sub, elem->data + 1, elem->datalen - 1) {
 			u8 new_bssid[ETH_ALEN];
+			size_t profile_len;
 			const u8 *index;
 
 			if (sub->id != 0 || sub->datalen < 4) {
@@ -809,15 +879,14 @@ static size_t ieee802_11_find_bssid_profile(const u8 *start, size_t len,
 					       index[2],
 					       new_bssid);
 			if (ether_addr_equal(new_bssid, bss->bssid)) {
-				found = true;
 				elems->bssid_index_len = index[1];
 				elems->bssid_index = (void *)&index[2];
-				break;
+				return profile_len;
 			}
 		}
 	}
 
-	return found ? profile_len : 0;
+	return 0;
 }
 
 static void
@@ -878,7 +947,8 @@ ieee80211_prep_mle_link_parse(struct ieee80211_elems_parse *elems_parse,
 {
 	struct ieee802_11_elems *elems = &elems_parse->elems;
 	struct ieee80211_mle_per_sta_profile *prof;
-	const struct element *tmp;
+	const struct element *ml_basic_elem = NULL;
+	const struct element *tmp, *ret;
 	ssize_t ml_len;
 	const u8 *end;
 
@@ -897,12 +967,11 @@ ieee80211_prep_mle_link_parse(struct ieee80211_elems_parse *elems_parse,
 		    IEEE80211_ML_CONTROL_TYPE_BASIC)
 			continue;
 
-		elems_parse->ml_basic_elem = tmp;
+		ml_basic_elem = tmp;
 		break;
 	}
 
-	ml_len = cfg80211_defragment_element(elems_parse->ml_basic_elem,
-					     elems->ie_start,
+	ml_len = cfg80211_defragment_element(ml_basic_elem, elems->ie_start,
 					     elems->total_len,
 					     elems_parse->scratch_pos,
 					     elems_parse->scratch +
@@ -944,54 +1013,44 @@ ieee80211_prep_mle_link_parse(struct ieee80211_elems_parse *elems_parse,
 	sub->len = end - sub->start;
 
 	sub->mode = params->mode;
-	sub->action = params->action;
+	sub->type = params->type;
 	sub->from_ap = params->from_ap;
 	sub->link_id = -1;
 
-	return cfg80211_find_ext_elem(WLAN_EID_EXT_NON_INHERITANCE,
-				      sub->start, sub->len);
+	ret = cfg80211_find_ext_elem(WLAN_EID_EXT_NON_INHERITANCE,
+				     sub->start, sub->len);
+	if (ret)
+		return ret;
+
+	/*
+	 * Since we know we want and found a profile, apply an empty
+	 * non-inheritance if the profile didn't have one, so that any
+	 * element that shouldn't be inherited by spec isn't.
+	 */
+	return (const void *)empty_non_inheritance;
 }
 
-static void
-ieee80211_mle_defrag_reconf(struct ieee80211_elems_parse *elems_parse)
+static const void *
+ieee80211_mle_defrag(struct ieee80211_elems_parse *elems_parse,
+		     struct ieee80211_elem_defrag *defrag,
+		     size_t *out_len)
 {
-	struct ieee802_11_elems *elems = &elems_parse->elems;
+	const void *ret;
 	ssize_t ml_len;
 
-	ml_len = cfg80211_defragment_element(elems_parse->ml_reconf_elem,
-					     elems->ie_start,
-					     elems->total_len,
+	ml_len = cfg80211_defragment_element(defrag->elem,
+					     defrag->start, defrag->len,
 					     elems_parse->scratch_pos,
 					     elems_parse->scratch +
 						elems_parse->scratch_len -
 						elems_parse->scratch_pos,
 					     WLAN_EID_FRAGMENT);
 	if (ml_len < 0)
-		return;
-	elems->ml_reconf = (void *)elems_parse->scratch_pos;
-	elems->ml_reconf_len = ml_len;
+		return NULL;
+	ret = elems_parse->scratch_pos;
+	*out_len = ml_len;
 	elems_parse->scratch_pos += ml_len;
-}
-
-static void
-ieee80211_mle_defrag_epcs(struct ieee80211_elems_parse *elems_parse)
-{
-	struct ieee802_11_elems *elems = &elems_parse->elems;
-	ssize_t ml_len;
-
-	ml_len = cfg80211_defragment_element(elems_parse->ml_epcs_elem,
-					     elems->ie_start,
-					     elems->total_len,
-					     elems_parse->scratch_pos,
-					     elems_parse->scratch +
-						elems_parse->scratch_len -
-						elems_parse->scratch_pos,
-					     WLAN_EID_FRAGMENT);
-	if (ml_len < 0)
-		return;
-	elems->ml_epcs = (void *)elems_parse->scratch_pos;
-	elems->ml_epcs_len = ml_len;
-	elems_parse->scratch_pos += ml_len;
+	return ret;
 }
 
 struct ieee802_11_elems *
@@ -1002,18 +1061,22 @@ ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params)
 	const struct element *non_inherit = NULL;
 	struct ieee802_11_elems *elems;
 	size_t scratch_len = 3 * params->len;
-	bool multi_link_inner = false;
+	bool inside_multilink = false;
 
+	BUILD_BUG_ON(sizeof(empty_non_inheritance) != empty_non_inheritance[1] + 2);
 	BUILD_BUG_ON(offsetof(typeof(*elems_parse), elems) != 0);
 
 	/* cannot parse for both a specific link and non-transmitted BSS */
 	if (WARN_ON(params->link_id >= 0 && params->bss))
 		return NULL;
 
-	elems_parse = kzalloc(struct_size(elems_parse, scratch, scratch_len),
-			      GFP_ATOMIC);
+	elems_parse = kzalloc_flex(*elems_parse, scratch, scratch_len,
+				   GFP_ATOMIC);
 	if (!elems_parse)
 		return NULL;
+
+	elems_parse->elems.frame_type = params->type;
+	elems_parse->elems.from_ap = params->from_ap;
 
 	elems_parse->scratch_len = scratch_len;
 	elems_parse->scratch_pos = elems_parse->scratch;
@@ -1043,19 +1106,37 @@ ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params)
 		sub.start = elems_parse->scratch_pos;
 		sub.mode = params->mode;
 		sub.len = nontx_len;
-		sub.action = params->action;
+		sub.type = params->type;
 		sub.link_id = params->link_id;
+
+		/* indicate to consumer whether or not profile was found */
+		if (params->bss->transmitted_bss && !nontx_len)
+			elems->mbssid_nontx_profile_missing = true;
 
 		/* consume the space used for non-transmitted profile */
 		elems_parse->scratch_pos += nontx_len;
 
 		non_inherit = cfg80211_find_ext_elem(WLAN_EID_EXT_NON_INHERITANCE,
 						     sub.start, nontx_len);
+		/*
+		 * If it's a non-transmitted BSS, we shouldn't pick
+		 * any elements in the outer parsing that shouldn't
+		 * be inherited. If the profile has a non-inheritance
+		 * element this automatically happens, but if not then
+		 * provide an empty one so that the hard-coded elements
+		 * in cfg80211_is_element_inherited() are ignored, but
+		 * it must be called.
+		 */
+		if (params->bss->transmitted_bss && !non_inherit)
+			non_inherit = (const void *)empty_non_inheritance;
 	} else {
-		/* must always parse to get elems_parse->ml_basic_elem */
+		/*
+		 * Find the multi-link element and the non-inherit element inside
+		 * the applicable profile, if requested by params->link_id >= 0.
+		 */
 		non_inherit = ieee80211_prep_mle_link_parse(elems_parse, params,
 							    &sub);
-		multi_link_inner = true;
+		inside_multilink = true;
 	}
 
 	elems_parse->skip_vendor =
@@ -1066,14 +1147,21 @@ ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params)
 
 	/* Override with nontransmitted/per-STA profile if found */
 	if (sub.len) {
-		elems_parse->multi_link_inner = multi_link_inner;
+		elems_parse->inside_multilink = inside_multilink;
 		elems_parse->skip_vendor = false;
 		_ieee802_11_parse_elems_full(&sub, elems_parse, NULL);
 	}
 
-	ieee80211_mle_defrag_reconf(elems_parse);
-
-	ieee80211_mle_defrag_epcs(elems_parse);
+	elems->ml_reconf = ieee80211_mle_defrag(elems_parse,
+						&elems_parse->ml_reconf,
+						&elems->ml_reconf_len);
+	elems->ml_epcs = ieee80211_mle_defrag(elems_parse,
+					      &elems_parse->ml_epcs,
+					      &elems->ml_epcs_len);
+	if (!elems->ml_basic)
+		elems->ml_basic = ieee80211_mle_defrag(elems_parse,
+						       &elems_parse->ml_basic,
+						       &elems->ml_basic_len);
 
 	if (elems->tim && !elems->parse_error) {
 		const struct ieee80211_tim_ie *tim_ie = elems->tim;
@@ -1097,11 +1185,9 @@ ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params)
 }
 EXPORT_SYMBOL_IF_KUNIT(ieee802_11_parse_elems_full);
 
-int ieee80211_parse_bitrates(enum nl80211_chan_width width,
-			     const struct ieee80211_supported_band *sband,
+int ieee80211_parse_bitrates(const struct ieee80211_supported_band *sband,
 			     const u8 *srates, int srates_len, u32 *rates)
 {
-	u32 rate_flags = ieee80211_chanwidth_rate_flags(width);
 	struct ieee80211_rate *br;
 	int brate, rate, i, j, count = 0;
 
@@ -1112,8 +1198,6 @@ int ieee80211_parse_bitrates(enum nl80211_chan_width width,
 
 		for (j = 0; j < sband->n_bitrates; j++) {
 			br = &sband->bitrates[j];
-			if ((rate_flags & br->flags) != rate_flags)
-				continue;
 
 			brate = DIV_ROUND_UP(br->bitrate, 5);
 			if (brate == rate) {

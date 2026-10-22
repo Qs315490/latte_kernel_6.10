@@ -30,7 +30,6 @@
 #include <linux/iio/consumer.h>
 #include <linux/iio/iio.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 
@@ -237,7 +236,7 @@ static void dpot_dac_remove(struct platform_device *pdev)
 
 static const struct of_device_id dpot_dac_match[] = {
 	{ .compatible = "dpot-dac" },
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(of, dpot_dac_match);
 

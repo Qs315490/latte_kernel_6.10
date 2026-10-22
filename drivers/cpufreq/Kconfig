@@ -163,7 +163,6 @@ config CPU_FREQ_GOV_ONDEMAND
 
 config CPU_FREQ_GOV_CONSERVATIVE
 	tristate "'conservative' cpufreq governor"
-	depends on CPU_FREQ
 	select CPU_FREQ_GOV_COMMON
 	help
 	  'conservative' - this driver is rather similar to the 'ondemand'
@@ -188,7 +187,7 @@ config CPU_FREQ_GOV_CONSERVATIVE
 
 config CPU_FREQ_GOV_SCHEDUTIL
 	bool "'schedutil' cpufreq policy governor"
-	depends on CPU_FREQ && SMP
+	depends on SMP
 	select CPU_FREQ_GOV_ATTR_SET
 	select IRQ_WORK
 	help
@@ -214,6 +213,18 @@ config CPUFREQ_DT
 	  This adds a generic DT based cpufreq driver for frequency management.
 	  It supports both uniprocessor (UP) and symmetric multiprocessor (SMP)
 	  systems.
+
+	  If in doubt, say N.
+
+config CPUFREQ_DT_RUST
+	tristate "Rust based Generic DT based cpufreq driver"
+	depends on HAVE_CLK && OF && RUST
+	select CPUFREQ_DT_PLATDEV
+	select PM_OPP
+	help
+	  This adds a Rust based generic DT based cpufreq driver for frequency
+	  management.  It supports both uniprocessor (UP) and symmetric
+	  multiprocessor (SMP) systems.
 
 	  If in doubt, say N.
 
@@ -353,6 +364,6 @@ config ACPI_CPPC_CPUFREQ_FIE
 
 	  If in doubt, say N.
 
-endif
+endif # CPU_FREQ
 
 endmenu

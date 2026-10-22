@@ -187,7 +187,7 @@ static int acp6x_pdm_dma_open(struct snd_soc_component *component,
 
 	runtime = substream->runtime;
 	adata = dev_get_drvdata(component->dev);
-	pdm_data = kzalloc(sizeof(*pdm_data), GFP_KERNEL);
+	pdm_data = kzalloc_obj(*pdm_data);
 	if (!pdm_data)
 		return -EINVAL;
 
@@ -346,7 +346,7 @@ static const struct snd_soc_component_driver acp6x_pdm_component = {
 	.close			= acp6x_pdm_dma_close,
 	.hw_params		= acp6x_pdm_dma_hw_params,
 	.pointer		= acp6x_pdm_dma_pointer,
-	.pcm_construct		= acp6x_pdm_dma_new,
+	.pcm_new		= acp6x_pdm_dma_new,
 	.legacy_dai_naming	= 1,
 };
 
@@ -394,7 +394,7 @@ static void acp6x_pdm_audio_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 }
 
-static int __maybe_unused acp6x_pdm_resume(struct device *dev)
+static int acp6x_pdm_resume(struct device *dev)
 {
 	struct pdm_dev_data *adata;
 	struct snd_pcm_runtime *runtime;
@@ -415,7 +415,7 @@ static int __maybe_unused acp6x_pdm_resume(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused acp6x_pdm_suspend(struct device *dev)
+static int acp6x_pdm_suspend(struct device *dev)
 {
 	struct pdm_dev_data *adata;
 
@@ -424,7 +424,7 @@ static int __maybe_unused acp6x_pdm_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused acp6x_pdm_runtime_resume(struct device *dev)
+static int acp6x_pdm_runtime_resume(struct device *dev)
 {
 	struct pdm_dev_data *adata;
 
@@ -434,8 +434,8 @@ static int __maybe_unused acp6x_pdm_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops acp6x_pdm_pm_ops = {
-	SET_RUNTIME_PM_OPS(acp6x_pdm_suspend, acp6x_pdm_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(acp6x_pdm_suspend, acp6x_pdm_resume)
+	RUNTIME_PM_OPS(acp6x_pdm_suspend, acp6x_pdm_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(acp6x_pdm_suspend, acp6x_pdm_resume)
 };
 
 static struct platform_driver acp6x_pdm_dma_driver = {
@@ -443,7 +443,7 @@ static struct platform_driver acp6x_pdm_dma_driver = {
 	.remove = acp6x_pdm_audio_remove,
 	.driver = {
 		.name = "acp_yc_pdm_dma",
-		.pm = &acp6x_pdm_pm_ops,
+		.pm = pm_ptr(&acp6x_pdm_pm_ops),
 	},
 };
 

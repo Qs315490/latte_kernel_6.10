@@ -6,7 +6,7 @@
 #include <linux/prime_numbers.h>
 #include <linux/sort.h>
 
-#include <drm/drm_buddy.h>
+#include <linux/gpu_buddy.h>
 
 #include "../i915_selftest.h"
 
@@ -371,7 +371,7 @@ static int igt_mock_splintered_region(void *arg)
 	struct drm_i915_private *i915 = mem->i915;
 	struct i915_ttm_buddy_resource *res;
 	struct drm_i915_gem_object *obj;
-	struct drm_buddy *mm;
+	struct gpu_buddy *mm;
 	unsigned int expected_order;
 	LIST_HEAD(objects);
 	u64 size;
@@ -413,15 +413,8 @@ static int igt_mock_splintered_region(void *arg)
 
 	close_objects(mem, &objects);
 
-	/*
-	 * While we should be able allocate everything without any flag
-	 * restrictions, if we consider I915_BO_ALLOC_CONTIGUOUS then we are
-	 * actually limited to the largest power-of-two for the region size i.e
-	 * max_order, due to the inner workings of the buddy allocator. So make
-	 * sure that does indeed hold true.
-	 */
-
-	obj = igt_object_create(mem, &objects, size, I915_BO_ALLOC_CONTIGUOUS);
+	obj = igt_object_create(mem, &objects, roundup_pow_of_two(size),
+				I915_BO_ALLOC_CONTIGUOUS);
 	if (!IS_ERR(obj)) {
 		pr_err("%s too large contiguous allocation was not rejected\n",
 		       __func__);
@@ -429,8 +422,7 @@ static int igt_mock_splintered_region(void *arg)
 		goto out_close;
 	}
 
-	obj = igt_object_create(mem, &objects, rounddown_pow_of_two(size),
-				I915_BO_ALLOC_CONTIGUOUS);
+	obj = igt_object_create(mem, &objects, size, I915_BO_ALLOC_CONTIGUOUS);
 	if (IS_ERR(obj)) {
 		pr_err("%s largest possible contiguous allocation failed\n",
 		       __func__);
@@ -455,8 +447,8 @@ static int igt_mock_max_segment(void *arg)
 	struct drm_i915_private *i915 = mem->i915;
 	struct i915_ttm_buddy_resource *res;
 	struct drm_i915_gem_object *obj;
-	struct drm_buddy_block *block;
-	struct drm_buddy *mm;
+	struct gpu_buddy_block *block;
+	struct gpu_buddy *mm;
 	struct list_head *blocks;
 	struct scatterlist *sg;
 	I915_RND_STATE(prng);
@@ -495,8 +487,8 @@ static int igt_mock_max_segment(void *arg)
 	mm = res->mm;
 	size = 0;
 	list_for_each_entry(block, blocks, link) {
-		if (drm_buddy_block_size(mm, block) > size)
-			size = drm_buddy_block_size(mm, block);
+		if (gpu_buddy_block_size(mm, block) > size)
+			size = gpu_buddy_block_size(mm, block);
 	}
 	if (size < max_segment) {
 		pr_err("%s: Failed to create a huge contiguous block [> %u], largest block %lld\n",
@@ -535,14 +527,14 @@ static u64 igt_object_mappable_total(struct drm_i915_gem_object *obj)
 	struct intel_memory_region *mr = obj->mm.region;
 	struct i915_ttm_buddy_resource *bman_res =
 		to_ttm_buddy_resource(obj->mm.res);
-	struct drm_buddy *mm = bman_res->mm;
-	struct drm_buddy_block *block;
+	struct gpu_buddy *mm = bman_res->mm;
+	struct gpu_buddy_block *block;
 	u64 total;
 
 	total = 0;
 	list_for_each_entry(block, &bman_res->blocks, link) {
-		u64 start = drm_buddy_block_offset(block);
-		u64 end = start + drm_buddy_block_size(mm, block);
+		u64 start = gpu_buddy_block_offset(block);
+		u64 end = start + gpu_buddy_block_size(mm, block);
 
 		if (start < resource_size(&mr->io))
 			total += min_t(u64, end, resource_size(&mr->io)) - start;

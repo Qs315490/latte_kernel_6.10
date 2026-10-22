@@ -1,16 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <net/netdev_lock.h>
 #include <net/netdev_queues.h>
 #include <net/sock.h>
 #include <linux/ethtool_netlink.h>
 #include <linux/phy_link_topology.h>
 #include <linux/pm_runtime.h>
-#include "netlink.h"
+
+#include "common.h"
 #include "module_fw.h"
+#include "netlink.h"
 
 static struct genl_family ethtool_genl_family;
 
 static bool ethnl_ok __read_mostly;
+
+/* Serializes broadcast notification sequence allocation with the multicast
+ * send, so that userspace observes nlmsg_seq monotonic in receive order
+ * regardless of which lock the caller holds (rtnl or instance lock).
+ */
+static DEFINE_MUTEX(ethnl_bcast_lock);
 static u32 ethnl_bcast_seq;
 
 #define ETHTOOL_FLAGS_BASIC (ETHTOOL_FLAG_COMPACT_BITSETS |	\
@@ -51,7 +60,7 @@ const struct nla_policy ethnl_header_policy_phy_stats[] = {
 	[ETHTOOL_A_HEADER_PHY_INDEX]		= NLA_POLICY_MIN(NLA_U32, 1),
 };
 
-int ethnl_sock_priv_set(struct sk_buff *skb, struct net_device *dev, u32 portid,
+int ethnl_sock_priv_set(struct sk_buff *skb, struct net *net, u32 portid,
 			enum ethnl_sock_type type)
 {
 	struct ethnl_sock_priv *sk_priv;
@@ -60,7 +69,7 @@ int ethnl_sock_priv_set(struct sk_buff *skb, struct net_device *dev, u32 portid,
 	if (IS_ERR(sk_priv))
 		return PTR_ERR(sk_priv);
 
-	sk_priv->dev = dev;
+	sk_priv->net = net;
 	sk_priv->portid = portid;
 	sk_priv->type = type;
 
@@ -89,6 +98,8 @@ int ethnl_ops_begin(struct net_device *dev)
 
 	if (dev->dev.parent)
 		pm_runtime_get_sync(dev->dev.parent);
+
+	netdev_assert_locked_ops_compat(dev);
 
 	if (!netif_device_present(dev) ||
 	    dev->reg_state >= NETREG_UNREGISTERING) {
@@ -216,10 +227,12 @@ struct phy_device *ethnl_req_get_phydev(const struct ethnl_req_info *req_info,
 {
 	struct phy_device *phydev;
 
-	ASSERT_RTNL();
-
 	if (!req_info->dev)
 		return NULL;
+
+	/* If there is no PHY in sight there's no need for assert locking */
+	if (!phy_link_topo_empty(req_info->dev))
+		ASSERT_RTNL();
 
 	if (!req_info->phy_index)
 		return req_info->dev->phydev;
@@ -319,8 +332,7 @@ void *ethnl_dump_put(struct sk_buff *skb, struct netlink_callback *cb, u8 cmd)
 
 void *ethnl_bcastmsg_put(struct sk_buff *skb, u8 cmd)
 {
-	return genlmsg_put(skb, 0, ++ethnl_bcast_seq, &ethtool_genl_family, 0,
-			   cmd);
+	return genlmsg_put(skb, 0, 0, &ethtool_genl_family, 0, cmd);
 }
 
 void *ethnl_unicast_put(struct sk_buff *skb, u32 portid, u32 seq, u8 cmd)
@@ -330,8 +342,15 @@ void *ethnl_unicast_put(struct sk_buff *skb, u32 portid, u32 seq, u8 cmd)
 
 int ethnl_multicast(struct sk_buff *skb, struct net_device *dev)
 {
-	return genlmsg_multicast_netns(&ethtool_genl_family, dev_net(dev), skb,
-				       0, ETHNL_MCGRP_MONITOR, GFP_KERNEL);
+	struct nlmsghdr *nlh = nlmsg_hdr(skb);
+	int ret;
+
+	mutex_lock(&ethnl_bcast_lock);
+	nlh->nlmsg_seq = ++ethnl_bcast_seq;
+	ret = genlmsg_multicast_netns(&ethtool_genl_family, dev_net(dev), skb,
+				      0, ETHNL_MCGRP_MONITOR, GFP_KERNEL);
+	mutex_unlock(&ethnl_bcast_lock);
+	return ret;
 }
 
 /* GET request helpers */
@@ -352,6 +371,18 @@ struct ethnl_dump_ctx {
 	struct ethnl_req_info		*req_info;
 	struct ethnl_reply_data		*reply_data;
 	unsigned long			pos_ifindex;
+};
+
+/**
+ * struct ethnl_perphy_dump_ctx - context for dumpit() PHY-aware callbacks
+ * @ethnl_ctx: generic ethnl context
+ * @ifindex: For Filtered DUMP requests, the ifindex of the targeted netdev
+ * @pos_phyindex: iterator position for multi-msg DUMP
+ */
+struct ethnl_perphy_dump_ctx {
+	struct ethnl_dump_ctx	ethnl_ctx;
+	unsigned int		ifindex;
+	unsigned long		pos_phyindex;
 };
 
 static const struct ethnl_request_ops *
@@ -390,6 +421,7 @@ ethnl_default_requests[__ETHTOOL_MSG_USER_CNT] = {
 	[ETHTOOL_MSG_PSE_GET]		= &ethnl_pse_request_ops,
 	[ETHTOOL_MSG_PSE_SET]		= &ethnl_pse_request_ops,
 	[ETHTOOL_MSG_RSS_GET]		= &ethnl_rss_request_ops,
+	[ETHTOOL_MSG_RSS_SET]		= &ethnl_rss_request_ops,
 	[ETHTOOL_MSG_PLCA_GET_CFG]	= &ethnl_plca_cfg_request_ops,
 	[ETHTOOL_MSG_PLCA_SET_CFG]	= &ethnl_plca_cfg_request_ops,
 	[ETHTOOL_MSG_PLCA_GET_STATUS]	= &ethnl_plca_status_request_ops,
@@ -397,11 +429,19 @@ ethnl_default_requests[__ETHTOOL_MSG_USER_CNT] = {
 	[ETHTOOL_MSG_MM_SET]		= &ethnl_mm_request_ops,
 	[ETHTOOL_MSG_TSCONFIG_GET]	= &ethnl_tsconfig_request_ops,
 	[ETHTOOL_MSG_TSCONFIG_SET]	= &ethnl_tsconfig_request_ops,
+	[ETHTOOL_MSG_PHY_GET]		= &ethnl_phy_request_ops,
+	[ETHTOOL_MSG_MSE_GET]		= &ethnl_mse_request_ops,
 };
 
 static struct ethnl_dump_ctx *ethnl_dump_context(struct netlink_callback *cb)
 {
 	return (struct ethnl_dump_ctx *)cb->ctx;
+}
+
+static struct ethnl_perphy_dump_ctx *
+ethnl_perphy_dump_context(struct netlink_callback *cb)
+{
+	return (struct ethnl_perphy_dump_ctx *)cb->ctx;
 }
 
 /**
@@ -431,12 +471,18 @@ static int ethnl_default_parse(struct ethnl_req_info *req_info,
 		return ret;
 
 	if (request_ops->parse_request) {
-		ret = request_ops->parse_request(req_info, tb, info->extack);
+		ret = request_ops->parse_request(req_info, info, tb,
+						 info->extack);
 		if (ret < 0)
-			return ret;
+			goto err_dev;
 	}
 
 	return 0;
+
+err_dev:
+	netdev_put(req_info->dev, &req_info->dev_tracker);
+	req_info->dev = NULL;
+	return ret;
 }
 
 /**
@@ -464,6 +510,7 @@ static int ethnl_default_doit(struct sk_buff *skb, struct genl_info *info)
 	struct ethnl_req_info *req_info = NULL;
 	const u8 cmd = info->genlhdr->cmd;
 	const struct ethnl_request_ops *ops;
+	bool need_rtnl = false;
 	int hdr_len, reply_len;
 	struct sk_buff *rskb;
 	void *reply_payload;
@@ -486,14 +533,24 @@ static int ethnl_default_doit(struct sk_buff *skb, struct genl_info *info)
 
 	ret = ethnl_default_parse(req_info, info, ops, !ops->allow_nodev_do);
 	if (ret < 0)
-		goto err_dev;
+		goto err_free;
 	ethnl_init_reply_data(reply_data, ops, req_info->dev);
 
-	rtnl_lock();
+	if (req_info->dev) {
+		need_rtnl = !netdev_need_ops_lock(req_info->dev) ||
+			    ethtool_nl_msg_needs_rtnl(req_info->dev, cmd);
+		if (need_rtnl)
+			rtnl_lock();
+		netdev_lock_ops(req_info->dev);
+	}
 	ret = ops->prepare_data(req_info, reply_data, info);
-	rtnl_unlock();
+	if (req_info->dev) {
+		netdev_unlock_ops(req_info->dev);
+		if (need_rtnl)
+			rtnl_unlock();
+	}
 	if (ret < 0)
-		goto err_cleanup;
+		goto err_dev;
 	ret = ops->reply_size(req_info, reply_data);
 	if (ret < 0)
 		goto err_cleanup;
@@ -528,6 +585,7 @@ err_cleanup:
 		ops->cleanup_data(reply_data);
 err_dev:
 	netdev_put(req_info->dev, &req_info->dev_tracker);
+err_free:
 	kfree(reply_data);
 	kfree(req_info);
 	return ret;
@@ -537,6 +595,7 @@ static int ethnl_default_dump_one(struct sk_buff *skb, struct net_device *dev,
 				  const struct ethnl_dump_ctx *ctx,
 				  const struct genl_info *info)
 {
+	bool need_rtnl;
 	void *ehdr;
 	int ret;
 
@@ -547,11 +606,17 @@ static int ethnl_default_dump_one(struct sk_buff *skb, struct net_device *dev,
 		return -EMSGSIZE;
 
 	ethnl_init_reply_data(ctx->reply_data, ctx->ops, dev);
-	rtnl_lock();
+	need_rtnl = !netdev_need_ops_lock(dev) ||
+		    ethtool_nl_msg_needs_rtnl(dev, ctx->ops->request_cmd);
+	if (need_rtnl)
+		rtnl_lock();
+	netdev_lock_ops(dev);
 	ret = ctx->ops->prepare_data(ctx->req_info, ctx->reply_data, info);
-	rtnl_unlock();
+	netdev_unlock_ops(dev);
+	if (need_rtnl)
+		rtnl_unlock();
 	if (ret < 0)
-		goto out;
+		goto out_cancel;
 	ret = ethnl_fill_reply_header(skb, dev, ctx->ops->hdr_attr);
 	if (ret < 0)
 		goto out;
@@ -560,6 +625,7 @@ static int ethnl_default_dump_one(struct sk_buff *skb, struct net_device *dev,
 out:
 	if (ctx->ops->cleanup_data)
 		ctx->ops->cleanup_data(ctx->reply_data);
+out_cancel:
 	ctx->reply_data->dev = NULL;
 	if (ret < 0)
 		genlmsg_cancel(skb, ehdr);
@@ -574,18 +640,19 @@ static int ethnl_default_dumpit(struct sk_buff *skb,
 {
 	struct ethnl_dump_ctx *ctx = ethnl_dump_context(cb);
 	struct net *net = sock_net(skb->sk);
+	netdevice_tracker dev_tracker;
 	struct net_device *dev;
 	int ret = 0;
 
 	rcu_read_lock();
 	for_each_netdev_dump(net, dev, ctx->pos_ifindex) {
-		dev_hold(dev);
+		netdev_hold(dev, &dev_tracker, GFP_ATOMIC);
 		rcu_read_unlock();
 
 		ret = ethnl_default_dump_one(skb, dev, ctx, genl_info_dump(cb));
 
 		rcu_read_lock();
-		dev_put(dev);
+		netdev_put(dev, &dev_tracker);
 
 		if (ret < 0 && ret != -EOPNOTSUPP) {
 			if (likely(skb->len))
@@ -626,6 +693,8 @@ static int ethnl_default_start(struct netlink_callback *cb)
 	}
 
 	ret = ethnl_default_parse(req_info, &info->info, ops, false);
+	if (ret < 0)
+		goto free_reply_data;
 	if (req_info->dev) {
 		/* We ignore device specification in dump requests but as the
 		 * same parser as for non-dump (doit) requests is used, it
@@ -634,8 +703,6 @@ static int ethnl_default_start(struct netlink_callback *cb)
 		netdev_put(req_info->dev, &req_info->dev_tracker);
 		req_info->dev = NULL;
 	}
-	if (ret < 0)
-		goto free_reply_data;
 
 	ctx->ops = ops;
 	ctx->req_info = req_info;
@@ -652,6 +719,173 @@ free_req_info:
 	return ret;
 }
 
+/* per-PHY ->start() handler for GET requests */
+static int ethnl_perphy_start(struct netlink_callback *cb)
+{
+	struct ethnl_perphy_dump_ctx *phy_ctx = ethnl_perphy_dump_context(cb);
+	const struct genl_dumpit_info *info = genl_dumpit_info(cb);
+	struct ethnl_dump_ctx *ctx = &phy_ctx->ethnl_ctx;
+	struct ethnl_reply_data *reply_data;
+	const struct ethnl_request_ops *ops;
+	struct ethnl_req_info *req_info;
+	struct genlmsghdr *ghdr;
+	int ret;
+
+	BUILD_BUG_ON(sizeof(*ctx) > sizeof(cb->ctx));
+
+	ghdr = nlmsg_data(cb->nlh);
+	ops = ethnl_default_requests[ghdr->cmd];
+	if (WARN_ONCE(!ops, "cmd %u has no ethnl_request_ops\n", ghdr->cmd))
+		return -EOPNOTSUPP;
+	req_info = kzalloc(ops->req_info_size, GFP_KERNEL);
+	if (!req_info)
+		return -ENOMEM;
+	reply_data = kmalloc(ops->reply_data_size, GFP_KERNEL);
+	if (!reply_data) {
+		ret = -ENOMEM;
+		goto free_req_info;
+	}
+
+	/* Unlike per-dev dump, don't ignore dev. The dump handler
+	 * will notice it and dump PHYs from given dev. We only keep track of
+	 * the dev's ifindex, .dumpit() will grab and release the netdev itself.
+	 */
+	ret = ethnl_default_parse(req_info, &info->info, ops, false);
+	if (ret < 0)
+		goto free_reply_data;
+	if (req_info->dev) {
+		phy_ctx->ifindex = req_info->dev->ifindex;
+		netdev_put(req_info->dev, &req_info->dev_tracker);
+		req_info->dev = NULL;
+	}
+
+	ctx->ops = ops;
+	ctx->req_info = req_info;
+	ctx->reply_data = reply_data;
+	ctx->pos_ifindex = 0;
+
+	return 0;
+
+free_reply_data:
+	kfree(reply_data);
+free_req_info:
+	kfree(req_info);
+
+	return ret;
+}
+
+static int ethnl_perphy_dump_one_dev(struct sk_buff *skb,
+				     struct ethnl_perphy_dump_ctx *ctx,
+				     const struct genl_info *info)
+{
+	struct ethnl_dump_ctx *ethnl_ctx = &ctx->ethnl_ctx;
+	struct net_device *dev = ethnl_ctx->req_info->dev;
+	struct phy_device_node *pdn;
+	int ret;
+
+	if (!dev->link_topo)
+		return 0;
+
+	xa_for_each_start(&dev->link_topo->phys, ctx->pos_phyindex, pdn,
+			  ctx->pos_phyindex) {
+		ethnl_ctx->req_info->phy_index = ctx->pos_phyindex;
+
+		/* We can re-use the original dump_one as ->prepare_data in
+		 * commands use ethnl_req_get_phydev(), which gets the PHY from
+		 * the req_info->phy_index
+		 */
+		ret = ethnl_default_dump_one(skb, dev, ethnl_ctx, info);
+		if (ret)
+			return ret;
+	}
+
+	ctx->pos_phyindex = 0;
+
+	return 0;
+}
+
+static int ethnl_perphy_dump_all_dev(struct sk_buff *skb,
+				     struct ethnl_perphy_dump_ctx *ctx,
+				     const struct genl_info *info)
+{
+	struct ethnl_dump_ctx *ethnl_ctx = &ctx->ethnl_ctx;
+	struct net *net = sock_net(skb->sk);
+	netdevice_tracker dev_tracker;
+	struct net_device *dev;
+	int ret = 0;
+
+	rcu_read_lock();
+	for_each_netdev_dump(net, dev, ethnl_ctx->pos_ifindex) {
+		netdev_hold(dev, &dev_tracker, GFP_ATOMIC);
+		rcu_read_unlock();
+
+		/* per-PHY commands use ethnl_req_get_phydev(), which needs the
+		 * net_device in the req_info
+		 */
+		ethnl_ctx->req_info->dev = dev;
+		ret = ethnl_perphy_dump_one_dev(skb, ctx, info);
+
+		rcu_read_lock();
+		netdev_put(dev, &dev_tracker);
+		ethnl_ctx->req_info->dev = NULL;
+
+		if (ret < 0 && ret != -EOPNOTSUPP) {
+			if (likely(skb->len))
+				ret = skb->len;
+			break;
+		}
+		ret = 0;
+	}
+	rcu_read_unlock();
+
+	return ret;
+}
+
+/* per-PHY ->dumpit() handler for GET requests. */
+static int ethnl_perphy_dumpit(struct sk_buff *skb,
+			       struct netlink_callback *cb)
+{
+	struct ethnl_perphy_dump_ctx *ctx = ethnl_perphy_dump_context(cb);
+	const struct genl_dumpit_info *info = genl_dumpit_info(cb);
+	struct ethnl_dump_ctx *ethnl_ctx = &ctx->ethnl_ctx;
+	int ret = 0;
+
+	if (ctx->ifindex) {
+		netdevice_tracker dev_tracker;
+		struct net_device *dev;
+
+		dev = netdev_get_by_index(genl_info_net(&info->info),
+					  ctx->ifindex, &dev_tracker,
+					  GFP_KERNEL);
+		if (!dev)
+			return -ENODEV;
+
+		ethnl_ctx->req_info->dev = dev;
+		ret = ethnl_perphy_dump_one_dev(skb, ctx, genl_info_dump(cb));
+
+		if (ret < 0 && ret != -EOPNOTSUPP && likely(skb->len))
+			ret = skb->len;
+
+		netdev_put(dev, &dev_tracker);
+	} else {
+		ret = ethnl_perphy_dump_all_dev(skb, ctx, genl_info_dump(cb));
+	}
+
+	return ret;
+}
+
+/* per-PHY ->done() handler for GET requests */
+static int ethnl_perphy_done(struct netlink_callback *cb)
+{
+	struct ethnl_perphy_dump_ctx *ctx = ethnl_perphy_dump_context(cb);
+	struct ethnl_dump_ctx *ethnl_ctx = &ctx->ethnl_ctx;
+
+	kfree(ethnl_ctx->reply_data);
+	kfree(ethnl_ctx->req_info);
+
+	return 0;
+}
+
 /* default ->done() handler for GET requests */
 static int ethnl_default_done(struct netlink_callback *cb)
 {
@@ -666,9 +900,10 @@ static int ethnl_default_done(struct netlink_callback *cb)
 static int ethnl_default_set_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	const struct ethnl_request_ops *ops;
-	struct ethnl_req_info req_info = {};
 	const u8 cmd = info->genlhdr->cmd;
+	struct ethnl_req_info *req_info;
 	struct net_device *dev;
+	bool need_rtnl;
 	int ret;
 
 	ops = ethnl_default_requests[cmd];
@@ -677,22 +912,28 @@ static int ethnl_default_set_doit(struct sk_buff *skb, struct genl_info *info)
 	if (GENL_REQ_ATTR_CHECK(info, ops->hdr_attr))
 		return -EINVAL;
 
-	ret = ethnl_parse_header_dev_get(&req_info, info->attrs[ops->hdr_attr],
-					 genl_info_net(info), info->extack,
-					 true);
+	req_info = kzalloc(ops->req_info_size, GFP_KERNEL);
+	if (!req_info)
+		return -ENOMEM;
+
+	ret = ethnl_default_parse(req_info, info,  ops, true);
 	if (ret < 0)
-		return ret;
+		goto out_free_req;
 
 	if (ops->set_validate) {
-		ret = ops->set_validate(&req_info, info);
+		ret = ops->set_validate(req_info, info);
 		/* 0 means nothing to do */
 		if (ret <= 0)
 			goto out_dev;
 	}
 
-	dev = req_info.dev;
+	dev = req_info->dev;
+	need_rtnl = !netdev_need_ops_lock(dev) ||
+		    ethtool_nl_msg_needs_rtnl(dev, cmd);
 
-	rtnl_lock();
+	if (need_rtnl)
+		rtnl_lock();
+	netdev_lock_ops(dev);
 	dev->cfg_pending = kmemdup(dev->cfg, sizeof(*dev->cfg),
 				   GFP_KERNEL_ACCOUNT);
 	if (!dev->cfg_pending) {
@@ -704,14 +945,14 @@ static int ethnl_default_set_doit(struct sk_buff *skb, struct genl_info *info)
 	if (ret < 0)
 		goto out_free_cfg;
 
-	ret = ops->set(&req_info, info);
+	ret = ops->set(req_info, info);
 	if (ret < 0)
 		goto out_ops;
 
 	swap(dev->cfg, dev->cfg_pending);
 	if (!ret)
 		goto out_ops;
-	ethtool_notify(dev, ops->set_ntf_cmd, NULL);
+	ethnl_notify(dev, ops->set_ntf_cmd, req_info);
 
 	ret = 0;
 out_ops:
@@ -720,9 +961,13 @@ out_free_cfg:
 	kfree(dev->cfg_pending);
 out_tie_cfg:
 	dev->cfg_pending = dev->cfg;
-	rtnl_unlock();
+	netdev_unlock_ops(dev);
+	if (need_rtnl)
+		rtnl_unlock();
 out_dev:
-	ethnl_parse_header_dev_put(&req_info);
+	ethnl_parse_header_dev_put(req_info);
+out_free_req:
+	kfree(req_info);
 	return ret;
 }
 
@@ -743,11 +988,13 @@ ethnl_default_notify_ops[ETHTOOL_MSG_KERNEL_MAX + 1] = {
 	[ETHTOOL_MSG_MODULE_NTF]	= &ethnl_module_request_ops,
 	[ETHTOOL_MSG_PLCA_NTF]		= &ethnl_plca_cfg_request_ops,
 	[ETHTOOL_MSG_MM_NTF]		= &ethnl_mm_request_ops,
+	[ETHTOOL_MSG_RSS_NTF]		= &ethnl_rss_request_ops,
+	[ETHTOOL_MSG_RSS_CREATE_NTF]	= &ethnl_rss_request_ops,
 };
 
 /* default notification handler */
 static void ethnl_default_notify(struct net_device *dev, unsigned int cmd,
-				 const void *data)
+				 const struct ethnl_req_info *orig_req_info)
 {
 	struct ethnl_reply_data *reply_data;
 	const struct ethnl_request_ops *ops;
@@ -776,11 +1023,18 @@ static void ethnl_default_notify(struct net_device *dev, unsigned int cmd,
 
 	req_info->dev = dev;
 	req_info->flags |= ETHTOOL_FLAG_COMPACT_BITSETS;
+	if (orig_req_info) {
+		req_info->phy_index = orig_req_info->phy_index;
+		memcpy(&req_info[1], &orig_req_info[1],
+		       ops->req_info_size - sizeof(*req_info));
+	}
+
+	netdev_assert_locked_ops_compat(dev);
 
 	ethnl_init_reply_data(reply_data, ops, dev);
 	ret = ops->prepare_data(req_info, reply_data, &info);
 	if (ret < 0)
-		goto err_cleanup;
+		goto err_rep;
 	ret = ops->reply_size(req_info, reply_data);
 	if (ret < 0)
 		goto err_cleanup;
@@ -815,6 +1069,7 @@ err_skb:
 err_cleanup:
 	if (ops->cleanup_data)
 		ops->cleanup_data(reply_data);
+err_rep:
 	kfree(reply_data);
 	kfree(req_info);
 	return;
@@ -823,7 +1078,7 @@ err_cleanup:
 /* notifications */
 
 typedef void (*ethnl_notify_handler_t)(struct net_device *dev, unsigned int cmd,
-				       const void *data);
+				       const struct ethnl_req_info *req_info);
 
 static const ethnl_notify_handler_t ethnl_notify_handlers[] = {
 	[ETHTOOL_MSG_LINKINFO_NTF]	= ethnl_default_notify,
@@ -841,20 +1096,28 @@ static const ethnl_notify_handler_t ethnl_notify_handlers[] = {
 	[ETHTOOL_MSG_MODULE_NTF]	= ethnl_default_notify,
 	[ETHTOOL_MSG_PLCA_NTF]		= ethnl_default_notify,
 	[ETHTOOL_MSG_MM_NTF]		= ethnl_default_notify,
+	[ETHTOOL_MSG_RSS_NTF]		= ethnl_default_notify,
+	[ETHTOOL_MSG_RSS_CREATE_NTF]	= ethnl_default_notify,
 };
 
-void ethtool_notify(struct net_device *dev, unsigned int cmd, const void *data)
+void ethnl_notify(struct net_device *dev, unsigned int cmd,
+		  const struct ethnl_req_info *req_info)
 {
 	if (unlikely(!ethnl_ok))
 		return;
-	ASSERT_RTNL();
+	netdev_assert_locked_ops_compat(dev);
 
 	if (likely(cmd < ARRAY_SIZE(ethnl_notify_handlers) &&
 		   ethnl_notify_handlers[cmd]))
-		ethnl_notify_handlers[cmd](dev, cmd, data);
+		ethnl_notify_handlers[cmd](dev, cmd, req_info);
 	else
 		WARN_ONCE(1, "notification %u not implemented (dev=%s)\n",
 			  cmd, netdev_name(dev));
+}
+
+void ethtool_notify(struct net_device *dev, unsigned int cmd)
+{
+	ethnl_notify(dev, cmd, NULL);
 }
 EXPORT_SYMBOL(ethtool_notify);
 
@@ -862,7 +1125,7 @@ static void ethnl_notify_features(struct netdev_notifier_info *info)
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(info);
 
-	ethtool_notify(dev, ETHTOOL_MSG_FEATURES_NTF, NULL);
+	ethtool_notify(dev, ETHTOOL_MSG_FEATURES_NTF);
 }
 
 static int ethnl_netdev_event(struct notifier_block *this, unsigned long event,
@@ -1185,9 +1448,9 @@ static const struct genl_ops ethtool_genl_ops[] = {
 	{
 		.cmd	= ETHTOOL_MSG_PSE_GET,
 		.doit	= ethnl_default_doit,
-		.start	= ethnl_default_start,
-		.dumpit	= ethnl_default_dumpit,
-		.done	= ethnl_default_done,
+		.start	= ethnl_perphy_start,
+		.dumpit	= ethnl_perphy_dumpit,
+		.done	= ethnl_perphy_done,
 		.policy = ethnl_pse_get_policy,
 		.maxattr = ARRAY_SIZE(ethnl_pse_get_policy) - 1,
 	},
@@ -1209,9 +1472,9 @@ static const struct genl_ops ethtool_genl_ops[] = {
 	{
 		.cmd	= ETHTOOL_MSG_PLCA_GET_CFG,
 		.doit	= ethnl_default_doit,
-		.start	= ethnl_default_start,
-		.dumpit	= ethnl_default_dumpit,
-		.done	= ethnl_default_done,
+		.start	= ethnl_perphy_start,
+		.dumpit	= ethnl_perphy_dumpit,
+		.done	= ethnl_perphy_done,
 		.policy = ethnl_plca_get_cfg_policy,
 		.maxattr = ARRAY_SIZE(ethnl_plca_get_cfg_policy) - 1,
 	},
@@ -1225,9 +1488,9 @@ static const struct genl_ops ethtool_genl_ops[] = {
 	{
 		.cmd	= ETHTOOL_MSG_PLCA_GET_STATUS,
 		.doit	= ethnl_default_doit,
-		.start	= ethnl_default_start,
-		.dumpit	= ethnl_default_dumpit,
-		.done	= ethnl_default_done,
+		.start	= ethnl_perphy_start,
+		.dumpit	= ethnl_perphy_dumpit,
+		.done	= ethnl_perphy_done,
 		.policy = ethnl_plca_get_status_policy,
 		.maxattr = ARRAY_SIZE(ethnl_plca_get_status_policy) - 1,
 	},
@@ -1256,10 +1519,10 @@ static const struct genl_ops ethtool_genl_ops[] = {
 	},
 	{
 		.cmd	= ETHTOOL_MSG_PHY_GET,
-		.doit	= ethnl_phy_doit,
-		.start	= ethnl_phy_start,
-		.dumpit	= ethnl_phy_dumpit,
-		.done	= ethnl_phy_done,
+		.doit	= ethnl_default_doit,
+		.start	= ethnl_perphy_start,
+		.dumpit	= ethnl_perphy_dumpit,
+		.done	= ethnl_perphy_done,
 		.policy = ethnl_phy_get_policy,
 		.maxattr = ARRAY_SIZE(ethnl_phy_get_policy) - 1,
 	},
@@ -1278,6 +1541,36 @@ static const struct genl_ops ethtool_genl_ops[] = {
 		.doit	= ethnl_default_set_doit,
 		.policy = ethnl_tsconfig_set_policy,
 		.maxattr = ARRAY_SIZE(ethnl_tsconfig_set_policy) - 1,
+	},
+	{
+		.cmd	= ETHTOOL_MSG_RSS_SET,
+		.flags	= GENL_UNS_ADMIN_PERM,
+		.doit	= ethnl_default_set_doit,
+		.policy = ethnl_rss_set_policy,
+		.maxattr = ARRAY_SIZE(ethnl_rss_set_policy) - 1,
+	},
+	{
+		.cmd	= ETHTOOL_MSG_RSS_CREATE_ACT,
+		.flags	= GENL_UNS_ADMIN_PERM,
+		.doit	= ethnl_rss_create_doit,
+		.policy	= ethnl_rss_create_policy,
+		.maxattr = ARRAY_SIZE(ethnl_rss_create_policy) - 1,
+	},
+	{
+		.cmd	= ETHTOOL_MSG_RSS_DELETE_ACT,
+		.flags	= GENL_UNS_ADMIN_PERM,
+		.doit	= ethnl_rss_delete_doit,
+		.policy	= ethnl_rss_delete_policy,
+		.maxattr = ARRAY_SIZE(ethnl_rss_delete_policy) - 1,
+	},
+	{
+		.cmd	= ETHTOOL_MSG_MSE_GET,
+		.doit	= ethnl_default_doit,
+		.start	= ethnl_perphy_start,
+		.dumpit	= ethnl_perphy_dumpit,
+		.done	= ethnl_perphy_done,
+		.policy = ethnl_mse_get_policy,
+		.maxattr = ARRAY_SIZE(ethnl_mse_get_policy) - 1,
 	},
 };
 

@@ -340,8 +340,8 @@ static const struct scsi_host_template k2_sata_sht = {
 
 static struct ata_port_operations k2_sata_ops = {
 	.inherits		= &ata_bmdma_port_ops,
-	.softreset              = k2_sata_softreset,
-	.hardreset              = k2_sata_hardreset,
+	.reset.softreset	= k2_sata_softreset,
+	.reset.hardreset	= k2_sata_hardreset,
 	.sff_tf_load		= k2_sata_tf_load,
 	.sff_tf_read		= k2_sata_tf_read,
 	.sff_check_status	= k2_stat_check_status,
@@ -500,14 +500,13 @@ static int k2_sata_init_one(struct pci_dev *pdev, const struct pci_device_id *en
  * controller
  * */
 static const struct pci_device_id k2_sata_pci_tbl[] = {
-	{ PCI_VDEVICE(SERVERWORKS, 0x0240), chip_svw4 },
-	{ PCI_VDEVICE(SERVERWORKS, 0x0241), chip_svw8 },
-	{ PCI_VDEVICE(SERVERWORKS, 0x0242), chip_svw4 },
-	{ PCI_VDEVICE(SERVERWORKS, 0x024a), chip_svw4 },
-	{ PCI_VDEVICE(SERVERWORKS, 0x024b), chip_svw4 },
-	{ PCI_VDEVICE(SERVERWORKS, 0x0410), chip_svw42 },
-	{ PCI_VDEVICE(SERVERWORKS, 0x0411), chip_svw43 },
-
+	{ PCI_VDEVICE(SERVERWORKS, 0x0240), .driver_data = chip_svw4 },
+	{ PCI_VDEVICE(SERVERWORKS, 0x0241), .driver_data = chip_svw8 },
+	{ PCI_VDEVICE(SERVERWORKS, 0x0242), .driver_data = chip_svw4 },
+	{ PCI_VDEVICE(SERVERWORKS, 0x024a), .driver_data = chip_svw4 },
+	{ PCI_VDEVICE(SERVERWORKS, 0x024b), .driver_data = chip_svw4 },
+	{ PCI_VDEVICE(SERVERWORKS, 0x0410), .driver_data = chip_svw42 },
+	{ PCI_VDEVICE(SERVERWORKS, 0x0411), .driver_data = chip_svw43 },
 	{ }
 };
 

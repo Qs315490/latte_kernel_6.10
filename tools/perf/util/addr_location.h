@@ -11,16 +11,19 @@ struct symbol;
 
 struct addr_location {
 	struct thread *thread;
-	struct maps   *maps;
 	struct map    *map;
 	struct symbol *sym;
 	const char    *srcline;
 	u64	      addr;
 	char	      level;
-	u8	      filtered;
 	u8	      cpumode;
+	u16	      filtered;
 	s32	      cpu;
 	s32	      socket;
+	/* Same as machine.parallelism but within [1, nr_cpus]. */
+	int	      parallelism;
+	/* See he_stat.latency. */
+	u64	      latency;
 };
 
 void addr_location__init(struct addr_location *al);

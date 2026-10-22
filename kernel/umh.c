@@ -359,7 +359,7 @@ struct subprocess_info *call_usermodehelper_setup(const char *path, char **argv,
 		void *data)
 {
 	struct subprocess_info *sub_info;
-	sub_info = kzalloc(sizeof(struct subprocess_info), gfp_mask);
+	sub_info = kzalloc_obj(struct subprocess_info, gfp_mask);
 	if (!sub_info)
 		goto out;
 
@@ -430,7 +430,7 @@ int call_usermodehelper_exec(struct subprocess_info *sub_info, int wait)
 	sub_info->complete = (wait == UMH_NO_WAIT) ? NULL : &done;
 	sub_info->wait = wait;
 
-	queue_work(system_unbound_wq, &sub_info->work);
+	queue_work(system_dfl_wq, &sub_info->work);
 	if (wait == UMH_NO_WAIT)	/* task has freed sub_info */
 		goto unlock;
 

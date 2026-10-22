@@ -116,6 +116,16 @@ static int ipsec_fs_create_aliased_ft(struct mlx5_core_dev *ibv_owner,
 	memcpy(alias_attr.access_key, alias_key, ACCESS_KEY_LEN);
 	alias_attr.obj_id = aliased_object_id;
 	alias_attr.obj_type = MLX5_GENERAL_OBJECT_TYPES_FLOW_TABLE_ALIAS;
+	if (MLX5_CAP_GEN_2(ibv_owner, sw_vhca_id_valid) &&
+	    MLX5_CAP_GEN(ibv_allowed, ft_alias_sw_vhca_id)) {
+		vhca_id_to_be_accessed = MLX5_CAP_GEN_2(ibv_owner, sw_vhca_id);
+		alias_attr.vhca_id_type = VHCA_ID_TYPE_SW;
+	} else {
+		vhca_id_to_be_accessed = MLX5_CAP_GEN(ibv_owner, vhca_id);
+		alias_attr.vhca_id_type = VHCA_ID_TYPE_HW;
+		if (MLX5_CAP_GEN_2(ibv_owner, sw_vhca_id_valid))
+			mlx5_core_warn(ibv_owner, "IPsec with migration isn't supported, if migration is required update FW.\n");
+	}
 	alias_attr.vhca_id = vhca_id_to_be_accessed;
 	ret = mlx5_cmd_alias_obj_create(ibv_allowed, &alias_attr, obj_id);
 	if (ret) {
@@ -139,7 +149,7 @@ ipsec_fs_roce_rx_rule_setup(struct mlx5_core_dev *mdev,
 	struct mlx5_flow_spec *spec;
 	int err = 0;
 
-	spec = kvzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kvzalloc_obj(*spec);
 	if (!spec)
 		return -ENOMEM;
 
@@ -164,6 +174,8 @@ ipsec_fs_roce_rx_rule_setup(struct mlx5_core_dev *mdev,
 	roce->rule = rule;
 
 	memset(spec, 0, sizeof(*spec));
+	if (default_dst->type == MLX5_FLOW_DESTINATION_TYPE_FLOW_TABLE)
+		flow_act.flags |= FLOW_ACT_IGNORE_FLOW_LEVEL;
 	rule = mlx5_add_flow_rules(roce->ft, spec, &flow_act, default_dst, 1);
 	if (IS_ERR(rule)) {
 		err = PTR_ERR(rule);
@@ -178,6 +190,8 @@ ipsec_fs_roce_rx_rule_setup(struct mlx5_core_dev *mdev,
 		goto out;
 
 	flow_act.action = MLX5_FLOW_CONTEXT_ACTION_FWD_DEST;
+	if (default_dst->type == MLX5_FLOW_DESTINATION_TYPE_FLOW_TABLE)
+		flow_act.flags &= ~FLOW_ACT_IGNORE_FLOW_LEVEL;
 	dst.type = MLX5_FLOW_DESTINATION_TYPE_TABLE_TYPE;
 	dst.ft = roce->ft_rdma;
 	rule = mlx5_add_flow_rules(roce->nic_master_ft, NULL, &flow_act, &dst,
@@ -238,7 +252,7 @@ static int ipsec_fs_roce_tx_mpv_rule_setup(struct mlx5_core_dev *mdev,
 	struct mlx5_flow_spec *spec;
 	int err = 0;
 
-	spec = kvzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kvzalloc_obj(*spec);
 	if (!spec)
 		return -ENOMEM;
 
@@ -846,7 +860,7 @@ struct mlx5_ipsec_fs *mlx5_ipsec_fs_roce_init(struct mlx5_core_dev *mdev,
 		return NULL;
 	}
 
-	roce_ipsec = kzalloc(sizeof(*roce_ipsec), GFP_KERNEL);
+	roce_ipsec = kzalloc_obj(*roce_ipsec);
 	if (!roce_ipsec)
 		return NULL;
 

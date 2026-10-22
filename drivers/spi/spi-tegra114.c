@@ -728,9 +728,9 @@ static int tegra_spi_set_hw_cs_timing(struct spi_device *spi)
 	u32 inactive_cycles;
 	u8 cs_state;
 
-	if (setup->unit != SPI_DELAY_UNIT_SCK ||
-	    hold->unit != SPI_DELAY_UNIT_SCK ||
-	    inactive->unit != SPI_DELAY_UNIT_SCK) {
+	if ((setup->value && setup->unit != SPI_DELAY_UNIT_SCK) ||
+	    (hold->value && hold->unit != SPI_DELAY_UNIT_SCK) ||
+	    (inactive->value && inactive->unit != SPI_DELAY_UNIT_SCK)) {
 		dev_err(&spi->dev,
 			"Invalid delay unit %d, should be SPI_DELAY_UNIT_SCK\n",
 			SPI_DELAY_UNIT_SCK);
@@ -920,7 +920,7 @@ static struct tegra_spi_client_data
 		return NULL;
 	}
 
-	cdata = kzalloc(sizeof(*cdata), GFP_KERNEL);
+	cdata = kzalloc_obj(*cdata);
 	if (!cdata)
 		return NULL;
 
@@ -978,11 +978,14 @@ static int tegra_spi_setup(struct spi_device *spi)
 	if (spi_get_csgpiod(spi, 0))
 		gpiod_set_value(spi_get_csgpiod(spi, 0), 0);
 
+	/* Update default register to include CS polarity and SPI mode */
 	val = tspi->def_command1_reg;
 	if (spi->mode & SPI_CS_HIGH)
 		val &= ~SPI_CS_POL_INACTIVE(spi_get_chipselect(spi, 0));
 	else
 		val |= SPI_CS_POL_INACTIVE(spi_get_chipselect(spi, 0));
+	val &= ~SPI_CONTROL_MODE_MASK;
+	val |= SPI_MODE_SEL(spi->mode & 0x3);
 	tspi->def_command1_reg = val;
 	tegra_spi_writel(tspi, tspi->def_command1_reg, SPI_COMMAND1);
 	spin_unlock_irqrestore(&tspi->lock, flags);
@@ -1299,7 +1302,7 @@ static int tegra_spi_probe(struct platform_device *pdev)
 	int ret, spi_irq;
 	int bus_num;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*tspi));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*tspi));
 	if (!host) {
 		dev_err(&pdev->dev, "host allocation failed\n");
 		return -ENOMEM;
@@ -1333,36 +1336,31 @@ static int tegra_spi_probe(struct platform_device *pdev)
 	tspi->soc_data = of_device_get_match_data(&pdev->dev);
 	if (!tspi->soc_data) {
 		dev_err(&pdev->dev, "unsupported tegra\n");
-		ret = -ENODEV;
-		goto exit_free_host;
+		return -ENODEV;
 	}
 
 	tspi->base = devm_platform_get_and_ioremap_resource(pdev, 0, &r);
-	if (IS_ERR(tspi->base)) {
-		ret = PTR_ERR(tspi->base);
-		goto exit_free_host;
-	}
+	if (IS_ERR(tspi->base))
+		return PTR_ERR(tspi->base);
+
 	tspi->phys = r->start;
 
 	spi_irq = platform_get_irq(pdev, 0);
-	if (spi_irq < 0) {
-		ret = spi_irq;
-		goto exit_free_host;
-	}
+	if (spi_irq < 0)
+		return spi_irq;
+
 	tspi->irq = spi_irq;
 
 	tspi->clk = devm_clk_get(&pdev->dev, "spi");
 	if (IS_ERR(tspi->clk)) {
 		dev_err(&pdev->dev, "can not get clock\n");
-		ret = PTR_ERR(tspi->clk);
-		goto exit_free_host;
+		return PTR_ERR(tspi->clk);
 	}
 
 	tspi->rst = devm_reset_control_get_exclusive(&pdev->dev, "spi");
 	if (IS_ERR(tspi->rst)) {
 		dev_err(&pdev->dev, "can not get reset\n");
-		ret = PTR_ERR(tspi->rst);
-		goto exit_free_host;
+		return PTR_ERR(tspi->rst);
 	}
 
 	tspi->max_buf_size = SPI_FIFO_DEPTH << 2;
@@ -1370,7 +1368,7 @@ static int tegra_spi_probe(struct platform_device *pdev)
 
 	ret = tegra_spi_init_dma_param(tspi, true);
 	if (ret < 0)
-		goto exit_free_host;
+		return ret;
 	ret = tegra_spi_init_dma_param(tspi, false);
 	if (ret < 0)
 		goto exit_rx_dma_free;
@@ -1412,8 +1410,7 @@ static int tegra_spi_probe(struct platform_device *pdev)
 		goto exit_pm_disable;
 	}
 
-	host->dev.of_node = pdev->dev.of_node;
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "can not register to host err %d\n", ret);
 		goto exit_free_irq;
@@ -1429,8 +1426,7 @@ exit_pm_disable:
 	tegra_spi_deinit_dma_param(tspi, false);
 exit_rx_dma_free:
 	tegra_spi_deinit_dma_param(tspi, true);
-exit_free_host:
-	spi_controller_put(host);
+
 	return ret;
 }
 
@@ -1438,6 +1434,8 @@ static void tegra_spi_remove(struct platform_device *pdev)
 {
 	struct spi_controller *host = platform_get_drvdata(pdev);
 	struct tegra_spi_data	*tspi = spi_controller_get_devdata(host);
+
+	spi_unregister_controller(host);
 
 	free_irq(tspi->irq, tspi);
 

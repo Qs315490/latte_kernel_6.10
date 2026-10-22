@@ -8,6 +8,7 @@
 #ifndef RSEQ_H
 #define RSEQ_H
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
@@ -142,7 +143,12 @@ static inline struct rseq_abi *rseq_get_abi(void)
  * succeed. A restartable sequence executed from a non-registered
  * thread will always fail.
  */
-int rseq_register_current_thread(void);
+int __rseq_register_current_thread(bool nolibc, bool legacy);
+
+static inline int rseq_register_current_thread(void)
+{
+	return __rseq_register_current_thread(false, false);
+}
 
 /*
  * Unregister rseq for current thread.
@@ -158,6 +164,11 @@ int32_t rseq_fallback_current_cpu(void);
  * Restartable sequence fallback for reading the current node number.
  */
 int32_t rseq_fallback_current_node(void);
+
+/*
+ * Returns true if rseq is supported.
+ */
+bool rseq_available(void);
 
 /*
  * Values returned can be either the current CPU number, -1 (rseq is

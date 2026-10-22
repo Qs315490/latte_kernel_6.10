@@ -5,7 +5,6 @@
  */
 #include <linux/clk.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
@@ -154,14 +153,14 @@ find_format_by_index(struct venus_inst *inst, unsigned int index, u32 type)
 		return NULL;
 
 	for (i = 0; i < size; i++) {
-		bool valid;
+		bool valid = false;
 
 		if (fmt[i].type != type)
 			continue;
 
 		if (V4L2_TYPE_IS_OUTPUT(type)) {
 			valid = venus_helper_check_codec(inst, fmt[i].pixfmt);
-		} else if (V4L2_TYPE_IS_CAPTURE(type)) {
+		} else {
 			valid = venus_helper_check_format(inst, fmt[i].pixfmt);
 
 			if (fmt[i].pixfmt == V4L2_PIX_FMT_QC10C &&
@@ -329,8 +328,6 @@ static int vdec_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
 	struct vb2_queue *q;
 
 	q = v4l2_m2m_get_vq(inst->m2m_ctx, f->type);
-	if (!q)
-		return -EINVAL;
 
 	if (vb2_is_busy(q))
 		return -EBUSY;
@@ -435,9 +432,13 @@ vdec_g_selection(struct file *file, void *fh, struct v4l2_selection *s)
 static int
 vdec_querycap(struct file *file, void *fh, struct v4l2_capability *cap)
 {
+	struct venus_inst *inst = to_inst(file);
+	struct venus_core *core = inst->core;
+
 	strscpy(cap->driver, "qcom-venus", sizeof(cap->driver));
 	strscpy(cap->card, "Qualcomm Venus video decoder", sizeof(cap->card));
-	strscpy(cap->bus_info, "platform:qcom-venus", sizeof(cap->bus_info));
+	snprintf(cap->bus_info, sizeof(cap->bus_info),
+		 "plat:%s:dec", dev_name(core->dev));
 
 	return 0;
 }
@@ -481,11 +482,9 @@ static int vdec_s_parm(struct file *file, void *fh, struct v4l2_streamparm *a)
 	us_per_frame = timeperframe->numerator * (u64)USEC_PER_SEC;
 	do_div(us_per_frame, timeperframe->denominator);
 
-	if (!us_per_frame)
-		return -EINVAL;
-
-	fps = (u64)USEC_PER_SEC;
-	do_div(fps, us_per_frame);
+	us_per_frame = clamp(us_per_frame, 1, USEC_PER_SEC);
+	fps = USEC_PER_SEC / (u32)us_per_frame;
+	fps = min(VENUS_MAX_FPS, fps);
 
 	inst->fps = fps;
 	inst->timeperframe = *timeperframe;
@@ -569,7 +568,13 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 
 		fdata.buffer_type = HFI_BUFFER_INPUT;
 		fdata.flags |= HFI_BUFFERFLAG_EOS;
-		if (IS_V6(inst->core) && is_fw_rev_or_older(inst->core, 1, 0, 87))
+
+		/* Send NULL EOS addr for only IRIS2 (SM8250),for firmware <= 1.0.87.
+		 * SC7280 also reports "1.0.<hash>" parsed as 1.0.0; restricting to IRIS2
+		 * avoids misapplying this quirk and breaking VP9 decode on SC7280.
+		 */
+
+		if (IS_IRIS2(inst->core) && is_fw_rev_or_older(inst->core, 1, 0, 87))
 			fdata.device_addr = 0;
 		else
 			fdata.device_addr = 0xdeadb000;
@@ -1110,10 +1115,20 @@ static int vdec_start_output(struct venus_inst *inst)
 
 	if (inst->codec_state == VENUS_DEC_STATE_SEEK) {
 		ret = venus_helper_process_initial_out_bufs(inst);
-		if (inst->next_buf_last)
+		if (ret)
+			return ret;
+
+		if (inst->next_buf_last) {
 			inst->codec_state = VENUS_DEC_STATE_DRC;
-		else
+		} else {
 			inst->codec_state = VENUS_DEC_STATE_DECODING;
+
+			if (inst->streamon_cap) {
+				ret = venus_helper_queue_dpb_bufs(inst);
+				if (ret)
+					return ret;
+			}
+		}
 		goto done;
 	}
 
@@ -1434,10 +1449,10 @@ static void vdec_buf_done(struct venus_inst *inst, unsigned int buf_type,
 				inst->drain_active = false;
 				inst->codec_state = VENUS_DEC_STATE_STOPPED;
 			}
+		} else {
+			if (!bytesused)
+				state = VB2_BUF_STATE_ERROR;
 		}
-
-		if (!bytesused)
-			state = VB2_BUF_STATE_ERROR;
 	} else {
 		vbuf->sequence = inst->sequence_out++;
 	}
@@ -1668,7 +1683,7 @@ static int vdec_open(struct file *file)
 	struct venus_inst *inst;
 	int ret;
 
-	inst = kzalloc(sizeof(*inst), GFP_KERNEL);
+	inst = kzalloc_obj(*inst);
 	if (!inst)
 		return -ENOMEM;
 
@@ -1724,9 +1739,8 @@ static int vdec_open(struct file *file)
 	v4l2_fh_init(&inst->fh, core->vdev_dec);
 
 	inst->fh.ctrl_handler = &inst->ctrl_handler;
-	v4l2_fh_add(&inst->fh);
+	v4l2_fh_add(&inst->fh, file);
 	inst->fh.m2m_ctx = inst->m2m_ctx;
-	file->private_data = &inst->fh;
 
 	return 0;
 
@@ -1747,7 +1761,7 @@ static int vdec_close(struct file *file)
 
 	vdec_pm_get(inst);
 	cancel_work_sync(&inst->delayed_process_work);
-	venus_close_common(inst);
+	venus_close_common(inst, file);
 	ida_destroy(&inst->dpb_ids);
 	vdec_pm_put(inst, false);
 
@@ -1771,12 +1785,9 @@ static int vdec_probe(struct platform_device *pdev)
 	struct venus_core *core;
 	int ret;
 
-	if (!dev->parent)
-		return -EPROBE_DEFER;
-
 	core = dev_get_drvdata(dev->parent);
 	if (!core)
-		return -EPROBE_DEFER;
+		return -EINVAL;
 
 	platform_set_drvdata(pdev, core);
 
@@ -1875,6 +1886,5 @@ static struct platform_driver qcom_venus_dec_driver = {
 };
 module_platform_driver(qcom_venus_dec_driver);
 
-MODULE_ALIAS("platform:qcom-venus-decoder");
 MODULE_DESCRIPTION("Qualcomm Venus video decoder driver");
 MODULE_LICENSE("GPL v2");

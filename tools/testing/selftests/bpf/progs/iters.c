@@ -1175,6 +1175,122 @@ __naked int loop_state_deps2(void)
 }
 
 SEC("?raw_tp")
+__failure
+__msg("math between fp pointer and register with unbounded")
+__flag(BPF_F_TEST_STATE_FREQ)
+__naked int loop_state_deps3(void)
+{
+	/* This is equivalent to a C program below.
+	 *
+	 *   if (random() != 24) {       // assume false branch is placed first
+	 *     i = iter_new();           // fp[-8]
+	 *     while (iter_next(i));
+	 *     iter_destroy(i);
+	 *     return;
+	 *   }
+	 *
+	 *   for (i = 10; i > 0; i--);   // increase dfs_depth for child states
+	 *
+	 *   i = iter_new();             // fp[-8]
+	 *   b = -24;                    // r8
+	 *   for (;;) {                  // checkpoint (L)
+	 *     if (iter_next(i))         // checkpoint (N)
+	 *       break;
+	 *     if (random() == 77) {     // assume false branch is placed first
+	 *       *(u64 *)(r10 + b) = 7;  // this is not safe when b == -25
+	 *       iter_destroy(i);
+	 *       return;
+	 *     }
+	 *     if (random() == 42) {     // assume false branch is placed first
+	 *       b = -25;
+	 *     }
+	 *   }
+	 *   iter_destroy(i);
+	 *
+	 * In case of a buggy verifier first loop might poison
+	 * env->cur_state->loop_entry with a state having 0 branches
+	 * and small dfs_depth. This would trigger NOT_EXACT states
+	 * comparison for some states within second loop.
+	 * Specifically, checkpoint (L) might be problematic if:
+	 * - branch with '*(u64 *)(r10 + b) = 7' is not explored yet;
+	 * - checkpoint (L) is first reached in state {b=-24};
+	 * - traversal is pruned at checkpoint (N) setting checkpoint's (L)
+	 *   branch count to 0, thus making it eligible for use in pruning;
+	 * - checkpoint (L) is next reached in state {b=-25},
+	 *   this would cause NOT_EXACT comparison with a state {b=-24}
+	 *   while 'b' is not marked precise yet.
+	 */
+	asm volatile (
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == 24 goto 2f;"
+		"r1 = r10;"
+		"r1 += -8;"
+		"r2 = 0;"
+		"r3 = 5;"
+		"call %[bpf_iter_num_new];"
+	"1:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_next];"
+		"if r0 != 0 goto 1b;"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_destroy];"
+		"r0 = 0;"
+		"exit;"
+	"2:"
+		/* loop to increase dfs_depth */
+		"r0 = 10;"
+	"3:"
+		"r0 -= 1;"
+		"if r0 != 0 goto 3b;"
+		/* end of loop */
+		"r1 = r10;"
+		"r1 += -8;"
+		"r2 = 0;"
+		"r3 = 10;"
+		"call %[bpf_iter_num_new];"
+		"r8 = -24;"
+	"main_loop_%=:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_next];"
+		"if r0 == 0 goto main_loop_end_%=;"
+		/* first if */
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == 77 goto unsafe_write_%=;"
+		/* second if */
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == 42 goto poison_r8_%=;"
+		/* iterate */
+		"goto main_loop_%=;"
+	"main_loop_end_%=:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_destroy];"
+		"r0 = 0;"
+		"exit;"
+
+	"unsafe_write_%=:"
+		"r0 = r10;"
+		"r0 += r8;"
+		"r1 = 7;"
+		"*(u64 *)(r0 + 0) = r1;"
+		"goto main_loop_end_%=;"
+
+	"poison_r8_%=:"
+		"r8 = -25;"
+		"goto main_loop_%=;"
+		:
+		: __imm(bpf_get_prandom_u32),
+		  __imm(bpf_iter_num_new),
+		  __imm(bpf_iter_num_next),
+		  __imm(bpf_iter_num_destroy)
+		: __clobber_all
+	);
+}
+
+SEC("?raw_tp")
 __success
 __naked int triple_continue(void)
 {
@@ -1489,7 +1605,7 @@ int iter_subprog_check_stacksafe(const void *ctx)
 struct bpf_iter_num global_it;
 
 SEC("raw_tp")
-__failure __msg("arg#0 expected pointer to an iterator on stack")
+__failure __msg("R1 expected pointer to an iterator on stack")
 int iter_new_bad_arg(const void *ctx)
 {
 	bpf_iter_num_new(&global_it, 0, 1);
@@ -1497,7 +1613,7 @@ int iter_new_bad_arg(const void *ctx)
 }
 
 SEC("raw_tp")
-__failure __msg("arg#0 expected pointer to an iterator on stack")
+__failure __msg("R1 expected pointer to an iterator on stack")
 int iter_next_bad_arg(const void *ctx)
 {
 	bpf_iter_num_next(&global_it);
@@ -1505,11 +1621,449 @@ int iter_next_bad_arg(const void *ctx)
 }
 
 SEC("raw_tp")
-__failure __msg("arg#0 expected pointer to an iterator on stack")
+__failure __msg("R1 expected pointer to an iterator on stack")
 int iter_destroy_bad_arg(const void *ctx)
 {
 	bpf_iter_num_destroy(&global_it);
 	return 0;
+}
+
+SEC("raw_tp")
+__success
+int clean_live_states(const void *ctx)
+{
+	char buf[1];
+	int i, j, k, l, m, n, o;
+
+	bpf_for(i, 0, 10)
+	bpf_for(j, 0, 10)
+	bpf_for(k, 0, 10)
+	bpf_for(l, 0, 10)
+	bpf_for(m, 0, 10)
+	bpf_for(n, 0, 10)
+	bpf_for(o, 0, 10) {
+		if (unlikely(bpf_get_prandom_u32()))
+			buf[0] = 42;
+		bpf_printk("%s", buf);
+	}
+	return 0;
+}
+
+SEC("?raw_tp")
+__flag(BPF_F_TEST_STATE_FREQ)
+__failure __msg("misaligned stack access off -31+0 size 8")
+__naked int absent_mark_in_the_middle_state(void)
+{
+	/* This is equivalent to C program below.
+	 *
+	 * r8 = bpf_get_prandom_u32();
+	 * r6 = -32;
+	 * bpf_iter_num_new(&fp[-8], 0, 10);
+	 * if (unlikely(bpf_get_prandom_u32()))
+	 *   r6 = -31;
+	 * while (bpf_iter_num_next(&fp[-8])) {
+	 *   if (unlikely(bpf_get_prandom_u32()))
+	 *     *(fp + r6) = 7;
+	 * }
+	 * bpf_iter_num_destroy(&fp[-8])
+	 * return 0
+	 */
+	asm volatile (
+		"call %[bpf_get_prandom_u32];"
+		"r8 = r0;"
+		"r7 = 0;"
+		"r6 = -32;"
+		"r0 = 0;"
+		"*(u64 *)(r10 - 16) = r0;"
+		"r1 = r10;"
+		"r1 += -8;"
+		"r2 = 0;"
+		"r3 = 10;"
+		"call %[bpf_iter_num_new];"
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == r8 goto change_r6_%=;"
+	"loop_%=:"
+		"call noop;"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_next];"
+		"if r0 == 0 goto loop_end_%=;"
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == r8 goto use_r6_%=;"
+		"goto loop_%=;"
+	"loop_end_%=:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_destroy];"
+		"r0 = 0;"
+		"exit;"
+	"use_r6_%=:"
+		"r0 = r10;"
+		"r0 += r6;"
+		"r1 = 7;"
+		"*(u64 *)(r0 + 0) = r1;"
+		"goto loop_%=;"
+	"change_r6_%=:"
+		"r6 = -31;"
+		"goto loop_%=;"
+		:
+		: __imm(bpf_iter_num_new),
+		  __imm(bpf_iter_num_next),
+		  __imm(bpf_iter_num_destroy),
+		  __imm(bpf_get_prandom_u32)
+		: __clobber_all
+	);
+}
+
+__used __naked
+static int noop(void)
+{
+	asm volatile (
+		"r0 = 0;"
+		"exit;"
+	);
+}
+
+SEC("?raw_tp")
+__flag(BPF_F_TEST_STATE_FREQ)
+__failure __msg("misaligned stack access off -31+0 size 8")
+__naked int absent_mark_in_the_middle_state2(void)
+{
+	/* This is equivalent to C program below.
+	 *
+	 *     r8 = bpf_get_prandom_u32();
+	 *     r6 = -32;
+	 *     bpf_iter_num_new(&fp[-8], 0, 10);
+	 *     if (unlikely(bpf_get_prandom_u32())) {
+	 *       r6 = -31;
+	 * jump_into_loop:
+	 *       goto +0;
+	 *       goto loop;
+	 *     }
+	 *     if (unlikely(bpf_get_prandom_u32()))
+	 *       goto jump_into_loop;
+	 * loop:
+	 *     while (bpf_iter_num_next(&fp[-8])) {
+	 *       if (unlikely(bpf_get_prandom_u32()))
+	 *         *(fp + r6) = 7;
+	 *     }
+	 *     bpf_iter_num_destroy(&fp[-8])
+	 *     return 0
+	 */
+	asm volatile (
+		"call %[bpf_get_prandom_u32];"
+		"r8 = r0;"
+		"r7 = 0;"
+		"r6 = -32;"
+		"r0 = 0;"
+		"*(u64 *)(r10 - 16) = r0;"
+		"r1 = r10;"
+		"r1 += -8;"
+		"r2 = 0;"
+		"r3 = 10;"
+		"call %[bpf_iter_num_new];"
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == r8 goto change_r6_%=;"
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == r8 goto jump_into_loop_%=;"
+	"loop_%=:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_next];"
+		"if r0 == 0 goto loop_end_%=;"
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == r8 goto use_r6_%=;"
+		"goto loop_%=;"
+	"loop_end_%=:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_destroy];"
+		"r0 = 0;"
+		"exit;"
+	"use_r6_%=:"
+		"r0 = r10;"
+		"r0 += r6;"
+		"r1 = 7;"
+		"*(u64 *)(r0 + 0) = r1;"
+		"goto loop_%=;"
+	"change_r6_%=:"
+		"r6 = -31;"
+	"jump_into_loop_%=: "
+		"goto +0;"
+		"goto loop_%=;"
+		:
+		: __imm(bpf_iter_num_new),
+		  __imm(bpf_iter_num_next),
+		  __imm(bpf_iter_num_destroy),
+		  __imm(bpf_get_prandom_u32)
+		: __clobber_all
+	);
+}
+
+SEC("?raw_tp")
+__flag(BPF_F_TEST_STATE_FREQ)
+__failure __msg("misaligned stack access off -31+0 size 8")
+__naked int absent_mark_in_the_middle_state3(void)
+{
+	/*
+	 * bpf_iter_num_new(&fp[-8], 0, 10)
+	 * loop1(-32, &fp[-8])
+	 * loop1_wrapper(&fp[-8])
+	 * bpf_iter_num_destroy(&fp[-8])
+	 */
+	asm volatile (
+		"r1 = r10;"
+		"r1 += -8;"
+		"r2 = 0;"
+		"r3 = 10;"
+		"call %[bpf_iter_num_new];"
+		/* call #1 */
+		"r1 = -32;"
+		"r2 = r10;"
+		"r2 += -8;"
+		"call loop1;"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_destroy];"
+		/* call #2 */
+		"r1 = r10;"
+		"r1 += -8;"
+		"r2 = 0;"
+		"r3 = 10;"
+		"call %[bpf_iter_num_new];"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call loop1_wrapper;"
+		/* return */
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_destroy];"
+		"r0 = 0;"
+		"exit;"
+		:
+		: __imm(bpf_iter_num_new),
+		  __imm(bpf_iter_num_destroy),
+		  __imm(bpf_get_prandom_u32)
+		: __clobber_all
+	);
+}
+
+__used __naked
+static int loop1(void)
+{
+	/*
+	 *  int loop1(num, iter) {
+	 *     r6 = num;
+	 *     r7 = iter;
+	 *     while (bpf_iter_num_next(r7)) {
+	 *       if (unlikely(bpf_get_prandom_u32()))
+	 *         *(fp + r6) = 7;
+	 *     }
+	 *     return 0
+	 *  }
+	 */
+	asm volatile (
+		"r6 = r1;"
+		"r7 = r2;"
+		"call %[bpf_get_prandom_u32];"
+		"r8 = r0;"
+	"loop_%=:"
+		"r1 = r7;"
+		"call %[bpf_iter_num_next];"
+		"if r0 == 0 goto loop_end_%=;"
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == r8 goto use_r6_%=;"
+		"goto loop_%=;"
+	"loop_end_%=:"
+		"r0 = 0;"
+		"exit;"
+	"use_r6_%=:"
+		"r0 = r10;"
+		"r0 += r6;"
+		"r1 = 7;"
+		"*(u64 *)(r0 + 0) = r1;"
+		"goto loop_%=;"
+		:
+		: __imm(bpf_iter_num_next),
+		  __imm(bpf_get_prandom_u32)
+		: __clobber_all
+	);
+}
+
+__used __naked
+static int loop1_wrapper(void)
+{
+	/*
+	 *  int loop1_wrapper(iter) {
+	 *    r6 = -32;
+	 *    r7 = iter;
+	 *    if (unlikely(bpf_get_prandom_u32()))
+	 *      r6 = -31;
+	 *    loop1(r6, r7);
+	 *    return 0;
+	 *  }
+	 */
+	asm volatile (
+		"r6 = -32;"
+		"r7 = r1;"
+		"call %[bpf_get_prandom_u32];"
+		"r8 = r0;"
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == r8 goto change_r6_%=;"
+	"loop_%=:"
+		"r1 = r6;"
+		"r2 = r7;"
+		"call loop1;"
+		"r0 = 0;"
+		"exit;"
+	"change_r6_%=:"
+		"r6 = -31;"
+		"goto loop_%=;"
+		:
+		: __imm(bpf_iter_num_next),
+		  __imm(bpf_get_prandom_u32)
+		: __clobber_all
+	);
+}
+
+/*
+ * This is similar to a test case absent_mark_in_the_middle_state(),
+ * but adapted for use with bpf_loop().
+ */
+SEC("raw_tp")
+__flag(BPF_F_TEST_STATE_FREQ)
+__failure __msg("math between fp pointer and register with unbounded min value is not allowed")
+__naked void absent_mark_in_the_middle_state4(void)
+{
+	/*
+	 * Equivalent to a C program below:
+	 *
+	 * int main(void) {
+	 *   fp[-8] = bpf_get_prandom_u32();
+	 *   fp[-16] = -32;                    // used in a memory access below
+	 *   bpf_loop(7, loop_cb4, fp, 0);
+	 *   return 0;
+	 * }
+	 *
+	 * int loop_cb4(int i, void *ctx) {
+	 *   if (unlikely(ctx[-8] > bpf_get_prandom_u32()))
+	 *     *(u64 *)(fp + ctx[-16]) = 42;   // aligned access expected
+	 *   if (unlikely(fp[-8] > bpf_get_prandom_u32()))
+	 *     ctx[-16] = -31;                 // makes said access unaligned
+	 *   return 0;
+	 * }
+	 */
+	asm volatile (
+		"call %[bpf_get_prandom_u32];"
+		"r8 = r0;"
+		"*(u64 *)(r10 - 8) = r0;"
+		"*(u64 *)(r10 - 16) = -32;"
+		"r1 = 7;"
+		"r2 = loop_cb4 ll;"
+		"r3 = r10;"
+		"r4 = 0;"
+		"call %[bpf_loop];"
+		"r0 = 0;"
+		"exit;"
+		:
+		: __imm(bpf_loop),
+		  __imm(bpf_get_prandom_u32)
+		: __clobber_all
+	);
+}
+
+__used __naked
+static void loop_cb4(void)
+{
+	asm volatile (
+		"r9 = r2;"
+		"r8 = *(u64 *)(r9 - 8);"
+		"r6 = *(u64 *)(r9 - 16);"
+		"call %[bpf_get_prandom_u32];"
+		"if r0 > r8 goto use_fp16_%=;"
+	"1:"
+		"call %[bpf_get_prandom_u32];"
+		"if r0 > r8 goto update_fp16_%=;"
+	"2:"
+		"r0 = 0;"
+		"exit;"
+	"use_fp16_%=:"
+		"r1 = r10;"
+		"r1 += r6;"
+		"*(u64 *)(r1 + 0) = 42;"
+		"goto 1b;"
+	"update_fp16_%=:"
+		"*(u64 *)(r9 - 16) = -31;"
+		"goto 2b;"
+		:
+		: __imm(bpf_get_prandom_u32)
+	);
+}
+
+SEC("raw_tp")
+__success
+__naked int stack_misc_vs_scalar_in_a_loop(void)
+{
+	asm volatile(
+		"*(u8 *)(r10 - 15) = 1;" /* This marks stack slot fp[-16] as STACK_MISC. */
+		"*(u8 *)(r10 - 23) = 1;"
+		"*(u8 *)(r10 - 31) = 1;"
+		"*(u8 *)(r10 - 39) = 1;"
+		"*(u8 *)(r10 - 47) = 1;"
+		"*(u8 *)(r10 - 55) = 1;"
+		"*(u8 *)(r10 - 63) = 1;"
+		"*(u8 *)(r10 - 71) = 1;"
+		"*(u8 *)(r10 - 79) = 1;"
+		"r1 = r10;"
+		"r1 += -8;"
+		"r2 = 0;"
+		"r3 = 10;"
+		"call %[bpf_iter_num_new];"
+	"loop_%=:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_next];"
+		"if r0 == 0 goto loop_end_%=;"
+
+#define maybe_change_stack_slot(off) \
+		"call %[bpf_get_prandom_u32];"	\
+		"if r0 == 42 goto +1;"		\
+		"goto +1;"			\
+		"*(u64 *)(r10 " #off ") = r0;"
+
+		/*
+		 * When comparing verifier states fp[-16] will be
+		 * either STACK_MISC or SCALAR. Pruning logic should
+		 * consider old STACK_MISC equivalent to current SCALAR
+		 * to avoid states explosion.
+		 */
+		maybe_change_stack_slot(-16)
+		maybe_change_stack_slot(-24)
+		maybe_change_stack_slot(-32)
+		maybe_change_stack_slot(-40)
+		maybe_change_stack_slot(-48)
+		maybe_change_stack_slot(-56)
+		maybe_change_stack_slot(-64)
+		maybe_change_stack_slot(-72)
+		maybe_change_stack_slot(-80)
+
+#undef maybe_change_stack_slot
+
+		"goto loop_%=;"
+	"loop_end_%=:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_destroy];"
+		"r0 = 0;"
+		"exit;"
+		:
+		: __imm(bpf_get_prandom_u32),
+		  __imm(bpf_iter_num_new),
+		  __imm(bpf_iter_num_next),
+		  __imm(bpf_iter_num_destroy),
+		  __imm_addr(amap)
+		: __clobber_all
+	);
 }
 
 char _license[] SEC("license") = "GPL";

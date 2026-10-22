@@ -394,7 +394,7 @@ static const struct scsi_host_template amd_sht = {
 
 static const struct ata_port_operations amd_base_port_ops = {
 	.inherits	= &ata_bmdma32_port_ops,
-	.prereset	= amd_pre_reset,
+	.reset.prereset	= amd_pre_reset,
 };
 
 static struct ata_port_operations amd33_port_ops = {
@@ -429,7 +429,7 @@ static const struct ata_port_operations nv_base_port_ops = {
 	.inherits	= &ata_bmdma_port_ops,
 	.cable_detect	= ata_cable_ignore,
 	.mode_filter	= nv_mode_filter,
-	.prereset	= nv_pre_reset,
+	.reset.prereset	= nv_pre_reset,
 	.host_stop	= nv_host_stop,
 };
 
@@ -597,29 +597,71 @@ static int amd_reinit_one(struct pci_dev *pdev)
 #endif
 
 static const struct pci_device_id amd[] = {
-	{ PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_COBRA_7401),		0 },
-	{ PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_VIPER_7409),		1 },
-	{ PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_VIPER_7411),		3 },
-	{ PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_OPUS_7441),		4 },
-	{ PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_8111_IDE),		5 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_IDE),	7 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE2_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE2S_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE3_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE3S_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_CK804_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP04_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP65_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP67_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP73_IDE),	8 },
-	{ PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP77_IDE),	8 },
-	{ PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_CS5536_IDE),		9 },
-	{ PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_CS5536_DEV_IDE),	9 },
-
-	{ },
+	{
+		PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_COBRA_7401),
+		.driver_data = 0,
+	}, {
+		PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_VIPER_7409),
+		.driver_data = 1,
+	}, {
+		PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_VIPER_7411),
+		.driver_data = 3,
+	}, {
+		PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_OPUS_7441),
+		.driver_data = 4,
+	}, {
+		PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_8111_IDE),
+		.driver_data = 5,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_IDE),
+		.driver_data = 7,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE2_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE2S_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE3_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE3S_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_CK804_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP04_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP65_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP67_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP73_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(NVIDIA,	PCI_DEVICE_ID_NVIDIA_NFORCE_MCP77_IDE),
+		.driver_data = 8,
+	}, {
+		PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_CS5536_IDE),
+		.driver_data = 9,
+	}, {
+		PCI_VDEVICE(AMD,	PCI_DEVICE_ID_AMD_CS5536_DEV_IDE),
+		.driver_data = 9
+	},
+	{ }
 };
 
 static struct pci_driver amd_pci_driver = {

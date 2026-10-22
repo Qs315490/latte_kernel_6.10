@@ -127,49 +127,34 @@ enum drm_panthor_ioctl_id {
 
 	/** @DRM_PANTHOR_TILER_HEAP_DESTROY: Destroy a tiler heap. */
 	DRM_PANTHOR_TILER_HEAP_DESTROY,
+
+	/** @DRM_PANTHOR_BO_SET_LABEL: Label a BO. */
+	DRM_PANTHOR_BO_SET_LABEL,
+
+	/**
+	 * @DRM_PANTHOR_SET_USER_MMIO_OFFSET: Set the offset to use as the user MMIO offset.
+	 *
+	 * The default behavior is to pick the MMIO offset based on the size of the pgoff_t
+	 * type seen by the process that manipulates the FD, such that a 32-bit process can
+	 * always map the user MMIO ranges. But this approach doesn't work well for emulators
+	 * like FEX, where the emulator is an 64-bit binary which might be executing 32-bit
+	 * code. In that case, the kernel thinks it's the 64-bit process and assumes
+	 * DRM_PANTHOR_USER_MMIO_OFFSET_64BIT is in use, but the UMD library expects
+	 * DRM_PANTHOR_USER_MMIO_OFFSET_32BIT, because it can't mmap() anything above the
+	 * pgoff_t size.
+	 */
+	DRM_PANTHOR_SET_USER_MMIO_OFFSET,
+
+	/** @DRM_PANTHOR_BO_SYNC: Sync BO data to/from the device */
+	DRM_PANTHOR_BO_SYNC,
+
+	/**
+	 * @DRM_PANTHOR_BO_QUERY_INFO: Query information about a BO.
+	 *
+	 * This is useful for imported BOs.
+	 */
+	DRM_PANTHOR_BO_QUERY_INFO,
 };
-
-/**
- * DRM_IOCTL_PANTHOR() - Build a Panthor IOCTL number
- * @__access: Access type. Must be R, W or RW.
- * @__id: One of the DRM_PANTHOR_xxx id.
- * @__type: Suffix of the type being passed to the IOCTL.
- *
- * Don't use this macro directly, use the DRM_IOCTL_PANTHOR_xxx
- * values instead.
- *
- * Return: An IOCTL number to be passed to ioctl() from userspace.
- */
-#define DRM_IOCTL_PANTHOR(__access, __id, __type) \
-	DRM_IO ## __access(DRM_COMMAND_BASE + DRM_PANTHOR_ ## __id, \
-			   struct drm_panthor_ ## __type)
-
-#define DRM_IOCTL_PANTHOR_DEV_QUERY \
-	DRM_IOCTL_PANTHOR(WR, DEV_QUERY, dev_query)
-#define DRM_IOCTL_PANTHOR_VM_CREATE \
-	DRM_IOCTL_PANTHOR(WR, VM_CREATE, vm_create)
-#define DRM_IOCTL_PANTHOR_VM_DESTROY \
-	DRM_IOCTL_PANTHOR(WR, VM_DESTROY, vm_destroy)
-#define DRM_IOCTL_PANTHOR_VM_BIND \
-	DRM_IOCTL_PANTHOR(WR, VM_BIND, vm_bind)
-#define DRM_IOCTL_PANTHOR_VM_GET_STATE \
-	DRM_IOCTL_PANTHOR(WR, VM_GET_STATE, vm_get_state)
-#define DRM_IOCTL_PANTHOR_BO_CREATE \
-	DRM_IOCTL_PANTHOR(WR, BO_CREATE, bo_create)
-#define DRM_IOCTL_PANTHOR_BO_MMAP_OFFSET \
-	DRM_IOCTL_PANTHOR(WR, BO_MMAP_OFFSET, bo_mmap_offset)
-#define DRM_IOCTL_PANTHOR_GROUP_CREATE \
-	DRM_IOCTL_PANTHOR(WR, GROUP_CREATE, group_create)
-#define DRM_IOCTL_PANTHOR_GROUP_DESTROY \
-	DRM_IOCTL_PANTHOR(WR, GROUP_DESTROY, group_destroy)
-#define DRM_IOCTL_PANTHOR_GROUP_SUBMIT \
-	DRM_IOCTL_PANTHOR(WR, GROUP_SUBMIT, group_submit)
-#define DRM_IOCTL_PANTHOR_GROUP_GET_STATE \
-	DRM_IOCTL_PANTHOR(WR, GROUP_GET_STATE, group_get_state)
-#define DRM_IOCTL_PANTHOR_TILER_HEAP_CREATE \
-	DRM_IOCTL_PANTHOR(WR, TILER_HEAP_CREATE, tiler_heap_create)
-#define DRM_IOCTL_PANTHOR_TILER_HEAP_DESTROY \
-	DRM_IOCTL_PANTHOR(WR, TILER_HEAP_DESTROY, tiler_heap_destroy)
 
 /**
  * DOC: IOCTL arguments
@@ -271,6 +256,26 @@ enum drm_panthor_dev_query_type {
 };
 
 /**
+ * enum drm_panthor_gpu_coherency: Type of GPU coherency
+ */
+enum drm_panthor_gpu_coherency {
+	/**
+	 * @DRM_PANTHOR_GPU_COHERENCY_ACE_LITE: ACE Lite coherency.
+	 */
+	DRM_PANTHOR_GPU_COHERENCY_ACE_LITE = 0,
+
+	/**
+	 * @DRM_PANTHOR_GPU_COHERENCY_ACE: ACE coherency.
+	 */
+	DRM_PANTHOR_GPU_COHERENCY_ACE = 1,
+
+	/**
+	 * @DRM_PANTHOR_GPU_COHERENCY_NONE: No coherency.
+	 */
+	DRM_PANTHOR_GPU_COHERENCY_NONE = 31,
+};
+
+/**
  * struct drm_panthor_gpu_info - GPU information
  *
  * Structure grouping all queryable information relating to the GPU.
@@ -326,7 +331,16 @@ struct drm_panthor_gpu_info {
 	 */
 	__u32 thread_max_barrier_size;
 
-	/** @coherency_features: Coherency features. */
+	/**
+	 * @coherency_features: Coherency features.
+	 *
+	 * Combination of drm_panthor_gpu_coherency flags.
+	 *
+	 * Note that this is just what the coherency protocols supported by the
+	 * GPU, but the actual coherency in place depends on the SoC
+	 * integration and is reflected by
+	 * drm_panthor_gpu_info::selected_coherency.
+	 */
 	__u32 coherency_features;
 
 	/** @texture_features: Texture features. */
@@ -334,6 +348,13 @@ struct drm_panthor_gpu_info {
 
 	/** @as_present: Bitmask encoding the number of address-space exposed by the MMU. */
 	__u32 as_present;
+
+	/**
+	 * @selected_coherency: Coherency selected for this device.
+	 *
+	 * One of drm_panthor_gpu_coherency.
+	 */
+	__u32 selected_coherency;
 
 	/** @shader_present: Bitmask encoding the shader cores exposed by the GPU. */
 	__u64 shader_present;
@@ -349,6 +370,9 @@ struct drm_panthor_gpu_info {
 
 	/** @pad: MBZ. */
 	__u32 pad;
+
+	/** @gpu_features: Bitmask describing supported GPU-wide features */
+	__u64 gpu_features;
 };
 
 /**
@@ -386,6 +410,38 @@ struct drm_panthor_csif_info {
 };
 
 /**
+ * enum drm_panthor_timestamp_info_flags - drm_panthor_timestamp_info.flags
+ */
+enum drm_panthor_timestamp_info_flags {
+	/** @DRM_PANTHOR_TIMESTAMP_GPU: Query GPU time. */
+	DRM_PANTHOR_TIMESTAMP_GPU = 1 << 0,
+
+	/** @DRM_PANTHOR_TIMESTAMP_CPU_NONE: Don't query CPU time. */
+	DRM_PANTHOR_TIMESTAMP_CPU_NONE = 0 << 1,
+
+	/** @DRM_PANTHOR_TIMESTAMP_CPU_MONOTONIC: Query CPU time using CLOCK_MONOTONIC. */
+	DRM_PANTHOR_TIMESTAMP_CPU_MONOTONIC = 1 << 1,
+
+	/** @DRM_PANTHOR_TIMESTAMP_CPU_MONOTONIC_RAW: Query CPU time using CLOCK_MONOTONIC_RAW. */
+	DRM_PANTHOR_TIMESTAMP_CPU_MONOTONIC_RAW = 2 << 1,
+
+	/** @DRM_PANTHOR_TIMESTAMP_CPU_TYPE_MASK: Space reserved for CPU clock type. */
+	DRM_PANTHOR_TIMESTAMP_CPU_TYPE_MASK = 7 << 1,
+
+	/** @DRM_PANTHOR_TIMESTAMP_GPU_OFFSET: Query GPU offset. */
+	DRM_PANTHOR_TIMESTAMP_GPU_OFFSET = 1 << 4,
+
+	/** @DRM_PANTHOR_TIMESTAMP_GPU_CYCLE_COUNT: Query GPU cycle count. */
+	DRM_PANTHOR_TIMESTAMP_GPU_CYCLE_COUNT = 1 << 5,
+
+	/** @DRM_PANTHOR_TIMESTAMP_FREQ: Query timestamp frequency. */
+	DRM_PANTHOR_TIMESTAMP_FREQ = 1 << 6,
+
+	/** @DRM_PANTHOR_TIMESTAMP_DURATION: Return duration of time query. */
+	DRM_PANTHOR_TIMESTAMP_DURATION = 1 << 7,
+};
+
+/**
  * struct drm_panthor_timestamp_info - Timestamp information
  *
  * Structure grouping all queryable information relating to the GPU timestamp.
@@ -397,11 +453,38 @@ struct drm_panthor_timestamp_info {
 	 */
 	__u64 timestamp_frequency;
 
-	/** @current_timestamp: The current timestamp. */
+	/** @current_timestamp: The current GPU timestamp. */
 	__u64 current_timestamp;
 
-	/** @timestamp_offset: The offset of the timestamp timer. */
+	/** @timestamp_offset: The offset of the GPU timestamp timer. */
 	__u64 timestamp_offset;
+
+	/**
+	 * @flags: Bitmask of drm_panthor_timestamp_info_flags.
+	 *
+	 * If set to 0, then it is interpreted as:
+	 *  DRM_PANTHOR_TIMESTAMP_GPU |
+	 *  DRM_PANTHOR_TIMESTAMP_GPU_OFFSET |
+	 *  DRM_PANTHOR_TIMESTAMP_FREQ
+	 *
+	 * Note: these flags are exclusive to each other (only one can be used):
+	 * - DRM_PANTHOR_TIMESTAMP_CPU_NONE
+	 * - DRM_PANTHOR_TIMESTAMP_CPU_MONOTONIC
+	 * - DRM_PANTHOR_TIMESTAMP_CPU_MONOTONIC_RAW
+	 */
+	__u32 flags;
+
+	/** @duration_nsec: Duration of time query. */
+	__u32 duration_nsec;
+
+	/** @cycle_count: Value of GPU_CYCLE_COUNT. */
+	__u64 cycle_count;
+
+	/** @cpu_timestamp_sec: Seconds part of CPU timestamp. */
+	__u64 cpu_timestamp_sec;
+
+	/** @cpu_timestamp_nsec: Nanseconds part of CPU timestamp. */
+	__u64 cpu_timestamp_nsec;
 };
 
 /**
@@ -657,6 +740,15 @@ struct drm_panthor_vm_get_state {
 enum drm_panthor_bo_flags {
 	/** @DRM_PANTHOR_BO_NO_MMAP: The buffer object will never be CPU-mapped in userspace. */
 	DRM_PANTHOR_BO_NO_MMAP = (1 << 0),
+
+	/**
+	 * @DRM_PANTHOR_BO_WB_MMAP: Force "Write-Back Cacheable" CPU mapping.
+	 *
+	 * CPU map the buffer object in userspace by forcing the "Write-Back
+	 * Cacheable" cacheability attribute. The mapping otherwise uses the
+	 * "Non-Cacheable" attribute if the GPU is not IO coherent.
+	 */
+	DRM_PANTHOR_BO_WB_MMAP = (1 << 1),
 };
 
 /**
@@ -1017,6 +1109,193 @@ struct drm_panthor_tiler_heap_destroy {
 
 	/** @pad: Padding field, MBZ. */
 	__u32 pad;
+};
+
+/**
+ * struct drm_panthor_bo_set_label - Arguments passed to DRM_IOCTL_PANTHOR_BO_SET_LABEL
+ */
+struct drm_panthor_bo_set_label {
+	/** @handle: Handle of the buffer object to label. */
+	__u32 handle;
+
+	/**  @pad: MBZ. */
+	__u32 pad;
+
+	/**
+	 * @label: User pointer to a NUL-terminated string
+	 *
+	 * Length cannot be greater than 4096
+	 */
+	__u64 label;
+};
+
+/**
+ * struct drm_panthor_set_user_mmio_offset - Arguments passed to
+ * DRM_IOCTL_PANTHOR_SET_USER_MMIO_OFFSET
+ *
+ * This ioctl is only really useful if you want to support userspace
+ * CPU emulation environments where the size of an unsigned long differs
+ * between the host and the guest architectures.
+ */
+struct drm_panthor_set_user_mmio_offset {
+	/**
+	 * @offset: User MMIO offset to use.
+	 *
+	 * Must be either DRM_PANTHOR_USER_MMIO_OFFSET_32BIT or
+	 * DRM_PANTHOR_USER_MMIO_OFFSET_64BIT.
+	 *
+	 * Use DRM_PANTHOR_USER_MMIO_OFFSET (which selects OFFSET_32BIT or
+	 * OFFSET_64BIT based on the size of an unsigned long) unless you
+	 * have a very good reason to overrule this decision.
+	 */
+	__u64 offset;
+};
+
+/**
+ * enum drm_panthor_bo_sync_op_type - BO sync type
+ */
+enum drm_panthor_bo_sync_op_type {
+	/** @DRM_PANTHOR_BO_SYNC_CPU_CACHE_FLUSH: Flush CPU caches. */
+	DRM_PANTHOR_BO_SYNC_CPU_CACHE_FLUSH = 0,
+
+	/** @DRM_PANTHOR_BO_SYNC_CPU_CACHE_FLUSH_AND_INVALIDATE: Flush and invalidate CPU caches. */
+	DRM_PANTHOR_BO_SYNC_CPU_CACHE_FLUSH_AND_INVALIDATE = 1,
+};
+
+/**
+ * struct drm_panthor_bo_sync_op - BO map sync op
+ */
+struct drm_panthor_bo_sync_op {
+	/** @handle: Handle of the buffer object to sync. */
+	__u32 handle;
+
+	/** @type: Type of operation. */
+	__u32 type;
+
+	/**
+	 * @offset: Offset into the BO at which the sync range starts.
+	 *
+	 * This will be rounded down to the nearest cache line as needed.
+	 */
+	__u64 offset;
+
+	/**
+	 * @size: Size of the range to sync
+	 *
+	 * @size + @offset will be rounded up to the nearest cache line as
+	 * needed.
+	 */
+	__u64 size;
+};
+
+/**
+ * struct drm_panthor_bo_sync - BO map sync request
+ */
+struct drm_panthor_bo_sync {
+	/**
+	 * @ops: Array of struct drm_panthor_bo_sync_op sync operations.
+	 */
+	struct drm_panthor_obj_array ops;
+};
+
+/**
+ * enum drm_panthor_bo_extra_flags - Set of flags returned on a BO_QUERY_INFO request
+ *
+ * Those are flags reflecting BO properties that are not directly coming from the flags
+ * passed are creation time, or information on BOs that were imported from other drivers.
+ */
+enum drm_panthor_bo_extra_flags {
+	/**
+	 * @DRM_PANTHOR_BO_IS_IMPORTED: BO has been imported from an external driver.
+	 *
+	 * Note that imported dma-buf handles are not flagged as imported if they
+	 * where exported by panthor. Only buffers that are coming from other drivers
+	 * (dma heaps, other GPUs, display controllers, V4L, ...).
+	 *
+	 * It's also important to note that all imported BOs are mapped cached and can't
+	 * be considered IO-coherent even if the GPU is. This means they require explicit
+	 * syncs that must go through the DRM_PANTHOR_BO_SYNC ioctl (userland cache
+	 * maintenance is not allowed in that case, because extra operations might be
+	 * needed to make changes visible to the CPU/device, like buffer migration when the
+	 * exporter is a GPU with its own VRAM).
+	 */
+	DRM_PANTHOR_BO_IS_IMPORTED = (1 << 0),
+};
+
+/**
+ * struct drm_panthor_bo_query_info - Query BO info
+ */
+struct drm_panthor_bo_query_info {
+	/** @handle: Handle of the buffer object to query flags on. */
+	__u32 handle;
+
+	/**
+	 * @extra_flags: Combination of enum drm_panthor_bo_extra_flags flags.
+	 */
+	__u32 extra_flags;
+
+	/**
+	 * @create_flags: Flags passed at creation time.
+	 *
+	 * Combination of enum drm_panthor_bo_flags flags.
+	 * Will be zero if the buffer comes from a different driver.
+	 */
+	__u32 create_flags;
+
+	/** @pad: Will be zero on return. */
+	__u32 pad;
+};
+
+/**
+ * DRM_IOCTL_PANTHOR() - Build a Panthor IOCTL number
+ * @__access: Access type. Must be R, W or RW.
+ * @__id: One of the DRM_PANTHOR_xxx id.
+ * @__type: Suffix of the type being passed to the IOCTL.
+ *
+ * Don't use this macro directly, use the DRM_IOCTL_PANTHOR_xxx
+ * values instead.
+ *
+ * Return: An IOCTL number to be passed to ioctl() from userspace.
+ */
+#define DRM_IOCTL_PANTHOR(__access, __id, __type) \
+	DRM_IO ## __access(DRM_COMMAND_BASE + DRM_PANTHOR_ ## __id, \
+			   struct drm_panthor_ ## __type)
+
+enum {
+	DRM_IOCTL_PANTHOR_DEV_QUERY =
+		DRM_IOCTL_PANTHOR(WR, DEV_QUERY, dev_query),
+	DRM_IOCTL_PANTHOR_VM_CREATE =
+		DRM_IOCTL_PANTHOR(WR, VM_CREATE, vm_create),
+	DRM_IOCTL_PANTHOR_VM_DESTROY =
+		DRM_IOCTL_PANTHOR(WR, VM_DESTROY, vm_destroy),
+	DRM_IOCTL_PANTHOR_VM_BIND =
+		DRM_IOCTL_PANTHOR(WR, VM_BIND, vm_bind),
+	DRM_IOCTL_PANTHOR_VM_GET_STATE =
+		DRM_IOCTL_PANTHOR(WR, VM_GET_STATE, vm_get_state),
+	DRM_IOCTL_PANTHOR_BO_CREATE =
+		DRM_IOCTL_PANTHOR(WR, BO_CREATE, bo_create),
+	DRM_IOCTL_PANTHOR_BO_MMAP_OFFSET =
+		DRM_IOCTL_PANTHOR(WR, BO_MMAP_OFFSET, bo_mmap_offset),
+	DRM_IOCTL_PANTHOR_GROUP_CREATE =
+		DRM_IOCTL_PANTHOR(WR, GROUP_CREATE, group_create),
+	DRM_IOCTL_PANTHOR_GROUP_DESTROY =
+		DRM_IOCTL_PANTHOR(WR, GROUP_DESTROY, group_destroy),
+	DRM_IOCTL_PANTHOR_GROUP_SUBMIT =
+		DRM_IOCTL_PANTHOR(WR, GROUP_SUBMIT, group_submit),
+	DRM_IOCTL_PANTHOR_GROUP_GET_STATE =
+		DRM_IOCTL_PANTHOR(WR, GROUP_GET_STATE, group_get_state),
+	DRM_IOCTL_PANTHOR_TILER_HEAP_CREATE =
+		DRM_IOCTL_PANTHOR(WR, TILER_HEAP_CREATE, tiler_heap_create),
+	DRM_IOCTL_PANTHOR_TILER_HEAP_DESTROY =
+		DRM_IOCTL_PANTHOR(WR, TILER_HEAP_DESTROY, tiler_heap_destroy),
+	DRM_IOCTL_PANTHOR_BO_SET_LABEL =
+		DRM_IOCTL_PANTHOR(WR, BO_SET_LABEL, bo_set_label),
+	DRM_IOCTL_PANTHOR_SET_USER_MMIO_OFFSET =
+		DRM_IOCTL_PANTHOR(WR, SET_USER_MMIO_OFFSET, set_user_mmio_offset),
+	DRM_IOCTL_PANTHOR_BO_SYNC =
+		DRM_IOCTL_PANTHOR(WR, BO_SYNC, bo_sync),
+	DRM_IOCTL_PANTHOR_BO_QUERY_INFO =
+		DRM_IOCTL_PANTHOR(WR, BO_QUERY_INFO, bo_query_info),
 };
 
 #if defined(__cplusplus)

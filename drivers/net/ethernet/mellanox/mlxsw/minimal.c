@@ -7,7 +7,6 @@
 #include <linux/i2c.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/types.h>
 
 #include "core.h"
@@ -398,14 +397,12 @@ static int mlxsw_m_linecards_init(struct mlxsw_m *mlxsw_m)
 	/* Add slot for main board. */
 	mlxsw_m->num_of_slots += 1;
 
-	mlxsw_m->ports = kcalloc(max_ports, sizeof(*mlxsw_m->ports),
-				 GFP_KERNEL);
+	mlxsw_m->ports = kzalloc_objs(*mlxsw_m->ports, max_ports);
 	if (!mlxsw_m->ports)
 		return -ENOMEM;
 
-	mlxsw_m->line_cards = kcalloc(mlxsw_m->num_of_slots,
-				      sizeof(*mlxsw_m->line_cards),
-				      GFP_KERNEL);
+	mlxsw_m->line_cards = kzalloc_objs(*mlxsw_m->line_cards,
+					   mlxsw_m->num_of_slots);
 	if (!mlxsw_m->line_cards) {
 		err = -ENOMEM;
 		goto err_kcalloc;
@@ -413,10 +410,8 @@ static int mlxsw_m_linecards_init(struct mlxsw_m *mlxsw_m)
 
 	for (i = 0; i < mlxsw_m->num_of_slots; i++) {
 		mlxsw_m->line_cards[i] =
-			kzalloc(struct_size(mlxsw_m->line_cards[i],
-					    module_to_port,
-					    mlxsw_m->max_modules_per_slot),
-				GFP_KERNEL);
+			kzalloc_flex(*mlxsw_m->line_cards[i], module_to_port,
+				     mlxsw_m->max_modules_per_slot);
 		if (!mlxsw_m->line_cards[i]) {
 			err = -ENOMEM;
 			goto err_kmalloc_array;
@@ -717,7 +712,7 @@ static struct mlxsw_driver mlxsw_m_driver = {
 };
 
 static const struct i2c_device_id mlxsw_m_i2c_id[] = {
-	{ "mlxsw_minimal" },
+	{ .name = "mlxsw_minimal" },
 	{ }
 };
 

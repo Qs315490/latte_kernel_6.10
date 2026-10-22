@@ -72,13 +72,14 @@ struct picolcd_pending *picolcd_send_and_wait(struct hid_device *hdev,
 	struct picolcd_pending *work;
 	struct hid_report *report = picolcd_out_report(report_id, hdev);
 	unsigned long flags;
-	int i, j, k;
+	int i, j;
+	unsigned int k;
 
 	if (!report || !data)
 		return NULL;
 	if (data->status & PICOLCD_FAILED)
 		return NULL;
-	work = kzalloc(sizeof(*work), GFP_KERNEL);
+	work = kzalloc_obj(*work);
 	if (!work)
 		return NULL;
 
@@ -363,7 +364,6 @@ static int picolcd_raw_event(struct hid_device *hdev,
 	return 1;
 }
 
-#ifdef CONFIG_PM
 static int picolcd_suspend(struct hid_device *hdev, pm_message_t message)
 {
 	if (PMSG_IS_AUTO(message))
@@ -401,7 +401,6 @@ static int picolcd_reset_resume(struct hid_device *hdev)
 	picolcd_leds_set(hid_get_drvdata(hdev));
 	return 0;
 }
-#endif
 
 /* initialize keypad input device */
 static int picolcd_init_keys(struct picolcd_data *data,
@@ -530,7 +529,7 @@ static int picolcd_probe(struct hid_device *hdev,
 	 * Let's allocate the picolcd data structure, set some reasonable
 	 * defaults, and associate it with the device
 	 */
-	data = kzalloc(sizeof(struct picolcd_data), GFP_KERNEL);
+	data = kzalloc_obj(struct picolcd_data);
 	if (data == NULL) {
 		hid_err(hdev, "can't allocate space for Minibox PicoLCD device data\n");
 		return -ENOMEM;
@@ -648,11 +647,9 @@ static struct hid_driver picolcd_driver = {
 	.probe =         picolcd_probe,
 	.remove =        picolcd_remove,
 	.raw_event =     picolcd_raw_event,
-#ifdef CONFIG_PM
-	.suspend =       picolcd_suspend,
-	.resume =        picolcd_resume,
-	.reset_resume =  picolcd_reset_resume,
-#endif
+	.suspend =       pm_ptr(picolcd_suspend),
+	.resume =        pm_ptr(picolcd_resume),
+	.reset_resume =  pm_ptr(picolcd_reset_resume),
 };
 module_hid_driver(picolcd_driver);
 

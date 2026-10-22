@@ -13,7 +13,6 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/spi/spi.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/lcm.h>
 #include <linux/property.h>
@@ -1852,7 +1851,7 @@ static const struct of_device_id adis16480_of_match[] = {
 	{ .compatible = "adi,adis16547-1" },
 	{ .compatible = "adi,adis16547-2" },
 	{ .compatible = "adi,adis16547-3" },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, adis16480_of_match);
 

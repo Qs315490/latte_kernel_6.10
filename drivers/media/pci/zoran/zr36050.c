@@ -547,7 +547,7 @@ static int zr36050_set_video(struct videocodec *codec, const struct tvnorm *norm
 	struct zoran *zr = videocodec_to_zoran(codec);
 	int size;
 
-	zrdev_dbg(zr, "%s: set_video %d.%d, %d/%d-%dx%d (0x%x) q%d call\n",
+	zrdev_dbg(zr, "%s: set_video %d.%d, (%u,%u)/%ux%u (0x%x) q%d call\n",
 		  ptr->name, norm->h_start, norm->v_start,
 		  cap->x, cap->y, cap->width, cap->height,
 		  cap->decimation, cap->quality);
@@ -741,7 +741,7 @@ static int zr36050_setup(struct videocodec *codec)
 		return -ENOSPC;
 	}
 	//mem structure init
-	ptr = kzalloc(sizeof(*ptr), GFP_KERNEL);
+	ptr = kzalloc_obj(*ptr);
 	codec->data = ptr;
 	if (!ptr)
 		return -ENOMEM;

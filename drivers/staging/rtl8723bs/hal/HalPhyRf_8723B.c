@@ -39,7 +39,6 @@ static u8 DeltaSwingTableIdx_2GA_P_8188E[] = {
 /* 3 Tx Power Tracking */
 /* 3 ============================================================ */
 
-
 static void setIqkMatrix_8723B(
 	struct dm_odm_t *pDM_Odm,
 	u8 OFDM_index,
@@ -79,7 +78,7 @@ static void setIqkMatrix_8723B(
 			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_XCTxAFE, bMaskH4Bits, value32);
 
 			value32 = ((IqkResult_X * ele_D)>>7)&0x01;
-			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_ECCAThreshold, BIT24, value32);
+			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_ECCAThreshold, BIT(24), value32);
 			break;
 		case RF_PATH_B:
 			/* write new elements A, C, D to regC88 and regC9C,
@@ -92,7 +91,7 @@ static void setIqkMatrix_8723B(
 			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_XDTxAFE, bMaskH4Bits, value32);
 
 			value32 = ((IqkResult_X * ele_D)>>7)&0x01;
-			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_ECCAThreshold, BIT28, value32);
+			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_ECCAThreshold, BIT(28), value32);
 
 			break;
 		default:
@@ -103,13 +102,13 @@ static void setIqkMatrix_8723B(
 		case RF_PATH_A:
 			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_XATxIQImbalance, bMaskDWord, OFDMSwingTable_New[OFDM_index]);
 			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_XCTxAFE, bMaskH4Bits, 0x00);
-			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_ECCAThreshold, BIT24, 0x00);
+			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_ECCAThreshold, BIT(24), 0x00);
 			break;
 
 		case RF_PATH_B:
 			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_XBTxIQImbalance, bMaskDWord, OFDMSwingTable_New[OFDM_index]);
 			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_XDTxAFE, bMaskH4Bits, 0x00);
-			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_ECCAThreshold, BIT28, 0x00);
+			PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_ECCAThreshold, BIT(28), 0x00);
 			break;
 
 		default:
@@ -118,37 +117,17 @@ static void setIqkMatrix_8723B(
 	}
 }
 
-
 static void setCCKFilterCoefficient(struct dm_odm_t *pDM_Odm, u8 CCKSwingIndex)
 {
-	if (!pDM_Odm->RFCalibrateInfo.bCCKinCH14) {
-		rtw_write8(pDM_Odm->Adapter, 0xa22, CCKSwingTable_Ch1_Ch13_New[CCKSwingIndex][0]);
-		rtw_write8(pDM_Odm->Adapter, 0xa23, CCKSwingTable_Ch1_Ch13_New[CCKSwingIndex][1]);
-		rtw_write8(pDM_Odm->Adapter, 0xa24, CCKSwingTable_Ch1_Ch13_New[CCKSwingIndex][2]);
-		rtw_write8(pDM_Odm->Adapter, 0xa25, CCKSwingTable_Ch1_Ch13_New[CCKSwingIndex][3]);
-		rtw_write8(pDM_Odm->Adapter, 0xa26, CCKSwingTable_Ch1_Ch13_New[CCKSwingIndex][4]);
-		rtw_write8(pDM_Odm->Adapter, 0xa27, CCKSwingTable_Ch1_Ch13_New[CCKSwingIndex][5]);
-		rtw_write8(pDM_Odm->Adapter, 0xa28, CCKSwingTable_Ch1_Ch13_New[CCKSwingIndex][6]);
-		rtw_write8(pDM_Odm->Adapter, 0xa29, CCKSwingTable_Ch1_Ch13_New[CCKSwingIndex][7]);
-	} else {
-		rtw_write8(pDM_Odm->Adapter, 0xa22, CCKSwingTable_Ch14_New[CCKSwingIndex][0]);
-		rtw_write8(pDM_Odm->Adapter, 0xa23, CCKSwingTable_Ch14_New[CCKSwingIndex][1]);
-		rtw_write8(pDM_Odm->Adapter, 0xa24, CCKSwingTable_Ch14_New[CCKSwingIndex][2]);
-		rtw_write8(pDM_Odm->Adapter, 0xa25, CCKSwingTable_Ch14_New[CCKSwingIndex][3]);
-		rtw_write8(pDM_Odm->Adapter, 0xa26, CCKSwingTable_Ch14_New[CCKSwingIndex][4]);
-		rtw_write8(pDM_Odm->Adapter, 0xa27, CCKSwingTable_Ch14_New[CCKSwingIndex][5]);
-		rtw_write8(pDM_Odm->Adapter, 0xa28, CCKSwingTable_Ch14_New[CCKSwingIndex][6]);
-		rtw_write8(pDM_Odm->Adapter, 0xa29, CCKSwingTable_Ch14_New[CCKSwingIndex][7]);
-	}
-}
+	u8 (*swingtable)[8];
 
-void DoIQK_8723B(
-	struct dm_odm_t *pDM_Odm,
-	u8 DeltaThermalIndex,
-	u8 ThermalValue,
-	u8 Threshold
-)
-{
+	if (!pDM_Odm->RFCalibrateInfo.bCCKinCH14)
+		swingtable = CCKSwingTable_Ch1_Ch13_New;
+	else
+		swingtable = CCKSwingTable_Ch14_New;
+
+	for (int i = 0; i < 8; i++)
+		rtw_write8(pDM_Odm->Adapter, 0xa22 + i, swingtable[CCKSwingIndex][i]);
 }
 
 /*-----------------------------------------------------------------------------
@@ -167,7 +146,8 @@ void DoIQK_8723B(
  *When		Who	Remark
  *04/23/2012	MHC	Create Version 0.
  *
- *---------------------------------------------------------------------------*/
+ *---------------------------------------------------------------------------
+ */
 void ODM_TxPwrTrackSetPwr_8723B(
 	struct dm_odm_t *pDM_Odm,
 	enum pwrtrack_method Method,
@@ -217,8 +197,6 @@ void ODM_TxPwrTrackSetPwr_8723B(
 	}
 
 	if (Method == TXAGC) {
-		struct adapter *Adapter = pDM_Odm->Adapter;
-
 		pDM_Odm->Remnant_OFDMSwingIdx[RFPath] = pDM_Odm->Absolute_OFDMSwingIdx[RFPath];
 
 		pDM_Odm->Modify_TxAGC_Flag_PathA = true;
@@ -322,7 +300,7 @@ static void GetDeltaSwingTable_8723B(
 	u16 rate = *(pDM_Odm->pForcedDataRate);
 	u8 channel = pHalData->CurrentChannel;
 
-	if (1 <= channel && channel <= 14) {
+	if (channel >= 1 && channel <= 14) {
 		if (IS_CCK_RATE(rate)) {
 			*TemperatureUP_A   = pRFCalibrateInfo->DeltaSwingTableIdx_2GCCKA_P;
 			*TemperatureDOWN_A = pRFCalibrateInfo->DeltaSwingTableIdx_2GCCKA_N;
@@ -342,7 +320,6 @@ static void GetDeltaSwingTable_8723B(
 	}
 }
 
-
 void ConfigureTxpowerTrack_8723B(struct txpwrtrack_cfg *pConfig)
 {
 	pConfig->SwingTableSize_CCK = CCK_TABLE_SIZE;
@@ -353,7 +330,6 @@ void ConfigureTxpowerTrack_8723B(struct txpwrtrack_cfg *pConfig)
 	pConfig->ThermalRegAddr = RF_T_METER_8723B;
 
 	pConfig->ODM_TxPwrTrackSetPwr = ODM_TxPwrTrackSetPwr_8723B;
-	pConfig->DoIQK = DoIQK_8723B;
 	pConfig->PHY_LCCalibrate = PHY_LCCalibrate_8723B;
 	pConfig->GetDeltaSwingTable = GetDeltaSwingTable_8723B;
 }
@@ -435,12 +411,10 @@ static u8 phy_PathA_IQK_8723B(
 	/* leave IQK mode */
 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_IQK, bMaskH3Bytes, 0x000000);
 
-
 	/*  Check failed */
 	regEAC = PHY_QueryBBReg(pDM_Odm->Adapter, rRx_Power_After_IQK_A_2, bMaskDWord);
 	regE94 = PHY_QueryBBReg(pDM_Odm->Adapter, rTx_Power_Before_IQK_A, bMaskDWord);
 	regE9C = PHY_QueryBBReg(pDM_Odm->Adapter, rTx_Power_After_IQK_A, bMaskDWord);
-
 
 	/* Allen 20131125 */
 	tmp = (regE9C & 0x03FF0000)>>16;
@@ -448,7 +422,7 @@ static u8 phy_PathA_IQK_8723B(
 		tmp = 0x400 - tmp;
 
 	if (
-		!(regEAC & BIT28) &&
+		!(regEAC & BIT(28)) &&
 		(((regE94 & 0x03FF0000)>>16) != 0x142) &&
 		(((regE9C & 0x03FF0000)>>16) != 0x42) &&
 		(((regE94 & 0x03FF0000)>>16) < 0x110) &&
@@ -547,7 +521,7 @@ static u8 phy_PathA_RxIQK8723B(
 		tmp = 0x400 - tmp;
 
 	if (
-		!(regEAC & BIT28) &&
+		!(regEAC & BIT(28)) &&
 		(((regE94 & 0x03FF0000)>>16) != 0x142) &&
 		(((regE9C & 0x03FF0000)>>16) != 0x42) &&
 		(((regE94 & 0x03FF0000)>>16) < 0x110) &&
@@ -573,7 +547,6 @@ static u8 phy_PathA_RxIQK8723B(
 	/* PA, PAD setting */
 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, 0xdf, bRFRegOffsetMask, 0xf80);
 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, 0x55, bRFRegOffsetMask, 0x4021f);
-
 
 	/* IQK setting */
 	PHY_SetBBReg(pDM_Odm->Adapter, rRx_IQK, bMaskDWord, 0x01004800);
@@ -638,7 +611,7 @@ static u8 phy_PathA_RxIQK8723B(
 		tmp = 0x400 - tmp;
 
 	if (
-		!(regEAC & BIT27) && /* if Tx is OK, check whether Rx is OK */
+		!(regEAC & BIT(27)) && /* if Tx is OK, check whether Rx is OK */
 		(((regEA4 & 0x03FF0000)>>16) != 0x132) &&
 		(((regEAC & 0x03FF0000)>>16) != 0x36) &&
 		(((regEA4 & 0x03FF0000)>>16) < 0x110) &&
@@ -672,8 +645,6 @@ static u8 phy_PathB_IQK_8723B(struct adapter *padapter)
 	/* 	enable path B PA in TXIQK mode */
 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, 0xed, 0x20, 0x1);
 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, 0x43, bRFRegOffsetMask, 0x30fc1);
-
-
 
 	/* 1 Tx IQK */
 	/* IQK setting */
@@ -731,7 +702,7 @@ static u8 phy_PathB_IQK_8723B(struct adapter *padapter)
 		tmp = 0x400 - tmp;
 
 	if (
-		!(regEAC & BIT28) &&
+		!(regEAC & BIT(28)) &&
 		(((regE94 & 0x03FF0000)>>16) != 0x142) &&
 		(((regE9C & 0x03FF0000)>>16) != 0x42) &&
 		(((regE94 & 0x03FF0000)>>16) < 0x110) &&
@@ -767,11 +738,9 @@ static u8 phy_PathB_RxIQK8723B(struct adapter *padapter, bool configPathB)
 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, 0xed, 0x20, 0x1);
 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, 0x43, bRFRegOffsetMask, 0x30fcd);
 
-
 	/* IQK setting */
 	PHY_SetBBReg(pDM_Odm->Adapter, rTx_IQK, bMaskDWord, 0x01007c00);
 	PHY_SetBBReg(pDM_Odm->Adapter, rRx_IQK, bMaskDWord, 0x01004800);
-
 
 	/* path-B IQK setting */
 	PHY_SetBBReg(pDM_Odm->Adapter, rTx_IQK_Tone_A, bMaskDWord, 0x18008c1c);
@@ -802,7 +771,6 @@ static u8 phy_PathB_RxIQK8723B(struct adapter *padapter, bool configPathB)
 	PHY_SetBBReg(pDM_Odm->Adapter, rIQK_AGC_Pts, bMaskDWord, 0xf9000000);
 	PHY_SetBBReg(pDM_Odm->Adapter, rIQK_AGC_Pts, bMaskDWord, 0xf8000000);
 
-
 	/*  delay x ms */
 	/* PlatformStallExecution(IQK_DELAY_TIME_88E*1000); */
 	mdelay(IQK_DELAY_TIME_8723B);
@@ -826,7 +794,7 @@ static u8 phy_PathB_RxIQK8723B(struct adapter *padapter, bool configPathB)
 		tmp = 0x400 - tmp;
 
 	if (
-		!(regEAC & BIT28) &&
+		!(regEAC & BIT(28)) &&
 		(((regE94 & 0x03FF0000)>>16) != 0x142) &&
 		(((regE9C & 0x03FF0000)>>16) != 0x42)  &&
 		(((regE94 & 0x03FF0000)>>16) < 0x110) &&
@@ -910,15 +878,13 @@ static u8 phy_PathB_RxIQK8723B(struct adapter *padapter, bool configPathB)
 /* 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_IQK, 0xffffff00, 0x00000000); */
 /* 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_B, 0xdf, bRFRegOffsetMask, 0x180); */
 
-
-
 	/* Allen 20131125 */
 	tmp = (regEAC & 0x03FF0000)>>16;
 	if ((tmp & 0x200) > 0)
 		tmp = 0x400 - tmp;
 
 	if (
-		!(regEAC & BIT27) && /* if Tx is OK, check whether Rx is OK */
+		!(regEAC & BIT(27)) && /* if Tx is OK, check whether Rx is OK */
 		(((regEA4 & 0x03FF0000)>>16) != 0x132) &&
 		(((regEAC & 0x03FF0000)>>16) != 0x36) &&
 		(((regEA4 & 0x03FF0000)>>16) < 0x110) &&
@@ -1088,6 +1054,7 @@ void ODM_SetIQCbyRFpath(struct dm_odm_t *pDM_Odm, u32 RFpath)
 {
 
 	struct odm_rf_cal_t *pRFCalibrateInfo = &pDM_Odm->RFCalibrateInfo;
+	u8 path;
 
 	if (
 		(pRFCalibrateInfo->TxIQC_8723B[PATH_S0][IDX_0xC80][VAL] != 0x0) &&
@@ -1095,23 +1062,18 @@ void ODM_SetIQCbyRFpath(struct dm_odm_t *pDM_Odm, u32 RFpath)
 		(pRFCalibrateInfo->TxIQC_8723B[PATH_S1][IDX_0xC80][VAL] != 0x0) &&
 		(pRFCalibrateInfo->RxIQC_8723B[PATH_S1][IDX_0xC14][VAL] != 0x0)
 	) {
-		if (RFpath) { /* S1: RFpath = 0, S0:RFpath = 1 */
-			/* S0 TX IQC */
-			PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->TxIQC_8723B[PATH_S0][IDX_0xC94][KEY], bMaskDWord, pRFCalibrateInfo->TxIQC_8723B[PATH_S0][IDX_0xC94][VAL]);
-			PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->TxIQC_8723B[PATH_S0][IDX_0xC80][KEY], bMaskDWord, pRFCalibrateInfo->TxIQC_8723B[PATH_S0][IDX_0xC80][VAL]);
-			PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->TxIQC_8723B[PATH_S0][IDX_0xC4C][KEY], bMaskDWord, pRFCalibrateInfo->TxIQC_8723B[PATH_S0][IDX_0xC4C][VAL]);
-			/* S0 RX IQC */
-			PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->RxIQC_8723B[PATH_S0][IDX_0xC14][KEY], bMaskDWord, pRFCalibrateInfo->RxIQC_8723B[PATH_S0][IDX_0xC14][VAL]);
-			PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->RxIQC_8723B[PATH_S0][IDX_0xCA0][KEY], bMaskDWord, pRFCalibrateInfo->RxIQC_8723B[PATH_S0][IDX_0xCA0][VAL]);
-		} else {
-			/* S1 TX IQC */
-			PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->TxIQC_8723B[PATH_S1][IDX_0xC94][KEY], bMaskDWord, pRFCalibrateInfo->TxIQC_8723B[PATH_S1][IDX_0xC94][VAL]);
-			PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->TxIQC_8723B[PATH_S1][IDX_0xC80][KEY], bMaskDWord, pRFCalibrateInfo->TxIQC_8723B[PATH_S1][IDX_0xC80][VAL]);
-			PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->TxIQC_8723B[PATH_S1][IDX_0xC4C][KEY], bMaskDWord, pRFCalibrateInfo->TxIQC_8723B[PATH_S1][IDX_0xC4C][VAL]);
-			/* S1 RX IQC */
-			PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->RxIQC_8723B[PATH_S1][IDX_0xC14][KEY], bMaskDWord, pRFCalibrateInfo->RxIQC_8723B[PATH_S1][IDX_0xC14][VAL]);
-			PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->RxIQC_8723B[PATH_S1][IDX_0xCA0][KEY], bMaskDWord, pRFCalibrateInfo->RxIQC_8723B[PATH_S1][IDX_0xCA0][VAL]);
-		}
+		if (RFpath)
+			path = PATH_S0;
+		else
+			path = PATH_S1;
+
+		/* TX IQC */
+		PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->TxIQC_8723B[path][IDX_0xC94][KEY], bMaskDWord, pRFCalibrateInfo->TxIQC_8723B[path][IDX_0xC94][VAL]);
+		PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->TxIQC_8723B[path][IDX_0xC80][KEY], bMaskDWord, pRFCalibrateInfo->TxIQC_8723B[path][IDX_0xC80][VAL]);
+		PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->TxIQC_8723B[path][IDX_0xC4C][KEY], bMaskDWord, pRFCalibrateInfo->TxIQC_8723B[path][IDX_0xC4C][VAL]);
+		/* RX IQC */
+		PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->RxIQC_8723B[path][IDX_0xC14][KEY], bMaskDWord, pRFCalibrateInfo->RxIQC_8723B[path][IDX_0xC14][VAL]);
+		PHY_SetBBReg(pDM_Odm->Adapter, pRFCalibrateInfo->RxIQC_8723B[path][IDX_0xCA0][KEY], bMaskDWord, pRFCalibrateInfo->RxIQC_8723B[path][IDX_0xCA0][VAL]);
 	}
 }
 
@@ -1139,7 +1101,6 @@ static void _PHY_SaveADDARegisters8723B(
 	}
 }
 
-
 static void _PHY_SaveMACRegisters8723B(
 	struct adapter *padapter, u32 *MACReg, u32 *MACBackup
 )
@@ -1154,7 +1115,6 @@ static void _PHY_SaveMACRegisters8723B(
 	MACBackup[i] = rtw_read32(pDM_Odm->Adapter, MACReg[i]);
 
 }
-
 
 static void _PHY_ReloadADDARegisters8723B(
 	struct adapter *padapter,
@@ -1183,7 +1143,6 @@ static void _PHY_ReloadMACRegisters8723B(
 	}
 	rtw_write32(padapter, MACReg[i], MACBackup[i]);
 }
-
 
 static void _PHY_PathADDAOn8723B(
 	struct adapter *padapter,
@@ -1221,9 +1180,9 @@ static void _PHY_MACSettingCalibration8723B(
 	rtw_write8(pDM_Odm->Adapter, MACReg[i], 0x3F);
 
 	for (i = 1 ; i < (IQK_MAC_REG_NUM - 1); i++) {
-		rtw_write8(pDM_Odm->Adapter, MACReg[i], (u8)(MACBackup[i]&(~BIT3)));
+		rtw_write8(pDM_Odm->Adapter, MACReg[i], (u8)(MACBackup[i]&(~BIT(3))));
 	}
-	rtw_write8(pDM_Odm->Adapter, MACReg[i], (u8)(MACBackup[i]&(~BIT5)));
+	rtw_write8(pDM_Odm->Adapter, MACReg[i], (u8)(MACBackup[i]&(~BIT(5))));
 
 }
 
@@ -1307,8 +1266,6 @@ static bool phy_SimularityCompare_8723B(
 		return false;
 	}
 }
-
-
 
 static void phy_IQCalibrate_8723B(
 	struct adapter *padapter,
@@ -1395,12 +1352,10 @@ static void phy_IQCalibrate_8723B(
 	PHY_SetBBReg(pDM_Odm->Adapter, rOFDM0_TRMuxPar, bMaskDWord, 0x000800e4);
 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_XCD_RFInterfaceSW, bMaskDWord, 0x22204000);
 
-
 /* 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_XAB_RFInterfaceSW, BIT10, 0x01); */
 /* 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_XAB_RFInterfaceSW, BIT26, 0x01); */
 /* 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_XA_RFInterfaceOE, BIT10, 0x00); */
 /* 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_XB_RFInterfaceOE, BIT10, 0x00); */
-
 
 /* RX IQ calibration setting for 8723B D cut large current issue when leaving IPS */
 
@@ -1421,8 +1376,10 @@ static void phy_IQCalibrate_8723B(
 			PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_IQK, bMaskH3Bytes, 0x000000);
 			pDM_Odm->RFCalibrateInfo.TxLOK[RF_PATH_A] = PHY_QueryRFReg(pDM_Odm->Adapter, RF_PATH_A, 0x8, bRFRegOffsetMask);
 
-				result[t][0] = (PHY_QueryBBReg(pDM_Odm->Adapter, rTx_Power_Before_IQK_A, bMaskDWord)&0x3FF0000)>>16;
-				result[t][1] = (PHY_QueryBBReg(pDM_Odm->Adapter, rTx_Power_After_IQK_A, bMaskDWord)&0x3FF0000)>>16;
+			result[t][0] = (PHY_QueryBBReg(pDM_Odm->Adapter, rTx_Power_Before_IQK_A,
+						       bMaskDWord) & 0x3FF0000) >> 16;
+			result[t][1] = (PHY_QueryBBReg(pDM_Odm->Adapter, rTx_Power_After_IQK_A,
+						       bMaskDWord) & 0x3FF0000) >> 16;
 			break;
 		}
 	}
@@ -1437,9 +1394,6 @@ static void phy_IQCalibrate_8723B(
 				result[t][3] = (PHY_QueryBBReg(pDM_Odm->Adapter, rRx_Power_After_IQK_A_2, bMaskDWord)&0x3FF0000)>>16;
 			break;
 		}
-	}
-
-	if (0x00 == PathAOK) {
 	}
 
 /* path B IQK */
@@ -1506,7 +1460,6 @@ static void phy_IQCalibrate_8723B(
 	}
 
 }
-
 
 static void phy_LCCalibrate_8723B(struct dm_odm_t *pDM_Odm, bool is2T)
 {
@@ -1616,7 +1569,6 @@ void PHY_IQCalibrate_8723B(
 	if (pDM_Odm->RFCalibrateInfo.bIQKInProgress)
 		return;
 
-
 	pDM_Odm->RFCalibrateInfo.bIQKInProgress = true;
 
 	if (bRestore) {
@@ -1674,7 +1626,6 @@ void PHY_IQCalibrate_8723B(
 /* 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, BIT12, 0x0); */
 /* 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, BIT11, 0x1); */
 
-
 	for (i = 0; i < 8; i++) {
 		result[0][i] = 0;
 		result[1][i] = 0;
@@ -1688,7 +1639,6 @@ void PHY_IQCalibrate_8723B(
 	is12simular = false;
 	is23simular = false;
 	is13simular = false;
-
 
 	for (i = 0; i < 3; i++) {
 		phy_IQCalibrate_8723B(padapter, result, i, Is2ant, RF_Path);
@@ -1792,7 +1742,6 @@ void PHY_IQCalibrate_8723B(
 	pDM_Odm->RFCalibrateInfo.bIQKInProgress = false;
 }
 
-
 void PHY_LCCalibrate_8723B(struct dm_odm_t *pDM_Odm)
 {
 	bool		bSingleTone = false, bCarrierSuppression = false;
@@ -1812,9 +1761,7 @@ void PHY_LCCalibrate_8723B(struct dm_odm_t *pDM_Odm)
 
 	pDM_Odm->RFCalibrateInfo.bLCKInProgress = true;
 
-
 	phy_LCCalibrate_8723B(pDM_Odm, false);
-
 
 	pDM_Odm->RFCalibrateInfo.bLCKInProgress = false;
 }

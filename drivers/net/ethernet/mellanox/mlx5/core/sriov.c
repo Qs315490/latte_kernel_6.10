@@ -47,7 +47,7 @@ static int sriov_restore_guids(struct mlx5_core_dev *dev, int vf, u16 func_id)
 	if (sriov->vfs_ctx[vf].node_guid ||
 	    sriov->vfs_ctx[vf].port_guid ||
 	    sriov->vfs_ctx[vf].policy != MLX5_POLICY_INVALID) {
-		in = kzalloc(sizeof(*in), GFP_KERNEL);
+		in = kzalloc_obj(*in);
 		if (!in)
 			return -ENOMEM;
 
@@ -193,7 +193,9 @@ static int mlx5_sriov_enable(struct pci_dev *pdev, int num_vfs)
 	err = pci_enable_sriov(pdev, num_vfs);
 	if (err) {
 		mlx5_core_warn(dev, "pci_enable_sriov failed : %d\n", err);
+		devl_lock(devlink);
 		mlx5_device_disable_sriov(dev, num_vfs, true, true);
+		devl_unlock(devlink);
 	}
 	return err;
 }
@@ -271,6 +273,7 @@ void mlx5_sriov_detach(struct mlx5_core_dev *dev)
 
 static u16 mlx5_get_max_vfs(struct mlx5_core_dev *dev)
 {
+	struct mlx5_esw_pf_info host_pf_info;
 	u16 host_total_vfs;
 	const u32 *out;
 
@@ -282,8 +285,8 @@ static u16 mlx5_get_max_vfs(struct mlx5_core_dev *dev)
 		 */
 		if (IS_ERR(out))
 			goto done;
-		host_total_vfs = MLX5_GET(query_esw_functions_out, out,
-					  host_params_context.host_total_vfs);
+		host_pf_info = mlx5_esw_get_host_pf_info(dev, out);
+		host_total_vfs = host_pf_info.total_vfs;
 		kvfree(out);
 		return host_total_vfs;
 	}
@@ -305,7 +308,7 @@ int mlx5_sriov_init(struct mlx5_core_dev *dev)
 	sriov->max_vfs = mlx5_get_max_vfs(dev);
 	sriov->num_vfs = pci_num_vf(pdev);
 	sriov->max_ec_vfs = mlx5_core_ec_sriov_enabled(dev) ? pci_sriov_get_totalvfs(dev->pdev) : 0;
-	sriov->vfs_ctx = kcalloc(total_vfs, sizeof(*sriov->vfs_ctx), GFP_KERNEL);
+	sriov->vfs_ctx = kzalloc_objs(*sriov->vfs_ctx, total_vfs);
 	if (!sriov->vfs_ctx)
 		return -ENOMEM;
 

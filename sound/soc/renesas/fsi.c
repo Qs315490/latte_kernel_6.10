@@ -220,7 +220,7 @@ struct fsi_stream {
 	/*
 	 * these are initialized by fsi_handler_init()
 	 */
-	struct fsi_stream_handler *handler;
+	const struct fsi_stream_handler *handler;
 	struct fsi_priv		*priv;
 
 	/*
@@ -292,6 +292,7 @@ struct fsi_master {
 	void __iomem *base;
 	struct fsi_priv fsia;
 	struct fsi_priv fsib;
+	struct clk *clk_spu;
 	const struct fsi_core *core;
 	spinlock_t lock;
 };
@@ -343,14 +344,9 @@ static void __fsi_reg_mask_set(u32 __iomem *reg, u32 mask, u32 data)
 #define fsi_core_read(p, r)   _fsi_master_read(p, p->core->r)
 static u32 _fsi_master_read(struct fsi_master *master, u32 reg)
 {
-	u32 ret;
-	unsigned long flags;
+	guard(spinlock_irqsave)(&master->lock);
 
-	spin_lock_irqsave(&master->lock, flags);
-	ret = __fsi_reg_read(master->base + reg);
-	spin_unlock_irqrestore(&master->lock, flags);
-
-	return ret;
+	return __fsi_reg_read(master->base + reg);
 }
 
 #define fsi_master_mask_set(p, r, m, d) _fsi_master_mask_set(p, MST_##r, m, d)
@@ -358,11 +354,9 @@ static u32 _fsi_master_read(struct fsi_master *master, u32 reg)
 static void _fsi_master_mask_set(struct fsi_master *master,
 			       u32 reg, u32 mask, u32 data)
 {
-	unsigned long flags;
+	guard(spinlock_irqsave)(&master->lock);
 
-	spin_lock_irqsave(&master->lock, flags);
 	__fsi_reg_mask_set(master->base + reg, mask, data);
-	spin_unlock_irqrestore(&master->lock, flags);
 }
 
 /*
@@ -449,6 +443,16 @@ static int fsi_sample2frame(struct fsi_priv *fsi, int samples)
 	return samples / fsi->chan_num;
 }
 
+static int fsi_stream_is_working(struct fsi_priv *fsi,
+				 struct fsi_stream *io)
+{
+	struct fsi_master *master = fsi_get_master(fsi);
+
+	guard(spinlock_irqsave)(&master->lock);
+
+	return !!(io->substream && io->substream->runtime);
+}
+
 static int fsi_get_current_fifo_samples(struct fsi_priv *fsi,
 					struct fsi_stream *io)
 {
@@ -467,6 +471,10 @@ static int fsi_get_current_fifo_samples(struct fsi_priv *fsi,
 
 static void fsi_count_fifo_err(struct fsi_priv *fsi)
 {
+	if (!fsi_stream_is_working(fsi, &fsi->playback) &&
+	    !fsi_stream_is_working(fsi, &fsi->capture))
+		return;
+
 	u32 ostatus = fsi_reg_read(fsi, DOFF_ST);
 	u32 istatus = fsi_reg_read(fsi, DIFF_ST);
 
@@ -495,20 +503,6 @@ static inline struct fsi_stream *fsi_stream_get(struct fsi_priv *fsi,
 	return fsi_is_play(substream) ? &fsi->playback : &fsi->capture;
 }
 
-static int fsi_stream_is_working(struct fsi_priv *fsi,
-				 struct fsi_stream *io)
-{
-	struct fsi_master *master = fsi_get_master(fsi);
-	unsigned long flags;
-	int ret;
-
-	spin_lock_irqsave(&master->lock, flags);
-	ret = !!(io->substream && io->substream->runtime);
-	spin_unlock_irqrestore(&master->lock, flags);
-
-	return ret;
-}
-
 static struct fsi_priv *fsi_stream_to_priv(struct fsi_stream *io)
 {
 	return io->priv;
@@ -520,9 +514,9 @@ static void fsi_stream_init(struct fsi_priv *fsi,
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct fsi_master *master = fsi_get_master(fsi);
-	unsigned long flags;
 
-	spin_lock_irqsave(&master->lock, flags);
+	guard(spinlock_irqsave)(&master->lock);
+
 	io->substream	= substream;
 	io->buff_sample_capa	= fsi_frame2sample(fsi, runtime->buffer_size);
 	io->buff_sample_pos	= 0;
@@ -533,16 +527,14 @@ static void fsi_stream_init(struct fsi_priv *fsi,
 	io->oerr_num	= -1; /* ignore 1st err */
 	io->uerr_num	= -1; /* ignore 1st err */
 	fsi_stream_handler_call(io, init, fsi, io);
-	spin_unlock_irqrestore(&master->lock, flags);
 }
 
 static void fsi_stream_quit(struct fsi_priv *fsi, struct fsi_stream *io)
 {
 	struct snd_soc_dai *dai = fsi_get_dai(io->substream);
 	struct fsi_master *master = fsi_get_master(fsi);
-	unsigned long flags;
 
-	spin_lock_irqsave(&master->lock, flags);
+	guard(spinlock_irqsave)(&master->lock);
 
 	if (io->oerr_num > 0)
 		dev_err(dai->dev, "over_run = %d\n", io->oerr_num);
@@ -560,7 +552,6 @@ static void fsi_stream_quit(struct fsi_priv *fsi, struct fsi_stream *io)
 	io->bus_option		= 0;
 	io->oerr_num	= 0;
 	io->uerr_num	= 0;
-	spin_unlock_irqrestore(&master->lock, flags);
 }
 
 static int fsi_stream_transfer(struct fsi_stream *io)
@@ -695,6 +686,10 @@ static void fsi_irq_clear_status(struct fsi_priv *fsi)
 	u32 data = 0;
 	struct fsi_master *master = fsi_get_master(fsi);
 
+	if (!fsi_stream_is_working(fsi, &fsi->playback) &&
+	    !fsi_stream_is_working(fsi, &fsi->capture))
+		return;
+
 	data |= AB_IO(1, fsi_get_port_shift(fsi, &fsi->playback));
 	data |= AB_IO(1, fsi_get_port_shift(fsi, &fsi->capture));
 
@@ -723,70 +718,6 @@ static void fsi_spdif_clk_ctrl(struct fsi_priv *fsi, int enable)
 /*
  *		clock function
  */
-static int fsi_clk_init(struct device *dev,
-			struct fsi_priv *fsi,
-			int xck,
-			int ick,
-			int div,
-			int (*set_rate)(struct device *dev,
-					struct fsi_priv *fsi))
-{
-	struct fsi_clk *clock = &fsi->clock;
-	int is_porta = fsi_is_port_a(fsi);
-
-	clock->xck	= NULL;
-	clock->ick	= NULL;
-	clock->div	= NULL;
-	clock->rate	= 0;
-	clock->count	= 0;
-	clock->set_rate	= set_rate;
-
-	clock->own = devm_clk_get(dev, NULL);
-	if (IS_ERR(clock->own))
-		return -EINVAL;
-
-	/* external clock */
-	if (xck) {
-		clock->xck = devm_clk_get(dev, is_porta ? "xcka" : "xckb");
-		if (IS_ERR(clock->xck)) {
-			dev_err(dev, "can't get xck clock\n");
-			return -EINVAL;
-		}
-		if (clock->xck == clock->own) {
-			dev_err(dev, "cpu doesn't support xck clock\n");
-			return -EINVAL;
-		}
-	}
-
-	/* FSIACLK/FSIBCLK */
-	if (ick) {
-		clock->ick = devm_clk_get(dev,  is_porta ? "icka" : "ickb");
-		if (IS_ERR(clock->ick)) {
-			dev_err(dev, "can't get ick clock\n");
-			return -EINVAL;
-		}
-		if (clock->ick == clock->own) {
-			dev_err(dev, "cpu doesn't support ick clock\n");
-			return -EINVAL;
-		}
-	}
-
-	/* FSI-DIV */
-	if (div) {
-		clock->div = devm_clk_get(dev,  is_porta ? "diva" : "divb");
-		if (IS_ERR(clock->div)) {
-			dev_err(dev, "can't get div clock\n");
-			return -EINVAL;
-		}
-		if (clock->div == clock->own) {
-			dev_err(dev, "cpu doesn't support div clock\n");
-			return -EINVAL;
-		}
-	}
-
-	return 0;
-}
-
 #define fsi_clk_invalid(fsi) fsi_clk_valid(fsi, 0)
 static void fsi_clk_valid(struct fsi_priv *fsi, unsigned long rate)
 {
@@ -797,6 +728,54 @@ static int fsi_clk_is_valid(struct fsi_priv *fsi)
 {
 	return	fsi->clock.set_rate &&
 		fsi->clock.rate;
+}
+
+static int fsi_clk_prepare(struct fsi_priv *fsi)
+{
+	struct fsi_clk *clock = &fsi->clock;
+	struct clk *spu = fsi->master->clk_spu;
+	struct clk *xck = clock->xck;
+	struct clk *ick = clock->ick;
+	struct clk *div = clock->div;
+	int ret;
+
+	ret = clk_prepare(spu);
+	if (ret)
+		return ret;
+	ret = clk_prepare(xck);
+	if (ret)
+		goto err_spu;
+	ret = clk_prepare(ick);
+	if (ret)
+		goto err_xck;
+	ret = clk_prepare(div);
+	if (ret)
+		goto err_ick;
+
+	return 0;
+
+err_ick:
+	clk_unprepare(ick);
+err_xck:
+	clk_unprepare(xck);
+err_spu:
+	clk_unprepare(spu);
+
+	return ret;
+}
+
+static void fsi_clk_unprepare(struct fsi_priv *fsi)
+{
+	struct fsi_clk *clock = &fsi->clock;
+	struct clk *spu = fsi->master->clk_spu;
+	struct clk *xck = clock->xck;
+	struct clk *ick = clock->ick;
+	struct clk *div = clock->div;
+
+	clk_unprepare(div);
+	clk_unprepare(ick);
+	clk_unprepare(xck);
+	clk_unprepare(spu);
 }
 
 static int fsi_clk_enable(struct device *dev,
@@ -932,6 +911,11 @@ static int fsi_clk_set_rate_external(struct device *dev,
 	int ackmd, bpfmd;
 	int ret = 0;
 
+	if (!xck || !ick) {
+		dev_err(dev, "xck clock or ick clock is missing\n");
+		return -EINVAL;
+	}
+
 	/* check clock rate */
 	xrate = clk_get_rate(xck);
 	if (xrate % rate) {
@@ -967,6 +951,11 @@ static int fsi_clk_set_rate_cpg(struct device *dev,
 	int adj;
 	int ackmd, bpfmd;
 	int ret = -EINVAL;
+
+	if (!ick || !div) {
+		dev_err(dev, "ick clock or div clock is missing\n");
+		return -EINVAL;
+	}
 
 	if (!(12288000 % rate))
 		target = 12288000;
@@ -1038,6 +1027,74 @@ static int fsi_clk_set_rate_cpg(struct device *dev,
 		clk_get_rate(ick), clk_get_rate(div));
 
 	return ret;
+}
+
+static int fsi_clk_init(struct device *dev, struct fsi_priv *fsi)
+{
+	struct fsi_clk *clock = &fsi->clock;
+	struct fsi_master *master = fsi->master;
+	int is_porta = fsi_is_port_a(fsi);
+	int xck, ick, div;
+
+	if (fsi->clk_cpg) {
+		xck = 0; ick = 1; div = 1;
+		clock->set_rate = fsi_clk_set_rate_cpg;
+	} else {
+		xck = 1; ick = 1; div = 0;
+		clock->set_rate = fsi_clk_set_rate_external;
+	}
+
+	clock->xck	= NULL;
+	clock->ick	= NULL;
+	clock->div	= NULL;
+	clock->rate	= 0;
+	clock->count	= 0;
+
+	clock->own = devm_clk_get(dev, NULL);
+	if (IS_ERR(clock->own))
+		return dev_err_probe(dev, PTR_ERR(clock->own), "Can't get fck clock\n");
+
+	if (!master->clk_spu) {
+		master->clk_spu = devm_clk_get_optional(dev, "spu");
+		if (IS_ERR(master->clk_spu))
+			return dev_err_probe(dev, PTR_ERR(master->clk_spu),
+					"Can't get spu clock\n");
+	}
+
+	/* external clock */
+	if (xck) {
+		clock->xck = devm_clk_get_optional(dev, is_porta ? "xcka" : "xckb");
+		if (IS_ERR(clock->xck))
+			return dev_err_probe(dev, PTR_ERR(clock->xck), "Can't get xck clock\n");
+		if (clock->xck == clock->own) {
+			dev_err(dev, "cpu doesn't support xck clock\n");
+			return -EINVAL;
+		}
+	}
+
+	/* FSIACLK/FSIBCLK */
+	if (ick) {
+		clock->ick = devm_clk_get_optional(dev,  is_porta ? "icka" : "ickb");
+		if (IS_ERR(clock->ick))
+			return dev_err_probe(dev, PTR_ERR(clock->ick), "Can't get ick clock\n");
+		if (clock->ick == clock->own) {
+			dev_err(dev, "cpu doesn't support ick clock\n");
+			return -EINVAL;
+		}
+	}
+
+	/* FSI-DIV */
+	if (div) {
+		clock->div = devm_clk_get_optional(dev,  is_porta ? "diva" : "divb");
+		if (IS_ERR(clock->div))
+			return dev_err_probe(dev, PTR_ERR(clock->div), "Can't get div clock\n");
+		if (clock->div == clock->own) {
+			dev_err(dev, "cpu doesn't support div clock\n");
+			return -EINVAL;
+		}
+	}
+
+	return 0;
 }
 
 static void fsi_pointer_update(struct fsi_stream *io, int size)
@@ -1229,13 +1286,13 @@ static int fsi_pio_pop_init(struct fsi_priv *fsi, struct fsi_stream *io)
 	return 0;
 }
 
-static struct fsi_stream_handler fsi_pio_push_handler = {
+static const struct fsi_stream_handler fsi_pio_push_handler = {
 	.init		= fsi_pio_push_init,
 	.transfer	= fsi_pio_push,
 	.start_stop	= fsi_pio_start_stop,
 };
 
-static struct fsi_stream_handler fsi_pio_pop_handler = {
+static const struct fsi_stream_handler fsi_pio_pop_handler = {
 	.init		= fsi_pio_pop_init,
 	.transfer	= fsi_pio_pop,
 	.start_stop	= fsi_pio_start_stop,
@@ -1432,7 +1489,7 @@ static int fsi_dma_remove(struct fsi_priv *fsi, struct fsi_stream *io)
 	return 0;
 }
 
-static struct fsi_stream_handler fsi_dma_push_handler = {
+static const struct fsi_stream_handler fsi_dma_push_handler = {
 	.init		= fsi_dma_init,
 	.probe		= fsi_dma_probe,
 	.transfer	= fsi_dma_transfer,
@@ -1503,6 +1560,11 @@ static int fsi_hw_startup(struct fsi_priv *fsi,
 			  struct device *dev)
 {
 	u32 data = 0;
+	int ret;
+	/* enable spu bus bridge clock */
+	ret = clk_enable(fsi->master->clk_spu);
+	if (ret)
+		return ret;
 
 	/* clock setting */
 	if (fsi_is_clk_master(fsi))
@@ -1548,8 +1610,13 @@ static int fsi_hw_startup(struct fsi_priv *fsi,
 	fsi_fifo_init(fsi, io, dev);
 
 	/* start master clock */
-	if (fsi_is_clk_master(fsi))
-		return fsi_clk_enable(dev, fsi);
+	if (fsi_is_clk_master(fsi)) {
+		ret = fsi_clk_enable(dev, fsi);
+		if (ret) {
+			clk_disable(fsi->master->clk_spu);
+			return ret;
+		}
+	}
 
 	return 0;
 }
@@ -1557,9 +1624,15 @@ static int fsi_hw_startup(struct fsi_priv *fsi,
 static int fsi_hw_shutdown(struct fsi_priv *fsi,
 			    struct device *dev)
 {
+	int ret;
 	/* stop master clock */
-	if (fsi_is_clk_master(fsi))
-		return fsi_clk_disable(dev, fsi);
+	if (fsi_is_clk_master(fsi)) {
+		ret = fsi_clk_disable(dev, fsi);
+		if (ret)
+			return ret;
+	}
+	/* stop spu bus bridge clock */
+	clk_disable(fsi->master->clk_spu);
 
 	return 0;
 }
@@ -1571,7 +1644,7 @@ static int fsi_dai_startup(struct snd_pcm_substream *substream,
 
 	fsi_clk_invalid(fsi);
 
-	return 0;
+	return fsi_clk_prepare(fsi);
 }
 
 static void fsi_dai_shutdown(struct snd_pcm_substream *substream,
@@ -1579,6 +1652,7 @@ static void fsi_dai_shutdown(struct snd_pcm_substream *substream,
 {
 	struct fsi_priv *fsi = fsi_get_priv(substream);
 
+	fsi_clk_unprepare(fsi);
 	fsi_clk_invalid(fsi);
 }
 
@@ -1600,10 +1674,10 @@ static int fsi_dai_trigger(struct snd_pcm_substream *substream, int cmd,
 			ret = fsi_stream_transfer(io);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
-		if (!ret)
-			ret = fsi_hw_shutdown(fsi, dai->dev);
 		fsi_stream_stop(fsi, io);
 		fsi_stream_quit(fsi, io);
+		if (!ret)
+			ret = fsi_hw_shutdown(fsi, dai->dev);
 		break;
 	}
 
@@ -1678,15 +1752,6 @@ static int fsi_dai_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 		break;
 	}
 
-	if (fsi_is_clk_master(fsi)) {
-		if (fsi->clk_cpg)
-			fsi_clk_init(dai->dev, fsi, 0, 1, 1,
-				     fsi_clk_set_rate_cpg);
-		else
-			fsi_clk_init(dai->dev, fsi, 1, 1, 0,
-				     fsi_clk_set_rate_external);
-	}
-
 	/* set format */
 	if (fsi_is_spdif(fsi))
 		ret = fsi_set_fmt_spdif(fsi);
@@ -1708,11 +1773,6 @@ static int fsi_dai_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
-/*
- * Select below from Sound Card, not auto
- *	SND_SOC_DAIFMT_CBC_CFC
- *	SND_SOC_DAIFMT_CBP_CFP
- */
 static const u64 fsi_dai_formats =
 	SND_SOC_POSSIBLE_DAIFMT_I2S	|
 	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
@@ -1831,7 +1891,7 @@ static const struct snd_soc_component_driver fsi_soc_component = {
 	.name		= "fsi",
 	.open		= fsi_pcm_open,
 	.pointer	= fsi_pointer,
-	.pcm_construct	= fsi_pcm_new,
+	.pcm_new	= fsi_pcm_new,
 };
 
 /*
@@ -1937,20 +1997,10 @@ static int fsi_probe(struct platform_device *pdev)
 
 	memset(&info, 0, sizeof(info));
 
-	core = NULL;
-	if (np) {
-		core = of_device_get_match_data(&pdev->dev);
-		fsi_of_parse("fsia", np, &info.port_a, &pdev->dev);
-		fsi_of_parse("fsib", np, &info.port_b, &pdev->dev);
-	} else {
-		const struct platform_device_id	*id_entry = pdev->id_entry;
-		if (id_entry)
-			core = (struct fsi_core *)id_entry->driver_data;
+	fsi_of_parse("fsia", np, &info.port_a, &pdev->dev);
+	fsi_of_parse("fsib", np, &info.port_b, &pdev->dev);
 
-		if (pdev->dev.platform_data)
-			memcpy(&info, pdev->dev.platform_data, sizeof(info));
-	}
-
+	core = of_device_get_match_data(&pdev->dev);
 	if (!core) {
 		dev_err(&pdev->dev, "unknown fsi device\n");
 		return -ENODEV;
@@ -1984,6 +2034,11 @@ static int fsi_probe(struct platform_device *pdev)
 	fsi->master	= master;
 	fsi_port_info_init(fsi, &info.port_a);
 	fsi_handler_init(fsi, &info.port_a);
+	ret = fsi_clk_init(&pdev->dev, fsi);
+	if (ret) {
+		dev_err(&pdev->dev, "FSIA clk init failed\n");
+		return ret;
+	}
 	ret = fsi_stream_probe(fsi, &pdev->dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "FSIA stream probe failed\n");
@@ -1997,6 +2052,11 @@ static int fsi_probe(struct platform_device *pdev)
 	fsi->master	= master;
 	fsi_port_info_init(fsi, &info.port_b);
 	fsi_handler_init(fsi, &info.port_b);
+	ret = fsi_clk_init(&pdev->dev, fsi);
+	if (ret) {
+		dev_err(&pdev->dev, "FSIB clk init failed\n");
+		goto exit_fsia;
+	}
 	ret = fsi_stream_probe(fsi, &pdev->dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "FSIB stream probe failed\n");

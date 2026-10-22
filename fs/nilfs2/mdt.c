@@ -148,9 +148,7 @@ nilfs_mdt_submit_block(struct inode *inode, unsigned long blkoff, blk_opf_t opf,
 	}
 	map_bh(bh, inode->i_sb, (sector_t)blknum);
 
-	bh->b_end_io = end_buffer_read_sync;
-	get_bh(bh);
-	submit_bh(opf, bh);
+	bh_submit(bh, opf, bh_end_read);
 	ret = 0;
 
 	trace_nilfs2_mdt_submit_block(inode, inode->i_ino, blkoff,
@@ -203,7 +201,7 @@ static int nilfs_mdt_read_block(struct inode *inode, unsigned long block,
 	err = -EIO;
 	if (!buffer_uptodate(first_bh)) {
 		nilfs_err(inode->i_sb,
-			  "I/O error reading meta-data file (ino=%lu, block-offset=%lu)",
+			  "I/O error reading meta-data file (ino=%llu, block-offset=%lu)",
 			  inode->i_ino, block);
 		goto failed_bh;
 	}
@@ -422,8 +420,6 @@ static int nilfs_mdt_write_folio(struct folio *folio,
 
 	if (wbc->sync_mode == WB_SYNC_ALL)
 		err = nilfs_construct_segment(sb);
-	else if (wbc->for_reclaim)
-		nilfs_flush_segment(sb, inode->i_ino);
 
 	return err;
 }

@@ -106,21 +106,6 @@ int os_get_ifname(int fd, char* namebuf)
 	return 0;
 }
 
-int os_set_slip(int fd)
-{
-	int disc, sencap;
-
-	disc = N_SLIP;
-	if (ioctl(fd, TIOCSETD, &disc) < 0)
-		return -errno;
-
-	sencap = 0;
-	if (ioctl(fd, SIOCSIFENCAP, &sencap) < 0)
-		return -errno;
-
-	return 0;
-}
-
 int os_mode_fd(int fd, int mode)
 {
 	int err;
@@ -550,7 +535,7 @@ ssize_t os_rcv_fd_msg(int fd, int *fds, unsigned int n_fds,
 	    cmsg->cmsg_type != SCM_RIGHTS)
 		return n;
 
-	memcpy(fds, CMSG_DATA(cmsg), cmsg->cmsg_len);
+	memcpy(fds, CMSG_DATA(cmsg), cmsg->cmsg_len - CMSG_LEN(0));
 	return n;
 }
 

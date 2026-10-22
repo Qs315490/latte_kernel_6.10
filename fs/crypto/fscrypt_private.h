@@ -11,9 +11,10 @@
 #ifndef _FSCRYPT_PRIVATE_H
 #define _FSCRYPT_PRIVATE_H
 
+#include <crypto/sha2.h>
 #include <linux/fscrypt.h>
+#include <linux/minmax.h>
 #include <linux/siphash.h>
-#include <crypto/hash.h>
 #include <linux/blk-crypto.h>
 
 #define CONST_STRLEN(str)	(sizeof(str) - 1)
@@ -26,6 +27,41 @@
  * absolute minimum, which applies when only 128-bit encryption is used.
  */
 #define FSCRYPT_MIN_KEY_SIZE	16
+
+/* Maximum size of a raw fscrypt master key */
+#define FSCRYPT_MAX_RAW_KEY_SIZE	64
+
+/* Maximum size of a hardware-wrapped fscrypt master key */
+#define FSCRYPT_MAX_HW_WRAPPED_KEY_SIZE	BLK_CRYPTO_MAX_HW_WRAPPED_KEY_SIZE
+
+/* Maximum size of an fscrypt master key across both key types */
+#define FSCRYPT_MAX_ANY_KEY_SIZE \
+	MAX(FSCRYPT_MAX_RAW_KEY_SIZE, FSCRYPT_MAX_HW_WRAPPED_KEY_SIZE)
+
+/*
+ * FSCRYPT_MAX_KEY_SIZE is defined in the UAPI header, but the addition of
+ * hardware-wrapped keys has made it misleading as it's only for raw keys.
+ * Don't use it in kernel code; use one of the above constants instead.
+ */
+#undef FSCRYPT_MAX_KEY_SIZE
+
+/*
+ * This mask is passed as the third argument to the crypto_alloc_*() functions
+ * to prevent fscrypt from using the Crypto API drivers for non-inline crypto
+ * engines.  Those drivers have been problematic for fscrypt.  fscrypt users
+ * have reported hangs and even incorrect en/decryption with these drivers.
+ * Since going to the driver, off CPU, and back again is really slow, such
+ * drivers can be over 50 times slower than the CPU-based code for fscrypt's
+ * workload.  Even on platforms that lack AES instructions on the CPU, using the
+ * offloads has been shown to be slower, even staying with AES.  (Of course,
+ * Adiantum is faster still, and is the recommended option on such platforms...)
+ *
+ * Note that fscrypt also supports inline crypto engines.  Those don't use the
+ * Crypto API and work much better than the old-style (non-inline) engines.
+ */
+#define FSCRYPT_CRYPTOAPI_MASK                            \
+	(CRYPTO_ALG_ASYNC | CRYPTO_ALG_ALLOCATES_MEMORY | \
+	 CRYPTO_ALG_KERN_DRIVER_ONLY)
 
 #define FSCRYPT_CONTEXT_V1	1
 #define FSCRYPT_CONTEXT_V2	2
@@ -200,21 +236,30 @@ struct fscrypt_symlink_data {
  * @tfm: crypto API transform object
  * @blk_key: key for blk-crypto
  *
- * Normally only one of the fields will be non-NULL.
+ * Only one of the fields is non-NULL.
  */
 struct fscrypt_prepared_key {
-	struct crypto_skcipher *tfm;
+	struct crypto_sync_skcipher *tfm;
 #ifdef CONFIG_FS_ENCRYPTION_INLINE_CRYPT
 	struct blk_crypto_key *blk_key;
 #endif
+};
+
+/* An entry in the linked list ->mk_mode_keys */
+struct fscrypt_mode_key {
+	struct fscrypt_prepared_key key;
+	struct list_head link;
+	u8 hkdf_context;
+	u8 mode_num;
+	u8 data_unit_bits;
 };
 
 /*
  * fscrypt_inode_info - the "encryption key" for an inode
  *
  * When an encrypted file's key is made available, an instance of this struct is
- * allocated and stored in ->i_crypt_info.  Once created, it remains until the
- * inode is evicted.
+ * allocated and a pointer to it is stored in the file's in-memory inode.  Once
+ * created, it remains until the inode is evicted.
  */
 struct fscrypt_inode_info {
 
@@ -241,9 +286,6 @@ struct fscrypt_inode_info {
 	 * cached here for efficiency.  Only used for regular files.
 	 */
 	u8 ci_data_unit_bits;
-
-	/* Cached value: log2 of number of data units per FS block */
-	u8 ci_data_units_per_block_bits;
 
 	/* Hashed inode number.  Only set for IV_INO_LBLK_32 */
 	u32 ci_hashed_ino;
@@ -301,8 +343,7 @@ int fscrypt_initialize(struct super_block *sb);
 int fscrypt_crypt_data_unit(const struct fscrypt_inode_info *ci,
 			    fscrypt_direction_t rw, u64 index,
 			    struct page *src_page, struct page *dest_page,
-			    unsigned int len, unsigned int offs,
-			    gfp_t gfp_flags);
+			    unsigned int len, unsigned int offs);
 struct page *fscrypt_alloc_bounce_page(gfp_t gfp_flags);
 
 void __printf(3, 4) __cold
@@ -346,12 +387,8 @@ bool __fscrypt_fname_encrypted_size(const union fscrypt_policy *policy,
 				    u32 *encrypted_len_ret);
 
 /* hkdf.c */
-struct fscrypt_hkdf {
-	struct crypto_shash *hmac_tfm;
-};
-
-int fscrypt_init_hkdf(struct fscrypt_hkdf *hkdf, const u8 *master_key,
-		      unsigned int master_key_size);
+void fscrypt_init_hkdf(struct hmac_sha512_key *hkdf, const u8 *master_key,
+		       unsigned int master_key_size);
 
 /*
  * The list of contexts in which fscrypt uses HKDF.  These values are used as
@@ -360,23 +397,24 @@ int fscrypt_init_hkdf(struct fscrypt_hkdf *hkdf, const u8 *master_key,
  * outputs are unique and cryptographically isolated, i.e. knowledge of one
  * output doesn't reveal another.
  */
-#define HKDF_CONTEXT_KEY_IDENTIFIER	1 /* info=<empty>		*/
+#define HKDF_CONTEXT_KEY_IDENTIFIER_FOR_RAW_KEY	1 /* info=<empty>	*/
 #define HKDF_CONTEXT_PER_FILE_ENC_KEY	2 /* info=file_nonce		*/
 #define HKDF_CONTEXT_DIRECT_KEY		3 /* info=mode_num		*/
 #define HKDF_CONTEXT_IV_INO_LBLK_64_KEY	4 /* info=mode_num||fs_uuid	*/
 #define HKDF_CONTEXT_DIRHASH_KEY	5 /* info=file_nonce		*/
 #define HKDF_CONTEXT_IV_INO_LBLK_32_KEY	6 /* info=mode_num||fs_uuid	*/
 #define HKDF_CONTEXT_INODE_HASH_KEY	7 /* info=<empty>		*/
+#define HKDF_CONTEXT_KEY_IDENTIFIER_FOR_HW_WRAPPED_KEY \
+					8 /* info=<empty>		*/
 
-int fscrypt_hkdf_expand(const struct fscrypt_hkdf *hkdf, u8 context,
-			const u8 *info, unsigned int infolen,
-			u8 *okm, unsigned int okmlen);
-
-void fscrypt_destroy_hkdf(struct fscrypt_hkdf *hkdf);
+void fscrypt_hkdf_expand(const struct hmac_sha512_key *hkdf, u8 context,
+			 const u8 *info, unsigned int infolen,
+			 u8 *okm, unsigned int okmlen);
 
 /* inline_crypt.c */
 #ifdef CONFIG_FS_ENCRYPTION_INLINE_CRYPT
-int fscrypt_select_encryption_impl(struct fscrypt_inode_info *ci);
+int fscrypt_select_encryption_impl(struct fscrypt_inode_info *ci,
+				   bool is_hw_wrapped_key);
 
 static inline bool
 fscrypt_using_inline_encryption(const struct fscrypt_inode_info *ci)
@@ -385,36 +423,34 @@ fscrypt_using_inline_encryption(const struct fscrypt_inode_info *ci)
 }
 
 int fscrypt_prepare_inline_crypt_key(struct fscrypt_prepared_key *prep_key,
-				     const u8 *raw_key,
+				     const u8 *key_bytes, size_t key_size,
+				     bool is_hw_wrapped,
 				     const struct fscrypt_inode_info *ci);
 
 void fscrypt_destroy_inline_crypt_key(struct super_block *sb,
 				      struct fscrypt_prepared_key *prep_key);
+
+int fscrypt_derive_sw_secret(struct super_block *sb,
+			     const u8 *wrapped_key, size_t wrapped_key_size,
+			     u8 sw_secret[BLK_CRYPTO_SW_SECRET_SIZE]);
 
 /*
  * Check whether the crypto transform or blk-crypto key has been allocated in
  * @prep_key, depending on which encryption implementation the file will use.
  */
 static inline bool
-fscrypt_is_key_prepared(struct fscrypt_prepared_key *prep_key,
+fscrypt_is_key_prepared(const struct fscrypt_prepared_key *prep_key,
 			const struct fscrypt_inode_info *ci)
 {
-	/*
-	 * The two smp_load_acquire()'s here pair with the smp_store_release()'s
-	 * in fscrypt_prepare_inline_crypt_key() and fscrypt_prepare_key().
-	 * I.e., in some cases (namely, if this prep_key is a per-mode
-	 * encryption key) another task can publish blk_key or tfm concurrently,
-	 * executing a RELEASE barrier.  We need to use smp_load_acquire() here
-	 * to safely ACQUIRE the memory the other task published.
-	 */
 	if (fscrypt_using_inline_encryption(ci))
-		return smp_load_acquire(&prep_key->blk_key) != NULL;
-	return smp_load_acquire(&prep_key->tfm) != NULL;
+		return prep_key->blk_key != NULL;
+	return prep_key->tfm != NULL;
 }
 
 #else /* CONFIG_FS_ENCRYPTION_INLINE_CRYPT */
 
-static inline int fscrypt_select_encryption_impl(struct fscrypt_inode_info *ci)
+static inline int fscrypt_select_encryption_impl(struct fscrypt_inode_info *ci,
+						 bool is_hw_wrapped_key)
 {
 	return 0;
 }
@@ -427,7 +463,8 @@ fscrypt_using_inline_encryption(const struct fscrypt_inode_info *ci)
 
 static inline int
 fscrypt_prepare_inline_crypt_key(struct fscrypt_prepared_key *prep_key,
-				 const u8 *raw_key,
+				 const u8 *key_bytes, size_t key_size,
+				 bool is_hw_wrapped,
 				 const struct fscrypt_inode_info *ci)
 {
 	WARN_ON_ONCE(1);
@@ -440,15 +477,37 @@ fscrypt_destroy_inline_crypt_key(struct super_block *sb,
 {
 }
 
+static inline int
+fscrypt_derive_sw_secret(struct super_block *sb,
+			 const u8 *wrapped_key, size_t wrapped_key_size,
+			 u8 sw_secret[BLK_CRYPTO_SW_SECRET_SIZE])
+{
+	fscrypt_warn(NULL, "kernel doesn't support hardware-wrapped keys");
+	return -EOPNOTSUPP;
+}
+
 static inline bool
-fscrypt_is_key_prepared(struct fscrypt_prepared_key *prep_key,
+fscrypt_is_key_prepared(const struct fscrypt_prepared_key *prep_key,
 			const struct fscrypt_inode_info *ci)
 {
-	return smp_load_acquire(&prep_key->tfm) != NULL;
+	return prep_key->tfm != NULL;
 }
 #endif /* !CONFIG_FS_ENCRYPTION_INLINE_CRYPT */
 
 /* keyring.c */
+
+/*
+ * fscrypt_master_key_user - a user's claim to a master key
+ */
+struct fscrypt_master_key_user {
+	struct list_head link;
+	kuid_t uid;
+	/*
+	 * This 'struct key' contains no secret.  It exists solely to charge the
+	 * appropriate user's key quota.
+	 */
+	struct key *quota_key;
+};
 
 /*
  * fscrypt_master_key_secret - secret key material of an in-use master key
@@ -456,20 +515,38 @@ fscrypt_is_key_prepared(struct fscrypt_prepared_key *prep_key,
 struct fscrypt_master_key_secret {
 
 	/*
-	 * For v2 policy keys: HKDF context keyed by this master key.
-	 * For v1 policy keys: not set (hkdf.hmac_tfm == NULL).
+	 * The KDF with which subkeys of this key can be derived.
+	 *
+	 * For v1 policy keys, this isn't applicable and won't be set.
+	 * Otherwise, this KDF will be keyed by this master key if
+	 * ->is_hw_wrapped=false, or by the "software secret" that hardware
+	 * derived from this master key if ->is_hw_wrapped=true.
 	 */
-	struct fscrypt_hkdf	hkdf;
+	struct hmac_sha512_key	hkdf;
 
 	/*
-	 * Size of the raw key in bytes.  This remains set even if ->raw was
+	 * True if this key is a hardware-wrapped key; false if this key is a
+	 * raw key (i.e. a "software key").  For v1 policy keys this will always
+	 * be false, as v1 policy support is a legacy feature which doesn't
+	 * support newer functionality such as hardware-wrapped keys.
+	 */
+	bool			is_hw_wrapped;
+
+	/*
+	 * Size of the key in bytes.  This remains set even if ->bytes was
 	 * zeroized due to no longer being needed.  I.e. we still remember the
 	 * size of the key even if we don't need to remember the key itself.
 	 */
 	u32			size;
 
-	/* For v1 policy keys: the raw key.  Wiped for v2 policy keys. */
-	u8			raw[FSCRYPT_MAX_KEY_SIZE];
+	/*
+	 * The bytes of the key, when still needed.  This can be either a raw
+	 * key or a hardware-wrapped key, as indicated by ->is_hw_wrapped.  In
+	 * the case of a raw, v2 policy key, there is no need to remember the
+	 * actual key separately from ->hkdf so this field will be zeroized as
+	 * soon as ->hkdf is initialized.
+	 */
+	u8			bytes[FSCRYPT_MAX_ANY_KEY_SIZE];
 
 } __randomize_layout;
 
@@ -514,8 +591,8 @@ struct fscrypt_master_key {
 	/*
 	 * Active and structural reference counts.  An active ref guarantees
 	 * that the struct continues to exist, continues to be in the keyring
-	 * ->s_master_keys, and that any embedded subkeys (e.g.
-	 * ->mk_direct_keys) that have been prepared continue to exist.
+	 * ->s_master_keys, and that any non-file-scoped subkeys (e.g.
+	 * ->mk_mode_keys) that have been prepared continue to exist.
 	 * A structural ref only guarantees that the struct continues to exist.
 	 *
 	 * There is one active ref associated with ->mk_present being true, and
@@ -547,19 +624,18 @@ struct fscrypt_master_key {
 	struct fscrypt_key_specifier		mk_spec;
 
 	/*
-	 * Keyring which contains a key of type 'key_type_fscrypt_user' for each
-	 * user who has added this key.  Normally each key will be added by just
-	 * one user, but it's possible that multiple users share a key, and in
-	 * that case we need to keep track of those users so that one user can't
-	 * remove the key before the others want it removed too.
+	 * List of user claims to this key (struct fscrypt_master_key_user).
+	 * Normally each key will be added by just one user, but it's possible
+	 * that multiple users share a key, and in that case we need to keep
+	 * track of those users so that one user can't remove the key before the
+	 * others want it removed too.
 	 *
-	 * This is NULL for v1 policy keys; those can only be added by root.
+	 * Used only for v2 policy keys.  v1 policy keys can be added only by
+	 * root, so user tracking doesn't apply to them.
 	 *
-	 * Locking: protected by ->mk_sem.  (We don't just rely on the keyrings
-	 * subsystem semaphore ->mk_users->sem, as we need support for atomic
-	 * search+insert along with proper synchronization with other fields.)
+	 * Locking: protected by ->mk_sem.
 	 */
-	struct key		*mk_users;
+	struct list_head	mk_users;
 
 	/*
 	 * List of inodes that were unlocked using this key.  This allows the
@@ -569,12 +645,21 @@ struct fscrypt_master_key {
 	spinlock_t		mk_decrypted_inodes_lock;
 
 	/*
-	 * Per-mode encryption keys for the various types of encryption policies
-	 * that use them.  Allocated and derived on-demand.
+	 * A list of 'struct fscrypt_mode_key' for the (hkdf_context, mode_num,
+	 * data_unit_bits, inlinecrypt) combinations that are in use for this
+	 * master key, for hkdf_context in [HKDF_CONTEXT_DIRECT_KEY,
+	 * HKDF_CONTEXT_IV_INO_LBLK_32_KEY, HKDF_CONTEXT_IV_INO_LBLK_64_KEY].
+	 *
+	 * This is a linked list and not a hash table because in practice
+	 * there's just a single encryption policy per master key, using
+	 * _at most_ 2 nodes in this list.  Per-file keys don't use this at all.
+	 *
+	 * This list is append-only until the master key is fully removed, at
+	 * which time the list is cleared.  Before then,
+	 * fscrypt_mode_key_setup_mutex synchronizes appends, and searches use
+	 * the RCU read lock together with ->mk_sem held for read.
 	 */
-	struct fscrypt_prepared_key mk_direct_keys[FSCRYPT_MODE_MAX + 1];
-	struct fscrypt_prepared_key mk_iv_ino_lblk_64_keys[FSCRYPT_MODE_MAX + 1];
-	struct fscrypt_prepared_key mk_iv_ino_lblk_32_keys[FSCRYPT_MODE_MAX + 1];
+	struct list_head	mk_mode_keys;
 
 	/* Hash key for inode numbers.  Initialized only when needed. */
 	siphash_key_t		mk_ino_hash_key;
@@ -624,7 +709,7 @@ struct fscrypt_master_key *
 fscrypt_find_master_key(struct super_block *sb,
 			const struct fscrypt_key_specifier *mk_spec);
 
-int fscrypt_get_test_dummy_key_identifier(
+void fscrypt_get_test_dummy_key_identifier(
 			  u8 key_identifier[FSCRYPT_KEY_IDENTIFIER_SIZE]);
 
 int fscrypt_add_test_dummy_key(struct super_block *sb,
@@ -660,8 +745,8 @@ void fscrypt_destroy_prepared_key(struct super_block *sb,
 int fscrypt_set_per_file_enc_key(struct fscrypt_inode_info *ci,
 				 const u8 *raw_key);
 
-int fscrypt_derive_dirhash_key(struct fscrypt_inode_info *ci,
-			       const struct fscrypt_master_key *mk);
+void fscrypt_derive_dirhash_key(struct fscrypt_inode_info *ci,
+				const struct fscrypt_master_key *mk);
 
 void fscrypt_hash_inode_number(struct fscrypt_inode_info *ci,
 			       const struct fscrypt_master_key *mk);

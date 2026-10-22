@@ -204,7 +204,7 @@ int br_dev_siocdevprivate(struct net_device *dev, struct ifreq *rq,
 		if (num > BR_MAX_PORTS)
 			num = BR_MAX_PORTS;
 
-		indices = kcalloc(num, sizeof(int), GFP_KERNEL);
+		indices = kzalloc_objs(int, num);
 		if (indices == NULL)
 			return -ENOMEM;
 
@@ -257,13 +257,13 @@ int br_dev_siocdevprivate(struct net_device *dev, struct ifreq *rq,
 		memset(&p, 0, sizeof(struct __port_info));
 		memcpy(&p.designated_root, &pt->designated_root, 8);
 		memcpy(&p.designated_bridge, &pt->designated_bridge, 8);
-		p.port_id = pt->port_id;
-		p.designated_port = pt->designated_port;
-		p.path_cost = pt->path_cost;
-		p.designated_cost = pt->designated_cost;
+		p.port_id = READ_ONCE(pt->port_id);
+		p.designated_port = READ_ONCE(pt->designated_port);
+		p.path_cost = READ_ONCE(pt->path_cost);
+		p.designated_cost = READ_ONCE(pt->designated_cost);
 		p.state = pt->state;
 		p.top_change_ack = pt->topology_change_ack;
-		p.config_pending = pt->config_pending;
+		p.config_pending = READ_ONCE(pt->config_pending);
 		p.message_age_timer_value = br_timer_value(&pt->message_age_timer);
 		p.forward_delay_timer_value = br_timer_value(&pt->forward_delay_timer);
 		p.hold_timer_value = br_timer_value(&pt->hold_timer);
@@ -357,7 +357,7 @@ static int old_deviceless(struct net *net, void __user *data)
 
 		if (args[2] >= 2048)
 			return -ENOMEM;
-		indices = kcalloc(args[2], sizeof(int), GFP_KERNEL);
+		indices = kzalloc_objs(int, args[2]);
 		if (indices == NULL)
 			return -ENOMEM;
 
@@ -394,10 +394,26 @@ static int old_deviceless(struct net *net, void __user *data)
 	return -EOPNOTSUPP;
 }
 
-int br_ioctl_stub(struct net *net, struct net_bridge *br, unsigned int cmd,
-		  struct ifreq *ifr, void __user *uarg)
+int br_ioctl_stub(struct net *net, unsigned int cmd, void __user *uarg)
 {
 	int ret = -EOPNOTSUPP;
+	struct ifreq ifr;
+
+	if (cmd == SIOCBRADDIF || cmd == SIOCBRDELIF) {
+		void __user *data;
+		char *colon;
+
+		if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
+
+		if (get_user_ifreq(&ifr, &data, uarg))
+			return -EFAULT;
+
+		ifr.ifr_name[IFNAMSIZ - 1] = 0;
+		colon = strchr(ifr.ifr_name, ':');
+		if (colon)
+			*colon = 0;
+	}
 
 	rtnl_lock();
 
@@ -430,7 +446,21 @@ int br_ioctl_stub(struct net *net, struct net_bridge *br, unsigned int cmd,
 		break;
 	case SIOCBRADDIF:
 	case SIOCBRDELIF:
-		ret = add_del_if(br, ifr->ifr_ifindex, cmd == SIOCBRADDIF);
+	{
+		struct net_device *dev;
+
+		dev = __dev_get_by_name(net, ifr.ifr_name);
+		if (!dev || !netif_device_present(dev)) {
+			ret = -ENODEV;
+			break;
+		}
+		if (!netif_is_bridge_master(dev)) {
+			ret = -EOPNOTSUPP;
+			break;
+		}
+
+		ret = add_del_if(netdev_priv(dev), ifr.ifr_ifindex, cmd == SIOCBRADDIF);
+	}
 		break;
 	}
 

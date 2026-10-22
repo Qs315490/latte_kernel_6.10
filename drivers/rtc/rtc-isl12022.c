@@ -413,6 +413,7 @@ static int isl12022_setup_irq(struct device *dev, int irq)
 	if (ret)
 		return ret;
 
+	isl12022->irq_enabled = true;
 	ret = devm_request_threaded_irq(dev, irq, NULL,
 					isl12022_rtc_interrupt,
 					IRQF_SHARED | IRQF_ONESHOT,
@@ -603,7 +604,7 @@ static const struct of_device_id isl12022_dt_match[] = {
 MODULE_DEVICE_TABLE(of, isl12022_dt_match);
 
 static const struct i2c_device_id isl12022_id[] = {
-	{ "isl12022" },
+	{ .name = "isl12022" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, isl12022_id);

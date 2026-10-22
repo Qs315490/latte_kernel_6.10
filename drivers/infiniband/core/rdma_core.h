@@ -70,9 +70,15 @@ void uverbs_finalize_object(struct ib_uobject *uobj,
 int uverbs_output_written(const struct uverbs_attr_bundle *bundle, size_t idx);
 
 void setup_ufile_idr_uobject(struct ib_uverbs_file *ufile);
-void release_ufile_idr_uobject(struct ib_uverbs_file *ufile);
 
+#if IS_ENABLED(CONFIG_INFINIBAND_USER_ACCESS)
 struct ib_udata *uverbs_get_cleared_udata(struct uverbs_attr_bundle *attrs);
+#else
+static inline struct ib_udata *uverbs_get_cleared_udata(struct uverbs_attr_bundle *attrs)
+{
+	return NULL;
+}
+#endif
 
 /*
  * This is the runtime description of the uverbs API, used by the syscall
@@ -156,6 +162,8 @@ extern const struct uapi_definition uverbs_def_obj_counters[];
 extern const struct uapi_definition uverbs_def_obj_cq[];
 extern const struct uapi_definition uverbs_def_obj_device[];
 extern const struct uapi_definition uverbs_def_obj_dm[];
+extern const struct uapi_definition uverbs_def_obj_dmabuf[];
+extern const struct uapi_definition uverbs_def_obj_dmah[];
 extern const struct uapi_definition uverbs_def_obj_flow_action[];
 extern const struct uapi_definition uverbs_def_obj_intf[];
 extern const struct uapi_definition uverbs_def_obj_mr[];

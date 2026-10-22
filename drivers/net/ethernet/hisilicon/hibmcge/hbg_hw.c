@@ -12,11 +12,20 @@
 
 #define HBG_HW_EVENT_WAIT_TIMEOUT_US	(2 * 1000 * 1000)
 #define HBG_HW_EVENT_WAIT_INTERVAL_US	(10 * 1000)
+#define HBG_MAC_LINK_WAIT_TIMEOUT_US	(500 * 1000)
+#define HBG_MAC_LINK_WAIT_INTERVAL_US	(5 * 1000)
 /* little endian or big endian.
  * ctrl means packet description, data means skb packet data
  */
 #define HBG_ENDIAN_CTRL_LE_DATA_BE	0x0
 #define HBG_PCU_FRAME_LEN_PLUS 4
+
+#define HBG_FIFO_TX_FULL_THRSLD		0x3F0
+#define HBG_FIFO_TX_EMPTY_THRSLD	0x1F0
+#define HBG_FIFO_RX_FULL_THRSLD		0x240
+#define HBG_FIFO_RX_EMPTY_THRSLD	0x190
+#define HBG_CFG_FIFO_FULL_THRSLD	0x10
+#define HBG_CFG_FIFO_EMPTY_THRSLD	0x01
 
 static bool hbg_hw_spec_is_valid(struct hbg_priv *priv)
 {
@@ -168,6 +177,11 @@ static void hbg_hw_set_mac_max_frame_len(struct hbg_priv *priv,
 
 void hbg_hw_set_mtu(struct hbg_priv *priv, u16 mtu)
 {
+	/* burst_len BIT(29) set to 1 can improve the TX performance.
+	 * But packet drop occurs when mtu > 2000.
+	 * So, BIT(29) reset to 0 when mtu > 2000.
+	 */
+	u32 burst_len_bit = (mtu > 2000) ? 0 : 1;
 	u32 frame_len;
 
 	frame_len = mtu + VLAN_HLEN * priv->dev_specs.vlan_layers +
@@ -175,6 +189,9 @@ void hbg_hw_set_mtu(struct hbg_priv *priv, u16 mtu)
 
 	hbg_hw_set_pcu_max_frame_len(priv, frame_len);
 	hbg_hw_set_mac_max_frame_len(priv, frame_len);
+
+	hbg_reg_write_field(priv, HBG_REG_BRUST_LENGTH_ADDR,
+			    HBG_REG_BRUST_LENGTH_B, burst_len_bit);
 }
 
 void hbg_hw_mac_enable(struct hbg_priv *priv, u32 enable)
@@ -213,10 +230,32 @@ void hbg_hw_fill_buffer(struct hbg_priv *priv, u32 buffer_dma_addr)
 
 void hbg_hw_adjust_link(struct hbg_priv *priv, u32 speed, u32 duplex)
 {
+	u32 link_status;
+	int ret;
+
+	hbg_hw_mac_enable(priv, HBG_STATUS_DISABLE);
+
 	hbg_reg_write_field(priv, HBG_REG_PORT_MODE_ADDR,
 			    HBG_REG_PORT_MODE_M, speed);
 	hbg_reg_write_field(priv, HBG_REG_DUPLEX_TYPE_ADDR,
 			    HBG_REG_DUPLEX_B, duplex);
+
+	hbg_hw_event_notify(priv, HBG_HW_EVENT_CORE_RESET);
+
+	hbg_hw_mac_enable(priv, HBG_STATUS_ENABLE);
+
+	if (priv->mac.phy_addr == HBG_NO_PHY)
+		return;
+
+	/* wait MAC link up */
+	ret = readl_poll_timeout(priv->io_base + HBG_REG_AN_NEG_STATE_ADDR,
+				 link_status,
+				 FIELD_GET(HBG_REG_AN_NEG_STATE_NP_LINK_OK_B,
+					   link_status),
+				 HBG_MAC_LINK_WAIT_INTERVAL_US,
+				 HBG_MAC_LINK_WAIT_TIMEOUT_US);
+	if (ret)
+		hbg_np_link_fail_task_schedule(priv);
 }
 
 /* only support uc filter */
@@ -224,6 +263,10 @@ void hbg_hw_set_mac_filter_enable(struct hbg_priv *priv, u32 enable)
 {
 	hbg_reg_write_field(priv, HBG_REG_REC_FILT_CTRL_ADDR,
 			    HBG_REG_REC_FILT_CTRL_UC_MATCH_EN_B, enable);
+
+	/* only uc filter is supported, so set all bits of mc mask reg to 1 */
+	hbg_reg_write64(priv, HBG_REG_STATION_ADDR_LOW_MSK_0, U64_MAX);
+	hbg_reg_write64(priv, HBG_REG_STATION_ADDR_LOW_MSK_1, U64_MAX);
 }
 
 void hbg_hw_set_pause_enable(struct hbg_priv *priv, u32 tx_en, u32 rx_en)
@@ -232,6 +275,9 @@ void hbg_hw_set_pause_enable(struct hbg_priv *priv, u32 tx_en, u32 rx_en)
 			    HBG_REG_PAUSE_ENABLE_TX_B, tx_en);
 	hbg_reg_write_field(priv, HBG_REG_PAUSE_ENABLE_ADDR,
 			    HBG_REG_PAUSE_ENABLE_RX_B, rx_en);
+
+	hbg_reg_write_field(priv, HBG_REG_REC_FILT_CTRL_ADDR,
+			    HBG_REG_REC_FILT_CTRL_PAUSE_FRM_PASS_B, rx_en);
 }
 
 void hbg_hw_get_pause_enable(struct hbg_priv *priv, u32 *tx_en, u32 *rx_en)
@@ -245,6 +291,41 @@ void hbg_hw_get_pause_enable(struct hbg_priv *priv, u32 *tx_en, u32 *rx_en)
 void hbg_hw_set_rx_pause_mac_addr(struct hbg_priv *priv, u64 mac_addr)
 {
 	hbg_reg_write64(priv, HBG_REG_FD_FC_ADDR_LOW_ADDR, mac_addr);
+}
+
+static void hbg_hw_set_fifo_thrsld(struct hbg_priv *priv,
+				   u32 full, u32 empty, enum hbg_dir dir)
+{
+	u32 value = 0;
+
+	value |= FIELD_PREP(HBG_REG_FIFO_THRSLD_FULL_M, full);
+	value |= FIELD_PREP(HBG_REG_FIFO_THRSLD_EMPTY_M, empty);
+
+	if (dir & HBG_DIR_TX)
+		hbg_reg_write(priv, HBG_REG_TX_FIFO_THRSLD_ADDR, value);
+
+	if (dir & HBG_DIR_RX)
+		hbg_reg_write(priv, HBG_REG_RX_FIFO_THRSLD_ADDR, value);
+}
+
+static void hbg_hw_set_cfg_fifo_thrsld(struct hbg_priv *priv,
+				       u32 full, u32 empty, enum hbg_dir dir)
+{
+	u32 value;
+
+	value = hbg_reg_read(priv, HBG_REG_CFG_FIFO_THRSLD_ADDR);
+
+	if (dir & HBG_DIR_TX) {
+		value |= FIELD_PREP(HBG_REG_CFG_FIFO_THRSLD_TX_FULL_M, full);
+		value |= FIELD_PREP(HBG_REG_CFG_FIFO_THRSLD_TX_EMPTY_M, empty);
+	}
+
+	if (dir & HBG_DIR_RX) {
+		value |= FIELD_PREP(HBG_REG_CFG_FIFO_THRSLD_RX_FULL_M, full);
+		value |= FIELD_PREP(HBG_REG_CFG_FIFO_THRSLD_RX_EMPTY_M, empty);
+	}
+
+	hbg_reg_write(priv, HBG_REG_CFG_FIFO_THRSLD_ADDR, value);
 }
 
 static void hbg_hw_init_transmit_ctrl(struct hbg_priv *priv)
@@ -307,5 +388,12 @@ int hbg_hw_init(struct hbg_priv *priv)
 
 	hbg_hw_init_rx_control(priv);
 	hbg_hw_init_transmit_ctrl(priv);
+
+	hbg_hw_set_fifo_thrsld(priv, HBG_FIFO_TX_FULL_THRSLD,
+			       HBG_FIFO_TX_EMPTY_THRSLD, HBG_DIR_TX);
+	hbg_hw_set_fifo_thrsld(priv, HBG_FIFO_RX_FULL_THRSLD,
+			       HBG_FIFO_RX_EMPTY_THRSLD, HBG_DIR_RX);
+	hbg_hw_set_cfg_fifo_thrsld(priv, HBG_CFG_FIFO_FULL_THRSLD,
+				   HBG_CFG_FIFO_EMPTY_THRSLD, HBG_DIR_TX_RX);
 	return 0;
 }

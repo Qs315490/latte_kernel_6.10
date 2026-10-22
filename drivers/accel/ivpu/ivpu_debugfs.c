@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2020-2024 Intel Corporation
+ * Copyright (C) 2020-2026 Intel Corporation
  */
 
 #include <linux/debugfs.h>
+#include <linux/fault-inject.h>
 
 #include <drm/drm_debugfs.h>
 #include <drm/drm_file.h>
@@ -19,6 +20,7 @@
 #include "ivpu_hw.h"
 #include "ivpu_jsm_msg.h"
 #include "ivpu_pm.h"
+#include "vpu_boot_api.h"
 
 static inline struct ivpu_device *seq_to_ivpu(struct seq_file *s)
 {
@@ -95,7 +97,8 @@ static int last_bootmode_show(struct seq_file *s, void *v)
 {
 	struct ivpu_device *vdev = seq_to_ivpu(s);
 
-	seq_printf(s, "%s\n", (vdev->pm->is_warmboot) ? "warmboot" : "coldboot");
+	seq_printf(s, "%s\n", (vdev->fw->last_boot_mode == VPU_BOOT_TYPE_WARMBOOT) ?
+		   "warm boot" : "cold boot");
 
 	return 0;
 }
@@ -124,6 +127,14 @@ static int firewall_irq_counter_show(struct seq_file *s, void *v)
 	return 0;
 }
 
+static int engine_reset_counter_show(struct seq_file *s, void *v)
+{
+	struct ivpu_device *vdev = seq_to_ivpu(s);
+
+	seq_printf(s, "%d\n", atomic_read(&vdev->pm->engine_reset_counter));
+	return 0;
+}
+
 static const struct drm_debugfs_info vdev_debugfs_list[] = {
 	{"bo_list", bo_list_show, 0},
 	{"fw_name", fw_name_show, 0},
@@ -134,6 +145,7 @@ static const struct drm_debugfs_info vdev_debugfs_list[] = {
 	{"reset_counter", reset_counter_show, 0},
 	{"reset_pending", reset_pending_show, 0},
 	{"firewall_irq_counter", firewall_irq_counter_show, 0},
+	{"engine_reset_counter", engine_reset_counter_show, 0},
 };
 
 static int dvfs_mode_get(void *data, u64 *dvfs_mode)
@@ -331,7 +343,7 @@ ivpu_force_recovery_fn(struct file *file, const char __user *user_buf, size_t si
 		return -EINVAL;
 
 	ret = ivpu_rpm_get(vdev);
-	if (ret)
+	if (ret < 0)
 		return ret;
 
 	ivpu_pm_trigger_recovery(vdev, "debugfs");
@@ -349,8 +361,9 @@ static const struct file_operations ivpu_force_recovery_fops = {
 static int ivpu_reset_engine_fn(void *data, u64 val)
 {
 	struct ivpu_device *vdev = (struct ivpu_device *)data;
+	struct vpu_jsm_msg resp;
 
-	return ivpu_jsm_reset_engine(vdev, (u32)val);
+	return ivpu_jsm_reset_engine(vdev, (u32)val, &resp);
 }
 
 DEFINE_DEBUGFS_ATTRIBUTE(ivpu_reset_engine_fops, NULL, ivpu_reset_engine_fn, "0x%02llx\n");
@@ -382,7 +395,7 @@ static int dct_active_set(void *data, u64 active_percent)
 		return -EINVAL;
 
 	ret = ivpu_rpm_get(vdev);
-	if (ret)
+	if (ret < 0)
 		return ret;
 
 	if (active_percent)
@@ -396,6 +409,78 @@ static int dct_active_set(void *data, u64 active_percent)
 }
 
 DEFINE_DEBUGFS_ATTRIBUTE(ivpu_dct_fops, dct_active_get, dct_active_set, "%llu\n");
+
+static void print_priority_band(struct seq_file *s, struct ivpu_hw_info *hw,
+				int band, const char *name)
+{
+	seq_printf(s, "%-9s: grace_period %9u process_grace_period %9u process_quantum %9u\n",
+		   name,
+		   hw->hws.grace_period[band],
+		   hw->hws.process_grace_period[band],
+		   hw->hws.process_quantum[band]);
+}
+
+static int priority_bands_show(struct seq_file *s, void *v)
+{
+	struct ivpu_device *vdev = s->private;
+	struct ivpu_hw_info *hw = vdev->hw;
+
+	print_priority_band(s, hw, VPU_JOB_SCHEDULING_PRIORITY_BAND_IDLE, "Idle");
+	print_priority_band(s, hw, VPU_JOB_SCHEDULING_PRIORITY_BAND_NORMAL, "Normal");
+	print_priority_band(s, hw, VPU_JOB_SCHEDULING_PRIORITY_BAND_FOCUS, "Focus");
+	print_priority_band(s, hw, VPU_JOB_SCHEDULING_PRIORITY_BAND_REALTIME, "Realtime");
+
+	return 0;
+}
+
+static int priority_bands_fops_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, priority_bands_show, inode->i_private);
+}
+
+static ssize_t
+priority_bands_fops_write(struct file *file, const char __user *user_buf, size_t size, loff_t *pos)
+{
+	struct seq_file *s = file->private_data;
+	struct ivpu_device *vdev = s->private;
+	char buf[64];
+	u32 grace_period;
+	u32 process_grace_period;
+	u32 process_quantum;
+	u32 band;
+	int ret;
+
+	if (*pos != 0 || size >= sizeof(buf))
+		return -EINVAL;
+
+	ret = simple_write_to_buffer(buf, sizeof(buf) - 1, pos, user_buf, size);
+	if (ret < 0)
+		return ret;
+
+	buf[ret] = '\0';
+	ret = sscanf(buf, "%u %u %u %u", &band, &grace_period, &process_grace_period,
+		     &process_quantum);
+	if (ret != 4)
+		return -EINVAL;
+
+	if (band >= VPU_JOB_SCHEDULING_PRIORITY_BAND_COUNT)
+		return -EINVAL;
+
+	vdev->hw->hws.grace_period[band] = grace_period;
+	vdev->hw->hws.process_grace_period[band] = process_grace_period;
+	vdev->hw->hws.process_quantum[band] = process_quantum;
+
+	return size;
+}
+
+static const struct file_operations ivpu_hws_priority_bands_fops = {
+	.owner = THIS_MODULE,
+	.open = priority_bands_fops_open,
+	.write = priority_bands_fops_write,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
 
 void ivpu_debugfs_init(struct ivpu_device *vdev)
 {
@@ -419,6 +504,8 @@ void ivpu_debugfs_init(struct ivpu_device *vdev)
 			    &fw_trace_hw_comp_mask_fops);
 	debugfs_create_file("fw_trace_level", 0200, debugfs_root, vdev,
 			    &fw_trace_level_fops);
+	debugfs_create_file("hws_priority_bands", 0200, debugfs_root, vdev,
+			    &ivpu_hws_priority_bands_fops);
 
 	debugfs_create_file("reset_engine", 0200, debugfs_root, vdev,
 			    &ivpu_reset_engine_fops);
@@ -430,4 +517,8 @@ void ivpu_debugfs_init(struct ivpu_device *vdev)
 				    debugfs_root, vdev, &fw_profiling_freq_fops);
 		debugfs_create_file("dct", 0644, debugfs_root, vdev, &ivpu_dct_fops);
 	}
+
+#ifdef CONFIG_FAULT_INJECTION
+	fault_create_debugfs_attr("fail_hw", debugfs_root, &ivpu_hw_failure);
+#endif
 }

@@ -9,6 +9,7 @@
 #include <linux/err.h>
 #include <linux/hwmon.h>
 #include <linux/i2c.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 
@@ -154,6 +155,7 @@ static int isl28022_read_current(struct device *dev, u32 attr, long *val)
 	struct isl28022_data *data = dev_get_drvdata(dev);
 	unsigned int regval;
 	int err;
+	u16 sign_bit;
 
 	switch (attr) {
 	case hwmon_curr_input:
@@ -161,8 +163,9 @@ static int isl28022_read_current(struct device *dev, u32 attr, long *val)
 				  ISL28022_REG_CURRENT, &regval);
 		if (err < 0)
 			return err;
-		*val = ((long)regval * 1250L * (long)data->gain) /
-			(long)data->shunt;
+		sign_bit = (regval >> 15) & 0x01;
+		*val = (((long)(((u16)regval) & 0x7FFF) - (sign_bit * 32768)) *
+			1250L * (long)data->gain) / (long)data->shunt;
 		break;
 	default:
 		return -EOPNOTSUPP;
@@ -183,8 +186,8 @@ static int isl28022_read_power(struct device *dev, u32 attr, long *val)
 				  ISL28022_REG_POWER, &regval);
 		if (err < 0)
 			return err;
-		*val = ((51200000L * ((long)data->gain)) /
-			(long)data->shunt) * (long)regval;
+		*val = min(div_u64(51200000ULL * data->gain * regval,
+				   data->shunt), LONG_MAX);
 		break;
 	default:
 		return -EOPNOTSUPP;
@@ -301,7 +304,7 @@ static const struct regmap_config isl28022_regmap_config = {
 	.writeable_reg = isl28022_is_writeable_reg,
 	.volatile_reg = isl28022_is_volatile_reg,
 	.val_format_endian = REGMAP_ENDIAN_BIG,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 	.use_single_read = true,
 	.use_single_write = true,
 };
@@ -324,26 +327,6 @@ static int shunt_voltage_show(struct seq_file *seqf, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(shunt_voltage);
 
-static struct dentry *isl28022_debugfs_root;
-
-static void isl28022_debugfs_remove(void *res)
-{
-	debugfs_remove_recursive(res);
-}
-
-static void isl28022_debugfs_init(struct i2c_client *client, struct isl28022_data *data)
-{
-	char name[16];
-	struct dentry *debugfs;
-
-	scnprintf(name, sizeof(name), "%d-%04hx", client->adapter->nr, client->addr);
-
-	debugfs = debugfs_create_dir(name, isl28022_debugfs_root);
-	debugfs_create_file("shunt_voltage", 0444, debugfs, data, &shunt_voltage_fops);
-
-	devm_add_action_or_reset(&client->dev, isl28022_debugfs_remove, debugfs);
-}
-
 /*
  * read property values and make consistency checks.
  *
@@ -355,21 +338,28 @@ static void isl28022_debugfs_init(struct i2c_client *client, struct isl28022_dat
  */
 static int isl28022_read_properties(struct device *dev, struct isl28022_data *data)
 {
+	const char *propname;
 	u32 val;
 	int err;
 
-	err = device_property_read_u32(dev, "shunt-resistor-micro-ohms", &val);
-	if (err == -EINVAL)
+	propname = "shunt-resistor-micro-ohms";
+	if (device_property_present(dev, propname)) {
+		err = device_property_read_u32(dev, propname, &val);
+		if (err)
+			return err;
+	} else {
 		val = 10000;
-	else if (err < 0)
-		return err;
+	}
 	data->shunt = val;
 
-	err = device_property_read_u32(dev, "renesas,shunt-range-microvolt", &val);
-	if (err == -EINVAL)
+	propname = "renesas,shunt-range-microvolt";
+	if (device_property_present(dev, propname)) {
+		err = device_property_read_u32(dev, propname, &val);
+		if (err)
+			return err;
+	} else {
 		val = 320000;
-	else if (err < 0)
-		return err;
+	}
 
 	switch (val) {
 	case 40000:
@@ -393,20 +383,19 @@ static int isl28022_read_properties(struct device *dev, struct isl28022_data *da
 			goto shunt_invalid;
 		break;
 	default:
-		return dev_err_probe(dev, -EINVAL,
-				     "renesas,shunt-range-microvolt invalid value %d\n",
-				     val);
+		return dev_err_probe(dev, -EINVAL, "%s invalid value %u\n", propname, val);
 	}
 
-	err = device_property_read_u32(dev, "renesas,average-samples", &val);
-	if (err == -EINVAL)
+	propname = "renesas,average-samples";
+	if (device_property_present(dev, propname)) {
+		err = device_property_read_u32(dev, propname, &val);
+		if (err)
+			return err;
+	} else {
 		val = 1;
-	else if (err < 0)
-		return err;
+	}
 	if (val > 128 || hweight32(val) != 1)
-		return dev_err_probe(dev, -EINVAL,
-				     "renesas,average-samples invalid value %d\n",
-				     val);
+		return dev_err_probe(dev, -EINVAL, "%s invalid value %u\n", propname, val);
 
 	data->average = val;
 
@@ -475,7 +464,7 @@ static int isl28022_probe(struct i2c_client *client)
 	if (err)
 		return err;
 
-	isl28022_debugfs_init(client, data);
+	debugfs_create_file("shunt_voltage", 0444, client->debugfs, data, &shunt_voltage_fops);
 
 	hwmon_dev = devm_hwmon_device_register_with_info(dev, client->name,
 							 data, &isl28022_chip_info, NULL);
@@ -486,7 +475,7 @@ static int isl28022_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id isl28022_ids[] = {
-	{ "isl28022" },
+	{ .name = "isl28022" },
 	{ /* LIST END */ }
 };
 MODULE_DEVICE_TABLE(i2c, isl28022_ids);
@@ -505,27 +494,7 @@ static struct i2c_driver isl28022_driver = {
 	.probe	= isl28022_probe,
 	.id_table	= isl28022_ids,
 };
-
-static int __init isl28022_init(void)
-{
-	int err;
-
-	isl28022_debugfs_root = debugfs_create_dir("isl28022", NULL);
-	err = i2c_add_driver(&isl28022_driver);
-	if (!err)
-		return 0;
-
-	debugfs_remove_recursive(isl28022_debugfs_root);
-	return err;
-}
-module_init(isl28022_init);
-
-static void __exit isl28022_exit(void)
-{
-	i2c_del_driver(&isl28022_driver);
-	debugfs_remove_recursive(isl28022_debugfs_root);
-}
-module_exit(isl28022_exit);
+module_i2c_driver(isl28022_driver);
 
 MODULE_AUTHOR("Carsten Spieß <mail@carsten-spiess.de>");
 MODULE_DESCRIPTION("ISL28022 driver");

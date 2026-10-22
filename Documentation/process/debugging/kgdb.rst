@@ -380,6 +380,13 @@ virtual address where the kernel image is mapped and confuses
 gdb which resolves addresses of kernel symbols from the symbol table
 of vmlinux.
 
+Kernel parameter: ``rodata``
+----------------------------
+
+``CONFIG_STRICT_KERNEL_RWX`` is turned on by default and is not
+visible to menuconfig on some architectures (arm64 for example),
+you can pass ``rodata=off`` to the kernel in this case.
+
 Using kdb
 =========
 
@@ -506,7 +513,7 @@ unregister all the kernel hook points.
 
 All kgdb I/O drivers can be reconfigured at run time, if
 ``CONFIG_SYSFS`` and ``CONFIG_MODULES`` are enabled, by echo'ing a new
-config string to ``/sys/module/<driver>/parameter/<option>``. The driver
+config string to ``/sys/module/<driver>/parameters/<option>``. The driver
 can be unconfigured by passing an empty string. You cannot change the
 configuration while the debugger is attached. Make sure to detach the
 debugger with the ``detach`` command prior to trying to unconfigure a
@@ -689,7 +696,7 @@ The kernel debugger is organized into a number of components:
 
 1. The debug core
 
-   The debug core is found in ``kernel/debugger/debug_core.c``. It
+   The debug core is found in ``kernel/debug/debug_core.c``. It
    contains:
 
    -  A generic OS exception handler which includes sync'ing the
@@ -870,7 +877,7 @@ attached keyboard. The keyboard infrastructure is only compiled into the
 kernel when ``CONFIG_KDB_KEYBOARD=y`` is set in the kernel configuration.
 
 The core polled keyboard driver for PS/2 type keyboards is in
-``drivers/char/kdb_keyboard.c``. This driver is hooked into the debug core
+``kernel/debug/kdb/kdb_keyboard.c``. This driver is hooked into the debug core
 when kgdboc populates the callback in the array called
 :c:expr:`kdb_poll_funcs[]`. The kdb_get_kbd_char() is the top-level
 function which polls hardware for single character input.
@@ -889,34 +896,6 @@ in the virtual console layer. On resuming kernel execution, the kernel
 debugger calls kgdboc_post_exp_handler() which in turn calls
 con_debug_leave().
 
-Any video driver that wants to be compatible with the kernel debugger
-and the atomic kms callbacks must implement the ``mode_set_base_atomic``,
-``fb_debug_enter`` and ``fb_debug_leave operations``. For the
-``fb_debug_enter`` and ``fb_debug_leave`` the option exists to use the
-generic drm fb helper functions or implement something custom for the
-hardware. The following example shows the initialization of the
-.mode_set_base_atomic operation in
-drivers/gpu/drm/i915/intel_display.c::
-
-
-    static const struct drm_crtc_helper_funcs intel_helper_funcs = {
-    [...]
-            .mode_set_base_atomic = intel_pipe_set_base_atomic,
-    [...]
-    };
-
-
-Here is an example of how the i915 driver initializes the
-fb_debug_enter and fb_debug_leave functions to use the generic drm
-helpers in ``drivers/gpu/drm/i915/intel_fb.c``::
-
-
-    static struct fb_ops intelfb_ops = {
-    [...]
-           .fb_debug_enter = drm_fb_helper_debug_enter,
-           .fb_debug_leave = drm_fb_helper_debug_leave,
-    [...]
-    };
 
 
 Credits

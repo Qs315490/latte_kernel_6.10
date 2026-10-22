@@ -16,6 +16,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/cleanup.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
@@ -418,18 +419,17 @@ static int as73211_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec cons
 	case IIO_CHAN_INFO_RAW: {
 		int ret;
 
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret < 0)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 
 		ret = as73211_req_data(data);
 		if (ret < 0) {
-			iio_device_release_direct_mode(indio_dev);
+			iio_device_release_direct(indio_dev);
 			return ret;
 		}
 
 		ret = i2c_smbus_read_word_data(data->client, chan->address);
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 		if (ret < 0)
 			return ret;
 
@@ -517,6 +517,16 @@ static int _as73211_write_raw(struct iio_dev *indio_dev,
 	struct as73211_data *data = iio_priv(indio_dev);
 	int ret;
 
+	/* Need to switch to config mode ... */
+	if ((data->osr & AS73211_OSR_DOS_MASK) != AS73211_OSR_DOS_CONFIG) {
+		data->osr &= ~AS73211_OSR_DOS_MASK;
+		data->osr |= AS73211_OSR_DOS_CONFIG;
+
+		ret = i2c_smbus_write_byte_data(data->client, AS73211_REG_OSR, data->osr);
+		if (ret < 0)
+			return ret;
+	}
+
 	switch (mask) {
 	case IIO_CHAN_INFO_SAMP_FREQ: {
 		int reg_bits, freq_kHz = val / HZ_PER_KHZ;  /* 1024, 2048, ... */
@@ -601,28 +611,14 @@ static int as73211_write_raw(struct iio_dev *indio_dev, struct iio_chan_spec con
 	struct as73211_data *data = iio_priv(indio_dev);
 	int ret;
 
-	mutex_lock(&data->mutex);
+	guard(mutex)(&data->mutex);
 
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret < 0)
-		goto error_unlock;
-
-	/* Need to switch to config mode ... */
-	if ((data->osr & AS73211_OSR_DOS_MASK) != AS73211_OSR_DOS_CONFIG) {
-		data->osr &= ~AS73211_OSR_DOS_MASK;
-		data->osr |= AS73211_OSR_DOS_CONFIG;
-
-		ret = i2c_smbus_write_byte_data(data->client, AS73211_REG_OSR, data->osr);
-		if (ret < 0)
-			goto error_release;
-	}
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
 
 	ret = _as73211_write_raw(indio_dev, chan, val, val2, mask);
+	iio_device_release_direct(indio_dev);
 
-error_release:
-	iio_device_release_direct_mode(indio_dev);
-error_unlock:
-	mutex_unlock(&data->mutex);
 	return ret;
 }
 
@@ -643,7 +639,7 @@ static irqreturn_t as73211_trigger_handler(int irq __always_unused, void *p)
 	struct {
 		__le16 chan[4];
 		aligned_s64 ts;
-	} scan;
+	} scan = { };
 	int data_result, ret;
 
 	mutex_lock(&data->mutex);
@@ -681,9 +677,6 @@ static irqreturn_t as73211_trigger_handler(int irq __always_unused, void *p)
 				(char *)&scan.chan[0], 3 * sizeof(scan.chan[0]));
 		if (ret < 0)
 			goto done;
-
-		/* Avoid pushing uninitialized data */
-		scan.chan[3] = 0;
 	}
 
 	if (data_result) {
@@ -882,8 +875,8 @@ static const struct of_device_id as73211_of_match[] = {
 MODULE_DEVICE_TABLE(of, as73211_of_match);
 
 static const struct i2c_device_id as73211_id[] = {
-	{ "as73211", (kernel_ulong_t)&as73211_spec },
-	{ "as7331", (kernel_ulong_t)&as7331_spec },
+	{ .name = "as73211", .driver_data = (kernel_ulong_t)&as73211_spec },
+	{ .name = "as7331", .driver_data = (kernel_ulong_t)&as7331_spec },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, as73211_id);

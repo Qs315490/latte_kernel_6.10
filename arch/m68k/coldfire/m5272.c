@@ -16,7 +16,6 @@
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/phy.h>
-#include <linux/phy_fixed.h>
 #include <asm/machdep.h>
 #include <asm/coldfire.h>
 #include <asm/mcfsim.h>
@@ -56,13 +55,13 @@ static void __init m5272_uarts_init(void)
 	u32 v;
 
 	/* Enable the output lines for the serial ports */
-	v = readl(MCFSIM_PBCNT);
+	v = mcf_read32(MCFSIM_PBCNT);
 	v = (v & ~0x000000ff) | 0x00000055;
-	writel(v, MCFSIM_PBCNT);
+	mcf_write32(v, MCFSIM_PBCNT);
 
-	v = readl(MCFSIM_PDCNT);
+	v = mcf_read32(MCFSIM_PDCNT);
 	v = (v & ~0x000003fc) | 0x000002a8;
-	writel(v, MCFSIM_PDCNT);
+	mcf_write32(v, MCFSIM_PDCNT);
 }
 
 /***************************************************************************/
@@ -71,9 +70,9 @@ static void m5272_cpu_reset(void)
 {
 	local_irq_disable();
 	/* Set watchdog to reset, and enabled */
-	__raw_writew(0, MCFSIM_WIRR);
-	__raw_writew(1, MCFSIM_WRRR);
-	__raw_writew(0, MCFSIM_WCR);
+	mcf_write16(0, MCFSIM_WIRR);
+	mcf_write16(1, MCFSIM_WRRR);
+	mcf_write16(0, MCFSIM_WCR);
 	for (;;)
 		/* wait for watchdog to timeout */;
 }
@@ -84,7 +83,7 @@ void __init config_BSP(char *commandp, int size)
 {
 #if defined (CONFIG_MOD5272)
 	/* Set base of device vectors to be 64 */
-	writeb(0x40, MCFSIM_PIVR);
+	mcf_write8(0x40, MCFSIM_PIVR);
 #endif
 
 #if defined(CONFIG_NETtel) || defined(CONFIG_SCALES)
@@ -103,23 +102,9 @@ void __init config_BSP(char *commandp, int size)
 
 /***************************************************************************/
 
-/*
- * Some 5272 based boards have the FEC ethernet directly connected to
- * an ethernet switch. In this case we need to use the fixed phy type,
- * and we need to declare it early in boot.
- */
-static struct fixed_phy_status nettel_fixed_phy_status __initdata = {
-	.link	= 1,
-	.speed	= 100,
-	.duplex	= 0,
-};
-
-/***************************************************************************/
-
 static int __init init_BSP(void)
 {
 	m5272_uarts_init();
-	fixed_phy_add(PHY_POLL, 0, &nettel_fixed_phy_status);
 	clkdev_add_table(m5272_clk_lookup, ARRAY_SIZE(m5272_clk_lookup));
 	return 0;
 }

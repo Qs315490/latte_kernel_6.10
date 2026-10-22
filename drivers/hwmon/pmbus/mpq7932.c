@@ -51,8 +51,8 @@ static const struct regulator_desc mpq7932_regulators_desc[] = {
 };
 
 static const struct regulator_desc mpq7932_regulators_desc_one[] = {
-	PMBUS_REGULATOR_STEP_ONE("buck", MPQ7932_N_VOLTAGES,
-				 MPQ7932_UV_STEP, MPQ7932_BUCK_UV_MIN),
+	PMBUS_REGULATOR_STEP_ONE_NODE("buck", MPQ7932_N_VOLTAGES,
+				      MPQ7932_UV_STEP, MPQ7932_BUCK_UV_MIN),
 };
 #endif
 
@@ -145,9 +145,9 @@ static const struct of_device_id mpq7932_of_match[] = {
 MODULE_DEVICE_TABLE(of, mpq7932_of_match);
 
 static const struct i2c_device_id mpq7932_id[] = {
-	{ "mpq2286", },
-	{ "mpq7932", },
-	{ },
+	{ .name = "mpq2286" },
+	{ .name = "mpq7932" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mpq7932_id);
 

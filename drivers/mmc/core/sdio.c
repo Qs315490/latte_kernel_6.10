@@ -198,7 +198,7 @@ static int sdio_read_cccr(struct mmc_card *card, u32 ocr)
 			if (ret)
 				goto out;
 
-			if (mmc_host_uhs(card->host)) {
+			if (mmc_host_can_uhs(card->host)) {
 				if (data & SDIO_UHS_DDR50)
 					card->sw_caps.sd3_bus_mode
 						|= SD_MODE_UHS_DDR50 | SD_MODE_UHS_SDR50
@@ -527,7 +527,7 @@ static int sdio_set_bus_speed_mode(struct mmc_card *card)
 	 * If the host doesn't support any of the UHS-I modes, fallback on
 	 * default speed.
 	 */
-	if (!mmc_host_uhs(card->host))
+	if (!mmc_host_can_uhs(card->host))
 		return 0;
 
 	bus_speed = SDIO_SPEED_SDR12;
@@ -669,7 +669,7 @@ static int mmc_sdio_init_card(struct mmc_host *host, u32 ocr,
 	WARN_ON(!host->claimed);
 
 	/* to query card if 1.8V signalling is supported */
-	if (mmc_host_uhs(host))
+	if (mmc_host_can_uhs(host))
 		ocr |= R4_18V_PRESENT;
 
 try_again:
@@ -945,7 +945,11 @@ static void mmc_sdio_remove(struct mmc_host *host)
  */
 static int mmc_sdio_alive(struct mmc_host *host)
 {
-	return mmc_select_card(host->card);
+	if (!mmc_host_is_spi(host))
+		return mmc_select_card(host->card);
+	else
+		return mmc_io_rw_direct(host->card, 0, 0, SDIO_CCCR_CCCR, 0,
+					NULL);
 }
 
 /*

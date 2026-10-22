@@ -414,7 +414,7 @@ static void vmw_stdu_crtc_mode_set_nofb(struct drm_crtc *crtc)
 }
 
 static void vmw_stdu_crtc_atomic_disable(struct drm_crtc *crtc,
-					 struct drm_atomic_state *state)
+					 struct drm_atomic_commit *state)
 {
 	struct vmw_private *dev_priv;
 	struct vmw_screen_target_display_unit *stdu;
@@ -839,7 +839,7 @@ static void vmw_stdu_connector_destroy(struct drm_connector *connector)
 
 static enum drm_mode_status
 vmw_stdu_connector_mode_valid(struct drm_connector *connector,
-			      struct drm_display_mode *mode)
+			      const struct drm_display_mode *mode)
 {
 	enum drm_mode_status ret;
 	struct drm_device *dev = connector->dev;
@@ -879,7 +879,7 @@ vmw_stdu_connector_mode_valid(struct drm_connector *connector,
  * the same mode but its relative X,Y position in the topology will change.
  */
 static int vmw_stdu_connector_atomic_check(struct drm_connector *conn,
-					   struct drm_atomic_state *state)
+					   struct drm_atomic_commit *state)
 {
 	struct drm_connector_state *conn_state;
 	struct vmw_screen_target_display_unit *du;
@@ -1399,7 +1399,7 @@ static int vmw_stdu_plane_update_surface(struct vmw_private *dev_priv,
  */
 static void
 vmw_stdu_primary_plane_atomic_update(struct drm_plane *plane,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state, plane);
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state, plane);
@@ -1460,7 +1460,7 @@ vmw_stdu_primary_plane_atomic_update(struct drm_plane *plane,
 
 static void
 vmw_stdu_crtc_atomic_flush(struct drm_crtc *crtc,
-			   struct drm_atomic_state *state)
+			   struct drm_atomic_commit *state)
 {
 	struct vmw_private *vmw = vmw_priv(crtc->dev);
 	struct vmw_screen_target_display_unit *stdu = vmw_crtc_to_stdu(crtc);
@@ -1482,7 +1482,7 @@ static const struct drm_plane_funcs vmw_stdu_plane_funcs = {
 static const struct drm_plane_funcs vmw_stdu_cursor_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
-	.destroy = vmw_du_cursor_plane_destroy,
+	.destroy = vmw_cursor_plane_destroy,
 	.reset = vmw_du_plane_reset,
 	.atomic_duplicate_state = vmw_du_plane_duplicate_state,
 	.atomic_destroy_state = vmw_du_plane_destroy_state,
@@ -1494,10 +1494,10 @@ static const struct drm_plane_funcs vmw_stdu_cursor_funcs = {
  */
 static const struct
 drm_plane_helper_funcs vmw_stdu_cursor_plane_helper_funcs = {
-	.atomic_check = vmw_du_cursor_plane_atomic_check,
-	.atomic_update = vmw_du_cursor_plane_atomic_update,
-	.prepare_fb = vmw_du_cursor_plane_prepare_fb,
-	.cleanup_fb = vmw_du_cursor_plane_cleanup_fb,
+	.atomic_check = vmw_cursor_plane_atomic_check,
+	.atomic_update = vmw_cursor_plane_atomic_update,
+	.prepare_fb = vmw_cursor_plane_prepare_fb,
+	.cleanup_fb = vmw_cursor_plane_cleanup_fb,
 };
 
 static const struct
@@ -1515,6 +1515,7 @@ static const struct drm_crtc_helper_funcs vmw_stdu_crtc_helper_funcs = {
 	.atomic_flush = vmw_stdu_crtc_atomic_flush,
 	.atomic_enable = vmw_vkms_crtc_atomic_enable,
 	.atomic_disable = vmw_stdu_crtc_atomic_disable,
+	.handle_vblank_timeout  = vmw_vkms_handle_vblank_timeout,
 };
 
 
@@ -1541,7 +1542,7 @@ static int vmw_stdu_init(struct vmw_private *dev_priv, unsigned unit)
 	struct drm_crtc *crtc;
 	int    ret;
 
-	stdu = kzalloc(sizeof(*stdu), GFP_KERNEL);
+	stdu = kzalloc_obj(*stdu);
 	if (!stdu)
 		return -ENOMEM;
 
@@ -1584,6 +1585,7 @@ static int vmw_stdu_init(struct vmw_private *dev_priv, unsigned unit)
 	}
 
 	drm_plane_helper_add(&cursor->base, &vmw_stdu_cursor_plane_helper_funcs);
+	drm_plane_enable_fb_damage_clips(&cursor->base);
 
 	ret = drm_connector_init(dev, connector, &vmw_stdu_connector_funcs,
 				 DRM_MODE_CONNECTOR_VIRTUAL);

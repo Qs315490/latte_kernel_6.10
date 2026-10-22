@@ -18,7 +18,9 @@ allOf:
 
 properties:
   compatible:
-    const: visionox,rm69299-1080p-display
+    enum:
+      - visionox,rm69299-1080p-display
+      - visionox,rm69299-shift
 
   reg:
     maxItems: 1
@@ -34,8 +36,6 @@ properties:
   port: true
   reset-gpios: true
 
-additionalProperties: false
-
 required:
   - compatible
   - reg
@@ -43,6 +43,8 @@ required:
   - vdd3p3-supply
   - reset-gpios
   - port
+
+additionalProperties: false
 
 examples:
   - |

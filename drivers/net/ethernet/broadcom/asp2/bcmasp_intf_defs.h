@@ -118,8 +118,7 @@
 #define  UMC_PSW_MS			0x624
 #define  UMC_PSW_LS			0x628
 
-#define UMAC2FB_OFFSET_2_1		0x9f044
-#define UMAC2FB_OFFSET			0x9f03c
+#define UMAC2FB_OFFSET			0x9f044
 #define  UMAC2FB_CFG			0x0
 #define   UMAC2FB_CFG_OPUT_EN		BIT(0)
 #define   UMAC2FB_CFG_VLAN_EN		BIT(1)
@@ -247,6 +246,10 @@
 	((((intf)->channel - 6) * 0x14) + 0xa2000)
 #define  RX_SPB_TOP_BLKOUT		0x00
 
+/*
+ * Number of 4 KB pages that make up the contiguous RBUF_4K streaming ring
+ * and the page pool used as copy-target SKB data areas.
+ */
 #define NUM_4K_BUFFERS			32
 #define RING_BUFFER_SIZE		(PAGE_SIZE * NUM_4K_BUFFERS)
 

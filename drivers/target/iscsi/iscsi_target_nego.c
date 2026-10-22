@@ -212,7 +212,7 @@ int iscsi_target_check_login_request(
 
 	if ((login_req->max_version != login->version_max) ||
 	    (login_req->min_version != login->version_min)) {
-		pr_err("Login request changed Version Max/Nin"
+		pr_err("Login request changed Version Max/Min"
 			" unexpectedly to 0x%02x/0x%02x, protocol error\n",
 			login_req->max_version, login_req->min_version);
 		iscsit_tx_login_rsp(conn, ISCSI_STATUS_CLS_INITIATOR_ERR,
@@ -557,7 +557,7 @@ static void iscsi_target_do_login_rx(struct work_struct *work)
 	 * before initial PDU processing in iscsi_target_start_negotiation()
 	 * has completed, go ahead and retry until it's cleared.
 	 *
-	 * Otherwise if the TCP connection drops while this is occuring,
+	 * Otherwise if the TCP connection drops while this is occurring,
 	 * iscsi_target_start_negotiation() will detect the failure, call
 	 * cancel_delayed_work_sync(&conn->login_work), and cleanup the
 	 * remaining iscsi connection resources from iscsi_np process context.
@@ -899,10 +899,14 @@ static int iscsi_target_handle_csg_zero(
 			SENDER_TARGET,
 			login->rsp_buf,
 			&login->rsp_length,
+			MAX_KEY_VALUE_PAIRS,
 			conn->param_list,
 			conn->tpg->tpg_attrib.login_keys_workaround);
-	if (ret < 0)
+	if (ret < 0) {
+		iscsit_tx_login_rsp(conn, ISCSI_STATUS_CLS_INITIATOR_ERR,
+				ISCSI_LOGIN_STATUS_INIT_ERR);
 		return -1;
+	}
 
 	if (!iscsi_check_negotiated_keys(conn->param_list)) {
 		bool auth_required = iscsi_conn_auth_required(conn);
@@ -986,6 +990,7 @@ static int iscsi_target_handle_csg_one(struct iscsit_conn *conn, struct iscsi_lo
 			SENDER_TARGET,
 			login->rsp_buf,
 			&login->rsp_length,
+			MAX_KEY_VALUE_PAIRS,
 			conn->param_list,
 			conn->tpg->tpg_attrib.login_keys_workaround);
 	if (ret < 0) {
@@ -1050,7 +1055,7 @@ static int iscsi_target_do_login(struct iscsit_conn *conn, struct iscsi_login *l
 				/*
 				 * Check to make sure the TCP connection has not
 				 * dropped asynchronously while session reinstatement
-				 * was occuring in this kthread context, before
+				 * was occurring in this kthread context, before
 				 * transitioning to full feature phase operation.
 				 */
 				if (iscsi_target_sk_check_close(conn))

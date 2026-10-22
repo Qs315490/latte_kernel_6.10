@@ -285,7 +285,7 @@ int ath_descdma_setup(struct ath_softc *sc, struct ath_descdma *dd,
 {
 	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
 	u8 *ds;
-	int i, bsize, desc_len;
+	int i, desc_len;
 
 	ath_dbg(common, CONFIG, "%s DMA: %u buffers %u desc/buf\n",
 		name, nbuf, ndesc);
@@ -339,8 +339,7 @@ int ath_descdma_setup(struct ath_softc *sc, struct ath_descdma *dd,
 	if (is_tx) {
 		struct ath_buf *bf;
 
-		bsize = sizeof(struct ath_buf) * nbuf;
-		bf = devm_kzalloc(sc->dev, bsize, GFP_KERNEL);
+		bf = devm_kcalloc(sc->dev, sizeof(*bf), nbuf, GFP_KERNEL);
 		if (!bf)
 			return -ENOMEM;
 
@@ -370,8 +369,7 @@ int ath_descdma_setup(struct ath_softc *sc, struct ath_descdma *dd,
 	} else {
 		struct ath_rxbuf *bf;
 
-		bsize = sizeof(struct ath_rxbuf) * nbuf;
-		bf = devm_kzalloc(sc->dev, bsize, GFP_KERNEL);
+		bf = devm_kcalloc(sc->dev, sizeof(struct ath_rxbuf), nbuf, GFP_KERNEL);
 		if (!bf)
 			return -ENOMEM;
 
@@ -576,7 +574,7 @@ static int ath9k_nvmem_request_eeprom(struct ath_softc *sc)
 	size_t len;
 	int err;
 
-	cell = devm_nvmem_cell_get(sc->dev, "calibration");
+	cell = nvmem_cell_get(sc->dev, "calibration");
 	if (IS_ERR(cell)) {
 		err = PTR_ERR(cell);
 
@@ -593,6 +591,7 @@ static int ath9k_nvmem_request_eeprom(struct ath_softc *sc)
 	}
 
 	buf = nvmem_cell_read(cell, &len);
+	nvmem_cell_put(cell);
 	if (IS_ERR(buf))
 		return PTR_ERR(buf);
 
@@ -647,7 +646,9 @@ static int ath9k_of_init(struct ath_softc *sc)
 		ah->ah_flags |= AH_NO_EEP_SWAP;
 	}
 
-	of_get_mac_address(np, common->macaddr);
+	ret = of_get_mac_address(np, common->macaddr);
+	if (ret == -EPROBE_DEFER)
+		return ret;
 
 	return 0;
 }
@@ -956,7 +957,6 @@ static void ath9k_set_hw_capab(struct ath_softc *sc, struct ieee80211_hw *hw)
 	hw->wiphy->flags |= WIPHY_FLAG_IBSS_RSN;
 	hw->wiphy->flags |= WIPHY_FLAG_SUPPORTS_TDLS;
 	hw->wiphy->flags |= WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL;
-	hw->wiphy->flags |= WIPHY_FLAG_SUPPORTS_5_10_MHZ;
 	hw->wiphy->flags |= WIPHY_FLAG_HAS_CHANNEL_SWITCH;
 	hw->wiphy->flags |= WIPHY_FLAG_AP_UAPSD;
 
@@ -1097,7 +1097,7 @@ static void ath9k_deinit_softc(struct ath_softc *sc)
 		if (ATH_TXQ_SETUP(sc, i))
 			ath_tx_cleanupq(sc, &sc->tx.txq[i]);
 
-	del_timer_sync(&sc->sleep_timer);
+	timer_delete_sync(&sc->sleep_timer);
 	ath9k_hw_deinit(sc->sc_ah);
 	if (sc->dfs_detector != NULL)
 		sc->dfs_detector->exit(sc->dfs_detector);

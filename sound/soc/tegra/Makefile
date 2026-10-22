@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 # Tegra platform Support
 snd-soc-tegra-pcm-y := tegra_pcm.o
-snd-soc-tegra-utils-y += tegra_asoc_utils.o
 snd-soc-tegra20-ac97-y := tegra20_ac97.o
 snd-soc-tegra20-das-y := tegra20_das.o
 snd-soc-tegra20-i2s-y := tegra20_i2s.o
@@ -13,7 +12,7 @@ snd-soc-tegra210-dmic-y := tegra210_dmic.o
 snd-soc-tegra210-i2s-y := tegra210_i2s.o
 snd-soc-tegra186-asrc-y := tegra186_asrc.o
 snd-soc-tegra186-dspk-y := tegra186_dspk.o
-snd-soc-tegra210-admaif-y := tegra210_admaif.o
+snd-soc-tegra210-admaif-y := tegra210_admaif.o tegra_isomgr_bw.o
 snd-soc-tegra210-mvc-y := tegra210_mvc.o
 snd-soc-tegra210-sfc-y := tegra210_sfc.o
 snd-soc-tegra210-amx-y := tegra210_amx.o
@@ -43,9 +42,11 @@ obj-$(CONFIG_SND_SOC_TEGRA210_OPE) += snd-soc-tegra210-ope.o
 
 # Tegra machine Support
 snd-soc-tegra-wm8903-y := tegra_wm8903.o
+snd-soc-tegra-wm8962-y := tegra_wm8962.o
 snd-soc-tegra-machine-y := tegra_asoc_machine.o
 snd-soc-tegra-audio-graph-card-y := tegra_audio_graph_card.o
 
 obj-$(CONFIG_SND_SOC_TEGRA_WM8903) += snd-soc-tegra-wm8903.o
+obj-$(CONFIG_SND_SOC_TEGRA_WM8962) += snd-soc-tegra-wm8962.o
 obj-$(CONFIG_SND_SOC_TEGRA_MACHINE_DRV) += snd-soc-tegra-machine.o
 obj-$(CONFIG_SND_SOC_TEGRA_AUDIO_GRAPH_CARD) += snd-soc-tegra-audio-graph-card.o

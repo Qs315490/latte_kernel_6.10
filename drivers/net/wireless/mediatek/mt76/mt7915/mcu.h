@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: ISC */
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /* Copyright (C) 2020 MediaTek Inc. */
 
 #ifndef __MT7915_MCU_H
@@ -57,7 +57,7 @@ struct mt7915_mcu_bcc_notify {
 struct mt7915_mcu_rdd_report {
 	struct mt76_connac2_mcu_rxd_hdr rxd;
 
-	u8 band_idx;
+	u8 rdd_idx;
 	u8 long_detected;
 	u8 constant_prf_detected;
 	u8 staggered_prf_detected;
@@ -399,6 +399,17 @@ struct bss_info_inband_discovery {
 	__le16 prob_rsp_len;
 } __packed __aligned(4);
 
+struct bss_info_prot {
+	__le16 tag;
+	__le16 len;
+	__le32 prot_type;
+	__le32 prot_mode;
+	__le32 rts_len_thres;
+	__le16 he_rts_thres;
+	u8 rts_pkt_thres;
+	u8 rsv[5];
+} __packed;
+
 enum {
 	BSS_INFO_BCN_CSA,
 	BSS_INFO_BCN_BCC,
@@ -429,10 +440,16 @@ enum {
 
 enum {
 	TX_POWER_LIMIT_ENABLE,
+	TX_POWER_LIMIT_PATH_ENABLE = 0x3,
 	TX_POWER_LIMIT_TABLE = 0x4,
 	TX_POWER_LIMIT_INFO = 0x7,
 	TX_POWER_LIMIT_FRAME = 0x11,
 	TX_POWER_LIMIT_FRAME_MIN = 0x12,
+};
+
+enum {
+	TX_POWER_INFO_PATH = 1,
+	TX_POWER_INFO_RATE,
 };
 
 enum {
@@ -514,17 +531,5 @@ enum {
 					 sizeof(struct bss_info_he) +	\
 					 sizeof(struct bss_info_bmc_rate) +\
 					 sizeof(struct bss_info_ext_bss))
-
-static inline s8
-mt7915_get_power_bound(struct mt7915_phy *phy, s8 txpower)
-{
-	struct mt76_phy *mphy = phy->mt76;
-	int n_chains = hweight16(mphy->chainmask);
-
-	txpower = mt76_get_sar_power(mphy, mphy->chandef.chan, txpower * 2);
-	txpower -= mt76_tx_power_nss_delta(n_chains);
-
-	return txpower;
-}
 
 #endif

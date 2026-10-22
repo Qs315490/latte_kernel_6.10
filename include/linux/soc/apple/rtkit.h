@@ -56,7 +56,7 @@ struct apple_rtkit_shmem {
  *                 context.
  */
 struct apple_rtkit_ops {
-	void (*crashed)(void *cookie);
+	void (*crashed)(void *cookie, const void *crashlog, size_t crashlog_size);
 	void (*recv_message)(void *cookie, u8 endpoint, u64 message);
 	bool (*recv_message_early)(void *cookie, u8 endpoint, u64 message);
 	int (*shmem_setup)(void *cookie, struct apple_rtkit_shmem *bfr);
@@ -124,6 +124,13 @@ int apple_rtkit_wake(struct apple_rtkit *rtk);
  * Shutdown the co-processor
  */
 int apple_rtkit_shutdown(struct apple_rtkit *rtk);
+
+/*
+ * Put the co-processor into the lowest power state. Note that it usually
+ * is not possible to recover from this state without a full SoC reset.
+ */
+
+int apple_rtkit_poweroff(struct apple_rtkit *rtk);
 
 /*
  * Put the co-processor into idle mode

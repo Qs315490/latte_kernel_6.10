@@ -8,10 +8,10 @@
 #include <linux/mfd/tps68470.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/tps68470.h>
+#include <linux/platform_data/x86/int3472.h>
 #include <linux/regmap.h>
 #include <linux/string.h>
 
-#include "common.h"
 #include "tps68470.h"
 
 #define DESIGNED_FOR_CHROMEOS		1
@@ -180,7 +180,7 @@ static int skl_int3472_tps68470_probe(struct i2c_client *client)
 		if (!board_data)
 			return dev_err_probe(&client->dev, -ENODEV, "No board-data found for this model\n");
 
-		cells = kcalloc(TPS68470_WIN_MFD_CELL_COUNT, sizeof(*cells), GFP_KERNEL);
+		cells = kzalloc_objs(*cells, TPS68470_WIN_MFD_CELL_COUNT);
 		if (!cells)
 			return -ENOMEM;
 
@@ -197,6 +197,7 @@ static int skl_int3472_tps68470_probe(struct i2c_client *client)
 		cells[1].platform_data = (void *)board_data->tps68470_regulator_pdata;
 		cells[1].pdata_size = sizeof(struct tps68470_regulator_platform_data);
 		cells[2].name = "tps68470-gpio";
+		cells[2].swnode = board_data->tps68470_gpio_swnode;
 
 		for (i = 0; i < board_data->n_gpiod_lookups; i++)
 			gpiod_add_lookup_table(board_data->tps68470_gpio_lookup_tables[i]);
@@ -261,4 +262,5 @@ module_i2c_driver(int3472_tps68470);
 MODULE_DESCRIPTION("Intel SkyLake INT3472 ACPI TPS68470 Device Driver");
 MODULE_AUTHOR("Daniel Scally <djrscally@gmail.com>");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("INTEL_INT3472");
 MODULE_SOFTDEP("pre: clk-tps68470 tps68470-regulator");

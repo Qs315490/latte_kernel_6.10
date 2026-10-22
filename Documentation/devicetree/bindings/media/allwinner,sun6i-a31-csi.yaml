@@ -40,6 +40,12 @@ properties:
   resets:
     maxItems: 1
 
+  interconnects:
+    maxItems: 1
+
+  interconnect-names:
+    const: dma-mem
+
   port:
     $ref: /schemas/graph.yaml#/$defs/port-base
     description: Parallel input port, connect to a parallel sensor
@@ -110,7 +116,7 @@ examples:
         reg = <0x01cb4000 0x1000>;
         interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>;
         clocks = <&ccu CLK_BUS_CSI>,
-                 <&ccu CLK_CSI1_SCLK>,
+                 <&ccu CLK_CSI_SCLK>,
                  <&ccu CLK_DRAM_CSI>;
         clock-names = "bus",
                       "mod",

@@ -14,7 +14,7 @@
 
 #include <linux/unaligned.h>
 #include <linux/firmware.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/of_irq.h>
@@ -27,28 +27,28 @@
 #include "pcm6240.h"
 
 static const struct i2c_device_id pcmdevice_i2c_id[] = {
-	{ "adc3120",  ADC3120  },
-	{ "adc5120",  ADC5120  },
-	{ "adc6120",  ADC6120  },
-	{ "dix4192",  DIX4192  },
-	{ "pcm1690",  PCM1690  },
-	{ "pcm3120",  PCM3120  },
-	{ "pcm3140",  PCM3140  },
-	{ "pcm5120",  PCM5120  },
-	{ "pcm5140",  PCM5140  },
-	{ "pcm6120",  PCM6120  },
-	{ "pcm6140",  PCM6140  },
-	{ "pcm6240",  PCM6240  },
-	{ "pcm6260",  PCM6260  },
-	{ "pcm9211",  PCM9211  },
-	{ "pcmd3140", PCMD3140 },
-	{ "pcmd3180", PCMD3180 },
-	{ "pcmd512x", PCMD512X },
-	{ "taa5212",  TAA5212  },
-	{ "taa5412",  TAA5412  },
-	{ "tad5212",  TAD5212  },
-	{ "tad5412",  TAD5412  },
-	{}
+	{ .name = "adc3120", .driver_data = ADC3120 },
+	{ .name = "adc5120", .driver_data = ADC5120 },
+	{ .name = "adc6120", .driver_data = ADC6120 },
+	{ .name = "dix4192", .driver_data = DIX4192 },
+	{ .name = "pcm1690", .driver_data = PCM1690 },
+	{ .name = "pcm3120", .driver_data = PCM3120 },
+	{ .name = "pcm3140", .driver_data = PCM3140 },
+	{ .name = "pcm5120", .driver_data = PCM5120 },
+	{ .name = "pcm5140", .driver_data = PCM5140 },
+	{ .name = "pcm6120", .driver_data = PCM6120 },
+	{ .name = "pcm6140", .driver_data = PCM6140 },
+	{ .name = "pcm6240", .driver_data = PCM6240 },
+	{ .name = "pcm6260", .driver_data = PCM6260 },
+	{ .name = "pcm9211", .driver_data = PCM9211 },
+	{ .name = "pcmd3140", .driver_data = PCMD3140 },
+	{ .name = "pcmd3180", .driver_data = PCMD3180 },
+	{ .name = "pcmd512x", .driver_data = PCMD512X },
+	{ .name = "taa5212", .driver_data = TAA5212 },
+	{ .name = "taa5412", .driver_data = TAA5412 },
+	{ .name = "tad5212", .driver_data = TAD5212 },
+	{ .name = "tad5412", .driver_data = TAD5412 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pcmdevice_i2c_id);
 
@@ -1139,8 +1139,7 @@ static int pcmdevice_info_profile(
 	struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_info *uinfo)
 {
-	struct snd_soc_component *codec
-		= snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
 	struct pcmdevice_priv *pcm_dev =
 		snd_soc_component_get_drvdata(codec);
 
@@ -1156,8 +1155,7 @@ static int pcmdevice_get_profile_id(
 	struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *codec
-		= snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
 	struct pcmdevice_priv *pcm_dev =
 		snd_soc_component_get_drvdata(codec);
 
@@ -1170,8 +1168,7 @@ static int pcmdevice_set_profile_id(
 	struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *codec
-		= snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
 	struct pcmdevice_priv *pcm_dev =
 		snd_soc_component_get_drvdata(codec);
 	int nr_profile = ucontrol->value.integer.value[0];
@@ -1233,15 +1230,11 @@ static struct pcmdevice_config_info *pcmdevice_add_config(void *ctxt,
 	int *status)
 {
 	struct pcmdevice_priv *pcm_dev = (struct pcmdevice_priv *)ctxt;
-	struct pcmdevice_config_info *cfg_info;
+	struct pcmdevice_config_info *cfg_info = NULL;
 	struct pcmdevice_block_data **bk_da;
+	char cfg_name[64] = {};
 	unsigned int config_offset = 0, i;
-
-	cfg_info = kzalloc(sizeof(struct pcmdevice_config_info), GFP_KERNEL);
-	if (!cfg_info) {
-		*status = -ENOMEM;
-		goto out;
-	}
+	unsigned int nblocks;
 
 	if (pcm_dev->regbin.fw_hdr.binary_version_num >= 0x105) {
 		if (config_offset + 64 > (int)config_size) {
@@ -1250,7 +1243,7 @@ static struct pcmdevice_config_info *pcmdevice_add_config(void *ctxt,
 				"%s: cfg_name out of boundary\n", __func__);
 			goto out;
 		}
-		memcpy(cfg_info->cfg_name, &config_data[config_offset], 64);
+		memcpy(cfg_name, &config_data[config_offset], 64);
 		config_offset += 64;
 	}
 
@@ -1260,16 +1253,17 @@ static struct pcmdevice_config_info *pcmdevice_add_config(void *ctxt,
 			__func__);
 		goto out;
 	}
-	cfg_info->nblocks =
-		get_unaligned_be32(&config_data[config_offset]);
+	nblocks = get_unaligned_be32(&config_data[config_offset]);
 	config_offset += 4;
 
-	bk_da = cfg_info->blk_data = kcalloc(cfg_info->nblocks,
-		sizeof(struct pcmdevice_block_data *), GFP_KERNEL);
-	if (!bk_da) {
+	cfg_info = kzalloc_flex(*cfg_info, blk_data, nblocks);
+	if (!cfg_info) {
 		*status = -ENOMEM;
 		goto out;
 	}
+	cfg_info->nblocks = nblocks;
+	memcpy(cfg_info->cfg_name, cfg_name, sizeof(cfg_info->cfg_name));
+	bk_da = cfg_info->blk_data;
 	cfg_info->real_nblocks = 0;
 	for (i = 0; i < cfg_info->nblocks; i++) {
 		if (config_offset + 12 > config_size) {
@@ -1279,8 +1273,7 @@ static struct pcmdevice_config_info *pcmdevice_add_config(void *ctxt,
 				__func__, i, cfg_info->nblocks);
 			break;
 		}
-		bk_da[i] = kzalloc(sizeof(struct pcmdevice_block_data),
-			GFP_KERNEL);
+		bk_da[i] = kzalloc_obj(struct pcmdevice_block_data);
 		if (!bk_da[i]) {
 			*status = -ENOMEM;
 			break;
@@ -1353,8 +1346,8 @@ static int pcmdev_gain_ctrl_add(struct pcmdevice_priv *pcm_dev,
 		return 0;
 	}
 
-	pcmdev_controls = devm_kzalloc(pcm_dev->dev,
-		nr_chn * sizeof(struct snd_kcontrol_new), GFP_KERNEL);
+	pcmdev_controls = devm_kcalloc(pcm_dev->dev, nr_chn,
+				       sizeof(struct snd_kcontrol_new), GFP_KERNEL);
 	if (!pcmdev_controls)
 		return -ENOMEM;
 
@@ -1453,14 +1446,11 @@ static void pcmdevice_config_info_remove(void *ctxt)
 	for (i = 0; i < regbin->ncfgs; i++) {
 		if (!cfg_info[i])
 			continue;
-		if (cfg_info[i]->blk_data) {
-			for (j = 0; j < (int)cfg_info[i]->real_nblocks; j++) {
-				if (!cfg_info[i]->blk_data[j])
-					continue;
-				kfree(cfg_info[i]->blk_data[j]->regdata);
-				kfree(cfg_info[i]->blk_data[j]);
-			}
-			kfree(cfg_info[i]->blk_data);
+		for (j = 0; j < (int)cfg_info[i]->real_nblocks; j++) {
+			if (!cfg_info[i]->blk_data[j])
+				continue;
+			kfree(cfg_info[i]->blk_data[j]->regdata);
+			kfree(cfg_info[i]->blk_data[j]);
 		}
 		kfree(cfg_info[i]);
 	}
@@ -1552,7 +1542,7 @@ static int pcmdev_regbin_ready(const struct firmware *fmw, void *ctxt)
 		ret = -EINVAL;
 		goto out;
 	}
-	cfg_info = kcalloc(fw_hdr->nconfig, sizeof(*cfg_info), GFP_KERNEL);
+	cfg_info = kzalloc_objs(*cfg_info, fw_hdr->nconfig);
 	if (!cfg_info) {
 		pcm_dev->fw_state = PCMDEVICE_FW_LOAD_FAILED;
 		ret = -ENOMEM;
@@ -1642,8 +1632,7 @@ static int pcmdevice_comp_probe(struct snd_soc_component *comp)
 	}
 	ret = pcmdev_profile_ctrl_add(pcm_dev);
 out:
-	if (fw_entry)
-		release_firmware(fw_entry);
+	release_firmware(fw_entry);
 
 	mutex_unlock(&pcm_dev->codec_lock);
 	return ret;
@@ -2035,10 +2024,8 @@ static const struct regmap_config pcmdevice_i2c_regmap = {
 
 static void pcmdevice_remove(struct pcmdevice_priv *pcm_dev)
 {
-	if (gpio_is_valid(pcm_dev->irq_info.gpio)) {
-		gpio_free(pcm_dev->irq_info.gpio);
-		free_irq(pcm_dev->irq_info.nmb, pcm_dev);
-	}
+	if (pcm_dev->irq)
+		free_irq(pcm_dev->irq, pcm_dev);
 	mutex_destroy(&pcm_dev->codec_lock);
 }
 
@@ -2109,7 +2096,7 @@ static int pcmdevice_i2c_probe(struct i2c_client *i2c)
 		ndev = 1;
 		dev_addrs[0] = i2c->addr;
 	}
-	pcm_dev->irq_info.gpio = of_irq_get(np, 0);
+	pcm_dev->irq = of_irq_get(np, 0);
 
 	for (i = 0; i < ndev; i++)
 		pcm_dev->addr[i] = dev_addrs[i];
@@ -2132,22 +2119,10 @@ static int pcmdevice_i2c_probe(struct i2c_client *i2c)
 
 	if (pcm_dev->chip_id == PCM1690)
 		goto skip_interrupt;
-	if (gpio_is_valid(pcm_dev->irq_info.gpio)) {
-		dev_dbg(pcm_dev->dev, "irq-gpio = %d", pcm_dev->irq_info.gpio);
-
-		ret = gpio_request(pcm_dev->irq_info.gpio, "PCMDEV-IRQ");
-		if (!ret) {
-			int gpio = pcm_dev->irq_info.gpio;
-
-			gpio_direction_input(gpio);
-			pcm_dev->irq_info.nmb = gpio_to_irq(gpio);
-
-		} else
-			dev_err(pcm_dev->dev, "%s: GPIO %d request error\n",
-				__func__, pcm_dev->irq_info.gpio);
+	if (pcm_dev->irq) {
+		dev_dbg(pcm_dev->dev, "irq = %d", pcm_dev->irq);
 	} else
-		dev_err(pcm_dev->dev, "Looking up irq-gpio failed %d\n",
-			pcm_dev->irq_info.gpio);
+		dev_err(pcm_dev->dev, "No irq provided\n");
 
 skip_interrupt:
 	ret = devm_snd_soc_register_component(&i2c->dev,

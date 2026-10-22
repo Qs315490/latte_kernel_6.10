@@ -333,7 +333,6 @@ static const unsigned int qdsd_data3_pins[] = { 146 };
 		.io_reg = 0x4 + 0x1000 * id,			\
 		.intr_cfg_reg = 0x8 + 0x1000 * id,		\
 		.intr_status_reg = 0xc + 0x1000 * id,		\
-		.intr_target_reg = 0x8 + 0x1000 * id,		\
 		.mux_bit = 2,					\
 		.pull_bit = 0,					\
 		.drv_bit = 6,					\
@@ -359,7 +358,6 @@ static const unsigned int qdsd_data3_pins[] = { 146 };
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -539,6 +537,7 @@ enum msm8917_functions {
 	msm_mux_webcam_standby,
 	msm_mux_wsa_io,
 	msm_mux_wsa_irq,
+	msm_mux_wsa_reset,
 	msm_mux__,
 };
 
@@ -1123,6 +1122,10 @@ static const char * const wsa_io_groups[] = {
 	"gpio94", "gpio95",
 };
 
+static const char * const wsa_reset_groups[] = {
+	"gpio96",
+};
+
 static const char * const blsp_spi8_groups[] = {
 	"gpio96", "gpio97", "gpio98", "gpio99",
 };
@@ -1297,7 +1300,7 @@ static const struct pinfunction msm8917_functions[] = {
 	MSM_PIN_FUNCTION(gcc_gp3_clk_b),
 	MSM_PIN_FUNCTION(gcc_plltest),
 	MSM_PIN_FUNCTION(gcc_tlmm),
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(gsm0_tx),
 	MSM_PIN_FUNCTION(key_focus),
 	MSM_PIN_FUNCTION(key_snapshot),
@@ -1378,6 +1381,7 @@ static const struct pinfunction msm8917_functions[] = {
 	MSM_PIN_FUNCTION(webcam_standby),
 	MSM_PIN_FUNCTION(wsa_io),
 	MSM_PIN_FUNCTION(wsa_irq),
+	MSM_PIN_FUNCTION(wsa_reset),
 };
 
 static const struct msm_pingroup msm8917_groups[] = {
@@ -1601,7 +1605,6 @@ static struct platform_driver msm8917_pinctrl_driver = {
 		.of_match_table = msm8917_pinctrl_of_match,
 	},
 	.probe = msm8917_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init msm8917_pinctrl_init(void)
@@ -1616,5 +1619,5 @@ static void __exit msm8917_pinctrl_exit(void)
 }
 module_exit(msm8917_pinctrl_exit);
 
-MODULE_DESCRIPTION("Qualcomm msm8917 pinctrl driver");
+MODULE_DESCRIPTION("Qualcomm msm8917/msm8937 pinctrl driver");
 MODULE_LICENSE("GPL");

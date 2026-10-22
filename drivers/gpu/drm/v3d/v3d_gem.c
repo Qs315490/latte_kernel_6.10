@@ -11,6 +11,7 @@
 #include <linux/uaccess.h>
 
 #include <drm/drm_managed.h>
+#include <drm/drm_print.h>
 
 #include "v3d_drv.h"
 #include "v3d_regs.h"
@@ -25,7 +26,7 @@ v3d_init_core(struct v3d_dev *v3d, int core)
 	 * type.  If you want the default behavior, you can still put
 	 * "2" in the indirect texture state's output_type field.
 	 */
-	if (v3d->ver < 40)
+	if (v3d->ver < V3D_GEN_41)
 		V3D_CORE_WRITE(core, V3D_CTL_MISCCFG, V3D_MISCCFG_OVRTMUOUT);
 
 	/* Whenever we flush the L2T cache, we always want to flush
@@ -35,30 +36,35 @@ v3d_init_core(struct v3d_dev *v3d, int core)
 	V3D_CORE_WRITE(core, V3D_CTL_L2TFLEND, ~0);
 }
 
-/* Sets invariant state for the HW. */
-static void
-v3d_init_hw_state(struct v3d_dev *v3d)
-{
-	v3d_init_core(v3d, 0);
-}
-
-static void
+void
 v3d_idle_axi(struct v3d_dev *v3d, int core)
 {
+	if (v3d->ver >= V3D_GEN_71) {
+		V3D_WRITE(V3D_GMP_CFG(v3d->ver), V3D_GMP_CFG_STOP_REQ);
+
+		if (wait_for((V3D_READ(V3D_GMP_STATUS(v3d->ver)) &
+			      (V3D_GMP_STATUS_RD_COUNT_MASK |
+			       V3D_GMP_STATUS_WR_COUNT_MASK |
+			       V3D_GMP_STATUS_CFG_BUSY)) == 0, 100)) {
+			drm_err(&v3d->drm, "Failed to wait for safe GMP shutdown\n");
+		}
+		return;
+	}
+
 	V3D_CORE_WRITE(core, V3D_GMP_CFG(v3d->ver), V3D_GMP_CFG_STOP_REQ);
 
 	if (wait_for((V3D_CORE_READ(core, V3D_GMP_STATUS(v3d->ver)) &
 		      (V3D_GMP_STATUS_RD_COUNT_MASK |
 		       V3D_GMP_STATUS_WR_COUNT_MASK |
 		       V3D_GMP_STATUS_CFG_BUSY)) == 0, 100)) {
-		DRM_ERROR("Failed to wait for safe GMP shutdown\n");
+		drm_err(&v3d->drm, "Failed to wait for safe GMP shutdown\n");
 	}
 }
 
-static void
+void
 v3d_idle_gca(struct v3d_dev *v3d)
 {
-	if (v3d->ver >= 41)
+	if (v3d->ver >= V3D_GEN_41)
 		return;
 
 	V3D_GCA_WRITE(V3D_GCA_SAFE_SHUTDOWN, V3D_GCA_SAFE_SHUTDOWN_EN);
@@ -66,7 +72,7 @@ v3d_idle_gca(struct v3d_dev *v3d)
 	if (wait_for((V3D_GCA_READ(V3D_GCA_SAFE_SHUTDOWN_ACK) &
 		      V3D_GCA_SAFE_SHUTDOWN_ACK_ACKED) ==
 		     V3D_GCA_SAFE_SHUTDOWN_ACK_ACKED, 100)) {
-		DRM_ERROR("Failed to wait for safe GCA shutdown\n");
+		drm_err(&v3d->drm, "Failed to wait for safe GCA shutdown\n");
 	}
 }
 
@@ -105,20 +111,39 @@ v3d_reset_v3d(struct v3d_dev *v3d)
 }
 
 void
+v3d_reset_sms(struct v3d_dev *v3d)
+{
+	if (v3d->ver < V3D_GEN_71)
+		return;
+
+	V3D_SMS_WRITE(V3D_SMS_REE_CS, V3D_SET_FIELD(0x4, V3D_SMS_STATE));
+
+	if (wait_for(!(V3D_GET_FIELD(V3D_SMS_READ(V3D_SMS_REE_CS),
+				     V3D_SMS_STATE) == V3D_SMS_ISOLATING_FOR_RESET) &&
+		     !(V3D_GET_FIELD(V3D_SMS_READ(V3D_SMS_REE_CS),
+				     V3D_SMS_STATE) == V3D_SMS_RESETTING), 100)) {
+		drm_err(&v3d->drm, "Failed to wait for SMS reset\n");
+	}
+}
+
+void
 v3d_reset(struct v3d_dev *v3d)
 {
 	struct drm_device *dev = &v3d->drm;
 
-	DRM_DEV_ERROR(dev->dev, "Resetting GPU for hang.\n");
-	DRM_DEV_ERROR(dev->dev, "V3D_ERR_STAT: 0x%08x\n",
-		      V3D_CORE_READ(0, V3D_ERR_STAT));
+	drm_err(dev, "Resetting GPU for hang.\n");
+	drm_err(dev, "V3D_ERR_STAT: 0x%08x\n", V3D_CORE_READ(0, V3D_ERR_STAT));
+
 	trace_v3d_reset_begin(dev);
 
 	/* XXX: only needed for safe powerdown, not reset. */
 	if (false)
 		v3d_idle_axi(v3d, 0);
 
+	v3d_irq_disable(v3d);
+
 	v3d_idle_gca(v3d);
+	v3d_reset_sms(v3d);
 	v3d_reset_v3d(v3d);
 
 	v3d_mmu_set_page_table(v3d);
@@ -132,13 +157,13 @@ v3d_reset(struct v3d_dev *v3d)
 static void
 v3d_flush_l3(struct v3d_dev *v3d)
 {
-	if (v3d->ver < 41) {
+	if (v3d->ver < V3D_GEN_41) {
 		u32 gca_ctrl = V3D_GCA_READ(V3D_GCA_CACHE_CTRL);
 
 		V3D_GCA_WRITE(V3D_GCA_CACHE_CTRL,
 			      gca_ctrl | V3D_GCA_CACHE_CTRL_FLUSH);
 
-		if (v3d->ver < 33) {
+		if (v3d->ver < V3D_GEN_33) {
 			V3D_GCA_WRITE(V3D_GCA_CACHE_CTRL,
 				      gca_ctrl & ~V3D_GCA_CACHE_CTRL_FLUSH);
 		}
@@ -151,7 +176,7 @@ v3d_flush_l3(struct v3d_dev *v3d)
 static void
 v3d_invalidate_l2c(struct v3d_dev *v3d, int core)
 {
-	if (v3d->ver > 32)
+	if (v3d->ver >= V3D_GEN_33)
 		return;
 
 	V3D_CORE_WRITE(core, V3D_CTL_L2CACTL,
@@ -193,10 +218,18 @@ v3d_clean_caches(struct v3d_dev *v3d)
 
 	trace_v3d_cache_clean_begin(dev);
 
+	/* GFXH-1897: Ensure pending flushes complete before writing L2TCACTL */
+	if (v3d->ver < V3D_GEN_71) {
+		if (wait_for(!(V3D_CORE_READ(core, V3D_CTL_L2TCACTL) &
+			       V3D_L2TCACTL_L2TFLS), 100)) {
+			drm_err(dev, "Timeout waiting for L2T clean\n");
+		}
+	}
+
 	V3D_CORE_WRITE(core, V3D_CTL_L2TCACTL, V3D_L2TCACTL_TMUWCF);
 	if (wait_for(!(V3D_CORE_READ(core, V3D_CTL_L2TCACTL) &
 		       V3D_L2TCACTL_TMUWCF), 100)) {
-		DRM_ERROR("Timeout waiting for TMU write combiner flush\n");
+		drm_err(dev, "Timeout waiting for TMU write combiner flush\n");
 	}
 
 	mutex_lock(&v3d->cache_clean_lock);
@@ -206,7 +239,7 @@ v3d_clean_caches(struct v3d_dev *v3d)
 
 	if (wait_for(!(V3D_CORE_READ(core, V3D_CTL_L2TCACTL) &
 		       V3D_L2TCACTL_L2TFLS), 100)) {
-		DRM_ERROR("Timeout waiting for L2T clean\n");
+		drm_err(dev, "Timeout waiting for L2T clean\n");
 	}
 
 	mutex_unlock(&v3d->cache_clean_lock);
@@ -239,6 +272,31 @@ v3d_invalidate_caches(struct v3d_dev *v3d)
 	v3d_invalidate_slices(v3d, 0);
 }
 
+/* Sets invariant state for the HW. */
+void
+v3d_init_hw_state(struct v3d_dev *v3d)
+{
+	v3d_init_core(v3d, 0);
+}
+
+static void
+v3d_huge_mnt_init(struct v3d_dev *v3d)
+{
+	int err = 0;
+
+	if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) && super_pages)
+		err = drm_gem_huge_mnt_create(&v3d->drm, "within_size");
+
+	if (drm_gem_get_huge_mnt(&v3d->drm))
+		drm_info(&v3d->drm, "Using Transparent Hugepages\n");
+	else if (err)
+		drm_warn(&v3d->drm, "Can't use Transparent Hugepages (%d)\n",
+			 err);
+	else
+		drm_notice(&v3d->drm,
+			   "Transparent Hugepage support is recommended for optimal performance on this platform!\n");
+}
+
 int
 v3d_gem_init(struct drm_device *dev)
 {
@@ -249,25 +307,30 @@ v3d_gem_init(struct drm_device *dev)
 	for (i = 0; i < V3D_MAX_QUEUES; i++) {
 		struct v3d_queue_state *queue = &v3d->queue[i];
 
+		queue->stats = v3d_stats_alloc();
+		if (!queue->stats) {
+			ret = -ENOMEM;
+			goto err_stats;
+		}
+
 		queue->fence_context = dma_fence_context_alloc(1);
-		memset(&queue->stats, 0, sizeof(queue->stats));
-		seqcount_init(&queue->stats.lock);
+
+		spin_lock_init(&queue->queue_lock);
 	}
 
 	spin_lock_init(&v3d->mm_lock);
-	spin_lock_init(&v3d->job_lock);
 	ret = drmm_mutex_init(dev, &v3d->bo_lock);
 	if (ret)
-		return ret;
+		goto err_stats;
 	ret = drmm_mutex_init(dev, &v3d->reset_lock);
 	if (ret)
-		return ret;
+		goto err_stats;
 	ret = drmm_mutex_init(dev, &v3d->sched_lock);
 	if (ret)
-		return ret;
+		goto err_stats;
 	ret = drmm_mutex_init(dev, &v3d->cache_clean_lock);
 	if (ret)
-		return ret;
+		goto err_stats;
 
 	/* Note: We don't allocate address 0.  Various bits of HW
 	 * treat 0 as special, such as the occlusion query counters
@@ -279,43 +342,46 @@ v3d_gem_init(struct drm_device *dev)
 			       &v3d->pt_paddr,
 			       GFP_KERNEL | __GFP_NOWARN | __GFP_ZERO);
 	if (!v3d->pt) {
-		drm_mm_takedown(&v3d->mm);
 		dev_err(v3d->drm.dev,
 			"Failed to allocate page tables. Please ensure you have DMA enabled.\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_dma_alloc;
 	}
 
-	v3d_init_hw_state(v3d);
-	v3d_mmu_set_page_table(v3d);
-
-	v3d_gemfs_init(v3d);
+	v3d_huge_mnt_init(v3d);
 
 	ret = v3d_sched_init(v3d);
-	if (ret) {
-		drm_mm_takedown(&v3d->mm);
-		dma_free_coherent(v3d->drm.dev, pt_size, (void *)v3d->pt,
-				  v3d->pt_paddr);
-		return ret;
-	}
+	if (ret)
+		goto err_sched;
 
 	return 0;
+
+err_sched:
+	dma_free_coherent(v3d->drm.dev, pt_size, (void *)v3d->pt, v3d->pt_paddr);
+err_dma_alloc:
+	drm_mm_takedown(&v3d->mm);
+err_stats:
+	for (i--; i >= 0; i--)
+		v3d_stats_put(v3d->queue[i].stats);
+
+	return ret;
 }
 
 void
 v3d_gem_destroy(struct drm_device *dev)
 {
 	struct v3d_dev *v3d = to_v3d_dev(dev);
+	enum v3d_queue q;
 
 	v3d_sched_fini(v3d);
-	v3d_gemfs_fini(v3d);
 
 	/* Waiting for jobs to finish would need to be done before
 	 * unregistering V3D.
 	 */
-	WARN_ON(v3d->bin_job);
-	WARN_ON(v3d->render_job);
-	WARN_ON(v3d->tfu_job);
-	WARN_ON(v3d->csd_job);
+	for (q = 0; q < V3D_MAX_QUEUES; q++) {
+		WARN_ON(v3d->queue[q].active_job);
+		v3d_stats_put(v3d->queue[q].stats);
+	}
 
 	drm_mm_takedown(&v3d->mm);
 

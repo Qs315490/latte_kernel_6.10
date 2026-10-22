@@ -899,10 +899,15 @@ bos_descriptors_read(struct file *filp, struct kobject *kobj,
 {
 	struct device *dev = kobj_to_dev(kobj);
 	struct usb_device *udev = to_usb_device(dev);
-	struct usb_host_bos *bos = udev->bos;
+	struct usb_host_bos *bos;
 	struct usb_bos_descriptor *desc;
 	size_t desclen, n = 0;
+	int rc;
 
+	rc = usb_lock_device_interruptible(udev);
+	if (rc < 0)
+		return -EINTR;
+	bos = udev->bos;
 	if (bos) {
 		desc = bos->desc;
 		desclen = le16_to_cpu(desc->wTotalLength);
@@ -911,6 +916,7 @@ bos_descriptors_read(struct file *filp, struct kobject *kobj,
 			memcpy(buf, (void *) desc + off, n);
 		}
 	}
+	usb_unlock_device(udev);
 	return n;
 }
 static const BIN_ATTR_RO(bos_descriptors, 65535); /* max-size BOS */
@@ -944,7 +950,7 @@ static umode_t dev_bin_attrs_are_visible(struct kobject *kobj,
 }
 
 static const struct attribute_group dev_bin_attr_grp = {
-	.bin_attrs_new =	dev_bin_attrs,
+	.bin_attrs =	dev_bin_attrs,
 	.is_bin_visible =	dev_bin_attrs_are_visible,
 };
 

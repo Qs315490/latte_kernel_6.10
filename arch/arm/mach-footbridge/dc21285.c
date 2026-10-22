@@ -135,7 +135,7 @@ static struct timer_list perr_timer;
 
 static void dc21285_enable_error(struct timer_list *timer)
 {
-	del_timer(timer);
+	timer_delete(timer);
 
 	if (timer == &serr_timer)
 		enable_irq(IRQ_PCI_SERR);
@@ -262,7 +262,7 @@ int __init dc21285_setup(int nr, struct pci_sys_data *sys)
 {
 	struct resource *res;
 
-	res = kcalloc(2, sizeof(struct resource), GFP_KERNEL);
+	res = kzalloc_objs(struct resource, 2);
 	if (!res) {
 		printk("out of memory for root bus resources");
 		return 0;

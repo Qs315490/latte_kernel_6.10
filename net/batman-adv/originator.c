@@ -7,7 +7,6 @@
 #include "originator.h"
 #include "main.h"
 
-#include <linux/atomic.h>
 #include <linux/container_of.h>
 #include <linux/err.h>
 #include <linux/errno.h>
@@ -29,7 +28,6 @@
 #include <linux/workqueue.h>
 #include <uapi/linux/batadv_packet.h>
 
-#include "bat_algo.h"
 #include "distributed-arp-table.h"
 #include "fragmentation.h"
 #include "gateway_client.h"
@@ -38,7 +36,6 @@
 #include "log.h"
 #include "multicast.h"
 #include "netlink.h"
-#include "network-coding.h"
 #include "routing.h"
 #include "translation-table.h"
 
@@ -47,7 +44,7 @@ static struct lock_class_key batadv_orig_hash_lock_class_key;
 
 /**
  * batadv_orig_hash_find() - Find and return originator from orig_hash
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @data: mac address of the originator
  *
  * Return: orig_node (with increased refcnt), NULL on errors
@@ -181,7 +178,7 @@ batadv_orig_node_vlan_new(struct batadv_orig_node *orig_node,
 	if (vlan)
 		goto out;
 
-	vlan = kzalloc(sizeof(*vlan), GFP_ATOMIC);
+	vlan = kzalloc_obj(*vlan, GFP_ATOMIC);
 	if (!vlan)
 		goto out;
 
@@ -213,7 +210,7 @@ void batadv_orig_node_vlan_release(struct kref *ref)
 
 /**
  * batadv_originator_init() - Initialize all originator structures
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  *
  * Return: 0 on success or negative error number in case of failure
  */
@@ -338,7 +335,7 @@ batadv_orig_router_get(struct batadv_orig_node *orig_node,
 
 /**
  * batadv_orig_to_router() - get next hop neighbor to an orig address
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_addr: the originator MAC address to search the best next hop router for
  * @if_outgoing: the interface where the payload packet has been received or
  *  the OGM should be sent to
@@ -419,7 +416,7 @@ batadv_orig_ifinfo_new(struct batadv_orig_node *orig_node,
 	if (orig_ifinfo)
 		goto out;
 
-	orig_ifinfo = kzalloc(sizeof(*orig_ifinfo), GFP_ATOMIC);
+	orig_ifinfo = kzalloc_obj(*orig_ifinfo, GFP_ATOMIC);
 	if (!orig_ifinfo)
 		goto out;
 
@@ -442,7 +439,7 @@ out:
 }
 
 /**
- * batadv_neigh_ifinfo_get() - find the ifinfo from an neigh_node
+ * batadv_neigh_ifinfo_get() - find the ifinfo from a neigh_node
  * @neigh: the neigh node to be queried
  * @if_outgoing: the interface for which the ifinfo should be acquired
  *
@@ -475,7 +472,7 @@ batadv_neigh_ifinfo_get(struct batadv_neigh_node *neigh,
 }
 
 /**
- * batadv_neigh_ifinfo_new() - search and possibly create an neigh_ifinfo object
+ * batadv_neigh_ifinfo_new() - search and possibly create a neigh_ifinfo object
  * @neigh: the neigh node to be queried
  * @if_outgoing: the interface for which the ifinfo should be acquired
  *
@@ -497,7 +494,7 @@ batadv_neigh_ifinfo_new(struct batadv_neigh_node *neigh,
 	if (neigh_ifinfo)
 		goto out;
 
-	neigh_ifinfo = kzalloc(sizeof(*neigh_ifinfo), GFP_ATOMIC);
+	neigh_ifinfo = kzalloc_obj(*neigh_ifinfo, GFP_ATOMIC);
 	if (!neigh_ifinfo)
 		goto out;
 
@@ -567,7 +564,7 @@ batadv_hardif_neigh_create(struct batadv_hard_iface *hard_iface,
 			   const u8 *neigh_addr,
 			   struct batadv_orig_node *orig_node)
 {
-	struct batadv_priv *bat_priv = netdev_priv(hard_iface->soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(hard_iface->mesh_iface);
 	struct batadv_hardif_neigh_node *hardif_neigh;
 
 	spin_lock_bh(&hard_iface->neigh_list_lock);
@@ -577,7 +574,7 @@ batadv_hardif_neigh_create(struct batadv_hard_iface *hard_iface,
 	if (hardif_neigh)
 		goto out;
 
-	hardif_neigh = kzalloc(sizeof(*hardif_neigh), GFP_ATOMIC);
+	hardif_neigh = kzalloc_obj(*hardif_neigh, GFP_ATOMIC);
 	if (!hardif_neigh)
 		goto out;
 
@@ -685,7 +682,7 @@ batadv_neigh_node_create(struct batadv_orig_node *orig_node,
 	if (!hardif_neigh)
 		goto out;
 
-	neigh_node = kzalloc(sizeof(*neigh_node), GFP_ATOMIC);
+	neigh_node = kzalloc_obj(*neigh_node, GFP_ATOMIC);
 	if (!neigh_node)
 		goto out;
 
@@ -696,8 +693,11 @@ batadv_neigh_node_create(struct batadv_orig_node *orig_node,
 	kref_get(&hard_iface->refcount);
 	ether_addr_copy(neigh_node->addr, neigh_addr);
 	neigh_node->if_incoming = hard_iface;
-	neigh_node->orig_node = orig_node;
 	neigh_node->last_seen = jiffies;
+
+#ifdef CONFIG_BATMAN_ADV_BATMAN_V
+	ACCESS_PRIVATE(neigh_node, orig_node_id) = orig_node;
+#endif
 
 	/* increment unique neighbor refcount */
 	kref_get(&hardif_neigh->refcount);
@@ -754,20 +754,25 @@ batadv_neigh_node_get_or_create(struct batadv_orig_node *orig_node,
 int batadv_hardif_neigh_dump(struct sk_buff *msg, struct netlink_callback *cb)
 {
 	struct batadv_hard_iface *primary_if, *hard_iface;
-	struct net_device *soft_iface;
+	struct net_device *mesh_iface;
 	struct batadv_priv *bat_priv;
 	int ret;
 
-	soft_iface = batadv_netlink_get_softif(cb);
-	if (IS_ERR(soft_iface))
-		return PTR_ERR(soft_iface);
+	mesh_iface = batadv_netlink_get_meshif(cb);
+	if (IS_ERR(mesh_iface))
+		return PTR_ERR(mesh_iface);
 
-	bat_priv = netdev_priv(soft_iface);
+	bat_priv = netdev_priv(mesh_iface);
 
 	primary_if = batadv_primary_if_get_selected(bat_priv);
-	if (!primary_if || primary_if->if_status != BATADV_IF_ACTIVE) {
+	if (!primary_if) {
 		ret = -ENOENT;
-		goto out_put_soft_iface;
+		goto out_put_mesh_iface;
+	}
+
+	if (primary_if->if_status != BATADV_IF_ACTIVE) {
+		ret = -ENOENT;
+		goto out_put_primary_if;
 	}
 
 	hard_iface = batadv_netlink_get_hardif(bat_priv, cb);
@@ -794,8 +799,8 @@ out_put_hard_iface:
 	batadv_hardif_put(hard_iface);
 out_put_primary_if:
 	batadv_hardif_put(primary_if);
-out_put_soft_iface:
-	dev_put(soft_iface);
+out_put_mesh_iface:
+	dev_put(mesh_iface);
 
 	return ret;
 }
@@ -831,8 +836,6 @@ static void batadv_orig_node_free_rcu(struct rcu_head *rcu)
 	struct batadv_orig_node *orig_node;
 
 	orig_node = container_of(rcu, struct batadv_orig_node, rcu);
-
-	batadv_mcast_purge_orig(orig_node);
 
 	batadv_frag_purge_orig(orig_node, NULL);
 
@@ -884,15 +887,14 @@ void batadv_orig_node_release(struct kref *ref)
 	}
 	spin_unlock_bh(&orig_node->vlan_list_lock);
 
-	/* Free nc_nodes */
-	batadv_nc_purge_orig(orig_node->bat_priv, orig_node, NULL);
+	batadv_mcast_purge_orig(orig_node);
 
 	call_rcu(&orig_node->rcu, batadv_orig_node_free_rcu);
 }
 
 /**
  * batadv_originator_free() - Free all originator structures
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  */
 void batadv_originator_free(struct batadv_priv *bat_priv)
 {
@@ -906,7 +908,7 @@ void batadv_originator_free(struct batadv_priv *bat_priv)
 	if (!hash)
 		return;
 
-	cancel_delayed_work_sync(&bat_priv->orig_work);
+	disable_delayed_work_sync(&bat_priv->orig_work);
 
 	bat_priv->orig_hash = NULL;
 
@@ -928,7 +930,7 @@ void batadv_originator_free(struct batadv_priv *bat_priv)
 
 /**
  * batadv_orig_node_new() - creates a new orig_node
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @addr: the mac address of the originator
  *
  * Creates a new originator object and initialises all the generic fields.
@@ -947,7 +949,7 @@ struct batadv_orig_node *batadv_orig_node_new(struct batadv_priv *bat_priv,
 	batadv_dbg(BATADV_DBG_BATMAN, bat_priv,
 		   "Creating new originator: %pM\n", addr);
 
-	orig_node = kzalloc(sizeof(*orig_node), GFP_ATOMIC);
+	orig_node = kzalloc_obj(*orig_node, GFP_ATOMIC);
 	if (!orig_node)
 		return NULL;
 
@@ -960,15 +962,13 @@ struct batadv_orig_node *batadv_orig_node_new(struct batadv_priv *bat_priv,
 	spin_lock_init(&orig_node->tt_lock);
 	spin_lock_init(&orig_node->vlan_list_lock);
 
-	batadv_nc_init_orig(orig_node);
-
 	/* extra reference for return */
 	kref_init(&orig_node->refcount);
 
 	orig_node->bat_priv = bat_priv;
 	ether_addr_copy(orig_node->orig, addr);
 	batadv_dat_init_orig_node_addr(orig_node);
-	atomic_set(&orig_node->last_ttvn, 0);
+	WRITE_ONCE(orig_node->last_ttvn, 0);
 	orig_node->tt_buff = NULL;
 	orig_node->tt_buff_len = 0;
 	orig_node->last_seen = jiffies;
@@ -1009,7 +1009,7 @@ free_orig_node:
 
 /**
  * batadv_purge_neigh_ifinfo() - purge obsolete ifinfo entries from neighbor
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @neigh: orig node which is to be checked
  */
 static void
@@ -1050,7 +1050,7 @@ batadv_purge_neigh_ifinfo(struct batadv_priv *bat_priv,
 
 /**
  * batadv_purge_orig_ifinfo() - purge obsolete ifinfo entries from originator
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: orig node which is to be checked
  *
  * Return: true if any ifinfo entry was purged, false otherwise.
@@ -1102,7 +1102,7 @@ batadv_purge_orig_ifinfo(struct batadv_priv *bat_priv,
 
 /**
  * batadv_purge_orig_neighbors() - purges neighbors from originator
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: orig node which is to be checked
  *
  * Return: true if any neighbor was purged, false otherwise
@@ -1160,7 +1160,7 @@ batadv_purge_orig_neighbors(struct batadv_priv *bat_priv,
 
 /**
  * batadv_find_best_neighbor() - finds the best neighbor after purging
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: orig node which is to be checked
  * @if_outgoing: the interface for which the metric should be compared
  *
@@ -1194,7 +1194,7 @@ batadv_find_best_neighbor(struct batadv_priv *bat_priv,
 
 /**
  * batadv_purge_orig_node() - purges obsolete information from an orig_node
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: orig node which is to be checked
  *
  * This function checks if the orig_node or substructures of it have become
@@ -1208,6 +1208,7 @@ static bool batadv_purge_orig_node(struct batadv_priv *bat_priv,
 	struct batadv_neigh_node *best_neigh_node;
 	struct batadv_hard_iface *hard_iface;
 	bool changed_ifinfo, changed_neigh;
+	struct list_head *iter;
 
 	if (batadv_has_timed_out(orig_node->last_seen,
 				 2 * BATADV_PURGE_TIMEOUT)) {
@@ -1232,11 +1233,8 @@ static bool batadv_purge_orig_node(struct batadv_priv *bat_priv,
 
 	/* ... then for all other interfaces. */
 	rcu_read_lock();
-	list_for_each_entry_rcu(hard_iface, &batadv_hardif_list, list) {
+	netdev_for_each_lower_private_rcu(bat_priv->mesh_iface, hard_iface, iter) {
 		if (hard_iface->if_status != BATADV_IF_ACTIVE)
-			continue;
-
-		if (hard_iface->soft_iface != bat_priv->soft_iface)
 			continue;
 
 		if (!kref_get_unless_zero(&hard_iface->refcount))
@@ -1258,7 +1256,7 @@ static bool batadv_purge_orig_node(struct batadv_priv *bat_priv,
 
 /**
  * batadv_purge_orig_ref() - Purge all outdated originators
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  */
 void batadv_purge_orig_ref(struct batadv_priv *bat_priv)
 {
@@ -1325,20 +1323,25 @@ static void batadv_purge_orig(struct work_struct *work)
 int batadv_orig_dump(struct sk_buff *msg, struct netlink_callback *cb)
 {
 	struct batadv_hard_iface *primary_if, *hard_iface;
-	struct net_device *soft_iface;
+	struct net_device *mesh_iface;
 	struct batadv_priv *bat_priv;
 	int ret;
 
-	soft_iface = batadv_netlink_get_softif(cb);
-	if (IS_ERR(soft_iface))
-		return PTR_ERR(soft_iface);
+	mesh_iface = batadv_netlink_get_meshif(cb);
+	if (IS_ERR(mesh_iface))
+		return PTR_ERR(mesh_iface);
 
-	bat_priv = netdev_priv(soft_iface);
+	bat_priv = netdev_priv(mesh_iface);
 
 	primary_if = batadv_primary_if_get_selected(bat_priv);
-	if (!primary_if || primary_if->if_status != BATADV_IF_ACTIVE) {
+	if (!primary_if) {
 		ret = -ENOENT;
-		goto out_put_soft_iface;
+		goto out_put_mesh_iface;
+	}
+
+	if (primary_if->if_status != BATADV_IF_ACTIVE) {
+		ret = -ENOENT;
+		goto out_put_primary_if;
 	}
 
 	hard_iface = batadv_netlink_get_hardif(bat_priv, cb);
@@ -1365,8 +1368,8 @@ out_put_hard_iface:
 	batadv_hardif_put(hard_iface);
 out_put_primary_if:
 	batadv_hardif_put(primary_if);
-out_put_soft_iface:
-	dev_put(soft_iface);
+out_put_mesh_iface:
+	dev_put(mesh_iface);
 
 	return ret;
 }

@@ -43,7 +43,7 @@ struct snd_seq_timer *snd_seq_timer_new(void)
 {
 	struct snd_seq_timer *tmr;
 	
-	tmr = kzalloc(sizeof(*tmr), GFP_KERNEL);
+	tmr = kzalloc_obj(*tmr);
 	if (!tmr)
 		return NULL;
 	spin_lock_init(&tmr->lock);
@@ -61,12 +61,23 @@ struct snd_seq_timer *snd_seq_timer_new(void)
 void snd_seq_timer_delete(struct snd_seq_timer **tmr)
 {
 	struct snd_seq_timer *t = *tmr;
-	*tmr = NULL;
+	struct snd_timer_instance *ti;
 
 	if (t == NULL) {
 		pr_debug("ALSA: seq: snd_seq_timer_delete() called with NULL timer\n");
 		return;
 	}
+
+	scoped_guard(spinlock_irq, &t->lock) {
+		ti = t->timeri;
+		t->timeri = NULL;
+	}
+	if (ti) {
+		snd_timer_close(ti);
+		snd_timer_instance_free(ti);
+	}
+
+	*tmr = NULL;
 	t->running = 0;
 
 	/* reset time */
@@ -333,10 +344,10 @@ int snd_seq_timer_stop(struct snd_seq_timer *tmr)
 
 static int initialize_timer(struct snd_seq_timer *tmr)
 {
-	struct snd_timer *t;
 	unsigned long freq;
 
-	t = tmr->timeri->timer;
+	struct snd_timer *t __free(snd_timeri_timer) =
+		snd_timeri_timer_get(tmr->timeri);
 	if (!t)
 		return -EINVAL;
 
@@ -351,11 +362,10 @@ static int initialize_timer(struct snd_seq_timer *tmr)
 	tmr->ticks = 1;
 	if (!(t->hw.flags & SNDRV_TIMER_HW_SLAVE)) {
 		unsigned long r = snd_timer_resolution(tmr->timeri);
-		if (r) {
-			tmr->ticks = (unsigned int)(1000000000uL / (r * freq));
-			if (! tmr->ticks)
-				tmr->ticks = 1;
-		}
+		unsigned long den;
+
+		if (r && !check_mul_overflow(r, freq, &den))
+			tmr->ticks = max(1U, (unsigned int)(1000000000uL / den));
 	}
 	tmr->initialized = 1;
 	return 0;
@@ -440,13 +450,13 @@ void snd_seq_info_timer_read(struct snd_info_entry *entry,
 			     struct snd_info_buffer *buffer)
 {
 	int idx;
-	struct snd_seq_queue *q;
 	struct snd_seq_timer *tmr;
 	struct snd_timer_instance *ti;
 	unsigned long resolution;
 	
 	for (idx = 0; idx < SNDRV_SEQ_MAX_QUEUES; idx++) {
-		q = queueptr(idx);
+		struct snd_seq_queue *q __free(snd_seq_queue) = queueptr(idx);
+
 		if (q == NULL)
 			continue;
 		scoped_guard(mutex, &q->timer_mutex) {
@@ -456,12 +466,16 @@ void snd_seq_info_timer_read(struct snd_info_entry *entry,
 			ti = tmr->timeri;
 			if (!ti)
 				break;
-			snd_iprintf(buffer, "Timer for queue %i : %s\n", q->queue, ti->timer->name);
+
+			struct snd_timer *t __free(snd_timeri_timer) =
+				snd_timeri_timer_get(ti);
+			snd_iprintf(buffer, "Timer for queue %i : %s\n",
+				    q->queue,
+				    t ? t->name : "DEAD");
 			resolution = snd_timer_resolution(ti) * tmr->ticks;
 			snd_iprintf(buffer, "  Period time : %lu.%09lu\n", resolution / 1000000000, resolution % 1000000000);
 			snd_iprintf(buffer, "  Skew : %u / %u\n", tmr->skew, tmr->skew_base);
 		}
-		queuefree(q);
  	}
 }
 #endif /* CONFIG_SND_PROC_FS */

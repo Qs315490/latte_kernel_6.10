@@ -63,7 +63,13 @@ struct mlx5_eswitch_rep {
 void mlx5_eswitch_register_vport_reps(struct mlx5_eswitch *esw,
 				      const struct mlx5_eswitch_rep_ops *ops,
 				      u8 rep_type);
+void
+mlx5_eswitch_register_vport_reps_nested(struct mlx5_eswitch *esw,
+					const struct mlx5_eswitch_rep_ops *ops,
+					u8 rep_type);
 void mlx5_eswitch_unregister_vport_reps(struct mlx5_eswitch *esw, u8 rep_type);
+void mlx5_eswitch_unregister_vport_reps_nested(struct mlx5_eswitch *esw,
+					       u8 rep_type);
 void *mlx5_eswitch_get_proto_dev(struct mlx5_eswitch *esw,
 				 u16 vport_num,
 				 u8 rep_type);
@@ -147,6 +153,8 @@ u32 mlx5_eswitch_get_vport_metadata_for_set(struct mlx5_eswitch *esw,
 
 /* reuse tun_opts for the mapped ipsec obj id when tun_id is 0 (invalid) */
 #define ESW_IPSEC_RX_MAPPED_ID_MASK GENMASK(ESW_TUN_OPTS_BITS - 1, 0)
+#define ESW_IPSEC_RX_MAPPED_ID_MATCH_MASK \
+	GENMASK(31 - ESW_RESERVED_BITS, ESW_ZONE_ID_BITS)
 
 u8 mlx5_eswitch_mode(const struct mlx5_core_dev *dev);
 u16 mlx5_eswitch_get_total_vports(const struct mlx5_core_dev *dev);
@@ -215,7 +223,7 @@ static inline bool is_mdev_switchdev_mode(struct mlx5_core_dev *dev)
 static inline u16 mlx5_eswitch_manager_vport(struct mlx5_core_dev *dev)
 {
 	return mlx5_core_is_ecpf_esw_manager(dev) ?
-		MLX5_VPORT_ECPF : MLX5_VPORT_PF;
+		MLX5_VPORT_ECPF : MLX5_VPORT_HOST_PF;
 }
 
 #endif

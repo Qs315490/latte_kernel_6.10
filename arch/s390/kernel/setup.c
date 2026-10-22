@@ -13,8 +13,7 @@
  * This file handles the architecture-dependent parts of initialization
  */
 
-#define KMSG_COMPONENT "setup"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "setup: " fmt
 
 #include <linux/errno.h>
 #include <linux/export.h>
@@ -47,13 +46,13 @@
 #include <linux/kexec.h>
 #include <linux/crash_dump.h>
 #include <linux/memory.h>
-#include <linux/compat.h>
 #include <linux/start_kernel.h>
 #include <linux/hugetlb.h>
 #include <linux/kmemleak.h>
 
 #include <asm/archrandom.h>
 #include <asm/boot_data.h>
+#include <asm/machine.h>
 #include <asm/ipl.h>
 #include <asm/facility.h>
 #include <asm/smp.h>
@@ -111,7 +110,7 @@ struct exception_table_entry __amode31_ref *__stop_amode31_ex_table = _stop_amod
  * Because the AMODE31 sections are relocated below 2G at startup,
  * the content of control registers CR2, CR5 and CR15 must be updated
  * with new addresses after the relocation. The initial initialization of
- * control registers occurs in head64.S and then gets updated again after AMODE31
+ * control registers occurs in head.S and then gets updated again after AMODE31
  * relocation. We must access the relevant AMODE31 tables indirectly via
  * pointers placed in the .amode31.refs linker section. Those pointers get
  * updated automatically during AMODE31 relocation and always contain a valid
@@ -179,8 +178,6 @@ unsigned long __bootdata_preserved(MODULES_END);
 /* An array with a pointer to the lowcore of every CPU. */
 struct lowcore *lowcore_ptr[NR_CPUS];
 EXPORT_SYMBOL(lowcore_ptr);
-
-DEFINE_STATIC_KEY_FALSE(cpu_has_bear);
 
 /*
  * The Write Back bit position in the physaddr is given by the SLPC PCI.
@@ -251,7 +248,7 @@ static void __init conmode_default(void)
 	char query_buffer[1024];
 	char *ptr;
 
-        if (MACHINE_IS_VM) {
+	if (machine_is_vm()) {
 		cpcmd("QUERY CONSOLE", query_buffer, 1024, NULL);
 		console_devno = simple_strtoul(query_buffer + 5, NULL, 16);
 		ptr = strstr(query_buffer, "SUBCHANNEL =");
@@ -289,7 +286,7 @@ static void __init conmode_default(void)
 			SET_CONSOLE_SCLP;
 #endif
 		}
-	} else if (MACHINE_IS_KVM) {
+	} else if (machine_is_kvm()) {
 		if (sclp.has_vt220 && IS_ENABLED(CONFIG_SCLP_VT220_CONSOLE))
 			SET_CONSOLE_VT220;
 		else if (sclp.has_linemode && IS_ENABLED(CONFIG_SCLP_CONSOLE))
@@ -415,7 +412,6 @@ static void __init setup_lowcore(void)
 	lc->clock_comparator = clock_comparator_max;
 	lc->current_task = (unsigned long)&init_task;
 	lc->lpp = LPP_MAGIC;
-	lc->machine_flags = get_lowcore()->machine_flags;
 	lc->preempt_count = get_lowcore()->preempt_count;
 	nmi_alloc_mcesa_early(&lc->mcesad);
 	lc->sys_enter_timer = get_lowcore()->sys_enter_timer;
@@ -607,7 +603,7 @@ static void __init reserve_crashkernel(void)
 	int rc;
 
 	rc = parse_crashkernel(boot_command_line, ident_map_size,
-			       &crash_size, &crash_base, NULL, NULL);
+			       &crash_size, &crash_base, NULL, NULL, NULL);
 
 	crash_base = ALIGN(crash_base, KEXEC_CRASH_MEM_ALIGN);
 	crash_size = ALIGN(crash_size, KEXEC_CRASH_MEM_ALIGN);
@@ -652,7 +648,7 @@ static void __init reserve_crashkernel(void)
 		return;
 	}
 
-	if (!oldmem_data.start && MACHINE_IS_VM)
+	if (!oldmem_data.start && machine_is_vm())
 		diag10_range(PFN_DOWN(crash_base), PFN_DOWN(crash_size));
 	crashk_res.start = crash_base;
 	crashk_res.end = crash_base + crash_size - 1;
@@ -719,6 +715,11 @@ static void __init memblock_add_physmem_info(void)
 		memblock_physmem_add(start, end - start);
 	memblock_set_bottom_up(false);
 	memblock_set_node(0, ULONG_MAX, &memblock.memory, 0);
+}
+
+static void __init setup_high_memory(void)
+{
+	high_memory = __va(ident_map_size);
 }
 
 /*
@@ -836,7 +837,7 @@ static void __init setup_control_program_code(void)
 		return;
 
 	diag_stat_inc(DIAG_STAT_X318);
-	asm volatile("diag %0,0,0x318\n" : : "d" (diag318_info.val));
+	asm volatile("diag %0,0,0x318" : : "d" (diag318_info.val));
 }
 
 /*
@@ -898,12 +899,12 @@ void __init setup_arch(char **cmdline_p)
         /*
          * print what head.S has found out about the machine
          */
-	if (MACHINE_IS_VM)
+	if (machine_is_vm())
 		pr_info("Linux is running as a z/VM "
 			"guest operating system in 64-bit mode\n");
-	else if (MACHINE_IS_KVM)
+	else if (machine_is_kvm())
 		pr_info("Linux is running under KVM in 64-bit mode\n");
-	else if (MACHINE_IS_LPAR)
+	else if (machine_is_lpar())
 		pr_info("Linux is running natively in 64-bit mode\n");
 	else
 		pr_info("Linux is running as a guest in 64-bit mode\n");
@@ -911,7 +912,7 @@ void __init setup_arch(char **cmdline_p)
 	if (!boot_earlyprintk)
 		boot_rb_foreach(print_rb_entry);
 
-	if (have_relocated_lowcore())
+	if (machine_has_relocated_lowcore())
 		pr_info("Lowcore relocated to 0x%px\n", get_lowcore());
 
 	log_component_list();
@@ -953,6 +954,7 @@ void __init setup_arch(char **cmdline_p)
 
 	free_physmem_info();
 	setup_memory_end();
+	setup_high_memory();
 	memblock_dump_all();
 	setup_memory();
 
@@ -961,8 +963,6 @@ void __init setup_arch(char **cmdline_p)
 	setup_uv();
 	dma_contiguous_reserve(ident_map_size);
 	vmcp_cma_reserve();
-	if (MACHINE_HAS_EDAT2)
-		hugetlb_cma_reserve(PUD_SHIFT - PAGE_SHIFT);
 
 	reserve_crashkernel();
 #ifdef CONFIG_CRASH_DUMP
@@ -981,10 +981,6 @@ void __init setup_arch(char **cmdline_p)
 	numa_setup();
 	smp_detect_cpus();
 	topology_init_early();
-
-	if (test_facility(193))
-		static_branch_enable(&cpu_has_bear);
-
 	setup_protection_map();
 	/*
 	 * Create kernel page tables.

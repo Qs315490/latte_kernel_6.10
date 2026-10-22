@@ -19,8 +19,10 @@
 #include <linux/netdevice.h>
 #include <linux/module.h>
 #include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <linux/udp.h>
 #include <net/pkt_cls.h>
+#include <linux/ptp_classify.h>
 #include <net/pkt_sched.h>
 #include <linux/filter.h>
 
@@ -68,14 +70,6 @@ int aq_ndev_open(struct net_device *ndev)
 	if (err < 0)
 		goto err_exit;
 
-	err = aq_reapply_rxnfc_all_rules(aq_nic);
-	if (err < 0)
-		goto err_exit;
-
-	err = aq_filters_vlans_update(aq_nic);
-	if (err < 0)
-		goto err_exit;
-
 	err = aq_nic_start(aq_nic);
 	if (err < 0) {
 		aq_nic_stop(aq_nic);
@@ -113,17 +107,24 @@ static netdev_tx_t aq_ndev_start_xmit(struct sk_buff *skb, struct net_device *nd
 		 * and hardware PTP design of the chip. Otherwise ptp stream
 		 * will fail to sync
 		 */
-		if (unlikely(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) ||
-		    unlikely((ip_hdr(skb)->version == 4) &&
-			     (ip_hdr(skb)->protocol == IPPROTO_UDP) &&
-			     ((udp_hdr(skb)->dest == htons(319)) ||
-			      (udp_hdr(skb)->dest == htons(320)))) ||
-		    unlikely(eth_hdr(skb)->h_proto == htons(ETH_P_1588)))
+		if (unlikely(skb->protocol == htons(ETH_P_IP) &&
+			     ip_hdr(skb)->protocol == IPPROTO_UDP &&
+			     (udp_hdr(skb)->dest == htons(PTP_EV_PORT) ||
+			      udp_hdr(skb)->dest == htons(PTP_GEN_PORT))))
+			return aq_ptp_xmit(aq_nic, skb);
+
+		/* PTP over IPv6 does not use extension headers */
+		if (unlikely(skb->protocol == htons(ETH_P_IPV6) &&
+			     ipv6_hdr(skb)->nexthdr == IPPROTO_UDP &&
+			     (udp_hdr(skb)->dest == htons(PTP_EV_PORT) ||
+			      udp_hdr(skb)->dest == htons(PTP_GEN_PORT))))
+			return aq_ptp_xmit(aq_nic, skb);
+
+		if (unlikely(eth_hdr(skb)->h_proto == htons(ETH_P_1588)))
 			return aq_ptp_xmit(aq_nic, skb);
 	}
 #endif
 
-	skb_tx_timestamp(skb);
 	return aq_nic_xmit(aq_nic, skb);
 }
 
@@ -259,10 +260,15 @@ static void aq_ndev_set_multicast_settings(struct net_device *ndev)
 	(void)aq_nic_set_multicast_list(aq_nic, ndev);
 }
 
-#if IS_REACHABLE(CONFIG_PTP_1588_CLOCK)
-static int aq_ndev_config_hwtstamp(struct aq_nic_s *aq_nic,
-				   struct hwtstamp_config *config)
+static int aq_ndev_hwtstamp_set(struct net_device *netdev,
+				struct kernel_hwtstamp_config *config,
+				struct netlink_ext_ack *extack)
 {
+	struct aq_nic_s *aq_nic = netdev_priv(netdev);
+
+	if (!IS_REACHABLE(CONFIG_PTP_1588_CLOCK) || !aq_nic->aq_ptp)
+		return -EOPNOTSUPP;
+
 	switch (config->tx_type) {
 	case HWTSTAMP_TX_OFF:
 	case HWTSTAMP_TX_ON:
@@ -291,59 +297,17 @@ static int aq_ndev_config_hwtstamp(struct aq_nic_s *aq_nic,
 
 	return aq_ptp_hwtstamp_config_set(aq_nic->aq_ptp, config);
 }
-#endif
 
-static int aq_ndev_hwtstamp_set(struct aq_nic_s *aq_nic, struct ifreq *ifr)
-{
-	struct hwtstamp_config config;
-#if IS_REACHABLE(CONFIG_PTP_1588_CLOCK)
-	int ret_val;
-#endif
-
-	if (!aq_nic->aq_ptp)
-		return -EOPNOTSUPP;
-
-	if (copy_from_user(&config, ifr->ifr_data, sizeof(config)))
-		return -EFAULT;
-#if IS_REACHABLE(CONFIG_PTP_1588_CLOCK)
-	ret_val = aq_ndev_config_hwtstamp(aq_nic, &config);
-	if (ret_val)
-		return ret_val;
-#endif
-
-	return copy_to_user(ifr->ifr_data, &config, sizeof(config)) ?
-	       -EFAULT : 0;
-}
-
-#if IS_REACHABLE(CONFIG_PTP_1588_CLOCK)
-static int aq_ndev_hwtstamp_get(struct aq_nic_s *aq_nic, struct ifreq *ifr)
-{
-	struct hwtstamp_config config;
-
-	if (!aq_nic->aq_ptp)
-		return -EOPNOTSUPP;
-
-	aq_ptp_hwtstamp_config_get(aq_nic->aq_ptp, &config);
-	return copy_to_user(ifr->ifr_data, &config, sizeof(config)) ?
-	       -EFAULT : 0;
-}
-#endif
-
-static int aq_ndev_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
+static int aq_ndev_hwtstamp_get(struct net_device *netdev,
+				struct kernel_hwtstamp_config *config)
 {
 	struct aq_nic_s *aq_nic = netdev_priv(netdev);
 
-	switch (cmd) {
-	case SIOCSHWTSTAMP:
-		return aq_ndev_hwtstamp_set(aq_nic, ifr);
+	if (!aq_nic->aq_ptp)
+		return -EOPNOTSUPP;
 
-#if IS_REACHABLE(CONFIG_PTP_1588_CLOCK)
-	case SIOCGHWTSTAMP:
-		return aq_ndev_hwtstamp_get(aq_nic, ifr);
-#endif
-	}
-
-	return -EOPNOTSUPP;
+	aq_ptp_hwtstamp_config_get(aq_nic->aq_ptp, config);
+	return 0;
 }
 
 static int aq_ndo_vlan_rx_add_vid(struct net_device *ndev, __be16 proto,
@@ -501,12 +465,13 @@ static const struct net_device_ops aq_ndev_ops = {
 	.ndo_set_mac_address = aq_ndev_set_mac_address,
 	.ndo_set_features = aq_ndev_set_features,
 	.ndo_fix_features = aq_ndev_fix_features,
-	.ndo_eth_ioctl = aq_ndev_ioctl,
 	.ndo_vlan_rx_add_vid = aq_ndo_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid = aq_ndo_vlan_rx_kill_vid,
 	.ndo_setup_tc = aq_ndo_setup_tc,
 	.ndo_bpf = aq_xdp,
 	.ndo_xdp_xmit = aq_xdp_xmit,
+	.ndo_hwtstamp_get = aq_ndev_hwtstamp_get,
+	.ndo_hwtstamp_set = aq_ndev_hwtstamp_set,
 };
 
 static int __init aq_ndev_init_module(void)

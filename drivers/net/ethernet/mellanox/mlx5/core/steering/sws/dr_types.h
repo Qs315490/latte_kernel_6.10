@@ -986,7 +986,6 @@ struct mlx5dr_matcher_rx_tx {
 					       [DR_RULE_MAX_STES];
 	u8 num_of_builders;
 	u8 num_of_builders_arr[DR_RULE_IPV_MAX][DR_RULE_IPV_MAX];
-	u64 default_icm_addr;
 	struct mlx5dr_table_rx_tx *nic_tbl;
 	u32 prio;
 	struct list_head list_node;
@@ -1473,7 +1472,6 @@ struct mlx5dr_send_ring {
 int mlx5dr_send_ring_alloc(struct mlx5dr_domain *dmn);
 void mlx5dr_send_ring_free(struct mlx5dr_domain *dmn,
 			   struct mlx5dr_send_ring *send_ring);
-int mlx5dr_send_ring_force_drain(struct mlx5dr_domain *dmn);
 int mlx5dr_send_postsend_ste(struct mlx5dr_domain *dmn,
 			     struct mlx5dr_ste *ste,
 			     u8 *data,

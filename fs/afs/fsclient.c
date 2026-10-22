@@ -477,6 +477,9 @@ void afs_fs_fetch_data(struct afs_operation *op)
 	if (!call)
 		return afs_op_nomem(op);
 
+	if (op->flags & AFS_OPERATION_ASYNC)
+		call->async = true;
+
 	/* marshall the parameters */
 	bp = call->request;
 	bp[0] = htonl(FSFETCHDATA);
@@ -484,7 +487,7 @@ void afs_fs_fetch_data(struct afs_operation *op)
 	bp[2] = htonl(vp->fid.vnode);
 	bp[3] = htonl(vp->fid.unique);
 	bp[4] = htonl(lower_32_bits(subreq->start + subreq->transferred));
-	bp[5] = htonl(lower_32_bits(subreq->len   + subreq->transferred));
+	bp[5] = htonl(lower_32_bits(subreq->len   - subreq->transferred));
 
 	call->fid = vp->fid;
 	trace_afs_make_fs_call(call, &vp->fid);
@@ -886,7 +889,7 @@ void afs_fs_symlink(struct afs_operation *op)
 	namesz = name->len;
 	padsz = (4 - (namesz & 3)) & 3;
 
-	c_namesz = strlen(op->create.symlink);
+	c_namesz = strlen(op->create.symlink->content);
 	c_padsz = (4 - (c_namesz & 3)) & 3;
 
 	reqsz = (6 * 4) + namesz + padsz + c_namesz + c_padsz + (6 * 4);
@@ -910,7 +913,7 @@ void afs_fs_symlink(struct afs_operation *op)
 		bp = (void *) bp + padsz;
 	}
 	*bp++ = htonl(c_namesz);
-	memcpy(bp, op->create.symlink, c_namesz);
+	memcpy(bp, op->create.symlink->content, c_namesz);
 	bp = (void *) bp + c_namesz;
 	if (c_padsz > 0) {
 		memset(bp, 0, c_padsz);
@@ -1653,7 +1656,7 @@ int afs_fs_give_up_all_callbacks(struct afs_net *net, struct afs_server *server,
 	bp = call->request;
 	*bp++ = htonl(FSGIVEUPALLCALLBACKS);
 
-	call->server = afs_use_server(server, afs_server_trace_give_up_cb);
+	call->server = afs_use_server(server, false, afs_server_trace_use_give_up_cb);
 	afs_make_call(call, GFP_NOFS);
 	afs_wait_for_call_to_complete(call);
 	ret = call->error;
@@ -1760,7 +1763,7 @@ bool afs_fs_get_capabilities(struct afs_net *net, struct afs_server *server,
 		return false;
 
 	call->key	= key;
-	call->server	= afs_use_server(server, afs_server_trace_get_caps);
+	call->server	= afs_use_server(server, false, afs_server_trace_use_get_caps);
 	call->peer	= rxrpc_kernel_get_peer(estate->addresses->addrs[addr_index].peer);
 	call->probe	= afs_get_endpoint_state(estate, afs_estate_trace_get_getcaps);
 	call->probe_index = addr_index;
@@ -2010,7 +2013,7 @@ static int afs_deliver_fs_fetch_acl(struct afs_call *call)
 		size = call->count2 = ntohl(call->tmp);
 		size = round_up(size, 4);
 
-		acl = kmalloc(struct_size(acl, data, size), GFP_KERNEL);
+		acl = kmalloc_flex(*acl, data, size);
 		if (!acl)
 			return -ENOMEM;
 		op->acl = acl;

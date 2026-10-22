@@ -17,11 +17,12 @@
  *	Copyright (C) 2000 Inside Out Networks, All rights reserved.
  *	Copyright (C) 2001-2002 Greg Kroah-Hartman <greg@kroah.com>
  */
+
+#include <linux/atomic.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
@@ -555,7 +556,7 @@ static int mos7715_parport_init(struct usb_serial *serial)
 	struct mos7715_parport *mos_parport;
 
 	/* allocate and initialize parallel port control struct */
-	mos_parport = kzalloc(sizeof(struct mos7715_parport), GFP_KERNEL);
+	mos_parport = kzalloc_obj(struct mos7715_parport);
 	if (!mos_parport)
 		return -ENOMEM;
 
@@ -1703,7 +1704,7 @@ static int mos7720_port_probe(struct usb_serial_port *port)
 {
 	struct moschip_port *mos7720_port;
 
-	mos7720_port = kzalloc(sizeof(*mos7720_port), GFP_KERNEL);
+	mos7720_port = kzalloc_obj(*mos7720_port);
 	if (!mos7720_port)
 		return -ENOMEM;
 

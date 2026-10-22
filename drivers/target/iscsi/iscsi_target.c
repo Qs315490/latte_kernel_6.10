@@ -121,7 +121,7 @@ struct iscsi_tiqn *iscsit_add_tiqn(unsigned char *buf)
 		return ERR_PTR(-EINVAL);
 	}
 
-	tiqn = kzalloc(sizeof(*tiqn), GFP_KERNEL);
+	tiqn = kzalloc_obj(*tiqn);
 	if (!tiqn)
 		return ERR_PTR(-ENOMEM);
 
@@ -352,7 +352,7 @@ struct iscsi_np *iscsit_add_np(
 		return np;
 	}
 
-	np = kzalloc(sizeof(*np), GFP_KERNEL);
+	np = kzalloc_obj(*np);
 	if (!np) {
 		mutex_unlock(&np_lock);
 		return ERR_PTR(-ENOMEM);
@@ -674,7 +674,7 @@ static int __init iscsi_target_init_module(void)
 	int ret = 0, size;
 
 	pr_debug("iSCSI-Target "ISCSIT_VERSION"\n");
-	iscsit_global = kzalloc(sizeof(*iscsit_global), GFP_KERNEL);
+	iscsit_global = kzalloc_obj(*iscsit_global);
 	if (!iscsit_global)
 		return -1;
 
@@ -981,7 +981,7 @@ static int iscsit_allocate_iovecs(struct iscsit_cmd *cmd)
 	u32 iov_count = max(1UL, DIV_ROUND_UP(cmd->se_cmd.data_length, PAGE_SIZE));
 
 	iov_count += ISCSI_IOV_DATA_BUFFER;
-	cmd->iov_data = kcalloc(iov_count, sizeof(*cmd->iov_data), GFP_KERNEL);
+	cmd->iov_data = kzalloc_objs(*cmd->iov_data, iov_count);
 	if (!cmd->iov_data)
 		return -ENOMEM;
 
@@ -995,6 +995,7 @@ int iscsit_setup_scsi_cmd(struct iscsit_conn *conn, struct iscsit_cmd *cmd,
 	int data_direction, payload_length;
 	struct iscsi_ecdb_ahdr *ecdb_ahdr;
 	struct iscsi_scsi_req *hdr;
+	u16 ahslength, cdb_length;
 	int iscsi_task_attr;
 	unsigned char *cdb;
 	int sam_task_attr;
@@ -1108,14 +1109,27 @@ int iscsit_setup_scsi_cmd(struct iscsit_conn *conn, struct iscsit_cmd *cmd,
 				ISCSI_REASON_CMD_NOT_SUPPORTED, buf);
 		}
 
-		cdb = kmalloc(be16_to_cpu(ecdb_ahdr->ahslength) + 15,
-			      GFP_KERNEL);
+		ahslength = be16_to_cpu(ecdb_ahdr->ahslength);
+		if (!ahslength) {
+			pr_err("Extended CDB AHS with zero length, protocol error.\n");
+			return iscsit_add_reject_cmd(cmd,
+				ISCSI_REASON_PROTOCOL_ERROR, buf);
+		}
+		if (ahslength > (hdr->hlength * 4) - 3) {
+			pr_err("Extended CDB AHS length %u exceeds available PDU buffer.\n",
+			       ahslength);
+			return iscsit_add_reject_cmd(cmd,
+				ISCSI_REASON_PROTOCOL_ERROR, buf);
+		}
+
+		cdb_length = ahslength - 1 + ISCSI_CDB_SIZE;
+
+		cdb = kmalloc(cdb_length, GFP_KERNEL);
 		if (cdb == NULL)
 			return iscsit_add_reject_cmd(cmd,
 				ISCSI_REASON_BOOKMARK_NO_RESOURCES, buf);
 		memcpy(cdb, hdr->cdb, ISCSI_CDB_SIZE);
-		memcpy(cdb + ISCSI_CDB_SIZE, ecdb_ahdr->ecdb,
-		       be16_to_cpu(ecdb_ahdr->ahslength) - 1);
+		memcpy(cdb + ISCSI_CDB_SIZE, ecdb_ahdr->ecdb, cdb_length - ISCSI_CDB_SIZE);
 	}
 
 	data_direction = (hdr->flags & ISCSI_FLAG_CMD_WRITE) ? DMA_TO_DEVICE :
@@ -1992,7 +2006,7 @@ iscsit_handle_task_mgt_cmd(struct iscsit_conn *conn, struct iscsit_cmd *cmd,
 		hdr->refcmdsn = cpu_to_be32(ISCSI_RESERVED_TAG);
 
 	cmd->data_direction = DMA_NONE;
-	cmd->tmr_req = kzalloc(sizeof(*cmd->tmr_req), GFP_KERNEL);
+	cmd->tmr_req = kzalloc_obj(*cmd->tmr_req);
 	if (!cmd->tmr_req) {
 		return iscsit_add_reject_cmd(cmd,
 					     ISCSI_REASON_BOOKMARK_NO_RESOURCES,
@@ -2281,7 +2295,9 @@ iscsit_handle_text_cmd(struct iscsit_conn *conn, struct iscsit_cmd *cmd,
 			goto reject;
 
 		if (conn->conn_ops->DataDigest) {
-			data_crc = iscsit_crc_buf(text_in, rx_size, 0, NULL);
+			data_crc = iscsit_crc_buf(text_in,
+						  ALIGN(payload_length, 4),
+						  0, NULL);
 			if (checksum != data_crc) {
 				pr_err("Text data CRC32C DataDigest"
 					" 0x%08x does not match computed"
@@ -2300,6 +2316,7 @@ iscsit_handle_text_cmd(struct iscsit_conn *conn, struct iscsit_cmd *cmd,
 					" Command CmdSN: 0x%08x due to"
 					" DataCRC error.\n", hdr->cmdsn);
 					kfree(text_in);
+					cmd->text_in_ptr = NULL;
 					return 0;
 				}
 			} else {
@@ -3419,7 +3436,7 @@ iscsit_build_sendtargets_response(struct iscsit_cmd *cmd,
 					}
 				}
 
-				if (inet_addr_is_any((struct sockaddr *)&np->np_sockaddr))
+				if (inet_addr_is_any(&np->np_sockaddr))
 					sockaddr = &conn->local_sockaddr;
 				else
 					sockaddr = &np->np_sockaddr;
@@ -4263,8 +4280,8 @@ int iscsit_close_connection(
 	spin_unlock(&iscsit_global->ts_bitmap_lock);
 
 	iscsit_stop_timers_for_cmds(conn);
-	iscsit_stop_nopin_response_timer(conn);
 	iscsit_stop_nopin_timer(conn);
+	iscsit_stop_nopin_response_timer(conn);
 
 	if (conn->conn_transport->iscsit_wait_conn)
 		conn->conn_transport->iscsit_wait_conn(conn);

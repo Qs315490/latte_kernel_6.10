@@ -121,7 +121,7 @@ static int bpf_tcp_ca_btf_struct_access(struct bpf_verifier_log *log,
 BPF_CALL_2(bpf_tcp_send_ack, struct tcp_sock *, tp, u32, rcv_nxt)
 {
 	/* bpf_tcp_ca prog cannot have NULL tp */
-	__tcp_send_ack((struct sock *)tp, rcv_nxt);
+	__tcp_send_ack((struct sock *)tp, rcv_nxt, 0);
 	return 0;
 }
 
@@ -168,7 +168,7 @@ bpf_tcp_ca_get_func_proto(enum bpf_func_id func_id,
 		 */
 		if (prog_ops_moff(prog) !=
 		    offsetof(struct tcp_congestion_ops, release))
-			return &bpf_sk_setsockopt_proto;
+			return &bpf_sk_setsockopt_nodelay_proto;
 		return NULL;
 	case BPF_FUNC_getsockopt:
 		/* Since get/setsockopt is usually expected to
@@ -272,6 +272,10 @@ static void bpf_tcp_ca_cwnd_event(struct sock *sk, enum tcp_ca_event ev)
 {
 }
 
+static void bpf_tcp_ca_cwnd_event_tx_start(struct sock *sk)
+{
+}
+
 static void bpf_tcp_ca_in_ack_event(struct sock *sk, u32 flags)
 {
 }
@@ -313,6 +317,7 @@ static struct tcp_congestion_ops __bpf_ops_tcp_congestion_ops = {
 	.cong_avoid = bpf_tcp_ca_cong_avoid,
 	.set_state = bpf_tcp_ca_set_state,
 	.cwnd_event = bpf_tcp_ca_cwnd_event,
+	.cwnd_event_tx_start = bpf_tcp_ca_cwnd_event_tx_start,
 	.in_ack_event = bpf_tcp_ca_in_ack_event,
 	.pkts_acked = bpf_tcp_ca_pkts_acked,
 	.min_tso_segs = bpf_tcp_ca_min_tso_segs,

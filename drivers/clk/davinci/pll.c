@@ -243,14 +243,14 @@ static struct clk *davinci_pll_div_register(struct device *dev,
 	struct clk *clk;
 	int ret;
 
-	gate = kzalloc(sizeof(*gate), GFP_KERNEL);
+	gate = kzalloc_obj(*gate);
 	if (!gate)
 		return ERR_PTR(-ENOMEM);
 
 	gate->reg = reg;
 	gate->bit_idx = DIV_ENABLE_SHIFT;
 
-	divider = kzalloc(sizeof(*divider), GFP_KERNEL);
+	divider = kzalloc_obj(*divider);
 	if (!divider) {
 		ret = -ENOMEM;
 		goto err_free_gate;
@@ -433,7 +433,7 @@ struct clk *davinci_pll_clk_register(struct device *dev,
 					  info->unlock_mask, 0);
 	}
 
-	pllout = kzalloc(sizeof(*pllout), GFP_KERNEL);
+	pllout = kzalloc_obj(*pllout);
 	if (!pllout) {
 		ret = -ENOMEM;
 		goto err_unregister_prediv;
@@ -489,7 +489,7 @@ struct clk *davinci_pll_clk_register(struct device *dev,
 		parent_name = postdiv_name;
 	}
 
-	pllen = kzalloc(sizeof(*pllen), GFP_KERNEL);
+	pllen = kzalloc_obj(*pllen);
 	if (!pllen) {
 		ret = -ENOMEM;
 		goto err_unregister_postdiv;
@@ -579,7 +579,7 @@ davinci_pll_obsclk_register(struct device *dev,
 	u32 oscdiv;
 	int ret;
 
-	mux = kzalloc(sizeof(*mux), GFP_KERNEL);
+	mux = kzalloc_obj(*mux);
 	if (!mux)
 		return ERR_PTR(-ENOMEM);
 
@@ -587,7 +587,7 @@ davinci_pll_obsclk_register(struct device *dev,
 	mux->table = info->table;
 	mux->mask = info->ocsrc_mask;
 
-	gate = kzalloc(sizeof(*gate), GFP_KERNEL);
+	gate = kzalloc_obj(*gate);
 	if (!gate) {
 		ret = -ENOMEM;
 		goto err_free_mux;
@@ -596,7 +596,7 @@ davinci_pll_obsclk_register(struct device *dev,
 	gate->reg = base + CKEN;
 	gate->bit_idx = CKEN_OBSCLK_SHIFT;
 
-	divider = kzalloc(sizeof(*divider), GFP_KERNEL);
+	divider = kzalloc_obj(*divider);
 	if (!divider) {
 		ret = -ENOMEM;
 		goto err_free_gate;
@@ -690,14 +690,14 @@ davinci_pll_sysclk_register(struct device *dev,
 	else
 		reg = PLLDIV4 + 4 * (info->id - 4);
 
-	gate = kzalloc(sizeof(*gate), GFP_KERNEL);
+	gate = kzalloc_obj(*gate);
 	if (!gate)
 		return ERR_PTR(-ENOMEM);
 
 	gate->reg = base + reg;
 	gate->bit_idx = DIV_ENABLE_SHIFT;
 
-	divider = kzalloc(sizeof(*divider), GFP_KERNEL);
+	divider = kzalloc_obj(*divider);
 	if (!divider) {
 		ret = -ENOMEM;
 		goto err_free_gate;
@@ -763,25 +763,26 @@ int of_davinci_pll_init(struct device *dev, struct device_node *node,
 		return PTR_ERR(clk);
 	}
 
-	child = of_get_child_by_name(node, "pllout");
-	if (of_device_is_available(child))
+	child = of_get_available_child_by_name(node, "pllout");
+	if (child) {
 		of_clk_add_provider(child, of_clk_src_simple_get, clk);
-	of_node_put(child);
+		of_node_put(child);
+	}
 
-	child = of_get_child_by_name(node, "sysclk");
-	if (of_device_is_available(child)) {
+	child = of_get_available_child_by_name(node, "sysclk");
+	if (child) {
 		struct clk_onecell_data *clk_data;
 		struct clk **clks;
 		int n_clks =  max_sysclk_id + 1;
 		int i;
 
-		clk_data = kzalloc(sizeof(*clk_data), GFP_KERNEL);
+		clk_data = kzalloc_obj(*clk_data);
 		if (!clk_data) {
 			of_node_put(child);
 			return -ENOMEM;
 		}
 
-		clks = kmalloc_array(n_clks, sizeof(*clks), GFP_KERNEL);
+		clks = kmalloc_objs(*clks, n_clks);
 		if (!clks) {
 			kfree(clk_data);
 			of_node_put(child);
@@ -803,11 +804,11 @@ int of_davinci_pll_init(struct device *dev, struct device_node *node,
 				clks[(*div_info)->id] = clk;
 		}
 		of_clk_add_provider(child, of_clk_src_onecell_get, clk_data);
+		of_node_put(child);
 	}
-	of_node_put(child);
 
-	child = of_get_child_by_name(node, "auxclk");
-	if (of_device_is_available(child)) {
+	child = of_get_available_child_by_name(node, "auxclk");
+	if (child) {
 		char child_name[MAX_NAME_SIZE];
 
 		snprintf(child_name, MAX_NAME_SIZE, "%s_auxclk", info->name);
@@ -818,11 +819,12 @@ int of_davinci_pll_init(struct device *dev, struct device_node *node,
 				 child_name, PTR_ERR(clk));
 		else
 			of_clk_add_provider(child, of_clk_src_simple_get, clk);
-	}
-	of_node_put(child);
 
-	child = of_get_child_by_name(node, "obsclk");
-	if (of_device_is_available(child)) {
+		of_node_put(child);
+	}
+
+	child = of_get_available_child_by_name(node, "obsclk");
+	if (child) {
 		if (obsclk_info)
 			clk = davinci_pll_obsclk_register(dev, obsclk_info, base);
 		else
@@ -833,32 +835,23 @@ int of_davinci_pll_init(struct device *dev, struct device_node *node,
 				 PTR_ERR(clk));
 		else
 			of_clk_add_provider(child, of_clk_src_simple_get, clk);
+		of_node_put(child);
 	}
-	of_node_put(child);
 
 	return 0;
 }
 
 /* needed in early boot for clocksource/clockevent */
-#ifdef CONFIG_ARCH_DAVINCI_DA850
 CLK_OF_DECLARE(da850_pll0, "ti,da850-pll0", of_da850_pll0_init);
-#endif
 
 static const struct of_device_id davinci_pll_of_match[] = {
-#ifdef CONFIG_ARCH_DAVINCI_DA850
 	{ .compatible = "ti,da850-pll1", .data = of_da850_pll1_init },
-#endif
 	{ }
 };
 
 static const struct platform_device_id davinci_pll_id_table[] = {
-#ifdef CONFIG_ARCH_DAVINCI_DA830
-	{ .name = "da830-pll",   .driver_data = (kernel_ulong_t)da830_pll_init   },
-#endif
-#ifdef CONFIG_ARCH_DAVINCI_DA850
 	{ .name = "da850-pll0",  .driver_data = (kernel_ulong_t)da850_pll0_init  },
 	{ .name = "da850-pll1",  .driver_data = (kernel_ulong_t)da850_pll1_init  },
-#endif
 	{ }
 };
 
@@ -949,7 +942,7 @@ static void davinci_pll_debug_init(struct clk_hw *hw, struct dentry *dentry)
 	struct davinci_pll_clk *pll = to_davinci_pll_clk(hw);
 	struct debugfs_regset32 *regset;
 
-	regset = kzalloc(sizeof(*regset), GFP_KERNEL);
+	regset = kzalloc_obj(*regset);
 	if (!regset)
 		return;
 

@@ -22,12 +22,12 @@
  * the "wakeup" GPIO is not given, power management will be disabled.
  */
 
+#include <linux/bitfield.h>
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/jiffies.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 
@@ -67,10 +67,6 @@
 #define MLX90614_CONST_OFFSET_REM 500000 /* remainder of offset (273.15*50) */
 #define MLX90614_CONST_SCALE 20 /* Scale in milliKelvin (0.02 * 1000) */
 #define MLX90614_CONST_FIR 0x7 /* Fixed value for FIR part of low pass filter */
-
-/* Non-constant mask variant of FIELD_GET() and FIELD_PREP() */
-#define field_get(_mask, _reg)	(((_reg) & (_mask)) >> (ffs(_mask) - 1))
-#define field_prep(_mask, _val)	(((_val) << (ffs(_mask) - 1)) & (_mask))
 
 struct mlx_chip_info {
 	/* EEPROM offsets with 16-bit data, MSB first */
@@ -225,7 +221,6 @@ static void mlx90614_power_put(struct mlx90614_data *data)
 	if (!data->wakeup_gpio)
 		return;
 
-	pm_runtime_mark_last_busy(&data->client->dev);
 	pm_runtime_put_autosuspend(&data->client->dev);
 }
 #else
@@ -703,8 +698,8 @@ static const struct mlx_chip_info mlx90615_chip_info = {
 };
 
 static const struct i2c_device_id mlx90614_id[] = {
-	{ "mlx90614", .driver_data = (kernel_ulong_t)&mlx90614_chip_info },
-	{ "mlx90615", .driver_data = (kernel_ulong_t)&mlx90615_chip_info },
+	{ .name = "mlx90614", .driver_data = (kernel_ulong_t)&mlx90614_chip_info },
+	{ .name = "mlx90615", .driver_data = (kernel_ulong_t)&mlx90615_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mlx90614_id);

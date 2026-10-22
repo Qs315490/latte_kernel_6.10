@@ -36,7 +36,7 @@ metadata available in which case the driver returns ``-ENODATA``.
 
 Not all kfuncs have to be implemented by the device driver; when not
 implemented, the default ones that return ``-EOPNOTSUPP`` will be used
-to indicate the device driver have not implemented this kfunc.
+to indicate the device driver has not implemented this kfunc.
 
 
 Within an XDP frame, the metadata layout (accessed via ``xdp_buff``) is
@@ -119,6 +119,39 @@ Supported Devices
 It is possible to query which kfunc the particular netdev implements via
 netlink. See ``xdp-rx-metadata-features`` attribute set in
 ``Documentation/netlink/specs/netdev.yaml``.
+
+Driver Implementation
+=====================
+
+Certain devices may prepend metadata to received packets. However, as of now,
+``AF_XDP`` lacks the ability to communicate the size of the ``data_meta`` area
+to the consumer. Therefore, it is the responsibility of the driver to copy any
+device-reserved metadata out from the metadata area and ensure that
+``xdp_buff->data_meta`` is pointing to ``xdp_buff->data`` before presenting the
+frame to the XDP program. This is necessary so that, after the XDP program
+adjusts the metadata area, the consumer can reliably retrieve the metadata
+address using ``METADATA_SIZE`` offset.
+
+The following diagram shows how custom metadata is positioned relative to the
+packet data and how pointers are adjusted for metadata access::
+
+              |<-- bpf_xdp_adjust_meta(xdp_buff, -METADATA_SIZE) --|
+  new xdp_buff->data_meta                              old xdp_buff->data_meta
+              |                                                    |
+              |                                            xdp_buff->data
+              |                                                    |
+   +----------+----------------------------------------------------+------+
+   | headroom |                  custom metadata                   | data |
+   +----------+----------------------------------------------------+------+
+              |                                                    |
+              |                                            xdp_desc->addr
+              |<------ xsk_umem__get_data() - METADATA_SIZE -------|
+
+``bpf_xdp_adjust_meta`` ensures that ``METADATA_SIZE`` is aligned to 4 bytes,
+does not exceed 252 bytes, and leaves sufficient space for building the
+xdp_frame. If these conditions are not met, it returns a negative error. In this
+case, the BPF program should not proceed to populate data into the ``data_meta``
+area.
 
 Example
 =======

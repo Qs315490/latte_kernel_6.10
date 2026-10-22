@@ -36,12 +36,10 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
-#include <linux/uaccess.h>
 #include "usb-wwan.h"
 
 #define DRIVER_AUTHOR	"Roelf Diedericks"
@@ -198,7 +196,7 @@ static int ipw_attach(struct usb_serial *serial)
 {
 	struct usb_wwan_intf_private *data;
 
-	data = kzalloc(sizeof(struct usb_wwan_intf_private), GFP_KERNEL);
+	data = kzalloc_obj(struct usb_wwan_intf_private);
 	if (!data)
 		return -ENOMEM;
 

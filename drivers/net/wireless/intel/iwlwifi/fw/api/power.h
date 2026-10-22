@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2012-2014, 2018-2024 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2026 Intel Corporation
  * Copyright (C) 2013-2014 Intel Mobile Communications GmbH
  * Copyright (C) 2015-2017 Intel Deutschland GmbH
  */
 #ifndef __iwl_fw_api_power_h__
 #define __iwl_fw_api_power_h__
+
+#include "nvm-reg.h"
 
 /* Power Management Commands, Responses, Notifications */
 
@@ -54,7 +56,7 @@ struct iwl_ltr_config_cmd_v1 {
  * @flags: See &enum iwl_ltr_config_flags
  * @static_long: static LTR Long register value.
  * @static_short: static LTR Short register value.
- * @ltr_cfg_values: LTR parameters table values (in usec) in folowing order:
+ * @ltr_cfg_values: LTR parameters table values (in usec) in following order:
  *	TX, RX, Short Idle, Long Idle. Used only if %LTR_CFG_FLAG_UPDATE_VALUES
  *	is set.
  * @ltr_short_idle_timeout: LTR Short Idle timeout (in usec). Used only if
@@ -83,12 +85,14 @@ struct iwl_ltr_config_cmd {
  *		'1' PM could sleep over DTIM till listen Interval.
  * @POWER_FLAGS_SNOOZE_ENA_MSK: Enable snoozing only if uAPSD is enabled and all
  *		access categories are both delivery and trigger enabled.
+ *		(Not supported since version 3)
  * @POWER_FLAGS_BT_SCO_ENA: Enable BT SCO coex only if uAPSD and
  *		PBW Snoozing enabled
  * @POWER_FLAGS_ADVANCE_PM_ENA_MSK: Advanced PM (uAPSD) enable mask
  * @POWER_FLAGS_LPRX_ENA_MSK: Low Power RX enable.
  * @POWER_FLAGS_UAPSD_MISBEHAVING_ENA_MSK: AP/GO's uAPSD misbehaving
- *		detection enablement
+ *		detection enablement (Not supported since version 3)
+ * @POWER_FLAGS_ENABLE_SMPS_MSK: SMPS is allowed for this vif
 */
 enum iwl_power_flags {
 	POWER_FLAGS_POWER_SAVE_ENA_MSK		= BIT(0),
@@ -99,6 +103,7 @@ enum iwl_power_flags {
 	POWER_FLAGS_ADVANCE_PM_ENA_MSK		= BIT(9),
 	POWER_FLAGS_LPRX_ENA_MSK		= BIT(11),
 	POWER_FLAGS_UAPSD_MISBEHAVING_ENA_MSK	= BIT(12),
+	POWER_FLAGS_ENABLE_SMPS_MSK		= BIT(14),
 };
 
 #define IWL_POWER_VEC_SIZE 5
@@ -171,9 +176,9 @@ struct iwl_device_power_cmd {
 } __packed;
 
 /**
- * struct iwl_mac_power_cmd - New power command containing uAPSD support
+ * struct iwl_mac_power_cmd_v2 - power command V2 containing uAPSD support
  * MAC_PM_POWER_TABLE = 0xA9 (command, has simple generic response)
- * @id_and_color:	MAC contex identifier, &enum iwl_ctxt_id_and_color
+ * @id_and_color:	MAC context identifier, &enum iwl_ctxt_id_and_color
  * @flags:		Power table command flags from POWER_FLAGS_*
  * @keep_alive_seconds:	Keep alive period in seconds. Default - 25 sec.
  *			Minimum allowed:- 3 * DTIM. Keep alive period must be
@@ -212,11 +217,10 @@ struct iwl_device_power_cmd {
  * @limited_ps_threshold: (unused)
  * @reserved: reserved (padding)
  */
-struct iwl_mac_power_cmd {
+struct iwl_mac_power_cmd_v2 {
 	/* CONTEXT_DESC_API_T_VER_1 */
 	__le32 id_and_color;
 
-	/* CLIENT_PM_POWER_TABLE_S_VER_1 */
 	__le16 flags;
 	__le16 keep_alive_seconds;
 	__le32 rx_data_timeout;
@@ -237,7 +241,44 @@ struct iwl_mac_power_cmd {
 	u8 heavy_rx_thld_percentage;
 	u8 limited_ps_threshold;
 	u8 reserved;
-} __packed;
+} __packed; /* CLIENT_PM_POWER_TABLE_S_VER_1, VER_2 */
+
+/**
+ * struct iwl_mac_power_cmd - power command
+ * MAC_PM_POWER_TABLE = 0xA9 (command, has simple generic response)
+ * @id_and_color:	MAC context identifier, &enum iwl_ctxt_id_and_color
+ * @flags:		Power table command flags from POWER_FLAGS_*
+ * @keep_alive_seconds:	Keep alive period in seconds. Default - 25 sec.
+ *			Minimum allowed:- 3 * DTIM. Keep alive period must be
+ *			set regardless of power scheme or current power state.
+ *			FW use this value also when PM is disabled.
+ * @rx_data_timeout:    Minimum time (usec) from last Rx packet for AM to
+ *			PSM transition - legacy PM
+ * @tx_data_timeout:    Minimum time (usec) from last Tx packet for AM to
+ *			PSM transition - legacy PM
+ * @lprx_rssi_threshold: Signal strength up to which LP RX can be enabled.
+ *			Default: 80dbm
+ * @skip_dtim_periods:	Number of DTIM periods to skip if Skip over DTIM flag
+ *			is set. For example, if it is required to skip over
+ *			one DTIM, this value need to be set to 2 (DTIM periods).
+ * @qndp_tid:		TID client shall use for uAPSD QNDP triggers
+ * @uapsd_ac_flags:	Set trigger-enabled and delivery-enabled indication for
+ *			each corresponding AC.
+ *			Use IEEE80211_WMM_IE_STA_QOSINFO_AC* for correct values.
+ */
+struct iwl_mac_power_cmd {
+	/* CONTEXT_DESC_API_T_VER_1 */
+	__le32 id_and_color;
+
+	__le16 flags;
+	__le16 keep_alive_seconds;
+	__le32 rx_data_timeout;
+	__le32 tx_data_timeout;
+	u8 lprx_rssi_threshold;
+	u8 skip_dtim_periods;
+	u8 qndp_tid;
+	u8 uapsd_ac_flags;
+} __packed; /* CLIENT_PM_POWER_TABLE_S_VER_3 */
 
 /*
  * struct iwl_uapsd_misbehaving_ap_notif - FW sends this notification when
@@ -251,19 +292,6 @@ struct iwl_uapsd_misbehaving_ap_notif {
 	u8 mac_id;
 	u8 reserved[3];
 } __packed;
-
-/**
- * struct iwl_reduce_tx_power_cmd - TX power reduction command
- * REDUCE_TX_POWER_CMD = 0x9f
- * @flags: (reserved for future implementation)
- * @mac_context_id: id of the mac ctx for which we are reducing TX power.
- * @pwr_restriction: TX power restriction in dBms.
- */
-struct iwl_reduce_tx_power_cmd {
-	u8 flags;
-	u8 mac_context_id;
-	__le16 pwr_restriction;
-} __packed; /* TX_REDUCED_POWER_API_S_VER_1 */
 
 enum iwl_dev_tx_power_cmd_mode {
 	IWL_TX_POWER_MODE_SET_LINK = 0,
@@ -279,6 +307,7 @@ enum iwl_dev_tx_power_cmd_mode {
 #define IWL_NUM_CHAIN_LIMITS	2
 #define IWL_NUM_SUB_BANDS_V1	5
 #define IWL_NUM_SUB_BANDS_V2	11
+#define IWL_NUM_SUB_BANDS_V3	12
 
 /**
  * struct iwl_dev_tx_power_common - Common part of the TX power reduction cmd
@@ -339,50 +368,6 @@ struct iwl_dev_tx_power_cmd_v5 {
 } __packed; /* TX_REDUCED_POWER_API_S_VER_5 */
 
 /**
- * struct iwl_dev_tx_power_cmd_v6 - TX power reduction command version 6
- * @per_chain: per chain restrictions
- * @enable_ack_reduction: enable or disable close range ack TX power
- *	reduction.
- * @per_chain_restriction_changed: is per_chain_restriction has changed
- *	from last command. used if set_mode is
- *	IWL_TX_POWER_MODE_SET_SAR_TIMER.
- *	note: if not changed, the command is used for keep alive only.
- * @reserved: reserved (padding)
- * @timer_period: timer in milliseconds. if expires FW will change to default
- *	BIOS values. relevant if setMode is IWL_TX_POWER_MODE_SET_SAR_TIMER
- */
-struct iwl_dev_tx_power_cmd_v6 {
-	__le16 per_chain[IWL_NUM_CHAIN_TABLES_V2][IWL_NUM_CHAIN_LIMITS][IWL_NUM_SUB_BANDS_V2];
-	u8 enable_ack_reduction;
-	u8 per_chain_restriction_changed;
-	u8 reserved[2];
-	__le32 timer_period;
-} __packed; /* TX_REDUCED_POWER_API_S_VER_6 */
-
-/**
- * struct iwl_dev_tx_power_cmd_v7 - TX power reduction command version 7
- * @per_chain: per chain restrictions
- * @enable_ack_reduction: enable or disable close range ack TX power
- *	reduction.
- * @per_chain_restriction_changed: is per_chain_restriction has changed
- *	from last command. used if set_mode is
- *	IWL_TX_POWER_MODE_SET_SAR_TIMER.
- *	note: if not changed, the command is used for keep alive only.
- * @reserved: reserved (padding)
- * @timer_period: timer in milliseconds. if expires FW will change to default
- *	BIOS values. relevant if setMode is IWL_TX_POWER_MODE_SET_SAR_TIMER
- * @flags: reduce power flags.
- */
-struct iwl_dev_tx_power_cmd_v7 {
-	__le16 per_chain[IWL_NUM_CHAIN_TABLES_V2][IWL_NUM_CHAIN_LIMITS][IWL_NUM_SUB_BANDS_V2];
-	u8 enable_ack_reduction;
-	u8 per_chain_restriction_changed;
-	u8 reserved[2];
-	__le32 timer_period;
-	__le32 flags;
-} __packed; /* TX_REDUCED_POWER_API_S_VER_7 */
-
-/**
  * struct iwl_dev_tx_power_cmd_v8 - TX power reduction command version 8
  * @per_chain: per chain restrictions
  * @enable_ack_reduction: enable or disable close range ack TX power
@@ -426,8 +411,6 @@ struct iwl_dev_tx_power_cmd_per_band {
  * @v3: version 3 part of the command
  * @v4: version 4 part of the command
  * @v5: version 5 part of the command
- * @v6: version 6 part of the command
- * @v7: version 7 part of the command
  * @v8: version 8 part of the command
  */
 struct iwl_dev_tx_power_cmd_v3_v8 {
@@ -437,8 +420,6 @@ struct iwl_dev_tx_power_cmd_v3_v8 {
 		struct iwl_dev_tx_power_cmd_v3 v3;
 		struct iwl_dev_tx_power_cmd_v4 v4;
 		struct iwl_dev_tx_power_cmd_v5 v5;
-		struct iwl_dev_tx_power_cmd_v6 v6;
-		struct iwl_dev_tx_power_cmd_v7 v7;
 		struct iwl_dev_tx_power_cmd_v8 v8;
 	};
 };
@@ -483,24 +464,38 @@ struct iwl_dev_tx_power_cmd_v10 {
 	__le32 flags;
 } __packed; /* TX_REDUCED_POWER_API_S_VER_10 */
 
+struct iwl_dev_tx_power_cmd_v11 {
+	__le16 per_chain[IWL_NUM_CHAIN_TABLES_V2][IWL_NUM_CHAIN_LIMITS][IWL_NUM_SUB_BANDS_V3];
+	u8 per_chain_restriction_changed;
+	u8 reserved;
+	__le32 timer_period;
+	__le32 flags;
+} __packed; /* TX_REDUCED_POWER_API_S_VER_11 */
+
 /*
  * struct iwl_dev_tx_power_cmd - TX power reduction command (multiversion)
  * @common: common part of the command
  * @v9: version 9 part of the command
  * @v10: version 10 part of the command
+ * @v11: version 11 part of the command
  */
 struct iwl_dev_tx_power_cmd {
 	struct iwl_dev_tx_power_common common;
 	union {
 		struct iwl_dev_tx_power_cmd_v9 v9;
 		struct iwl_dev_tx_power_cmd_v10 v10;
+		struct iwl_dev_tx_power_cmd_v11 v11;
 	};
-} __packed; /* TX_REDUCED_POWER_API_S_VER_9_VER10 */
+} __packed; /* TX_REDUCED_POWER_API_S_VER_9
+	     * TX_REDUCED_POWER_API_S_VER_10
+	     * TX_REDUCED_POWER_API_S_VER_11
+	     */
 
 #define IWL_NUM_GEO_PROFILES		3
 #define IWL_NUM_GEO_PROFILES_V3		8
 #define IWL_NUM_BANDS_PER_CHAIN_V1	2
 #define IWL_NUM_BANDS_PER_CHAIN_V2	3
+#define IWL_NUM_BANDS_PER_CHAIN_V6	4
 
 /**
  * enum iwl_geo_per_chain_offset_operation - type of operation
@@ -582,12 +577,25 @@ struct iwl_geo_tx_power_profiles_cmd_v5 {
 	__le32 table_revision;
 } __packed; /* PER_CHAIN_LIMIT_OFFSET_CMD_VER_5 */
 
+/**
+ * struct iwl_geo_tx_power_profiles_cmd_v6 - struct for PER_CHAIN_LIMIT_OFFSET_CMD cmd.
+ * @ops: operations, value from &enum iwl_geo_per_chain_offset_operation
+ * @table: offset profile per band.
+ * @bios_hdr: describes the revision and the source of the BIOS
+ */
+struct iwl_geo_tx_power_profiles_cmd_v6 {
+	__le32 ops;
+	struct iwl_per_chain_offset table[IWL_NUM_GEO_PROFILES_V3][IWL_NUM_BANDS_PER_CHAIN_V6];
+	struct iwl_bios_config_hdr bios_hdr;
+} __packed; /* PER_CHAIN_LIMIT_OFFSET_CMD_VER_6 */
+
 union iwl_geo_tx_power_profiles_cmd {
 	struct iwl_geo_tx_power_profiles_cmd_v1 v1;
 	struct iwl_geo_tx_power_profiles_cmd_v2 v2;
 	struct iwl_geo_tx_power_profiles_cmd_v3 v3;
 	struct iwl_geo_tx_power_profiles_cmd_v4 v4;
 	struct iwl_geo_tx_power_profiles_cmd_v5 v5;
+	struct iwl_geo_tx_power_profiles_cmd_v6 v6;
 };
 
 /**
@@ -628,32 +636,45 @@ enum iwl_ppag_flags {
 
 /**
  * union iwl_ppag_table_cmd - union for all versions of PPAG command
- * @v1: version 1
- * @v2: version 2
- * version 3, 4, 5 and 6 are the same structure as v2,
- *	but has a different format of the flags bitmap
+ * @v1: command version 1 structure.
+ * @v5: command version 5 structure.
+ * @v7: command version 7 structure.
+ * @v8: command version 8 structure.
  * @v1.flags: values from &enum iwl_ppag_flags
  * @v1.gain: table of antenna gain values per chain and sub-band
  * @v1.reserved: reserved
- * @v2.flags: values from &enum iwl_ppag_flags
- * @v2.gain: table of antenna gain values per chain and sub-band
- * @v2.reserved: reserved
+ * @v5.flags: values from &enum iwl_ppag_flags
+ * @v5.gain: table of antenna gain values per chain and sub-band
+ * @v7.ppag_config_info: see @struct bios_value_u32
+ * @v7.gain: table of antenna gain values per chain and sub-band
+ * @v7.reserved: reserved
+ * @v8.ppag_config_info: see @struct bios_value_u32
+ * @v8.gain: table of antenna gain values per chain and sub-band
  */
 union iwl_ppag_table_cmd {
 	struct {
 		__le32 flags;
 		s8 gain[IWL_NUM_CHAIN_LIMITS][IWL_NUM_SUB_BANDS_V1];
 		s8 reserved[2];
-	} v1;
+	} __packed v1; /* PER_PLAT_ANTENNA_GAIN_CMD_API_S_VER_1 */
 	struct {
 		__le32 flags;
 		s8 gain[IWL_NUM_CHAIN_LIMITS][IWL_NUM_SUB_BANDS_V2];
 		s8 reserved[2];
-	} v2;
+	} __packed v5; /* PER_PLAT_ANTENNA_GAIN_CMD_API_S_VER_5 */
+	struct {
+		struct bios_value_u32 ppag_config_info;
+		s8 gain[IWL_NUM_CHAIN_LIMITS][IWL_NUM_SUB_BANDS_V2];
+		s8 reserved[2];
+	} __packed v7; /* PER_PLAT_ANTENNA_GAIN_CMD_API_S_VER_7 */
+	struct {
+		struct bios_value_u32 ppag_config_info;
+		s8 gain[IWL_NUM_CHAIN_LIMITS][IWL_NUM_SUB_BANDS_V3];
+	} __packed v8; /* PER_PLAT_ANTENNA_GAIN_CMD_API_S_VER_8 */
 } __packed;
 
-#define IWL_PPAG_CMD_V4_MASK (IWL_PPAG_ETSI_MASK | IWL_PPAG_CHINA_MASK)
-#define IWL_PPAG_CMD_V5_MASK (IWL_PPAG_CMD_V4_MASK | \
+#define IWL_PPAG_CMD_V1_MASK (IWL_PPAG_ETSI_MASK | IWL_PPAG_CHINA_MASK)
+#define IWL_PPAG_CMD_V5_MASK (IWL_PPAG_CMD_V1_MASK | \
 			      IWL_PPAG_ETSI_LPI_UHB_MASK | \
 			      IWL_PPAG_USA_LPI_UHB_MASK)
 
@@ -672,7 +693,7 @@ struct iwl_sar_offset_mapping_cmd {
 } __packed; /*SAR_OFFSET_MAPPING_TABLE_CMD_API_S*/
 
 /**
- * struct iwl_beacon_filter_cmd
+ * struct iwl_beacon_filter_cmd - beacon filter command
  * REPLY_BEACON_FILTERING_CMD = 0xd2 (command)
  * @bf_energy_delta: Used for RSSI filtering, if in 'normal' state. Send beacon
  *      to driver if delta in Energy values calculated for this and last
@@ -690,7 +711,7 @@ struct iwl_sar_offset_mapping_cmd {
  *      Roaming Energy Delta Threshold, otherwise use normal Energy Delta
  *      Threshold. Typical energy threshold is -72dBm.
  * @bf_temp_threshold: This threshold determines the type of temperature
- *	filtering (Slow or Fast) that is selected (Units are in Celsuis):
+ *	filtering (Slow or Fast) that is selected (Units are in Celsius):
  *	If the current temperature is above this threshold - Fast filter
  *	will be used, If the current temperature is below this threshold -
  *	Slow filter will be used.
@@ -698,12 +719,12 @@ struct iwl_sar_offset_mapping_cmd {
  *      calculated for this and the last passed beacon is greater than this
  *      threshold. Zero value means that the temperature change is ignored for
  *      beacon filtering; beacons will not be  forced to be sent to driver
- *      regardless of whether its temerature has been changed.
+ *      regardless of whether its temperature has been changed.
  * @bf_temp_slow_filter: Send Beacon to driver if delta in temperature values
  *      calculated for this and the last passed beacon is greater than this
  *      threshold. Zero value means that the temperature change is ignored for
  *      beacon filtering; beacons will not be forced to be sent to driver
- *      regardless of whether its temerature has been changed.
+ *      regardless of whether its temperature has been changed.
  * @bf_enable_beacon_filter: 1, beacon filtering is enabled; 0, disabled.
  * @bf_debug_flag: beacon filtering debug configuration
  * @bf_escape_timer: Send beacons to to driver if no beacons were passed
@@ -814,11 +835,11 @@ enum iwl_6ghz_ap_type {
 }; /* PHY_AP_TYPE_API_E_VER_1 */
 
 /**
- * struct iwl_txpower_constraints_cmd
+ * struct iwl_txpower_constraints_cmd - TX power constraints command
  * AP_TX_POWER_CONSTRAINTS_CMD
  * Used for VLP/LPI/AFC Access Point power constraints for 6GHz channels
  * @link_id: linkId
- * @ap_type: see &enum iwl_ap_type
+ * @ap_type: see &enum iwl_6ghz_ap_type
  * @eirp_pwr: 8-bit 2s complement signed integer in the range
  *	-64 dBm to 63 dBm with a 0.5 dB step
  *	default &DEFAULT_TPE_TX_POWER (no maximum limit)
@@ -838,4 +859,5 @@ struct iwl_txpower_constraints_cmd {
 	__s8 psd_pwr[IWL_MAX_TX_EIRP_PSD_PWR_MAX_SIZE];
 	u8 reserved[3];
 } __packed; /* PHY_AP_TX_POWER_CONSTRAINTS_CMD_API_S_VER_1 */
+
 #endif /* __iwl_fw_api_power_h__ */

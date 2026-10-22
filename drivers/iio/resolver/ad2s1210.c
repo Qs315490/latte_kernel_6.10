@@ -46,6 +46,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/bitmap.h>
 #include <linux/bits.h>
 #include <linux/cleanup.h>
 #include <linux/clk.h>
@@ -175,15 +176,14 @@ struct ad2s1210_state {
 static int ad2s1210_set_mode(struct ad2s1210_state *st, enum ad2s1210_mode mode)
 {
 	struct gpio_descs *gpios = st->mode_gpios;
-	DECLARE_BITMAP(bitmap, 2);
+	DECLARE_BITMAP(bitmap, 2) = { };
 
 	if (!gpios)
 		return mode == st->fixed_mode ? 0 : -EOPNOTSUPP;
 
-	bitmap[0] = mode;
+	bitmap_write(bitmap, mode, 0, 2);
 
-	return gpiod_set_array_value(gpios->ndescs, gpios->desc, gpios->info,
-				     bitmap);
+	return gpiod_multi_set_value_cansleep(gpios, bitmap);
 }
 
 /*
@@ -896,14 +896,14 @@ static const struct iio_event_spec ad2s1210_monitor_signal_event_spec[] = {
 		.mask_separate = BIT(IIO_EV_INFO_VALUE),
 	},
 	{
-		/* Sine/cosine DOS overrange fault.*/
+		/* Sine/cosine DOS overrange fault. */
 		.type = IIO_EV_TYPE_THRESH,
 		.dir = IIO_EV_DIR_RISING,
-		/* Degredation of signal overrange threshold. */
+		/* Degradation of signal overrange threshold. */
 		.mask_separate = BIT(IIO_EV_INFO_VALUE),
 	},
 	{
-		/* Sine/cosine DOS mismatch fault.*/
+		/* Sine/cosine DOS mismatch fault. */
 		.type = IIO_EV_TYPE_MAG,
 		.dir = IIO_EV_DIR_RISING,
 		.mask_separate = BIT(IIO_EV_INFO_VALUE),
@@ -1132,23 +1132,23 @@ static int ad2s1210_read_label(struct iio_dev *indio_dev,
 {
 	if (chan->type == IIO_ANGL) {
 		if (chan->channel == 0)
-			return sprintf(label, "position\n");
+			return sysfs_emit(label, "position\n");
 		if (chan->channel == 1)
-			return sprintf(label, "tracking error\n");
+			return sysfs_emit(label, "tracking error\n");
 	}
 	if (chan->type == IIO_ANGL_VEL)
-		return sprintf(label, "velocity\n");
+		return sysfs_emit(label, "velocity\n");
 	if (chan->type == IIO_PHASE)
-		return sprintf(label, "synthetic reference\n");
+		return sysfs_emit(label, "synthetic reference\n");
 	if (chan->type == IIO_ALTVOLTAGE) {
 		if (chan->output)
-			return sprintf(label, "excitation\n");
+			return sysfs_emit(label, "excitation\n");
 		if (chan->channel == 0)
-			return sprintf(label, "monitor signal\n");
+			return sysfs_emit(label, "monitor signal\n");
 		if (chan->channel == 1)
-			return sprintf(label, "cosine\n");
+			return sysfs_emit(label, "cosine\n");
 		if (chan->channel == 2)
-			return sprintf(label, "sine\n");
+			return sysfs_emit(label, "sine\n");
 	}
 
 	return -EINVAL;
@@ -1239,24 +1239,24 @@ static int ad2s1210_read_event_label(struct iio_dev *indio_dev,
 				     char *label)
 {
 	if (chan->type == IIO_ANGL)
-		return sprintf(label, "LOT\n");
+		return sysfs_emit(label, "LOT\n");
 	if (chan->type == IIO_ANGL_VEL)
-		return sprintf(label, "max tracking rate\n");
+		return sysfs_emit(label, "max tracking rate\n");
 	if (chan->type == IIO_PHASE)
-		return sprintf(label, "phase lock\n");
+		return sysfs_emit(label, "phase lock\n");
 	if (chan->type == IIO_ALTVOLTAGE) {
 		if (chan->channel == 0) {
 			if (type == IIO_EV_TYPE_THRESH &&
 			    dir == IIO_EV_DIR_FALLING)
-				return sprintf(label, "LOS\n");
+				return sysfs_emit(label, "LOS\n");
 			if (type == IIO_EV_TYPE_THRESH &&
 			    dir == IIO_EV_DIR_RISING)
-				return sprintf(label, "DOS overrange\n");
+				return sysfs_emit(label, "DOS overrange\n");
 			if (type == IIO_EV_TYPE_MAG)
-				return sprintf(label, "DOS mismatch\n");
+				return sysfs_emit(label, "DOS mismatch\n");
 		}
 		if (chan->channel == 1 || chan->channel == 2)
-			return sprintf(label, "clipped\n");
+			return sysfs_emit(label, "clipped\n");
 	}
 
 	return -EINVAL;
@@ -1334,13 +1334,14 @@ static irqreturn_t ad2s1210_trigger_handler(int irq, void *p)
 
 		ret = regmap_read(st->regmap, AD2S1210_REG_FAULT, &reg_val);
 		if (ret < 0)
-			return ret;
+			goto error_ret;
 
 		st->sample.fault = reg_val;
 	}
 
 	ad2s1210_push_events(indio_dev, st->sample.fault, pf->timestamp);
-	iio_push_to_buffers_with_timestamp(indio_dev, &st->scan, pf->timestamp);
+	iio_push_to_buffers_with_ts(indio_dev, &st->scan, sizeof(st->scan),
+				    pf->timestamp);
 
 error_ret:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -1427,7 +1428,7 @@ static int ad2s1210_setup_gpios(struct ad2s1210_state *st)
 	struct device *dev = &st->sdev->dev;
 	struct gpio_descs *resolution_gpios;
 	struct gpio_desc *reset_gpio;
-	DECLARE_BITMAP(bitmap, 2);
+	DECLARE_BITMAP(bitmap, 2) = { };
 	int ret;
 
 	/* should not be sampling on startup */
@@ -1471,12 +1472,9 @@ static int ad2s1210_setup_gpios(struct ad2s1210_state *st)
 			return dev_err_probe(dev, -EINVAL,
 				      "requires exactly 2 resolution-gpios\n");
 
-		bitmap[0] = st->resolution;
+		bitmap_write(bitmap, st->resolution, 0, 2);
 
-		ret = gpiod_set_array_value(resolution_gpios->ndescs,
-					    resolution_gpios->desc,
-					    resolution_gpios->info,
-					    bitmap);
+		ret = gpiod_multi_set_value_cansleep(resolution_gpios, bitmap);
 		if (ret < 0)
 			return dev_err_probe(dev, ret,
 					     "failed to set resolution gpios\n");
@@ -1600,7 +1598,7 @@ MODULE_DEVICE_TABLE(of, ad2s1210_of_match);
 
 static const struct spi_device_id ad2s1210_id[] = {
 	{ "ad2s1210" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad2s1210_id);
 

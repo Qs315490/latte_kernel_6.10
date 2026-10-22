@@ -121,6 +121,10 @@ static int aq_a2_fw_init(struct aq_hw_s *self)
 	u32 val;
 	int err;
 
+	err = hw_atl2_utils_get_filter_caps(self);
+	if (err)
+		return err;
+
 	hw_atl2_shared_buffer_get(self, link_control, link_control);
 	link_control.mode = AQ_HOST_MODE_ACTIVE;
 	hw_atl2_shared_buffer_write(self, link_control, link_control);
@@ -462,6 +466,44 @@ static int aq_a2_fw_get_mac_temp(struct aq_hw_s *self, int *temp)
 	return aq_a2_fw_get_phy_temp(self, temp);
 }
 
+static int aq_a2_fw_set_wol_params(struct aq_hw_s *self, const u8 *mac, u32 wol)
+{
+	struct mac_address_aligned_s mac_address;
+	struct link_control_s link_control;
+	struct wake_on_lan_s wake_on_lan;
+
+	memcpy(mac_address.aligned.mac_address, mac, ETH_ALEN);
+	hw_atl2_shared_buffer_write(self, mac_address, mac_address);
+
+	memset(&wake_on_lan, 0, sizeof(wake_on_lan));
+
+	if (wol & WAKE_MAGIC)
+		wake_on_lan.wake_on_magic_packet = 1U;
+
+	if (wol & (WAKE_PHY | AQ_FW_WAKE_ON_LINK_RTPM))
+		wake_on_lan.wake_on_link_up = 1U;
+
+	hw_atl2_shared_buffer_write(self, sleep_proxy, wake_on_lan);
+
+	hw_atl2_shared_buffer_get(self, link_control, link_control);
+	link_control.mode = AQ_HOST_MODE_SLEEP_PROXY;
+	hw_atl2_shared_buffer_write(self, link_control, link_control);
+
+	return hw_atl2_shared_buffer_finish_ack(self);
+}
+
+static int aq_a2_fw_set_power(struct aq_hw_s *self, unsigned int power_state,
+			      const u8 *mac)
+{
+	u32 wol = self->aq_nic_cfg->wol;
+	int err = 0;
+
+	if (wol)
+		err = aq_a2_fw_set_wol_params(self, mac, wol);
+
+	return err;
+}
+
 static int aq_a2_fw_set_eee_rate(struct aq_hw_s *self, u32 speed)
 {
 	struct link_options_s link_options;
@@ -568,18 +610,77 @@ u32 hw_atl2_utils_get_fw_version(struct aq_hw_s *self)
 	       version.bundle.build;
 }
 
-int hw_atl2_utils_get_action_resolve_table_caps(struct aq_hw_s *self,
-						u8 *base_index, u8 *count)
+int hw_atl2_utils_get_filter_caps(struct aq_hw_s *self)
 {
+	struct hw_atl2_priv *priv = self->priv;
 	struct filter_caps_s filter_caps;
+	u32 tag_top;
 	int err;
 
 	err = hw_atl2_shared_buffer_read_safe(self, filter_caps, &filter_caps);
 	if (err)
 		return err;
 
-	*base_index = filter_caps.rslv_tbl_base_index;
-	*count = filter_caps.rslv_tbl_count;
+	priv->art_base_index = filter_caps.rslv_tbl_base_index * 8;
+	priv->art_count = filter_caps.rslv_tbl_count * 8;
+	if (priv->art_count == 0)
+		priv->art_count = HW_ATL2_ART_TOTAL_ENTRIES;
+	priv->l2_filters_base_index = filter_caps.l2_filters_base_index;
+	if (priv->l2_filters_base_index >= HW_ATL2_MAC_MAX)
+		priv->l2_filters_base_index = HW_ATL2_MAC_UC;
+	priv->l2_filter_count = filter_caps.l2_filter_count;
+	priv->etype_filter_base_index = filter_caps.ethertype_filter_base_index;
+	priv->etype_filter_count = filter_caps.ethertype_filter_count;
+	priv->etype_filter_tag_top =
+		(priv->etype_filter_count >= HW_ATL2_RPF_ETYPE_TAGS) ?
+		 (HW_ATL2_RPF_ETYPE_TAGS) : (HW_ATL2_RPF_ETYPE_TAGS >> 1);
+	priv->vlan_filter_base_index = filter_caps.vlan_filter_base_index;
+	/* 0 - no tag, 1 - reserved for vlan-filter-offload filters */
+	tag_top =
+		  (filter_caps.vlan_filter_count == HW_ATL2_RPF_VLAN_FILTERS) ?
+		  (HW_ATL2_RPF_VLAN_FILTERS - 2) :
+		  (HW_ATL2_RPF_VLAN_FILTERS / 2 - 2);
+
+	if (filter_caps.vlan_filter_count > 2) {
+		priv->vlan_filter_count = min_t(u32,
+						filter_caps.vlan_filter_count - 2,
+						tag_top);
+	} else {
+		pr_debug("atlantic: FW vlan_filter_count=%u <= 2, no usable VLAN filters\n",
+			 filter_caps.vlan_filter_count);
+		priv->vlan_filter_count = 0;
+	}
+
+	priv->l3_v4_filter_base_index = filter_caps.l3_ip4_filter_base_index;
+	if (priv->l3_v4_filter_base_index >= HW_ATL2_RPF_L3V4_FILTERS) {
+		priv->l3_v4_filter_base_index = 0;
+		priv->l3_v4_filter_count = 0;
+	} else {
+		priv->l3_v4_filter_count = min_t(u32,
+						 filter_caps.l3_ip4_filter_count,
+						 HW_ATL2_RPF_L3V4_FILTERS - 1);
+	}
+
+	priv->l3_v6_filter_base_index = filter_caps.l3_ip6_filter_base_index;
+	if (priv->l3_v6_filter_base_index >= HW_ATL2_RPF_L3V6_FILTERS) {
+		priv->l3_v6_filter_base_index = 0;
+		priv->l3_v6_filter_count = 0;
+	} else {
+		priv->l3_v6_filter_count = min_t(u32,
+						 filter_caps.l3_ip6_filter_count,
+						 HW_ATL2_RPF_L3V6_FILTERS - 1);
+	}
+
+	priv->l4_filter_base_index = filter_caps.l4_filter_base_index;
+	if (priv->l4_filter_base_index >= HW_ATL2_RPF_L4_FILTERS) {
+		priv->l4_filter_base_index = 0;
+		priv->l4_filter_count = 0;
+	} else {
+		priv->l4_filter_count = min_t(u32,
+					      filter_caps.l4_filter_count,
+					      HW_ATL2_RPF_L4_FILTERS - 1);
+	}
+
 	return 0;
 }
 
@@ -605,6 +706,7 @@ const struct aq_fw_ops aq_a2_fw_ops = {
 	.set_state          = aq_a2_fw_set_state,
 	.update_link_status = aq_a2_fw_update_link_status,
 	.update_stats       = aq_a2_fw_update_stats,
+	.set_power          = aq_a2_fw_set_power,
 	.get_mac_temp       = aq_a2_fw_get_mac_temp,
 	.get_phy_temp       = aq_a2_fw_get_phy_temp,
 	.set_eee_rate       = aq_a2_fw_set_eee_rate,

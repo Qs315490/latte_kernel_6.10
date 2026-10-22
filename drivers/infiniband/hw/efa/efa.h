@@ -107,6 +107,7 @@ struct efa_cq {
 	u16 cq_idx;
 	/* NULL when no interrupts requested */
 	struct efa_eq *eq;
+	struct ib_umem *umem;
 };
 
 struct efa_qp {
@@ -147,6 +148,7 @@ int efa_query_device(struct ib_device *ibdev,
 		     struct ib_udata *udata);
 int efa_query_port(struct ib_device *ibdev, u32 port,
 		   struct ib_port_attr *props);
+int efa_query_port_speed(struct ib_device *ibdev, u32 port_num, u64 *speed);
 int efa_query_qp(struct ib_qp *ibqp, struct ib_qp_attr *qp_attr,
 		 int qp_attr_mask,
 		 struct ib_qp_init_attr *qp_init_attr);
@@ -160,14 +162,16 @@ int efa_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata);
 int efa_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *init_attr,
 		  struct ib_udata *udata);
 int efa_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata);
-int efa_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
-		  struct uverbs_attr_bundle *attrs);
+int efa_create_user_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+		       struct uverbs_attr_bundle *attrs);
 struct ib_mr *efa_reg_mr(struct ib_pd *ibpd, u64 start, u64 length,
 			 u64 virt_addr, int access_flags,
+			 struct ib_dmah *dmah,
 			 struct ib_udata *udata);
 struct ib_mr *efa_reg_user_mr_dmabuf(struct ib_pd *ibpd, u64 start,
 				     u64 length, u64 virt_addr,
 				     int fd, int access_flags,
+				     struct ib_dmah *dmah,
 				     struct uverbs_attr_bundle *attrs);
 int efa_dereg_mr(struct ib_mr *ibmr, struct ib_udata *udata);
 int efa_get_port_immutable(struct ib_device *ibdev, u32 port_num,

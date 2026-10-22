@@ -7,6 +7,7 @@
 
 #define pr_fmt(fmt) "SCMI Notifications BASE - " fmt
 
+#include <linux/math.h>
 #include <linux/module.h>
 #include <linux/scmi_protocol.h>
 
@@ -68,7 +69,7 @@ static int scmi_base_attributes_get(const struct scmi_protocol_handle *ph)
 	int ret;
 	struct scmi_xfer *t;
 	struct scmi_msg_resp_base_attributes *attr_info;
-	struct scmi_revision_info *rev = ph->get_priv(ph);
+	struct scmi_base_info *rev = ph->get_priv(ph);
 
 	ret = ph->xops->xfer_get_init(ph, PROTOCOL_ATTRIBUTES,
 				      0, sizeof(*attr_info), &t);
@@ -102,7 +103,7 @@ scmi_base_vendor_id_get(const struct scmi_protocol_handle *ph, bool sub_vendor)
 	int ret, size;
 	char *vendor_id;
 	struct scmi_xfer *t;
-	struct scmi_revision_info *rev = ph->get_priv(ph);
+	struct scmi_base_info *rev = ph->get_priv(ph);
 
 	if (sub_vendor) {
 		cmd = BASE_DISCOVER_SUB_VENDOR;
@@ -142,7 +143,7 @@ scmi_base_implementation_version_get(const struct scmi_protocol_handle *ph)
 	int ret;
 	__le32 *impl_ver;
 	struct scmi_xfer *t;
-	struct scmi_revision_info *rev = ph->get_priv(ph);
+	struct scmi_base_info *rev = ph->get_priv(ph);
 
 	ret = ph->xops->xfer_get_init(ph, BASE_DISCOVER_IMPLEMENT_VERSION,
 				      0, sizeof(*impl_ver), &t);
@@ -179,7 +180,7 @@ scmi_base_implementation_list_get(const struct scmi_protocol_handle *ph,
 	__le32 *num_skip, *num_ret;
 	u32 tot_num_ret = 0, loop_num_ret;
 	struct device *dev = ph->dev;
-	struct scmi_revision_info *rev = ph->get_priv(ph);
+	struct scmi_base_info *rev = ph->get_priv(ph);
 
 	ret = ph->xops->xfer_get_init(ph, BASE_DISCOVER_LIST_PROTOCOLS,
 				      sizeof(*num_skip), 0, &t);
@@ -219,8 +220,7 @@ scmi_base_implementation_list_get(const struct scmi_protocol_handle *ph,
 		}
 
 		real_list_sz = t->rx.len - sizeof(u32);
-		calc_list_sz = (1 + (loop_num_ret - 1) / sizeof(u32)) *
-				sizeof(u32);
+		calc_list_sz = round_up(loop_num_ret, sizeof(u32));
 		if (calc_list_sz != real_list_sz) {
 			dev_warn(dev,
 				 "Malformed reply - real_sz:%zd  calc_sz:%u  (loop_num_ret:%d)\n",
@@ -325,6 +325,8 @@ static void *scmi_base_fill_custom_report(const struct scmi_protocol_handle *ph,
 					  void *report, u32 *src_id)
 {
 	int i;
+	u32 error_status;
+	size_t expected_sz;
 	const struct scmi_base_error_notify_payld *p = payld;
 	struct scmi_base_error_report *r = report;
 
@@ -338,10 +340,19 @@ static void *scmi_base_fill_custom_report(const struct scmi_protocol_handle *ph,
 	if (evt_id != SCMI_EVENT_BASE_ERROR_EVENT || sizeof(*p) < payld_sz)
 		return NULL;
 
+	expected_sz = offsetof(typeof(*p), msg_reports);
+	if (payld_sz < expected_sz)
+		return NULL;
+
 	r->timestamp = timestamp;
 	r->agent_id = le32_to_cpu(p->agent_id);
-	r->fatal = IS_FATAL_ERROR(le32_to_cpu(p->error_status));
-	r->cmd_count = ERROR_CMD_COUNT(le32_to_cpu(p->error_status));
+	error_status = le32_to_cpu(p->error_status);
+	r->fatal = IS_FATAL_ERROR(error_status);
+	r->cmd_count = ERROR_CMD_COUNT(error_status);
+	expected_sz += r->cmd_count * sizeof(p->msg_reports[0]);
+	if (payld_sz < expected_sz)
+		return NULL;
+
 	for (i = 0; i < r->cmd_count; i++)
 		r->reports[i] = le64_to_cpu(p->msg_reports[i]);
 	*src_id = 0;
@@ -375,18 +386,13 @@ static int scmi_base_protocol_init(const struct scmi_protocol_handle *ph)
 {
 	int id, ret;
 	u8 *prot_imp;
-	u32 version;
 	char name[SCMI_SHORT_NAME_MAX_SIZE];
 	struct device *dev = ph->dev;
-	struct scmi_revision_info *rev = scmi_revision_area_get(ph);
+	struct scmi_base_info *rev = scmi_revision_area_get(ph);
 
-	ret = ph->xops->version_get(ph, &version);
-	if (ret)
-		return ret;
-
-	rev->major_ver = PROTOCOL_REV_MAJOR(version);
-	rev->minor_ver = PROTOCOL_REV_MINOR(version);
-	ph->set_priv(ph, rev, version);
+	rev->major_ver = PROTOCOL_REV_MAJOR(ph->version);
+	rev->minor_ver = PROTOCOL_REV_MINOR(ph->version);
+	ph->set_priv(ph, rev);
 
 	ret = scmi_base_attributes_get(ph);
 	if (ret)

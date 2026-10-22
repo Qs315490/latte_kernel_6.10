@@ -28,13 +28,11 @@ source "drivers/staging/media/imx/Kconfig"
 
 source "drivers/staging/media/ipu3/Kconfig"
 
+source "drivers/staging/media/ipu7/Kconfig"
+
 source "drivers/staging/media/max96712/Kconfig"
 
 source "drivers/staging/media/meson/vdec/Kconfig"
-
-source "drivers/staging/media/rkvdec/Kconfig"
-
-source "drivers/staging/media/starfive/Kconfig"
 
 source "drivers/staging/media/sunxi/Kconfig"
 
@@ -51,9 +49,5 @@ menuconfig STAGING_MEDIA_DEPRECATED
 	  then contact the linux-media@vger.kernel.org mailing list.
 
 	  If in doubt, say N here.
-
-if STAGING_MEDIA_DEPRECATED
-source "drivers/staging/media/deprecated/atmel/Kconfig"
-endif
 
 endif

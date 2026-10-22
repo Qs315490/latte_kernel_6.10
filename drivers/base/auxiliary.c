@@ -156,22 +156,33 @@
  *		},
  *		.ops = my_custom_ops,
  *	};
+ *
+ * Please note that such custom ops approach is valid, but it is hard to implement
+ * it right without global locks per-device to protect from auxiliary_drv removal
+ * during call to that ops. In addition, this implementation lacks proper module
+ * dependency, which causes to load/unload races between auxiliary parent and devices
+ * modules.
+ *
+ * The most easiest way to provide these ops reliably without needing to
+ * have a lock is to EXPORT_SYMBOL*() them and rely on already existing
+ * modules infrastructure for validity and correct dependencies chains.
  */
 
 static const struct auxiliary_device_id *auxiliary_match_id(const struct auxiliary_device_id *id,
 							    const struct auxiliary_device *auxdev)
 {
+	const char *auxdev_name = dev_name(&auxdev->dev);
+	const char *p = strrchr(auxdev_name, '.');
+	int match_size;
+
+	if (!p)
+		return NULL;
+	match_size = p - auxdev_name;
+
 	for (; id->name[0]; id++) {
-		const char *p = strrchr(dev_name(&auxdev->dev), '.');
-		int match_size;
-
-		if (!p)
-			continue;
-		match_size = p - dev_name(&auxdev->dev);
-
 		/* use dev_name(&auxdev->dev) prefix before last '.' char to match to */
 		if (strlen(id->name) == match_size &&
-		    !strncmp(dev_name(&auxdev->dev), id->name, match_size))
+		    !strncmp(auxdev_name, id->name, match_size))
 			return id;
 	}
 	return NULL;
@@ -196,28 +207,20 @@ static int auxiliary_uevent(const struct device *dev, struct kobj_uevent_env *en
 			      (int)(p - name), name);
 }
 
-static const struct dev_pm_ops auxiliary_dev_pm_ops = {
-	SET_RUNTIME_PM_OPS(pm_generic_runtime_suspend, pm_generic_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_generic_suspend, pm_generic_resume)
-};
-
 static int auxiliary_bus_probe(struct device *dev)
 {
 	const struct auxiliary_driver *auxdrv = to_auxiliary_drv(dev->driver);
 	struct auxiliary_device *auxdev = to_auxiliary_dev(dev);
 	int ret;
 
-	ret = dev_pm_domain_attach(dev, true);
+	ret = dev_pm_domain_attach(dev, PD_FLAG_ATTACH_POWER_ON |
+					PD_FLAG_DETACH_POWER_OFF);
 	if (ret) {
 		dev_warn(dev, "Failed to attach to PM Domain : %d\n", ret);
 		return ret;
 	}
 
-	ret = auxdrv->probe(auxdev, auxiliary_match_id(auxdrv->id_table, auxdev));
-	if (ret)
-		dev_pm_domain_detach(dev, true);
-
-	return ret;
+	return auxdrv->probe(auxdev, auxiliary_match_id(auxdrv->id_table, auxdev));
 }
 
 static void auxiliary_bus_remove(struct device *dev)
@@ -227,7 +230,6 @@ static void auxiliary_bus_remove(struct device *dev)
 
 	if (auxdrv->remove)
 		auxdrv->remove(auxdev);
-	dev_pm_domain_detach(dev, true);
 }
 
 static void auxiliary_bus_shutdown(struct device *dev)
@@ -251,7 +253,6 @@ static const struct bus_type auxiliary_bus_type = {
 	.shutdown = auxiliary_bus_shutdown,
 	.match = auxiliary_match,
 	.uevent = auxiliary_uevent,
-	.pm = &auxiliary_dev_pm_ops,
 };
 
 /**
@@ -384,6 +385,126 @@ void auxiliary_driver_unregister(struct auxiliary_driver *auxdrv)
 	kfree(auxdrv->driver.name);
 }
 EXPORT_SYMBOL_GPL(auxiliary_driver_unregister);
+
+static void auxiliary_device_release(struct device *dev)
+{
+	struct auxiliary_device *auxdev = to_auxiliary_dev(dev);
+
+	of_node_put(dev->of_node);
+	kfree(auxdev);
+}
+
+/**
+ * auxiliary_device_create - create a device on the auxiliary bus
+ * @dev: parent device
+ * @modname: module name used to create the auxiliary driver name.
+ * @devname: auxiliary bus device name
+ * @platform_data: auxiliary bus device platform data
+ * @id: auxiliary bus device id
+ *
+ * Helper to create an auxiliary bus device.
+ * The device created matches driver 'modname.devname' on the auxiliary bus.
+ */
+struct auxiliary_device *auxiliary_device_create(struct device *dev,
+						 const char *modname,
+						 const char *devname,
+						 void *platform_data,
+						 int id)
+{
+	struct auxiliary_device *auxdev;
+	int ret;
+
+	auxdev = kzalloc_obj(*auxdev);
+	if (!auxdev)
+		return NULL;
+
+	auxdev->id = id;
+	auxdev->name = devname;
+	auxdev->dev.parent = dev;
+	auxdev->dev.platform_data = platform_data;
+	auxdev->dev.release = auxiliary_device_release;
+	device_set_of_node_from_dev(&auxdev->dev, dev);
+
+	ret = auxiliary_device_init(auxdev);
+	if (ret) {
+		of_node_put(auxdev->dev.of_node);
+		kfree(auxdev);
+		return NULL;
+	}
+
+	ret = __auxiliary_device_add(auxdev, modname);
+	if (ret) {
+		/*
+		 * It may look odd but auxdev should not be freed here.
+		 * auxiliary_device_uninit() calls device_put() which call
+		 * the device release function, freeing auxdev.
+		 */
+		auxiliary_device_uninit(auxdev);
+		return NULL;
+	}
+
+	return auxdev;
+}
+EXPORT_SYMBOL_GPL(auxiliary_device_create);
+
+/**
+ * auxiliary_device_destroy - remove an auxiliary device
+ * @auxdev: pointer to the auxdev to be removed
+ *
+ * Helper to remove an auxiliary device created with
+ * auxiliary_device_create()
+ */
+void auxiliary_device_destroy(void *auxdev)
+{
+	struct auxiliary_device *_auxdev = auxdev;
+
+	auxiliary_device_delete(_auxdev);
+	auxiliary_device_uninit(_auxdev);
+}
+EXPORT_SYMBOL_GPL(auxiliary_device_destroy);
+
+/**
+ * __devm_auxiliary_device_create - create a managed device on the auxiliary bus
+ * @dev: parent device
+ * @modname: module name used to create the auxiliary driver name.
+ * @devname: auxiliary bus device name
+ * @platform_data: auxiliary bus device platform data
+ * @id: auxiliary bus device id
+ *
+ * Device managed helper to create an auxiliary bus device.
+ * The device created matches driver 'modname.devname' on the auxiliary bus.
+ */
+struct auxiliary_device *__devm_auxiliary_device_create(struct device *dev,
+							const char *modname,
+							const char *devname,
+							void *platform_data,
+							int id)
+{
+	struct auxiliary_device *auxdev;
+	int ret;
+
+	auxdev = auxiliary_device_create(dev, modname, devname, platform_data, id);
+	if (!auxdev)
+		return NULL;
+
+	ret = devm_add_action_or_reset(dev, auxiliary_device_destroy,
+				       auxdev);
+	if (ret)
+		return NULL;
+
+	return auxdev;
+}
+EXPORT_SYMBOL_GPL(__devm_auxiliary_device_create);
+
+/**
+ * dev_is_auxiliary - check if the device is an auxiliary one
+ * @dev: device to check
+ */
+bool dev_is_auxiliary(struct device *dev)
+{
+	return dev->bus == &auxiliary_bus_type;
+}
+EXPORT_SYMBOL_GPL(dev_is_auxiliary);
 
 void __init auxiliary_bus_init(void)
 {

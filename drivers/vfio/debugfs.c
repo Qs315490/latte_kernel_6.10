@@ -58,6 +58,23 @@ static int vfio_device_state_read(struct seq_file *seq, void *data)
 	return 0;
 }
 
+static int vfio_device_features_read(struct seq_file *seq, void *data)
+{
+	struct device *vf_dev = seq->private;
+	struct vfio_device *vdev = container_of(vf_dev, struct vfio_device, device);
+
+	if (vdev->migration_flags & VFIO_MIGRATION_STOP_COPY)
+		seq_puts(seq, "stop-copy\n");
+	if (vdev->migration_flags & VFIO_MIGRATION_P2P)
+		seq_puts(seq, "p2p\n");
+	if (vdev->migration_flags & VFIO_MIGRATION_PRE_COPY)
+		seq_puts(seq, "pre-copy\n");
+	if (vdev->log_ops)
+		seq_puts(seq, "dirty-tracking\n");
+
+	return 0;
+}
+
 void vfio_device_debugfs_init(struct vfio_device *vdev)
 {
 	struct device *dev = &vdev->device;
@@ -72,12 +89,15 @@ void vfio_device_debugfs_init(struct vfio_device *vdev)
 							vdev->debug_root);
 		debugfs_create_devm_seqfile(dev, "state", vfio_dev_migration,
 					    vfio_device_state_read);
+		debugfs_create_devm_seqfile(dev, "features", vfio_dev_migration,
+					    vfio_device_features_read);
 	}
 }
 
 void vfio_device_debugfs_exit(struct vfio_device *vdev)
 {
 	debugfs_remove_recursive(vdev->debug_root);
+	vdev->debug_root = NULL;
 }
 
 void vfio_debugfs_create_root(void)

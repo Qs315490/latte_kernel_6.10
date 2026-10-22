@@ -10,7 +10,6 @@
 #include <linux/i2c.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/interrupt.h>
 #include <linux/regulator/consumer.h>
 #include <linux/iio/iio.h>
@@ -492,7 +491,7 @@ static int cm32181_probe(struct i2c_client *client)
 
 	ret = devm_iio_device_register(dev, indio_dev);
 	if (ret) {
-		dev_err(dev, "%s: regist device failed\n", __func__);
+		dev_err(dev, "%s: register device failed\n", __func__);
 		return ret;
 	}
 

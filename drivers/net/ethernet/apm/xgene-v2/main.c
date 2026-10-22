@@ -9,8 +9,6 @@
 
 #include "main.h"
 
-static const struct acpi_device_id xge_acpi_match[];
-
 static int xge_get_resources(struct xge_pdata *pdata)
 {
 	struct platform_device *pdev;
@@ -407,7 +405,7 @@ static struct xge_desc_ring *xge_create_desc_ring(struct net_device *ndev)
 	struct xge_desc_ring *ring;
 	u16 size;
 
-	ring = kzalloc(sizeof(*ring), GFP_KERNEL);
+	ring = kzalloc_obj(*ring);
 	if (!ring)
 		return NULL;
 
@@ -419,8 +417,7 @@ static struct xge_desc_ring *xge_create_desc_ring(struct net_device *ndev)
 	if (!ring->desc_addr)
 		goto err;
 
-	ring->pkt_info = kcalloc(XGENE_ENET_NUM_DESC, sizeof(*ring->pkt_info),
-				 GFP_KERNEL);
+	ring->pkt_info = kzalloc_objs(*ring->pkt_info, XGENE_ENET_NUM_DESC);
 	if (!ring->pkt_info)
 		goto err;
 
@@ -731,7 +728,7 @@ MODULE_DEVICE_TABLE(acpi, xge_acpi_match);
 static struct platform_driver xge_driver = {
 	.driver = {
 		   .name = "xgene-enet-v2",
-		   .acpi_match_table = ACPI_PTR(xge_acpi_match),
+		   .acpi_match_table = xge_acpi_match,
 	},
 	.probe = xge_probe,
 	.remove = xge_remove,

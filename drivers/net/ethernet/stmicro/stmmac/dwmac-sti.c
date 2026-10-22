@@ -23,12 +23,7 @@
 
 #define DWMAC_50MHZ	50000000
 
-#define IS_PHY_IF_MODE_RGMII(iface)	(iface == PHY_INTERFACE_MODE_RGMII || \
-			iface == PHY_INTERFACE_MODE_RGMII_ID || \
-			iface == PHY_INTERFACE_MODE_RGMII_RXID || \
-			iface == PHY_INTERFACE_MODE_RGMII_TXID)
-
-#define IS_PHY_IF_MODE_GBIT(iface)	(IS_PHY_IF_MODE_RGMII(iface) || \
+#define IS_PHY_IF_MODE_GBIT(iface)	(phy_interface_mode_is_rgmii(iface) || \
 					 iface == PHY_INTERFACE_MODE_GMII)
 
 /* STiH4xx register definitions (STiH407/STiH410 families)
@@ -82,13 +77,9 @@
  *	001-RGMII
  *	010-SGMII
  *	100-RMII
+ * These are the DW MAC phy_intf_sel values.
  */
 #define MII_PHY_SEL_MASK	GENMASK(4, 2)
-#define ETH_PHY_SEL_RMII	BIT(4)
-#define ETH_PHY_SEL_SGMII	BIT(3)
-#define ETH_PHY_SEL_RGMII	BIT(2)
-#define ETH_PHY_SEL_GMII	0x0
-#define ETH_PHY_SEL_MII		0x0
 
 struct sti_dwmac {
 	phy_interface_t interface;	/* MII interface */
@@ -99,21 +90,14 @@ struct sti_dwmac {
 	int clk_sel_reg;	/* GMAC ext clk selection register */
 	struct regmap *regmap;
 	bool gmac_en;
-	u32 speed;
-	void (*fix_retime_src)(void *priv, unsigned int speed, unsigned int mode);
+	int speed;
+	void (*fix_retime_src)(void *priv, phy_interface_t interface,
+			       int speed, unsigned int mode);
 };
 
 struct sti_dwmac_of_data {
-	void (*fix_retime_src)(void *priv, unsigned int speed, unsigned int mode);
-};
-
-static u32 phy_intf_sels[] = {
-	[PHY_INTERFACE_MODE_MII] = ETH_PHY_SEL_MII,
-	[PHY_INTERFACE_MODE_GMII] = ETH_PHY_SEL_GMII,
-	[PHY_INTERFACE_MODE_RGMII] = ETH_PHY_SEL_RGMII,
-	[PHY_INTERFACE_MODE_RGMII_ID] = ETH_PHY_SEL_RGMII,
-	[PHY_INTERFACE_MODE_SGMII] = ETH_PHY_SEL_SGMII,
-	[PHY_INTERFACE_MODE_RMII] = ETH_PHY_SEL_RMII,
+	void (*fix_retime_src)(void *priv, phy_interface_t interface,
+			       int speed, unsigned int mode);
 };
 
 enum {
@@ -132,7 +116,8 @@ static u32 stih4xx_tx_retime_val[] = {
 				 | STIH4XX_ETH_SEL_INTERNAL_NOTEXT_PHYCLK,
 };
 
-static void stih4xx_fix_retime_src(void *priv, u32 spd, unsigned int mode)
+static void stih4xx_fix_retime_src(void *priv, phy_interface_t interface,
+				   int spd, unsigned int mode)
 {
 	struct sti_dwmac *dwmac = priv;
 	u32 src = dwmac->tx_retime_src;
@@ -148,7 +133,7 @@ static void stih4xx_fix_retime_src(void *priv, u32 spd, unsigned int mode)
 			src = TX_RETIME_SRC_CLKGEN;
 			freq = DWMAC_50MHZ;
 		}
-	} else if (IS_PHY_IF_MODE_RGMII(dwmac->interface)) {
+	} else if (phy_interface_mode_is_rgmii(dwmac->interface)) {
 		/* On GiGa clk source can be either ext or from clkgen */
 		freq = rgmii_clock(spd);
 
@@ -164,28 +149,38 @@ static void stih4xx_fix_retime_src(void *priv, u32 spd, unsigned int mode)
 			   stih4xx_tx_retime_val[src]);
 }
 
-static int sti_dwmac_set_mode(struct sti_dwmac *dwmac)
+static int sti_set_phy_intf_sel(void *bsp_priv, u8 phy_intf_sel)
 {
-	struct regmap *regmap = dwmac->regmap;
-	int iface = dwmac->interface;
-	u32 reg = dwmac->ctrl_reg;
-	u32 val;
+	struct sti_dwmac *dwmac = bsp_priv;
+	struct regmap *regmap;
+	u32 reg, val;
+
+	regmap = dwmac->regmap;
+	reg = dwmac->ctrl_reg;
 
 	if (dwmac->gmac_en)
 		regmap_update_bits(regmap, reg, EN_MASK, EN);
 
-	regmap_update_bits(regmap, reg, MII_PHY_SEL_MASK, phy_intf_sels[iface]);
+	if (phy_intf_sel != PHY_INTF_SEL_GMII_MII &&
+	    phy_intf_sel != PHY_INTF_SEL_RGMII &&
+	    phy_intf_sel != PHY_INTF_SEL_SGMII &&
+	    phy_intf_sel != PHY_INTF_SEL_RMII)
+		phy_intf_sel = PHY_INTF_SEL_GMII_MII;
 
-	val = (iface == PHY_INTERFACE_MODE_REVMII) ? 0 : ENMII;
+	regmap_update_bits(regmap, reg, MII_PHY_SEL_MASK,
+			   FIELD_PREP(MII_PHY_SEL_MASK, phy_intf_sel));
+
+	val = (dwmac->interface == PHY_INTERFACE_MODE_REVMII) ? 0 : ENMII;
 	regmap_update_bits(regmap, reg, ENMII_MASK, val);
 
-	dwmac->fix_retime_src(dwmac, dwmac->speed, 0);
+	dwmac->fix_retime_src(dwmac, dwmac->interface, dwmac->speed, 0);
 
 	return 0;
 }
 
 static int sti_dwmac_parse_data(struct sti_dwmac *dwmac,
-				struct platform_device *pdev)
+				struct platform_device *pdev,
+				struct plat_stmmacenet_data *plat_dat)
 {
 	struct resource *res;
 	struct device *dev = &pdev->dev;
@@ -204,12 +199,7 @@ static int sti_dwmac_parse_data(struct sti_dwmac *dwmac,
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 
-	err = of_get_phy_mode(np, &dwmac->interface);
-	if (err && err != -ENODEV) {
-		dev_err(dev, "Can't get phy-mode\n");
-		return err;
-	}
-
+	dwmac->interface = plat_dat->phy_interface;
 	dwmac->regmap = regmap;
 	dwmac->gmac_en = of_property_read_bool(np, "st,gmac_en");
 	dwmac->ext_phyclk = of_property_read_bool(np, "st,ext-phyclk");
@@ -242,6 +232,20 @@ static int sti_dwmac_parse_data(struct sti_dwmac *dwmac,
 	return 0;
 }
 
+static int sti_dwmac_init(struct device *dev, void *bsp_priv)
+{
+	struct sti_dwmac *dwmac = bsp_priv;
+
+	return clk_prepare_enable(dwmac->clk);
+}
+
+static void sti_dwmac_exit(struct device *dev, void *bsp_priv)
+{
+	struct sti_dwmac *dwmac = bsp_priv;
+
+	clk_disable_unprepare(dwmac->clk);
+}
+
 static int sti_dwmac_probe(struct platform_device *pdev)
 {
 	struct plat_stmmacenet_data *plat_dat;
@@ -268,7 +272,7 @@ static int sti_dwmac_probe(struct platform_device *pdev)
 	if (!dwmac)
 		return -ENOMEM;
 
-	ret = sti_dwmac_parse_data(dwmac, pdev);
+	ret = sti_dwmac_parse_data(dwmac, pdev, plat_dat);
 	if (ret) {
 		dev_err(&pdev->dev, "Unable to parse OF data\n");
 		return ret;
@@ -277,59 +281,13 @@ static int sti_dwmac_probe(struct platform_device *pdev)
 	dwmac->fix_retime_src = data->fix_retime_src;
 
 	plat_dat->bsp_priv = dwmac;
+	plat_dat->set_phy_intf_sel = sti_set_phy_intf_sel;
 	plat_dat->fix_mac_speed = data->fix_retime_src;
+	plat_dat->init = sti_dwmac_init;
+	plat_dat->exit = sti_dwmac_exit;
 
-	ret = clk_prepare_enable(dwmac->clk);
-	if (ret)
-		return ret;
-
-	ret = sti_dwmac_set_mode(dwmac);
-	if (ret)
-		goto disable_clk;
-
-	ret = stmmac_dvr_probe(&pdev->dev, plat_dat, &stmmac_res);
-	if (ret)
-		goto disable_clk;
-
-	return 0;
-
-disable_clk:
-	clk_disable_unprepare(dwmac->clk);
-
-	return ret;
+	return devm_stmmac_pltfr_probe(pdev, plat_dat, &stmmac_res);
 }
-
-static void sti_dwmac_remove(struct platform_device *pdev)
-{
-	struct sti_dwmac *dwmac = get_stmmac_bsp_priv(&pdev->dev);
-
-	stmmac_dvr_remove(&pdev->dev);
-
-	clk_disable_unprepare(dwmac->clk);
-}
-
-static int sti_dwmac_suspend(struct device *dev)
-{
-	struct sti_dwmac *dwmac = get_stmmac_bsp_priv(dev);
-	int ret = stmmac_suspend(dev);
-
-	clk_disable_unprepare(dwmac->clk);
-
-	return ret;
-}
-
-static int sti_dwmac_resume(struct device *dev)
-{
-	struct sti_dwmac *dwmac = get_stmmac_bsp_priv(dev);
-
-	clk_prepare_enable(dwmac->clk);
-	sti_dwmac_set_mode(dwmac);
-
-	return stmmac_resume(dev);
-}
-
-static DEFINE_SIMPLE_DEV_PM_OPS(sti_dwmac_pm_ops, sti_dwmac_suspend,
-						  sti_dwmac_resume);
 
 static const struct sti_dwmac_of_data stih4xx_dwmac_data = {
 	.fix_retime_src = stih4xx_fix_retime_src,
@@ -343,10 +301,9 @@ MODULE_DEVICE_TABLE(of, sti_dwmac_match);
 
 static struct platform_driver sti_dwmac_driver = {
 	.probe  = sti_dwmac_probe,
-	.remove = sti_dwmac_remove,
 	.driver = {
 		.name           = "sti-dwmac",
-		.pm		= pm_sleep_ptr(&sti_dwmac_pm_ops),
+		.pm		= &stmmac_pltfr_pm_ops,
 		.of_match_table = sti_dwmac_match,
 	},
 };

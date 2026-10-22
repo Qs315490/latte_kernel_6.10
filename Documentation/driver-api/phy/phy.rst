@@ -19,7 +19,7 @@ PHY. Other peripherals that use PHY include Wireless LAN, Ethernet,
 SATA etc.
 
 The intention of creating this framework is to bring the PHY drivers spread
-all over the Linux kernel to drivers/phy to increase code re-use and for
+all over the Linux kernel to drivers/phy to increase code reuse and for
 better code maintainability.
 
 This framework will be of use only to devices that use external PHY (PHY
@@ -198,8 +198,7 @@ pm_runtime_get_sync of PHY provider device because of parent-child relationship.
 It should also be noted that phy_power_on and phy_power_off performs
 phy_pm_runtime_get_sync and phy_pm_runtime_put respectively.
 There are exported APIs like phy_pm_runtime_get, phy_pm_runtime_get_sync,
-phy_pm_runtime_put, phy_pm_runtime_put_sync, phy_pm_runtime_allow and
-phy_pm_runtime_forbid for performing PM operations.
+phy_pm_runtime_put and phy_pm_runtime_put_sync for performing PM operations.
 
 PHY Mappings
 ============

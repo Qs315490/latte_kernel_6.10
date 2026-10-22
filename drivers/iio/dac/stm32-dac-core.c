@@ -9,7 +9,6 @@
 
 #include <linux/clk.h>
 #include <linux/delay.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -239,7 +238,7 @@ static const struct of_device_id stm32_dac_of_match[] = {
 		.compatible = "st,stm32h7-dac-core",
 		.data = (void *)&stm32h7_dac_cfg,
 	},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, stm32_dac_of_match);
 

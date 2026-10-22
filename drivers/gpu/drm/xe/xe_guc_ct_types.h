@@ -9,6 +9,7 @@
 #include <linux/interrupt.h>
 #include <linux/iosys-map.h>
 #include <linux/spinlock_types.h>
+#include <linux/stackdepot.h>
 #include <linux/wait.h>
 #include <linux/xarray.h>
 
@@ -38,6 +39,8 @@ struct guc_ctb_info {
  * struct guc_ctb - GuC command transport buffer (CTB)
  */
 struct guc_ctb {
+	/** @bo: Xe BO for CTB */
+	struct xe_bo *bo;
 	/** @desc: dma buffer map for CTB descriptor */
 	struct iosys_map desc;
 	/** @cmds: dma buffer map for CTB commands */
@@ -71,7 +74,7 @@ struct xe_guc_ct_snapshot {
 	/** @ctb_size: size of the snapshot of the CTB */
 	size_t ctb_size;
 	/** @ctb: snapshot of the entire CTB */
-	u32 *ctb;
+	void *ctb;
 };
 
 /**
@@ -99,10 +102,22 @@ struct xe_dead_ct {
 	bool reported;
 	/** @worker: worker thread to get out of interrupt context before dumping */
 	struct work_struct worker;
-	/** snapshot_ct: copy of CT state and CTB content at point of error */
+	/** @snapshot_ct: copy of CT state and CTB content at point of error */
 	struct xe_guc_ct_snapshot *snapshot_ct;
-	/** snapshot_log: copy of GuC log at point of error */
+	/** @snapshot_log: copy of GuC log at point of error */
 	struct xe_guc_log_snapshot *snapshot_log;
+};
+
+/** struct xe_fast_req_fence - Used to track FAST_REQ messages by fence to match error responses */
+struct xe_fast_req_fence {
+	/** @fence: sequence number sent in H2G and return in G2H error */
+	u16 fence;
+	/** @action: H2G action code */
+	u16 action;
+#if IS_ENABLED(CONFIG_DRM_XE_DEBUG_GUC)
+	/** @stack: call stack from when the H2G was sent */
+	depot_stack_handle_t stack;
+#endif
 };
 #endif
 
@@ -113,17 +128,15 @@ struct xe_dead_ct {
  * for the H2G and G2H requests sent and received through the buffers.
  */
 struct xe_guc_ct {
-	/** @bo: XE BO for CT */
-	struct xe_bo *bo;
 	/** @lock: protects everything in CT layer */
 	struct mutex lock;
 	/** @fast_lock: protects G2H channel and credits */
 	spinlock_t fast_lock;
 	/** @ctbs: buffers for sending and receiving commands */
 	struct {
-		/** @ctbs.send: Host to GuC (H2G, send) channel */
+		/** @ctbs.h2g: Host to GuC (H2G, send) channel */
 		struct guc_ctb h2g;
-		/** @ctbs.recv: GuC to Host (G2H, receive) channel */
+		/** @ctbs.g2h: GuC to Host (G2H, receive) channel */
 		struct guc_ctb g2h;
 	} ctbs;
 	/** @g2h_outstanding: number of outstanding G2H */
@@ -152,6 +165,8 @@ struct xe_guc_ct {
 #if IS_ENABLED(CONFIG_DRM_XE_DEBUG)
 	/** @dead: information for debugging dead CTs */
 	struct xe_dead_ct dead;
+	/** @fast_req: history of FAST_REQ messages for matching with G2H error responses */
+	struct xe_fast_req_fence fast_req[SZ_32];
 #endif
 };
 

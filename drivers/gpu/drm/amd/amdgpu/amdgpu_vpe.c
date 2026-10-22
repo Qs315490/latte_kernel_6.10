@@ -29,6 +29,7 @@
 #include "amdgpu_smu.h"
 #include "soc15_common.h"
 #include "vpe_v6_1.h"
+#include "vpe_v2_0.h"
 
 #define AMDGPU_CSA_VPE_SIZE 	64
 /* VPE CSA resides in the 4th page of CSA */
@@ -310,6 +311,10 @@ static int vpe_early_init(struct amdgpu_ip_block *ip_block)
 		vpe_v6_1_set_funcs(vpe);
 		vpe->collaborate_mode = true;
 		break;
+	case IP_VERSION(2, 0, 0):
+	case IP_VERSION(2, 2, 0):
+		vpe_v2_0_set_funcs(vpe);
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -322,6 +327,26 @@ static int vpe_early_init(struct amdgpu_ip_block *ip_block)
 	return 0;
 }
 
+static bool vpe_need_dpm0_at_power_down(struct amdgpu_device *adev)
+{
+	switch (amdgpu_ip_version(adev, VPE_HWIP, 0)) {
+	case IP_VERSION(6, 1, 1):
+		return adev->pm.fw_version < 0x0a640500;
+	default:
+		return false;
+	}
+}
+
+static int vpe_get_dpm_level(struct amdgpu_device *adev)
+{
+	struct amdgpu_vpe *vpe = &adev->vpe;
+
+	if (!adev->pm.dpm_enabled)
+		return 0;
+
+	return RREG32(vpe_get_reg_offset(vpe, 0, vpe->regs.dpm_request_lv));
+}
+
 static void vpe_idle_work_handler(struct work_struct *work)
 {
 	struct amdgpu_device *adev =
@@ -329,11 +354,17 @@ static void vpe_idle_work_handler(struct work_struct *work)
 	unsigned int fences = 0;
 
 	fences += amdgpu_fence_count_emitted(&adev->vpe.ring);
+	if (fences)
+		goto reschedule;
 
-	if (fences == 0)
-		amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_VPE, AMD_PG_STATE_GATE);
-	else
-		schedule_delayed_work(&adev->vpe.idle_work, VPE_IDLE_TIMEOUT);
+	if (vpe_need_dpm0_at_power_down(adev) && vpe_get_dpm_level(adev) != 0)
+		goto reschedule;
+
+	amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_VPE, AMD_PG_STATE_GATE);
+	return;
+
+reschedule:
+	schedule_delayed_work(&adev->vpe.idle_work, VPE_IDLE_TIMEOUT);
 }
 
 static int vpe_common_init(struct amdgpu_vpe *vpe)
@@ -379,9 +410,10 @@ static int vpe_sw_init(struct amdgpu_ip_block *ip_block)
 	if (ret)
 		goto out;
 
-	/* TODO: Add queue reset mask when FW fully supports it */
 	adev->vpe.supported_reset =
 		 amdgpu_get_soft_full_reset_mask(&adev->vpe.ring);
+	if (!amdgpu_sriov_vf(adev))
+		adev->vpe.supported_reset |= AMDGPU_RESET_TYPE_PER_QUEUE;
 	ret = amdgpu_vpe_sysfs_reset_mask_init(adev);
 	if (ret)
 		goto out;
@@ -435,6 +467,8 @@ static int vpe_hw_fini(struct amdgpu_ip_block *ip_block)
 	struct amdgpu_device *adev = ip_block->adev;
 	struct amdgpu_vpe *vpe = &adev->vpe;
 
+	cancel_delayed_work_sync(&adev->vpe.idle_work);
+
 	vpe_ring_stop(vpe);
 
 	/* Power off VPE */
@@ -445,10 +479,6 @@ static int vpe_hw_fini(struct amdgpu_ip_block *ip_block)
 
 static int vpe_suspend(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = ip_block->adev;
-
-	cancel_delayed_work_sync(&adev->vpe.idle_work);
-
 	return vpe_hw_fini(ip_block);
 }
 
@@ -537,6 +567,11 @@ static void vpe_ring_emit_fence(struct amdgpu_ring *ring, uint64_t addr,
 		amdgpu_ring_write(ring, 0);
 	}
 
+	/* WA: Force sync after TRAP to avoid VPE1 fail to power off */
+	if (ring->adev->vpe.collaborate_mode) {
+		amdgpu_ring_write(ring, VPE_CMD_HEADER(VPE_CMD_OPCODE_COLLAB_SYNC, 0));
+		amdgpu_ring_write(ring, 0xabcd);
+	}
 }
 
 static void vpe_ring_emit_pipeline_sync(struct amdgpu_ring *ring)
@@ -765,7 +800,7 @@ static int vpe_ring_test_ring(struct amdgpu_ring *ring)
 
 	ret = amdgpu_ring_alloc(ring, 4);
 	if (ret) {
-		dev_err(adev->dev, "amdgpu: dma failed to lock ring %d (%d).\n", ring->idx, ret);
+		dev_err(adev->dev, "dma failed to lock ring %d (%d).\n", ring->idx, ret);
 		goto out;
 	}
 
@@ -874,6 +909,27 @@ static void vpe_ring_end_use(struct amdgpu_ring *ring)
 	schedule_delayed_work(&adev->vpe.idle_work, VPE_IDLE_TIMEOUT);
 }
 
+static int vpe_ring_reset(struct amdgpu_ring *ring,
+			  unsigned int vmid,
+			  struct amdgpu_fence *timedout_fence)
+{
+	struct amdgpu_device *adev = ring->adev;
+	int r;
+
+	amdgpu_ring_reset_helper_begin(ring, timedout_fence);
+
+	r = amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_VPE,
+						   AMD_PG_STATE_GATE);
+	if (r)
+		return r;
+	r = amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_VPE,
+						   AMD_PG_STATE_UNGATE);
+	if (r)
+		return r;
+
+	return amdgpu_ring_reset_helper_end(ring, timedout_fence);
+}
+
 static ssize_t amdgpu_get_vpe_reset_mask(struct device *dev,
 						struct device_attribute *attr,
 						char *buf)
@@ -922,7 +978,7 @@ static const struct amdgpu_ring_funcs vpe_ring_funcs = {
 	.emit_frame_size =
 		5 + /* vpe_ring_init_cond_exec */
 		6 + /* vpe_ring_emit_pipeline_sync */
-		10 + 10 + 10 + /* vpe_ring_emit_fence */
+		12 + 12 + 12 + /* vpe_ring_emit_fence */
 		/* vpe_ring_emit_vm_flush */
 		SOC15_FLUSH_GPU_TLB_NUM_WREG * 3 +
 		SOC15_FLUSH_GPU_TLB_NUM_REG_WAIT * 6,
@@ -942,6 +998,7 @@ static const struct amdgpu_ring_funcs vpe_ring_funcs = {
 	.preempt_ib = vpe_ring_preempt_ib,
 	.begin_use = vpe_ring_begin_use,
 	.end_use = vpe_ring_end_use,
+	.reset = vpe_ring_reset,
 };
 
 static void vpe_set_ring_funcs(struct amdgpu_device *adev)
@@ -962,10 +1019,31 @@ const struct amd_ip_funcs vpe_ip_funcs = {
 	.set_powergating_state = vpe_set_powergating_state,
 };
 
+const struct amd_ip_funcs vpe2_ip_funcs = {
+	.name = "vpe_v2_0",
+	.early_init = vpe_early_init,
+	.sw_init = vpe_sw_init,
+	.sw_fini = vpe_sw_fini,
+	.hw_init = vpe_hw_init,
+	.hw_fini = vpe_hw_fini,
+	.suspend = vpe_suspend,
+	.resume = vpe_resume,
+	.set_clockgating_state = vpe_set_clockgating_state,
+	.set_powergating_state = vpe_set_powergating_state,
+};
+
 const struct amdgpu_ip_block_version vpe_v6_1_ip_block = {
 	.type = AMD_IP_BLOCK_TYPE_VPE,
 	.major = 6,
 	.minor = 1,
 	.rev = 0,
 	.funcs = &vpe_ip_funcs,
+};
+
+const struct amdgpu_ip_block_version vpe_v2_0_ip_block = {
+	.type = AMD_IP_BLOCK_TYPE_VPE,
+	.major = 2,
+	.minor = 0,
+	.rev = 0,
+	.funcs = &vpe2_ip_funcs,
 };

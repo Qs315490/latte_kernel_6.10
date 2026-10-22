@@ -9,29 +9,91 @@
 
 #include <drm/drm_drv.h>
 #include <drm/drm_file.h>
+#include <drm/drm_print.h>
 
 #include <linux/build_bug.h>
+#include <linux/compiler_attributes.h>
 #include <linux/dcache.h>
 #include <linux/debugfs.h>
+#include <linux/moduleparam.h>
 #include <linux/sysfs.h>
 #include <linux/types.h>
+
+static int
+validate_group_mask(struct pvr_device *pvr_dev, const u32 group_mask)
+{
+	if (group_mask & ~ROGUE_FWIF_LOG_TYPE_GROUP_MASK) {
+		drm_warn(from_pvr_device(pvr_dev),
+			 "Invalid fw_trace group mask 0x%08x (must be a subset of 0x%08x)",
+			 group_mask, ROGUE_FWIF_LOG_TYPE_GROUP_MASK);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static inline u32
+build_log_type(const u32 group_mask)
+{
+	if (!group_mask)
+		return ROGUE_FWIF_LOG_TYPE_NONE;
+
+	return group_mask | ROGUE_FWIF_LOG_TYPE_TRACE;
+}
+
+/*
+ * Don't gate this behind CONFIG_DEBUG_FS so that it can be used as an initial
+ * value without further conditional code...
+ */
+static u32 pvr_fw_trace_init_mask;
+
+/*
+ * ...but do only expose the module parameter if debugfs is enabled, since
+ * there's no reason to turn on fw_trace without it.
+ */
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+static int
+pvr_fw_trace_init_mask_set(const char *val, const struct kernel_param *kp)
+{
+	u32 mask = 0;
+	int err;
+
+	err = kstrtouint(val, 0, &mask);
+	if (err)
+		return err;
+
+	err = validate_group_mask(NULL, mask);
+	if (err)
+		return err;
+
+	*(unsigned int *)kp->arg = mask;
+
+	return 0;
+}
+
+static const struct kernel_param_ops pvr_fw_trace_init_mask_ops = {
+	.set = pvr_fw_trace_init_mask_set,
+	.get = param_get_hexint,
+};
+
+param_check_hexint(init_fw_trace_mask, &pvr_fw_trace_init_mask);
+module_param_cb(init_fw_trace_mask, &pvr_fw_trace_init_mask_ops, &pvr_fw_trace_init_mask, 0400);
+__MODULE_PARM_TYPE(init_fw_trace_mask, "hexint");
+MODULE_PARM_DESC(init_fw_trace_mask,
+		 "Enable FW trace for the specified groups at device init time");
+#endif
 
 static void
 tracebuf_ctrl_init(void *cpu_ptr, void *priv)
 {
 	struct rogue_fwif_tracebuf *tracebuf_ctrl = cpu_ptr;
 	struct pvr_fw_trace *fw_trace = priv;
-	u32 thread_nr;
 
 	tracebuf_ctrl->tracebuf_size_in_dwords = ROGUE_FW_TRACE_BUF_DEFAULT_SIZE_IN_DWORDS;
 	tracebuf_ctrl->tracebuf_flags = 0;
+	tracebuf_ctrl->log_type = build_log_type(fw_trace->group_mask);
 
-	if (fw_trace->group_mask)
-		tracebuf_ctrl->log_type = fw_trace->group_mask | ROGUE_FWIF_LOG_TYPE_TRACE;
-	else
-		tracebuf_ctrl->log_type = ROGUE_FWIF_LOG_TYPE_NONE;
-
-	for (thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); thread_nr++) {
+	for (u32 thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); thread_nr++) {
 		struct rogue_fwif_tracebuf_space *tracebuf_space =
 			&tracebuf_ctrl->tracebuf[thread_nr];
 		struct pvr_fw_trace_buffer *trace_buffer = &fw_trace->buffers[thread_nr];
@@ -48,10 +110,9 @@ int pvr_fw_trace_init(struct pvr_device *pvr_dev)
 {
 	struct pvr_fw_trace *fw_trace = &pvr_dev->fw_dev.fw_trace;
 	struct drm_device *drm_dev = from_pvr_device(pvr_dev);
-	u32 thread_nr;
 	int err;
 
-	for (thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); thread_nr++) {
+	for (u32 thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); thread_nr++) {
 		struct pvr_fw_trace_buffer *trace_buffer = &fw_trace->buffers[thread_nr];
 
 		trace_buffer->buf =
@@ -69,8 +130,13 @@ int pvr_fw_trace_init(struct pvr_device *pvr_dev)
 		}
 	}
 
-	/* TODO: Provide control of group mask. */
-	fw_trace->group_mask = 0;
+	/*
+	 * Load the initial group_mask from the init_fw_trace_mask module
+	 * parameter. This allows early tracing before the user can write to
+	 * debugfs. Unlike update_logtype(), we don't set log_type here as that
+	 * is initialised by tracebuf_ctrl_init().
+	 */
+	fw_trace->group_mask = pvr_fw_trace_init_mask;
 
 	fw_trace->tracebuf_ctrl =
 		pvr_fw_object_create_and_map(pvr_dev,
@@ -88,7 +154,7 @@ int pvr_fw_trace_init(struct pvr_device *pvr_dev)
 	BUILD_BUG_ON(ARRAY_SIZE(fw_trace->tracebuf_ctrl->tracebuf) !=
 		     ARRAY_SIZE(fw_trace->buffers));
 
-	for (thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); thread_nr++) {
+	for (u32 thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); thread_nr++) {
 		struct rogue_fwif_tracebuf_space *tracebuf_space =
 			&fw_trace->tracebuf_ctrl->tracebuf[thread_nr];
 		struct pvr_fw_trace_buffer *trace_buffer = &fw_trace->buffers[thread_nr];
@@ -99,7 +165,7 @@ int pvr_fw_trace_init(struct pvr_device *pvr_dev)
 	return 0;
 
 err_free_buf:
-	for (thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); thread_nr++) {
+	for (u32 thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); thread_nr++) {
 		struct pvr_fw_trace_buffer *trace_buffer = &fw_trace->buffers[thread_nr];
 
 		if (trace_buffer->buf)
@@ -112,9 +178,8 @@ err_free_buf:
 void pvr_fw_trace_fini(struct pvr_device *pvr_dev)
 {
 	struct pvr_fw_trace *fw_trace = &pvr_dev->fw_dev.fw_trace;
-	u32 thread_nr;
 
-	for (thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); thread_nr++) {
+	for (u32 thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); thread_nr++) {
 		struct pvr_fw_trace_buffer *trace_buffer = &fw_trace->buffers[thread_nr];
 
 		pvr_fw_object_unmap_and_destroy(trace_buffer->buf_obj);
@@ -122,14 +187,14 @@ void pvr_fw_trace_fini(struct pvr_device *pvr_dev)
 	pvr_fw_object_unmap_and_destroy(fw_trace->tracebuf_ctrl_obj);
 }
 
-#if defined(CONFIG_DEBUG_FS)
-
 /**
  * update_logtype() - Send KCCB command to trigger FW to update logtype
  * @pvr_dev: Target PowerVR device
- * @group_mask: New log group mask.
+ * @group_mask: New log group mask; must pass validate_group_mask().
  *
  * Returns:
+ *  * 0 if the provided @group_mask is the same as the current value (this is a
+ *    short-circuit evaluation),
  *  * 0 on success,
  *  * Any error returned by pvr_kccb_send_cmd(), or
  *  * -%EIO if the device is lost.
@@ -138,19 +203,21 @@ static int
 update_logtype(struct pvr_device *pvr_dev, u32 group_mask)
 {
 	struct pvr_fw_trace *fw_trace = &pvr_dev->fw_dev.fw_trace;
+	struct drm_device *drm_dev = from_pvr_device(pvr_dev);
 	struct rogue_fwif_kccb_cmd cmd;
 	int idx;
 	int err;
+	int slot;
 
-	if (group_mask)
-		fw_trace->tracebuf_ctrl->log_type = ROGUE_FWIF_LOG_TYPE_TRACE | group_mask;
-	else
-		fw_trace->tracebuf_ctrl->log_type = ROGUE_FWIF_LOG_TYPE_NONE;
+	/* No change in group_mask => nothing to update. */
+	if (fw_trace->group_mask == group_mask)
+		return 0;
 
 	fw_trace->group_mask = group_mask;
+	fw_trace->tracebuf_ctrl->log_type = build_log_type(group_mask);
 
 	down_read(&pvr_dev->reset_sem);
-	if (!drm_dev_enter(from_pvr_device(pvr_dev), &idx)) {
+	if (!drm_dev_enter(drm_dev, &idx)) {
 		err = -EIO;
 		goto err_up_read;
 	}
@@ -158,8 +225,13 @@ update_logtype(struct pvr_device *pvr_dev, u32 group_mask)
 	cmd.cmd_type = ROGUE_FWIF_KCCB_CMD_LOGTYPE_UPDATE;
 	cmd.kccb_flags = 0;
 
-	err = pvr_kccb_send_cmd(pvr_dev, &cmd, NULL);
+	err = pvr_kccb_send_cmd(pvr_dev, &cmd, &slot);
+	if (err)
+		goto err_drm_dev_exit;
 
+	err = pvr_kccb_wait_for_completion(pvr_dev, slot, HZ, NULL);
+
+err_drm_dev_exit:
 	drm_dev_exit(idx);
 
 err_up_read:
@@ -184,9 +256,7 @@ struct pvr_fw_trace_seq_data {
 
 static u32 find_sfid(u32 id)
 {
-	u32 i;
-
-	for (i = 0; i < ARRAY_SIZE(stid_fmts); i++) {
+	for (u32 i = 0; i < ARRAY_SIZE(stid_fmts); i++) {
 		if (stid_fmts[i].id == id)
 			return i;
 	}
@@ -285,12 +355,11 @@ static void fw_trace_get_first(struct pvr_fw_trace_seq_data *trace_seq_data)
 static void *fw_trace_seq_start(struct seq_file *s, loff_t *pos)
 {
 	struct pvr_fw_trace_seq_data *trace_seq_data = s->private;
-	u32 i;
 
 	/* Reset trace index, then advance to *pos. */
 	fw_trace_get_first(trace_seq_data);
 
-	for (i = 0; i < *pos; i++) {
+	for (u32 i = 0; i < *pos; i++) {
 		if (!fw_trace_get_next(trace_seq_data))
 			return NULL;
 	}
@@ -386,7 +455,7 @@ static int fw_trace_open(struct inode *inode, struct file *file)
 	struct pvr_fw_trace_seq_data *trace_seq_data;
 	int err;
 
-	trace_seq_data = kzalloc(sizeof(*trace_seq_data), GFP_KERNEL);
+	trace_seq_data = kzalloc_obj(*trace_seq_data);
 	if (!trace_seq_data)
 		return -ENOMEM;
 
@@ -444,23 +513,43 @@ static const struct file_operations pvr_fw_trace_fops = {
 	.release = fw_trace_release,
 };
 
-void
-pvr_fw_trace_mask_update(struct pvr_device *pvr_dev, u32 old_mask, u32 new_mask)
+static int pvr_fw_trace_mask_get(void *data, u64 *value)
 {
-	if (old_mask != new_mask)
-		update_logtype(pvr_dev, new_mask);
+	struct pvr_device *pvr_dev = data;
+
+	*value = pvr_dev->fw_dev.fw_trace.group_mask;
+
+	return 0;
 }
+
+static int pvr_fw_trace_mask_set(void *data, u64 value)
+{
+	struct pvr_device *pvr_dev = data;
+	const u32 group_mask = (u32)value;
+	int err;
+
+	err = validate_group_mask(pvr_dev, group_mask);
+	if (err)
+		return err;
+
+	return update_logtype(pvr_dev, group_mask);
+}
+
+DEFINE_DEBUGFS_ATTRIBUTE(pvr_fw_trace_mask_fops, pvr_fw_trace_mask_get,
+			 pvr_fw_trace_mask_set, "0x%08llx\n");
 
 void
 pvr_fw_trace_debugfs_init(struct pvr_device *pvr_dev, struct dentry *dir)
 {
 	struct pvr_fw_trace *fw_trace = &pvr_dev->fw_dev.fw_trace;
-	u32 thread_nr;
+
+	if (!IS_ENABLED(CONFIG_DEBUG_FS))
+		return;
 
 	static_assert(ARRAY_SIZE(fw_trace->buffers) <= 10,
 		      "The filename buffer is only large enough for a single-digit thread count");
 
-	for (thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); ++thread_nr) {
+	for (u32 thread_nr = 0; thread_nr < ARRAY_SIZE(fw_trace->buffers); ++thread_nr) {
 		char filename[8];
 
 		snprintf(filename, ARRAY_SIZE(filename), "trace_%u", thread_nr);
@@ -468,5 +557,7 @@ pvr_fw_trace_debugfs_init(struct pvr_device *pvr_dev, struct dentry *dir)
 				    &fw_trace->buffers[thread_nr],
 				    &pvr_fw_trace_fops);
 	}
+
+	debugfs_create_file("trace_mask", 0600, dir, pvr_dev,
+			    &pvr_fw_trace_mask_fops);
 }
-#endif

@@ -78,13 +78,13 @@ static ssize_t led_proc_write(struct file *file, const char __user *buffer,
 		return PTR_ERR(buf);
 
 	/* work around \n when echo'ing into proc */
-	if (buf[count - 1] == '\n')
+	if (count > 0 && buf[count - 1] == '\n')
 		buf[count - 1] = '\0';
 
 	/* before we change anything we want to stop any running timers,
 	 * otherwise calls such as on will have no persistent effect
 	 */
-	del_timer_sync(&led_blink_timer);
+	timer_delete_sync(&led_blink_timer);
 
 	if (!strcmp(buf, "on")) {
 		auxio_set_led(AUXIO_LED_ON);
@@ -134,7 +134,7 @@ static int __init led_init(void)
 static void __exit led_exit(void)
 {
 	remove_proc_entry("led", NULL);
-	del_timer_sync(&led_blink_timer);
+	timer_delete_sync(&led_blink_timer);
 }
 
 module_init(led_init);

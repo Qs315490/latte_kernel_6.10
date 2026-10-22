@@ -42,6 +42,7 @@ struct vxlan_mdb_remote {
 };
 
 #define VXLAN_SGRP_F_DELETE	BIT(0)
+#define VXLAN_SGRP_F_NEW	BIT(1)
 
 struct vxlan_mdb_src_entry {
 	struct hlist_node node;
@@ -430,7 +431,7 @@ static int vxlan_mdb_config_src_entry_init(struct vxlan_mdb_config *cfg,
 				       extack))
 		return -EINVAL;
 
-	src = kzalloc(sizeof(*src), GFP_KERNEL);
+	src = kzalloc_obj(*src);
 	if (!src)
 		return -ENOMEM;
 
@@ -697,7 +698,7 @@ static int vxlan_mdb_remote_rdst_init(const struct vxlan_mdb_config *cfg,
 	struct vxlan_rdst *rd;
 	int err;
 
-	rd = kzalloc(sizeof(*rd), GFP_KERNEL);
+	rd = kzalloc_obj(*rd);
 	if (!rd)
 		return -ENOMEM;
 
@@ -767,7 +768,7 @@ vxlan_mdb_remote_src_entry_add(struct vxlan_mdb_remote *remote,
 {
 	struct vxlan_mdb_src_entry *ent;
 
-	ent = kzalloc(sizeof(*ent), GFP_KERNEL);
+	ent = kzalloc_obj(*ent);
 	if (!ent)
 		return NULL;
 
@@ -844,6 +845,7 @@ vxlan_mdb_remote_src_add(const struct vxlan_mdb_config *cfg,
 		ent = vxlan_mdb_remote_src_entry_add(remote, &src->addr);
 		if (!ent)
 			return -ENOMEM;
+		ent->flags |= VXLAN_SGRP_F_NEW;
 	} else if (!(cfg->nlflags & NLM_F_REPLACE)) {
 		NL_SET_ERR_MSG_MOD(extack, "Source entry already exists");
 		return -EEXIST;
@@ -853,15 +855,16 @@ vxlan_mdb_remote_src_add(const struct vxlan_mdb_config *cfg,
 	if (err)
 		goto err_src_del;
 
-	/* Clear flags in case source entry was marked for deletion as part of
-	 * replace flow.
+	/* Clear the deletion mark so the entry survives the replace sweep.
+	 * The new mark is retained until the whole operation succeeds.
 	 */
-	ent->flags = 0;
+	ent->flags &= ~VXLAN_SGRP_F_DELETE;
 
 	return 0;
 
 err_src_del:
-	vxlan_mdb_remote_src_entry_del(ent);
+	if (ent->flags & VXLAN_SGRP_F_NEW)
+		vxlan_mdb_remote_src_entry_del(ent);
 	return err;
 }
 
@@ -889,11 +892,19 @@ static int vxlan_mdb_remote_srcs_add(const struct vxlan_mdb_config *cfg,
 			goto err_src_del;
 	}
 
+	hlist_for_each_entry(ent, &remote->src_list, node)
+		ent->flags &= ~VXLAN_SGRP_F_NEW;
+
 	return 0;
 
 err_src_del:
-	hlist_for_each_entry_safe(ent, tmp, &remote->src_list, node)
-		vxlan_mdb_remote_src_del(cfg->vxlan, &cfg->group, remote, ent);
+	hlist_for_each_entry_safe(ent, tmp, &remote->src_list, node) {
+		if (ent->flags & VXLAN_SGRP_F_NEW)
+			vxlan_mdb_remote_src_del(cfg->vxlan, &cfg->group, remote,
+						 ent);
+		else
+			ent->flags &= ~VXLAN_SGRP_F_DELETE;
+	}
 	return err;
 }
 
@@ -1069,7 +1080,7 @@ vxlan_mdb_remote_srcs_replace(const struct vxlan_mdb_config *cfg,
 
 	err = vxlan_mdb_remote_srcs_add(cfg, remote, extack);
 	if (err)
-		goto err_clear_delete;
+		return err;
 
 	hlist_for_each_entry_safe(ent, tmp, &remote->src_list, node) {
 		if (ent->flags & VXLAN_SGRP_F_DELETE)
@@ -1078,11 +1089,6 @@ vxlan_mdb_remote_srcs_replace(const struct vxlan_mdb_config *cfg,
 	}
 
 	return 0;
-
-err_clear_delete:
-	hlist_for_each_entry(ent, &remote->src_list, node)
-		ent->flags &= ~VXLAN_SGRP_F_DELETE;
-	return err;
 }
 
 static int vxlan_mdb_remote_replace(const struct vxlan_mdb_config *cfg,
@@ -1139,7 +1145,7 @@ static int vxlan_mdb_remote_add(const struct vxlan_mdb_config *cfg,
 		return -ENOENT;
 	}
 
-	remote = kzalloc(sizeof(*remote), GFP_KERNEL);
+	remote = kzalloc_obj(*remote);
 	if (!remote)
 		return -ENOMEM;
 
@@ -1187,7 +1193,7 @@ vxlan_mdb_entry_get(struct vxlan_dev *vxlan,
 	if (mdb_entry)
 		return mdb_entry;
 
-	mdb_entry = kzalloc(sizeof(*mdb_entry), GFP_KERNEL);
+	mdb_entry = kzalloc_obj(*mdb_entry);
 	if (!mdb_entry)
 		return ERR_PTR(-ENOMEM);
 
@@ -1625,7 +1631,7 @@ struct vxlan_mdb_entry *vxlan_mdb_entry_skb_get(struct vxlan_dev *vxlan,
 
 	switch (skb->protocol) {
 	case htons(ETH_P_IP):
-		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
+		if (!pskb_network_may_pull(skb, sizeof(struct iphdr)))
 			return NULL;
 		group.dst.sa.sa_family = AF_INET;
 		group.dst.sin.sin_addr.s_addr = ip_hdr(skb)->daddr;
@@ -1634,7 +1640,7 @@ struct vxlan_mdb_entry *vxlan_mdb_entry_skb_get(struct vxlan_dev *vxlan,
 		break;
 #if IS_ENABLED(CONFIG_IPV6)
 	case htons(ETH_P_IPV6):
-		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
+		if (!pskb_network_may_pull(skb, sizeof(struct ipv6hdr)))
 			return NULL;
 		group.dst.sa.sa_family = AF_INET6;
 		group.dst.sin6.sin6_addr = ipv6_hdr(skb)->daddr;

@@ -3,7 +3,7 @@
  * Copyright (c) 2021-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -728,7 +728,7 @@ xchk_iscan_mark_visited(
 	struct xfs_inode	*ip)
 {
 	mutex_lock(&iscan->lock);
-	iscan->__visited_ino = ip->i_ino;
+	iscan->__visited_ino = I_INO(ip);
 	trace_xchk_iscan_visit(iscan);
 	mutex_unlock(&iscan->lock);
 }

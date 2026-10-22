@@ -129,6 +129,7 @@ struct amdgpu_bo_vm;
 	  AMDGPU_PTE_MTYPE_GFX12_SHIFT(mtype))
 
 #define AMDGPU_PTE_DCC			(1ULL << 58)
+#define AMDGPU_PTE_BUS_ATOMICS		(1ULL << 59)
 #define AMDGPU_PTE_IS_PTE		(1ULL << 63)
 
 /* PDE Block Fragment Size for gfx v12 */
@@ -172,7 +173,7 @@ struct amdgpu_bo_vm;
 #define AMDGPU_VA_RESERVED_SEQ64_SIZE		(2ULL << 20)
 #define AMDGPU_VA_RESERVED_SEQ64_START(adev)	(AMDGPU_VA_RESERVED_CSA_START(adev) \
 						 - AMDGPU_VA_RESERVED_SEQ64_SIZE)
-#define AMDGPU_VA_RESERVED_TRAP_SIZE		(2ULL << 12)
+#define AMDGPU_VA_RESERVED_TRAP_SIZE		(1ULL << 16)
 #define AMDGPU_VA_RESERVED_TRAP_START(adev)	(AMDGPU_VA_RESERVED_SEQ64_START(adev) \
 						 - AMDGPU_VA_RESERVED_TRAP_SIZE)
 #define AMDGPU_VA_RESERVED_BOTTOM		(1ULL << 16)
@@ -185,9 +186,10 @@ struct amdgpu_bo_vm;
 #define AMDGPU_VM_USE_CPU_FOR_COMPUTE (1 << 1)
 
 /* VMPT level enumerate, and the hiberachy is:
- * PDB2->PDB1->PDB0->PTB
+ * PDB3->PDB2->PDB1->PDB0->PTB
  */
 enum amdgpu_vm_level {
+	AMDGPU_VM_PDB3,
 	AMDGPU_VM_PDB2,
 	AMDGPU_VM_PDB1,
 	AMDGPU_VM_PDB0,
@@ -203,15 +205,33 @@ struct amdgpu_vm_bo_base {
 	/* protected by bo being reserved */
 	struct amdgpu_vm_bo_base	*next;
 
-	/* protected by vm status_lock */
+	/* protected by vm reservation and invalidated_lock */
 	struct list_head		vm_status;
 
 	/* if the bo is counted as shared in mem stats
-	 * protected by vm status_lock */
+	 * protected by vm BO being reserved */
 	bool				shared;
 
-	/* protected by the BO being reserved */
+	/* if the BO was moved and all mappings are invalid
+	 * protected by the BO being reserved */
 	bool				moved;
+};
+
+/*
+ * The following status lists contain amdgpu_vm_bo_base objects for
+ * either PD/PTs, per VM BOs or BOs with individual resv object.
+ *
+ * The state transits are: evicted -> needs_update -> idle
+ */
+struct amdgpu_vm_bo_status {
+	/* BOs evicted which need to move into place again */
+	struct list_head		evicted;
+
+	/* BOs whose mappings changed but PDs/PTs haven't been updated */
+	struct list_head		needs_update;
+
+	/* BOs done with the state machine and need no further action */
+	struct list_head		idle;
 };
 
 /* provided by hw blocks that can write ptes, e.g., sdma */
@@ -236,9 +256,8 @@ struct amdgpu_vm_pte_funcs {
 };
 
 struct amdgpu_task_info {
+	struct drm_wedge_task_info task;
 	char		process_name[TASK_COMM_LEN];
-	char		task_name[TASK_COMM_LEN];
-	pid_t		pid;
 	pid_t		tgid;
 	struct kref	refcount;
 };
@@ -295,10 +314,10 @@ struct amdgpu_vm_update_params {
 	bool needs_flush;
 
 	/**
-	 * @allow_override: true for memory that is not uncached: allows MTYPE
-	 * to be overridden for NUMA local memory.
+	 * @override_pte: true for memory that is not uncached and gmc override function is
+	 * implemented to allow MTYPE to be overridden for NUMA local memory.
 	 */
-	bool allow_override;
+	bool override_pte;
 
 	/**
 	 * @tlb_flush_waitlist: temporary storage for BOs until tlb_flush
@@ -309,7 +328,7 @@ struct amdgpu_vm_update_params {
 struct amdgpu_vm_update_funcs {
 	int (*map_table)(struct amdgpu_bo_vm *bo);
 	int (*prepare)(struct amdgpu_vm_update_params *p,
-		       struct amdgpu_sync *sync);
+		       struct amdgpu_sync *sync, u64 k_job_id);
 	int (*update)(struct amdgpu_vm_update_params *p,
 		      struct amdgpu_bo_vm *bo, uint64_t pe, uint64_t addr,
 		      unsigned count, uint32_t incr, uint64_t flags);
@@ -344,39 +363,35 @@ struct amdgpu_vm {
 	bool			evicting;
 	unsigned int		saved_flags;
 
-	/* Lock to protect vm_bo add/del/move on all lists of vm */
-	spinlock_t		status_lock;
-
-	/* Memory statistics for this vm, protected by status_lock */
+	/* Memory statistics for this vm, protected by stats_lock */
+	spinlock_t		stats_lock;
 	struct amdgpu_mem_stats stats[__AMDGPU_PL_NUM];
 
-	/* Per-VM and PT BOs who needs a validation */
-	struct list_head	evicted;
+	/* BO's belonging to PD/PT which are internal to the kernel. */
+	struct amdgpu_vm_bo_status	kernel;
 
-	/* BOs for user mode queues that need a validation */
-	struct list_head	evicted_user;
+	/*
+	 * BOs allocated by userspace where the dma_resv is shared with the
+	 * root PD
+	 */
+	struct amdgpu_vm_bo_status	always_valid;
 
-	/* PT BOs which relocated and their parent need an update */
-	struct list_head	relocated;
+	/*
+	 * The following lists contain amdgpu_vm_bo_base objects for BOs which
+	 * have their own dma_resv object and not depend on the root PD.
+	 *
+	 * Lists are protected by the individual_lock.
+	 */
+	spinlock_t			individual_lock;
 
-	/* per VM BOs moved, but not yet updated in the PT */
-	struct list_head	moved;
+	/* Userspace BOs with individual resv object */
+	struct amdgpu_vm_bo_status	individual;
 
-	/* All BOs of this VM not currently in the state machine */
-	struct list_head	idle;
-
-	/* regular invalidated BOs, but not yet updated in the PT */
-	struct list_head	invalidated;
-
-	/* BO mappings freed, but not yet updated in the PT */
+	/*
+	 * This list contains amdgpu_bo_va_mapping objects which have been freed
+	 * but not updated in the PTs
+	 */
 	struct list_head	freed;
-
-	/* BOs which are invalidated, has been updated in the PTs */
-	struct list_head        done;
-
-	/* PT BOs scheduled to free and fill with zero if vm_resv is not hold */
-	struct list_head	pt_freed;
-	struct work_struct	pt_free_work;
 
 	/* contains the page directory */
 	struct amdgpu_vm_bo_base     root;
@@ -399,7 +414,7 @@ struct amdgpu_vm {
 	struct dma_fence	*last_unlocked;
 
 	unsigned int		pasid;
-	bool			reserved_vmid[AMDGPU_MAX_VMHUBS];
+	struct amdgpu_vmid	*reserved_vmid[AMDGPU_MAX_VMHUBS];
 
 	/* Flag to indicate if VM tables are updated by CPU or GPU (SDMA) */
 	bool					use_cpu_for_update;
@@ -426,6 +441,8 @@ struct amdgpu_vm {
 	struct ttm_lru_bulk_move lru_bulk_move;
 	/* Flag to indicate if VM is used for compute */
 	bool			is_compute_context;
+	/* Flag to indicate if VM needs a TLB fence (KFD or KGD) */
+	bool			need_tlb_fence;
 
 	/* Memory partition number, -1 means any partition */
 	int8_t			mem_id;
@@ -440,11 +457,8 @@ struct amdgpu_vm_manager {
 	unsigned int				first_kfd_vmid;
 	bool					concurrent_flush;
 
-	/* Handling of VM fences */
-	u64					fence_context;
-	unsigned				seqno[AMDGPU_MAX_RINGS];
-
 	uint64_t				max_pfn;
+	uint32_t				max_level;
 	uint32_t				num_level;
 	uint32_t				block_size;
 	uint32_t				fragment_size;
@@ -487,23 +501,21 @@ extern const struct amdgpu_vm_update_funcs amdgpu_vm_sdma_funcs;
 void amdgpu_vm_manager_init(struct amdgpu_device *adev);
 void amdgpu_vm_manager_fini(struct amdgpu_device *adev);
 
-int amdgpu_vm_set_pasid(struct amdgpu_device *adev, struct amdgpu_vm *vm,
-			u32 pasid);
-
 long amdgpu_vm_wait_idle(struct amdgpu_vm *vm, long timeout);
-int amdgpu_vm_init(struct amdgpu_device *adev, struct amdgpu_vm *vm, int32_t xcp_id);
+int amdgpu_vm_init(struct amdgpu_device *adev, struct amdgpu_vm *vm, int32_t xcp_id, uint32_t pasid);
 int amdgpu_vm_make_compute(struct amdgpu_device *adev, struct amdgpu_vm *vm);
-void amdgpu_vm_release_compute(struct amdgpu_device *adev, struct amdgpu_vm *vm);
 void amdgpu_vm_fini(struct amdgpu_device *adev, struct amdgpu_vm *vm);
 int amdgpu_vm_lock_pd(struct amdgpu_vm *vm, struct drm_exec *exec,
 		      unsigned int num_fences);
+int amdgpu_vm_lock_individual(struct amdgpu_vm *vm, struct drm_exec *exec,
+			      unsigned int num_fences);
 bool amdgpu_vm_ready(struct amdgpu_vm *vm);
 uint64_t amdgpu_vm_generation(struct amdgpu_device *adev, struct amdgpu_vm *vm);
 int amdgpu_vm_validate(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 		       struct ww_acquire_ctx *ticket,
 		       int (*callback)(void *p, struct amdgpu_bo *bo),
 		       void *param);
-int amdgpu_vm_flush(struct amdgpu_ring *ring, struct amdgpu_job *job, bool need_pipe_sync);
+void amdgpu_vm_flush(struct amdgpu_ring *ring, struct amdgpu_job *job, bool need_pipe_sync);
 int amdgpu_vm_update_pdes(struct amdgpu_device *adev,
 			  struct amdgpu_vm *vm, bool immediate);
 int amdgpu_vm_clear_freed(struct amdgpu_device *adev,
@@ -544,11 +556,11 @@ struct amdgpu_bo_va *amdgpu_vm_bo_add(struct amdgpu_device *adev,
 int amdgpu_vm_bo_map(struct amdgpu_device *adev,
 		     struct amdgpu_bo_va *bo_va,
 		     uint64_t addr, uint64_t offset,
-		     uint64_t size, uint64_t flags);
+		     uint64_t size, uint32_t flags);
 int amdgpu_vm_bo_replace_map(struct amdgpu_device *adev,
 			     struct amdgpu_bo_va *bo_va,
 			     uint64_t addr, uint64_t offset,
-			     uint64_t size, uint64_t flags);
+			     uint64_t size, uint32_t flags);
 int amdgpu_vm_bo_unmap(struct amdgpu_device *adev,
 		       struct amdgpu_bo_va *bo_va,
 		       uint64_t addr);
@@ -579,6 +591,9 @@ void amdgpu_vm_put_task_info(struct amdgpu_task_info *task_info);
 bool amdgpu_vm_handle_fault(struct amdgpu_device *adev, u32 pasid,
 			    u32 vmid, u32 node_id, uint64_t addr, uint64_t ts,
 			    bool write_fault);
+
+struct amdgpu_vm *amdgpu_vm_lock_by_pasid(struct amdgpu_device *adev,
+					  u32 pasid, struct drm_exec *exec);
 
 void amdgpu_vm_set_task_info(struct amdgpu_vm *vm);
 
@@ -629,7 +644,7 @@ static inline uint64_t amdgpu_vm_tlb_seq(struct amdgpu_vm *vm)
 	 * sure that the dma_fence structure isn't freed up.
 	 */
 	rcu_read_lock();
-	lock = vm->last_tlb_flush->lock;
+	lock = dma_fence_spinlock(vm->last_tlb_flush);
 	rcu_read_unlock();
 
 	spin_lock_irqsave(lock, flags);
@@ -672,5 +687,13 @@ void amdgpu_vm_update_fault_cache(struct amdgpu_device *adev,
 void amdgpu_vm_tlb_fence_create(struct amdgpu_device *adev,
 				 struct amdgpu_vm *vm,
 				 struct dma_fence **fence);
+
+void amdgpu_vm_print_task_info(struct amdgpu_device *adev,
+			       struct amdgpu_task_info *task_info);
+
+#define amdgpu_vm_bo_va_for_each_valid_mapping(bo_va, mapping) \
+		list_for_each_entry(mapping, &(bo_va)->valids, list)
+#define amdgpu_vm_bo_va_for_each_invalid_mapping(bo_va, mapping) \
+		list_for_each_entry(mapping, &(bo_va)->invalids, list)
 
 #endif

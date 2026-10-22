@@ -116,15 +116,15 @@ struct pvclock_wall_clock {
 } __attribute__((__packed__));
 
 struct vcpu_runstate_info {
-	uint32_t state;
-	uint64_t state_entry_time;
-	uint64_t time[5]; /* Extra field for overrun check */
+	u32 state;
+	u64 state_entry_time;
+	u64 time[5]; /* Extra field for overrun check */
 };
 
 struct compat_vcpu_runstate_info {
-	uint32_t state;
-	uint64_t state_entry_time;
-	uint64_t time[5];
+	u32 state;
+	u64 state_entry_time;
+	u64 time[5];
 } __attribute__((__packed__));
 
 struct arch_vcpu_info {
@@ -133,8 +133,8 @@ struct arch_vcpu_info {
 };
 
 struct vcpu_info {
-	uint8_t evtchn_upcall_pending;
-	uint8_t evtchn_upcall_mask;
+	u8 evtchn_upcall_pending;
+	u8 evtchn_upcall_mask;
 	unsigned long evtchn_pending_sel;
 	struct arch_vcpu_info arch;
 	struct pvclock_vcpu_time_info time;
@@ -145,7 +145,7 @@ struct shared_info {
 	unsigned long evtchn_pending[64];
 	unsigned long evtchn_mask[64];
 	struct pvclock_wall_clock wc;
-	uint32_t wc_sec_hi;
+	u32 wc_sec_hi;
 	/* arch_shared_info here */
 };
 
@@ -191,10 +191,7 @@ static void guest_code(void)
 	struct vcpu_runstate_info *rs = (void *)RUNSTATE_VADDR;
 	int i;
 
-	__asm__ __volatile__(
-		"sti\n"
-		"nop\n"
-	);
+	sti_nop();
 
 	/* Trigger an interrupt injection */
 	GUEST_SYNC(TEST_INJECT_VECTOR);
@@ -550,15 +547,9 @@ int main(int argc, char *argv[])
 	int irq_fd[2] = { -1, -1 };
 
 	if (do_eventfd_tests) {
-		irq_fd[0] = eventfd(0, 0);
-		irq_fd[1] = eventfd(0, 0);
+		irq_fd[0] = kvm_new_eventfd();
+		irq_fd[1] = kvm_new_eventfd();
 
-		/* Unexpected, but not a KVM failure */
-		if (irq_fd[0] == -1 || irq_fd[1] == -1)
-			do_evtchn_tests = do_eventfd_tests = false;
-	}
-
-	if (do_eventfd_tests) {
 		irq_routes.info.nr = 2;
 
 		irq_routes.entries[0].gsi = 32;
@@ -575,15 +566,8 @@ int main(int argc, char *argv[])
 
 		vm_ioctl(vm, KVM_SET_GSI_ROUTING, &irq_routes.info);
 
-		struct kvm_irqfd ifd = { };
-
-		ifd.fd = irq_fd[0];
-		ifd.gsi = 32;
-		vm_ioctl(vm, KVM_IRQFD, &ifd);
-
-		ifd.fd = irq_fd[1];
-		ifd.gsi = 33;
-		vm_ioctl(vm, KVM_IRQFD, &ifd);
+		kvm_assign_irqfd(vm, 32, irq_fd[0]);
+		kvm_assign_irqfd(vm, 33, irq_fd[1]);
 
 		struct sigaction sa = { };
 		sa.sa_handler = handle_alrm;
@@ -674,7 +658,7 @@ int main(int argc, char *argv[])
 					printf("Testing RUNSTATE_ADJUST\n");
 				rst.type = KVM_XEN_VCPU_ATTR_TYPE_RUNSTATE_ADJUST;
 				memset(&rst.u, 0, sizeof(rst.u));
-				rst.u.runstate.state = (uint64_t)-1;
+				rst.u.runstate.state = (u64)-1;
 				rst.u.runstate.time_blocked =
 					0x5a - rs->time[RUNSTATE_blocked];
 				rst.u.runstate.time_offline =
@@ -1129,7 +1113,7 @@ int main(int argc, char *argv[])
 			/* Don't change the address, just trigger a write */
 			struct kvm_xen_vcpu_attr adj = {
 				.type = KVM_XEN_VCPU_ATTR_TYPE_RUNSTATE_ADJUST,
-				.u.runstate.state = (uint64_t)-1
+				.u.runstate.state = (u64)-1
 			};
 			vcpu_ioctl(vcpu, KVM_XEN_VCPU_SET_ATTR, &adj);
 

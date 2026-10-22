@@ -25,6 +25,7 @@ config B44
 	select SSB
 	select MII
 	select PHYLIB
+	select FIXED_PHY
 	help
 	  If you have a network (Ethernet) controller of this type, say Y
 	  or M here.
@@ -77,6 +78,7 @@ config BCMGENET
 	select BCM7XXX_PHY
 	select MDIO_BCM_UNIMAC
 	select DIMLIB
+	select PAGE_POOL
 	select BROADCOM_PHY if ARCH_BCM2835
 	help
 	  This driver supports the built-in Ethernet MACs found in the
@@ -95,8 +97,7 @@ config BNX2
 
 config CNIC
 	tristate "QLogic CNIC support"
-	depends on PCI && (IPV6 || IPV6=n)
-	depends on MMU
+	depends on PCI
 	select BNX2
 	select UIO
 	help
@@ -123,6 +124,7 @@ config TIGON3
 	tristate "Broadcom Tigon3 support"
 	depends on PCI
 	depends on PTP_1588_CLOCK_OPTIONAL
+	select CRC32
 	select PHYLIB
 	help
 	  This driver supports Broadcom Tigon3 based gigabit Ethernet cards.
@@ -143,7 +145,7 @@ config BNX2X
 	depends on PTP_1588_CLOCK_OPTIONAL
 	select FW_LOADER
 	select ZLIB_INFLATE
-	select LIBCRC32C
+	select CRC32
 	select MDIO
 	help
 	  This driver supports Broadcom NetXtremeII 10 gigabit Ethernet cards.
@@ -207,7 +209,7 @@ config BNXT
 	depends on PCI
 	depends on PTP_1588_CLOCK_OPTIONAL
 	select FW_LOADER
-	select LIBCRC32C
+	select CRC32
 	select NET_DEVLINK
 	select PAGE_POOL
 	select DIMLIB
@@ -253,6 +255,17 @@ config BNXT_HWMON
 	  Say Y if you want to expose the thermal sensor data on NetXtreme-C/E
 	  devices, via the hwmon sysfs interface.
 
+config BNGE
+	tristate "Broadcom ThorUltra Ethernet device support"
+	depends on PCI
+	select NET_DEVLINK
+	select PAGE_POOL
+	select AUXILIARY_BUS
+	help
+	  This driver supports Broadcom ThorUltra 50/100/200/400/800 gigabit
+	  Ethernet cards. The module will be called bng_en. To compile this
+	  driver as a module, choose M here.
+
 config BCMASP
 	tristate "Broadcom ASP 2.0 Ethernet support"
 	depends on ARCH_BRCMSTB || COMPILE_TEST
@@ -260,6 +273,7 @@ config BCMASP
 	depends on OF
 	select PHYLIB
 	select MDIO_BCM_UNIMAC
+	select PAGE_POOL
 	help
 	  This configuration enables the Broadcom ASP 2.0 Ethernet controller
 	  driver which is present in Broadcom STB SoCs such as 72165.

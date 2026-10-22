@@ -33,7 +33,7 @@
  * 1100 - 1199 user space trusted application messages
  * 1200 - 1299 messages internal to the audit daemon
  * 1300 - 1399 audit event messages
- * 1400 - 1499 SE Linux use
+ * 1400 - 1499 access control messages
  * 1500 - 1599 kernel LSPP events
  * 1600 - 1699 kernel crypto events
  * 1700 - 1799 kernel anomaly records
@@ -146,6 +146,10 @@
 #define AUDIT_IPE_ACCESS	1420	/* IPE denial or grant */
 #define AUDIT_IPE_CONFIG_CHANGE	1421	/* IPE config change */
 #define AUDIT_IPE_POLICY_LOAD	1422	/* IPE policy load */
+#define AUDIT_LANDLOCK_ACCESS	1423	/* Landlock denial */
+#define AUDIT_LANDLOCK_DOMAIN	1424	/* Landlock domain status */
+#define AUDIT_MAC_TASK_CONTEXTS	1425	/* Multiple LSM task contexts */
+#define AUDIT_MAC_OBJ_CONTEXTS	1426	/* Multiple LSM objext contexts */
 
 #define AUDIT_FIRST_KERN_ANOM_MSG   1700
 #define AUDIT_LAST_KERN_ANOM_MSG    1799
@@ -346,7 +350,7 @@ enum {
 #define AUDIT_STATUS_ENABLED			0x0001
 #define AUDIT_STATUS_FAILURE			0x0002
 #define AUDIT_STATUS_PID			0x0004
-#define AUDIT_STATUS_RATE_LIMIT		0x0008
+#define AUDIT_STATUS_RATE_LIMIT			0x0008
 #define AUDIT_STATUS_BACKLOG_LIMIT		0x0010
 #define AUDIT_STATUS_BACKLOG_WAIT_TIME		0x0020
 #define AUDIT_STATUS_LOST			0x0040
@@ -382,8 +386,8 @@ enum {
  * These bits disambiguate different calling conventions that share an
  * ELF machine type, bitness, and endianness
  */
-#define __AUDIT_ARCH_CONVENTION_MASK 0x30000000
-#define __AUDIT_ARCH_CONVENTION_MIPS64_N32 0x20000000
+#define __AUDIT_ARCH_CONVENTION_MASK		0x30000000
+#define __AUDIT_ARCH_CONVENTION_MIPS64_N32	0x20000000
 
 /* distinguish syscall tables */
 #define __AUDIT_ARCH_64BIT 0x80000000
@@ -504,7 +508,7 @@ struct audit_tty_status {
 	__u32		log_passwd;	/* 1 = enabled, 0 = disabled */
 };
 
-#define AUDIT_UID_UNSET (unsigned int)-1
+#define AUDIT_UID_UNSET ((unsigned int)-1)
 #define AUDIT_SID_UNSET ((unsigned int)-1)
 
 /* audit_rule_data supports filter rules with both integer and string

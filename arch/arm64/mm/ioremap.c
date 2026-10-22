@@ -14,18 +14,18 @@ int arm64_ioremap_prot_hook_register(ioremap_prot_hook_t hook)
 	return 0;
 }
 
-void __iomem *ioremap_prot(phys_addr_t phys_addr, size_t size,
-			   unsigned long prot)
+void __iomem *__ioremap_prot(phys_addr_t phys_addr, size_t size,
+			     pgprot_t pgprot)
 {
 	unsigned long last_addr = phys_addr + size - 1;
-	pgprot_t pgprot = __pgprot(prot);
 
 	/* Don't allow outside PHYS_MASK */
 	if (last_addr & ~PHYS_MASK)
 		return NULL;
 
 	/* Don't allow RAM to be mapped. */
-	if (WARN_ON(pfn_is_map_memory(__phys_to_pfn(phys_addr))))
+	if (WARN_ONCE(pfn_is_map_memory(__phys_to_pfn(phys_addr)),
+		      "ioremap attempted on RAM pfn\n"))
 		return NULL;
 
 	/*
@@ -39,7 +39,7 @@ void __iomem *ioremap_prot(phys_addr_t phys_addr, size_t size,
 
 	return generic_ioremap_prot(phys_addr, size, pgprot);
 }
-EXPORT_SYMBOL(ioremap_prot);
+EXPORT_SYMBOL(__ioremap_prot);
 
 /*
  * Must be called after early_fixmap_init

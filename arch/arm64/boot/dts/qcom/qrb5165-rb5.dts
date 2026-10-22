@@ -38,14 +38,6 @@
 		clock-frequency = <40000000>;
 	};
 
-	dc12v: dc12v-regulator {
-		compatible = "regulator-fixed";
-		regulator-name = "DC12V";
-		regulator-min-microvolt = <12000000>;
-		regulator-max-microvolt = <12000000>;
-		regulator-always-on;
-	};
-
 	hdmi-out {
 		compatible = "hdmi-connector";
 		type = "a";
@@ -92,7 +84,7 @@
 		compatible = "regulator-fixed";
 		regulator-name = "LT9611_1V2";
 
-		vin-supply = <&vdc_3v3>;
+		vin-supply = <&vreg_l11c_3p3>;
 		regulator-min-microvolt = <1200000>;
 		regulator-max-microvolt = <1200000>;
 	};
@@ -101,7 +93,7 @@
 		compatible = "regulator-fixed";
 		regulator-name = "LT9611_3V3";
 
-		vin-supply = <&vdc_3v3>;
+		vin-supply = <&vreg_l11c_3p3>;
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
 		regulator-boot-on;
@@ -229,33 +221,6 @@
 				};
 			};
 		};
-	};
-
-	vbat: vbat-regulator {
-		compatible = "regulator-fixed";
-		regulator-name = "VBAT";
-		vin-supply = <&vreg_l11c_3p3>;
-		regulator-min-microvolt = <4200000>;
-		regulator-max-microvolt = <4200000>;
-		regulator-always-on;
-	};
-
-	vbat_som: vbat-som-regulator {
-		compatible = "regulator-fixed";
-		regulator-name = "VBAT_SOM";
-		vin-supply = <&dc12v>;
-		regulator-min-microvolt = <4200000>;
-		regulator-max-microvolt = <4200000>;
-		regulator-always-on;
-	};
-
-	vdc_3v3: vdc-3v3-regulator {
-		compatible = "regulator-fixed";
-		regulator-name = "VDC_3V3";
-		vin-supply = <&vreg_l11c_3p3>;
-		regulator-min-microvolt = <3300000>;
-		regulator-max-microvolt = <3300000>;
-		regulator-always-on;
 	};
 
 	vdc_5v: vdc-5v-regulator {
@@ -594,11 +559,10 @@
 
 &gpu {
 	status = "okay";
+};
 
-	zap-shader {
-		memory-region = <&gpu_mem>;
-		firmware-name = "qcom/sm8250/a650_zap.mbn";
-	};
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8250/a650_zap.mbn";
 };
 
 /* LS-I2C0 */
@@ -725,15 +689,11 @@
 	qcom,dual-dsi-mode;
 	qcom,master-dsi;
 #endif
+};
 
-	ports {
-		port@1 {
-			endpoint {
-				remote-endpoint = <&lt9611_a>;
-				data-lanes = <0 1 2 3>;
-			};
-		};
-	};
+&mdss_dsi0_out {
+	remote-endpoint = <&lt9611_a>;
+	data-lanes = <0 1 2 3>;
 };
 
 &mdss_dsi0_phy {
@@ -1008,15 +968,21 @@
 
 &q6asmdai {
 	dai@0 {
-		reg = <0>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
 	};
 
 	dai@1 {
-		reg = <1>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
 	};
 
 	dai@2 {
-		reg = <2>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>;
+	};
+
+	dai@3 {
+		direction = <Q6ASM_DAI_RX>;
+		is-compress-dai;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA4>;
 	};
 };
 
@@ -1032,6 +998,12 @@
 	no-mmc;
 };
 
+&slpi {
+	firmware-name = "qcom/sm8250/Thundercomm/RB5/slpi.mbn";
+
+	status = "okay";
+};
+
 &sound {
 	compatible = "qcom,qrb5165-rb5-sndcard";
 	pinctrl-0 = <&tert_mi2s_active>;
@@ -1041,10 +1013,7 @@
 		"SpkrLeft IN", "WSA_SPK1 OUT",
 		"SpkrRight IN", "WSA_SPK2 OUT",
 		"VA DMIC0", "vdd-micb",
-		"VA DMIC1", "vdd-micb",
-		"MM_DL1",  "MultiMedia1 Playback",
-		"MM_DL2",  "MultiMedia2 Playback",
-		"MultiMedia3 Capture", "MM_UL3";
+		"VA DMIC1", "vdd-micb";
 
 	mm1-dai-link {
 		link-name = "MultiMedia1";
@@ -1064,6 +1033,14 @@
 		link-name = "MultiMedia3";
 		cpu {
 			sound-dai = <&q6asmdai  MSM_FRONTEND_DAI_MULTIMEDIA3>;
+		};
+	};
+
+	mm4-dai-link {
+		link-name = "MultiMedia4";
+
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA4>;
 		};
 	};
 
@@ -1521,6 +1498,8 @@
 		power-role = "source";
 		data-role = "dual";
 		self-powered;
+
+		vbus-supply = <&pm8150b_vbus>;
 
 		source-pdos = <PDO_FIXED(5000, 3000,
 					 PDO_FIXED_DUAL_ROLE |

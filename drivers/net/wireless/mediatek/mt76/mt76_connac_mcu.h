@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: ISC */
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /* Copyright (C) 2020 MediaTek Inc. */
 
 #ifndef __MT76_CONNAC_MCU_H
@@ -628,6 +628,13 @@ struct sta_rec_tx_proc {
 	__le32 flag;
 } __packed;
 
+struct sta_rec_eml_op {
+	__le16 tag;
+	__le16 len;
+	u8 link_bitmap;
+	u8 link_ant_num[3];
+} __packed;
+
 /* wtbl_rec */
 
 struct wtbl_req_hdr {
@@ -796,6 +803,7 @@ struct wtbl_raw {
 					 sizeof(struct sta_rec_he_6g_capa) + \
 					 sizeof(struct sta_rec_pn_info) + \
 					 sizeof(struct sta_rec_tx_proc) + \
+					 sizeof(struct sta_rec_eml_op) + \
 					 sizeof(struct tlv) +		\
 					 MT76_CONNAC_WTBL_UPDATE_MAX_SIZE)
 
@@ -832,6 +840,7 @@ enum {
 	STA_REC_PN_INFO = 0x26,
 	STA_REC_KEY_V3 = 0x27,
 	STA_REC_HDRT = 0x28,
+	STA_REC_EML_OP = 0x29,
 	STA_REC_HDR_TRANS = 0x2B,
 	STA_REC_MAX_NUM
 };
@@ -869,6 +878,7 @@ enum {
 #define NETWORK_WDS			BIT(21)
 
 #define SCAN_FUNC_RANDOM_MAC		BIT(0)
+#define SCAN_FUNC_RNR_SCAN		BIT(3)
 #define SCAN_FUNC_SPLIT_SCAN		BIT(5)
 
 #define CONNECTION_INFRA_STA		(STA_TYPE_STA | NETWORK_INFRA)
@@ -1059,12 +1069,15 @@ enum {
 	MCU_UNI_EVENT_SCAN_DONE = 0x0e,
 	MCU_UNI_EVENT_RDD_REPORT = 0x11,
 	MCU_UNI_EVENT_ROC = 0x27,
+	MCU_UNI_EVENT_MBMC = 0x28,
 	MCU_UNI_EVENT_TX_DONE = 0x2d,
 	MCU_UNI_EVENT_THERMAL = 0x35,
+	MCU_UNI_EVENT_RSSI_MONITOR = 0x41,
 	MCU_UNI_EVENT_NIC_CAPAB = 0x43,
 	MCU_UNI_EVENT_WED_RRO = 0x57,
 	MCU_UNI_EVENT_PER_STA_INFO = 0x6d,
 	MCU_UNI_EVENT_ALL_STA_INFO = 0x6e,
+	MCU_UNI_EVENT_SDO = 0x83,
 };
 
 #define MCU_UNI_CMD_EVENT			BIT(1)
@@ -1182,6 +1195,11 @@ enum {
 #define MCU_UNI_CMD(_t)				(__MCU_CMD_FIELD_UNI |			\
 						 FIELD_PREP(__MCU_CMD_FIELD_ID,		\
 							    MCU_UNI_CMD_##_t))
+
+#define MCU_UNI_QUERY(_t)			(__MCU_CMD_FIELD_UNI | __MCU_CMD_FIELD_QUERY | \
+						 FIELD_PREP(__MCU_CMD_FIELD_ID,		\
+							    MCU_UNI_CMD_##_t))
+
 #define MCU_CE_CMD(_t)				(__MCU_CMD_FIELD_CE |			\
 						 FIELD_PREP(__MCU_CMD_FIELD_ID,		\
 							   MCU_CE_CMD_##_t))
@@ -1287,16 +1305,23 @@ enum {
 	MCU_UNI_CMD_EFUSE_CTRL = 0x2d,
 	MCU_UNI_CMD_RA = 0x2f,
 	MCU_UNI_CMD_MURU = 0x31,
+	MCU_UNI_CMD_TESTMODE_RX_STAT = 0x32,
 	MCU_UNI_CMD_BF = 0x33,
 	MCU_UNI_CMD_CHANNEL_SWITCH = 0x34,
 	MCU_UNI_CMD_THERMAL = 0x35,
 	MCU_UNI_CMD_VOW = 0x37,
 	MCU_UNI_CMD_FIXED_RATE_TABLE = 0x40,
+	MCU_UNI_CMD_RSSI_MONITOR = 0x41,
+	MCU_UNI_CMD_TESTMODE_CTRL = 0x46,
 	MCU_UNI_CMD_RRO = 0x57,
 	MCU_UNI_CMD_OFFCH_SCAN_CTRL = 0x58,
 	MCU_UNI_CMD_PER_STA_INFO = 0x6d,
 	MCU_UNI_CMD_ALL_STA_INFO = 0x6e,
 	MCU_UNI_CMD_ASSERT_DUMP = 0x6f,
+	MCU_UNI_CMD_EXT_EEPROM_CTRL = 0x74,
+	MCU_UNI_CMD_RADIO_STATUS = 0x80,
+	MCU_UNI_CMD_MLD = 0x82,
+	MCU_UNI_CMD_SDO = 0x88,
 };
 
 enum {
@@ -1350,6 +1375,7 @@ enum {
 	UNI_BSS_INFO_BASIC = 0,
 	UNI_BSS_INFO_RA = 1,
 	UNI_BSS_INFO_RLM = 2,
+	UNI_BSS_INFO_PROTECT_INFO = 3,
 	UNI_BSS_INFO_BSS_COLOR = 4,
 	UNI_BSS_INFO_HE_BASIC = 5,
 	UNI_BSS_INFO_11V_MBSSID = 6,
@@ -1369,6 +1395,8 @@ enum {
 	UNI_BSS_INFO_OFFLOAD = 25,
 	UNI_BSS_INFO_MLD = 26,
 	UNI_BSS_INFO_PM_DISABLE = 27,
+	UNI_BSS_INFO_EHT = 30,
+	UNI_BSS_INFO_MLD_LINK_OP = 36,
 };
 
 enum {
@@ -1571,7 +1599,7 @@ struct mt76_connac_hw_scan_done {
 	u8 pno_enabled;
 	u8 pad2[3];
 	u8 sparse_channel_valid_num;
-	u8 pad3[3];
+	u8 alpha2[3];
 	u8 channel_num[MT76_CONNAC_SCAN_DONE_EVENT_MAX_CHANNEL_NUM];
 	/* idle format for channel_idle_time
 	 * 0: first bytes: idle time(ms) 2nd byte: dwell time(ms)
@@ -1584,6 +1612,7 @@ struct mt76_connac_hw_scan_done {
 	u8 mdrdy_count[MT76_CONNAC_SCAN_DONE_EVENT_MAX_CHANNEL_NUM];
 	__le32 beacon_2g_num;
 	__le32 beacon_5g_num;
+	__le16 channel_scan_time[MT76_CONNAC_SCAN_DONE_EVENT_MAX_CHANNEL_NUM];
 } __packed;
 
 struct mt76_connac_sched_scan_req {
@@ -1851,7 +1880,7 @@ mt76_connac_mcu_gen_dl_mode(struct mt76_dev *dev, u8 feature_set, bool is_wa)
 
 	ret |= feature_set & FW_FEATURE_SET_ENCRYPT ?
 	       DL_MODE_ENCRYPT | DL_MODE_RESET_SEC_IV : 0;
-	if (is_mt7921(dev) || is_mt7925(dev))
+	if (is_connac2(dev) || is_connac3(dev))
 		ret |= feature_set & FW_FEATURE_ENCRY_MODE ?
 		       DL_CONFIG_ENCRY_MODE_SEL : 0;
 	ret |= FIELD_PREP(DL_MODE_KEY_IDX,
@@ -1877,6 +1906,29 @@ mt76_connac_mcu_get_wlan_idx(struct mt76_dev *dev, struct mt76_wcid *wcid,
 	} else {
 		*wlan_idx_lo = wcid ? wcid->idx : 0;
 	}
+}
+
+#define MT76_CONNAC_MCU_STATUS_WLAN_FAILURE	0xc0000001
+
+static inline int
+mt76_connac_mcu_bss_deact_err(struct mt76_dev *mdev, int err, bool enable)
+{
+	if (err != (int)MT76_CONNAC_MCU_STATUS_WLAN_FAILURE)
+		return err;
+
+	/* Ignore wlan_failure state false alarm when deactivating an
+	 * inactive network. It does not harm the firmware state.
+	 */
+	if (!enable) {
+		dev_dbg(mdev->dev,
+			"ignore wlan_failure when bss is deactivated\n");
+		return 0;
+	}
+
+	dev_warn(mdev->dev,
+		 "wlan_failure when bss is activated\n");
+
+	return err;
 }
 
 struct sk_buff *
@@ -1969,6 +2021,8 @@ int mt76_connac_mcu_start_patch(struct mt76_dev *dev);
 int mt76_connac_mcu_patch_sem_ctrl(struct mt76_dev *dev, bool get);
 int mt76_connac_mcu_start_firmware(struct mt76_dev *dev, u32 addr, u32 option);
 
+void mt76_connac_mcu_build_rnr_scan_param(struct mt76_dev *mdev,
+					  struct cfg80211_scan_request *sreq);
 int mt76_connac_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 			    struct ieee80211_scan_request *scan_req);
 int mt76_connac_mcu_cancel_hw_scan(struct mt76_phy *phy,

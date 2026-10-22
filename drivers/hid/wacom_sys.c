@@ -54,7 +54,7 @@ static void wacom_wac_queue_insert(struct hid_device *hdev,
 {
 	bool warned = false;
 
-	while (kfifo_avail(fifo) < size) {
+	while (kfifo_avail(fifo) < size && !kfifo_is_empty(fifo)) {
 		if (!warned)
 			hid_warn(hdev, "%s: kfifo has filled, starting to drop events\n", __func__);
 		warned = true;
@@ -62,19 +62,35 @@ static void wacom_wac_queue_insert(struct hid_device *hdev,
 		kfifo_skip(fifo);
 	}
 
-	kfifo_in(fifo, raw_data, size);
+	if (!kfifo_in(fifo, raw_data, size))
+		hid_warn_ratelimited(hdev, "%s: report is too large (%d)\n",
+				     __func__, size);
 }
 
 static void wacom_wac_queue_flush(struct hid_device *hdev,
 				  struct kfifo_rec_ptr_2 *fifo)
 {
 	while (!kfifo_is_empty(fifo)) {
-		u8 buf[WACOM_PKGLEN_MAX];
-		int size;
+		int size = kfifo_peek_len(fifo);
+		u8 *buf __free(kfree) = kzalloc(size, GFP_ATOMIC);
+		unsigned int count;
 		int err;
 
-		size = kfifo_out(fifo, buf, sizeof(buf));
-		err = hid_report_raw_event(hdev, HID_INPUT_REPORT, buf, size, false);
+		if (!buf) {
+			kfifo_skip(fifo);
+			continue;
+		}
+
+		count = kfifo_out(fifo, buf, size);
+		if (count != size) {
+			// Hard to say what is the "right" action in this
+			// circumstance. Skipping the entry and continuing
+			// to flush seems reasonable enough, however.
+			hid_warn(hdev, "%s: removed fifo entry with unexpected size\n",
+				 __func__);
+			continue;
+		}
+		err = hid_report_raw_event(hdev, HID_INPUT_REPORT, buf, size, size, false);
 		if (err) {
 			hid_warn(hdev, "%s: unable to flush event due to error %d\n",
 				 __func__, err);
@@ -158,13 +174,10 @@ static int wacom_raw_event(struct hid_device *hdev, struct hid_report *report,
 	if (wacom->wacom_wac.features.type == BOOTLOADER)
 		return 0;
 
-	if (size > WACOM_PKGLEN_MAX)
-		return 1;
-
 	if (wacom_wac_pen_serial_enforce(hdev, report, raw_data, size))
 		return -1;
 
-	memcpy(wacom->wacom_wac.data, raw_data, size);
+	wacom->wacom_wac.data = raw_data;
 
 	wacom_wac_irq(&wacom->wacom_wac, size);
 
@@ -319,7 +332,7 @@ static void wacom_feature_mapping(struct hid_device *hdev,
 					       data, n, WAC_CMD_RETRIES);
 			if (ret == n && features->type == HID_GENERIC) {
 				ret = hid_report_raw_event(hdev,
-					HID_FEATURE_REPORT, data, n, 0);
+					HID_FEATURE_REPORT, data, n, n, 0);
 			} else if (ret == 2 && features->type != HID_GENERIC) {
 				features->touch_max = data[1];
 			} else {
@@ -341,6 +354,7 @@ static void wacom_feature_mapping(struct hid_device *hdev,
 
 		hid_data->inputmode = field->report->id;
 		hid_data->inputmode_index = usage->usage_index;
+		hid_data->inputmode_field_index = field->index;
 		break;
 
 	case HID_UP_DIGITIZER:
@@ -380,7 +394,7 @@ static void wacom_feature_mapping(struct hid_device *hdev,
 					data, n, WAC_CMD_RETRIES);
 		if (ret == n) {
 			ret = hid_report_raw_event(hdev, HID_FEATURE_REPORT,
-						   data, n, 0);
+						   data, n, n, 0);
 		} else {
 			hid_warn(hdev, "%s: could not retrieve sensor offsets\n",
 				 __func__);
@@ -556,9 +570,14 @@ static int wacom_hid_set_device_mode(struct hid_device *hdev)
 
 	re = &(hdev->report_enum[HID_FEATURE_REPORT]);
 	r = re->report_id_hash[hid_data->inputmode];
-	if (r) {
-		r->field[0]->value[hid_data->inputmode_index] = 2;
-		hid_hw_request(hdev, r, HID_REQ_SET_REPORT);
+	if (r && hid_data->inputmode_field_index >= 0 &&
+	    hid_data->inputmode_field_index < r->maxfield) {
+		struct hid_field *field = r->field[hid_data->inputmode_field_index];
+
+		if (field && hid_data->inputmode_index < field->report_count) {
+			field->value[hid_data->inputmode_index] = 2;
+			hid_hw_request(hdev, r, HID_REQ_SET_REPORT);
+		}
 	}
 	return 0;
 }
@@ -877,7 +896,7 @@ static int wacom_add_shared_data(struct hid_device *hdev)
 
 	data = wacom_get_hdev_data(hdev);
 	if (!data) {
-		data = kzalloc(sizeof(struct wacom_hdev_data), GFP_KERNEL);
+		data = kzalloc_obj(struct wacom_hdev_data);
 		if (!data) {
 			mutex_unlock(&wacom_udev_list_lock);
 			return -ENOMEM;
@@ -1286,6 +1305,7 @@ static void wacom_devm_kfifo_release(struct device *dev, void *res)
 static int wacom_devm_kfifo_alloc(struct wacom *wacom)
 {
 	struct wacom_wac *wacom_wac = &wacom->wacom_wac;
+	int fifo_size = min(PAGE_SIZE, 10 * wacom_wac->features.pktlen);
 	struct kfifo_rec_ptr_2 *pen_fifo;
 	int error;
 
@@ -1296,7 +1316,7 @@ static int wacom_devm_kfifo_alloc(struct wacom *wacom)
 	if (!pen_fifo)
 		return -ENOMEM;
 
-	error = kfifo_alloc(pen_fifo, WACOM_PKGLEN_MAX, GFP_KERNEL);
+	error = kfifo_alloc(pen_fifo, fifo_size, GFP_KERNEL);
 	if (error) {
 		devres_free(pen_fifo);
 		return error;
@@ -2032,14 +2052,18 @@ static int wacom_initialize_remotes(struct wacom *wacom)
 
 	remote->remote_dir = kobject_create_and_add("wacom_remote",
 						    &wacom->hdev->dev.kobj);
-	if (!remote->remote_dir)
+	if (!remote->remote_dir) {
+		kfifo_free(&remote->remote_fifo);
 		return -ENOMEM;
+	}
 
 	error = sysfs_create_files(remote->remote_dir, remote_unpair_attrs);
 
 	if (error) {
 		hid_err(wacom->hdev,
 			"cannot create sysfs group err: %d\n", error);
+		kfifo_free(&remote->remote_fifo);
+		kobject_put(remote->remote_dir);
 		return error;
 	}
 
@@ -2352,11 +2376,15 @@ static int wacom_parse_and_register(struct wacom *wacom, bool wireless)
 	unsigned int connect_mask = HID_CONNECT_HIDRAW;
 
 	features->pktlen = wacom_compute_pktlen(hdev);
-	if (features->pktlen > WACOM_PKGLEN_MAX)
-		return -EINVAL;
+	if (!features->pktlen)
+		return -ENODEV;
 
 	if (!devres_open_group(&hdev->dev, wacom, GFP_KERNEL))
 		return -ENOMEM;
+
+	error = wacom_devm_kfifo_alloc(wacom);
+	if (error)
+		goto fail;
 
 	wacom->resources = true;
 
@@ -2432,16 +2460,16 @@ static int wacom_parse_and_register(struct wacom *wacom, bool wireless)
 
 	error = wacom_register_inputs(wacom);
 	if (error)
-		goto fail;
+		goto fail_hw_stop;
 
 	if (wacom->wacom_wac.features.device_type & WACOM_DEVICETYPE_PAD) {
 		error = wacom_initialize_leds(wacom);
 		if (error)
-			goto fail;
+			goto fail_hw_stop;
 
 		error = wacom_initialize_remotes(wacom);
 		if (error)
-			goto fail;
+			goto fail_hw_stop;
 	}
 
 	if (!wireless) {
@@ -2455,14 +2483,14 @@ static int wacom_parse_and_register(struct wacom *wacom, bool wireless)
 		cancel_delayed_work_sync(&wacom->init_work);
 		_wacom_query_tablet_data(wacom);
 		error = -ENODEV;
-		goto fail_quirks;
+		goto fail_hw_stop;
 	}
 
 	if (features->device_type & WACOM_DEVICETYPE_WL_MONITOR) {
 		error = hid_hw_open(hdev);
 		if (error) {
 			hid_err(hdev, "hw open failed\n");
-			goto fail_quirks;
+			goto fail_hw_stop;
 		}
 	}
 
@@ -2471,7 +2499,7 @@ static int wacom_parse_and_register(struct wacom *wacom, bool wireless)
 
 	return 0;
 
-fail_quirks:
+fail_hw_stop:
 	hid_hw_stop(hdev);
 fail:
 	wacom_release_resources(wacom);
@@ -2821,11 +2849,8 @@ static int wacom_probe(struct hid_device *hdev,
 	if (features->check_for_hid_type && features->hid_type != hdev->type)
 		return -ENODEV;
 
-	error = wacom_devm_kfifo_alloc(wacom);
-	if (error)
-		return error;
-
 	wacom_wac->hid_data.inputmode = -1;
+	wacom_wac->hid_data.inputmode_field_index = -1;
 	wacom_wac->mode_report = -1;
 
 	if (hid_is_usb(hdev)) {
@@ -2885,11 +2910,12 @@ static void wacom_remove(struct hid_device *hdev)
 	hid_hw_stop(hdev);
 
 	cancel_delayed_work_sync(&wacom->init_work);
+	cancel_delayed_work_sync(&wacom->aes_battery_work);
 	cancel_work_sync(&wacom->wireless_work);
 	cancel_work_sync(&wacom->battery_work);
 	cancel_work_sync(&wacom->remote_work);
 	cancel_work_sync(&wacom->mode_change_work);
-	del_timer_sync(&wacom->idleprox_timer);
+	timer_delete_sync(&wacom->idleprox_timer);
 	if (hdev->bus == BUS_BLUETOOTH)
 		device_remove_file(&hdev->dev, &dev_attr_speed);
 
@@ -2900,7 +2926,6 @@ static void wacom_remove(struct hid_device *hdev)
 		wacom_release_resources(wacom);
 }
 
-#ifdef CONFIG_PM
 static int wacom_resume(struct hid_device *hdev)
 {
 	struct wacom *wacom = hid_get_drvdata(hdev);
@@ -2920,7 +2945,6 @@ static int wacom_reset_resume(struct hid_device *hdev)
 {
 	return wacom_resume(hdev);
 }
-#endif /* CONFIG_PM */
 
 static struct hid_driver wacom_driver = {
 	.name =		"wacom",
@@ -2928,10 +2952,8 @@ static struct hid_driver wacom_driver = {
 	.probe =	wacom_probe,
 	.remove =	wacom_remove,
 	.report =	wacom_wac_report,
-#ifdef CONFIG_PM
-	.resume =	wacom_resume,
-	.reset_resume =	wacom_reset_resume,
-#endif
+	.resume =	pm_ptr(wacom_resume),
+	.reset_resume =	pm_ptr(wacom_reset_resume),
 	.raw_event =	wacom_raw_event,
 };
 module_hid_driver(wacom_driver);

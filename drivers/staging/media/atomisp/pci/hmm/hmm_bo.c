@@ -37,8 +37,6 @@ static int __bo_init(struct hmm_bo_device *bdev, struct hmm_buffer_object *bo,
 		     unsigned int pgnr)
 {
 	check_bodev_null_return(bdev, -EINVAL);
-	var_equal_return(hmm_bo_device_inited(bdev), 0, -EINVAL,
-			 "hmm_bo_device not inited yet.\n");
 	/* prevent zero size buffer object */
 	if (pgnr == 0) {
 		dev_err(atomisp_dev, "0 size buffer is not allowed.\n");
@@ -341,7 +339,6 @@ int hmm_bo_device_init(struct hmm_bo_device *bdev,
 	spin_lock_init(&bdev->list_lock);
 	mutex_init(&bdev->rbtree_mutex);
 
-	bdev->flag = HMM_BO_DEVICE_INITED;
 
 	INIT_LIST_HEAD(&bdev->entire_bo_list);
 	bdev->allocated_rbtree = RB_ROOT;
@@ -375,6 +372,8 @@ int hmm_bo_device_init(struct hmm_bo_device *bdev,
 	spin_unlock_irqrestore(&bdev->list_lock, flags);
 
 	__bo_insert_to_free_rbtree(&bdev->free_rbtree, bo);
+
+	bdev->flag = HMM_BO_DEVICE_INITED;
 
 	return 0;
 }
@@ -621,14 +620,23 @@ static void free_private_bo_pages(struct hmm_buffer_object *bo)
 /*Allocate pages which will be used only by ISP*/
 static int alloc_private_pages(struct hmm_buffer_object *bo)
 {
-	const gfp_t gfp = __GFP_NOWARN | __GFP_RECLAIM | __GFP_FS;
+	unsigned int nr_allocated = 0;
+	struct page *page;
 	int ret;
 
-	ret = alloc_pages_bulk(gfp, bo->pgnr, bo->pages);
-	if (ret != bo->pgnr) {
-		free_pages_bulk_array(ret, bo->pages);
-		dev_err(atomisp_dev, "alloc_pages_bulk() failed\n");
-		return -ENOMEM;
+	nr_allocated = alloc_pages_bulk(GFP_KERNEL, bo->pgnr, bo->pages);
+	/*
+	 * alloc_pages_bulk() does not try very hard to get pages under memory
+	 * pressure. If necessary fall back to alloc_page().
+	 */
+	while (nr_allocated < bo->pgnr) {
+		page = alloc_pages(GFP_KERNEL, 0);
+		if (!page) {
+			free_pages_bulk_array(nr_allocated, bo->pages);
+			return -ENOMEM;
+		}
+		bo->pages[nr_allocated] = page;
+		nr_allocated++;
 	}
 
 	ret = set_pages_array_uc(bo->pages, bo->pgnr);
@@ -677,7 +685,7 @@ int hmm_bo_alloc_pages(struct hmm_buffer_object *bo,
 	mutex_lock(&bo->mutex);
 	check_bo_status_no_goto(bo, HMM_BO_PAGE_ALLOCED, status_err);
 
-	bo->pages = kcalloc(bo->pgnr, sizeof(struct page *), GFP_KERNEL);
+	bo->pages = kzalloc_objs(struct page *, bo->pgnr);
 	if (unlikely(!bo->pages)) {
 		ret = -ENOMEM;
 		goto alloc_err;
@@ -976,8 +984,7 @@ void hmm_bo_unref(struct hmm_buffer_object *bo)
 
 static void hmm_bo_vm_open(struct vm_area_struct *vma)
 {
-	struct hmm_buffer_object *bo =
-	    (struct hmm_buffer_object *)vma->vm_private_data;
+	struct hmm_buffer_object *bo = vma->vm_private_data;
 
 	check_bo_null_return_void(bo);
 
@@ -994,8 +1001,7 @@ static void hmm_bo_vm_open(struct vm_area_struct *vma)
 
 static void hmm_bo_vm_close(struct vm_area_struct *vma)
 {
-	struct hmm_buffer_object *bo =
-	    (struct hmm_buffer_object *)vma->vm_private_data;
+	struct hmm_buffer_object *bo = vma->vm_private_data;
 
 	check_bo_null_return_void(bo);
 

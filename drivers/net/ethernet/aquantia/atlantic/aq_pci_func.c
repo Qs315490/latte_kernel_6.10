@@ -244,12 +244,13 @@ static int aq_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_ioremap;
 
-	self->aq_hw = kzalloc(sizeof(*self->aq_hw), GFP_KERNEL);
+	self->aq_hw = kzalloc_obj(*self->aq_hw);
 	if (!self->aq_hw) {
 		err = -ENOMEM;
 		goto err_ioremap;
 	}
 	self->aq_hw->aq_nic_cfg = aq_nic_get_cfg(self);
+	self->aq_hw->clk_select = -1;
 	if (self->aq_hw->aq_nic_cfg->aq_hw_caps->priv_data_len) {
 		int len = self->aq_hw->aq_nic_cfg->aq_hw_caps->priv_data_len;
 
@@ -293,8 +294,8 @@ static int aq_pci_probe(struct pci_dev *pdev,
 	numvecs = min((u8)AQ_CFG_VECS_DEF,
 		      aq_nic_get_cfg(self)->aq_hw_caps->msix_irqs);
 	numvecs = min(numvecs, num_online_cpus());
-	/* Request IRQ vector for PTP */
-	numvecs += 1;
+	/* Request IRQ lines for PTP */
+	numvecs += AQ_HW_PTP_IRQS;
 
 	numvecs += AQ_HW_SERVICE_IRQS;
 	/*enable interrupts */
@@ -371,7 +372,7 @@ static void aq_pci_shutdown(struct pci_dev *pdev)
 	pci_disable_device(pdev);
 
 	if (system_state == SYSTEM_POWER_OFF) {
-		pci_wake_from_d3(pdev, false);
+		pci_wake_from_d3(pdev, self->aq_hw->aq_nic_cfg->wol);
 		pci_set_power_state(pdev, PCI_D3hot);
 	}
 }
@@ -463,7 +464,7 @@ static const struct dev_pm_ops aq_pm_ops = {
 };
 #endif
 
-static struct pci_driver aq_pci_ops = {
+static struct pci_driver aq_pci_driver = {
 	.name = AQ_CFG_DRV_NAME,
 	.id_table = aq_pci_tbl,
 	.probe = aq_pci_probe,
@@ -476,11 +477,11 @@ static struct pci_driver aq_pci_ops = {
 
 int aq_pci_func_register_driver(void)
 {
-	return pci_register_driver(&aq_pci_ops);
+	return pci_register_driver(&aq_pci_driver);
 }
 
 void aq_pci_func_unregister_driver(void)
 {
-	pci_unregister_driver(&aq_pci_ops);
+	pci_unregister_driver(&aq_pci_driver);
 }
 

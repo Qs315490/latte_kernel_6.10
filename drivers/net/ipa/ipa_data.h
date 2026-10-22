@@ -180,15 +180,18 @@ struct ipa_resource_data {
  * @local:		array of IPA-local memory region descriptors
  * @imem_addr:		physical address of IPA region within IMEM
  * @imem_size:		size in bytes of IPA IMEM region
- * @smem_id:		item identifier for IPA region within SMEM memory
  * @smem_size:		size in bytes of the IPA SMEM region
  */
 struct ipa_mem_data {
 	u32 local_count;
 	const struct ipa_mem *local;
-	u32 imem_addr;
-	u32 imem_size;
-	u32 smem_id;
+
+	/* These values are now passed via DT, but to support
+	 * older systems we must allow this to be specified here.
+	 */
+	u32 imem_addr; /* DEPRECATED */
+	u32 imem_size; /* DEPRECATED */
+
 	u32 smem_size;
 };
 
@@ -250,6 +253,7 @@ extern const struct ipa_data ipa_data_v4_7;
 extern const struct ipa_data ipa_data_v4_9;
 extern const struct ipa_data ipa_data_v4_11;
 extern const struct ipa_data ipa_data_v5_0;
+extern const struct ipa_data ipa_data_v5_2;
 extern const struct ipa_data ipa_data_v5_5;
 
 #endif /* _IPA_DATA_H_ */

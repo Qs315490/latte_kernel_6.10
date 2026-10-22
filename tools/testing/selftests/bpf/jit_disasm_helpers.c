@@ -96,10 +96,19 @@ static int disasm_one_func(FILE *text_out, uint8_t *image, __u32 len)
 	__u32 *label_pc, pc;
 	int i, cnt, err = 0;
 	char buf[64];
+	char *cpu, *features;
 
 	triple = LLVMGetDefaultTargetTriple();
-	ctx = LLVMCreateDisasm(triple, &labels, 0, NULL, lookup_symbol);
-	if (!ASSERT_OK_PTR(ctx, "LLVMCreateDisasm")) {
+
+	cpu = LLVMGetHostCPUName();
+	features = LLVMGetHostCPUFeatures();
+
+	ctx = LLVMCreateDisasmCPUFeatures(triple, cpu, features, &labels, 0, NULL, lookup_symbol);
+
+	LLVMDisposeMessage(cpu);
+	LLVMDisposeMessage(features);
+
+	if (!ASSERT_OK_PTR(ctx, "LLVMCreateDisasmCPUFeatures")) {
 		err = -EINVAL;
 		goto out;
 	}
@@ -122,15 +131,15 @@ static int disasm_one_func(FILE *text_out, uint8_t *image, __u32 len)
 		pc += cnt;
 	}
 	qsort(labels.pcs, labels.cnt, sizeof(*labels.pcs), cmp_u32);
-	for (i = 0; i < labels.cnt; ++i)
-		/* gcc is unable to infer upper bound for labels.cnt and assumes
-		 * it to be U32_MAX. U32_MAX takes 10 decimal digits.
-		 * snprintf below prints into labels.names[*],
-		 * which has space only for two digits and a letter.
-		 * To avoid truncation warning use (i % MAX_LOCAL_LABELS),
-		 * which informs gcc about printed value upper bound.
-		 */
-		snprintf(labels.names[i], sizeof(labels.names[i]), "L%d", i % MAX_LOCAL_LABELS);
+	/* gcc is unable to infer upper bound for labels.cnt and
+	 * assumes it to be U32_MAX. U32_MAX takes 10 decimal digits.
+	 * snprintf below prints into labels.names[*], which has space
+	 * only for two digits and a letter.  To avoid truncation
+	 * warning use (i < MAX_LOCAL_LABELS), which informs gcc about
+	 * printed value upper bound.
+	 */
+	for (i = 0; i < labels.cnt && i < MAX_LOCAL_LABELS; ++i)
+		snprintf(labels.names[i], sizeof(labels.names[i]), "L%d", i);
 
 	/* now print with labels */
 	labels.print_phase = true;

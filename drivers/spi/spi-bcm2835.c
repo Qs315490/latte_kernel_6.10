@@ -622,7 +622,7 @@ static void bcm2835_spi_dma_rx_done(void *data)
 	/* reset fifo and HW */
 	bcm2835_spi_reset_hw(bs);
 
-	/* and mark as completed */;
+	/* and mark as completed */
 	spi_finalize_current_transfer(ctlr);
 }
 
@@ -1162,7 +1162,8 @@ static void bcm2835_spi_cleanup(struct spi_device *spi)
 				 sizeof(u32),
 				 DMA_TO_DEVICE);
 
-	gpiod_put(bs->cs_gpio);
+	if (!IS_ERR(bs->cs_gpio))
+		gpiod_put(bs->cs_gpio);
 	spi_set_csgpiod(spi, 0, NULL);
 
 	kfree(target);
@@ -1225,7 +1226,12 @@ static int bcm2835_spi_setup(struct spi_device *spi)
 	struct bcm2835_spi *bs = spi_controller_get_devdata(ctlr);
 	struct bcm2835_spidev *target = spi_get_ctldata(spi);
 	struct gpiod_lookup_table *lookup __free(kfree) = NULL;
-	int ret;
+	const char *pinctrl_compats[] = {
+		"brcm,bcm2835-gpio",
+		"brcm,bcm2711-gpio",
+		"brcm,bcm7211-gpio",
+	};
+	int ret, i;
 	u32 cs;
 
 	if (!target) {
@@ -1290,6 +1296,14 @@ static int bcm2835_spi_setup(struct spi_device *spi)
 		goto err_cleanup;
 	}
 
+	for (i = 0; i < ARRAY_SIZE(pinctrl_compats); i++) {
+		if (of_find_compatible_node(NULL, NULL, pinctrl_compats[i]))
+			break;
+	}
+
+	if (i == ARRAY_SIZE(pinctrl_compats))
+		return 0;
+
 	/*
 	 * TODO: The code below is a slightly better alternative to the utter
 	 * abuse of the GPIO API that I found here before. It creates a
@@ -1299,7 +1313,7 @@ static int bcm2835_spi_setup(struct spi_device *spi)
 	 * More on the problem that it addresses:
 	 *   https://www.spinics.net/lists/linux-gpio/msg36218.html
 	 */
-	lookup = kzalloc(struct_size(lookup, table, 2), GFP_KERNEL);
+	lookup = kzalloc_flex(*lookup, table, 2);
 	if (!lookup) {
 		ret = -ENOMEM;
 		goto err_cleanup;
@@ -1354,7 +1368,6 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 	ctlr->transfer_one = bcm2835_spi_transfer_one;
 	ctlr->handle_err = bcm2835_spi_handle_err;
 	ctlr->prepare_message = bcm2835_spi_prepare_message;
-	ctlr->dev.of_node = pdev->dev.of_node;
 
 	bs = spi_controller_get_devdata(ctlr);
 	bs->ctlr = ctlr;

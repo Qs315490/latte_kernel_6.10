@@ -274,7 +274,6 @@ struct ath_node {
 
 struct ath_tx_control {
 	struct ath_txq *txq;
-	struct ath_node *an;
 	struct ieee80211_sta *sta;
 	u8 paprd;
 };
@@ -444,7 +443,7 @@ ath_node_to_tid(struct ath_node *an, u8 tidno)
 
 #define case_rtn_string(val) case val: return #val
 
-#define ath_for_each_chanctx(_sc, _ctx)                             \
+#define ath_for_each_chanctx(sc, ctx)                               \
 	for (ctx = &sc->chanctx[0];                                 \
 	     ctx <= &sc->chanctx[ARRAY_SIZE(sc->chanctx) - 1];      \
 	     ctx++)
@@ -1018,7 +1017,7 @@ struct ath_softc {
 
 	u8 gtt_cnt;
 	u32 intrstatus;
-	u32 rx_active_check_time;
+	unsigned long rx_active_check_time;
 	u32 rx_active_count;
 	u16 ps_flags; /* PS_* */
 	bool ps_enabled;

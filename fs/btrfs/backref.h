@@ -190,7 +190,7 @@ struct btrfs_backref_share_check_ctx {
 	 * It's very common to have several file extent items that point to the
 	 * same extent (bytenr) but with different offsets and lengths. This
 	 * typically happens for COW writes, partial writes into prealloc
-	 * extents, NOCOW writes after snapshoting a root, hole punching or
+	 * extents, NOCOW writes after snapshotting a root, hole punching or
 	 * reflinking within the same file (less common perhaps).
 	 * So keep a small cache with the lookup results for the extent pointed
 	 * by the last few file extent items. This cache is checked, with a
@@ -226,8 +226,7 @@ int iterate_extent_inodes(struct btrfs_backref_walk_ctx *ctx,
 			  iterate_extent_inodes_t *iterate, void *user_ctx);
 
 int iterate_inodes_from_logical(u64 logical, struct btrfs_fs_info *fs_info,
-				struct btrfs_path *path, void *ctx,
-				bool ignore_offset);
+				void *ctx, bool ignore_offset);
 
 int paths_from_inode(u64 inum, struct inode_fs_paths *ipath);
 
@@ -242,7 +241,12 @@ char *btrfs_ref_to_path(struct btrfs_root *fs_root, struct btrfs_path *path,
 struct btrfs_data_container *init_data_container(u32 total_bytes);
 struct inode_fs_paths *init_ipath(s32 total_bytes, struct btrfs_root *fs_root,
 					struct btrfs_path *path);
-void free_ipath(struct inode_fs_paths *ipath);
+
+DEFINE_FREE(inode_fs_paths, struct inode_fs_paths *,
+	if (_T) {
+		kvfree(_T->fspath);
+		kfree(_T);
+	})
 
 int btrfs_find_one_extref(struct btrfs_root *root, u64 inode_objectid,
 			  u64 start_off, struct btrfs_path *path,
@@ -274,14 +278,11 @@ struct prelim_ref {
 struct btrfs_backref_iter {
 	u64 bytenr;
 	struct btrfs_path *path;
-	struct btrfs_fs_info *fs_info;
 	struct btrfs_key cur_key;
 	u32 item_ptr;
 	u32 cur_ptr;
 	u32 end_ptr;
 };
-
-struct btrfs_backref_iter *btrfs_backref_iter_alloc(struct btrfs_fs_info *fs_info);
 
 /*
  * For metadata with EXTENT_ITEM key (non-skinny) case, the first inline data
@@ -298,9 +299,11 @@ static inline bool btrfs_backref_has_tree_block_info(
 	return false;
 }
 
-int btrfs_backref_iter_start(struct btrfs_backref_iter *iter, u64 bytenr);
+int btrfs_backref_iter_init(struct btrfs_backref_iter *iter);
 
-int btrfs_backref_iter_next(struct btrfs_backref_iter *iter);
+int btrfs_backref_iter_start(struct btrfs_fs_info *fs_info, struct btrfs_backref_iter *iter, u64 bytenr);
+
+int btrfs_backref_iter_next(struct btrfs_fs_info *fs_info, struct btrfs_backref_iter *iter);
 
 /*
  * Backref cache related structures
@@ -313,10 +316,15 @@ int btrfs_backref_iter_next(struct btrfs_backref_iter *iter);
  * Represent a tree block in the backref cache
  */
 struct btrfs_backref_node {
-	struct {
-		struct rb_node rb_node;
-		u64 bytenr;
-	}; /* Use rb_simple_node for search/insert */
+	union{
+		/* Use rb_simple_node for search/insert */
+		struct {
+			struct rb_node rb_node;
+			u64 bytenr;
+		};
+
+		struct rb_simple_node simple_node;
+	};
 
 	/*
 	 * This is a sanity check, whenever we COW a block we will update
@@ -410,7 +418,7 @@ struct btrfs_backref_cache {
 	/*
 	 * Whether this cache is for relocation
 	 *
-	 * Reloction backref cache require more info for reloc root compared
+	 * Relocation backref cache require more info for reloc root compared
 	 * to generic backref cache.
 	 */
 	bool is_reloc;
@@ -423,13 +431,6 @@ struct btrfs_backref_node *btrfs_backref_alloc_node(
 struct btrfs_backref_edge *btrfs_backref_alloc_edge(
 		struct btrfs_backref_cache *cache);
 
-#define		LINK_LOWER	(1 << 0)
-#define		LINK_UPPER	(1 << 1)
-
-void btrfs_backref_link_edge(struct btrfs_backref_edge *edge,
-			     struct btrfs_backref_node *lower,
-			     struct btrfs_backref_node *upper,
-			     int link_which);
 void btrfs_backref_free_node(struct btrfs_backref_cache *cache,
 			     struct btrfs_backref_node *node);
 void btrfs_backref_free_edge(struct btrfs_backref_cache *cache,

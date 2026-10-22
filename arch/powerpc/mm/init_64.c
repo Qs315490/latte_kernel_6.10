@@ -386,10 +386,6 @@ void __ref vmemmap_free(unsigned long start, unsigned long end,
 }
 
 #endif
-void register_page_bootmem_memmap(unsigned long section_nr,
-				  struct page *start_page, unsigned long size)
-{
-}
 
 #endif /* CONFIG_SPARSEMEM_VMEMMAP */
 

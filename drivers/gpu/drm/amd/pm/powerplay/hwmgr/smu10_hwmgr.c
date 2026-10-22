@@ -127,42 +127,6 @@ static int smu10_construct_max_power_limits_table(struct pp_hwmgr *hwmgr,
 	return 0;
 }
 
-static int smu10_init_dynamic_state_adjustment_rule_settings(
-							struct pp_hwmgr *hwmgr)
-{
-	int count = 8;
-	struct phm_clock_voltage_dependency_table *table_clk_vlt;
-
-	table_clk_vlt = kzalloc(struct_size(table_clk_vlt, entries, count),
-				GFP_KERNEL);
-
-	if (NULL == table_clk_vlt) {
-		pr_err("Can not allocate memory!\n");
-		return -ENOMEM;
-	}
-
-	table_clk_vlt->count = count;
-	table_clk_vlt->entries[0].clk = PP_DAL_POWERLEVEL_0;
-	table_clk_vlt->entries[0].v = 0;
-	table_clk_vlt->entries[1].clk = PP_DAL_POWERLEVEL_1;
-	table_clk_vlt->entries[1].v = 1;
-	table_clk_vlt->entries[2].clk = PP_DAL_POWERLEVEL_2;
-	table_clk_vlt->entries[2].v = 2;
-	table_clk_vlt->entries[3].clk = PP_DAL_POWERLEVEL_3;
-	table_clk_vlt->entries[3].v = 3;
-	table_clk_vlt->entries[4].clk = PP_DAL_POWERLEVEL_4;
-	table_clk_vlt->entries[4].v = 4;
-	table_clk_vlt->entries[5].clk = PP_DAL_POWERLEVEL_5;
-	table_clk_vlt->entries[5].v = 5;
-	table_clk_vlt->entries[6].clk = PP_DAL_POWERLEVEL_6;
-	table_clk_vlt->entries[6].v = 6;
-	table_clk_vlt->entries[7].clk = PP_DAL_POWERLEVEL_7;
-	table_clk_vlt->entries[7].v = 7;
-	hwmgr->dyn_state.vddc_dep_on_dal_pwrl = table_clk_vlt;
-
-	return 0;
-}
-
 static int smu10_get_system_info_data(struct pp_hwmgr *hwmgr)
 {
 	struct smu10_hwmgr *smu10_data = (struct smu10_hwmgr *)hwmgr->backend;
@@ -175,8 +139,6 @@ static int smu10_get_system_info_data(struct pp_hwmgr *hwmgr)
 
 	smu10_construct_max_power_limits_table (hwmgr,
 				    &hwmgr->dyn_state.max_clock_voltage_on_ac);
-
-	smu10_init_dynamic_state_adjustment_rule_settings(hwmgr);
 
 	return 0;
 }
@@ -473,7 +435,7 @@ static int smu10_get_clock_voltage_dependency_table(struct pp_hwmgr *hwmgr,
 	uint32_t i;
 	struct smu10_voltage_dependency_table *ptable;
 
-	ptable = kzalloc(struct_size(ptable, entries, num_entry), GFP_KERNEL);
+	ptable = kzalloc_flex(*ptable, entries, num_entry);
 	if (NULL == ptable)
 		return -ENOMEM;
 
@@ -551,7 +513,7 @@ static int smu10_hwmgr_backend_init(struct pp_hwmgr *hwmgr)
 	int result = 0;
 	struct smu10_hwmgr *data;
 
-	data = kzalloc(sizeof(struct smu10_hwmgr), GFP_KERNEL);
+	data = kzalloc_obj(struct smu10_hwmgr);
 	if (data == NULL)
 		return -ENOMEM;
 
@@ -611,9 +573,6 @@ static int smu10_hwmgr_backend_fini(struct pp_hwmgr *hwmgr)
 	pinfo->vdd_dep_on_dppclk = NULL;
 	kfree(pinfo->vdd_dep_on_phyclk);
 	pinfo->vdd_dep_on_phyclk = NULL;
-
-	kfree(hwmgr->dyn_state.vddc_dep_on_dal_pwrl);
-	hwmgr->dyn_state.vddc_dep_on_dal_pwrl = NULL;
 
 	kfree(hwmgr->backend);
 	hwmgr->backend = NULL;
@@ -963,12 +922,6 @@ static int smu10_store_cc6_data(struct pp_hwmgr *hwmgr, uint32_t separation_time
 	return 0;
 }
 
-static int smu10_get_dal_power_level(struct pp_hwmgr *hwmgr,
-		struct amd_pp_simple_clock_info *info)
-{
-	return -EINVAL;
-}
-
 static int smu10_force_clock_level(struct pp_hwmgr *hwmgr,
 		enum pp_clock_type type, uint32_t mask)
 {
@@ -1024,15 +977,16 @@ static int smu10_force_clock_level(struct pp_hwmgr *hwmgr,
 	return 0;
 }
 
-static int smu10_print_clock_levels(struct pp_hwmgr *hwmgr,
-		enum pp_clock_type type, char *buf)
+static int smu10_emit_clock_levels(struct pp_hwmgr *hwmgr,
+				   enum pp_clock_type type, char *buf,
+				   int *offset)
 {
 	struct smu10_hwmgr *data = (struct smu10_hwmgr *)(hwmgr->backend);
 	struct smu10_voltage_dependency_table *mclk_table =
 			data->clock_vol_info.vdd_dep_on_fclk;
-	uint32_t i, now, size = 0;
+	uint32_t i, now, size = *offset;
 	uint32_t min_freq, max_freq = 0;
-	uint32_t ret = 0;
+	int ret = 0;
 
 	switch (type) {
 	case PP_SCLK:
@@ -1048,15 +1002,15 @@ static int smu10_print_clock_levels(struct pp_hwmgr *hwmgr,
 		else
 			i = 1;
 
-		size += sprintf(buf + size, "0: %uMhz %s\n",
-					data->gfx_min_freq_limit/100,
-					i == 0 ? "*" : "");
-		size += sprintf(buf + size, "1: %uMhz %s\n",
-					i == 1 ? now : SMU10_UMD_PSTATE_GFXCLK,
-					i == 1 ? "*" : "");
-		size += sprintf(buf + size, "2: %uMhz %s\n",
-					data->gfx_max_freq_limit/100,
-					i == 2 ? "*" : "");
+		size += sysfs_emit_at(buf, size, "0: %uMhz %s\n",
+				      data->gfx_min_freq_limit / 100,
+				      i == 0 ? "*" : "");
+		size += sysfs_emit_at(buf, size, "1: %uMhz %s\n",
+				      i == 1 ? now : SMU10_UMD_PSTATE_GFXCLK,
+				      i == 1 ? "*" : "");
+		size += sysfs_emit_at(buf, size, "2: %uMhz %s\n",
+				      data->gfx_max_freq_limit / 100,
+				      i == 2 ? "*" : "");
 		break;
 	case PP_MCLK:
 		ret = smum_send_msg_to_smc(hwmgr, PPSMC_MSG_GetFclkFrequency, &now);
@@ -1064,11 +1018,12 @@ static int smu10_print_clock_levels(struct pp_hwmgr *hwmgr,
 			return ret;
 
 		for (i = 0; i < mclk_table->count; i++)
-			size += sprintf(buf + size, "%d: %uMhz %s\n",
-					i,
-					mclk_table->entries[i].clk / 100,
-					((mclk_table->entries[i].clk / 100)
-					 == now) ? "*" : "");
+			size += sysfs_emit_at(
+				buf, size, "%d: %uMhz %s\n", i,
+				mclk_table->entries[i].clk / 100,
+				((mclk_table->entries[i].clk / 100) == now) ?
+					"*" :
+					"");
 		break;
 	case OD_SCLK:
 		if (hwmgr->od_enabled) {
@@ -1079,11 +1034,17 @@ static int smu10_print_clock_levels(struct pp_hwmgr *hwmgr,
 			if (ret)
 				return ret;
 
-			size += sprintf(buf + size, "%s:\n", "OD_SCLK");
-			size += sprintf(buf + size, "0: %10uMhz\n",
-			(data->gfx_actual_soft_min_freq > 0) ? data->gfx_actual_soft_min_freq : min_freq);
-			size += sprintf(buf + size, "1: %10uMhz\n",
-			(data->gfx_actual_soft_max_freq > 0) ? data->gfx_actual_soft_max_freq : max_freq);
+			size += sysfs_emit_at(buf, size, "%s:\n", "OD_SCLK");
+			size += sysfs_emit_at(
+				buf, size, "0: %10uMhz\n",
+				(data->gfx_actual_soft_min_freq > 0) ?
+					data->gfx_actual_soft_min_freq :
+					min_freq);
+			size += sysfs_emit_at(
+				buf, size, "1: %10uMhz\n",
+				(data->gfx_actual_soft_max_freq > 0) ?
+					data->gfx_actual_soft_max_freq :
+					max_freq);
 		}
 		break;
 	case OD_RANGE:
@@ -1095,16 +1056,19 @@ static int smu10_print_clock_levels(struct pp_hwmgr *hwmgr,
 			if (ret)
 				return ret;
 
-			size += sprintf(buf + size, "%s:\n", "OD_RANGE");
-			size += sprintf(buf + size, "SCLK: %7uMHz %10uMHz\n",
-				min_freq, max_freq);
+			size += sysfs_emit_at(buf, size, "%s:\n", "OD_RANGE");
+			size += sysfs_emit_at(buf, size,
+					      "SCLK: %7uMHz %10uMHz\n",
+					      min_freq, max_freq);
 		}
 		break;
 	default:
 		break;
 	}
 
-	return size;
+	*offset = size;
+
+	return 0;
 }
 
 static int smu10_get_performance_level(struct pp_hwmgr *hwmgr, const struct pp_hw_power_state *state,
@@ -1642,7 +1606,6 @@ static const struct pp_hwmgr_func smu10_hwmgr_funcs = {
 	.apply_state_adjust_rules = smu10_apply_state_adjust_rules,
 	.force_dpm_level = smu10_dpm_force_dpm_level,
 	.get_power_state_size = smu10_get_power_state_size,
-	.powerdown_uvd = NULL,
 	.powergate_uvd = smu10_powergate_vcn,
 	.powergate_vce = NULL,
 	.get_mclk = smu10_dpm_get_mclk,
@@ -1653,8 +1616,7 @@ static const struct pp_hwmgr_func smu10_hwmgr_funcs = {
 	.set_cpu_power_state = smu10_set_cpu_power_state,
 	.store_cc6_data = smu10_store_cc6_data,
 	.force_clock_level = smu10_force_clock_level,
-	.print_clock_levels = smu10_print_clock_levels,
-	.get_dal_power_level = smu10_get_dal_power_level,
+	.emit_clock_levels = smu10_emit_clock_levels,
 	.get_performance_level = smu10_get_performance_level,
 	.get_current_shallow_sleep_clocks = smu10_get_current_shallow_sleep_clocks,
 	.get_clock_by_type_with_latency = smu10_get_clock_by_type_with_latency,

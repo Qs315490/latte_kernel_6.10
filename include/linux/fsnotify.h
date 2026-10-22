@@ -129,7 +129,7 @@ static inline int fsnotify_file(struct file *file, __u32 mask)
 
 #ifdef CONFIG_FANOTIFY_ACCESS_PERMISSIONS
 
-void file_set_fsnotify_mode_from_watchers(struct file *file);
+int fsnotify_open_perm_and_set_mode(struct file *file);
 
 /*
  * fsnotify_file_area_perm - permission hook before access to file range
@@ -147,9 +147,6 @@ static inline int fsnotify_file_area_perm(struct file *file, int perm_mask,
 	if (!(perm_mask & (MAY_READ | MAY_WRITE | MAY_ACCESS)))
 		return 0;
 
-	if (likely(!FMODE_FSNOTIFY_PERM(file->f_mode)))
-		return 0;
-
 	/*
 	 * read()/write() and other types of access generate pre-content events.
 	 */
@@ -160,7 +157,8 @@ static inline int fsnotify_file_area_perm(struct file *file, int perm_mask,
 			return ret;
 	}
 
-	if (!(perm_mask & MAY_READ))
+	if (!(perm_mask & MAY_READ) ||
+	    likely(!FMODE_FSNOTIFY_ACCESS_PERM(file->f_mode)))
 		return 0;
 
 	/*
@@ -208,28 +206,10 @@ static inline int fsnotify_file_perm(struct file *file, int perm_mask)
 	return fsnotify_file_area_perm(file, perm_mask, NULL, 0);
 }
 
-/*
- * fsnotify_open_perm - permission hook before file open
- */
-static inline int fsnotify_open_perm(struct file *file)
-{
-	int ret;
-
-	if (likely(!FMODE_FSNOTIFY_PERM(file->f_mode)))
-		return 0;
-
-	if (file->f_flags & __FMODE_EXEC) {
-		ret = fsnotify_path(&file->f_path, FS_OPEN_EXEC_PERM);
-		if (ret)
-			return ret;
-	}
-
-	return fsnotify_path(&file->f_path, FS_OPEN_PERM);
-}
-
 #else
-static inline void file_set_fsnotify_mode_from_watchers(struct file *file)
+static inline int fsnotify_open_perm_and_set_mode(struct file *file)
 {
+	return 0;
 }
 
 static inline int fsnotify_file_area_perm(struct file *file, int perm_mask,
@@ -250,11 +230,6 @@ static inline int fsnotify_truncate_perm(const struct path *path, loff_t length)
 }
 
 static inline int fsnotify_file_perm(struct file *file, int perm_mask)
-{
-	return 0;
-}
-
-static inline int fsnotify_open_perm(struct file *file)
 {
 	return 0;
 }
@@ -282,6 +257,10 @@ static inline void fsnotify_move(struct inode *old_dir, struct inode *new_dir,
 	__u32 new_dir_mask = FS_MOVED_TO;
 	__u32 rename_mask = FS_RENAME;
 	const struct qstr *new_name = &moved->d_name;
+	struct fsnotify_rename_data rd = {
+		.moved = moved,
+		.target = target,
+	};
 
 	if (isdir) {
 		old_dir_mask |= FS_ISDIR;
@@ -290,12 +269,12 @@ static inline void fsnotify_move(struct inode *old_dir, struct inode *new_dir,
 	}
 
 	/* Event with information about both old and new parent+name */
-	fsnotify_name(rename_mask, moved, FSNOTIFY_EVENT_DENTRY,
+	fsnotify_name(rename_mask, &rd, FSNOTIFY_EVENT_RENAME,
 		      old_dir, old_name, 0);
 
 	fsnotify_name(old_dir_mask, source, FSNOTIFY_EVENT_INODE,
 		      old_dir, old_name, fs_cookie);
-	fsnotify_name(new_dir_mask, source, FSNOTIFY_EVENT_INODE,
+	fsnotify_name(new_dir_mask, &rd, FSNOTIFY_EVENT_RENAME,
 		      new_dir, new_name, fs_cookie);
 
 	if (target)
@@ -318,6 +297,11 @@ static inline void fsnotify_inode_delete(struct inode *inode)
 static inline void fsnotify_vfsmount_delete(struct vfsmount *mnt)
 {
 	__fsnotify_vfsmount_delete(mnt);
+}
+
+static inline void fsnotify_mntns_delete(struct mnt_namespace *mntns)
+{
+	__fsnotify_mntns_delete(mntns);
 }
 
 /*
@@ -515,17 +499,19 @@ static inline void fsnotify_change(struct dentry *dentry, unsigned int ia_valid)
 		fsnotify_dentry(dentry, mask);
 }
 
-static inline int fsnotify_sb_error(struct super_block *sb, struct inode *inode,
-				    int error)
+static inline void fsnotify_mnt_attach(struct mnt_namespace *ns, struct vfsmount *mnt)
 {
-	struct fs_error_report report = {
-		.error = error,
-		.inode = inode,
-		.sb = sb,
-	};
+	fsnotify_mnt(FS_MNT_ATTACH, ns, mnt);
+}
 
-	return fsnotify(FS_ERROR, &report, FSNOTIFY_EVENT_ERROR,
-			NULL, NULL, NULL, 0);
+static inline void fsnotify_mnt_detach(struct mnt_namespace *ns, struct vfsmount *mnt)
+{
+	fsnotify_mnt(FS_MNT_DETACH, ns, mnt);
+}
+
+static inline void fsnotify_mnt_move(struct mnt_namespace *ns, struct vfsmount *mnt)
+{
+	fsnotify_mnt(FS_MNT_MOVE, ns, mnt);
 }
 
 #endif	/* _LINUX_FS_NOTIFY_H */

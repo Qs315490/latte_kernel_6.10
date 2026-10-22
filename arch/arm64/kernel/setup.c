@@ -169,7 +169,7 @@ static void __init smp_build_mpidr_hash(void)
 
 static void __init setup_machine_fdt(phys_addr_t dt_phys)
 {
-	int size;
+	int size = 0;
 	void *dt_virt = fixmap_remap_fdt(dt_phys, &size, PAGE_KERNEL);
 	const char *name;
 
@@ -182,10 +182,10 @@ static void __init setup_machine_fdt(phys_addr_t dt_phys)
 	 */
 	if (!early_init_dt_scan(dt_virt, dt_phys)) {
 		pr_crit("\n"
-			"Error: invalid device tree blob at physical address %pa (virtual address 0x%px)\n"
-			"The dtb must be 8-byte aligned and must not exceed 2 MB in size\n"
-			"\nPlease check your bootloader.",
-			&dt_phys, dt_virt);
+			"Error: invalid device tree blob: PA=%pa, VA=%px, size=%d bytes\n"
+			"The dtb must be 8-byte aligned and must not exceed 2 MB in size.\n"
+			"\nPlease check your bootloader.\n",
+			&dt_phys, dt_virt, size);
 
 		/*
 		 * Note that in this _really_ early stage we cannot even BUG()
@@ -214,7 +214,7 @@ static void __init request_standard_resources(void)
 	unsigned long i = 0;
 	size_t res_size;
 
-	kernel_code.start   = __pa_symbol(_stext);
+	kernel_code.start   = __pa_symbol(_text);
 	kernel_code.end     = __pa_symbol(__init_begin - 1);
 	kernel_data.start   = __pa_symbol(_sdata);
 	kernel_data.end     = __pa_symbol(_end - 1);
@@ -280,7 +280,7 @@ u64 cpu_logical_map(unsigned int cpu)
 
 void __init __no_sanitize_address setup_arch(char **cmdline_p)
 {
-	setup_initial_init_mm(_stext, _etext, _edata, _end);
+	setup_initial_init_mm(_text, _etext, _edata, _end);
 
 	*cmdline_p = boot_command_line;
 

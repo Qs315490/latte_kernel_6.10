@@ -7,7 +7,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/mfd/core.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 
@@ -28,7 +27,7 @@ struct ssp_instruction {
 	__le32 a;
 	__le32 b;
 	u8 c;
-} __attribute__((__packed__));
+} __packed__;
 
 static const u8 ssp_magnitude_table[] = {110, 85, 171, 71, 203, 195, 0, 67,
 	208, 56, 175, 244, 206, 213, 0, 92, 250, 0, 55, 48, 189, 252, 171,
@@ -167,7 +166,7 @@ static void ssp_wdt_work_func(struct work_struct *work)
 
 static void ssp_wdt_timer_func(struct timer_list *t)
 {
-	struct ssp_data *data = from_timer(data, t, wdt_timer);
+	struct ssp_data *data = timer_container_of(data, t, wdt_timer);
 
 	switch (data->fw_dl_state) {
 	case SSP_FW_DL_STATE_FAIL:
@@ -190,7 +189,7 @@ static void ssp_enable_wdt_timer(struct ssp_data *data)
 
 static void ssp_disable_wdt_timer(struct ssp_data *data)
 {
-	del_timer_sync(&data->wdt_timer);
+	timer_delete_sync(&data->wdt_timer);
 	cancel_work_sync(&data->work_wdt);
 }
 
@@ -434,7 +433,7 @@ static const struct of_device_id ssp_of_match[] = {
 		.compatible	= "samsung,sensorhub-thermostat",
 		.data		= &ssp_thermostat_info,
 	},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ssp_of_match);
 
@@ -503,7 +502,7 @@ static int ssp_probe(struct spi_device *spi)
 	ret = spi_setup(spi);
 	if (ret < 0) {
 		dev_err(&spi->dev, "Failed to setup spi\n");
-		return ret;
+		goto err_setup_spi;
 	}
 
 	data->fw_dl_state = SSP_FW_DL_STATE_NONE;
@@ -568,6 +567,8 @@ err_read_reg:
 err_setup_irq:
 	mutex_destroy(&data->pending_lock);
 	mutex_destroy(&data->comm_lock);
+err_setup_spi:
+	mfd_remove_devices(&spi->dev);
 
 	dev_err(&spi->dev, "Probe failed!\n");
 
@@ -588,8 +589,9 @@ static void ssp_remove(struct spi_device *spi)
 	ssp_clean_pending_list(data);
 
 	free_irq(data->spi->irq, data);
+	cancel_delayed_work_sync(&data->work_refresh);
 
-	del_timer_sync(&data->wdt_timer);
+	timer_delete_sync(&data->wdt_timer);
 	cancel_work_sync(&data->work_wdt);
 
 	mutex_destroy(&data->comm_lock);

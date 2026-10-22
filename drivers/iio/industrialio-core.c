@@ -26,6 +26,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/wait.h>
+#include <linux/wordpart.h>
 
 #include <linux/iio/buffer.h>
 #include <linux/iio/buffer_impl.h>
@@ -96,6 +97,8 @@ static const char * const iio_chan_type_name_spec[] = {
 	[IIO_COLORTEMP] = "colortemp",
 	[IIO_CHROMATICITY] = "chromaticity",
 	[IIO_ATTENTION] = "attention",
+	[IIO_ALTCURRENT] = "altcurrent",
+	[IIO_COVERAGE] = "coverage",
 };
 
 static const char * const iio_modifier_names[] = {
@@ -151,6 +154,11 @@ static const char * const iio_modifier_names[] = {
 	[IIO_MOD_PITCH] = "pitch",
 	[IIO_MOD_YAW] = "yaw",
 	[IIO_MOD_ROLL] = "roll",
+	[IIO_MOD_RMS] = "rms",
+	[IIO_MOD_ACTIVE] = "active",
+	[IIO_MOD_REACTIVE] = "reactive",
+	[IIO_MOD_APPARENT] = "apparent",
+	[IIO_MOD_QUATERNION_AXIS] = "quaternionaxis",
 };
 
 /* relies on pairs of these shared then separate */
@@ -187,6 +195,8 @@ static const char * const iio_chan_info_postfix[] = {
 	[IIO_CHAN_INFO_CALIBAMBIENT] = "calibambient",
 	[IIO_CHAN_INFO_ZEROPOINT] = "zeropoint",
 	[IIO_CHAN_INFO_TROUGH] = "trough_raw",
+	[IIO_CHAN_INFO_CONVDELAY] = "convdelay",
+	[IIO_CHAN_INFO_POWERFACTOR] = "powerfactor",
 };
 /**
  * iio_device_id() - query the unique ID for the device
@@ -410,11 +420,15 @@ static ssize_t iio_debugfs_write_reg(struct file *file,
 	char buf[80];
 	int ret;
 
-	count = min(count, sizeof(buf) - 1);
-	if (copy_from_user(buf, userbuf, count))
-		return -EFAULT;
+	if (*ppos != 0 || count >= sizeof(buf))
+		return -EINVAL;
 
-	buf[count] = 0;
+	ret = simple_write_to_buffer(buf, sizeof(buf) - 1, ppos, userbuf,
+				     count);
+	if (ret < 0)
+		return ret;
+
+	buf[ret] = '\0';
 
 	ret = sscanf(buf, "%i %i", &reg, &val);
 
@@ -784,6 +798,7 @@ static ssize_t iio_format_list(char *buf, const int *vals, int type, int length,
 
 	switch (type) {
 	case IIO_VAL_INT:
+	case IIO_VAL_CHAR:
 		stride = 1;
 		break;
 	default:
@@ -965,8 +980,10 @@ static ssize_t iio_write_channel_info(struct device *dev,
 	struct iio_dev_attr *this_attr = to_iio_dev_attr(attr);
 	int ret, fract_mult = 100000;
 	int integer, fract = 0;
+	long long integer64;
 	bool is_char = false;
 	bool scale_db = false;
+	bool is_64bit = false;
 
 	/* Assumes decimal - precision based on number of digits */
 	if (!indio_dev->info->write_raw)
@@ -990,6 +1007,9 @@ static ssize_t iio_write_channel_info(struct device *dev,
 		case IIO_VAL_CHAR:
 			is_char = true;
 			break;
+		case IIO_VAL_INT_64:
+			is_64bit = true;
+			break;
 		default:
 			return -EINVAL;
 		}
@@ -1000,6 +1020,13 @@ static ssize_t iio_write_channel_info(struct device *dev,
 		if (sscanf(buf, "%c", &ch) != 1)
 			return -EINVAL;
 		integer = ch;
+	} else if (is_64bit) {
+		ret = kstrtoll(buf, 0, &integer64);
+		if (ret)
+			return ret;
+
+		fract = upper_32_bits(integer64);
+		integer = lower_32_bits(integer64);
 	} else {
 		ret = __iio_str_to_fixpoint(buf, fract_mult, &integer, &fract,
 					    scale_db);
@@ -1167,7 +1194,7 @@ int __iio_add_chan_devattr(const char *postfix,
 	int ret;
 	struct iio_dev_attr *iio_attr, *t;
 
-	iio_attr = kzalloc(sizeof(*iio_attr), GFP_KERNEL);
+	iio_attr = kzalloc_obj(*iio_attr);
 	if (iio_attr == NULL)
 		return -ENOMEM;
 	ret = __iio_device_attr_init(&iio_attr->dev_attr,
@@ -1225,7 +1252,7 @@ static int iio_device_add_channel_label(struct iio_dev *indio_dev,
 static int iio_device_add_info_mask_type(struct iio_dev *indio_dev,
 					 struct iio_chan_spec const *chan,
 					 enum iio_shared_by shared_by,
-					 const long *infomask)
+					 const unsigned long *infomask)
 {
 	struct iio_dev_opaque *iio_dev_opaque = to_iio_dev_opaque(indio_dev);
 	int i, ret, attrcount = 0;
@@ -1255,7 +1282,7 @@ static int iio_device_add_info_mask_type(struct iio_dev *indio_dev,
 static int iio_device_add_info_mask_type_avail(struct iio_dev *indio_dev,
 					       struct iio_chan_spec const *chan,
 					       enum iio_shared_by shared_by,
-					       const long *infomask)
+					       const unsigned long *infomask)
 {
 	struct iio_dev_opaque *iio_dev_opaque = to_iio_dev_opaque(indio_dev);
 	int i, ret, attrcount = 0;
@@ -1561,9 +1588,8 @@ static int iio_device_register_sysfs(struct iio_dev *indio_dev)
 		attrcount++;
 
 	iio_dev_opaque->chan_attr_group.attrs =
-		kcalloc(attrcount + 1,
-			sizeof(iio_dev_opaque->chan_attr_group.attrs[0]),
-			GFP_KERNEL);
+		kzalloc_objs(iio_dev_opaque->chan_attr_group.attrs[0],
+			     attrcount + 1);
 	if (iio_dev_opaque->chan_attr_group.attrs == NULL) {
 		ret = -ENOMEM;
 		goto error_clear_attrs;
@@ -1629,6 +1655,10 @@ static void iio_dev_release(struct device *device)
 
 	iio_device_detach_buffers(indio_dev);
 
+	mutex_destroy(&iio_dev_opaque->info_exist_lock);
+	mutex_destroy(&iio_dev_opaque->mlock);
+
+	lockdep_unregister_key(&iio_dev_opaque->info_exist_key);
 	lockdep_unregister_key(&iio_dev_opaque->mlock_key);
 
 	ida_free(&iio_ida, iio_dev_opaque->id);
@@ -1669,12 +1699,6 @@ struct iio_dev *iio_device_alloc(struct device *parent, int sizeof_priv)
 		ACCESS_PRIVATE(indio_dev, priv) = (char *)iio_dev_opaque +
 			ALIGN(sizeof(*iio_dev_opaque), IIO_DMA_MINALIGN);
 
-	indio_dev->dev.parent = parent;
-	indio_dev->dev.type = &iio_device_type;
-	indio_dev->dev.bus = &iio_bus_type;
-	device_initialize(&indio_dev->dev);
-	mutex_init(&iio_dev_opaque->mlock);
-	mutex_init(&iio_dev_opaque->info_exist_lock);
 	INIT_LIST_HEAD(&iio_dev_opaque->channel_attr_list);
 
 	iio_dev_opaque->id = ida_alloc(&iio_ida, GFP_KERNEL);
@@ -1695,7 +1719,15 @@ struct iio_dev *iio_device_alloc(struct device *parent, int sizeof_priv)
 	INIT_LIST_HEAD(&iio_dev_opaque->ioctl_handlers);
 
 	lockdep_register_key(&iio_dev_opaque->mlock_key);
-	lockdep_set_class(&iio_dev_opaque->mlock, &iio_dev_opaque->mlock_key);
+	lockdep_register_key(&iio_dev_opaque->info_exist_key);
+
+	mutex_init_with_key(&iio_dev_opaque->mlock, &iio_dev_opaque->mlock_key);
+	mutex_init_with_key(&iio_dev_opaque->info_exist_lock, &iio_dev_opaque->info_exist_key);
+
+	indio_dev->dev.parent = parent;
+	indio_dev->dev.type = &iio_device_type;
+	indio_dev->dev.bus = &iio_bus_type;
+	device_initialize(&indio_dev->dev);
 
 	return indio_dev;
 }
@@ -1766,7 +1798,7 @@ static int iio_chrdev_open(struct inode *inode, struct file *filp)
 
 	iio_device_get(indio_dev);
 
-	ib = kmalloc(sizeof(*ib), GFP_KERNEL);
+	ib = kmalloc_obj(*ib);
 	if (!ib) {
 		iio_device_put(indio_dev);
 		clear_bit(IIO_BUSY_BIT_POS, &iio_dev_opaque->flags);
@@ -2143,84 +2175,34 @@ int __devm_iio_device_register(struct device *dev, struct iio_dev *indio_dev,
 EXPORT_SYMBOL_GPL(__devm_iio_device_register);
 
 /**
- * iio_device_claim_direct_mode - Keep device in direct mode
- * @indio_dev:	the iio_dev associated with the device
+ * __iio_dev_mode_lock() - Locks the current IIO device mode
+ * @indio_dev: the iio_dev associated with the device
  *
- * If the device is in direct mode it is guaranteed to stay
- * that way until iio_device_release_direct_mode() is called.
+ * If the device is either in direct or buffer mode, it's guaranteed to stay
+ * that way until __iio_dev_mode_unlock() is called.
  *
- * Use with iio_device_release_direct_mode()
+ * This function is not meant to be used directly by drivers to protect internal
+ * state; a driver should have it's own mechanisms for that matter.
  *
- * Returns: 0 on success, -EBUSY on failure.
+ * There are very few cases where a driver actually needs to lock the current
+ * mode unconditionally. It's recommended to use iio_device_claim_direct() or
+ * iio_device_try_claim_buffer_mode() pairs or related helpers instead.
  */
-int iio_device_claim_direct_mode(struct iio_dev *indio_dev)
+void __iio_dev_mode_lock(struct iio_dev *indio_dev)
 {
-	struct iio_dev_opaque *iio_dev_opaque = to_iio_dev_opaque(indio_dev);
-
-	mutex_lock(&iio_dev_opaque->mlock);
-
-	if (iio_buffer_enabled(indio_dev)) {
-		mutex_unlock(&iio_dev_opaque->mlock);
-		return -EBUSY;
-	}
-	return 0;
+	mutex_lock(&to_iio_dev_opaque(indio_dev)->mlock);
 }
-EXPORT_SYMBOL_GPL(iio_device_claim_direct_mode);
+EXPORT_SYMBOL_GPL(__iio_dev_mode_lock);
 
 /**
- * iio_device_release_direct_mode - releases claim on direct mode
- * @indio_dev:	the iio_dev associated with the device
- *
- * Release the claim. Device is no longer guaranteed to stay
- * in direct mode.
- *
- * Use with iio_device_claim_direct_mode()
+ * __iio_dev_mode_unlock() - Unlocks the current IIO device mode
+ * @indio_dev: the iio_dev associated with the device
  */
-void iio_device_release_direct_mode(struct iio_dev *indio_dev)
+void __iio_dev_mode_unlock(struct iio_dev *indio_dev)
 {
 	mutex_unlock(&to_iio_dev_opaque(indio_dev)->mlock);
 }
-EXPORT_SYMBOL_GPL(iio_device_release_direct_mode);
-
-/**
- * iio_device_claim_buffer_mode - Keep device in buffer mode
- * @indio_dev:	the iio_dev associated with the device
- *
- * If the device is in buffer mode it is guaranteed to stay
- * that way until iio_device_release_buffer_mode() is called.
- *
- * Use with iio_device_release_buffer_mode().
- *
- * Returns: 0 on success, -EBUSY on failure.
- */
-int iio_device_claim_buffer_mode(struct iio_dev *indio_dev)
-{
-	struct iio_dev_opaque *iio_dev_opaque = to_iio_dev_opaque(indio_dev);
-
-	mutex_lock(&iio_dev_opaque->mlock);
-
-	if (iio_buffer_enabled(indio_dev))
-		return 0;
-
-	mutex_unlock(&iio_dev_opaque->mlock);
-	return -EBUSY;
-}
-EXPORT_SYMBOL_GPL(iio_device_claim_buffer_mode);
-
-/**
- * iio_device_release_buffer_mode - releases claim on buffer mode
- * @indio_dev:	the iio_dev associated with the device
- *
- * Release the claim. Device is no longer guaranteed to stay
- * in buffer mode.
- *
- * Use with iio_device_claim_buffer_mode().
- */
-void iio_device_release_buffer_mode(struct iio_dev *indio_dev)
-{
-	mutex_unlock(&to_iio_dev_opaque(indio_dev)->mlock);
-}
-EXPORT_SYMBOL_GPL(iio_device_release_buffer_mode);
+EXPORT_SYMBOL_GPL(__iio_dev_mode_unlock);
 
 /**
  * iio_device_get_current_mode() - helper function providing read-only access to

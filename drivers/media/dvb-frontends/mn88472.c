@@ -586,7 +586,7 @@ static int mn88472_probe(struct i2c_client *client)
 
 	dev_dbg(&client->dev, "\n");
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev) {
 		ret = -ENOMEM;
 		goto err;
@@ -708,8 +708,8 @@ static void mn88472_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mn88472_id_table[] = {
-	{ "mn88472" },
-	{}
+	{ .name = "mn88472" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mn88472_id_table);
 

@@ -11,7 +11,6 @@
 #include <linux/usb/typec_dp.h>
 #include <linux/usb/typec_altmode.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/err.h>
 #include <linux/of_device.h>
 #include <linux/device.h>
@@ -129,7 +128,7 @@ static int tusb1046_i2c_probe(struct i2c_client *client)
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
-		return dev_err_probe(dev, -ENOMEM, "failed to allocate driver data\n");
+		return -ENOMEM;
 
 	priv->client = client;
 

@@ -6,7 +6,7 @@
  *
  * Copyright 2009	Johannes Berg <johannes@sipsolutions.net>
  * Copyright 2013-2014  Intel Mobile Communications GmbH
- * Copyright 2018-2024	Intel Corporation
+ * Copyright 2018-2026	Intel Corporation
  */
 
 #include <linux/export.h>
@@ -29,8 +29,10 @@ void cfg80211_chandef_create(struct cfg80211_chan_def *chandef,
 
 	*chandef = (struct cfg80211_chan_def) {
 		.chan = chan,
-		.freq1_offset = chan->freq_offset,
 	};
+
+	WARN_ON(chan->band == NL80211_BAND_60GHZ ||
+		chan->band == NL80211_BAND_S1GHZ);
 
 	switch (chan_type) {
 	case NL80211_CHAN_NO_HT:
@@ -54,11 +56,6 @@ void cfg80211_chandef_create(struct cfg80211_chan_def *chandef,
 	}
 }
 EXPORT_SYMBOL(cfg80211_chandef_create);
-
-static int cfg80211_chandef_get_width(const struct cfg80211_chan_def *c)
-{
-	return nl80211_chan_width_to_mhz(c->width);
-}
 
 static u32 cfg80211_get_start_freq(const struct cfg80211_chan_def *chandef,
 				   u32 cf)
@@ -105,6 +102,11 @@ static u32 cfg80211_get_end_freq(const struct cfg80211_chan_def *chandef,
 	       punctured = 0) : (punctured >>= 1)))			\
 		if (!(punctured & 1))
 
+#define for_each_s1g_subchan(chandef, freq_khz)                   \
+	for (freq_khz = cfg80211_s1g_get_start_freq_khz(chandef); \
+	     freq_khz <= cfg80211_s1g_get_end_freq_khz(chandef);  \
+	     freq_khz += MHZ_TO_KHZ(1))
+
 struct cfg80211_per_bw_puncturing_values {
 	u8 len;
 	const u16 *valid_values;
@@ -136,9 +138,10 @@ static const struct cfg80211_per_bw_puncturing_values per_bw_puncturing[] = {
 	CFG80211_PER_BW_VALID_PUNCTURING_VALUES(320)
 };
 
-static bool valid_puncturing_bitmap(const struct cfg80211_chan_def *chandef)
+static bool valid_puncturing_bitmap(const struct cfg80211_chan_def *chandef,
+				    u32 primary_center, u32 punctured)
 {
-	u32 idx, i, start_freq, primary_center = chandef->chan->center_freq;
+	u32 idx, i, start_freq;
 
 	switch (chandef->width) {
 	case NL80211_CHAN_WIDTH_80:
@@ -154,18 +157,18 @@ static bool valid_puncturing_bitmap(const struct cfg80211_chan_def *chandef)
 		start_freq = chandef->center_freq1 - 160;
 		break;
 	default:
-		return chandef->punctured == 0;
+		return punctured == 0;
 	}
 
-	if (!chandef->punctured)
+	if (!punctured)
 		return true;
 
 	/* check if primary channel is punctured */
-	if (chandef->punctured & (u16)BIT((primary_center - start_freq) / 20))
+	if (punctured & (u16)BIT((primary_center - start_freq) / 20))
 		return false;
 
 	for (i = 0; i < per_bw_puncturing[idx].len; i++) {
-		if (per_bw_puncturing[idx].valid_values[i] == chandef->punctured)
+		if (per_bw_puncturing[idx].valid_values[i] == punctured)
 			return true;
 	}
 
@@ -277,12 +280,6 @@ int nl80211_chan_width_to_mhz(enum nl80211_chan_width chan_width)
 	case NL80211_CHAN_WIDTH_16:
 		mhz = 16;
 		break;
-	case NL80211_CHAN_WIDTH_5:
-		mhz = 5;
-		break;
-	case NL80211_CHAN_WIDTH_10:
-		mhz = 10;
-		break;
 	case NL80211_CHAN_WIDTH_20:
 	case NL80211_CHAN_WIDTH_20_NOHT:
 		mhz = 20;
@@ -315,7 +312,7 @@ static bool cfg80211_valid_center_freq(u32 center,
 	int step;
 
 	/* We only do strict verification on 6 GHz */
-	if (center < 5955 || center > 7115)
+	if (center < 5955 || center > 7215)
 		return true;
 
 	bw = nl80211_chan_width_to_mhz(width);
@@ -323,7 +320,7 @@ static bool cfg80211_valid_center_freq(u32 center,
 		return false;
 
 	/* Validate that the channels bw is entirely within the 6 GHz band */
-	if (center - bw / 2 < 5945 || center + bw / 2 > 7125)
+	if (center - bw / 2 < 5945 || center + bw / 2 > 7225)
 		return false;
 
 	/* With 320 MHz the permitted channels overlap */
@@ -339,75 +336,11 @@ static bool cfg80211_valid_center_freq(u32 center,
 	return (center - bw / 2 - 5945) % step == 0;
 }
 
-bool cfg80211_chandef_valid(const struct cfg80211_chan_def *chandef)
+static bool
+cfg80211_chandef_valid_control_freq(const struct cfg80211_chan_def *chandef,
+				    u32 control_freq)
 {
-	u32 control_freq, oper_freq;
-	int oper_width, control_width;
-
-	if (!chandef->chan)
-		return false;
-
-	if (chandef->freq1_offset >= 1000)
-		return false;
-
-	control_freq = chandef->chan->center_freq;
-
 	switch (chandef->width) {
-	case NL80211_CHAN_WIDTH_5:
-	case NL80211_CHAN_WIDTH_10:
-	case NL80211_CHAN_WIDTH_20:
-	case NL80211_CHAN_WIDTH_20_NOHT:
-		if (ieee80211_chandef_to_khz(chandef) !=
-		    ieee80211_channel_to_khz(chandef->chan))
-			return false;
-		if (chandef->center_freq2)
-			return false;
-		break;
-	case NL80211_CHAN_WIDTH_1:
-	case NL80211_CHAN_WIDTH_2:
-	case NL80211_CHAN_WIDTH_4:
-	case NL80211_CHAN_WIDTH_8:
-	case NL80211_CHAN_WIDTH_16:
-		if (chandef->chan->band != NL80211_BAND_S1GHZ)
-			return false;
-
-		control_freq = ieee80211_channel_to_khz(chandef->chan);
-		oper_freq = ieee80211_chandef_to_khz(chandef);
-		control_width = nl80211_chan_width_to_mhz(
-					ieee80211_s1g_channel_width(
-								chandef->chan));
-		oper_width = cfg80211_chandef_get_width(chandef);
-
-		if (oper_width < 0 || control_width < 0)
-			return false;
-		if (chandef->center_freq2)
-			return false;
-
-		if (control_freq + MHZ_TO_KHZ(control_width) / 2 >
-		    oper_freq + MHZ_TO_KHZ(oper_width) / 2)
-			return false;
-
-		if (control_freq - MHZ_TO_KHZ(control_width) / 2 <
-		    oper_freq - MHZ_TO_KHZ(oper_width) / 2)
-			return false;
-		break;
-	case NL80211_CHAN_WIDTH_80P80:
-		if (!chandef->center_freq2)
-			return false;
-		/* adjacent is not allowed -- that's a 160 MHz channel */
-		if (chandef->center_freq1 - chandef->center_freq2 == 80 ||
-		    chandef->center_freq2 - chandef->center_freq1 == 80)
-			return false;
-		break;
-	default:
-		if (chandef->center_freq2)
-			return false;
-		break;
-	}
-
-	switch (chandef->width) {
-	case NL80211_CHAN_WIDTH_5:
-	case NL80211_CHAN_WIDTH_10:
 	case NL80211_CHAN_WIDTH_20:
 	case NL80211_CHAN_WIDTH_20_NOHT:
 	case NL80211_CHAN_WIDTH_1:
@@ -415,7 +348,7 @@ bool cfg80211_chandef_valid(const struct cfg80211_chan_def *chandef)
 	case NL80211_CHAN_WIDTH_4:
 	case NL80211_CHAN_WIDTH_8:
 	case NL80211_CHAN_WIDTH_16:
-		/* all checked above */
+		/* checked separately */
 		break;
 	case NL80211_CHAN_WIDTH_320:
 		if (chandef->center_freq1 == control_freq + 150 ||
@@ -450,6 +383,85 @@ bool cfg80211_chandef_valid(const struct cfg80211_chan_def *chandef)
 		return false;
 	}
 
+	return true;
+}
+
+bool cfg80211_chandef_valid(const struct cfg80211_chan_def *chandef)
+{
+	u32 control_freq, control_freq_khz, start_khz, end_khz;
+
+	if (!chandef->chan)
+		return false;
+
+	if (chandef->freq1_offset >= 1000)
+		return false;
+
+	control_freq = chandef->chan->center_freq;
+
+	if (cfg80211_chandef_is_s1g(chandef) &&
+	    chandef->width != NL80211_CHAN_WIDTH_1 &&
+	    chandef->width != NL80211_CHAN_WIDTH_2 &&
+	    chandef->width != NL80211_CHAN_WIDTH_4 &&
+	    chandef->width != NL80211_CHAN_WIDTH_8 &&
+	    chandef->width != NL80211_CHAN_WIDTH_16)
+		return false;
+
+	switch (chandef->width) {
+	case NL80211_CHAN_WIDTH_20:
+	case NL80211_CHAN_WIDTH_20_NOHT:
+		if (ieee80211_chandef_to_khz(chandef) !=
+		    ieee80211_channel_to_khz(chandef->chan))
+			return false;
+		if (chandef->center_freq2)
+			return false;
+		break;
+	case NL80211_CHAN_WIDTH_1:
+	case NL80211_CHAN_WIDTH_2:
+	case NL80211_CHAN_WIDTH_4:
+	case NL80211_CHAN_WIDTH_8:
+	case NL80211_CHAN_WIDTH_16:
+		if (!cfg80211_chandef_is_s1g(chandef))
+			return false;
+		if (chandef->center_freq2)
+			return false;
+
+		control_freq_khz = ieee80211_channel_to_khz(chandef->chan);
+		start_khz = cfg80211_s1g_get_start_freq_khz(chandef);
+		end_khz = cfg80211_s1g_get_end_freq_khz(chandef);
+
+		if (control_freq_khz < start_khz || control_freq_khz > end_khz)
+			return false;
+		break;
+	case NL80211_CHAN_WIDTH_80P80:
+		if (!chandef->center_freq2)
+			return false;
+		/* adjacent is not allowed -- that's a 160 MHz channel */
+		if (chandef->center_freq1 - chandef->center_freq2 == 80 ||
+		    chandef->center_freq2 - chandef->center_freq1 == 80)
+			return false;
+		break;
+	default:
+		if (chandef->center_freq2)
+			return false;
+		break;
+	}
+
+	if (!cfg80211_chandef_valid_control_freq(chandef, control_freq))
+		return false;
+
+	if (chandef->npca_chan) {
+		switch (chandef->width) {
+		case NL80211_CHAN_WIDTH_80:
+		case NL80211_CHAN_WIDTH_160:
+		case NL80211_CHAN_WIDTH_320:
+			break;
+		default:
+			return false;
+		}
+	} else if (chandef->npca_punctured) {
+		return false;
+	}
+
 	if (!cfg80211_valid_center_freq(chandef->center_freq1, chandef->width))
 		return false;
 
@@ -466,7 +478,11 @@ bool cfg80211_chandef_valid(const struct cfg80211_chan_def *chandef)
 	    !cfg80211_edmg_chandef_valid(chandef))
 		return false;
 
-	return valid_puncturing_bitmap(chandef);
+	if (!cfg80211_chandef_is_s1g(chandef) && chandef->s1g_primary_2mhz)
+		return false;
+
+	return valid_puncturing_bitmap(chandef, control_freq,
+				       chandef->punctured);
 }
 EXPORT_SYMBOL(cfg80211_chandef_valid);
 
@@ -508,6 +524,220 @@ int cfg80211_chandef_primary(const struct cfg80211_chan_def *c,
 	return center;
 }
 EXPORT_SYMBOL(cfg80211_chandef_primary);
+
+bool cfg80211_chandef_npca_valid(struct wiphy *wiphy,
+				 const struct cfg80211_chan_def *chandef,
+				 const struct ieee80211_uhr_npca_info *npca)
+{
+	struct cfg80211_chan_def tmp = *chandef;
+	bool pri_upper, npca_upper;
+	u32 cf1;
+
+	if (chandef->npca_chan || chandef->npca_punctured)
+		return false;
+
+	if (!npca)
+		return true;
+
+	if (cfg80211_chandef_add_npca(wiphy, &tmp, npca))
+		return false;
+
+	if (!cfg80211_chandef_valid_control_freq(&tmp,
+						 tmp.npca_chan->center_freq))
+		return false;
+
+	cf1 = tmp.center_freq1;
+	pri_upper = tmp.chan->center_freq > cf1;
+	npca_upper = tmp.npca_chan->center_freq > cf1;
+
+	if (pri_upper == npca_upper)
+		return false;
+
+	if (!valid_puncturing_bitmap(&tmp,
+				     tmp.npca_chan->center_freq,
+				     tmp.npca_punctured) ||
+	    (tmp.punctured & tmp.npca_punctured) != tmp.punctured)
+		return false;
+
+	return true;
+}
+EXPORT_SYMBOL(cfg80211_chandef_npca_valid);
+
+int cfg80211_chandef_add_npca(struct wiphy *wiphy,
+			      struct cfg80211_chan_def *chandef,
+			      const struct ieee80211_uhr_npca_info *npca)
+{
+	struct cfg80211_chan_def new_chandef = *chandef;
+	u32 width, npca_freq;
+	u8 offs;
+
+	if (chandef->npca_chan || chandef->npca_punctured)
+		return -EINVAL;
+
+	if (WARN_ON(!cfg80211_chandef_valid(chandef)))
+		return -EINVAL;
+
+	if (!npca)
+		return 0;
+
+	switch (chandef->width) {
+	case NL80211_CHAN_WIDTH_80:
+	case NL80211_CHAN_WIDTH_160:
+	case NL80211_CHAN_WIDTH_320:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	offs = le32_get_bits(npca->params,
+			     IEEE80211_UHR_NPCA_PARAMS_PRIMARY_CHAN_OFFS);
+
+	width = cfg80211_chandef_get_width(chandef);
+	npca_freq = chandef->center_freq1 - width / 2 + 10 + 20 * offs;
+	new_chandef.npca_chan = ieee80211_get_channel(wiphy, npca_freq);
+	if (!new_chandef.npca_chan)
+		return -EINVAL;
+
+	if (npca->params & cpu_to_le32(IEEE80211_UHR_NPCA_PARAMS_DIS_SUBCH_BMAP_PRES))
+		new_chandef.npca_punctured = le16_to_cpu(npca->dis_subch_bmap[0]);
+
+	if (!cfg80211_chandef_valid(&new_chandef))
+		return -EINVAL;
+
+	*chandef = new_chandef;
+	return 0;
+}
+EXPORT_SYMBOL(cfg80211_chandef_add_npca);
+
+int cfg80211_chandef_add_dbe(struct cfg80211_chan_def *chandef,
+			     const struct ieee80211_uhr_dbe_info *dbe)
+{
+	struct cfg80211_chan_def new_chandef = *chandef;
+	u16 starting_freq, bw_mhz, start_old, start_new;
+	u8 bw, punct_shift;
+	int offset, index;
+
+	if (!dbe)
+		return 0;
+
+	if (!cfg80211_chandef_valid(chandef))
+		return -EINVAL;
+
+	if (chandef->width == NL80211_CHAN_WIDTH_20_NOHT)
+		return -EINVAL;
+
+	bw = u8_get_bits(dbe->params, IEEE80211_UHR_DBE_OPER_BANDWIDTH);
+
+	switch (chandef->chan->band) {
+	case NL80211_BAND_5GHZ:
+		if (bw > IEEE80211_UHR_DBE_OPER_BW_160)
+			return -EINVAL;
+		if (chandef->chan->center_freq < 5745)
+			starting_freq = 5180; /* channel 36 */
+		else
+			starting_freq = 5745; /* channel 149 */
+		break;
+	case NL80211_BAND_6GHZ:
+		starting_freq = 5955; /* channel 1 center */
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	switch (bw) {
+	case IEEE80211_UHR_DBE_OPER_BW_320_2:
+	case IEEE80211_UHR_DBE_OPER_BW_320_1:
+		if (chandef->width == NL80211_CHAN_WIDTH_160)
+			break;
+		fallthrough;
+	case IEEE80211_UHR_DBE_OPER_BW_160:
+		if (chandef->width == NL80211_CHAN_WIDTH_80)
+			break;
+		fallthrough;
+	case IEEE80211_UHR_DBE_OPER_BW_80:
+		if (chandef->width == NL80211_CHAN_WIDTH_40)
+			break;
+		fallthrough;
+	case IEEE80211_UHR_DBE_OPER_BW_40:
+		if (chandef->width == NL80211_CHAN_WIDTH_20)
+			break;
+		fallthrough;
+	default:
+		return -EINVAL;
+	}
+
+	switch (bw) {
+	case IEEE80211_UHR_DBE_OPER_BW_320_2:
+		/* 320-2 starts shifted by 160 */
+		starting_freq += 160;
+		fallthrough;
+	case IEEE80211_UHR_DBE_OPER_BW_320_1:
+		new_chandef.width = NL80211_CHAN_WIDTH_320;
+		bw_mhz = 320;
+		break;
+	case IEEE80211_UHR_DBE_OPER_BW_160:
+		new_chandef.width = NL80211_CHAN_WIDTH_160;
+		bw_mhz = 160;
+		break;
+	case IEEE80211_UHR_DBE_OPER_BW_80:
+		new_chandef.width = NL80211_CHAN_WIDTH_80;
+		bw_mhz = 80;
+		break;
+	case IEEE80211_UHR_DBE_OPER_BW_40:
+		new_chandef.width = NL80211_CHAN_WIDTH_40;
+		bw_mhz = 40;
+		break;
+	}
+
+	/* this should only happen for 320-2 and misconfigured AP */
+	if (chandef->chan->center_freq < starting_freq)
+		return -EINVAL;
+
+	offset = chandef->chan->center_freq - starting_freq;
+	index = offset / bw_mhz;
+	start_new = starting_freq - 10 + index * bw_mhz;
+	new_chandef.center_freq1 = start_new + bw_mhz / 2;
+
+	start_old = chandef->center_freq1 -
+		    cfg80211_chandef_get_width(chandef) / 2;
+
+	/*
+	 * If the DBE channel extends downward below the lower
+	 * edge of the BSS channel, we need to shift puncturing
+	 * bitmaps up to adjust for that.
+	 */
+	if (start_new < start_old)
+		punct_shift = (start_old - start_new) / 20;
+	else
+		punct_shift = 0;
+
+	new_chandef.punctured <<= punct_shift;
+	new_chandef.npca_punctured <<= punct_shift;
+
+	if (dbe->params & IEEE80211_UHR_DBE_OPER_DIS_SUBCHANNEL_BITMAP_PRES) {
+		u16 punct_mask = ((1 << (bw_mhz / 40)) - 1) << punct_shift;
+		u16 punctured = le16_to_cpu(dbe->dis_subch_bmap[0]);
+
+		if ((punctured & punct_mask) != (new_chandef.punctured & punct_mask))
+			return -EINVAL;
+
+		new_chandef.punctured = punctured;
+	}
+
+	if (!cfg80211_chandef_valid(&new_chandef))
+		return -EINVAL;
+
+	/*
+	 * If e.g. a 40 MHz BSS channel (erroneously) occupies the center of the
+	 * DBE 80 MHz channel, they would be incompatible; check and reject.
+	 */
+	if (!cfg80211_chandef_compatible(&new_chandef, chandef))
+		return -EINVAL;
+
+	*chandef = new_chandef;
+	return 0;
+}
+EXPORT_SYMBOL(cfg80211_chandef_add_dbe);
 
 static const struct cfg80211_chan_def *
 check_chandef_primary_compat(const struct cfg80211_chan_def *c1,
@@ -554,18 +784,25 @@ _cfg80211_chandef_compatible(const struct cfg80211_chan_def *c1,
 		return NULL;
 
 	/*
-	 * can't be compatible if one of them is 5/10 MHz or S1G
+	 * We need NPCA to be compatible for some scenarios such as
+	 * multiple APs, but in this case userspace should configure
+	 * identical chandefs including NPCA, even if perhaps one of
+	 * the AP interfaces doesn't even advertise it.
+	 */
+	if (c1->npca_chan || c2->npca_chan)
+		return NULL;
+
+	/*
+	 * can't be compatible if one of them is S1G
 	 * but they don't have the same width.
 	 */
-#define NARROW_OR_S1G(width)	((width) == NL80211_CHAN_WIDTH_5 || \
-				 (width) == NL80211_CHAN_WIDTH_10 || \
-				 (width) == NL80211_CHAN_WIDTH_1 || \
-				 (width) == NL80211_CHAN_WIDTH_2 || \
-				 (width) == NL80211_CHAN_WIDTH_4 || \
-				 (width) == NL80211_CHAN_WIDTH_8 || \
-				 (width) == NL80211_CHAN_WIDTH_16)
+#define IS_S1G(width)	((width) == NL80211_CHAN_WIDTH_1 || \
+			 (width) == NL80211_CHAN_WIDTH_2 || \
+			 (width) == NL80211_CHAN_WIDTH_4 || \
+			 (width) == NL80211_CHAN_WIDTH_8 || \
+			 (width) == NL80211_CHAN_WIDTH_16)
 
-	if (NARROW_OR_S1G(c1->width) || NARROW_OR_S1G(c2->width))
+	if (IS_S1G(c1->width) || IS_S1G(c2->width))
 		return NULL;
 
 	/*
@@ -651,6 +888,33 @@ void cfg80211_set_dfs_state(struct wiphy *wiphy,
 	}
 }
 
+void cfg80211_set_cac_state(struct wiphy *wiphy,
+			    const struct cfg80211_chan_def *chandef,
+			    bool cac_ongoing)
+{
+	struct ieee80211_channel *c;
+	int width;
+	u64 cac_time;
+
+	if (WARN_ON(!cfg80211_chandef_valid(chandef)))
+		return;
+
+	width = cfg80211_chandef_get_width(chandef);
+	if (width < 0)
+		return;
+
+	/* Get the same timestamp for all subchannels */
+	cac_time = cac_ongoing ? ktime_get_boottime_ns() : 0;
+
+	for_each_subchan(chandef, freq, cf) {
+		c = ieee80211_get_channel_khz(wiphy, freq);
+		if (!c)
+			continue;
+
+		c->cac_start_time = cac_time;
+	}
+}
+
 static bool
 cfg80211_dfs_permissive_check_wdev(struct cfg80211_registered_device *rdev,
 				   enum nl80211_iftype iftype,
@@ -730,6 +994,10 @@ static int cfg80211_get_chans_dfs_required(struct wiphy *wiphy,
 {
 	struct ieee80211_channel *c;
 
+	/* DFS is not required for S1G */
+	if (cfg80211_chandef_is_s1g(chandef))
+		return 0;
+
 	for_each_subchan(chandef, freq, cf) {
 		c = ieee80211_get_channel_khz(wiphy, freq);
 		if (!c)
@@ -759,6 +1027,7 @@ int cfg80211_chandef_dfs_required(struct wiphy *wiphy,
 	case NL80211_IFTYPE_AP:
 	case NL80211_IFTYPE_P2P_GO:
 	case NL80211_IFTYPE_MESH_POINT:
+	case NL80211_IFTYPE_NAN:
 		width = cfg80211_chandef_get_width(chandef);
 		if (width < 0)
 			return -EINVAL;
@@ -773,7 +1042,8 @@ int cfg80211_chandef_dfs_required(struct wiphy *wiphy,
 	case NL80211_IFTYPE_MONITOR:
 	case NL80211_IFTYPE_AP_VLAN:
 	case NL80211_IFTYPE_P2P_DEVICE:
-	case NL80211_IFTYPE_NAN:
+	case NL80211_IFTYPE_NAN_DATA:
+	case NL80211_IFTYPE_PD:
 		break;
 	case NL80211_IFTYPE_WDS:
 	case NL80211_IFTYPE_UNSPECIFIED:
@@ -897,6 +1167,8 @@ bool cfg80211_beaconing_iface_active(struct wireless_dev *wdev)
 	case NL80211_IFTYPE_P2P_DEVICE:
 	/* Can NAN type be considered as beaconing interface? */
 	case NL80211_IFTYPE_NAN:
+	case NL80211_IFTYPE_NAN_DATA:
+	case NL80211_IFTYPE_PD:
 		break;
 	case NL80211_IFTYPE_UNSPECIFIED:
 	case NL80211_IFTYPE_WDS:
@@ -1135,6 +1407,55 @@ static bool cfg80211_edmg_usable(struct wiphy *wiphy, u8 edmg_channels,
 	return true;
 }
 
+static bool cfg80211_s1g_usable(struct wiphy *wiphy,
+				const struct cfg80211_chan_def *chandef)
+{
+	u32 freq_khz;
+	const struct ieee80211_channel *chan;
+	u32 pri_khz = ieee80211_channel_to_khz(chandef->chan);
+	u32 end_khz = cfg80211_s1g_get_end_freq_khz(chandef);
+	u32 start_khz = cfg80211_s1g_get_start_freq_khz(chandef);
+	int width_mhz = cfg80211_chandef_get_width(chandef);
+	u32 prohibited_flags = IEEE80211_CHAN_DISABLED;
+
+	if (width_mhz >= 16)
+		prohibited_flags |= IEEE80211_CHAN_NO_16MHZ;
+	if (width_mhz >= 8)
+		prohibited_flags |= IEEE80211_CHAN_NO_8MHZ;
+	if (width_mhz >= 4)
+		prohibited_flags |= IEEE80211_CHAN_NO_4MHZ;
+
+	if (chandef->chan->flags & IEEE80211_CHAN_S1G_NO_PRIMARY)
+		return false;
+
+	if (pri_khz < start_khz || pri_khz > end_khz)
+		return false;
+
+	for_each_s1g_subchan(chandef, freq_khz) {
+		chan = ieee80211_get_channel_khz(wiphy, freq_khz);
+		if (!chan || (chan->flags & prohibited_flags))
+			return false;
+	}
+
+	if (chandef->s1g_primary_2mhz) {
+		u32 sib_khz;
+		const struct ieee80211_channel *sibling;
+
+		sibling = cfg80211_s1g_get_primary_sibling(wiphy, chandef);
+		if (!sibling)
+			return false;
+
+		if (sibling->flags & IEEE80211_CHAN_S1G_NO_PRIMARY)
+			return false;
+
+		sib_khz = ieee80211_channel_to_khz(sibling);
+		if (sib_khz < start_khz || sib_khz > end_khz)
+			return false;
+	}
+
+	return true;
+}
+
 bool _cfg80211_chandef_usable(struct wiphy *wiphy,
 			      const struct cfg80211_chan_def *chandef,
 			      u32 prohibited_flags,
@@ -1159,6 +1480,9 @@ bool _cfg80211_chandef_usable(struct wiphy *wiphy,
 	ext_nss_cap = __le16_to_cpu(vht_cap->vht_mcs.tx_highest) &
 			IEEE80211_VHT_EXT_NSS_BW_CAPABLE;
 
+	if (cfg80211_chandef_is_s1g(chandef))
+		return cfg80211_s1g_usable(wiphy, chandef);
+
 	if (edmg_cap->channels &&
 	    !cfg80211_edmg_usable(wiphy,
 				  chandef->edmg.channels,
@@ -1170,28 +1494,6 @@ bool _cfg80211_chandef_usable(struct wiphy *wiphy,
 	control_freq = chandef->chan->center_freq;
 
 	switch (chandef->width) {
-	case NL80211_CHAN_WIDTH_1:
-		width = 1;
-		break;
-	case NL80211_CHAN_WIDTH_2:
-		width = 2;
-		break;
-	case NL80211_CHAN_WIDTH_4:
-		width = 4;
-		break;
-	case NL80211_CHAN_WIDTH_8:
-		width = 8;
-		break;
-	case NL80211_CHAN_WIDTH_16:
-		width = 16;
-		break;
-	case NL80211_CHAN_WIDTH_5:
-		width = 5;
-		break;
-	case NL80211_CHAN_WIDTH_10:
-		prohibited_flags |= IEEE80211_CHAN_NO_10MHZ;
-		width = 10;
-		break;
 	case NL80211_CHAN_WIDTH_20:
 		if (!ht_cap->ht_supported &&
 		    chandef->chan->band != NL80211_BAND_6GHZ)
@@ -1496,6 +1798,12 @@ bool cfg80211_reg_check_beaconing(struct wiphy *wiphy,
 
 	if (cfg->reg_power == IEEE80211_REG_VLP_AP)
 		permitting_flags |= IEEE80211_CHAN_ALLOW_6GHZ_VLP_AP;
+
+	if ((cfg->iftype == NL80211_IFTYPE_P2P_GO ||
+	     cfg->iftype == NL80211_IFTYPE_AP) &&
+	    (chandef->width == NL80211_CHAN_WIDTH_20_NOHT ||
+	     chandef->width == NL80211_CHAN_WIDTH_20))
+		permitting_flags |= IEEE80211_CHAN_ALLOW_20MHZ_ACTIVITY;
 
 	return _cfg80211_reg_can_beacon(wiphy, chandef, cfg->iftype,
 					check_no_ir ? IEEE80211_CHAN_NO_IR : 0,

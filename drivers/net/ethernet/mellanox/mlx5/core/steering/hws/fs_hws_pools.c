@@ -117,11 +117,13 @@ mlx5_fs_hws_pr_bulk_create(struct mlx5_core_dev *dev, void *pool_ctx)
 		return NULL;
 	pr_pool_ctx = pool_ctx;
 	bulk_len = MLX5_FS_HWS_DEFAULT_BULK_LEN;
-	pr_bulk = kvzalloc(struct_size(pr_bulk, prs_data, bulk_len), GFP_KERNEL);
+	pr_bulk = kvzalloc_flex(*pr_bulk, prs_data, bulk_len);
 	if (!pr_bulk)
 		return NULL;
 
-	if (mlx5_fs_bulk_init(dev, &pr_bulk->fs_bulk, bulk_len))
+	mlx5_fs_bulk_init(&pr_bulk->fs_bulk, bulk_len);
+
+	if (mlx5_fs_bulk_bitmap_alloc(dev, &pr_bulk->fs_bulk))
 		goto free_pr_bulk;
 
 	for (i = 0; i < bulk_len; i++) {
@@ -184,7 +186,7 @@ int mlx5_fs_hws_pr_pool_init(struct mlx5_fs_pool *pr_pool,
 	    reformat_type != MLX5HWS_ACTION_TYP_REFORMAT_L2_TO_TNL_L2)
 		return -EOPNOTSUPP;
 
-	pr_pool_ctx = kzalloc(sizeof(*pr_pool_ctx), GFP_KERNEL);
+	pr_pool_ctx = kzalloc_obj(*pr_pool_ctx);
 	if (!pr_pool_ctx)
 		return -ENOMEM;
 	pr_pool_ctx->reformat_type = reformat_type;
@@ -271,11 +273,13 @@ mlx5_fs_hws_mh_bulk_create(struct mlx5_core_dev *dev, void *pool_ctx)
 
 	pattern = pool_ctx;
 	bulk_len = MLX5_FS_HWS_DEFAULT_BULK_LEN;
-	mh_bulk = kvzalloc(struct_size(mh_bulk, mhs_data, bulk_len), GFP_KERNEL);
+	mh_bulk = kvzalloc_flex(*mh_bulk, mhs_data, bulk_len);
 	if (!mh_bulk)
 		return NULL;
 
-	if (mlx5_fs_bulk_init(dev, &mh_bulk->fs_bulk, bulk_len))
+	mlx5_fs_bulk_init(&mh_bulk->fs_bulk, bulk_len);
+
+	if (mlx5_fs_bulk_bitmap_alloc(dev, &mh_bulk->fs_bulk))
 		goto free_mh_bulk;
 
 	for (int i = 0; i < bulk_len; i++) {
@@ -327,7 +331,7 @@ int mlx5_fs_hws_mh_pool_init(struct mlx5_fs_pool *fs_hws_mh_pool,
 {
 	struct mlx5hws_action_mh_pattern *pool_pattern;
 
-	pool_pattern = kzalloc(sizeof(*pool_pattern), GFP_KERNEL);
+	pool_pattern = kzalloc_obj(*pool_pattern);
 	if (!pool_pattern)
 		return -ENOMEM;
 	pool_pattern->data = kmemdup(pattern->data, pattern->sz, GFP_KERNEL);
@@ -405,46 +409,23 @@ bool mlx5_fs_hws_mh_pool_match(struct mlx5_fs_pool *mh_pool,
 struct mlx5hws_action *mlx5_fc_get_hws_action(struct mlx5hws_context *ctx,
 					      struct mlx5_fc *counter)
 {
-	u32 flags = MLX5HWS_ACTION_FLAG_HWS_FDB | MLX5HWS_ACTION_FLAG_SHARED;
+	struct mlx5_fs_hws_create_action_ctx create_ctx;
 	struct mlx5_fc_bulk *fc_bulk = counter->bulk;
-	struct mlx5_fc_bulk_hws_data *fc_bulk_hws;
+	struct mlx5hws_action *hws_action;
 
-	fc_bulk_hws = &fc_bulk->hws_data;
-	/* try avoid locking if not necessary */
-	if (refcount_inc_not_zero(&fc_bulk_hws->hws_action_refcount))
-		return fc_bulk_hws->hws_action;
+	create_ctx.hws_ctx = ctx;
+	create_ctx.id = fc_bulk->base_id;
+	create_ctx.actions_type = MLX5HWS_ACTION_TYP_CTR;
 
-	mutex_lock(&fc_bulk_hws->lock);
-	if (refcount_inc_not_zero(&fc_bulk_hws->hws_action_refcount)) {
-		mutex_unlock(&fc_bulk_hws->lock);
-		return fc_bulk_hws->hws_action;
-	}
-	fc_bulk_hws->hws_action =
-		mlx5hws_action_create_counter(ctx, fc_bulk->base_id, flags);
-	if (!fc_bulk_hws->hws_action) {
-		mutex_unlock(&fc_bulk_hws->lock);
-		return NULL;
-	}
-	refcount_set(&fc_bulk_hws->hws_action_refcount, 1);
-	mutex_unlock(&fc_bulk_hws->lock);
-
-	return fc_bulk_hws->hws_action;
+	mlx5_fc_local_get(counter);
+	hws_action = mlx5_fs_get_hws_action(&fc_bulk->hws_data, &create_ctx);
+	if (!hws_action)
+		mlx5_fc_local_put(counter);
+	return hws_action;
 }
 
 void mlx5_fc_put_hws_action(struct mlx5_fc *counter)
 {
-	struct mlx5_fc_bulk_hws_data *fc_bulk_hws = &counter->bulk->hws_data;
-
-	/* try avoid locking if not necessary */
-	if (refcount_dec_not_one(&fc_bulk_hws->hws_action_refcount))
-		return;
-
-	mutex_lock(&fc_bulk_hws->lock);
-	if (!refcount_dec_and_test(&fc_bulk_hws->hws_action_refcount)) {
-		mutex_unlock(&fc_bulk_hws->lock);
-		return;
-	}
-	mlx5hws_action_destroy(fc_bulk_hws->hws_action);
-	fc_bulk_hws->hws_action = NULL;
-	mutex_unlock(&fc_bulk_hws->lock);
+	mlx5_fs_put_hws_action(&counter->bulk->hws_data);
+	mlx5_fc_local_put(counter);
 }

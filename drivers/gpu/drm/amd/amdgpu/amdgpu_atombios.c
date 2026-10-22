@@ -36,11 +36,19 @@
 #include "atombios_encoders.h"
 #include "bif/bif_4_1_d.h"
 
-static void amdgpu_atombios_lookup_i2c_gpio_quirks(struct amdgpu_device *adev,
-					  ATOM_GPIO_I2C_ASSIGMENT *gpio,
-					  u8 index)
+/* VBIOS-reported table size is unchecked against the image; cap iterations and
+ * adev->i2c_bus[] indexing to AMDGPU_MAX_I2C_BUS.
+ */
+static int amdgpu_atombios_gpio_i2c_num_entries(uint16_t size)
 {
+	u32 bytes;
 
+	if (size < sizeof(ATOM_COMMON_TABLE_HEADER))
+		return 0;
+
+	bytes = size - sizeof(ATOM_COMMON_TABLE_HEADER);
+	return (int)min_t(u32, bytes / sizeof(ATOM_GPIO_I2C_ASSIGMENT),
+			  AMDGPU_MAX_I2C_BUS);
 }
 
 static struct amdgpu_i2c_bus_rec amdgpu_atombios_get_bus_rec_for_i2c_gpio(ATOM_GPIO_I2C_ASSIGMENT *gpio)
@@ -103,14 +111,10 @@ struct amdgpu_i2c_bus_rec amdgpu_atombios_lookup_i2c_gpio(struct amdgpu_device *
 	if (amdgpu_atom_parse_data_header(ctx, index, &size, NULL, NULL, &data_offset)) {
 		i2c_info = (struct _ATOM_GPIO_I2C_INFO *)(ctx->bios + data_offset);
 
-		num_indices = (size - sizeof(ATOM_COMMON_TABLE_HEADER)) /
-			sizeof(ATOM_GPIO_I2C_ASSIGMENT);
+		num_indices = amdgpu_atombios_gpio_i2c_num_entries(size);
 
 		gpio = &i2c_info->asGPIO_Info[0];
 		for (i = 0; i < num_indices; i++) {
-
-			amdgpu_atombios_lookup_i2c_gpio_quirks(adev, gpio, i);
-
 			if (gpio->sucI2cId.ucAccess == id) {
 				i2c = amdgpu_atombios_get_bus_rec_for_i2c_gpio(gpio);
 				break;
@@ -137,18 +141,46 @@ void amdgpu_atombios_i2c_init(struct amdgpu_device *adev)
 	if (amdgpu_atom_parse_data_header(ctx, index, &size, NULL, NULL, &data_offset)) {
 		i2c_info = (struct _ATOM_GPIO_I2C_INFO *)(ctx->bios + data_offset);
 
-		num_indices = (size - sizeof(ATOM_COMMON_TABLE_HEADER)) /
-			sizeof(ATOM_GPIO_I2C_ASSIGMENT);
+		num_indices = amdgpu_atombios_gpio_i2c_num_entries(size);
 
 		gpio = &i2c_info->asGPIO_Info[0];
 		for (i = 0; i < num_indices; i++) {
-			amdgpu_atombios_lookup_i2c_gpio_quirks(adev, gpio, i);
-
 			i2c = amdgpu_atombios_get_bus_rec_for_i2c_gpio(gpio);
 
 			if (i2c.valid) {
 				sprintf(stmp, "0x%x", i2c.i2c_id);
 				adev->i2c_bus[i] = amdgpu_i2c_create(adev_to_drm(adev), &i2c, stmp);
+			}
+			gpio = (ATOM_GPIO_I2C_ASSIGMENT *)
+				((u8 *)gpio + sizeof(ATOM_GPIO_I2C_ASSIGMENT));
+		}
+	}
+}
+
+void amdgpu_atombios_oem_i2c_init(struct amdgpu_device *adev, u8 i2c_id)
+{
+	struct atom_context *ctx = adev->mode_info.atom_context;
+	ATOM_GPIO_I2C_ASSIGMENT *gpio;
+	struct amdgpu_i2c_bus_rec i2c;
+	int index = GetIndexIntoMasterTable(DATA, GPIO_I2C_Info);
+	struct _ATOM_GPIO_I2C_INFO *i2c_info;
+	uint16_t data_offset, size;
+	int i, num_indices;
+	char stmp[32];
+
+	if (amdgpu_atom_parse_data_header(ctx, index, &size, NULL, NULL, &data_offset)) {
+		i2c_info = (struct _ATOM_GPIO_I2C_INFO *)(ctx->bios + data_offset);
+
+		num_indices = amdgpu_atombios_gpio_i2c_num_entries(size);
+
+		gpio = &i2c_info->asGPIO_Info[0];
+		for (i = 0; i < num_indices; i++) {
+			i2c = amdgpu_atombios_get_bus_rec_for_i2c_gpio(gpio);
+
+			if (i2c.valid && i2c.i2c_id == i2c_id) {
+				sprintf(stmp, "OEM 0x%x", i2c.i2c_id);
+				adev->i2c_bus[i] = amdgpu_i2c_create(adev_to_drm(adev), &i2c, stmp);
+				break;
 			}
 			gpio = (ATOM_GPIO_I2C_ASSIGMENT *)
 				((u8 *)gpio + sizeof(ATOM_GPIO_I2C_ASSIGMENT));
@@ -686,7 +718,6 @@ int amdgpu_atombios_get_clock_info(struct amdgpu_device *adev)
 		}
 		adev->clock.dp_extclk =
 			le16_to_cpu(firmware_info->info_21.usUniphyDPModeExtClkFreq);
-		adev->clock.current_dispclk = adev->clock.default_dispclk;
 
 		adev->clock.max_pixel_clock = le16_to_cpu(firmware_info->info.usMaxPixelClock);
 		if (adev->clock.max_pixel_clock == 0)
@@ -1666,9 +1697,9 @@ static int amdgpu_atombios_allocate_fb_scratch(struct amdgpu_device *adev)
 			(uint32_t)(ATOM_VRAM_BLOCK_SRIOV_MSG_SHARE_RESERVATION <<
 			ATOM_VRAM_OPERATION_FLAGS_SHIFT)) {
 			/* Firmware request VRAM reservation for SR-IOV */
-			adev->mman.fw_vram_usage_start_offset = (start_addr &
-				(~ATOM_VRAM_OPERATION_FLAGS_MASK)) << 10;
-			adev->mman.fw_vram_usage_size = size << 10;
+			amdgpu_ttm_init_vram_resv(adev, AMDGPU_RESV_FW_VRAM_USAGE,
+					  (start_addr & (~ATOM_VRAM_OPERATION_FLAGS_MASK)) << 10,
+					  size << 10, true);
 			/* Use the default scratch size */
 			usage_bytes = 0;
 		} else {
@@ -1796,16 +1827,43 @@ static ssize_t amdgpu_atombios_get_vbios_version(struct device *dev,
 	return sysfs_emit(buf, "%s\n", ctx->vbios_pn);
 }
 
+static ssize_t amdgpu_atombios_get_vbios_build(struct device *dev,
+					       struct device_attribute *attr,
+					       char *buf)
+{
+	struct drm_device *ddev = dev_get_drvdata(dev);
+	struct amdgpu_device *adev = drm_to_adev(ddev);
+	struct atom_context *ctx = adev->mode_info.atom_context;
+
+	return sysfs_emit(buf, "%s\n", ctx->build_num);
+}
+
 static DEVICE_ATTR(vbios_version, 0444, amdgpu_atombios_get_vbios_version,
 		   NULL);
+static DEVICE_ATTR(vbios_build, 0444, amdgpu_atombios_get_vbios_build, NULL);
 
 static struct attribute *amdgpu_vbios_version_attrs[] = {
-	&dev_attr_vbios_version.attr,
-	NULL
+	&dev_attr_vbios_version.attr, &dev_attr_vbios_build.attr, NULL
 };
 
+static umode_t amdgpu_vbios_version_attrs_is_visible(struct kobject *kobj,
+						     struct attribute *attr,
+						     int index)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct drm_device *ddev = dev_get_drvdata(dev);
+	struct amdgpu_device *adev = drm_to_adev(ddev);
+	struct atom_context *ctx = adev->mode_info.atom_context;
+
+	if (attr == &dev_attr_vbios_build.attr && !strlen(ctx->build_num))
+		return 0;
+
+	return attr->mode;
+}
+
 const struct attribute_group amdgpu_vbios_version_attr_group = {
-	.attrs = amdgpu_vbios_version_attrs
+	.attrs = amdgpu_vbios_version_attrs,
+	.is_visible = amdgpu_vbios_version_attrs_is_visible,
 };
 
 int amdgpu_atombios_sysfs_init(struct amdgpu_device *adev)
@@ -1851,7 +1909,7 @@ void amdgpu_atombios_fini(struct amdgpu_device *adev)
 int amdgpu_atombios_init(struct amdgpu_device *adev)
 {
 	struct card_info *atom_card_info =
-	    kzalloc(sizeof(struct card_info), GFP_KERNEL);
+	    kzalloc_obj(struct card_info);
 
 	if (!atom_card_info)
 		return -ENOMEM;

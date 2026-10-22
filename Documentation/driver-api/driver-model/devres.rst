@@ -275,7 +275,6 @@ GPIO
   devm_gpiod_put()
   devm_gpiod_unhinge()
   devm_gpiochip_add_data()
-  devm_gpio_request()
   devm_gpio_request_one()
 
 I2C
@@ -384,19 +383,17 @@ NET
 
 PER-CPU MEM
   devm_alloc_percpu()
-  devm_free_percpu()
 
 PCI
   devm_pci_alloc_host_bridge()  : managed PCI host bridge allocation
   devm_pci_remap_cfgspace()	: ioremap PCI configuration space
   devm_pci_remap_cfg_resource()	: ioremap PCI configuration space resource
 
-  pcim_enable_device()		: after success, some PCI ops become managed
+  pcim_enable_device()		: after success, the PCI device gets disabled automatically on driver detach
   pcim_iomap()			: do iomap() on a single BAR
   pcim_iomap_regions()		: do request_region() and iomap() on multiple BARs
   pcim_iomap_table()		: array of mapped addresses indexed by BAR
   pcim_iounmap()		: do iounmap() on a single BAR
-  pcim_iounmap_regions()	: do iounmap() and release_region() on multiple BARs
   pcim_pin_device()		: keep PCI device enabled after release
   pcim_set_mwi()		: enable Memory-Write-Invalidate PCI transaction
 
@@ -411,7 +408,6 @@ PINCTRL
   devm_pinctrl_get_select()
   devm_pinctrl_register()
   devm_pinctrl_register_and_init()
-  devm_pinctrl_unregister()
 
 POWER
   devm_reboot_mode_register()
@@ -468,3 +464,7 @@ SPI
 
 WATCHDOG
   devm_watchdog_register_device()
+
+WORKQUEUE
+  devm_alloc_workqueue()
+  devm_alloc_ordered_workqueue()

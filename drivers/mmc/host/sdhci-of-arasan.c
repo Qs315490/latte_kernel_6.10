@@ -99,6 +99,9 @@
 #define HIWORD_UPDATE(val, mask, shift) \
 		((val) << (shift) | (mask) << ((shift) + 16))
 
+#define CD_STABLE_TIMEOUT_US		2000000
+#define CD_STABLE_MAX_SLEEP_US		10
+
 /**
  * struct sdhci_arasan_soc_ctl_field - Field used in sdhci_arasan_soc_ctl_map
  *
@@ -149,8 +152,7 @@ struct sdhci_arasan_clk_ops {
  * @sdcardclk:		Pointer to normal 'struct clock' for sdcardclk_hw.
  * @sampleclk_hw:	Struct for the clock we might provide to a PHY.
  * @sampleclk:		Pointer to normal 'struct clock' for sampleclk_hw.
- * @clk_phase_in:	Array of Input Clock Phase Delays for all speed modes
- * @clk_phase_out:	Array of Output Clock Phase Delays for all speed modes
+ * @phase_map:		Struct for mmc_clk_phase_map provided.
  * @set_clk_delays:	Function pointer for setting Clock Delays
  * @clk_of_data:	Platform specific runtime clock data storage pointer
  */
@@ -159,8 +161,7 @@ struct sdhci_arasan_clk_data {
 	struct clk      *sdcardclk;
 	struct clk_hw	sampleclk_hw;
 	struct clk      *sampleclk;
-	int		clk_phase_in[MMC_TIMING_MMC_HS400 + 1];
-	int		clk_phase_out[MMC_TIMING_MMC_HS400 + 1];
+	struct mmc_clk_phase_map phase_map;
 	void		(*set_clk_delays)(struct sdhci_host *host);
 	void		*clk_of_data;
 };
@@ -206,12 +207,15 @@ struct sdhci_arasan_data {
  * 19MHz instead
  */
 #define SDHCI_ARASAN_QUIRK_CLOCK_25_BROKEN BIT(2)
+/* Enable CD stable check before power-up */
+#define SDHCI_ARASAN_QUIRK_ENSURE_CD_STABLE	BIT(3)
 };
 
 struct sdhci_arasan_of_data {
 	const struct sdhci_arasan_soc_ctl_map *soc_ctl_map;
 	const struct sdhci_pltfm_data *pdata;
 	const struct sdhci_arasan_clk_ops *clk_ops;
+	u32 quirks;
 };
 
 static const struct sdhci_arasan_soc_ctl_map rk3399_soc_ctl_map = {
@@ -514,6 +518,24 @@ static int sdhci_arasan_voltage_switch(struct mmc_host *mmc,
 	return -EINVAL;
 }
 
+static void sdhci_arasan_set_power_and_bus_voltage(struct sdhci_host *host, unsigned char mode,
+						   unsigned short vdd)
+{
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_arasan_data *sdhci_arasan = sdhci_pltfm_priv(pltfm_host);
+	u32 reg;
+
+	/*
+	 * Ensure that the card detect logic has stabilized before powering up, this is
+	 * necessary after a host controller reset.
+	 */
+	if (mode == MMC_POWER_UP && sdhci_arasan->quirks & SDHCI_ARASAN_QUIRK_ENSURE_CD_STABLE)
+		read_poll_timeout(sdhci_readl, reg, reg & SDHCI_CD_STABLE, CD_STABLE_MAX_SLEEP_US,
+				  CD_STABLE_TIMEOUT_US, false, host, SDHCI_PRESENT_STATE);
+
+	sdhci_set_power_and_bus_voltage(host, mode, vdd);
+}
+
 static const struct sdhci_ops sdhci_arasan_ops = {
 	.set_clock = sdhci_arasan_set_clock,
 	.get_max_clock = sdhci_pltfm_clk_get_max_clock,
@@ -521,7 +543,7 @@ static const struct sdhci_ops sdhci_arasan_ops = {
 	.set_bus_width = sdhci_set_bus_width,
 	.reset = sdhci_arasan_reset,
 	.set_uhs_signaling = sdhci_set_uhs_signaling,
-	.set_power = sdhci_set_power_and_bus_voltage,
+	.set_power = sdhci_arasan_set_power_and_bus_voltage,
 	.hw_reset = sdhci_arasan_hw_reset,
 };
 
@@ -570,7 +592,7 @@ static const struct sdhci_ops sdhci_arasan_cqe_ops = {
 	.set_bus_width = sdhci_set_bus_width,
 	.reset = sdhci_arasan_reset,
 	.set_uhs_signaling = sdhci_set_uhs_signaling,
-	.set_power = sdhci_set_power_and_bus_voltage,
+	.set_power = sdhci_arasan_set_power_and_bus_voltage,
 	.irq = sdhci_arasan_cqhci_irq,
 };
 
@@ -581,7 +603,6 @@ static const struct sdhci_pltfm_data sdhci_arasan_cqe_pdata = {
 			SDHCI_QUIRK2_CLOCK_DIV_ZERO_BROKEN,
 };
 
-#ifdef CONFIG_PM_SLEEP
 /**
  * sdhci_arasan_suspend - Suspend method for the driver
  * @dev:	Address of the device structure
@@ -675,10 +696,9 @@ static int sdhci_arasan_resume(struct device *dev)
 
 	return 0;
 }
-#endif /* ! CONFIG_PM_SLEEP */
 
-static SIMPLE_DEV_PM_OPS(sdhci_arasan_dev_pm_ops, sdhci_arasan_suspend,
-			 sdhci_arasan_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(sdhci_arasan_dev_pm_ops, sdhci_arasan_suspend,
+				sdhci_arasan_resume);
 
 /**
  * sdhci_arasan_sdcardclk_recalc_rate - Return the card clock rate
@@ -1227,36 +1247,9 @@ static void sdhci_arasan_set_clk_delays(struct sdhci_host *host)
 	struct sdhci_arasan_clk_data *clk_data = &sdhci_arasan->clk_data;
 
 	clk_set_phase(clk_data->sampleclk,
-		      clk_data->clk_phase_in[host->timing]);
+		      clk_data->phase_map.phase[host->timing].in_deg);
 	clk_set_phase(clk_data->sdcardclk,
-		      clk_data->clk_phase_out[host->timing]);
-}
-
-static void arasan_dt_read_clk_phase(struct device *dev,
-				     struct sdhci_arasan_clk_data *clk_data,
-				     unsigned int timing, const char *prop)
-{
-	struct device_node *np = dev->of_node;
-
-	u32 clk_phase[2] = {0};
-	int ret;
-
-	/*
-	 * Read Tap Delay values from DT, if the DT does not contain the
-	 * Tap Values then use the pre-defined values.
-	 */
-	ret = of_property_read_variable_u32_array(np, prop, &clk_phase[0],
-						  2, 0);
-	if (ret < 0) {
-		dev_dbg(dev, "Using predefined clock phase for %s = %d %d\n",
-			prop, clk_data->clk_phase_in[timing],
-			clk_data->clk_phase_out[timing]);
-		return;
-	}
-
-	/* The values read are Input and Output Clock Delays in order */
-	clk_data->clk_phase_in[timing] = clk_phase[0];
-	clk_data->clk_phase_out[timing] = clk_phase[1];
+		      clk_data->phase_map.phase[host->timing].out_deg);
 }
 
 /**
@@ -1293,8 +1286,8 @@ static void arasan_dt_parse_clk_phases(struct device *dev,
 		}
 
 		for (i = 0; i <= MMC_TIMING_MMC_HS400; i++) {
-			clk_data->clk_phase_in[i] = zynqmp_iclk_phase[i];
-			clk_data->clk_phase_out[i] = zynqmp_oclk_phase[i];
+			clk_data->phase_map.phase[i].in_deg = zynqmp_iclk_phase[i];
+			clk_data->phase_map.phase[i].out_deg = zynqmp_oclk_phase[i];
 		}
 	}
 
@@ -1305,8 +1298,8 @@ static void arasan_dt_parse_clk_phases(struct device *dev,
 			VERSAL_OCLK_PHASE;
 
 		for (i = 0; i <= MMC_TIMING_MMC_HS400; i++) {
-			clk_data->clk_phase_in[i] = versal_iclk_phase[i];
-			clk_data->clk_phase_out[i] = versal_oclk_phase[i];
+			clk_data->phase_map.phase[i].in_deg = versal_iclk_phase[i];
+			clk_data->phase_map.phase[i].out_deg = versal_oclk_phase[i];
 		}
 	}
 	if (of_device_is_compatible(dev->of_node, "xlnx,versal-net-emmc")) {
@@ -1316,32 +1309,12 @@ static void arasan_dt_parse_clk_phases(struct device *dev,
 			VERSAL_NET_EMMC_OCLK_PHASE;
 
 		for (i = 0; i <= MMC_TIMING_MMC_HS400; i++) {
-			clk_data->clk_phase_in[i] = versal_net_iclk_phase[i];
-			clk_data->clk_phase_out[i] = versal_net_oclk_phase[i];
+			clk_data->phase_map.phase[i].in_deg = versal_net_iclk_phase[i];
+			clk_data->phase_map.phase[i].out_deg = versal_net_oclk_phase[i];
 		}
 	}
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_LEGACY,
-				 "clk-phase-legacy");
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_MMC_HS,
-				 "clk-phase-mmc-hs");
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_SD_HS,
-				 "clk-phase-sd-hs");
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_UHS_SDR12,
-				 "clk-phase-uhs-sdr12");
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_UHS_SDR25,
-				 "clk-phase-uhs-sdr25");
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_UHS_SDR50,
-				 "clk-phase-uhs-sdr50");
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_UHS_SDR104,
-				 "clk-phase-uhs-sdr104");
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_UHS_DDR50,
-				 "clk-phase-uhs-ddr50");
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_MMC_DDR52,
-				 "clk-phase-mmc-ddr52");
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_MMC_HS200,
-				 "clk-phase-mmc-hs200");
-	arasan_dt_read_clk_phase(dev, clk_data, MMC_TIMING_MMC_HS400,
-				 "clk-phase-mmc-hs400");
+
+	mmc_of_parse_clk_phase(dev, &clk_data->phase_map);
 }
 
 static const struct sdhci_pltfm_data sdhci_arasan_pdata = {
@@ -1447,6 +1420,7 @@ static const struct sdhci_arasan_clk_ops zynqmp_clk_ops = {
 static struct sdhci_arasan_of_data sdhci_arasan_zynqmp_data = {
 	.pdata = &sdhci_arasan_zynqmp_pdata,
 	.clk_ops = &zynqmp_clk_ops,
+	.quirks = SDHCI_ARASAN_QUIRK_ENSURE_CD_STABLE,
 };
 
 static const struct sdhci_arasan_clk_ops versal_clk_ops = {
@@ -1457,6 +1431,7 @@ static const struct sdhci_arasan_clk_ops versal_clk_ops = {
 static struct sdhci_arasan_of_data sdhci_arasan_versal_data = {
 	.pdata = &sdhci_arasan_zynqmp_pdata,
 	.clk_ops = &versal_clk_ops,
+	.quirks = SDHCI_ARASAN_QUIRK_ENSURE_CD_STABLE,
 };
 
 static const struct sdhci_arasan_clk_ops versal_net_clk_ops = {
@@ -1467,6 +1442,7 @@ static const struct sdhci_arasan_clk_ops versal_net_clk_ops = {
 static struct sdhci_arasan_of_data sdhci_arasan_versal_net_data = {
 	.pdata = &sdhci_arasan_versal_net_pdata,
 	.clk_ops = &versal_net_clk_ops,
+	.quirks = SDHCI_ARASAN_QUIRK_ENSURE_CD_STABLE,
 };
 
 static struct sdhci_arasan_of_data intel_keembay_emmc_data = {
@@ -1484,6 +1460,17 @@ static struct sdhci_arasan_of_data intel_keembay_sd_data = {
 static struct sdhci_arasan_of_data intel_keembay_sdio_data = {
 	.soc_ctl_map = &intel_keembay_soc_ctl_map,
 	.pdata = &sdhci_keembay_sdio_pdata,
+	.clk_ops = &arasan_clk_ops,
+};
+
+static const struct sdhci_pltfm_data sdhci_arasan_axiado_pdata = {
+	.ops = &sdhci_arasan_ops,
+	.quirks = SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN |
+			SDHCI_QUIRK_BROKEN_CQE,
+};
+
+static struct sdhci_arasan_of_data sdhci_arasan_axiado_data = {
+	.pdata = &sdhci_arasan_axiado_pdata,
 	.clk_ops = &arasan_clk_ops,
 };
 
@@ -1512,6 +1499,10 @@ static const struct of_device_id sdhci_arasan_of_match[] = {
 	{
 		.compatible = "intel,keembay-sdhci-5.1-sdio",
 		.data = &intel_keembay_sdio_data,
+	},
+	{
+		.compatible = "axiado,ax3000-sdhci-5.1-emmc",
+		.data = &sdhci_arasan_axiado_data,
 	},
 	/* Generic compatible below here */
 	{
@@ -1883,34 +1874,26 @@ static int sdhci_arasan_probe(struct platform_device *pdev)
 		sdhci_arasan->soc_ctl_base = syscon_node_to_regmap(node);
 		of_node_put(node);
 
-		if (IS_ERR(sdhci_arasan->soc_ctl_base)) {
-			ret = dev_err_probe(dev,
+		if (IS_ERR(sdhci_arasan->soc_ctl_base))
+			return dev_err_probe(dev,
 					    PTR_ERR(sdhci_arasan->soc_ctl_base),
 					    "Can't get syscon\n");
-			goto err_pltfm_free;
-		}
 	}
 
 	sdhci_get_of_property(pdev);
 
 	sdhci_arasan->clk_ahb = devm_clk_get(dev, "clk_ahb");
-	if (IS_ERR(sdhci_arasan->clk_ahb)) {
-		ret = dev_err_probe(dev, PTR_ERR(sdhci_arasan->clk_ahb),
+	if (IS_ERR(sdhci_arasan->clk_ahb))
+		return dev_err_probe(dev, PTR_ERR(sdhci_arasan->clk_ahb),
 				    "clk_ahb clock not found.\n");
-		goto err_pltfm_free;
-	}
 
 	clk_xin = devm_clk_get(dev, "clk_xin");
-	if (IS_ERR(clk_xin)) {
-		ret = dev_err_probe(dev, PTR_ERR(clk_xin), "clk_xin clock not found.\n");
-		goto err_pltfm_free;
-	}
+	if (IS_ERR(clk_xin))
+		return dev_err_probe(dev, PTR_ERR(clk_xin), "clk_xin clock not found.\n");
 
 	ret = clk_prepare_enable(sdhci_arasan->clk_ahb);
-	if (ret) {
-		dev_err(dev, "Unable to enable AHB clock.\n");
-		goto err_pltfm_free;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "Unable to enable AHB clock.\n");
 
 	/* If clock-frequency property is set, use the provided value */
 	if (pltfm_host->clock &&
@@ -1945,6 +1928,8 @@ static int sdhci_arasan_probe(struct platform_device *pdev)
 	if (of_device_is_compatible(np, "rockchip,rk3399-sdhci-5.1"))
 		sdhci_arasan_update_clockmultiplier(host, 0x0);
 
+	sdhci_arasan->quirks |= data->quirks;
+
 	if (of_device_is_compatible(np, "intel,keembay-sdhci-5.1-emmc") ||
 	    of_device_is_compatible(np, "intel,keembay-sdhci-5.1-sd") ||
 	    of_device_is_compatible(np, "intel,keembay-sdhci-5.1-sdio")) {
@@ -1972,7 +1957,7 @@ static int sdhci_arasan_probe(struct platform_device *pdev)
 
 	ret = mmc_of_parse(host->mmc);
 	if (ret) {
-		ret = dev_err_probe(dev, ret, "parsing dt failed.\n");
+		dev_err_probe(dev, ret, "parsing dt failed.\n");
 		goto unreg_clk;
 	}
 
@@ -2029,8 +2014,6 @@ clk_disable_all:
 	clk_disable_unprepare(clk_xin);
 clk_dis_ahb:
 	clk_disable_unprepare(sdhci_arasan->clk_ahb);
-err_pltfm_free:
-	sdhci_pltfm_free(pdev);
 	return ret;
 }
 
@@ -2061,7 +2044,7 @@ static struct platform_driver sdhci_arasan_driver = {
 		.name = "sdhci-arasan",
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = sdhci_arasan_of_match,
-		.pm = &sdhci_arasan_dev_pm_ops,
+		.pm = pm_sleep_ptr(&sdhci_arasan_dev_pm_ops),
 	},
 	.probe = sdhci_arasan_probe,
 	.remove = sdhci_arasan_remove,

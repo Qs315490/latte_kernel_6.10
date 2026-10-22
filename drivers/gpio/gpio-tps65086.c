@@ -37,10 +37,8 @@ static int tps65086_gpio_direction_output(struct gpio_chip *chip,
 	struct tps65086_gpio *gpio = gpiochip_get_data(chip);
 
 	/* Set the initial value */
-	regmap_update_bits(gpio->tps->regmap, TPS65086_GPOCTRL,
-			   BIT(4 + offset), value ? BIT(4 + offset) : 0);
-
-	return 0;
+	return regmap_update_bits(gpio->tps->regmap, TPS65086_GPOCTRL,
+				  BIT(4 + offset), value ? BIT(4 + offset) : 0);
 }
 
 static int tps65086_gpio_get(struct gpio_chip *chip, unsigned offset)
@@ -52,16 +50,16 @@ static int tps65086_gpio_get(struct gpio_chip *chip, unsigned offset)
 	if (ret < 0)
 		return ret;
 
-	return val & BIT(4 + offset);
+	return !!(val & BIT(4 + offset));
 }
 
-static void tps65086_gpio_set(struct gpio_chip *chip, unsigned offset,
-			      int value)
+static int tps65086_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			     int value)
 {
 	struct tps65086_gpio *gpio = gpiochip_get_data(chip);
 
-	regmap_update_bits(gpio->tps->regmap, TPS65086_GPOCTRL,
-			   BIT(4 + offset), value ? BIT(4 + offset) : 0);
+	return regmap_update_bits(gpio->tps->regmap, TPS65086_GPOCTRL,
+				  BIT(4 + offset), value ? BIT(4 + offset) : 0);
 }
 
 static const struct gpio_chip template_chip = {
@@ -93,7 +91,7 @@ static int tps65086_gpio_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id tps65086_gpio_id_table[] = {
-	{ "tps65086-gpio", },
+	{ .name = "tps65086-gpio" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, tps65086_gpio_id_table);

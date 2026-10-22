@@ -14,11 +14,8 @@
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/hwmon.h>
-#include <linux/hwmon-sysfs.h>
 #include <linux/err.h>
-#include <linux/mutex.h>
 #include <linux/device.h>
-#include <linux/jiffies.h>
 #include <linux/regmap.h>
 
 #define TMP103_TEMP_REG		0x00
@@ -197,7 +194,7 @@ static int tmp103_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(tmp103_dev_pm_ops, tmp103_suspend, tmp103_resume);
 
 static const struct i2c_device_id tmp103_id[] = {
-	{ "tmp103" },
+	{ .name = "tmp103" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tmp103_id);

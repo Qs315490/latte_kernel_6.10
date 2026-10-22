@@ -174,8 +174,7 @@ static enum hrtimer_restart sched_clock_poll(struct hrtimer *hrt)
 	return HRTIMER_RESTART;
 }
 
-void __init
-sched_clock_register(u64 (*read)(void), int bits, unsigned long rate)
+void sched_clock_register(u64 (*read)(void), int bits, unsigned long rate)
 {
 	u64 res, wrap, new_mask, new_epoch, cyc, ns;
 	u32 new_mult, new_shift;
@@ -216,7 +215,7 @@ sched_clock_register(u64 (*read)(void), int bits, unsigned long rate)
 
 	update_clock_read_data(&rd);
 
-	if (sched_clock_timer.function != NULL) {
+	if (ACCESS_PRIVATE(&sched_clock_timer, function) != NULL) {
 		/* update timeout for clock wrap */
 		hrtimer_start(&sched_clock_timer, cd.wrap_kt,
 			      HRTIMER_MODE_REL_HARD);
@@ -247,6 +246,7 @@ sched_clock_register(u64 (*read)(void), int bits, unsigned long rate)
 
 	pr_debug("Registered %pS as sched_clock source\n", read);
 }
+EXPORT_SYMBOL_GPL(sched_clock_register);
 
 void __init generic_sched_clock_init(void)
 {
@@ -263,8 +263,7 @@ void __init generic_sched_clock_init(void)
 	 * Start the timer to keep sched_clock() properly updated and
 	 * sets the initial epoch.
 	 */
-	hrtimer_init(&sched_clock_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
-	sched_clock_timer.function = sched_clock_poll;
+	hrtimer_setup(&sched_clock_timer, sched_clock_poll, CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
 	hrtimer_start(&sched_clock_timer, cd.wrap_kt, HRTIMER_MODE_REL_HARD);
 }
 
@@ -297,6 +296,11 @@ int sched_clock_suspend(void)
 	return 0;
 }
 
+static int sched_clock_syscore_suspend(void *data)
+{
+	return sched_clock_suspend();
+}
+
 void sched_clock_resume(void)
 {
 	struct clock_read_data *rd = &cd.read_data[0];
@@ -306,14 +310,23 @@ void sched_clock_resume(void)
 	rd->read_sched_clock = cd.actual_read_sched_clock;
 }
 
-static struct syscore_ops sched_clock_ops = {
-	.suspend	= sched_clock_suspend,
-	.resume		= sched_clock_resume,
+static void sched_clock_syscore_resume(void *data)
+{
+	sched_clock_resume();
+}
+
+static const struct syscore_ops sched_clock_syscore_ops = {
+	.suspend	= sched_clock_syscore_suspend,
+	.resume		= sched_clock_syscore_resume,
+};
+
+static struct syscore sched_clock_syscore = {
+	.ops = &sched_clock_syscore_ops,
 };
 
 static int __init sched_clock_syscore_init(void)
 {
-	register_syscore_ops(&sched_clock_ops);
+	register_syscore(&sched_clock_syscore);
 
 	return 0;
 }

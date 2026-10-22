@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2012-2014, 2018-2021, 2023 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2021, 2023, 2025-2026 Intel Corporation
  * Copyright (C) 2013-2014 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -427,7 +427,7 @@ struct iwl_mvm_rm_sta_cmd {
 } __packed; /* REMOVE_STA_CMD_API_S_VER_2 */
 
 /**
- * struct iwl_mvm_mgmt_mcast_key_cmd_v1
+ * struct iwl_mvm_mgmt_mcast_key_cmd_v1 - IGTK command
  * ( MGMT_MCAST_KEY = 0x1f )
  * @ctrl_flags: &enum iwl_sta_key_flag
  * @igtk: IGTK key material
@@ -448,7 +448,7 @@ struct iwl_mvm_mgmt_mcast_key_cmd_v1 {
 } __packed; /* SEC_MGMT_MULTICAST_KEY_CMD_API_S_VER_1 */
 
 /**
- * struct iwl_mvm_mgmt_mcast_key_cmd
+ * struct iwl_mvm_mgmt_mcast_key_cmd - IGTK command
  * ( MGMT_MCAST_KEY = 0x1f )
  * @ctrl_flags: &enum iwl_sta_key_flag
  * @igtk: IGTK master key

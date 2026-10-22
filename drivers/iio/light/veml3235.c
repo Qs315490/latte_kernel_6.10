@@ -154,7 +154,7 @@ static const struct regmap_config veml3235_regmap_config = {
 	.rd_table = &veml3235_readable_table,
 	.wr_table = &veml3235_writable_table,
 	.volatile_table = &veml3235_volatile_table,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 };
 
 static int veml3235_get_it(struct veml3235_data *data, int *val, int *val2)
@@ -525,7 +525,7 @@ static const struct of_device_id veml3235_of_match[] = {
 MODULE_DEVICE_TABLE(of, veml3235_of_match);
 
 static const struct i2c_device_id veml3235_id[] = {
-	{ "veml3235" },
+	{ .name = "veml3235" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, veml3235_id);

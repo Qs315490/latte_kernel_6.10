@@ -9,7 +9,6 @@
 /*
  * sched-domains (multiprocessor balancing) declarations:
  */
-#ifdef CONFIG_SMP
 
 /* Generate SD flag indexes */
 #define SD_FLAG(name, mflags) __##name,
@@ -25,43 +24,30 @@ enum {
 };
 #undef SD_FLAG
 
-#ifdef CONFIG_SCHED_DEBUG
-
 struct sd_flag_debug {
 	unsigned int meta_flags;
 	char *name;
 };
 extern const struct sd_flag_debug sd_flag_debug[];
 
-#endif
+struct sched_domain_topology_level;
 
 #ifdef CONFIG_SCHED_SMT
-static inline int cpu_smt_flags(void)
-{
-	return SD_SHARE_CPUCAPACITY | SD_SHARE_LLC;
-}
+extern int cpu_smt_flags(void);
+extern const struct cpumask *tl_smt_mask(struct sched_domain_topology_level *tl, int cpu);
 #endif
 
 #ifdef CONFIG_SCHED_CLUSTER
-static inline int cpu_cluster_flags(void)
-{
-	return SD_CLUSTER | SD_SHARE_LLC;
-}
+extern int cpu_cluster_flags(void);
+extern const struct cpumask *tl_cls_mask(struct sched_domain_topology_level *tl, int cpu);
 #endif
 
 #ifdef CONFIG_SCHED_MC
-static inline int cpu_core_flags(void)
-{
-	return SD_SHARE_LLC;
-}
+extern int cpu_core_flags(void);
+extern const struct cpumask *tl_mc_mask(struct sched_domain_topology_level *tl, int cpu);
 #endif
 
-#ifdef CONFIG_NUMA
-static inline int cpu_numa_flags(void)
-{
-	return SD_NUMA;
-}
-#endif
+extern const struct cpumask *tl_pkg_mask(struct sched_domain_topology_level *tl, int cpu);
 
 extern int arch_asym_cpu_priority(int cpu);
 
@@ -81,7 +67,25 @@ struct sched_domain_shared {
 	atomic_t	ref;
 	atomic_t	nr_busy_cpus;
 	int		has_idle_cores;
-	int		nr_idle_scan;
+	union {
+		int	nr_idle_scan;
+		/*
+		 * Used during allocation to claim the sched_domain_shared
+		 * object at multiple levels.
+		 *
+		 * Note: between build and the first periodic LB tick, which
+		 * rewrites the union via update_idle_cpu_scan(), readers of
+		 * nr_idle_scan may observe the transient SD_* flag value as
+		 * the scan bound. The flag bits are small positive integers,
+		 * so the effect is just a slightly relaxed scan bound for one
+		 * window and self-heals on the first tick.
+		 */
+		int	alloc_flags;
+	};
+#ifdef CONFIG_SCHED_CACHE
+	unsigned long	util_avg;
+	unsigned long	capacity;
+#endif
 };
 
 struct sched_domain {
@@ -106,8 +110,18 @@ struct sched_domain {
 	unsigned int nr_balance_failed; /* initialise to 0 */
 
 	/* idle_balance() stats */
+	unsigned int newidle_call;
+	unsigned int newidle_success;
+	unsigned int newidle_ratio;
+	u64 newidle_stamp;
 	u64 max_newidle_lb_cost;
 	unsigned long last_decay_max_lb_cost;
+
+#ifdef CONFIG_SCHED_CACHE
+	unsigned int llc_max;
+	unsigned int *llc_counts __counted_by_ptr(llc_max);
+	unsigned long llc_bytes;
+#endif
 
 #ifdef CONFIG_SCHEDSTATS
 	/* sched_balance_rq() stats */
@@ -152,23 +166,31 @@ struct sched_domain {
 
 	unsigned int span_weight;
 	/*
-	 * Span of all CPUs in this domain.
+	 * See sched_domain_span(), on why flex arrays are broken.
 	 *
-	 * NOTE: this field is variable length. (Allocated dynamically
-	 * by attaching extra space to the end of the structure,
-	 * depending on how many CPUs the kernel has booted up with)
-	 */
 	unsigned long span[];
+	 */
 };
 
 static inline struct cpumask *sched_domain_span(struct sched_domain *sd)
 {
-	return to_cpumask(sd->span);
+	/*
+	 * Turns out that C flexible arrays are fundamentally broken since it
+	 * is allowed for offsetof(*sd, span) < sizeof(*sd), this means that
+	 * structure initialzation *sd = { ... }; which writes every byte
+	 * inside sizeof(*type), will over-write the start of the flexible
+	 * array.
+	 *
+	 * Luckily, the way we allocate sched_domain is by:
+	 *
+	 *   sizeof(*sd) + cpumask_size()
+	 *
+	 * this means that we have sufficient space for the whole flex array
+	 * *outside* of sizeof(*sd). So use that, and avoid using sd->span.
+	 */
+	unsigned long *bitmap = (void *)sd + sizeof(*sd);
+	return to_cpumask(bitmap);
 }
-
-extern void partition_sched_domains_locked(int ndoms_new,
-					   cpumask_var_t doms_new[],
-					   struct sched_domain_attr *dattr_new);
 
 extern void partition_sched_domains(int ndoms_new, cpumask_var_t doms_new[],
 				    struct sched_domain_attr *dattr_new);
@@ -181,14 +203,11 @@ bool cpus_equal_capacity(int this_cpu, int that_cpu);
 bool cpus_share_cache(int this_cpu, int that_cpu);
 bool cpus_share_resources(int this_cpu, int that_cpu);
 
-typedef const struct cpumask *(*sched_domain_mask_f)(int cpu);
+typedef const struct cpumask *(*sched_domain_mask_f)(struct sched_domain_topology_level *tl, int cpu);
 typedef int (*sched_domain_flags_f)(void);
-
-#define SDTL_OVERLAP	0x01
 
 struct sd_data {
 	struct sched_domain *__percpu *sd;
-	struct sched_domain_shared *__percpu *sds;
 	struct sched_group *__percpu *sg;
 	struct sched_group_capacity *__percpu *sgc;
 };
@@ -196,48 +215,16 @@ struct sd_data {
 struct sched_domain_topology_level {
 	sched_domain_mask_f mask;
 	sched_domain_flags_f sd_flags;
-	int		    flags;
 	int		    numa_level;
 	struct sd_data      data;
 	char                *name;
 };
 
 extern void __init set_sched_topology(struct sched_domain_topology_level *tl);
+extern void sched_update_asym_prefer_cpu(int cpu, int old_prio, int new_prio);
 
-# define SD_INIT_NAME(type)		.name = #type
-
-#else /* CONFIG_SMP */
-
-struct sched_domain_attr;
-
-static inline void
-partition_sched_domains_locked(int ndoms_new, cpumask_var_t doms_new[],
-			       struct sched_domain_attr *dattr_new)
-{
-}
-
-static inline void
-partition_sched_domains(int ndoms_new, cpumask_var_t doms_new[],
-			struct sched_domain_attr *dattr_new)
-{
-}
-
-static inline bool cpus_equal_capacity(int this_cpu, int that_cpu)
-{
-	return true;
-}
-
-static inline bool cpus_share_cache(int this_cpu, int that_cpu)
-{
-	return true;
-}
-
-static inline bool cpus_share_resources(int this_cpu, int that_cpu)
-{
-	return true;
-}
-
-#endif	/* !CONFIG_SMP */
+#define SDTL_INIT(maskfn, flagsfn, dname) ((struct sched_domain_topology_level) \
+	    { .mask = maskfn, .sd_flags = flagsfn, .name = #dname })
 
 #if defined(CONFIG_ENERGY_MODEL) && defined(CONFIG_CPU_FREQ_GOV_SCHEDUTIL)
 extern void rebuild_sched_domains_energy(void);
@@ -292,5 +279,11 @@ static inline int task_node(const struct task_struct *p)
 {
 	return cpu_to_node(task_cpu(p));
 }
+
+#ifdef CONFIG_SCHED_CACHE
+extern void sched_update_llc_bytes(unsigned int cpu);
+#else
+static inline void sched_update_llc_bytes(unsigned int cpu) { }
+#endif
 
 #endif /* _LINUX_SCHED_TOPOLOGY_H */

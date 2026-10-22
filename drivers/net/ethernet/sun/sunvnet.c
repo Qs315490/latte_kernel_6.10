@@ -436,7 +436,7 @@ static int vnet_port_probe(struct vio_dev *vdev, const struct vio_device_id *id)
 		goto err_out_put_mdesc;
 	}
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	port = kzalloc_obj(*port);
 	err = -ENOMEM;
 	if (!port)
 		goto err_out_put_mdesc;
@@ -505,7 +505,7 @@ static void vnet_port_remove(struct vio_dev *vdev)
 	struct vnet_port *port = dev_get_drvdata(&vdev->dev);
 
 	if (port) {
-		del_timer_sync(&port->vio.timer);
+		timer_delete_sync(&port->vio.timer);
 
 		napi_disable(&port->napi);
 

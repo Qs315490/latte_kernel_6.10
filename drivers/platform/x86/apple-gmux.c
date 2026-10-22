@@ -799,7 +799,7 @@ static int gmux_probe(struct pnp_dev *pnp, const struct pnp_device_id *id)
 		return -ENODEV;
 	}
 
-	gmux_data = kzalloc(sizeof(*gmux_data), GFP_KERNEL);
+	gmux_data = kzalloc_obj(*gmux_data);
 	if (!gmux_data)
 		return -ENOMEM;
 	pnp_set_drvdata(pnp, gmux_data);
@@ -1013,8 +1013,8 @@ static void gmux_remove(struct pnp_dev *pnp)
 }
 
 static const struct pnp_device_id gmux_device_ids[] = {
-	{GMUX_ACPI_HID, 0},
-	{"", 0}
+	{ .id = GMUX_ACPI_HID },
+	{ }
 };
 
 static const struct dev_pm_ops gmux_dev_pm_ops = {

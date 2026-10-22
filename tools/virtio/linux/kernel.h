@@ -14,6 +14,7 @@
 #include <linux/log2.h>
 #include <linux/types.h>
 #include <linux/overflow.h>
+#include <linux/limits.h>
 #include <linux/list.h>
 #include <linux/printk.h>
 #include <linux/bug.h>
@@ -63,6 +64,12 @@ static inline void *kmalloc_array(unsigned n, size_t s, gfp_t gfp)
 {
 	return kmalloc(n * s, gfp);
 }
+
+#define kmalloc_obj(VAR_OR_TYPE, ...) \
+	((typeof(VAR_OR_TYPE) *)kmalloc(sizeof(typeof(VAR_OR_TYPE)), 0))
+
+#define kmalloc_objs(VAR_OR_TYPE, COUNT, ...) \
+	((typeof(VAR_OR_TYPE) *)kmalloc(sizeof(typeof(VAR_OR_TYPE)) * (COUNT), 0))
 
 static inline void *kzalloc(size_t s, gfp_t gfp)
 {
@@ -134,6 +141,21 @@ static inline void *krealloc_array(void *p, size_t new_n, size_t new_size, gfp_t
 #define dev_err(dev, format, ...) fprintf (stderr, format, ## __VA_ARGS__)
 #define dev_warn(dev, format, ...) fprintf (stderr, format, ## __VA_ARGS__)
 #define dev_warn_once(dev, format, ...) fprintf (stderr, format, ## __VA_ARGS__)
+
+#define dev_WARN_ONCE(dev, condition, format...) \
+	WARN_ONCE(condition, format)
+
+static inline bool is_vmalloc_addr(const void *x)
+{
+	return false;
+}
+
+#define might_sleep() do { } while (0)
+
+static inline void synchronize_rcu(void)
+{
+	assert(0);
+}
 
 #define min(x, y) ({				\
 	typeof(x) _min1 = (x);			\

@@ -28,7 +28,6 @@ properties:
               - qcom,pm4125-typec
           - const: qcom,pmi632-typec
 
-
   connector:
     type: object
     $ref: /schemas/connector/usb-connector.yaml#
@@ -80,22 +79,17 @@ properties:
       - const: fr-swap
 
   vdd-vbus-supply:
-    description: VBUS power supply.
+    deprecated: true
+    description: use connector/vbus-supply instead.
 
   vdd-pdphy-supply:
     description: VDD regulator supply to the PDPHY.
-
-  port:
-    $ref: /schemas/graph.yaml#/properties/port
-    description:
-      Contains a port which produces data-role switching messages.
 
 required:
   - compatible
   - reg
   - interrupts
   - interrupt-names
-  - vdd-vbus-supply
 
 allOf:
   - if:

@@ -279,7 +279,9 @@ struct bnxt_qplib_qp {
 	u8				wqe_mode;
 	u8				state;
 	u8				cur_qp_state;
+	u8				is_user;
 	u64				modify_flags;
+	u32				ext_modify_flags;
 	u32				max_inline_data;
 	u32				mtu;
 	u8				path_mtu;
@@ -299,6 +301,7 @@ struct bnxt_qplib_qp {
 	u8				smac[6];
 	u16				vlan_id;
 	u16				port_id;
+	u16				udp_sport;
 	u8				nw_type;
 	struct bnxt_qplib_ah		ah;
 
@@ -342,9 +345,17 @@ struct bnxt_qplib_qp {
 	struct list_head		rq_flush;
 	u32				msn;
 	u32				msn_tbl_sz;
+	u32				psn_sz;
 	bool				is_host_msn_tbl;
 	u8				tos_dscp;
+	u32				ugid_index;
+	u16				dev_cap_flags;
+	u32				rate_limit;
+	u8				shaper_allocation_status;
 };
+
+#define BNXT_RE_MAX_MSG_SIZE	0x80000000
+#define BNXT_RE_INVAL_MSG_SIZE	0xFFFFFFFF
 
 #define BNXT_QPLIB_MAX_CQE_ENTRY_SIZE	sizeof(struct cq_base)
 
@@ -390,6 +401,7 @@ struct bnxt_qplib_cq_coal_param {
 	u8 normal_maxbuf;
 	u8 during_maxbuf;
 	u8 en_ring_idle_mode;
+	u8 enable;
 };
 
 #define BNXT_QPLIB_CQ_COAL_DEF_BUF_MAXTIME		0x1
@@ -543,8 +555,6 @@ int bnxt_qplib_enable_nq(struct pci_dev *pdev, struct bnxt_qplib_nq *nq,
 			 srqn_handler_t srq_handler);
 int bnxt_qplib_create_srq(struct bnxt_qplib_res *res,
 			  struct bnxt_qplib_srq *srq);
-int bnxt_qplib_modify_srq(struct bnxt_qplib_res *res,
-			  struct bnxt_qplib_srq *srq);
 int bnxt_qplib_query_srq(struct bnxt_qplib_res *res,
 			 struct bnxt_qplib_srq *srq);
 void bnxt_qplib_destroy_srq(struct bnxt_qplib_res *res,
@@ -608,6 +618,11 @@ static inline void *bnxt_qplib_get_swqe(struct bnxt_qplib_q *que, u32 *swq_idx)
 static inline void bnxt_qplib_swq_mod_start(struct bnxt_qplib_q *que, u32 idx)
 {
 	que->swq_start = que->swq[idx].next_idx;
+}
+
+static inline u32 bnxt_qplib_get_stride(void)
+{
+	return sizeof(struct sq_sge);
 }
 
 static inline u32 bnxt_qplib_get_depth(struct bnxt_qplib_q *que, u8 wqe_mode, bool is_sq)

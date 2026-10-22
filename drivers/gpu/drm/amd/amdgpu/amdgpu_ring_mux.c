@@ -124,7 +124,7 @@ static void amdgpu_mux_resubmit_chunks(struct amdgpu_ring_mux *mux)
 		}
 	}
 
-	del_timer(&mux->resubmit_timer);
+	timer_delete(&mux->resubmit_timer);
 	mux->s_resubmit = false;
 }
 
@@ -135,7 +135,8 @@ static void amdgpu_ring_mux_schedule_resubmit(struct amdgpu_ring_mux *mux)
 
 static void amdgpu_mux_resubmit_fallback(struct timer_list *t)
 {
-	struct amdgpu_ring_mux *mux = from_timer(mux, t, resubmit_timer);
+	struct amdgpu_ring_mux *mux = timer_container_of(mux, t,
+							 resubmit_timer);
 
 	if (!spin_trylock(&mux->lock)) {
 		amdgpu_ring_mux_schedule_resubmit(mux);
@@ -152,7 +153,7 @@ int amdgpu_ring_mux_init(struct amdgpu_ring_mux *mux, struct amdgpu_ring *ring,
 	mux->real_ring = ring;
 	mux->num_ring_entries = 0;
 
-	mux->ring_entry = kcalloc(entry_size, sizeof(struct amdgpu_mux_entry), GFP_KERNEL);
+	mux->ring_entry = kzalloc_objs(struct amdgpu_mux_entry, entry_size);
 	if (!mux->ring_entry)
 		return -ENOMEM;
 

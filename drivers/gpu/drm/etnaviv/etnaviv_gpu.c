@@ -8,7 +8,6 @@
 #include <linux/delay.h>
 #include <linux/dma-fence.h>
 #include <linux/dma-mapping.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -16,8 +15,11 @@
 #include <linux/reset.h>
 #include <linux/thermal.h>
 
+#include <drm/drm_print.h>
+
 #include "etnaviv_cmdbuf.h"
 #include "etnaviv_dump.h"
+#include "etnaviv_flop_reset.h"
 #include "etnaviv_gpu.h"
 #include "etnaviv_gem.h"
 #include "etnaviv_mmu.h"
@@ -837,6 +839,16 @@ int etnaviv_gpu_init(struct etnaviv_gpu *gpu)
 		goto fail;
 	}
 
+	if (etnaviv_flop_reset_ppu_require(&gpu->identity) &&
+	    !priv->flop_reset_data_ppu) {
+		ret = etnaviv_flop_reset_ppu_init(priv);
+		if (ret) {
+			dev_err(gpu->dev,
+				"Unable to initialize PPU flop reset data\n");
+			goto fail;
+		}
+	}
+
 	if (gpu->identity.nn_core_count > 0)
 		dev_warn(gpu->dev, "etnaviv has been instantiated on a NPU, "
                                    "for which the UAPI is still experimental\n");
@@ -1171,7 +1183,7 @@ static struct dma_fence *etnaviv_gpu_fence_alloc(struct etnaviv_gpu *gpu)
 	 */
 	lockdep_assert_held(&gpu->lock);
 
-	f = kzalloc(sizeof(*f), GFP_KERNEL);
+	f = kzalloc_obj(*f);
 	if (!f)
 		return NULL;
 
@@ -1778,8 +1790,9 @@ static int etnaviv_gpu_bind(struct device *dev, struct device *master,
 	int ret;
 
 	if (IS_ENABLED(CONFIG_DRM_ETNAVIV_THERMAL)) {
-		gpu->cooling = thermal_of_cooling_device_register(dev->of_node,
-				(char *)dev_name(dev), gpu, &cooling_ops);
+		gpu->cooling = thermal_of_cooling_device_register(dev->of_node, 0,
+								  dev_name(dev),
+								  gpu, &cooling_ops);
 		if (IS_ERR(gpu->cooling))
 			return PTR_ERR(gpu->cooling);
 	}

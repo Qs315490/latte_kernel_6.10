@@ -363,7 +363,7 @@ static void *chain_alloc(struct chain_allocator *ca, unsigned int size)
  *
  * One radix tree is represented by one struct mem_zone_bm_rtree. There are
  * two linked lists for the nodes of the tree, one for the inner nodes and
- * one for the leave nodes. The linked leave nodes are used for fast linear
+ * one for the leaf nodes. The linked leaf nodes are used for fast linear
  * access of the memory bitmap.
  *
  * The struct rtree_node represents one node of the radix tree.
@@ -646,7 +646,7 @@ static int create_mem_extents(struct list_head *list, gfp_t gfp_mask)
 			/* New extent is necessary */
 			struct mem_extent *new_ext;
 
-			new_ext = kzalloc(sizeof(struct mem_extent), gfp_mask);
+			new_ext = kzalloc_obj(struct mem_extent, gfp_mask);
 			if (!new_ext) {
 				free_mem_extents(list);
 				return -ENOMEM;
@@ -1094,16 +1094,15 @@ static void mark_nosave_pages(struct memory_bitmap *bm)
 			 ((unsigned long long) region->end_pfn << PAGE_SHIFT)
 				- 1);
 
-		for (pfn = region->start_pfn; pfn < region->end_pfn; pfn++)
-			if (pfn_valid(pfn)) {
-				/*
-				 * It is safe to ignore the result of
-				 * mem_bm_set_bit_check() here, since we won't
-				 * touch the PFNs for which the error is
-				 * returned anyway.
-				 */
-				mem_bm_set_bit_check(bm, pfn);
-			}
+		for_each_valid_pfn(pfn, region->start_pfn, region->end_pfn) {
+			/*
+			 * It is safe to ignore the result of
+			 * mem_bm_set_bit_check() here, since we won't
+			 * touch the PFNs for which the error is
+			 * returned anyway.
+			 */
+			mem_bm_set_bit_check(bm, pfn);
+		}
 	}
 }
 
@@ -1125,7 +1124,7 @@ int create_basic_memory_bitmaps(void)
 	else
 		BUG_ON(forbidden_pages_map || free_pages_map);
 
-	bm1 = kzalloc(sizeof(struct memory_bitmap), GFP_KERNEL);
+	bm1 = kzalloc_obj(struct memory_bitmap);
 	if (!bm1)
 		return -ENOMEM;
 
@@ -1133,7 +1132,7 @@ int create_basic_memory_bitmaps(void)
 	if (error)
 		goto Free_first_object;
 
-	bm2 = kzalloc(sizeof(struct memory_bitmap), GFP_KERNEL);
+	bm2 = kzalloc_obj(struct memory_bitmap);
 	if (!bm2)
 		goto Free_first_bitmap;
 
@@ -1245,8 +1244,9 @@ unsigned int snapshot_additional_pages(struct zone *zone)
 static void mark_free_pages(struct zone *zone)
 {
 	unsigned long pfn, max_zone_pfn, page_count = WD_PAGE_COUNT;
+	struct list_head *free_list;
 	unsigned long flags;
-	unsigned int order, t;
+	unsigned int order;
 	struct page *page;
 
 	if (zone_is_empty(zone))
@@ -1255,25 +1255,23 @@ static void mark_free_pages(struct zone *zone)
 	spin_lock_irqsave(&zone->lock, flags);
 
 	max_zone_pfn = zone_end_pfn(zone);
-	for (pfn = zone->zone_start_pfn; pfn < max_zone_pfn; pfn++)
-		if (pfn_valid(pfn)) {
-			page = pfn_to_page(pfn);
+	for_each_valid_pfn(pfn, zone->zone_start_pfn, max_zone_pfn) {
+		page = pfn_to_page(pfn);
 
-			if (!--page_count) {
-				touch_nmi_watchdog();
-				page_count = WD_PAGE_COUNT;
-			}
-
-			if (page_zone(page) != zone)
-				continue;
-
-			if (!swsusp_page_is_forbidden(page))
-				swsusp_unset_page_free(page);
+		if (!--page_count) {
+			touch_nmi_watchdog();
+			page_count = WD_PAGE_COUNT;
 		}
 
-	for_each_migratetype_order(order, t) {
-		list_for_each_entry(page,
-				&zone->free_area[order].free_list[t], buddy_list) {
+		if (page_zone(page) != zone)
+			continue;
+
+		if (!swsusp_page_is_forbidden(page))
+			swsusp_unset_page_free(page);
+	}
+
+	for_each_free_list(free_list, zone, order) {
+		list_for_each_entry(page, free_list, buddy_list) {
 			unsigned long i;
 
 			pfn = page_to_pfn(page);
@@ -1538,7 +1536,7 @@ static unsigned long copy_data_pages(struct memory_bitmap *copy_bm,
 	memory_bm_position_reset(orig_bm);
 	memory_bm_position_reset(copy_bm);
 	copy_pfn = memory_bm_next_pfn(copy_bm);
-	for(;;) {
+	for (;;) {
 		pfn = memory_bm_next_pfn(orig_bm);
 		if (unlikely(pfn == BM_END_OF_MAP))
 			break;
@@ -2112,22 +2110,20 @@ asmlinkage __visible int swsusp_save(void)
 {
 	unsigned int nr_pages, nr_highmem;
 
-	pr_info("Creating image:\n");
+	pm_deferred_pr_dbg("Creating image\n");
 
 	drain_local_pages(NULL);
 	nr_pages = count_data_pages();
 	nr_highmem = count_highmem_pages();
-	pr_info("Need to copy %u pages\n", nr_pages + nr_highmem);
+	pm_deferred_pr_dbg("Need to copy %u pages\n", nr_pages + nr_highmem);
 
 	if (!enough_free_mem(nr_pages, nr_highmem)) {
-		pr_err("Not enough free memory\n");
+		pm_deferred_pr_dbg("Not enough free memory for image creation\n");
 		return -ENOMEM;
 	}
 
-	if (swsusp_alloc(&copy_bm, nr_pages, nr_highmem)) {
-		pr_err("Memory allocation failed\n");
+	if (swsusp_alloc(&copy_bm, nr_pages, nr_highmem))
 		return -ENOMEM;
-	}
 
 	/*
 	 * During allocating of suspend pagedir, new cold pages may appear.
@@ -2146,7 +2142,8 @@ asmlinkage __visible int swsusp_save(void)
 	nr_zero_pages = nr_pages - nr_copy_pages;
 	nr_meta_pages = DIV_ROUND_UP(nr_pages * sizeof(long), PAGE_SIZE);
 
-	pr_info("Image created (%d pages copied, %d zero pages)\n", nr_copy_pages, nr_zero_pages);
+	pm_deferred_pr_dbg("Image created (%d pages copied, %d zero pages)\n",
+			   nr_copy_pages, nr_zero_pages);
 
 	return 0;
 }
@@ -2163,13 +2160,13 @@ static const char *check_image_kernel(struct swsusp_info *info)
 {
 	if (info->version_code != LINUX_VERSION_CODE)
 		return "kernel version";
-	if (strcmp(info->uts.sysname,init_utsname()->sysname))
+	if (strcmp(info->uts.sysname, init_utsname()->sysname))
 		return "system type";
-	if (strcmp(info->uts.release,init_utsname()->release))
+	if (strcmp(info->uts.release, init_utsname()->release))
 		return "kernel release";
-	if (strcmp(info->uts.version,init_utsname()->version))
+	if (strcmp(info->uts.version, init_utsname()->version))
 		return "version";
-	if (strcmp(info->uts.machine,init_utsname()->machine))
+	if (strcmp(info->uts.machine, init_utsname()->machine))
 		return "machine";
 	return NULL;
 }
@@ -2270,9 +2267,9 @@ int snapshot_read_next(struct snapshot_handle *handle)
 			 */
 			void *kaddr;
 
-			kaddr = kmap_atomic(page);
+			kaddr = kmap_local_page(page);
 			copy_page(buffer, kaddr);
-			kunmap_atomic(kaddr);
+			kunmap_local(kaddr);
 			handle->buffer = buffer;
 		} else {
 			handle->buffer = page_address(page);
@@ -2363,7 +2360,7 @@ static int unpack_orig_pfns(unsigned long *buf, struct memory_bitmap *bm,
 		struct memory_bitmap *zero_bm)
 {
 	unsigned long decoded_pfn;
-        bool zero;
+	bool zero;
 	int j;
 
 	for (j = 0; j < PAGE_SIZE / sizeof(long); j++) {
@@ -2561,9 +2558,9 @@ static void copy_last_highmem_page(void)
 	if (last_highmem_page) {
 		void *dst;
 
-		dst = kmap_atomic(last_highmem_page);
+		dst = kmap_local_page(last_highmem_page);
 		copy_page(dst, buffer);
-		kunmap_atomic(dst);
+		kunmap_local(dst);
 		last_highmem_page = NULL;
 	}
 }
@@ -2858,6 +2855,17 @@ int snapshot_write_finalize(struct snapshot_handle *handle)
 {
 	int error;
 
+	/*
+	 * Call snapshot_write_next() to drain any trailing zero pages,
+	 * but make sure we're in the data page region first.
+	 * This function can return PAGE_SIZE if the kernel was expecting
+	 * another copy page. Return -ENODATA in that situation.
+	 */
+	if (handle->cur > nr_meta_pages + 1) {
+		error = snapshot_write_next(handle);
+		if (error)
+			return error > 0 ? -ENODATA : error;
+	}
 	copy_last_highmem_page();
 	error = hibernate_restore_protect_page(handle->buffer);
 	/* Do that only if we have loaded the image entirely */
@@ -2881,13 +2889,13 @@ static inline void swap_two_pages_data(struct page *p1, struct page *p2,
 {
 	void *kaddr1, *kaddr2;
 
-	kaddr1 = kmap_atomic(p1);
-	kaddr2 = kmap_atomic(p2);
+	kaddr1 = kmap_local_page(p1);
+	kaddr2 = kmap_local_page(p2);
 	copy_page(buf, kaddr1);
 	copy_page(kaddr1, kaddr2);
 	copy_page(kaddr2, buf);
-	kunmap_atomic(kaddr2);
-	kunmap_atomic(kaddr1);
+	kunmap_local(kaddr2);
+	kunmap_local(kaddr1);
 }
 
 /**

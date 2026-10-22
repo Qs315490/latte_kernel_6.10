@@ -120,7 +120,8 @@ The following order of properties in device nodes is preferred:
 4. Standard/common properties (defined by common bindings, e.g. without
    vendor-prefixes)
 5. Vendor-specific properties
-6. "status" (if applicable)
+6. "status" (if applicable), preceded by a blank line if there is content
+   before the property
 7. Child nodes, where each node is preceded with a blank line
 
 The "status" property is by default "okay", thus it can be omitted.
@@ -132,6 +133,9 @@ The above-described ordering follows this approach:
 2. Each node will have common properties in similar place.
 3. Status is the last information to annotate that device node is or is not
    finished (board resources are needed).
+
+The individual properties inside each group shall use natural sort order by
+the property name.
 
 Example::
 
@@ -147,6 +151,7 @@ Example::
 		#address-cells = <1>;
 		#size-cells = <1>;
 		vendor,custom-property = <2>;
+
 		status = "disabled";
 
 		child_node: child-class@100 {
@@ -158,7 +163,11 @@ Example::
 	/* Board DTS */
 
 	&device_node {
-		vdd-supply = <&board_vreg1>;
+		vdd-0v9-supply = <&board_vreg1>;
+		vdd-1v8-supply = <&board_vreg4>;
+		vdd-3v3-supply = <&board_vreg2>;
+		vdd-12v-supply = <&board_vreg3>;
+
 		status = "okay";
 	}
 

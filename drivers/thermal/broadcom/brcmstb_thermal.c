@@ -16,6 +16,7 @@
 #include <linux/irqreturn.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -154,7 +155,7 @@ static int brcmstb_get_temp(struct thermal_zone_device *tz, int *temp)
 {
 	struct brcmstb_thermal_priv *priv = thermal_zone_device_priv(tz);
 	u32 val;
-	long t;
+	int t;
 
 	val = __raw_readl(priv->tmon_base + AVS_TMON_STATUS);
 
@@ -164,10 +165,7 @@ static int brcmstb_get_temp(struct thermal_zone_device *tz, int *temp)
 	val = (val & AVS_TMON_STATUS_data_msk) >> AVS_TMON_STATUS_data_shift;
 
 	t = avs_tmon_code_to_temp(priv, val);
-	if (t < 0)
-		*temp = 0;
-	else
-		*temp = t;
+	*temp = max(0, t);
 
 	return 0;
 }
@@ -286,14 +284,20 @@ static int brcmstb_set_trips(struct thermal_zone_device *tz, int low, int high)
 	return 0;
 }
 
-static const struct thermal_zone_device_ops brcmstb_16nm_of_ops = {
+static const struct thermal_zone_device_ops brcmstb_of_ops = {
 	.get_temp	= brcmstb_get_temp,
+};
+
+static const struct brcmstb_thermal_params brcmstb_8nm_params = {
+	.offset	= 418670,
+	.mult	= 509,
+	.of_ops	= &brcmstb_of_ops,
 };
 
 static const struct brcmstb_thermal_params brcmstb_16nm_params = {
 	.offset	= 457829,
 	.mult	= 557,
-	.of_ops	= &brcmstb_16nm_of_ops,
+	.of_ops	= &brcmstb_of_ops,
 };
 
 static const struct thermal_zone_device_ops brcmstb_28nm_of_ops = {
@@ -308,6 +312,7 @@ static const struct brcmstb_thermal_params brcmstb_28nm_params = {
 };
 
 static const struct of_device_id brcmstb_thermal_id_table[] = {
+	{ .compatible = "brcm,avs-tmon-bcm74110", .data = &brcmstb_8nm_params },
 	{ .compatible = "brcm,avs-tmon-bcm7216", .data = &brcmstb_16nm_params },
 	{ .compatible = "brcm,avs-tmon", .data = &brcmstb_28nm_params },
 	{},

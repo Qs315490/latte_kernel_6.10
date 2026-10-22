@@ -7,7 +7,6 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/rfkill.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -94,10 +93,10 @@ static const struct dmi_system_id rfkill_gpio_deny_table[] = {
 static int rfkill_gpio_probe(struct platform_device *pdev)
 {
 	struct rfkill_gpio_data *rfkill;
-	struct gpio_desc *gpio;
+	const char *type_name = NULL;
 	const char *name_property;
 	const char *type_property;
-	const char *type_name;
+	struct gpio_desc *gpio;
 	int ret;
 
 	if (dmi_check_system(rfkill_gpio_deny_table))
@@ -161,6 +160,9 @@ static int rfkill_gpio_probe(struct platform_device *pdev)
 					  rfkill);
 	if (!rfkill->rfkill_dev)
 		return -ENOMEM;
+
+	if (device_property_present(&pdev->dev, "default-blocked"))
+		rfkill_init_sw_state(rfkill->rfkill_dev, true);
 
 	ret = rfkill_register(rfkill->rfkill_dev);
 	if (ret < 0)

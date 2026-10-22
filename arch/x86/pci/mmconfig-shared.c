@@ -22,9 +22,10 @@
 #include <linux/slab.h>
 #include <linux/mutex.h>
 #include <linux/rculist.h>
-#include <asm/e820/api.h>
-#include <asm/pci_x86.h>
 #include <asm/acpi.h>
+#include <asm/e820/api.h>
+#include <asm/msr.h>
+#include <asm/pci_x86.h>
 
 /* Indicate if the ECAM resources have been placed into the resource table */
 static bool pci_mmcfg_running_state;
@@ -76,7 +77,7 @@ static struct pci_mmcfg_region *pci_mmconfig_alloc(int segment, int start,
 	if (addr == 0)
 		return NULL;
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new);
 	if (!new)
 		return NULL;
 

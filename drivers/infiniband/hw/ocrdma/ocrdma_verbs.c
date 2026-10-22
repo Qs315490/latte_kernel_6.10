@@ -45,9 +45,9 @@
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_user_verbs.h>
 #include <rdma/iw_cm.h>
-#include <rdma/ib_umem.h>
 #include <rdma/ib_addr.h>
 #include <rdma/ib_cache.h>
+#include <rdma/iter.h>
 #include <rdma/uverbs_ioctl.h>
 
 #include "ocrdma.h"
@@ -68,9 +68,11 @@ int ocrdma_query_device(struct ib_device *ibdev, struct ib_device_attr *attr,
 			struct ib_udata *uhw)
 {
 	struct ocrdma_dev *dev = get_ocrdma_dev(ibdev);
+	int err;
 
-	if (uhw->inlen || uhw->outlen)
-		return -EINVAL;
+	err = ib_is_udata_in_empty(uhw);
+	if (err)
+		return err;
 
 	memset(attr, 0, sizeof *attr);
 	memcpy(&attr->fw_ver, &dev->attr.fw_ver[0],
@@ -110,7 +112,7 @@ int ocrdma_query_device(struct ib_device *ibdev, struct ib_device_attr *attr,
 	attr->local_ca_ack_delay = dev->attr.local_ca_ack_delay;
 	attr->max_fast_reg_page_list_len = dev->attr.max_pages_per_frmr;
 	attr->max_pkeys = 1;
-	return 0;
+	return ib_respond_empty_udata(uhw);
 }
 
 static inline void get_link_speed_and_width(struct ocrdma_dev *dev,
@@ -195,7 +197,7 @@ static int ocrdma_add_mmap(struct ocrdma_ucontext *uctx, u64 phy_addr,
 {
 	struct ocrdma_mm *mm;
 
-	mm = kzalloc(sizeof(*mm), GFP_KERNEL);
+	mm = kzalloc_obj(*mm);
 	if (mm == NULL)
 		return -ENOMEM;
 	mm->key.phy_addr = phy_addr;
@@ -215,7 +217,7 @@ static void ocrdma_del_mmap(struct ocrdma_ucontext *uctx, u64 phy_addr,
 
 	mutex_lock(&uctx->mm_list_lock);
 	list_for_each_entry_safe(mm, tmp, &uctx->mm_head, entry) {
-		if (len != mm->key.len && phy_addr != mm->key.phy_addr)
+		if (len != mm->key.len || phy_addr != mm->key.phy_addr)
 			continue;
 
 		list_del(&mm->entry);
@@ -233,7 +235,7 @@ static bool ocrdma_search_mmap(struct ocrdma_ucontext *uctx, u64 phy_addr,
 
 	mutex_lock(&uctx->mm_list_lock);
 	list_for_each_entry(mm, &uctx->mm_head, entry) {
-		if (len != mm->key.len && phy_addr != mm->key.phy_addr)
+		if (len != mm->key.len || phy_addr != mm->key.phy_addr)
 			continue;
 
 		found = true;
@@ -502,7 +504,7 @@ int ocrdma_alloc_ucontext(struct ib_ucontext *uctx, struct ib_udata *udata)
 	resp.dpp_wqe_size = dev->attr.wqe_size;
 
 	memcpy(resp.fw_ver, dev->attr.fw_ver, sizeof(resp.fw_ver));
-	status = ib_copy_to_udata(udata, &resp, sizeof(resp));
+	status = ib_respond_udata(udata, resp);
 	if (status)
 		goto cpy_err;
 	return 0;
@@ -586,11 +588,10 @@ static int ocrdma_copy_pd_uresp(struct ocrdma_dev *dev, struct ocrdma_pd *pd,
 	u64 db_page_addr;
 	u64 dpp_page_addr = 0;
 	u32 db_page_size;
-	struct ocrdma_alloc_pd_uresp rsp;
+	struct ocrdma_alloc_pd_uresp rsp = {};
 	struct ocrdma_ucontext *uctx = rdma_udata_to_drv_context(
 		udata, struct ocrdma_ucontext, ibucontext);
 
-	memset(&rsp, 0, sizeof(rsp));
 	rsp.id = pd->id;
 	rsp.dpp_enabled = pd->dpp_enabled;
 	db_page_addr = ocrdma_get_db_addr(dev, pd->id);
@@ -611,7 +612,7 @@ static int ocrdma_copy_pd_uresp(struct ocrdma_dev *dev, struct ocrdma_pd *pd,
 		rsp.dpp_page_addr_lo = dpp_page_addr;
 	}
 
-	status = ib_copy_to_udata(udata, &rsp, sizeof(rsp));
+	status = ib_respond_udata(udata, rsp);
 	if (status)
 		goto ucopy_err;
 
@@ -620,9 +621,9 @@ static int ocrdma_copy_pd_uresp(struct ocrdma_dev *dev, struct ocrdma_pd *pd,
 
 ucopy_err:
 	if (pd->dpp_enabled)
-		ocrdma_del_mmap(pd->uctx, dpp_page_addr, PAGE_SIZE);
+		ocrdma_del_mmap(uctx, dpp_page_addr, PAGE_SIZE);
 dpp_map_err:
-	ocrdma_del_mmap(pd->uctx, db_page_addr, db_page_size);
+	ocrdma_del_mmap(uctx, db_page_addr, db_page_size);
 	return status;
 }
 
@@ -727,7 +728,7 @@ struct ib_mr *ocrdma_get_dma_mr(struct ib_pd *ibpd, int acc)
 		return ERR_PTR(-EINVAL);
 	}
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 
@@ -794,8 +795,7 @@ static int ocrdma_build_pbl_tbl(struct ocrdma_dev *dev, struct ocrdma_hw_mr *mr)
 	void *va;
 	dma_addr_t pa;
 
-	mr->pbl_table = kcalloc(mr->num_pbls, sizeof(struct ocrdma_pbl),
-				GFP_KERNEL);
+	mr->pbl_table = kzalloc_objs(*mr->pbl_table, mr->num_pbls);
 
 	if (!mr->pbl_table)
 		return -ENOMEM;
@@ -847,22 +847,26 @@ static void build_user_pbes(struct ocrdma_dev *dev, struct ocrdma_mr *mr)
 }
 
 struct ib_mr *ocrdma_reg_user_mr(struct ib_pd *ibpd, u64 start, u64 len,
-				 u64 usr_addr, int acc, struct ib_udata *udata)
+				 u64 usr_addr, int acc, struct ib_dmah *dmah,
+				 struct ib_udata *udata)
 {
 	int status = -ENOMEM;
 	struct ocrdma_dev *dev = get_ocrdma_dev(ibpd->device);
 	struct ocrdma_mr *mr;
 	struct ocrdma_pd *pd;
 
+	if (dmah)
+		return ERR_PTR(-EOPNOTSUPP);
+
 	pd = get_ocrdma_pd(ibpd);
 
 	if (acc & IB_ACCESS_REMOTE_WRITE && !(acc & IB_ACCESS_LOCAL_WRITE))
 		return ERR_PTR(-EINVAL);
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(status);
-	mr->umem = ib_umem_get(ibpd->device, start, len, acc);
+	mr->umem = ib_umem_get_va(ibpd->device, start, len, acc);
 	if (IS_ERR(mr->umem)) {
 		status = -EFAULT;
 		goto umem_err;
@@ -907,7 +911,6 @@ int ocrdma_dereg_mr(struct ib_mr *ib_mr, struct ib_udata *udata)
 
 	(void) ocrdma_mbx_dealloc_lkey(dev, mr->hwmr.fr_mr, mr->hwmr.lkey);
 
-	kfree(mr->pages);
 	ocrdma_free_mr_pbl_tbl(dev, &mr->hwmr);
 
 	/* it could be user registered memory. */
@@ -928,13 +931,12 @@ static int ocrdma_copy_cq_uresp(struct ocrdma_dev *dev, struct ocrdma_cq *cq,
 	int status;
 	struct ocrdma_ucontext *uctx = rdma_udata_to_drv_context(
 		udata, struct ocrdma_ucontext, ibucontext);
-	struct ocrdma_create_cq_uresp uresp;
+	struct ocrdma_create_cq_uresp uresp = {};
 
 	/* this must be user flow! */
 	if (!udata)
 		return -EINVAL;
 
-	memset(&uresp, 0, sizeof(uresp));
 	uresp.cq_id = cq->id;
 	uresp.page_size = PAGE_ALIGN(cq->len);
 	uresp.num_pages = 1;
@@ -943,12 +945,9 @@ static int ocrdma_copy_cq_uresp(struct ocrdma_dev *dev, struct ocrdma_cq *cq,
 	uresp.db_page_addr =  ocrdma_get_db_addr(dev, uctx->cntxt_pd->id);
 	uresp.db_page_size = dev->nic_info.db_page_size;
 	uresp.phase_change = cq->phase_change ? 1 : 0;
-	status = ib_copy_to_udata(udata, &uresp, sizeof(uresp));
-	if (status) {
-		pr_err("%s(%d) copy error cqid=0x%x.\n",
-		       __func__, dev->id, cq->id);
+	status = ib_respond_udata(udata, uresp);
+	if (status)
 		goto err;
-	}
 	status = ocrdma_add_mmap(uctx, uresp.db_page_addr, uresp.db_page_size);
 	if (status)
 		goto err;
@@ -980,8 +979,9 @@ int ocrdma_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 		return -EOPNOTSUPP;
 
 	if (udata) {
-		if (ib_copy_from_udata(&ureq, udata, sizeof(ureq)))
-			return -EFAULT;
+		status = ib_copy_validate_udata_in(udata, ureq, rsvd);
+		if (status)
+			return status;
 	} else
 		ureq.dpp_cq = 0;
 
@@ -1011,18 +1011,16 @@ ctx_err:
 	return status;
 }
 
-int ocrdma_resize_cq(struct ib_cq *ibcq, int new_cnt,
+int ocrdma_resize_cq(struct ib_cq *ibcq, unsigned int new_cnt,
 		     struct ib_udata *udata)
 {
-	int status = 0;
 	struct ocrdma_cq *cq = get_ocrdma_cq(ibcq);
 
-	if (new_cnt < 1 || new_cnt > cq->max_hw_cqe) {
-		status = -EINVAL;
-		return status;
-	}
+	if (new_cnt > cq->max_hw_cqe)
+		return -EINVAL;
+
 	ibcq->cqe = new_cnt;
-	return status;
+	return 0;
 }
 
 static void ocrdma_flush_cq(struct ocrdma_cq *cq)
@@ -1175,11 +1173,10 @@ static int ocrdma_copy_qp_uresp(struct ocrdma_qp *qp,
 {
 	int status;
 	u64 usr_db;
-	struct ocrdma_create_qp_uresp uresp;
+	struct ocrdma_create_qp_uresp uresp = {};
 	struct ocrdma_pd *pd = qp->pd;
 	struct ocrdma_dev *dev = get_ocrdma_dev(pd->ibpd.device);
 
-	memset(&uresp, 0, sizeof(uresp));
 	usr_db = dev->nic_info.unmapped_db +
 			(pd->id * dev->nic_info.db_page_size);
 	uresp.qp_id = qp->id;
@@ -1205,11 +1202,9 @@ static int ocrdma_copy_qp_uresp(struct ocrdma_qp *qp,
 		uresp.dpp_credit = dpp_credit_lmt;
 		uresp.dpp_offset = dpp_offset;
 	}
-	status = ib_copy_to_udata(udata, &uresp, sizeof(uresp));
-	if (status) {
-		pr_err("%s(%d) user copy error.\n", __func__, dev->id);
+	status = ib_respond_udata(udata, uresp);
+	if (status)
 		goto err;
-	}
 	status = ocrdma_add_mmap(pd->uctx, uresp.sq_page_addr[0],
 				 uresp.sq_page_size);
 	if (status)
@@ -1250,13 +1245,11 @@ static void ocrdma_set_qp_db(struct ocrdma_dev *dev, struct ocrdma_qp *qp,
 
 static int ocrdma_alloc_wr_id_tbl(struct ocrdma_qp *qp)
 {
-	qp->wqe_wr_id_tbl =
-	    kcalloc(qp->sq.max_cnt, sizeof(*(qp->wqe_wr_id_tbl)),
-		    GFP_KERNEL);
+	qp->wqe_wr_id_tbl = kzalloc_objs(*qp->wqe_wr_id_tbl, qp->sq.max_cnt);
 	if (qp->wqe_wr_id_tbl == NULL)
 		return -ENOMEM;
-	qp->rqe_wr_id_tbl =
-	    kcalloc(qp->rq.max_cnt, sizeof(u64), GFP_KERNEL);
+
+	qp->rqe_wr_id_tbl = kzalloc_objs(*qp->rqe_wr_id_tbl, qp->rq.max_cnt);
 	if (qp->rqe_wr_id_tbl == NULL)
 		return -ENOMEM;
 
@@ -1309,11 +1302,14 @@ int ocrdma_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *attrs,
 	if (status)
 		goto gen_err;
 
-	memset(&ureq, 0, sizeof(ureq));
 	if (udata) {
-		if (ib_copy_from_udata(&ureq, udata, sizeof(ureq)))
-			return -EFAULT;
+		status = ib_copy_validate_udata_in(udata, ureq, rsvd1);
+		if (status)
+			return status;
+	} else {
+		memset(&ureq, 0, sizeof(ureq));
 	}
+
 	ocrdma_set_qp_init_params(qp, pd, attrs);
 	if (udata == NULL)
 		qp->cap_flags |= (OCRDMA_QP_MW_BIND | OCRDMA_QP_LKEY0 |
@@ -1733,9 +1729,8 @@ static int ocrdma_copy_srq_uresp(struct ocrdma_dev *dev, struct ocrdma_srq *srq,
 				struct ib_udata *udata)
 {
 	int status;
-	struct ocrdma_create_srq_uresp uresp;
+	struct ocrdma_create_srq_uresp uresp = {};
 
-	memset(&uresp, 0, sizeof(uresp));
 	uresp.rq_dbid = srq->rq.dbid;
 	uresp.num_rq_pages = 1;
 	uresp.rq_page_addr[0] = virt_to_phys(srq->rq.va);
@@ -1752,7 +1747,7 @@ static int ocrdma_copy_srq_uresp(struct ocrdma_dev *dev, struct ocrdma_srq *srq,
 		uresp.db_shift = 16;
 	}
 
-	status = ib_copy_to_udata(udata, &uresp, sizeof(uresp));
+	status = ib_respond_udata(udata, uresp);
 	if (status)
 		return status;
 	status = ocrdma_add_mmap(srq->pd->uctx, uresp.rq_page_addr[0],
@@ -1786,8 +1781,8 @@ int ocrdma_create_srq(struct ib_srq *ibsrq, struct ib_srq_init_attr *init_attr,
 		return status;
 
 	if (!udata) {
-		srq->rqe_wr_id_tbl = kcalloc(srq->rq.max_cnt, sizeof(u64),
-					     GFP_KERNEL);
+		srq->rqe_wr_id_tbl =
+			kzalloc_objs(*srq->rqe_wr_id_tbl, srq->rq.max_cnt);
 		if (!srq->rqe_wr_id_tbl) {
 			status = -ENOMEM;
 			goto arm_err;
@@ -2907,19 +2902,13 @@ struct ib_mr *ocrdma_alloc_mr(struct ib_pd *ibpd, enum ib_mr_type mr_type,
 	if (max_num_sg > dev->attr.max_pages_per_frmr)
 		return ERR_PTR(-EINVAL);
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	mr = kzalloc_flex(*mr, pages, max_num_sg);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 
-	mr->pages = kcalloc(max_num_sg, sizeof(u64), GFP_KERNEL);
-	if (!mr->pages) {
-		status = -ENOMEM;
-		goto pl_err;
-	}
-
 	status = ocrdma_get_pbl_info(dev, mr, max_num_sg);
 	if (status)
-		goto pbl_err;
+		goto pl_err;
 	mr->hwmr.fr_mr = 1;
 	mr->hwmr.remote_rd = 0;
 	mr->hwmr.remote_wr = 0;
@@ -2928,7 +2917,7 @@ struct ib_mr *ocrdma_alloc_mr(struct ib_pd *ibpd, enum ib_mr_type mr_type,
 	mr->hwmr.mw_bind = 0;
 	status = ocrdma_build_pbl_tbl(dev, &mr->hwmr);
 	if (status)
-		goto pbl_err;
+		goto pl_err;
 	status = ocrdma_reg_mr(dev, &mr->hwmr, pd->id, 0);
 	if (status)
 		goto mbx_err;
@@ -2939,8 +2928,6 @@ struct ib_mr *ocrdma_alloc_mr(struct ib_pd *ibpd, enum ib_mr_type mr_type,
 	return &mr->ibmr;
 mbx_err:
 	ocrdma_free_mr_pbl_tbl(dev, &mr->hwmr);
-pbl_err:
-	kfree(mr->pages);
 pl_err:
 	kfree(mr);
 	return ERR_PTR(-ENOMEM);

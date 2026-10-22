@@ -8,7 +8,6 @@
 
 #include <linux/delay.h>
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/soundwire/sdw.h>
 #include <linux/soundwire/sdw_type.h>
 #include <linux/soundwire/sdw_registers.h>
@@ -455,7 +454,7 @@ static int rt700_sdw_probe(struct sdw_slave *slave,
 	return rt700_init(&slave->dev, sdw_regmap, regmap, slave);
 }
 
-static int rt700_sdw_remove(struct sdw_slave *slave)
+static void rt700_sdw_remove(struct sdw_slave *slave)
 {
 	struct rt700_priv *rt700 = dev_get_drvdata(&slave->dev);
 
@@ -465,8 +464,6 @@ static int rt700_sdw_remove(struct sdw_slave *slave)
 	}
 
 	pm_runtime_disable(&slave->dev);
-
-	return 0;
 }
 
 static const struct sdw_device_id rt700_id[] = {
@@ -475,7 +472,7 @@ static const struct sdw_device_id rt700_id[] = {
 };
 MODULE_DEVICE_TABLE(sdw, rt700_id);
 
-static int __maybe_unused rt700_dev_suspend(struct device *dev)
+static int rt700_dev_suspend(struct device *dev)
 {
 	struct rt700_priv *rt700 = dev_get_drvdata(dev);
 
@@ -490,7 +487,7 @@ static int __maybe_unused rt700_dev_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused rt700_dev_system_suspend(struct device *dev)
+static int rt700_dev_system_suspend(struct device *dev)
 {
 	struct sdw_slave *slave = dev_to_sdw_dev(dev);
 	struct rt700_priv *rt700 = dev_get_drvdata(dev);
@@ -520,29 +517,21 @@ static int __maybe_unused rt700_dev_system_suspend(struct device *dev)
 
 #define RT700_PROBE_TIMEOUT 5000
 
-static int __maybe_unused rt700_dev_resume(struct device *dev)
+static int rt700_dev_resume(struct device *dev)
 {
 	struct sdw_slave *slave = dev_to_sdw_dev(dev);
 	struct rt700_priv *rt700 = dev_get_drvdata(dev);
-	unsigned long time;
+	int ret;
 
 	if (!rt700->first_hw_init)
 		return 0;
 
-	if (!slave->unattach_request)
-		goto regmap_sync;
-
-	time = wait_for_completion_timeout(&slave->initialization_complete,
-				msecs_to_jiffies(RT700_PROBE_TIMEOUT));
-	if (!time) {
-		dev_err(&slave->dev, "Initialization not complete, timed out\n");
+	ret = sdw_slave_wait_for_init(slave, RT700_PROBE_TIMEOUT);
+	if (ret) {
 		sdw_show_ping_status(slave->bus, true);
-
-		return -ETIMEDOUT;
+		return ret;
 	}
 
-regmap_sync:
-	slave->unattach_request = 0;
 	regcache_cache_only(rt700->regmap, false);
 	regcache_sync_region(rt700->regmap, 0x3000, 0x8fff);
 	regcache_sync_region(rt700->regmap, 0x752010, 0x75206b);
@@ -551,14 +540,14 @@ regmap_sync:
 }
 
 static const struct dev_pm_ops rt700_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(rt700_dev_system_suspend, rt700_dev_resume)
-	SET_RUNTIME_PM_OPS(rt700_dev_suspend, rt700_dev_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(rt700_dev_system_suspend, rt700_dev_resume)
+	RUNTIME_PM_OPS(rt700_dev_suspend, rt700_dev_resume, NULL)
 };
 
 static struct sdw_driver rt700_sdw_driver = {
 	.driver = {
 		.name = "rt700",
-		.pm = &rt700_pm,
+		.pm = pm_ptr(&rt700_pm),
 	},
 	.probe = rt700_sdw_probe,
 	.remove = rt700_sdw_remove,

@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
-// Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+/*
+ *  Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ *  Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ */
 
 /* Disable MMIO tracing to prevent excessive logging of unwanted MMIO traces */
 #define __DISABLE_TRACE_MMIO__
 
 #include <linux/acpi.h>
+#include <linux/bitfield.h>
 #include <linux/clk.h>
+#include <linux/firmware.h>
 #include <linux/slab.h>
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
@@ -14,6 +19,8 @@
 #include <linux/of_platform.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
+#include <linux/pm_domain.h>
+#include <linux/pm_opp.h>
 #include <linux/soc/qcom/geni-se.h>
 
 /**
@@ -110,22 +117,94 @@ struct geni_se_desc {
 static const char * const icc_path_names[] = {"qup-core", "qup-config",
 						"qup-memory"};
 
-#define QUP_HW_VER_REG			0x4
+static const char * const protocol_name[] = { "None", "SPI", "UART", "I2C", "I3C", "SPI SLAVE" };
+
+/**
+ * struct se_fw_hdr - Serial Engine firmware configuration header
+ *
+ * This structure defines the SE firmware header, which together with the
+ * firmware payload is stored in individual ELF segments.
+ *
+ * @magic: Set to 'SEFW'.
+ * @version: Structure version number.
+ * @core_version: QUPV3 hardware version.
+ * @serial_protocol: Encoded in GENI_FW_REVISION.
+ * @fw_version: Firmware version, from GENI_FW_REVISION.
+ * @cfg_version: Configuration version, from GENI_INIT_CFG_REVISION.
+ * @fw_size_in_items: Number of 32-bit words in GENI_FW_RAM.
+ * @fw_offset: Byte offset to GENI_FW_RAM array.
+ * @cfg_size_in_items: Number of GENI_FW_CFG index/value pairs.
+ * @cfg_idx_offset: Byte offset to GENI_FW_CFG index array.
+ * @cfg_val_offset: Byte offset to GENI_FW_CFG values array.
+ */
+struct se_fw_hdr {
+	__le32 magic;
+	__le32 version;
+	__le32 core_version;
+	__le16 serial_protocol;
+	__le16 fw_version;
+	__le16 cfg_version;
+	__le16 fw_size_in_items;
+	__le16 fw_offset;
+	__le16 cfg_size_in_items;
+	__le16 cfg_idx_offset;
+	__le16 cfg_val_offset;
+};
+
+/*Magic numbers*/
+#define SE_MAGIC_NUM			0x57464553
+
+#define MAX_GENI_CFG_RAMn_CNT		455
+
+#define MI_PBT_NON_PAGED_SEGMENT	0x0
+#define MI_PBT_HASH_SEGMENT		0x2
+#define MI_PBT_NOTUSED_SEGMENT		0x3
+#define MI_PBT_SHARED_SEGMENT		0x4
+
+#define MI_PBT_FLAG_PAGE_MODE		BIT(20)
+#define MI_PBT_FLAG_SEGMENT_TYPE	GENMASK(26, 24)
+#define MI_PBT_FLAG_ACCESS_TYPE		GENMASK(23, 21)
+
+#define MI_PBT_PAGE_MODE_VALUE(x) FIELD_GET(MI_PBT_FLAG_PAGE_MODE, x)
+
+#define MI_PBT_SEGMENT_TYPE_VALUE(x) FIELD_GET(MI_PBT_FLAG_SEGMENT_TYPE, x)
+
+#define MI_PBT_ACCESS_TYPE_VALUE(x) FIELD_GET(MI_PBT_FLAG_ACCESS_TYPE, x)
+
+#define M_COMMON_GENI_M_IRQ_EN	(GENMASK(6, 1) | \
+				M_IO_DATA_DEASSERT_EN | \
+				M_IO_DATA_ASSERT_EN | M_RX_FIFO_RD_ERR_EN | \
+				M_RX_FIFO_WR_ERR_EN | M_TX_FIFO_RD_ERR_EN | \
+				M_TX_FIFO_WR_ERR_EN)
+
+/* Common QUPV3 registers */
+#define QUPV3_HW_VER_REG		0x4
+#define QUPV3_SE_AHB_M_CFG		0x118
+#define QUPV3_COMMON_CFG		0x120
+#define QUPV3_COMMON_CGC_CTRL		0x21c
+
+/* QUPV3_COMMON_CFG fields */
+#define FAST_SWITCH_TO_HIGH_DISABLE	BIT(0)
+
+/* QUPV3_SE_AHB_M_CFG fields */
+#define AHB_M_CLK_CGC_ON		BIT(0)
+
+/* QUPV3_COMMON_CGC_CTRL fields */
+#define COMMON_CSR_SLV_CLK_CGC_ON	BIT(0)
 
 /* Common SE registers */
-#define GENI_INIT_CFG_REVISION		0x0
-#define GENI_S_INIT_CFG_REVISION	0x4
-#define GENI_OUTPUT_CTRL		0x24
-#define GENI_CGC_CTRL			0x28
-#define GENI_CLK_CTRL_RO		0x60
-#define GENI_FW_S_REVISION_RO		0x6c
+#define SE_GENI_INIT_CFG_REVISION	0x0
+#define SE_GENI_S_INIT_CFG_REVISION	0x4
+#define SE_GENI_CGC_CTRL		0x28
+#define SE_GENI_CLK_CTRL_RO		0x60
+#define SE_GENI_FW_S_REVISION_RO	0x6c
+#define SE_GENI_CFG_REG0		0x100
 #define SE_GENI_BYTE_GRAN		0x254
 #define SE_GENI_TX_PACKING_CFG0		0x260
 #define SE_GENI_TX_PACKING_CFG1		0x264
 #define SE_GENI_RX_PACKING_CFG0		0x284
 #define SE_GENI_RX_PACKING_CFG1		0x288
-#define SE_GENI_M_GP_LENGTH		0x910
-#define SE_GENI_S_GP_LENGTH		0x914
+#define SE_GENI_S_IRQ_ENABLE		0x644
 #define SE_DMA_TX_PTR_L			0xc30
 #define SE_DMA_TX_PTR_H			0xc34
 #define SE_DMA_TX_ATTR			0xc38
@@ -142,12 +221,20 @@ static const char * const icc_path_names[] = {"qup-core", "qup-config",
 #define SE_DMA_RX_IRQ_EN		0xd48
 #define SE_DMA_RX_IRQ_EN_SET		0xd4c
 #define SE_DMA_RX_IRQ_EN_CLR		0xd50
-#define SE_DMA_RX_LEN_IN		0xd54
 #define SE_DMA_RX_MAX_BURST		0xd5c
 #define SE_DMA_RX_FLUSH			0xd60
 #define SE_GSI_EVENT_EN			0xe18
 #define SE_IRQ_EN			0xe1c
 #define SE_DMA_GENERAL_CFG		0xe30
+#define SE_GENI_FW_REVISION		0x1000
+#define SE_GENI_S_FW_REVISION		0x1004
+#define SE_GENI_CFG_RAMN		0x1010
+#define SE_GENI_CLK_CTRL		0x2000
+#define SE_DMA_IF_EN			0x2004
+#define SE_FIFO_IF_DISABLE		0x2008
+
+/* GENI_FW_REVISION_RO fields */
+#define FW_REV_VERSION_MSK		GENMASK(7, 0)
 
 /* GENI_OUTPUT_CTRL fields */
 #define DEFAULT_IO_OUTPUT_CTRL_MSK	GENMASK(6, 0)
@@ -179,12 +266,27 @@ static const char * const icc_path_names[] = {"qup-core", "qup-config",
 /* SE_DMA_GENERAL_CFG */
 #define DMA_RX_CLK_CGC_ON		BIT(0)
 #define DMA_TX_CLK_CGC_ON		BIT(1)
-#define DMA_AHB_SLV_CFG_ON		BIT(2)
+#define DMA_AHB_SLV_CLK_CGC_ON		BIT(2)
 #define AHB_SEC_SLV_CLK_CGC_ON		BIT(3)
 #define DUMMY_RX_NON_BUFFERABLE		BIT(4)
 #define RX_DMA_ZERO_PADDING_EN		BIT(5)
 #define RX_DMA_IRQ_DELAY_MSK		GENMASK(8, 6)
 #define RX_DMA_IRQ_DELAY_SHFT		6
+
+/* GENI_CLK_CTRL fields */
+#define SER_CLK_SEL			BIT(0)
+
+/* GENI_DMA_IF_EN fields */
+#define DMA_IF_EN			BIT(0)
+
+#define geni_setbits32(_addr, _v) writel(readl(_addr) |  (_v), _addr)
+#define geni_clrbits32(_addr, _v) writel(readl(_addr) & ~(_v), _addr)
+
+enum domain_idx {
+	DOMAIN_IDX_POWER,
+	DOMAIN_IDX_PERF,
+	DOMAIN_IDX_MAX
+};
 
 /**
  * geni_se_get_qup_hw_version() - Read the QUP wrapper Hardware version
@@ -196,7 +298,7 @@ u32 geni_se_get_qup_hw_version(struct geni_se *se)
 {
 	struct geni_wrapper *wrapper = se->wrapper;
 
-	return readl_relaxed(wrapper->base + QUP_HW_VER_REG);
+	return readl_relaxed(wrapper->base + QUPV3_HW_VER_REG);
 }
 EXPORT_SYMBOL_GPL(geni_se_get_qup_hw_version);
 
@@ -220,12 +322,12 @@ static void geni_se_io_init(void __iomem *base)
 {
 	u32 val;
 
-	val = readl_relaxed(base + GENI_CGC_CTRL);
+	val = readl_relaxed(base + SE_GENI_CGC_CTRL);
 	val |= DEFAULT_CGC_EN;
-	writel_relaxed(val, base + GENI_CGC_CTRL);
+	writel_relaxed(val, base + SE_GENI_CGC_CTRL);
 
 	val = readl_relaxed(base + SE_DMA_GENERAL_CFG);
-	val |= AHB_SEC_SLV_CLK_CGC_ON | DMA_AHB_SLV_CFG_ON;
+	val |= AHB_SEC_SLV_CLK_CGC_ON | DMA_AHB_SLV_CLK_CGC_ON;
 	val |= DMA_TX_CLK_CGC_ON | DMA_RX_CLK_CGC_ON;
 	writel_relaxed(val, base + SE_DMA_GENERAL_CFG);
 
@@ -488,6 +590,7 @@ static void geni_se_clks_off(struct geni_se *se)
 
 	clk_disable_unprepare(se->clk);
 	clk_bulk_disable_unprepare(wrapper->num_clks, wrapper->clks);
+	clk_disable_unprepare(se->core_clk);
 }
 
 /**
@@ -524,7 +627,18 @@ static int geni_se_clks_on(struct geni_se *se)
 
 	ret = clk_prepare_enable(se->clk);
 	if (ret)
-		clk_bulk_disable_unprepare(wrapper->num_clks, wrapper->clks);
+		goto err_bulk_clks;
+
+	ret = clk_prepare_enable(se->core_clk);
+	if (ret)
+		goto err_se_clk;
+
+	return 0;
+
+err_se_clk:
+	clk_disable_unprepare(se->clk);
+err_bulk_clks:
+	clk_bulk_disable_unprepare(wrapper->num_clks, wrapper->clks);
 	return ret;
 }
 
@@ -658,9 +772,12 @@ int geni_se_clk_freq_match(struct geni_se *se, unsigned long req_freq,
 }
 EXPORT_SYMBOL_GPL(geni_se_clk_freq_match);
 
-#define GENI_SE_DMA_DONE_EN BIT(0)
-#define GENI_SE_DMA_EOT_EN BIT(1)
-#define GENI_SE_DMA_AHB_ERR_EN BIT(2)
+#define GENI_SE_DMA_DONE_EN		BIT(0)
+#define GENI_SE_DMA_EOT_EN		BIT(1)
+#define GENI_SE_DMA_AHB_ERR_EN		BIT(2)
+#define GENI_SE_DMA_RESET_DONE_EN	BIT(3)
+#define GENI_SE_DMA_FLUSH_DONE		BIT(4)
+
 #define GENI_SE_DMA_EOT_BUF BIT(0)
 
 /**
@@ -802,30 +919,32 @@ EXPORT_SYMBOL_GPL(geni_se_rx_dma_unprep);
 
 int geni_icc_get(struct geni_se *se, const char *icc_ddr)
 {
-	int i, err;
-	const char *icc_names[] = {"qup-core", "qup-config", icc_ddr};
+	struct geni_icc_path *icc_paths = se->icc_paths;
 
 	if (has_acpi_companion(se->dev))
 		return 0;
 
-	for (i = 0; i < ARRAY_SIZE(se->icc_paths); i++) {
-		if (!icc_names[i])
-			continue;
+	icc_paths[GENI_TO_CORE].path = devm_of_icc_get(se->dev, "qup-core");
+	if (IS_ERR(icc_paths[GENI_TO_CORE].path))
+		return dev_err_probe(se->dev, PTR_ERR(icc_paths[GENI_TO_CORE].path),
+				     "Failed to get 'qup-core' ICC path\n");
 
-		se->icc_paths[i].path = devm_of_icc_get(se->dev, icc_names[i]);
-		if (IS_ERR(se->icc_paths[i].path))
-			goto err;
+	icc_paths[CPU_TO_GENI].path = devm_of_icc_get(se->dev, "qup-config");
+	if (IS_ERR(icc_paths[CPU_TO_GENI].path))
+		return dev_err_probe(se->dev, PTR_ERR(icc_paths[CPU_TO_GENI].path),
+				     "Failed to get 'qup-config' ICC path\n");
+
+	/* The DDR path is optional, depending on protocol and hw capabilities */
+	icc_paths[GENI_TO_DDR].path = devm_of_icc_get(se->dev, "qup-memory");
+	if (IS_ERR(icc_paths[GENI_TO_DDR].path)) {
+		if (PTR_ERR(icc_paths[GENI_TO_DDR].path) == -ENODATA)
+			icc_paths[GENI_TO_DDR].path = NULL;
+		else
+			return dev_err_probe(se->dev, PTR_ERR(icc_paths[GENI_TO_DDR].path),
+					     "Failed to get 'qup-memory' ICC path\n");
 	}
 
 	return 0;
-
-err:
-	err = PTR_ERR(se->icc_paths[i].path);
-	if (err != -EPROBE_DEFER)
-		dev_err_ratelimited(se->dev, "Failed to get ICC path '%s': %d\n",
-					icc_names[i], err);
-	return err;
-
 }
 EXPORT_SYMBOL_GPL(geni_icc_get);
 
@@ -846,6 +965,28 @@ int geni_icc_set_bw(struct geni_se *se)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(geni_icc_set_bw);
+
+/**
+ * geni_icc_set_bw_ab() - Set average bandwidth for all ICC paths and apply
+ * @se:		Pointer to the concerned serial engine.
+ * @core_ab:	Average bandwidth in kBps for GENI_TO_CORE path.
+ * @cfg_ab:	Average bandwidth in kBps for CPU_TO_GENI path.
+ * @ddr_ab:	Average bandwidth in kBps for GENI_TO_DDR path.
+ *
+ * Sets bandwidth values for all ICC paths and applies them. DDR path is
+ * optional and only set if it exists.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int geni_icc_set_bw_ab(struct geni_se *se, u32 core_ab, u32 cfg_ab, u32 ddr_ab)
+{
+	se->icc_paths[GENI_TO_CORE].avg_bw = core_ab;
+	se->icc_paths[CPU_TO_GENI].avg_bw = cfg_ab;
+	se->icc_paths[GENI_TO_DDR].avg_bw = ddr_ab;
+
+	return geni_icc_set_bw(se);
+}
+EXPORT_SYMBOL_GPL(geni_icc_set_bw_ab);
 
 void geni_icc_set_tag(struct geni_se *se, u32 tag)
 {
@@ -891,10 +1032,572 @@ int geni_icc_disable(struct geni_se *se)
 }
 EXPORT_SYMBOL_GPL(geni_icc_disable);
 
+/**
+ * geni_se_resources_deactivate() - Deactivate GENI SE device resources
+ * @se: Pointer to the geni_se structure
+ *
+ * Deactivates device resources for power saving: OPP rate to 0, pin control
+ * to sleep state, turns off clocks, and disables interconnect. Skips ACPI devices.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int geni_se_resources_deactivate(struct geni_se *se)
+{
+	int ret;
+
+	if (has_acpi_companion(se->dev))
+		return 0;
+
+	if (se->has_opp)
+		dev_pm_opp_set_rate(se->dev, 0);
+
+	ret = pinctrl_pm_select_sleep_state(se->dev);
+	if (ret)
+		return ret;
+
+	geni_se_clks_off(se);
+
+	return geni_icc_disable(se);
+}
+EXPORT_SYMBOL_GPL(geni_se_resources_deactivate);
+
+/**
+ * geni_se_resources_activate() - Activate GENI SE device resources
+ * @se: Pointer to the geni_se structure
+ *
+ * Activates device resources for operation: enables interconnect, prepares clocks,
+ * and sets pin control to default state. Includes error cleanup. Skips ACPI devices.
+ *
+ * Unlike geni_se_resources_deactivate(), this function doesn't alter the
+ * connected genpds' performance states, which must be additionally handled.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int geni_se_resources_activate(struct geni_se *se)
+{
+	int ret;
+
+	if (has_acpi_companion(se->dev))
+		return 0;
+
+	ret = geni_icc_enable(se);
+	if (ret)
+		return ret;
+
+	ret = geni_se_clks_on(se);
+	if (ret)
+		goto out_icc_disable;
+
+	ret = pinctrl_pm_select_default_state(se->dev);
+	if (ret) {
+		geni_se_clks_off(se);
+		goto out_icc_disable;
+	}
+
+	return 0;
+
+out_icc_disable:
+	geni_icc_disable(se);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(geni_se_resources_activate);
+
+/**
+ * geni_se_set_perf_level() - Set performance level for GENI SE.
+ * @se: Pointer to the struct geni_se instance.
+ * @level: The desired performance level.
+ *
+ * Sets the performance level by directly calling dev_pm_opp_set_level
+ * on the performance device associated with the SE.
+ *
+ * Return: 0 on success, or a negative error code on failure.
+ */
+int geni_se_set_perf_level(struct geni_se *se, unsigned long level)
+{
+	return dev_pm_opp_set_level(se->pd_list->pd_devs[DOMAIN_IDX_PERF], level);
+}
+EXPORT_SYMBOL_GPL(geni_se_set_perf_level);
+
+/**
+ * geni_se_set_perf_opp() - Set performance OPP for GENI SE by frequency.
+ * @se: Pointer to the struct geni_se instance.
+ * @clk_freq: The requested clock frequency.
+ *
+ * Finds the nearest operating performance point (OPP) for the given
+ * clock frequency and applies it to the SE's performance device.
+ *
+ * Return: 0 on success, or a negative error code on failure.
+ */
+int geni_se_set_perf_opp(struct geni_se *se, unsigned long clk_freq)
+{
+	struct device *perf_dev = se->pd_list->pd_devs[DOMAIN_IDX_PERF];
+	struct dev_pm_opp *opp;
+	int ret;
+
+	opp = dev_pm_opp_find_freq_floor(perf_dev, &clk_freq);
+	if (IS_ERR(opp)) {
+		dev_err(se->dev, "failed to find opp for freq %lu\n", clk_freq);
+		return PTR_ERR(opp);
+	}
+
+	ret = dev_pm_opp_set_opp(perf_dev, opp);
+	dev_pm_opp_put(opp);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(geni_se_set_perf_opp);
+
+/**
+ * geni_se_domain_attach() - Attach power domains to a GENI SE device.
+ * @se: Pointer to the geni_se structure representing the GENI SE device.
+ *
+ * This function attaches the power domains ("power" and "perf") required
+ * in the SCMI auto-VM environment to the GENI Serial Engine device. It
+ * initializes se->pd_list with the attached domains.
+ *
+ * Return: 0 on success, or a negative error code on failure.
+ */
+int geni_se_domain_attach(struct geni_se *se)
+{
+	struct dev_pm_domain_attach_data pd_data = {
+		.pd_flags = PD_FLAG_DEV_LINK_ON,
+		.pd_names = (const char*[]) { "power", "perf" },
+		.num_pd_names = 2,
+	};
+	int ret;
+
+	ret = devm_pm_domain_attach_list(se->dev,
+					 &pd_data, &se->pd_list);
+	if (ret == 0)
+		return -ENODEV;
+	else if (ret < 0)
+		return ret;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(geni_se_domain_attach);
+
+/**
+ * geni_se_resources_init() - Initialize resources for a GENI SE device.
+ * @se: Pointer to the geni_se structure representing the GENI SE device.
+ *
+ * This function initializes various resources required by the GENI Serial Engine
+ * (SE) device, including clock resources (core and SE clocks), interconnect
+ * paths for communication.
+ * It retrieves optional and mandatory clock resources, adds an OF-based
+ * operating performance point (OPP) table, and sets up interconnect paths
+ * with default bandwidths. The function also sets a flag (`has_opp`) to
+ * indicate whether OPP support is available for the device.
+ *
+ * Return: 0 on success, or a negative errno on failure.
+ */
+int geni_se_resources_init(struct geni_se *se)
+{
+	int ret;
+
+	se->core_clk = devm_clk_get_optional(se->dev, "core");
+	if (IS_ERR(se->core_clk))
+		return dev_err_probe(se->dev, PTR_ERR(se->core_clk),
+				     "Failed to get optional core clk\n");
+
+	se->clk = devm_clk_get(se->dev, "se");
+	if (IS_ERR(se->clk) && !has_acpi_companion(se->dev))
+		return dev_err_probe(se->dev, PTR_ERR(se->clk),
+				     "Failed to get SE clk\n");
+
+	ret = devm_pm_opp_set_clkname(se->dev, "se");
+	if (ret)
+		return ret;
+
+	ret = devm_pm_opp_of_add_table(se->dev);
+	if (ret && ret != -ENODEV)
+		return dev_err_probe(se->dev, ret, "Failed to add OPP table\n");
+
+	se->has_opp = (ret == 0);
+
+	ret = geni_icc_get(se, "qup-memory");
+	if (ret)
+		return ret;
+
+	return geni_icc_set_bw_ab(se, GENI_DEFAULT_BW, GENI_DEFAULT_BW, GENI_DEFAULT_BW);
+}
+EXPORT_SYMBOL_GPL(geni_se_resources_init);
+
+/**
+ * geni_find_protocol_fw() - Locate and validate SE firmware for a protocol.
+ * @dev: Pointer to the device structure.
+ * @fw: Pointer to the firmware image.
+ * @protocol: Expected serial engine protocol type.
+ *
+ * Identifies the appropriate firmware image or configuration required for a
+ * specific communication protocol instance running on a  Qualcomm GENI
+ * controller.
+ *
+ * Return: pointer to a valid 'struct se_fw_hdr' if found, or NULL otherwise.
+ */
+static struct se_fw_hdr *geni_find_protocol_fw(struct device *dev, const struct firmware *fw,
+					       enum geni_se_protocol_type protocol)
+{
+	const struct elf32_hdr *ehdr;
+	const struct elf32_phdr *phdrs;
+	const struct elf32_phdr	*phdr;
+	struct se_fw_hdr *sefw;
+	u32 fw_end, cfg_idx_end, cfg_val_end;
+	u16 fw_size;
+	int i;
+
+	if (!fw || fw->size < sizeof(struct elf32_hdr))
+		return NULL;
+
+	ehdr = (const struct elf32_hdr *)fw->data;
+	phdrs = (const struct elf32_phdr *)(fw->data + ehdr->e_phoff);
+
+	/*
+	 * The firmware is expected to have at least two program headers (segments).
+	 * One for metadata and the other for the actual protocol-specific firmware.
+	 */
+	if (ehdr->e_phnum < 2) {
+		dev_err(dev, "Invalid firmware: less than 2 program headers\n");
+		return NULL;
+	}
+
+	for (i = 0; i < ehdr->e_phnum; i++) {
+		phdr = &phdrs[i];
+
+		if (fw->size < phdr->p_offset + phdr->p_filesz) {
+			dev_err(dev, "Firmware size (%zu) < expected offset (%u) + size (%u)\n",
+				fw->size, phdr->p_offset, phdr->p_filesz);
+			return NULL;
+		}
+
+		if (phdr->p_type != PT_LOAD || !phdr->p_memsz)
+			continue;
+
+		if (MI_PBT_PAGE_MODE_VALUE(phdr->p_flags) != MI_PBT_NON_PAGED_SEGMENT ||
+		    MI_PBT_SEGMENT_TYPE_VALUE(phdr->p_flags) == MI_PBT_HASH_SEGMENT ||
+		    MI_PBT_ACCESS_TYPE_VALUE(phdr->p_flags) == MI_PBT_NOTUSED_SEGMENT ||
+		    MI_PBT_ACCESS_TYPE_VALUE(phdr->p_flags) == MI_PBT_SHARED_SEGMENT)
+			continue;
+
+		if (phdr->p_filesz < sizeof(struct se_fw_hdr))
+			continue;
+
+		sefw = (struct se_fw_hdr *)(fw->data + phdr->p_offset);
+		fw_size = le16_to_cpu(sefw->fw_size_in_items);
+		fw_end = le16_to_cpu(sefw->fw_offset) + fw_size * sizeof(u32);
+		cfg_idx_end = le16_to_cpu(sefw->cfg_idx_offset) +
+			      le16_to_cpu(sefw->cfg_size_in_items) * sizeof(u8);
+		cfg_val_end = le16_to_cpu(sefw->cfg_val_offset) +
+			      le16_to_cpu(sefw->cfg_size_in_items) * sizeof(u32);
+
+		if (le32_to_cpu(sefw->magic) != SE_MAGIC_NUM || le32_to_cpu(sefw->version) != 1)
+			continue;
+
+		if (le32_to_cpu(sefw->serial_protocol) != protocol)
+			continue;
+
+		if (fw_size % 2 != 0) {
+			fw_size++;
+			sefw->fw_size_in_items = cpu_to_le16(fw_size);
+		}
+
+		if (fw_size >= MAX_GENI_CFG_RAMn_CNT) {
+			dev_err(dev,
+				"Firmware size (%u) exceeds max allowed RAMn count (%u)\n",
+				fw_size, MAX_GENI_CFG_RAMn_CNT);
+			continue;
+		}
+
+		if (fw_end > phdr->p_filesz || cfg_idx_end > phdr->p_filesz ||
+		    cfg_val_end > phdr->p_filesz) {
+			dev_err(dev, "Truncated or corrupt SE FW segment found at index %d\n", i);
+			continue;
+		}
+
+		return sefw;
+	}
+
+	dev_err(dev, "Failed to get %s protocol firmware\n", protocol_name[protocol]);
+	return NULL;
+}
+
+/**
+ * geni_configure_xfer_mode() - Set the transfer mode.
+ * @se: Pointer to the concerned serial engine.
+ * @mode: SE data transfer mode.
+ *
+ * Set the transfer mode to either FIFO or DMA according to the mode specified
+ * by the protocol driver.
+ *
+ * Return: 0 if successful, otherwise return an error value.
+ */
+static int geni_configure_xfer_mode(struct geni_se *se, enum geni_se_xfer_mode mode)
+{
+	/* Configure SE FIFO, DMA or GSI mode. */
+	switch (mode) {
+	case GENI_GPI_DMA:
+		geni_setbits32(se->base + SE_GENI_DMA_MODE_EN, GENI_DMA_MODE_EN);
+		writel(0x0, se->base + SE_IRQ_EN);
+		writel(DMA_RX_EVENT_EN | DMA_TX_EVENT_EN | GENI_M_EVENT_EN | GENI_S_EVENT_EN,
+		       se->base + SE_GSI_EVENT_EN);
+		break;
+
+	case GENI_SE_FIFO:
+		geni_clrbits32(se->base + SE_GENI_DMA_MODE_EN, GENI_DMA_MODE_EN);
+		writel(DMA_RX_IRQ_EN | DMA_TX_IRQ_EN | GENI_M_IRQ_EN | GENI_S_IRQ_EN,
+		       se->base + SE_IRQ_EN);
+		writel(0x0, se->base + SE_GSI_EVENT_EN);
+		break;
+
+	case GENI_SE_DMA:
+		geni_setbits32(se->base + SE_GENI_DMA_MODE_EN, GENI_DMA_MODE_EN);
+		writel(DMA_RX_IRQ_EN | DMA_TX_IRQ_EN | GENI_M_IRQ_EN | GENI_S_IRQ_EN,
+		       se->base + SE_IRQ_EN);
+		writel(0x0, se->base + SE_GSI_EVENT_EN);
+		break;
+
+	default:
+		dev_err(se->dev, "Invalid geni-se transfer mode: %d\n", mode);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+/**
+ * geni_enable_interrupts() - Enable interrupts.
+ * @se: Pointer to the concerned serial engine.
+ *
+ * Enable the required interrupts during the firmware load process.
+ */
+static void geni_enable_interrupts(struct geni_se *se)
+{
+	u32 val;
+
+	/* Enable required interrupts. */
+	writel(M_COMMON_GENI_M_IRQ_EN, se->base + SE_GENI_M_IRQ_EN);
+
+	val = S_CMD_OVERRUN_EN | S_ILLEGAL_CMD_EN | S_CMD_CANCEL_EN | S_CMD_ABORT_EN |
+	      S_GP_IRQ_0_EN | S_GP_IRQ_1_EN | S_GP_IRQ_2_EN | S_GP_IRQ_3_EN |
+	      S_RX_FIFO_WR_ERR_EN | S_RX_FIFO_RD_ERR_EN;
+	writel(val, se->base + SE_GENI_S_IRQ_ENABLE);
+
+	/* DMA mode configuration. */
+	val = GENI_SE_DMA_RESET_DONE_EN | GENI_SE_DMA_AHB_ERR_EN | GENI_SE_DMA_DONE_EN;
+	writel(val, se->base + SE_DMA_TX_IRQ_EN_SET);
+	val = GENI_SE_DMA_FLUSH_DONE | GENI_SE_DMA_RESET_DONE_EN | GENI_SE_DMA_AHB_ERR_EN |
+	      GENI_SE_DMA_DONE_EN;
+	writel(val, se->base + SE_DMA_RX_IRQ_EN_SET);
+}
+
+/**
+ * geni_write_fw_revision() - Write the firmware revision.
+ * @se: Pointer to the concerned serial engine.
+ * @serial_protocol: serial protocol type.
+ * @fw_version: QUP firmware version.
+ *
+ * Write the firmware revision and protocol into the respective register.
+ */
+static void geni_write_fw_revision(struct geni_se *se, u16 serial_protocol, u16 fw_version)
+{
+	u32 reg;
+
+	reg = FIELD_PREP(FW_REV_PROTOCOL_MSK, serial_protocol);
+	reg |= FIELD_PREP(FW_REV_VERSION_MSK, fw_version);
+
+	writel(reg, se->base + SE_GENI_FW_REVISION);
+	writel(reg, se->base + SE_GENI_S_FW_REVISION);
+}
+
+/**
+ * geni_load_se_fw() - Load Serial Engine specific firmware.
+ * @se: Pointer to the concerned serial engine.
+ * @fw: Pointer to the firmware structure.
+ * @mode: SE data transfer mode.
+ * @protocol: Protocol type to be used with the SE (e.g., UART, SPI, I2C).
+ *
+ * Load the protocol firmware into the IRAM of the Serial Engine.
+ *
+ * Return: 0 if successful, otherwise return an error value.
+ */
+static int geni_load_se_fw(struct geni_se *se, const struct firmware *fw,
+			   enum geni_se_xfer_mode mode, enum geni_se_protocol_type protocol)
+{
+	const u32 *fw_data, *cfg_val_arr;
+	const u8 *cfg_idx_arr;
+	u32 i, reg_value;
+	int ret;
+	struct se_fw_hdr *hdr;
+
+	hdr = geni_find_protocol_fw(se->dev, fw, protocol);
+	if (!hdr)
+		return -EINVAL;
+
+	fw_data = (const u32 *)((u8 *)hdr + le16_to_cpu(hdr->fw_offset));
+	cfg_idx_arr = (const u8 *)hdr + le16_to_cpu(hdr->cfg_idx_offset);
+	cfg_val_arr = (const u32 *)((u8 *)hdr + le16_to_cpu(hdr->cfg_val_offset));
+
+	ret = geni_icc_set_bw(se);
+	if (ret)
+		return ret;
+
+	ret = geni_icc_enable(se);
+	if (ret)
+		return ret;
+
+	ret = geni_se_resources_on(se);
+	if (ret)
+		goto out_icc_disable;
+
+	/*
+	 * Disable high-priority interrupts until all currently executing
+	 * low-priority interrupts have been fully handled.
+	 */
+	geni_setbits32(se->wrapper->base + QUPV3_COMMON_CFG, FAST_SWITCH_TO_HIGH_DISABLE);
+
+	/* Set AHB_M_CLK_CGC_ON to indicate hardware controls se-wrapper cgc clock. */
+	geni_setbits32(se->wrapper->base + QUPV3_SE_AHB_M_CFG, AHB_M_CLK_CGC_ON);
+
+	/* Let hardware to control common cgc. */
+	geni_setbits32(se->wrapper->base + QUPV3_COMMON_CGC_CTRL, COMMON_CSR_SLV_CLK_CGC_ON);
+
+	/*
+	 * Setting individual bits in GENI_OUTPUT_CTRL activates corresponding output lines,
+	 * allowing the hardware to drive data as configured.
+	 */
+	writel(0x0, se->base + GENI_OUTPUT_CTRL);
+
+	/* Set SCLK and HCLK to program RAM */
+	geni_setbits32(se->base + SE_GENI_CGC_CTRL, PROG_RAM_SCLK_OFF | PROG_RAM_HCLK_OFF);
+	writel(0x0, se->base + SE_GENI_CLK_CTRL);
+	geni_clrbits32(se->base + SE_GENI_CGC_CTRL, PROG_RAM_SCLK_OFF | PROG_RAM_HCLK_OFF);
+
+	/* Enable required clocks for DMA CSR, TX and RX. */
+	reg_value = AHB_SEC_SLV_CLK_CGC_ON | DMA_AHB_SLV_CLK_CGC_ON |
+		    DMA_TX_CLK_CGC_ON | DMA_RX_CLK_CGC_ON;
+	geni_setbits32(se->base + SE_DMA_GENERAL_CFG, reg_value);
+
+	/* Let hardware control CGC by default. */
+	writel(DEFAULT_CGC_EN, se->base + SE_GENI_CGC_CTRL);
+
+	/* Set version of the configuration register part of firmware. */
+	writel(le16_to_cpu(hdr->cfg_version), se->base + SE_GENI_INIT_CFG_REVISION);
+	writel(le16_to_cpu(hdr->cfg_version), se->base + SE_GENI_S_INIT_CFG_REVISION);
+
+	/* Configure GENI primitive table. */
+	for (i = 0; i < le16_to_cpu(hdr->cfg_size_in_items); i++)
+		writel(cfg_val_arr[i],
+		       se->base + SE_GENI_CFG_REG0 + (cfg_idx_arr[i] * sizeof(u32)));
+
+	/* Configure condition for assertion of RX_RFR_WATERMARK condition. */
+	reg_value = geni_se_get_rx_fifo_depth(se);
+	writel(reg_value - 2, se->base + SE_GENI_RX_RFR_WATERMARK_REG);
+
+	/* Let hardware control CGC */
+	geni_setbits32(se->base + GENI_OUTPUT_CTRL, DEFAULT_IO_OUTPUT_CTRL_MSK);
+
+	ret = geni_configure_xfer_mode(se, mode);
+	if (ret)
+		goto out_resources_off;
+
+	geni_enable_interrupts(se);
+
+	geni_write_fw_revision(se, le16_to_cpu(hdr->serial_protocol), le16_to_cpu(hdr->fw_version));
+
+	/* Program RAM address space. */
+	memcpy_toio(se->base + SE_GENI_CFG_RAMN, fw_data,
+		    le16_to_cpu(hdr->fw_size_in_items) * sizeof(u32));
+
+	/* Put default values on GENI's output pads. */
+	writel_relaxed(0x1, se->base + GENI_FORCE_DEFAULT_REG);
+
+	/* Toggle SCLK/HCLK from high to low to finalize RAM programming and apply config. */
+	geni_setbits32(se->base + SE_GENI_CGC_CTRL, PROG_RAM_SCLK_OFF | PROG_RAM_HCLK_OFF);
+	geni_setbits32(se->base + SE_GENI_CLK_CTRL, SER_CLK_SEL);
+	geni_clrbits32(se->base + SE_GENI_CGC_CTRL, PROG_RAM_SCLK_OFF | PROG_RAM_HCLK_OFF);
+
+	/* Serial engine DMA interface is enabled. */
+	geni_setbits32(se->base + SE_DMA_IF_EN, DMA_IF_EN);
+
+	/* Enable or disable FIFO interface of the serial engine. */
+	if (mode == GENI_SE_FIFO)
+		geni_clrbits32(se->base + SE_FIFO_IF_DISABLE, FIFO_IF_DISABLE);
+	else
+		geni_setbits32(se->base + SE_FIFO_IF_DISABLE, FIFO_IF_DISABLE);
+
+out_resources_off:
+	geni_se_resources_off(se);
+
+out_icc_disable:
+	geni_icc_disable(se);
+	return ret;
+}
+
+/**
+ * geni_load_se_firmware() - Load firmware for SE based on protocol
+ * @se: Pointer to the concerned serial engine.
+ * @protocol: Protocol type to be used with the SE (e.g., UART, SPI, I2C).
+ *
+ * Retrieves the firmware name from device properties and sets the transfer mode
+ * (FIFO or GSI DMA) based on device tree configuration. Enforces FIFO mode for
+ * UART protocol due to lack of GSI DMA support. Requests the firmware and loads
+ * it into the SE.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int geni_load_se_firmware(struct geni_se *se, enum geni_se_protocol_type protocol)
+{
+	const char *fw_name;
+	const struct firmware *fw;
+	enum geni_se_xfer_mode mode = GENI_SE_FIFO;
+	int ret;
+
+	if (protocol >= ARRAY_SIZE(protocol_name)) {
+		dev_err(se->dev, "Invalid geni-se protocol: %d", protocol);
+		return -EINVAL;
+	}
+
+	ret = device_property_read_string(se->wrapper->dev, "firmware-name", &fw_name);
+	if (ret) {
+		dev_err(se->dev, "Failed to read firmware-name property: %d\n", ret);
+		return -EINVAL;
+	}
+
+	if (of_property_read_bool(se->dev->of_node, "qcom,enable-gsi-dma"))
+		mode = GENI_GPI_DMA;
+
+	/* GSI mode is not supported by the UART driver; therefore, setting FIFO mode */
+	if (protocol == GENI_SE_UART)
+		mode = GENI_SE_FIFO;
+
+	ret = request_firmware(&fw, fw_name, se->dev);
+	if (ret) {
+		if (ret == -ENOENT)
+			return -EPROBE_DEFER;
+
+		dev_err(se->dev, "Failed to request firmware '%s' for protocol %d: ret: %d\n",
+			fw_name, protocol, ret);
+		return ret;
+	}
+
+	ret = geni_load_se_fw(se, fw, mode, protocol);
+	release_firmware(fw);
+
+	if (ret) {
+		dev_err(se->dev, "Failed to load SE firmware for protocol %d: ret: %d\n",
+			protocol, ret);
+		return ret;
+	}
+
+	dev_dbg(se->dev, "Firmware load for %s protocol is successful for xfer mode: %d\n",
+		protocol_name[protocol], mode);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(geni_load_se_firmware);
+
 static int geni_se_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct geni_wrapper *wrapper;
+	const struct geni_se_desc *desc;
 	int ret;
 
 	wrapper = devm_kzalloc(dev, sizeof(*wrapper), GFP_KERNEL);
@@ -906,13 +1609,10 @@ static int geni_se_probe(struct platform_device *pdev)
 	if (IS_ERR(wrapper->base))
 		return PTR_ERR(wrapper->base);
 
-	if (!has_acpi_companion(&pdev->dev)) {
-		const struct geni_se_desc *desc;
-		int i;
+	desc = device_get_match_data(&pdev->dev);
 
-		desc = device_get_match_data(&pdev->dev);
-		if (!desc)
-			return -EINVAL;
+	if (!has_acpi_companion(&pdev->dev) && desc->num_clks) {
+		int i;
 
 		wrapper->num_clks = min_t(unsigned int, desc->num_clks, MAX_CLKS);
 
@@ -953,6 +1653,8 @@ static const struct geni_se_desc qup_desc = {
 	.num_clks = ARRAY_SIZE(qup_clks),
 };
 
+static const struct geni_se_desc sa8255p_qup_desc = {};
+
 static const char * const i2c_master_hub_clks[] = {
 	"s-ahb",
 };
@@ -965,6 +1667,7 @@ static const struct geni_se_desc i2c_master_hub_desc = {
 static const struct of_device_id geni_se_dt_match[] = {
 	{ .compatible = "qcom,geni-se-qup", .data = &qup_desc },
 	{ .compatible = "qcom,geni-se-i2c-master-hub", .data = &i2c_master_hub_desc },
+	{ .compatible = "qcom,sa8255p-geni-se-qup", .data = &sa8255p_qup_desc },
 	{}
 };
 MODULE_DEVICE_TABLE(of, geni_se_dt_match);

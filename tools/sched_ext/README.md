@@ -58,15 +58,8 @@ CONFIG_SCHED_CLASS_EXT=y
 CONFIG_BPF_SYSCALL=y
 CONFIG_BPF_JIT=y
 CONFIG_DEBUG_INFO_BTF=y
-```
-
-It's also recommended that you also include the following Kconfig options:
-
-```
 CONFIG_BPF_JIT_ALWAYS_ON=y
 CONFIG_BPF_JIT_DEFAULT_ON=y
-CONFIG_PAHOLE_HAS_SPLIT_BTF=y
-CONFIG_PAHOLE_HAS_BTF_TAG=y
 ```
 
 There is a `Kconfig` file in this directory whose contents you can append to
@@ -175,9 +168,9 @@ well on single-socket systems with a unified L3 cache.
 
 Another simple, yet slightly more complex scheduler that provides an example of
 a basic weighted FIFO queuing policy. It also provides examples of some common
-useful BPF features, such as sleepable per-task storage allocation in the
-`ops.prep_enable()` callback, and using the `BPF_MAP_TYPE_QUEUE` map type to
-enqueue tasks. It also illustrates how core-sched support could be implemented.
+useful BPF features, such as arena-backed doubly-linked lists threaded through
+per-task context and `bpf_res_spin_lock` for per-queue synchronization. It also
+illustrates how core-sched support could be implemented.
 
 ## scx_central
 

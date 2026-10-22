@@ -288,9 +288,9 @@ static int meson_spifc_probe(struct platform_device *pdev)
 	struct meson_spifc *spifc;
 	void __iomem *base;
 	unsigned int rate;
-	int ret = 0;
+	int ret;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(struct meson_spifc));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(struct meson_spifc));
 	if (!host)
 		return -ENOMEM;
 
@@ -300,29 +300,23 @@ static int meson_spifc_probe(struct platform_device *pdev)
 	spifc->dev = &pdev->dev;
 
 	base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(base)) {
-		ret = PTR_ERR(base);
-		goto out_err;
-	}
+	if (IS_ERR(base))
+		return PTR_ERR(base);
 
 	spifc->regmap = devm_regmap_init_mmio(spifc->dev, base,
 					      &spifc_regmap_config);
-	if (IS_ERR(spifc->regmap)) {
-		ret = PTR_ERR(spifc->regmap);
-		goto out_err;
-	}
+	if (IS_ERR(spifc->regmap))
+		return PTR_ERR(spifc->regmap);
 
 	spifc->clk = devm_clk_get_enabled(spifc->dev, NULL);
 	if (IS_ERR(spifc->clk)) {
 		dev_err(spifc->dev, "missing clock\n");
-		ret = PTR_ERR(spifc->clk);
-		goto out_err;
+		return PTR_ERR(spifc->clk);
 	}
 
 	rate = clk_get_rate(spifc->clk);
 
 	host->num_chipselect = 1;
-	host->dev.of_node = pdev->dev.of_node;
 	host->bits_per_word_mask = SPI_BPW_MASK(8);
 	host->auto_runtime_pm = true;
 	host->transfer_one = meson_spifc_transfer_one;
@@ -343,8 +337,7 @@ static int meson_spifc_probe(struct platform_device *pdev)
 	return 0;
 out_pm:
 	pm_runtime_disable(spifc->dev);
-out_err:
-	spi_controller_put(host);
+
 	return ret;
 }
 
@@ -352,6 +345,7 @@ static void meson_spifc_remove(struct platform_device *pdev)
 {
 	pm_runtime_get_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
+	pm_runtime_put_noidle(&pdev->dev);
 }
 
 #ifdef CONFIG_PM_SLEEP

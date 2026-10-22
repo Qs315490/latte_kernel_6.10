@@ -1309,8 +1309,7 @@ int mptscsih_show_info(struct seq_file *m, struct Scsi_Host *host)
  *
  *	Returns 0. (rtn value discarded by linux scsi mid-layer)
  */
-int
-mptscsih_qcmd(struct scsi_cmnd *SCpnt)
+enum scsi_qc_status mptscsih_qcmd(struct scsi_cmnd *SCpnt)
 {
 	MPT_SCSI_HOST		*hd;
 	MPT_FRAME_HDR		*mf;
@@ -1843,65 +1842,6 @@ mptscsih_dev_reset(struct scsi_cmnd * SCpnt)
 		return FAILED;
 }
 
-/*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
-/**
- *	mptscsih_target_reset - Perform a SCSI TARGET_RESET!
- *	@SCpnt: Pointer to scsi_cmnd structure, IO which reset is due to
- *
- *	(linux scsi_host_template.eh_target_reset_handler routine)
- *
- *	Returns SUCCESS or FAILED.
- **/
-int
-mptscsih_target_reset(struct scsi_cmnd * SCpnt)
-{
-	MPT_SCSI_HOST	*hd;
-	int		 retval;
-	VirtDevice	 *vdevice;
-	MPT_ADAPTER	*ioc;
-
-	/* If we can't locate our host adapter structure, return FAILED status.
-	 */
-	if ((hd = shost_priv(SCpnt->device->host)) == NULL){
-		printk(KERN_ERR MYNAM ": target reset: "
-		   "Can't locate host! (sc=%p)\n", SCpnt);
-		return FAILED;
-	}
-
-	ioc = hd->ioc;
-	printk(MYIOC_s_INFO_FMT "attempting target reset! (sc=%p)\n",
-	       ioc->name, SCpnt);
-	scsi_print_command(SCpnt);
-
-	vdevice = SCpnt->device->hostdata;
-	if (!vdevice || !vdevice->vtarget) {
-		retval = 0;
-		goto out;
-	}
-
-	/* Target reset to hidden raid component is not supported
-	 */
-	if (vdevice->vtarget->tflags & MPT_TARGET_FLAGS_RAID_COMPONENT) {
-		retval = FAILED;
-		goto out;
-	}
-
-	retval = mptscsih_IssueTaskMgmt(hd,
-				MPI_SCSITASKMGMT_TASKTYPE_TARGET_RESET,
-				vdevice->vtarget->channel,
-				vdevice->vtarget->id, 0, 0,
-				mptscsih_get_tm_timeout(ioc));
-
- out:
-	printk (MYIOC_s_INFO_FMT "target reset: %s (sc=%p)\n",
-	    ioc->name, ((retval == 0) ? "SUCCESS" : "FAILED" ), SCpnt);
-
-	if (retval == 0)
-		return SUCCESS;
-	else
-		return FAILED;
-}
-
 
 /*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
 /**
@@ -2133,7 +2073,7 @@ mptscsih_taskmgmt_complete(MPT_ADAPTER *ioc, MPT_FRAME_HDR *mf,
  *	This is anyones guess quite frankly.
  */
 int
-mptscsih_bios_param(struct scsi_device * sdev, struct block_device *bdev,
+mptscsih_bios_param(struct scsi_device * sdev, struct gendisk *unused,
 		sector_t capacity, int geom[])
 {
 	int		heads;
@@ -2915,14 +2855,14 @@ mptscsih_do_cmd(MPT_SCSI_HOST *hd, INTERNAL_CMD *io)
 		timeout = 10;
 		break;
 
-	case RESERVE:
+	case RESERVE_6:
 		cmdLen = 6;
 		dir = MPI_SCSIIO_CONTROL_READ;
 		CDB[0] = cmd;
 		timeout = 10;
 		break;
 
-	case RELEASE:
+	case RELEASE_6:
 		cmdLen = 6;
 		dir = MPI_SCSIIO_CONTROL_READ;
 		CDB[0] = cmd;
@@ -3306,7 +3246,6 @@ EXPORT_SYMBOL(mptscsih_sdev_destroy);
 EXPORT_SYMBOL(mptscsih_sdev_configure);
 EXPORT_SYMBOL(mptscsih_abort);
 EXPORT_SYMBOL(mptscsih_dev_reset);
-EXPORT_SYMBOL(mptscsih_target_reset);
 EXPORT_SYMBOL(mptscsih_bus_reset);
 EXPORT_SYMBOL(mptscsih_host_reset);
 EXPORT_SYMBOL(mptscsih_bios_param);

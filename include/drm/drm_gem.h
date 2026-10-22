@@ -35,10 +35,14 @@
  */
 
 #include <linux/kref.h>
+#include <linux/dma-buf.h>
 #include <linux/dma-resv.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
 
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+#include <drm/drm_device.h>
+#endif
 #include <drm/drm_vma_manager.h>
 
 struct iosys_map;
@@ -125,7 +129,8 @@ struct drm_gem_object_funcs {
 	/**
 	 * @pin:
 	 *
-	 * Pin backing buffer in memory. Used by the drm_gem_map_attach() helper.
+	 * Pin backing buffer in memory, such that dma-buf importers can
+	 * access it. Used by the drm_gem_map_attach() helper.
 	 *
 	 * This callback is optional.
 	 */
@@ -158,7 +163,8 @@ struct drm_gem_object_funcs {
 	 * @vmap:
 	 *
 	 * Returns a virtual address for the buffer. Used by the
-	 * drm_gem_dmabuf_vmap() helper.
+	 * drm_gem_dmabuf_vmap() helper. Called with a held GEM reservation
+	 * lock.
 	 *
 	 * This callback is optional.
 	 */
@@ -168,7 +174,8 @@ struct drm_gem_object_funcs {
 	 * @vunmap:
 	 *
 	 * Releases the address previously returned by @vmap. Used by the
-	 * drm_gem_dmabuf_vunmap() helper.
+	 * drm_gem_dmabuf_vunmap() helper. Called with a held GEM reservation
+	 * lock.
 	 *
 	 * This callback is optional.
 	 */
@@ -191,7 +198,8 @@ struct drm_gem_object_funcs {
 	 * @evict:
 	 *
 	 * Evicts gem object out from memory. Used by the drm_gem_object_evict()
-	 * helper. Returns 0 on success, -errno otherwise.
+	 * helper. Returns 0 on success, -errno otherwise. Called with a held
+	 * GEM reservation lock.
 	 *
 	 * This callback is optional.
 	 */
@@ -237,17 +245,11 @@ struct drm_gem_object_funcs {
  * for lockless &shrinker.count_objects, and provides
  * &drm_gem_lru_scan for driver's &shrinker.scan_objects
  * implementation.
+ *
+ * Any access to this kind of object must be done with
+ * drm_device::gem_lru_mutex held.
  */
 struct drm_gem_lru {
-	/**
-	 * @lock:
-	 *
-	 * Lock protecting movement of GEM objects between LRUs.  All
-	 * LRUs that the object can move between should be protected
-	 * by the same lock.
-	 */
-	struct mutex *lock;
-
 	/**
 	 * @count:
 	 *
@@ -393,19 +395,34 @@ struct drm_gem_object {
 	struct dma_resv _resv;
 
 	/**
-	 * @gpuva:
+	 * @gpuva: Fields used by GPUVM to manage mappings pointing to this GEM object.
 	 *
-	 * Provides the list of GPU VAs attached to this GEM object.
+	 * When DRM_GPUVM_IMMEDIATE_MODE is set, this list is protected by the
+	 * mutex. Otherwise, the list is protected by the GEMs &dma_resv lock.
 	 *
-	 * Drivers should lock list accesses with the GEMs &dma_resv lock
-	 * (&drm_gem_object.resv) or a custom lock if one is provided.
+	 * Note that all entries in this list must agree on whether
+	 * DRM_GPUVM_IMMEDIATE_MODE is set.
 	 */
 	struct {
+		/**
+		 * @gpuva.list: list of GPUVM mappings attached to this GEM object.
+		 *
+		 * Drivers should lock list accesses with either the GEMs
+		 * &dma_resv lock (&drm_gem_object.resv) or the
+		 * &drm_gem_object.gpuva.lock mutex.
+		 */
 		struct list_head list;
 
-#ifdef CONFIG_LOCKDEP
-		struct lockdep_map *lock_dep_map;
-#endif
+		/**
+		 * @gpuva.lock: lock protecting access to &drm_gem_object.gpuva.list
+		 * when DRM_GPUVM_IMMEDIATE_MODE is used.
+		 *
+		 * Only used when DRM_GPUVM_IMMEDIATE_MODE is set. It should be
+		 * safe to take this mutex during the fence signalling path, so
+		 * do not allocate memory while holding this lock. Otherwise,
+		 * the &dma_resv lock should be used.
+		 */
+		struct mutex lock;
 	} gpuva;
 
 	/**
@@ -430,6 +447,9 @@ struct drm_gem_object {
 	 * @lru:
 	 *
 	 * The current LRU list that the GEM object is on.
+	 *
+	 * Access to this field must be done with drm_device::gem_lru_mutex
+	 * held.
 	 */
 	struct drm_gem_lru *lru;
 };
@@ -449,6 +469,7 @@ struct drm_gem_object {
 	.poll		= drm_poll,\
 	.read		= drm_read,\
 	.llseek		= noop_llseek,\
+	.get_unmapped_area	= drm_gem_get_unmapped_area,\
 	.mmap		= drm_gem_mmap, \
 	.fop_flags	= FOP_UNSIGNED_OFFSET
 
@@ -471,13 +492,40 @@ struct drm_gem_object {
 		DRM_GEM_FOPS,\
 	}
 
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+int drm_gem_huge_mnt_create(struct drm_device *dev, const char *value);
+#else
+static inline int drm_gem_huge_mnt_create(struct drm_device *dev,
+					  const char *value)
+{
+	return 0;
+}
+#endif
+
+/**
+ * drm_gem_get_huge_mnt - Get the huge tmpfs mountpoint used by a DRM device
+ * @dev: DRM device
+ *
+ * This function gets the huge tmpfs mountpoint used by DRM device @dev. A huge
+ * tmpfs mountpoint is used instead of `shm_mnt` after a successful call to
+ * drm_gem_huge_mnt_create() when CONFIG_TRANSPARENT_HUGEPAGE is enabled.
+ *
+ * Returns:
+ * The huge tmpfs mountpoint in use, NULL otherwise.
+ */
+static inline struct vfsmount *drm_gem_get_huge_mnt(struct drm_device *dev)
+{
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	return dev->huge_mnt;
+#else
+	return NULL;
+#endif
+}
+
 void drm_gem_object_release(struct drm_gem_object *obj);
 void drm_gem_object_free(struct kref *kref);
 int drm_gem_object_init(struct drm_device *dev,
 			struct drm_gem_object *obj, size_t size);
-int drm_gem_object_init_with_mnt(struct drm_device *dev,
-				 struct drm_gem_object *obj, size_t size,
-				 struct vfsmount *gemfs);
 void drm_gem_private_object_init(struct drm_device *dev,
 				 struct drm_gem_object *obj, size_t size);
 void drm_gem_private_object_fini(struct drm_gem_object *obj);
@@ -486,6 +534,14 @@ void drm_gem_vm_close(struct vm_area_struct *vma);
 int drm_gem_mmap_obj(struct drm_gem_object *obj, unsigned long obj_size,
 		     struct vm_area_struct *vma);
 int drm_gem_mmap(struct file *filp, struct vm_area_struct *vma);
+
+#ifdef CONFIG_MMU
+unsigned long drm_gem_get_unmapped_area(struct file *filp, unsigned long uaddr,
+					unsigned long len, unsigned long pgoff,
+					unsigned long flags);
+#else
+#define drm_gem_get_unmapped_area NULL
+#endif
 
 /**
  * drm_gem_object_get - acquire a GEM buffer object reference
@@ -536,8 +592,8 @@ void drm_gem_put_pages(struct drm_gem_object *obj, struct page **pages,
 void drm_gem_lock(struct drm_gem_object *obj);
 void drm_gem_unlock(struct drm_gem_object *obj);
 
-int drm_gem_vmap_unlocked(struct drm_gem_object *obj, struct iosys_map *map);
-void drm_gem_vunmap_unlocked(struct drm_gem_object *obj, struct iosys_map *map);
+int drm_gem_vmap(struct drm_gem_object *obj, struct iosys_map *map);
+void drm_gem_vunmap(struct drm_gem_object *obj, struct iosys_map *map);
 
 int drm_gem_objects_lookup(struct drm_file *filp, void __user *bo_handles,
 			   int count, struct drm_gem_object ***objs_out);
@@ -551,16 +607,19 @@ void drm_gem_unlock_reservations(struct drm_gem_object **objs, int count,
 int drm_gem_dumb_map_offset(struct drm_file *file, struct drm_device *dev,
 			    u32 handle, u64 *offset);
 
-void drm_gem_lru_init(struct drm_gem_lru *lru, struct mutex *lock);
+void drm_gem_lru_init(struct drm_gem_lru *lru);
 void drm_gem_lru_remove(struct drm_gem_object *obj);
 void drm_gem_lru_move_tail_locked(struct drm_gem_lru *lru, struct drm_gem_object *obj);
 void drm_gem_lru_move_tail(struct drm_gem_lru *lru, struct drm_gem_object *obj);
-unsigned long drm_gem_lru_scan(struct drm_gem_lru *lru,
-			       unsigned int nr_to_scan,
-			       unsigned long *remaining,
-			       bool (*shrink)(struct drm_gem_object *obj));
+unsigned long
+drm_gem_lru_scan(struct drm_device *dev,
+		 struct drm_gem_lru *lru,
+		 unsigned int nr_to_scan,
+		 unsigned long *remaining,
+		 bool (*shrink)(struct drm_gem_object *obj, struct ww_acquire_ctx *ticket),
+		 struct ww_acquire_ctx *ticket);
 
-int drm_gem_evict(struct drm_gem_object *obj);
+int drm_gem_evict_locked(struct drm_gem_object *obj);
 
 /**
  * drm_gem_object_is_shared_for_memory_stats - helper for shared memory stats
@@ -575,27 +634,25 @@ static inline bool drm_gem_object_is_shared_for_memory_stats(struct drm_gem_obje
 	return (obj->handle_count > 1) || obj->dma_buf;
 }
 
-#ifdef CONFIG_LOCKDEP
 /**
- * drm_gem_gpuva_set_lock() - Set the lock protecting accesses to the gpuva list.
- * @obj: the &drm_gem_object
- * @lock: the lock used to protect the gpuva list. The locking primitive
- * must contain a dep_map field.
+ * drm_gem_is_imported() - Tests if GEM object's buffer has been imported
+ * @obj: the GEM object
  *
- * Call this if you're not proctecting access to the gpuva list with the
- * dma-resv lock, but with a custom lock.
+ * Returns:
+ * True if the GEM object's buffer has been imported, false otherwise
  */
-#define drm_gem_gpuva_set_lock(obj, lock) \
-	if (!WARN((obj)->gpuva.lock_dep_map, \
-		  "GEM GPUVA lock should be set only once.")) \
-		(obj)->gpuva.lock_dep_map = &(lock)->dep_map
-#define drm_gem_gpuva_assert_lock_held(obj) \
-	lockdep_assert((obj)->gpuva.lock_dep_map ? \
-		       lock_is_held((obj)->gpuva.lock_dep_map) : \
+static inline bool drm_gem_is_imported(const struct drm_gem_object *obj)
+{
+	return !!obj->import_attach;
+}
+
+#ifdef CONFIG_LOCKDEP
+#define drm_gem_gpuva_assert_lock_held(gpuvm, obj) \
+	lockdep_assert(drm_gpuvm_immediate_mode(gpuvm) ? \
+		       lockdep_is_held(&(obj)->gpuva.lock) : \
 		       dma_resv_held((obj)->resv))
 #else
-#define drm_gem_gpuva_set_lock(obj, lock) do {} while (0)
-#define drm_gem_gpuva_assert_lock_held(obj) do {} while (0)
+#define drm_gem_gpuva_assert_lock_held(gpuvm, obj) do {} while (0)
 #endif
 
 /**

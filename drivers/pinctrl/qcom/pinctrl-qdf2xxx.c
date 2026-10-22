@@ -106,7 +106,6 @@ static int qdf2xxx_pinctrl_probe(struct platform_device *pdev)
 		groups[gpio].io_reg = 0x04 + 0x10000 * gpio;
 		groups[gpio].intr_cfg_reg = 0x08 + 0x10000 * gpio;
 		groups[gpio].intr_status_reg = 0x0c + 0x10000 * gpio;
-		groups[gpio].intr_target_reg = 0x08 + 0x10000 * gpio;
 
 		groups[gpio].mux_bit = 2;
 		groups[gpio].pull_bit = 0;
@@ -145,7 +144,6 @@ static struct platform_driver qdf2xxx_pinctrl_driver = {
 		.acpi_match_table = qdf2xxx_acpi_ids,
 	},
 	.probe = qdf2xxx_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init qdf2xxx_pinctrl_init(void)

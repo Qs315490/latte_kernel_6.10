@@ -18,8 +18,6 @@
 #include "octep_vf_config.h"
 #include "octep_vf_main.h"
 
-struct workqueue_struct *octep_vf_wq;
-
 /* Supported Devices */
 static const struct pci_device_id octep_vf_pci_id_tbl[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, OCTEP_PCI_DEVICE_ID_CN93_VF)},
@@ -115,7 +113,7 @@ static int octep_vf_enable_msix_range(struct octep_vf_device *oct)
 	/* Generic interrupts apart from input/output queues */
 	//num_msix = oct->num_oqs + CFG_GET_NON_IOQ_MSIX(oct->conf);
 	num_msix = oct->num_oqs;
-	oct->msix_entries = kcalloc(num_msix, sizeof(struct msix_entry), GFP_KERNEL);
+	oct->msix_entries = kzalloc_objs(struct msix_entry, num_msix);
 	if (!oct->msix_entries)
 		goto msix_alloc_err;
 
@@ -220,7 +218,7 @@ static int octep_vf_request_irqs(struct octep_vf_device *oct)
 ioq_irq_err:
 	while (i) {
 		--i;
-		free_irq(oct->msix_entries[i].vector, oct);
+		free_irq(oct->msix_entries[i].vector, oct->ioq_vector[i]);
 	}
 	return -1;
 }
@@ -288,28 +286,45 @@ static void octep_vf_clean_irqs(struct octep_vf_device *oct)
 }
 
 /**
+ * octep_vf_update_pkt() - Update IQ/OQ IN/OUT_CNT registers.
+ *
+ * @iq: Octeon Tx queue data structure.
+ * @oq: Octeon Rx queue data structure.
+ */
+
+static void octep_vf_update_pkt(struct octep_vf_iq *iq, struct octep_vf_oq *oq)
+{
+	u32 pkts_pend = READ_ONCE(oq->pkts_pending);
+	u32 last_pkt_count = READ_ONCE(oq->last_pkt_count);
+	u32 pkts_processed = READ_ONCE(iq->pkts_processed);
+	u32 pkt_in_done = READ_ONCE(iq->pkt_in_done);
+
+	netdev_dbg(iq->netdev, "enabling intr for Q-%u\n", iq->q_no);
+	if (pkts_processed) {
+		writel(pkts_processed, iq->inst_cnt_reg);
+		readl(iq->inst_cnt_reg);
+		WRITE_ONCE(iq->pkt_in_done, (pkt_in_done - pkts_processed));
+		WRITE_ONCE(iq->pkts_processed, 0);
+	}
+	if (last_pkt_count - pkts_pend) {
+		writel(last_pkt_count - pkts_pend, oq->pkts_sent_reg);
+		readl(oq->pkts_sent_reg);
+		WRITE_ONCE(oq->last_pkt_count, pkts_pend);
+	}
+
+	/* Flush the previous wrties before writing to RESEND bit */
+	smp_wmb();
+}
+
+/**
  * octep_vf_enable_ioq_irq() - Enable MSI-x interrupt of a Tx/Rx queue.
  *
  * @iq: Octeon Tx queue data structure.
  * @oq: Octeon Rx queue data structure.
  */
-static void octep_vf_enable_ioq_irq(struct octep_vf_iq *iq, struct octep_vf_oq *oq)
+static void octep_vf_enable_ioq_irq(struct octep_vf_iq *iq,
+				    struct octep_vf_oq *oq)
 {
-	u32 pkts_pend = oq->pkts_pending;
-
-	netdev_dbg(iq->netdev, "enabling intr for Q-%u\n", iq->q_no);
-	if (iq->pkts_processed) {
-		writel(iq->pkts_processed, iq->inst_cnt_reg);
-		iq->pkt_in_done -= iq->pkts_processed;
-		iq->pkts_processed = 0;
-	}
-	if (oq->last_pkt_count - pkts_pend) {
-		writel(oq->last_pkt_count - pkts_pend, oq->pkts_sent_reg);
-		oq->last_pkt_count = pkts_pend;
-	}
-
-	/* Flush the previous wrties before writing to RESEND bit */
-	smp_wmb();
 	writeq(1UL << OCTEP_VF_OQ_INTR_RESEND_BIT, oq->pkts_sent_reg);
 	writeq(1UL << OCTEP_VF_IQ_INTR_RESEND_BIT, iq->inst_cnt_reg);
 }
@@ -335,6 +350,7 @@ static int octep_vf_napi_poll(struct napi_struct *napi, int budget)
 	if (tx_pending || rx_done >= budget)
 		return budget;
 
+	octep_vf_update_pkt(ioq_vector->iq, ioq_vector->oq);
 	if (likely(napi_complete_done(napi, rx_done)))
 		octep_vf_enable_ioq_irq(ioq_vector->iq, ioq_vector->oq);
 
@@ -835,7 +851,9 @@ static void octep_vf_tx_timeout(struct net_device *netdev, unsigned int txqueue)
 	struct octep_vf_device *oct = netdev_priv(netdev);
 
 	netdev_hold(netdev, NULL, GFP_ATOMIC);
-	schedule_work(&oct->tx_timeout_task);
+	if (!schedule_work(&oct->tx_timeout_task))
+		netdev_put(netdev, NULL);
+
 }
 
 static int octep_vf_set_mac(struct net_device *netdev, void *p)
@@ -951,7 +969,7 @@ int octep_vf_device_setup(struct octep_vf_device *oct)
 	struct pci_dev *pdev = oct->pdev;
 
 	/* allocate memory for oct->conf */
-	oct->conf = kzalloc(sizeof(*oct->conf), GFP_KERNEL);
+	oct->conf = kzalloc_obj(*oct->conf);
 	if (!oct->conf)
 		return -ENOMEM;
 

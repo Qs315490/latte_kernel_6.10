@@ -18,12 +18,12 @@
 #include <linux/rbtree_types.h>
 #include <linux/spinlock_types_raw.h>
 
-extern int max_lock_depth; /* for sysctl */
+extern int max_lock_depth;
 
 struct rt_mutex_base {
 	raw_spinlock_t		wait_lock;
-	struct rb_root_cached   waiters;
-	struct task_struct	*owner;
+	struct rb_root_cached   waiters __guarded_by(&wait_lock);
+	struct task_struct	*owner  __guarded_by(&wait_lock);
 };
 
 #define __RT_MUTEX_BASE_INITIALIZER(rtbasename)				\
@@ -41,10 +41,22 @@ struct rt_mutex_base {
  */
 static inline bool rt_mutex_base_is_locked(struct rt_mutex_base *lock)
 {
-	return READ_ONCE(lock->owner) != NULL;
+	return data_race(READ_ONCE(lock->owner) != NULL);
 }
 
+#ifdef CONFIG_RT_MUTEXES
+#define RT_MUTEX_HAS_WAITERS	1UL
+
+static inline struct task_struct *rt_mutex_owner(struct rt_mutex_base *lock)
+{
+	unsigned long owner = (unsigned long) data_race(READ_ONCE(lock->owner));
+
+	return (struct task_struct *) (owner & ~RT_MUTEX_HAS_WAITERS);
+}
+#endif
 extern void rt_mutex_base_init(struct rt_mutex_base *rtb);
+
+context_lock_struct(rt_mutex);
 
 /**
  * The rt_mutex structure
@@ -98,8 +110,10 @@ do { \
 extern void __rt_mutex_init(struct rt_mutex *lock, const char *name, struct lock_class_key *key);
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
-extern void rt_mutex_lock_nested(struct rt_mutex *lock, unsigned int subclass);
-extern void _rt_mutex_lock_nest_lock(struct rt_mutex *lock, struct lockdep_map *nest_lock);
+extern void rt_mutex_lock_nested(struct rt_mutex *lock, unsigned int subclass)
+	__acquires(lock);
+extern void _rt_mutex_lock_nest_lock(struct rt_mutex *lock, struct lockdep_map *nest_lock)
+	__acquires(lock);
 #define rt_mutex_lock(lock) rt_mutex_lock_nested(lock, 0)
 #define rt_mutex_lock_nest_lock(lock, nest_lock)			\
 	do {								\
@@ -108,15 +122,19 @@ extern void _rt_mutex_lock_nest_lock(struct rt_mutex *lock, struct lockdep_map *
 	} while (0)
 
 #else
-extern void rt_mutex_lock(struct rt_mutex *lock);
+extern void rt_mutex_lock(struct rt_mutex *lock) __acquires(lock);
 #define rt_mutex_lock_nested(lock, subclass) rt_mutex_lock(lock)
 #define rt_mutex_lock_nest_lock(lock, nest_lock) rt_mutex_lock(lock)
 #endif
 
-extern int rt_mutex_lock_interruptible(struct rt_mutex *lock);
-extern int rt_mutex_lock_killable(struct rt_mutex *lock);
-extern int rt_mutex_trylock(struct rt_mutex *lock);
+extern int rt_mutex_lock_interruptible(struct rt_mutex *lock)
+	__cond_acquires(0, lock);
+extern int rt_mutex_lock_killable(struct rt_mutex *lock)
+	__cond_acquires(0, lock);
+extern int rt_mutex_trylock(struct rt_mutex *lock)
+	__cond_acquires(true, lock);
 
-extern void rt_mutex_unlock(struct rt_mutex *lock);
+extern void rt_mutex_unlock(struct rt_mutex *lock)
+	__releases(lock);
 
 #endif

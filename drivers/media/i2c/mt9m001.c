@@ -743,9 +743,10 @@ static int mt9m001_probe(struct i2c_client *client)
 	if (!mt9m001)
 		return -ENOMEM;
 
-	mt9m001->clk = devm_clk_get(&client->dev, NULL);
+	mt9m001->clk = devm_v4l2_sensor_clk_get(&client->dev, NULL);
 	if (IS_ERR(mt9m001->clk))
-		return PTR_ERR(mt9m001->clk);
+		return dev_err_probe(&client->dev, PTR_ERR(mt9m001->clk),
+				     "failed to get the clock\n");
 
 	mt9m001->standby_gpio = devm_gpiod_get_optional(&client->dev, "standby",
 							GPIOD_OUT_LOW);
@@ -854,7 +855,7 @@ static void mt9m001_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mt9m001_id[] = {
-	{ "mt9m001" },
+	{ .name = "mt9m001" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mt9m001_id);

@@ -495,7 +495,7 @@ static void pmcraid_clr_trans_op(
 	}
 
 	if (pinstance->reset_cmd != NULL) {
-		del_timer(&pinstance->reset_cmd->timer);
+		timer_delete(&pinstance->reset_cmd->timer);
 		spin_lock_irqsave(
 			pinstance->host->host_lock, lock_flags);
 		pinstance->reset_cmd->cmd_done(pinstance->reset_cmd);
@@ -544,7 +544,7 @@ static void pmcraid_ioa_reset(struct pmcraid_cmd *);
  */
 static void pmcraid_bist_done(struct timer_list *t)
 {
-	struct pmcraid_cmd *cmd = from_timer(cmd, t, timer);
+	struct pmcraid_cmd *cmd = timer_container_of(cmd, t, timer);
 	struct pmcraid_instance *pinstance = cmd->drv_inst;
 	unsigned long lock_flags;
 	int rc;
@@ -601,7 +601,7 @@ static void pmcraid_start_bist(struct pmcraid_cmd *cmd)
  */
 static void pmcraid_reset_alert_done(struct timer_list *t)
 {
-	struct pmcraid_cmd *cmd = from_timer(cmd, t, timer);
+	struct pmcraid_cmd *cmd = timer_container_of(cmd, t, timer);
 	struct pmcraid_instance *pinstance = cmd->drv_inst;
 	u32 status = ioread32(pinstance->ioa_status);
 	unsigned long lock_flags;
@@ -685,7 +685,7 @@ static void pmcraid_reset_alert(struct pmcraid_cmd *cmd)
  */
 static void pmcraid_timeout_handler(struct timer_list *t)
 {
-	struct pmcraid_cmd *cmd = from_timer(cmd, t, timer);
+	struct pmcraid_cmd *cmd = timer_container_of(cmd, t, timer);
 	struct pmcraid_instance *pinstance = cmd->drv_inst;
 	unsigned long lock_flags;
 
@@ -1999,7 +1999,7 @@ static void pmcraid_fail_outstanding_cmds(struct pmcraid_instance *pinstance)
 			cpu_to_le32(PMCRAID_DRIVER_ILID);
 
 		/* In case the command timer is still running */
-		del_timer(&cmd->timer);
+		timer_delete(&cmd->timer);
 
 		/* If this is an IO command, complete it by invoking scsi_done
 		 * function. If this is one of the internal commands other
@@ -3242,14 +3242,14 @@ static int pmcraid_build_ioadl(
  *	  SCSI_MLQUEUE_DEVICE_BUSY if device is busy
  *	  SCSI_MLQUEUE_HOST_BUSY if host is busy
  */
-static int pmcraid_queuecommand_lck(struct scsi_cmnd *scsi_cmd)
+static enum scsi_qc_status pmcraid_queuecommand_lck(struct scsi_cmnd *scsi_cmd)
 {
 	struct pmcraid_instance *pinstance;
 	struct pmcraid_resource_entry *res;
 	struct pmcraid_ioarcb *ioarcb;
+	enum scsi_qc_status rc = 0;
 	struct pmcraid_cmd *cmd;
 	u32 fw_version;
-	int rc = 0;
 
 	pinstance =
 		(struct pmcraid_instance *)scsi_cmd->device->host->hostdata;
@@ -3468,7 +3468,7 @@ static long pmcraid_chr_ioctl(
 	void __user *argp = (void __user *)arg;
 	int retval = -ENOTTY;
 
-	hdr = kmalloc(sizeof(struct pmcraid_ioctl_header), GFP_KERNEL);
+	hdr = kmalloc_obj(struct pmcraid_ioctl_header);
 
 	if (!hdr) {
 		pmcraid_err("failed to allocate memory for ioctl header\n");
@@ -3982,7 +3982,7 @@ static void pmcraid_tasklet_function(unsigned long instance)
 		list_del(&cmd->free_list);
 		spin_unlock_irqrestore(&pinstance->pending_pool_lock,
 					pending_lock_flags);
-		del_timer(&cmd->timer);
+		timer_delete(&cmd->timer);
 		atomic_dec(&pinstance->outstanding_cmds);
 
 		if (cmd->cmd_done == pmcraid_ioa_reset) {
@@ -4385,9 +4385,8 @@ static int pmcraid_allocate_config_buffers(struct pmcraid_instance *pinstance)
 	int i;
 
 	pinstance->res_entries =
-			kcalloc(PMCRAID_MAX_RESOURCES,
-				sizeof(struct pmcraid_resource_entry),
-				GFP_KERNEL);
+			kzalloc_objs(struct pmcraid_resource_entry,
+				     PMCRAID_MAX_RESOURCES);
 
 	if (NULL == pinstance->res_entries) {
 		pmcraid_err("failed to allocate memory for resource table\n");

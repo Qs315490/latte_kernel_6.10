@@ -162,6 +162,8 @@ struct fib_info {
 	struct fib_nh		fib_nh[] __counted_by(fib_nhs);
 };
 
+int __net_init fib4_semantics_init(struct net *net);
+void __net_exit fib4_semantics_exit(struct net *net);
 
 #ifdef CONFIG_IP_MULTIPLE_TABLES
 struct fib_rule;
@@ -267,7 +269,6 @@ struct fib_dump_filter {
 	bool			filter_set;
 	bool			dump_routes;
 	bool			dump_exceptions;
-	bool			rtnl_held;
 	unsigned char		protocol;
 	unsigned char		rt_type;
 	unsigned int		flags;
@@ -373,7 +374,7 @@ static inline int fib_lookup(struct net *net, struct flowi4 *flp,
 			     struct fib_result *res, unsigned int flags)
 {
 	struct fib_table *tb;
-	int err = -ENETUNREACH;
+	int err = -EAGAIN;
 
 	flags |= FIB_LOOKUP_NOREF;
 	if (net->ipv4.fib_has_custom_rules)
@@ -387,17 +388,16 @@ static inline int fib_lookup(struct net *net, struct flowi4 *flp,
 	if (tb)
 		err = fib_table_lookup(tb, flp, res, flags);
 
-	if (!err)
+	if (err != -EAGAIN)
 		goto out;
 
 	tb = rcu_dereference_rtnl(net->ipv4.fib_default);
 	if (tb)
 		err = fib_table_lookup(tb, flp, res, flags);
 
-out:
 	if (err == -EAGAIN)
 		err = -ENETUNREACH;
-
+out:
 	rcu_read_unlock();
 
 	return err;
@@ -438,7 +438,7 @@ static inline bool fib4_rules_early_flow_dissect(struct net *net,
 
 static inline bool fib_dscp_masked_match(dscp_t dscp, const struct flowi4 *fl4)
 {
-	return dscp == inet_dsfield_to_dscp(RT_TOS(fl4->flowi4_tos));
+	return dscp == (fl4->flowi4_dscp & INET_DSCP_LEGACY_TOS_MASK);
 }
 
 /* Exported by fib_frontend.c */
@@ -557,7 +557,7 @@ static inline u32 fib_multipath_hash_from_keys(const struct net *net,
 	siphash_aligned_key_t hash_key;
 	u32 mp_seed;
 
-	mp_seed = READ_ONCE(net->ipv4.sysctl_fib_multipath_hash_seed).mp_seed;
+	mp_seed = READ_ONCE(net->ipv4.sysctl_fib_multipath_hash_seed.mp_seed);
 	fib_multipath_hash_construct_key(&hash_key, mp_seed);
 
 	return flow_hash_from_keys_seed(keys, &hash_key);
@@ -572,7 +572,8 @@ static inline u32 fib_multipath_hash_from_keys(const struct net *net,
 
 int fib_check_nh(struct net *net, struct fib_nh *nh, u32 table, u8 scope,
 		 struct netlink_ext_ack *extack);
-void fib_select_multipath(struct fib_result *res, int hash);
+void fib_select_multipath(struct fib_result *res, int hash,
+			  const struct flowi4 *fl4);
 void fib_select_path(struct net *net, struct fib_result *res,
 		     struct flowi4 *fl4, const struct sk_buff *skb);
 
@@ -624,6 +625,11 @@ void free_fib_info(struct fib_info *fi);
 static inline void fib_info_hold(struct fib_info *fi)
 {
 	refcount_inc(&fi->fib_clntref);
+}
+
+static inline bool fib_info_hold_safe(struct fib_info *fi)
+{
+	return refcount_inc_not_zero(&fi->fib_clntref);
 }
 
 static inline void fib_info_put(struct fib_info *fi)

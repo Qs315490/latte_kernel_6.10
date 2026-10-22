@@ -212,8 +212,7 @@ static int amdgpu_ctx_init_entity(struct amdgpu_ctx *ctx, u32 hw_ip,
 	int32_t ctx_prio;
 	int r;
 
-	entity = kzalloc(struct_size(entity, fences, amdgpu_sched_jobs),
-			 GFP_KERNEL);
+	entity = kzalloc_flex(*entity, fences, amdgpu_sched_jobs);
 	if (!entity)
 		return  -ENOMEM;
 
@@ -232,11 +231,17 @@ static int amdgpu_ctx_init_entity(struct amdgpu_ctx *ctx, u32 hw_ip,
 	} else {
 		struct amdgpu_fpriv *fpriv;
 
-		fpriv = container_of(ctx->ctx_mgr, struct amdgpu_fpriv, ctx_mgr);
+		/* TODO: Stop using fpriv here, we only need the xcp_id. */
+		fpriv = container_of(ctx->mgr, struct amdgpu_fpriv, ctx_mgr);
 		r = amdgpu_xcp_select_scheds(adev, hw_ip, hw_prio, fpriv,
 						&num_scheds, &scheds);
 		if (r)
-			goto cleanup_entity;
+			goto error_free_entity;
+	}
+
+	if (num_scheds == 0) {
+		r = -EINVAL;
+		goto error_free_entity;
 	}
 
 	/* disable load balance if the hw engine retains context among dependent jobs */
@@ -250,7 +255,7 @@ static int amdgpu_ctx_init_entity(struct amdgpu_ctx *ctx, u32 hw_ip,
 	}
 
 	r = drm_sched_entity_init(&entity->entity, drm_prio, scheds, num_scheds,
-				  &ctx->guilty);
+				  NULL);
 	if (r)
 		goto error_free_entity;
 
@@ -321,7 +326,6 @@ static int amdgpu_ctx_init(struct amdgpu_ctx_mgr *mgr, int32_t priority,
 			   struct drm_file *filp, struct amdgpu_ctx *ctx)
 {
 	struct amdgpu_fpriv *fpriv = filp->driver_priv;
-	u32 current_stable_pstate;
 	int r;
 
 	r = amdgpu_ctx_priority_permit(filp, priority);
@@ -339,37 +343,21 @@ static int amdgpu_ctx_init(struct amdgpu_ctx_mgr *mgr, int32_t priority,
 	ctx->generation = amdgpu_vm_generation(mgr->adev, &fpriv->vm);
 	ctx->init_priority = priority;
 	ctx->override_priority = AMDGPU_CTX_PRIORITY_UNSET;
+	ctx->stable_pstate = AMDGPU_CTX_STABLE_PSTATE_NONE;
 
-	r = amdgpu_ctx_get_stable_pstate(ctx, &current_stable_pstate);
-	if (r)
-		return r;
-
-	if (mgr->adev->pm.stable_pstate_ctx)
-		ctx->stable_pstate = mgr->adev->pm.stable_pstate_ctx->stable_pstate;
-	else
-		ctx->stable_pstate = current_stable_pstate;
-
-	ctx->ctx_mgr = &(fpriv->ctx_mgr);
 	return 0;
 }
 
-static int amdgpu_ctx_set_stable_pstate(struct amdgpu_ctx *ctx,
-					u32 stable_pstate)
+static int __amdgpu_ctx_set_stable_pstate(struct amdgpu_ctx *ctx,
+					  u32 stable_pstate)
 {
 	struct amdgpu_device *adev = ctx->mgr->adev;
 	enum amd_dpm_forced_level level;
+	struct amdgpu_ctx *current_ctx;
 	u32 current_stable_pstate;
-	int r;
+	int r = 0;
 
-	mutex_lock(&adev->pm.stable_pstate_ctx_lock);
-	if (adev->pm.stable_pstate_ctx && adev->pm.stable_pstate_ctx != ctx) {
-		r = -EBUSY;
-		goto done;
-	}
-
-	r = amdgpu_ctx_get_stable_pstate(ctx, &current_stable_pstate);
-	if (r || (stable_pstate == current_stable_pstate))
-		goto done;
+	lockdep_assert_held(&adev->pm.stable_pstate_ctx_lock);
 
 	switch (stable_pstate) {
 	case AMDGPU_CTX_STABLE_PSTATE_NONE:
@@ -388,17 +376,41 @@ static int amdgpu_ctx_set_stable_pstate(struct amdgpu_ctx *ctx,
 		level = AMD_DPM_FORCED_LEVEL_PROFILE_PEAK;
 		break;
 	default:
-		r = -EINVAL;
-		goto done;
+		return -EINVAL;
 	}
 
-	r = amdgpu_dpm_force_performance_level(adev, level);
+	current_ctx = adev->pm.stable_pstate_ctx;
+	if (current_ctx && current_ctx != ctx)
+		return -EBUSY;
 
-	if (level == AMD_DPM_FORCED_LEVEL_AUTO)
-		adev->pm.stable_pstate_ctx = NULL;
-	else
+	r = amdgpu_ctx_get_stable_pstate(ctx, &current_stable_pstate);
+	if (r || current_stable_pstate == stable_pstate)
+		return r;
+
+	r = amdgpu_dpm_force_performance_level(adev, level);
+	if (r)
+		return r;
+
+	if (!current_ctx) {
 		adev->pm.stable_pstate_ctx = ctx;
-done:
+		/*
+		 * Serialized by context taking ownership for the first time
+		 * while holding adev->pm.stable_pstate_ctx_lock).
+		 */
+		WRITE_ONCE(ctx->stable_pstate, current_stable_pstate);
+	}
+
+	return 0;
+}
+
+static int amdgpu_ctx_set_stable_pstate(struct amdgpu_ctx *ctx,
+					u32 stable_pstate)
+{
+	struct amdgpu_device *adev = ctx->mgr->adev;
+	int r;
+
+	mutex_lock(&adev->pm.stable_pstate_ctx_lock);
+	r = __amdgpu_ctx_set_stable_pstate(ctx, stable_pstate);
 	mutex_unlock(&adev->pm.stable_pstate_ctx_lock);
 
 	return r;
@@ -424,7 +436,12 @@ static void amdgpu_ctx_fini(struct kref *ref)
 	}
 
 	if (drm_dev_enter(adev_to_drm(adev), &idx)) {
-		amdgpu_ctx_set_stable_pstate(ctx, ctx->stable_pstate);
+		mutex_lock(&adev->pm.stable_pstate_ctx_lock);
+		if (adev->pm.stable_pstate_ctx == ctx) {
+			__amdgpu_ctx_set_stable_pstate(ctx, ctx->stable_pstate);
+			adev->pm.stable_pstate_ctx = NULL;
+		}
+		mutex_unlock(&adev->pm.stable_pstate_ctx_lock);
 		drm_dev_exit(idx);
 	}
 
@@ -438,18 +455,21 @@ int amdgpu_ctx_get_entity(struct amdgpu_ctx *ctx, u32 hw_ip, u32 instance,
 	struct drm_sched_entity *ctx_entity;
 
 	if (hw_ip >= AMDGPU_HW_IP_NUM) {
-		DRM_ERROR("unknown HW IP type: %d\n", hw_ip);
+		drm_err(adev_to_drm(ctx->mgr->adev),
+			"unknown HW IP type: %d\n", hw_ip);
 		return -EINVAL;
 	}
 
 	/* Right now all IPs have only one instance - multiple rings. */
 	if (instance != 0) {
-		DRM_DEBUG("invalid ip instance: %d\n", instance);
+		drm_dbg(adev_to_drm(ctx->mgr->adev),
+			"invalid ip instance: %d\n", instance);
 		return -EINVAL;
 	}
 
 	if (ring >= amdgpu_ctx_num_entities[hw_ip]) {
-		DRM_DEBUG("invalid ring: %d %d\n", hw_ip, ring);
+		drm_dbg(adev_to_drm(ctx->mgr->adev),
+			"invalid ring: %d %d\n", hw_ip, ring);
 		return -EINVAL;
 	}
 
@@ -480,7 +500,7 @@ static int amdgpu_ctx_alloc(struct amdgpu_device *adev,
 	struct amdgpu_ctx *ctx;
 	int r;
 
-	ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kmalloc_obj(*ctx);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -572,6 +592,27 @@ static int amdgpu_ctx_query(struct amdgpu_device *adev,
 
 #define AMDGPU_RAS_COUNTE_DELAY_MS 3000
 
+static bool amdgpu_ctx_guilty(struct amdgpu_ctx *ctx)
+{
+	int i, j, r;
+
+	for (i = 0; i < AMDGPU_HW_IP_NUM; ++i) {
+		for (j = 0; j < amdgpu_ctx_num_entities[i]; ++j) {
+			struct amdgpu_ctx_entity *ctx_entity;
+
+			ctx_entity = ctx->entities[i][j];
+			if (!ctx_entity)
+				continue;
+
+			r = drm_sched_entity_error(&ctx_entity->entity);
+			if (r == -ETIME)
+				return true;
+		}
+	}
+
+	return false;
+}
+
 static int amdgpu_ctx_query2(struct amdgpu_device *adev,
 			     struct amdgpu_fpriv *fpriv, uint32_t id,
 			     union drm_amdgpu_ctx_out *out)
@@ -600,7 +641,7 @@ static int amdgpu_ctx_query2(struct amdgpu_device *adev,
 	if (ctx->generation != amdgpu_vm_generation(adev, &fpriv->vm))
 		out->state.flags |= AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
 
-	if (atomic_read(&ctx->guilty))
+	if (amdgpu_ctx_guilty(ctx))
 		out->state.flags |= AMDGPU_CTX_QUERY2_FLAGS_GUILTY;
 
 	if (amdgpu_in_reset(adev))
@@ -874,7 +915,8 @@ int amdgpu_ctx_wait_prev_fence(struct amdgpu_ctx *ctx,
 
 	r = dma_fence_wait(other, true);
 	if (r < 0 && r != -ERESTARTSYS)
-		DRM_ERROR("Error (%ld) waiting for fence!\n", r);
+		drm_err(adev_to_drm(ctx->mgr->adev),
+			"AMDGPU: Error waiting for fence in ctx %p\n", ctx);
 
 	dma_fence_put(other);
 	return r;
@@ -919,7 +961,7 @@ long amdgpu_ctx_mgr_entity_flush(struct amdgpu_ctx_mgr *mgr, long timeout)
 	return timeout;
 }
 
-void amdgpu_ctx_mgr_entity_fini(struct amdgpu_ctx_mgr *mgr)
+static void amdgpu_ctx_mgr_entity_fini(struct amdgpu_ctx_mgr *mgr)
 {
 	struct amdgpu_ctx *ctx;
 	struct idr *idp;
@@ -929,7 +971,7 @@ void amdgpu_ctx_mgr_entity_fini(struct amdgpu_ctx_mgr *mgr)
 
 	idr_for_each_entry(idp, ctx, id) {
 		if (kref_read(&ctx->refcount) != 1) {
-			DRM_ERROR("ctx %p is still alive\n", ctx);
+			drm_err(adev_to_drm(mgr->adev), "ctx %p is still alive\n", ctx);
 			continue;
 		}
 
@@ -944,24 +986,13 @@ void amdgpu_ctx_mgr_entity_fini(struct amdgpu_ctx_mgr *mgr)
 				drm_sched_entity_fini(entity);
 			}
 		}
+		kref_put(&ctx->refcount, amdgpu_ctx_fini);
 	}
 }
 
 void amdgpu_ctx_mgr_fini(struct amdgpu_ctx_mgr *mgr)
 {
-	struct amdgpu_ctx *ctx;
-	struct idr *idp;
-	uint32_t id;
-
 	amdgpu_ctx_mgr_entity_fini(mgr);
-
-	idp = &mgr->ctx_handles;
-
-	idr_for_each_entry(idp, ctx, id) {
-		if (kref_put(&ctx->refcount, amdgpu_ctx_fini) != 1)
-			DRM_ERROR("ctx %p is still alive\n", ctx);
-	}
-
 	idr_destroy(&mgr->ctx_handles);
 	mutex_destroy(&mgr->lock);
 }

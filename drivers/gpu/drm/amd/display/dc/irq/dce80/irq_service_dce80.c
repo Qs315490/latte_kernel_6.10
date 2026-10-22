@@ -37,36 +37,9 @@
 
 #include "dc_types.h"
 
-static bool hpd_ack(
-	struct irq_service *irq_service,
-	const struct irq_source_info *info)
-{
-	uint32_t addr = info->status_reg;
-	uint32_t value = dm_read_reg(irq_service->ctx, addr);
-	uint32_t current_status =
-		get_reg_field_value(
-			value,
-			DC_HPD1_INT_STATUS,
-			DC_HPD1_SENSE_DELAYED);
-
-	dal_irq_service_ack_generic(irq_service, info);
-
-	value = dm_read_reg(irq_service->ctx, info->enable_reg);
-
-	set_reg_field_value(
-		value,
-		current_status ? 0 : 1,
-		DC_HPD1_INT_CONTROL,
-		DC_HPD1_INT_POLARITY);
-
-	dm_write_reg(irq_service->ctx, info->enable_reg, value);
-
-	return true;
-}
-
 static struct irq_source_info_funcs hpd_irq_info_funcs  = {
 	.set = NULL,
-	.ack = hpd_ack
+	.ack = hpd1_ack
 };
 
 static struct irq_source_info_funcs hpd_rx_irq_info_funcs = {
@@ -95,7 +68,7 @@ static struct irq_source_info_funcs vupdate_irq_info_funcs = {
 		.enable_mask = DC_HPD1_INT_CONTROL__DC_HPD1_INT_EN_MASK,\
 		.enable_value = {\
 			DC_HPD1_INT_CONTROL__DC_HPD1_INT_EN_MASK,\
-			~DC_HPD1_INT_CONTROL__DC_HPD1_INT_EN_MASK\
+			(uint32_t)~DC_HPD1_INT_CONTROL__DC_HPD1_INT_EN_MASK\
 		},\
 		.ack_reg = mmDC_HPD ## reg_num ## _INT_CONTROL,\
 		.ack_mask = DC_HPD1_INT_CONTROL__DC_HPD1_INT_ACK_MASK,\
@@ -110,7 +83,7 @@ static struct irq_source_info_funcs vupdate_irq_info_funcs = {
 		.enable_mask = DC_HPD1_INT_CONTROL__DC_HPD1_RX_INT_EN_MASK,\
 		.enable_value = {\
 				DC_HPD1_INT_CONTROL__DC_HPD1_RX_INT_EN_MASK,\
-			~DC_HPD1_INT_CONTROL__DC_HPD1_RX_INT_EN_MASK },\
+			(uint32_t)~DC_HPD1_INT_CONTROL__DC_HPD1_RX_INT_EN_MASK },\
 		.ack_reg = mmDC_HPD ## reg_num ## _INT_CONTROL,\
 		.ack_mask = DC_HPD1_INT_CONTROL__DC_HPD1_RX_INT_ACK_MASK,\
 		.ack_value = DC_HPD1_INT_CONTROL__DC_HPD1_RX_INT_ACK_MASK,\
@@ -125,7 +98,7 @@ static struct irq_source_info_funcs vupdate_irq_info_funcs = {
 		GRPH_INTERRUPT_CONTROL__GRPH_PFLIP_INT_MASK_MASK,\
 		.enable_value = {\
 			GRPH_INTERRUPT_CONTROL__GRPH_PFLIP_INT_MASK_MASK,\
-			~GRPH_INTERRUPT_CONTROL__GRPH_PFLIP_INT_MASK_MASK},\
+			(uint32_t)~GRPH_INTERRUPT_CONTROL__GRPH_PFLIP_INT_MASK_MASK},\
 		.ack_reg = mmDCP ## reg_num ## _GRPH_INTERRUPT_STATUS,\
 		.ack_mask = GRPH_INTERRUPT_STATUS__GRPH_PFLIP_INT_CLEAR_MASK,\
 		.ack_value = GRPH_INTERRUPT_STATUS__GRPH_PFLIP_INT_CLEAR_MASK,\
@@ -140,7 +113,7 @@ static struct irq_source_info_funcs vupdate_irq_info_funcs = {
 		CRTC_INTERRUPT_CONTROL__CRTC_V_UPDATE_INT_MSK_MASK,\
 		.enable_value = {\
 			CRTC_INTERRUPT_CONTROL__CRTC_V_UPDATE_INT_MSK_MASK,\
-			~CRTC_INTERRUPT_CONTROL__CRTC_V_UPDATE_INT_MSK_MASK},\
+			(uint32_t)~CRTC_INTERRUPT_CONTROL__CRTC_V_UPDATE_INT_MSK_MASK},\
 		.ack_reg = mmCRTC ## reg_num ## _CRTC_V_UPDATE_INT_STATUS,\
 		.ack_mask =\
 		CRTC_V_UPDATE_INT_STATUS__CRTC_V_UPDATE_INT_CLEAR_MASK,\
@@ -156,7 +129,7 @@ static struct irq_source_info_funcs vupdate_irq_info_funcs = {
 		CRTC_VERTICAL_INTERRUPT0_CONTROL__CRTC_VERTICAL_INTERRUPT0_INT_ENABLE_MASK,\
 		.enable_value = {\
 			CRTC_VERTICAL_INTERRUPT0_CONTROL__CRTC_VERTICAL_INTERRUPT0_INT_ENABLE_MASK,\
-			~CRTC_VERTICAL_INTERRUPT0_CONTROL__CRTC_VERTICAL_INTERRUPT0_INT_ENABLE_MASK},\
+			(uint32_t)~CRTC_VERTICAL_INTERRUPT0_CONTROL__CRTC_VERTICAL_INTERRUPT0_INT_ENABLE_MASK},\
 		.ack_reg = mmCRTC ## reg_num ## _CRTC_VERTICAL_INTERRUPT0_CONTROL,\
 		.ack_mask =\
 		CRTC_VERTICAL_INTERRUPT0_CONTROL__CRTC_VERTICAL_INTERRUPT0_CLEAR_MASK,\
@@ -294,8 +267,7 @@ static void dce80_irq_construct(
 struct irq_service *dal_irq_service_dce80_create(
 	struct irq_service_init_data *init_data)
 {
-	struct irq_service *irq_service = kzalloc(sizeof(*irq_service),
-						  GFP_KERNEL);
+	struct irq_service *irq_service = kzalloc_obj(*irq_service);
 
 	if (!irq_service)
 		return NULL;
@@ -303,5 +275,3 @@ struct irq_service *dal_irq_service_dce80_create(
 	dce80_irq_construct(irq_service, init_data);
 	return irq_service;
 }
-
-

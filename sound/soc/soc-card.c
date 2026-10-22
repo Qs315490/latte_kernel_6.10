@@ -15,18 +15,8 @@
 static inline int _soc_card_ret(struct snd_soc_card *card,
 				const char *func, int ret)
 {
-	switch (ret) {
-	case -EPROBE_DEFER:
-	case -ENOTSUPP:
-	case 0:
-		break;
-	default:
-		dev_err(card->dev,
-			"ASoC: error at %s on %s: %d\n",
-			func, card->name, ret);
-	}
-
-	return ret;
+	return snd_soc_ret(card->dev, ret,
+			   "at %s() on %s\n", func, card->name);
 }
 
 struct snd_kcontrol *snd_soc_card_get_kcontrol(struct snd_soc_card *soc_card,
@@ -256,3 +246,16 @@ void snd_soc_card_remove_dai_link(struct snd_soc_card *card,
 		card->remove_dai_link(card, dai_link);
 }
 EXPORT_SYMBOL_GPL(snd_soc_card_remove_dai_link);
+
+void snd_soc_card_set_topology_name(struct snd_soc_card *card, const char *prefix)
+{
+	if (!prefix || !card->name)
+		return;
+
+	if (!card->topology_shortname)
+		card->topology_shortname = devm_kasprintf(card->dev, GFP_KERNEL,
+							  "%s-%s", prefix, card->name);
+
+	card->name = card->topology_shortname;
+}
+EXPORT_SYMBOL_GPL(snd_soc_card_set_topology_name);

@@ -41,10 +41,6 @@ properties:
     minItems: 1
     maxItems: 5
 
-  assigned-clocks: true
-
-  assigned-clock-parents: true
-
   iommus:
     minItems: 1
     maxItems: 32
@@ -78,8 +74,6 @@ required:
   - clocks
   - clock-names
   - iommus
-  - assigned-clocks
-  - assigned-clock-parents
 
 allOf:
   - if:
@@ -166,7 +160,7 @@ examples:
 
     vcodec_enc_vp8: vcodec@19002000 {
       compatible = "mediatek,mt8173-vcodec-enc-vp8";
-      reg =  <0x19002000 0x1000>;	/* VENC_LT_SYS */
+      reg =  <0x19002000 0x1000>; /* VENC_LT_SYS */
       interrupts = <GIC_SPI 202 IRQ_TYPE_LEVEL_LOW>;
       iommus = <&iommu M4U_PORT_VENC_RCPU_SET2>,
              <&iommu M4U_PORT_VENC_REC_FRM_SET2>,

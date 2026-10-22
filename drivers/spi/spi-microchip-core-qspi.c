@@ -74,6 +74,13 @@
 #define STATUS_FLAGSX4		BIT(8)
 #define STATUS_MASK		GENMASK(8, 0)
 
+/*
+ * QSPI Direct Access register defines
+ */
+#define DIRECT_ACCESS_EN_SSEL		BIT(0)
+#define DIRECT_ACCESS_OP_SSEL		BIT(1)
+#define DIRECT_ACCESS_OP_SSEL_SHIFT	1
+
 #define BYTESUPPER_MASK		GENMASK(31, 16)
 #define BYTESLOWER_MASK		GENMASK(15, 0)
 
@@ -92,7 +99,6 @@
 #define REG_IEN			(0x0c)
 #define REG_STATUS		(0x10)
 #define REG_DIRECT_ACCESS	(0x14)
-#define REG_UPPER_ACCESS	(0x18)
 #define REG_RX_DATA		(0x40)
 #define REG_TX_DATA		(0x44)
 #define REG_X4_RX_DATA		(0x48)
@@ -158,7 +164,39 @@ static int mchp_coreqspi_set_mode(struct mchp_coreqspi *qspi, const struct spi_m
 	return 0;
 }
 
-static inline void mchp_coreqspi_read_op(struct mchp_coreqspi *qspi)
+static void mchp_coreqspi_set_cs(struct spi_device *spi, bool enable)
+{
+	struct mchp_coreqspi *qspi = spi_controller_get_devdata(spi->controller);
+	u32 val;
+
+	val = readl(qspi->regs + REG_DIRECT_ACCESS);
+
+	val &= ~DIRECT_ACCESS_OP_SSEL;
+	val |= !enable << DIRECT_ACCESS_OP_SSEL_SHIFT;
+
+	writel(val, qspi->regs + REG_DIRECT_ACCESS);
+}
+
+static int mchp_coreqspi_setup(struct spi_device *spi)
+{
+	struct mchp_coreqspi *qspi = spi_controller_get_devdata(spi->controller);
+	u32 val;
+
+	/*
+	 * Active low devices need to be specifically set to their inactive
+	 * states during probe.
+	 */
+	if (spi->mode & SPI_CS_HIGH)
+		return 0;
+
+	val = readl(qspi->regs + REG_DIRECT_ACCESS);
+	val |= DIRECT_ACCESS_OP_SSEL;
+	writel(val, qspi->regs + REG_DIRECT_ACCESS);
+
+	return 0;
+}
+
+static void mchp_coreqspi_read_op(struct mchp_coreqspi *qspi)
 {
 	u32 control, data;
 
@@ -194,7 +232,7 @@ static inline void mchp_coreqspi_read_op(struct mchp_coreqspi *qspi)
 	}
 }
 
-static inline void mchp_coreqspi_write_op(struct mchp_coreqspi *qspi, bool word)
+static void mchp_coreqspi_write_op(struct mchp_coreqspi *qspi)
 {
 	u32 control, data;
 
@@ -219,6 +257,87 @@ static inline void mchp_coreqspi_write_op(struct mchp_coreqspi *qspi, bool word)
 			;
 		data =  *qspi->txbuf++;
 		writel_relaxed(data, qspi->regs + REG_TX_DATA);
+	}
+}
+
+static void mchp_coreqspi_write_read_op(struct mchp_coreqspi *qspi)
+{
+	u32 control, data;
+
+	qspi->rx_len = qspi->tx_len;
+
+	control = readl_relaxed(qspi->regs + REG_CONTROL);
+	control |= CONTROL_FLAGSX4;
+	writel_relaxed(control, qspi->regs + REG_CONTROL);
+
+	while (qspi->tx_len >= 4) {
+		while (readl_relaxed(qspi->regs + REG_STATUS) & STATUS_TXFIFOFULL)
+			;
+
+		data = qspi->txbuf ? *((u32 *)qspi->txbuf) : 0xaa;
+		if (qspi->txbuf)
+			qspi->txbuf += 4;
+		qspi->tx_len -= 4;
+		writel_relaxed(data, qspi->regs + REG_X4_TX_DATA);
+
+		/*
+		 * The rx FIFO is twice the size of the tx FIFO, so there is
+		 * no requirement to block transmission if receive data is not
+		 * ready, and it is fine to let the tx FIFO completely fill
+		 * without reading anything from the rx FIFO. Once the tx FIFO
+		 * has been filled and becomes non-full due to a transmission
+		 * occurring there will always be something to receive.
+		 * IOW, this is safe as TX_FIFO_SIZE + 4 < 2 * TX_FIFO_SIZE
+		 */
+		if (qspi->rx_len >= 4) {
+			if (readl_relaxed(qspi->regs + REG_STATUS) & STATUS_RXAVAILABLE) {
+				data = readl_relaxed(qspi->regs + REG_X4_RX_DATA);
+				*(u32 *)qspi->rxbuf = data;
+				qspi->rxbuf += 4;
+				qspi->rx_len -= 4;
+			}
+		}
+	}
+
+	/*
+	 * Since transmission is not being blocked by clearing the rx FIFO,
+	 * loop here until all received data "leaked" by the loop above has
+	 * been dealt with.
+	 */
+	while (qspi->rx_len >= 4) {
+		while (readl_relaxed(qspi->regs + REG_STATUS) & STATUS_RXFIFOEMPTY)
+			;
+		data = readl_relaxed(qspi->regs + REG_X4_RX_DATA);
+		*(u32 *)qspi->rxbuf = data;
+		qspi->rxbuf += 4;
+		qspi->rx_len -= 4;
+	}
+
+	/*
+	 * Since rx_len and tx_len must be < 4 bytes at this point, there's no
+	 * concern about overflowing the rx or tx FIFOs any longer. It's
+	 * therefore safe to loop over the remainder of the transmit data before
+	 * handling the remaining receive data.
+	 */
+	if (!qspi->tx_len)
+		return;
+
+	control &= ~CONTROL_FLAGSX4;
+	writel_relaxed(control, qspi->regs + REG_CONTROL);
+
+	while (qspi->tx_len--) {
+		while (readl_relaxed(qspi->regs + REG_STATUS) & STATUS_TXFIFOFULL)
+			;
+		data = qspi->txbuf ? *qspi->txbuf : 0xaa;
+		qspi->txbuf++;
+		writel_relaxed(data, qspi->regs + REG_TX_DATA);
+	}
+
+	while (qspi->rx_len--) {
+		while (readl_relaxed(qspi->regs + REG_STATUS) & STATUS_RXFIFOEMPTY)
+			;
+		data = readl_relaxed(qspi->regs + REG_RX_DATA);
+		*qspi->rxbuf++ = (data & 0xFF);
 	}
 }
 
@@ -266,7 +385,7 @@ static irqreturn_t mchp_coreqspi_isr(int irq, void *dev_id)
 }
 
 static int mchp_coreqspi_setup_clock(struct mchp_coreqspi *qspi, struct spi_device *spi,
-				     const struct spi_mem_op *op)
+				     u32 max_freq)
 {
 	unsigned long clk_hz;
 	u32 control, baud_rate_val = 0;
@@ -275,11 +394,11 @@ static int mchp_coreqspi_setup_clock(struct mchp_coreqspi *qspi, struct spi_devi
 	if (!clk_hz)
 		return -EINVAL;
 
-	baud_rate_val = DIV_ROUND_UP(clk_hz, 2 * op->max_freq);
+	baud_rate_val = DIV_ROUND_UP(clk_hz, 2 * max_freq);
 	if (baud_rate_val > MAX_DIVIDER || baud_rate_val < MIN_DIVIDER) {
 		dev_err(&spi->dev,
 			"could not configure the clock for spi clock %d Hz & system clock %ld Hz\n",
-			op->max_freq, clk_hz);
+			max_freq, clk_hz);
 		return -EINVAL;
 	}
 
@@ -299,20 +418,7 @@ static int mchp_coreqspi_setup_clock(struct mchp_coreqspi *qspi, struct spi_devi
 	return 0;
 }
 
-static int mchp_coreqspi_setup_op(struct spi_device *spi_dev)
-{
-	struct spi_controller *ctlr = spi_dev->controller;
-	struct mchp_coreqspi *qspi = spi_controller_get_devdata(ctlr);
-	u32 control = readl_relaxed(qspi->regs + REG_CONTROL);
-
-	control |= (CONTROL_MASTER | CONTROL_ENABLE);
-	control &= ~CONTROL_CLKIDLE;
-	writel_relaxed(control, qspi->regs + REG_CONTROL);
-
-	return 0;
-}
-
-static inline void mchp_coreqspi_config_op(struct mchp_coreqspi *qspi, const struct spi_mem_op *op)
+static void mchp_coreqspi_config_op(struct mchp_coreqspi *qspi, const struct spi_mem_op *op)
 {
 	u32 idle_cycles = 0;
 	int total_bytes, cmd_bytes, frames, ctrl;
@@ -367,23 +473,13 @@ static inline void mchp_coreqspi_config_op(struct mchp_coreqspi *qspi, const str
 	writel_relaxed(frames, qspi->regs + REG_FRAMES);
 }
 
-static int mchp_qspi_wait_for_ready(struct spi_mem *mem)
+static int mchp_coreqspi_wait_for_ready(struct mchp_coreqspi *qspi)
 {
-	struct mchp_coreqspi *qspi = spi_controller_get_devdata
-				    (mem->spi->controller);
 	u32 status;
-	int ret;
 
-	ret = readl_poll_timeout(qspi->regs + REG_STATUS, status,
+	return readl_poll_timeout(qspi->regs + REG_STATUS, status,
 				 (status & STATUS_READY), 0,
 				 TIMEOUT_MS);
-	if (ret) {
-		dev_err(&mem->spi->dev,
-			"Timeout waiting on QSPI ready.\n");
-		return -ETIMEDOUT;
-	}
-
-	return ret;
 }
 
 static int mchp_coreqspi_exec_op(struct spi_mem *mem, const struct spi_mem_op *op)
@@ -396,11 +492,13 @@ static int mchp_coreqspi_exec_op(struct spi_mem *mem, const struct spi_mem_op *o
 	int err, i;
 
 	mutex_lock(&qspi->op_lock);
-	err = mchp_qspi_wait_for_ready(mem);
-	if (err)
+	err = mchp_coreqspi_wait_for_ready(qspi);
+	if (err) {
+		dev_err(&mem->spi->dev, "Timeout waiting on QSPI ready.\n");
 		goto error;
+	}
 
-	err = mchp_coreqspi_setup_clock(qspi, mem->spi, op);
+	err = mchp_coreqspi_setup_clock(qspi, mem->spi, op->max_freq);
 	if (err)
 		goto error;
 
@@ -410,12 +508,13 @@ static int mchp_coreqspi_exec_op(struct spi_mem *mem, const struct spi_mem_op *o
 
 	reinit_completion(&qspi->data_completion);
 	mchp_coreqspi_config_op(qspi, op);
+	mchp_coreqspi_set_cs(mem->spi, true);
 	if (op->cmd.opcode) {
 		qspi->txbuf = &opcode;
 		qspi->rxbuf = NULL;
 		qspi->tx_len = op->cmd.nbytes;
 		qspi->rx_len = 0;
-		mchp_coreqspi_write_op(qspi, false);
+		mchp_coreqspi_write_op(qspi);
 	}
 
 	qspi->txbuf = &opaddr[0];
@@ -426,7 +525,7 @@ static int mchp_coreqspi_exec_op(struct spi_mem *mem, const struct spi_mem_op *o
 		qspi->rxbuf = NULL;
 		qspi->tx_len = op->addr.nbytes;
 		qspi->rx_len = 0;
-		mchp_coreqspi_write_op(qspi, false);
+		mchp_coreqspi_write_op(qspi);
 	}
 
 	if (op->data.nbytes) {
@@ -435,7 +534,7 @@ static int mchp_coreqspi_exec_op(struct spi_mem *mem, const struct spi_mem_op *o
 			qspi->rxbuf = NULL;
 			qspi->rx_len = 0;
 			qspi->tx_len = op->data.nbytes;
-			mchp_coreqspi_write_op(qspi, true);
+			mchp_coreqspi_write_op(qspi);
 		} else {
 			qspi->txbuf = NULL;
 			qspi->rxbuf = (u8 *)op->data.buf.in;
@@ -450,6 +549,7 @@ static int mchp_coreqspi_exec_op(struct spi_mem *mem, const struct spi_mem_op *o
 		err = -ETIMEDOUT;
 
 error:
+	mchp_coreqspi_set_cs(mem->spi, false);
 	mutex_unlock(&qspi->op_lock);
 	mchp_coreqspi_disable_ints(qspi);
 
@@ -458,10 +558,6 @@ error:
 
 static bool mchp_coreqspi_supports_op(struct spi_mem *mem, const struct spi_mem_op *op)
 {
-	struct mchp_coreqspi *qspi = spi_controller_get_devdata(mem->spi->controller);
-	unsigned long clk_hz;
-	u32 baud_rate_val;
-
 	if (!spi_mem_default_supports_op(mem, op))
 		return false;
 
@@ -483,14 +579,6 @@ static bool mchp_coreqspi_supports_op(struct spi_mem *mem, const struct spi_mem_
 		if (op->data.dir == SPI_MEM_DATA_OUT)
 			return false;
 	}
-
-	clk_hz = clk_get_rate(qspi->clk);
-	if (!clk_hz)
-		return false;
-
-	baud_rate_val = DIV_ROUND_UP(clk_hz, 2 * op->max_freq);
-	if (baud_rate_val > MAX_DIVIDER || baud_rate_val < MIN_DIVIDER)
-		return false;
 
 	return true;
 }
@@ -515,6 +603,119 @@ static const struct spi_controller_mem_caps mchp_coreqspi_mem_caps = {
 	.per_op_freq = true,
 };
 
+static int mchp_coreqspi_unprepare_message(struct spi_controller *ctlr, struct spi_message *m)
+{
+	struct mchp_coreqspi *qspi = spi_controller_get_devdata(ctlr);
+
+	/*
+	 * This delay is required for the driver to function correctly,
+	 * but no explanation has been determined for why it is required.
+	 */
+	udelay(750);
+
+	mutex_unlock(&qspi->op_lock);
+
+	return 0;
+}
+
+static int mchp_coreqspi_prepare_message(struct spi_controller *ctlr, struct spi_message *m)
+{
+	struct mchp_coreqspi *qspi = spi_controller_get_devdata(ctlr);
+	struct spi_transfer *t = NULL;
+	u32 control, frames;
+	u32 total_bytes = 0, cmd_bytes = 0, idle_cycles = 0;
+	int ret;
+	bool quad = false, dual = false;
+
+	mutex_lock(&qspi->op_lock);
+	ret = mchp_coreqspi_wait_for_ready(qspi);
+	if (ret) {
+		mutex_unlock(&qspi->op_lock);
+		dev_err(&m->spi->dev, "Timeout waiting on QSPI ready.\n");
+		return ret;
+	}
+
+	ret = mchp_coreqspi_setup_clock(qspi, m->spi, m->spi->max_speed_hz);
+	if (ret) {
+		mutex_unlock(&qspi->op_lock);
+		return ret;
+	}
+
+	control = readl_relaxed(qspi->regs + REG_CONTROL);
+	control &= ~(CONTROL_MODE12_MASK | CONTROL_MODE0);
+	writel_relaxed(control, qspi->regs + REG_CONTROL);
+
+	reinit_completion(&qspi->data_completion);
+
+	list_for_each_entry(t, &m->transfers, transfer_list) {
+		total_bytes += t->len;
+		if (!cmd_bytes && !(t->tx_buf && t->rx_buf))
+			cmd_bytes = t->len;
+		if (!t->rx_buf)
+			cmd_bytes = total_bytes;
+		if (t->tx_nbits == SPI_NBITS_QUAD || t->rx_nbits == SPI_NBITS_QUAD)
+			quad = true;
+		else if (t->tx_nbits == SPI_NBITS_DUAL || t->rx_nbits == SPI_NBITS_DUAL)
+			dual = true;
+	}
+
+	control = readl_relaxed(qspi->regs + REG_CONTROL);
+	if (quad) {
+		control |= (CONTROL_MODE0 | CONTROL_MODE12_EX_RW);
+	} else if (dual) {
+		control &= ~CONTROL_MODE0;
+		control |= CONTROL_MODE12_FULL;
+	} else {
+		control &= ~(CONTROL_MODE12_MASK | CONTROL_MODE0);
+	}
+	writel_relaxed(control, qspi->regs + REG_CONTROL);
+
+	frames = total_bytes & BYTESUPPER_MASK;
+	writel_relaxed(frames, qspi->regs + REG_FRAMESUP);
+	frames = total_bytes & BYTESLOWER_MASK;
+	frames |= cmd_bytes << FRAMES_CMDBYTES_SHIFT;
+	frames |= idle_cycles << FRAMES_IDLE_SHIFT;
+	control = readl_relaxed(qspi->regs + REG_CONTROL);
+	if (control & CONTROL_MODE12_MASK)
+		frames |= (1 << FRAMES_SHIFT);
+
+	frames |= FRAMES_FLAGWORD;
+	writel_relaxed(frames, qspi->regs + REG_FRAMES);
+
+	return 0;
+};
+
+static int mchp_coreqspi_transfer_one(struct spi_controller *ctlr, struct spi_device *spi,
+				      struct spi_transfer *t)
+{
+	struct mchp_coreqspi *qspi = spi_controller_get_devdata(ctlr);
+	bool dual_quad = false;
+
+	qspi->tx_len = t->len;
+
+	if (t->tx_nbits == SPI_NBITS_QUAD || t->rx_nbits == SPI_NBITS_QUAD ||
+			t->tx_nbits == SPI_NBITS_DUAL ||
+			t->rx_nbits == SPI_NBITS_DUAL)
+		dual_quad = true;
+
+	if (t->tx_buf)
+		qspi->txbuf = (u8 *)t->tx_buf;
+
+	if (!t->rx_buf) {
+		mchp_coreqspi_write_op(qspi);
+	} else if (!dual_quad) {
+		qspi->rxbuf = (u8 *)t->rx_buf;
+		qspi->rx_len = t->len;
+		mchp_coreqspi_write_read_op(qspi);
+	} else {
+		qspi->rxbuf = (u8 *)t->rx_buf;
+		qspi->rx_len = t->len;
+		mchp_coreqspi_read_op(qspi);
+	}
+
+	return 0;
+}
+
 static int mchp_coreqspi_probe(struct platform_device *pdev)
 {
 	struct spi_controller *ctlr;
@@ -522,14 +723,14 @@ static int mchp_coreqspi_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
 	int ret;
+	u32 num_cs, val;
 
 	ctlr = devm_spi_alloc_host(&pdev->dev, sizeof(*qspi));
 	if (!ctlr)
-		return dev_err_probe(&pdev->dev, -ENOMEM,
-				     "unable to allocate host for QSPI controller\n");
+		return -ENOMEM;
 
 	qspi = spi_controller_get_devdata(ctlr);
-	platform_set_drvdata(pdev, qspi);
+	platform_set_drvdata(pdev, ctlr);
 
 	qspi->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(qspi->regs))
@@ -555,15 +756,41 @@ static int mchp_coreqspi_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	/*
+	 * The IP core only has a single CS, any more have to be provided via
+	 * gpios
+	 */
+	if (of_property_read_u32(pdev->dev.of_node, "num-cs", &num_cs))
+		num_cs = 1;
+
+	ctlr->num_chipselect = num_cs;
+
 	ctlr->bits_per_word_mask = SPI_BPW_MASK(8);
 	ctlr->mem_ops = &mchp_coreqspi_mem_ops;
 	ctlr->mem_caps = &mchp_coreqspi_mem_caps;
-	ctlr->setup = mchp_coreqspi_setup_op;
 	ctlr->mode_bits = SPI_CPOL | SPI_CPHA | SPI_RX_DUAL | SPI_RX_QUAD |
 			  SPI_TX_DUAL | SPI_TX_QUAD;
 	ctlr->dev.of_node = np;
+	ctlr->min_speed_hz = clk_get_rate(qspi->clk) / 30;
+	ctlr->prepare_message = mchp_coreqspi_prepare_message;
+	ctlr->unprepare_message = mchp_coreqspi_unprepare_message;
+	ctlr->transfer_one = mchp_coreqspi_transfer_one;
+	ctlr->setup = mchp_coreqspi_setup;
+	ctlr->set_cs = mchp_coreqspi_set_cs;
+	ctlr->use_gpio_descriptors = true;
 
-	ret = devm_spi_register_controller(&pdev->dev, ctlr);
+	val = readl_relaxed(qspi->regs + REG_CONTROL);
+	val |= (CONTROL_MASTER | CONTROL_ENABLE);
+	writel_relaxed(val, qspi->regs + REG_CONTROL);
+
+	/*
+	 * Put cs into software controlled mode
+	 */
+	val = readl_relaxed(qspi->regs + REG_DIRECT_ACCESS);
+	val |= DIRECT_ACCESS_EN_SSEL;
+	writel(val, qspi->regs + REG_DIRECT_ACCESS);
+
+	ret = spi_register_controller(ctlr);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "spi_register_controller failed\n");
@@ -573,9 +800,13 @@ static int mchp_coreqspi_probe(struct platform_device *pdev)
 
 static void mchp_coreqspi_remove(struct platform_device *pdev)
 {
-	struct mchp_coreqspi *qspi = platform_get_drvdata(pdev);
-	u32 control = readl_relaxed(qspi->regs + REG_CONTROL);
+	struct spi_controller *ctlr = platform_get_drvdata(pdev);
+	struct mchp_coreqspi *qspi = spi_controller_get_devdata(ctlr);
+	u32 control;
 
+	spi_unregister_controller(ctlr);
+
+	control = readl_relaxed(qspi->regs + REG_CONTROL);
 	mchp_coreqspi_disable_ints(qspi);
 	control &= ~CONTROL_ENABLE;
 	writel_relaxed(control, qspi->regs + REG_CONTROL);

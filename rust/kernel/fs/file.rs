@@ -10,10 +10,17 @@
 use crate::{
     bindings,
     cred::Credential,
-    error::{code::*, Error, Result},
-    types::{ARef, AlwaysRefCounted, NotThreadSafe, Opaque},
+    error::{code::*, to_result, Error, Result},
+    fmt,
+    sync::aref::{ARef, AlwaysRefCounted},
+    types::{NotThreadSafe, Opaque},
 };
 use core::ptr;
+
+/// Primitive type representing the offset within a [`File`].
+///
+/// Type alias for `bindings::loff_t`.
+pub type Offset = bindings::loff_t;
 
 /// Flags associated with a [`File`].
 pub mod flags {
@@ -219,12 +226,13 @@ unsafe impl AlwaysRefCounted for File {
 ///   must be on the same thread as this file.
 ///
 /// [`assume_no_fdget_pos`]: LocalFile::assume_no_fdget_pos
+#[repr(transparent)]
 pub struct LocalFile {
     inner: Opaque<bindings::file>,
 }
 
 // SAFETY: The type invariants guarantee that `LocalFile` is always ref-counted. This implementation
-// makes `ARef<File>` own a normal refcount.
+// makes `ARef<LocalFile>` own a normal refcount.
 unsafe impl AlwaysRefCounted for LocalFile {
     #[inline]
     fn inc_ref(&self) {
@@ -235,7 +243,8 @@ unsafe impl AlwaysRefCounted for LocalFile {
     #[inline]
     unsafe fn dec_ref(obj: ptr::NonNull<LocalFile>) {
         // SAFETY: To call this method, the caller passes us ownership of a normal refcount, so we
-        // may drop it. The cast is okay since `File` has the same representation as `struct file`.
+        // may drop it. The cast is okay since `LocalFile` has the same representation as
+        // `struct file`.
         unsafe { bindings::fput(obj.cast().as_ptr()) }
     }
 }
@@ -267,13 +276,13 @@ impl LocalFile {
     /// # Safety
     ///
     /// * The caller must ensure that `ptr` points at a valid file and that the file's refcount is
-    ///   positive for the duration of 'a.
+    ///   positive for the duration of `'a`.
     /// * The caller must ensure that if there is an active call to `fdget_pos` that did not take
     ///   the `f_pos_lock` mutex, then that call is on the current thread.
     #[inline]
     pub unsafe fn from_raw_file<'a>(ptr: *const bindings::file) -> &'a LocalFile {
         // SAFETY: The caller guarantees that the pointer is not dangling and stays valid for the
-        // duration of 'a. The cast is okay because `File` is `repr(transparent)`.
+        // duration of `'a`. The cast is okay because `LocalFile` is `repr(transparent)`.
         //
         // INVARIANT: The caller guarantees that there are no problematic `fdget_pos` calls.
         unsafe { &*ptr.cast() }
@@ -341,13 +350,13 @@ impl File {
     /// # Safety
     ///
     /// * The caller must ensure that `ptr` points at a valid file and that the file's refcount is
-    ///   positive for the duration of 'a.
+    ///   positive for the duration of `'a`.
     /// * The caller must ensure that if there are active `fdget_pos` calls on this file, then they
     ///   took the `f_pos_lock` mutex.
     #[inline]
     pub unsafe fn from_raw_file<'a>(ptr: *const bindings::file) -> &'a File {
         // SAFETY: The caller guarantees that the pointer is not dangling and stays valid for the
-        // duration of 'a. The cast is okay because `File` is `repr(transparent)`.
+        // duration of `'a`. The cast is okay because `File` is `repr(transparent)`.
         //
         // INVARIANT: The caller guarantees that there are no problematic `fdget_pos` calls.
         unsafe { &*ptr.cast() }
@@ -364,7 +373,7 @@ impl core::ops::Deref for File {
         //
         // By the type invariants, there are no `fdget_pos` calls that did not take the
         // `f_pos_lock` mutex.
-        unsafe { LocalFile::from_raw_file(self as *const File as *const bindings::file) }
+        unsafe { LocalFile::from_raw_file(core::ptr::from_ref(self).cast()) }
     }
 }
 
@@ -392,12 +401,12 @@ pub struct FileDescriptorReservation {
 
 impl FileDescriptorReservation {
     /// Creates a new file descriptor reservation.
+    #[inline]
     pub fn get_unused_fd_flags(flags: u32) -> Result<Self> {
         // SAFETY: FFI call, there are no safety requirements on `flags`.
         let fd: i32 = unsafe { bindings::get_unused_fd_flags(flags) };
-        if fd < 0 {
-            return Err(Error::from_errno(fd));
-        }
+        to_result(fd)?;
+
         Ok(Self {
             fd: fd as u32,
             _not_send: NotThreadSafe,
@@ -405,6 +414,7 @@ impl FileDescriptorReservation {
     }
 
     /// Returns the file descriptor number that was reserved.
+    #[inline]
     pub fn reserved_fd(&self) -> u32 {
         self.fd
     }
@@ -413,6 +423,7 @@ impl FileDescriptorReservation {
     ///
     /// The previously reserved file descriptor is bound to `file`. This method consumes the
     /// [`FileDescriptorReservation`], so it will not be usable after this call.
+    #[inline]
     pub fn fd_install(self, file: ARef<File>) {
         // SAFETY: `self.fd` was previously returned by `get_unused_fd_flags`. We have not yet used
         // the fd, so it is still valid, and `current` still refers to the same task, as this type
@@ -433,6 +444,7 @@ impl FileDescriptorReservation {
 }
 
 impl Drop for FileDescriptorReservation {
+    #[inline]
     fn drop(&mut self) {
         // SAFETY: By the type invariants of this type, `self.fd` was previously returned by
         // `get_unused_fd_flags`. We have not yet used the fd, so it is still valid, and `current`
@@ -441,9 +453,9 @@ impl Drop for FileDescriptorReservation {
     }
 }
 
-/// Represents the `EBADF` error code.
+/// Represents the [`EBADF`] error code.
 ///
-/// Used for methods that can only fail with `EBADF`.
+/// Used for methods that can only fail with [`EBADF`].
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub struct BadFdError;
 
@@ -454,8 +466,8 @@ impl From<BadFdError> for Error {
     }
 }
 
-impl core::fmt::Debug for BadFdError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Debug for BadFdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("EBADF")
     }
 }

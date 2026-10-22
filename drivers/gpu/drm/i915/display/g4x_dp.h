@@ -8,35 +8,35 @@
 
 #include <linux/types.h>
 
-#include "i915_reg_defs.h"
+#include "intel_display_reg_defs.h"
 
 enum pipe;
 enum port;
-struct drm_i915_private;
 struct intel_crtc_state;
+struct intel_display;
 struct intel_dp;
 struct intel_encoder;
 
 #ifdef I915
-const struct dpll *vlv_get_dpll(struct drm_i915_private *i915);
-bool g4x_dp_port_enabled(struct drm_i915_private *dev_priv,
-			 i915_reg_t dp_reg, enum port port,
+const struct dpll *vlv_get_dpll(struct intel_display *display);
+bool g4x_dp_port_enabled(struct intel_display *display,
+			 intel_reg_t dp_reg, enum port port,
 			 enum pipe *pipe);
-bool g4x_dp_init(struct drm_i915_private *dev_priv,
-		 i915_reg_t output_reg, enum port port);
+bool g4x_dp_init(struct intel_display *display,
+		 intel_reg_t output_reg, enum port port);
 #else
-static inline const struct dpll *vlv_get_dpll(struct drm_i915_private *i915)
+static inline const struct dpll *vlv_get_dpll(struct intel_display *display)
 {
 	return NULL;
 }
-static inline bool g4x_dp_port_enabled(struct drm_i915_private *dev_priv,
-				       i915_reg_t dp_reg, int port,
+static inline bool g4x_dp_port_enabled(struct intel_display *display,
+				       intel_reg_t dp_reg, int port,
 				       enum pipe *pipe)
 {
 	return false;
 }
-static inline bool g4x_dp_init(struct drm_i915_private *dev_priv,
-			       i915_reg_t output_reg, int port)
+static inline bool g4x_dp_init(struct intel_display *display,
+			       intel_reg_t output_reg, int port)
 {
 	return false;
 }

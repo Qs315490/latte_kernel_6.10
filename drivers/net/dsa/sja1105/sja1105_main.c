@@ -1260,7 +1260,9 @@ static int sja1105_set_port_speed(struct sja1105_private *priv, int port,
 				  int speed_mbps)
 {
 	struct sja1105_mac_config_entry *mac;
+	struct device *dev = priv->ds->dev;
 	u64 speed;
+	int rc;
 
 	/* On P/Q/R/S, one can read from the device via the MAC reconfiguration
 	 * tables. On E/T, MAC reconfig tables are not readable, only writable.
@@ -1302,35 +1304,8 @@ static int sja1105_set_port_speed(struct sja1105_private *priv, int port,
 	 * table, since this will be used for the clocking setup, and we no
 	 * longer need to store it in the static config (already told hardware
 	 * we want auto during upload phase).
-	 * Actually for the SGMII port, the MAC is fixed at 1 Gbps and
-	 * we need to configure the PCS only (if even that).
 	 */
-	if (priv->phy_mode[port] == PHY_INTERFACE_MODE_SGMII)
-		speed = priv->info->port_speed[SJA1105_SPEED_1000MBPS];
-	else if (priv->phy_mode[port] == PHY_INTERFACE_MODE_2500BASEX)
-		speed = priv->info->port_speed[SJA1105_SPEED_2500MBPS];
-
 	mac[port].speed = speed;
-
-	return 0;
-}
-
-/* Write the MAC Configuration Table entry and, if necessary, the CGU settings,
- * after a link speedchange for this port.
- */
-static int sja1105_set_port_config(struct sja1105_private *priv, int port)
-{
-	struct sja1105_mac_config_entry *mac;
-	struct device *dev = priv->ds->dev;
-	int rc;
-
-	/* On P/Q/R/S, one can read from the device via the MAC reconfiguration
-	 * tables. On E/T, MAC reconfig tables are not readable, only writable.
-	 * We have to *know* what the MAC looks like.  For the sake of keeping
-	 * the code common, we'll use the static configuration tables as a
-	 * reasonable approximation for both E/T and P/Q/R/S.
-	 */
-	mac = priv->static_config.tables[BLK_IDX_MAC_CONFIG].entries;
 
 	/* Write to the dynamic reconfiguration tables */
 	rc = sja1105_dynamic_config_write(priv, BLK_IDX_MAC_CONFIG, port,
@@ -1387,9 +1362,7 @@ static void sja1105_mac_link_up(struct phylink_config *config,
 	struct sja1105_private *priv = dp->ds->priv;
 	int port = dp->index;
 
-	if (!sja1105_set_port_speed(priv, port, speed))
-		sja1105_set_port_config(priv, port);
-
+	sja1105_set_port_speed(priv, port, speed);
 	sja1105_inhibit_tx(priv, BIT(port), false);
 }
 
@@ -2081,17 +2054,13 @@ static void sja1105_bridge_stp_state_set(struct dsa_switch *ds, int port,
 	switch (state) {
 	case BR_STATE_DISABLED:
 	case BR_STATE_BLOCKING:
+	case BR_STATE_LISTENING:
 		/* From UM10944 description of DRPDTAG (why put this there?):
 		 * "Management traffic flows to the port regardless of the state
 		 * of the INGRESS flag". So BPDUs are still be allowed to pass.
 		 * At the moment no difference between DISABLED and BLOCKING.
 		 */
 		mac[port].ingress   = false;
-		mac[port].egress    = false;
-		mac[port].dyn_learn = false;
-		break;
-	case BR_STATE_LISTENING:
-		mac[port].ingress   = true;
 		mac[port].egress    = false;
 		mac[port].dyn_learn = false;
 		break;
@@ -2291,14 +2260,12 @@ int sja1105_static_config_reload(struct sja1105_private *priv,
 {
 	struct ptp_system_timestamp ptp_sts_before;
 	struct ptp_system_timestamp ptp_sts_after;
-	u16 bmcr[SJA1105_MAX_NUM_PORTS] = {0};
-	u64 mac_speed[SJA1105_MAX_NUM_PORTS];
 	struct sja1105_mac_config_entry *mac;
 	struct dsa_switch *ds = priv->ds;
+	struct dsa_port *dp;
 	s64 t1, t2, t3, t4;
-	s64 t12, t34;
-	int rc, i;
-	s64 now;
+	s64 t12, t34, now;
+	int rc;
 
 	mutex_lock(&priv->fdb_lock);
 	mutex_lock(&priv->mgmt_lock);
@@ -2310,13 +2277,15 @@ int sja1105_static_config_reload(struct sja1105_private *priv,
 	 * switch wants to see in the static config in order to allow us to
 	 * change it through the dynamic interface later.
 	 */
-	for (i = 0; i < ds->num_ports; i++) {
-		mac_speed[i] = mac[i].speed;
-		mac[i].speed = priv->info->port_speed[SJA1105_SPEED_AUTO];
+	dsa_switch_for_each_available_port(dp, ds) {
+		/* May be called during unbind when we unoffload a VLAN-aware
+		 * bridge from port 1 while port 0 was already torn down
+		 */
+		if (!dp->pl)
+			continue;
 
-		if (priv->pcs[i])
-			bmcr[i] = mdiobus_c45_read(priv->mdio_pcs, i,
-						   MDIO_MMD_VEND2, MDIO_CTRL1);
+		phylink_replay_link_begin(dp->pl);
+		mac[dp->index].speed = priv->info->port_speed[SJA1105_SPEED_AUTO];
 	}
 
 	/* No PTP operations can run right now */
@@ -2341,10 +2310,10 @@ int sja1105_static_config_reload(struct sja1105_private *priv,
 		goto out;
 	}
 
-	t1 = timespec64_to_ns(&ptp_sts_before.pre_ts);
-	t2 = timespec64_to_ns(&ptp_sts_before.post_ts);
-	t3 = timespec64_to_ns(&ptp_sts_after.pre_ts);
-	t4 = timespec64_to_ns(&ptp_sts_after.post_ts);
+	t1 = ktime_to_ns(ptp_sts_before.pre_sts.systime);
+	t2 = ktime_to_ns(ptp_sts_before.post_sts.systime);
+	t3 = ktime_to_ns(ptp_sts_after.pre_sts.systime);
+	t4 = ktime_to_ns(ptp_sts_after.post_sts.systime);
 	/* Mid point, corresponds to pre-reset PTPCLKVAL */
 	t12 = t1 + (t2 - t1) / 2;
 	/* Mid point, corresponds to post-reset PTPCLKVAL, aka 0 */
@@ -2370,49 +2339,13 @@ int sja1105_static_config_reload(struct sja1105_private *priv,
 			goto out;
 	}
 
-	for (i = 0; i < ds->num_ports; i++) {
-		struct phylink_pcs *pcs = priv->pcs[i];
-		unsigned int neg_mode;
-
-		mac[i].speed = mac_speed[i];
-		rc = sja1105_set_port_config(priv, i);
-		if (rc < 0)
-			goto out;
-
-		if (!pcs)
-			continue;
-
-		if (bmcr[i] & BMCR_ANENABLE)
-			neg_mode = PHYLINK_PCS_NEG_INBAND_ENABLED;
-		else
-			neg_mode = PHYLINK_PCS_NEG_OUTBAND;
-
-		rc = pcs->ops->pcs_config(pcs, neg_mode, priv->phy_mode[i],
-					  NULL, true);
-		if (rc < 0)
-			goto out;
-
-		if (neg_mode == PHYLINK_PCS_NEG_OUTBAND) {
-			int speed = SPEED_UNKNOWN;
-
-			if (priv->phy_mode[i] == PHY_INTERFACE_MODE_2500BASEX)
-				speed = SPEED_2500;
-			else if (bmcr[i] & BMCR_SPEED1000)
-				speed = SPEED_1000;
-			else if (bmcr[i] & BMCR_SPEED100)
-				speed = SPEED_100;
-			else
-				speed = SPEED_10;
-
-			pcs->ops->pcs_link_up(pcs, neg_mode, priv->phy_mode[i],
-					      speed, DUPLEX_FULL);
-		}
-	}
-
 	rc = sja1105_reload_cbs(priv);
-	if (rc < 0)
-		goto out;
+
 out:
+	dsa_switch_for_each_available_port(dp, ds)
+		if (dp->pl)
+			phylink_replay_link_end(dp->pl);
+
 	mutex_unlock(&priv->mgmt_lock);
 	mutex_unlock(&priv->fdb_lock);
 
@@ -2914,7 +2847,8 @@ static void sja1105_mirror_del(struct dsa_switch *ds, int port,
 }
 
 static int sja1105_port_policer_add(struct dsa_switch *ds, int port,
-				    struct dsa_mall_policer_tc_entry *policer)
+				    const struct flow_action_police *policer,
+				    struct netlink_ext_ack *extack)
 {
 	struct sja1105_l2_policing_entry *policing;
 	struct sja1105_private *priv = ds->priv;
@@ -2925,7 +2859,7 @@ static int sja1105_port_policer_add(struct dsa_switch *ds, int port,
 	 * the value of RATE bytes divided by 64, up to a maximum of SMAX
 	 * bytes.
 	 */
-	policing[port].rate = div_u64(512 * policer->rate_bytes_per_sec,
+	policing[port].rate = div_u64(512 * policer->rate_bytes_ps,
 				      1000000);
 	policing[port].smax = policer->burst;
 

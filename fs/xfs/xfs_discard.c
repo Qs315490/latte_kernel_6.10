@@ -3,7 +3,7 @@
  * Copyright (C) 2010, 2023 Red Hat, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
 #include "xfs_log_format.h"
@@ -103,30 +103,12 @@ xfs_discard_endio(
 	bio_put(bio);
 }
 
-static inline struct block_device *
-xfs_group_bdev(
-	const struct xfs_group	*xg)
-{
-	struct xfs_mount	*mp = xg->xg_mount;
-
-	switch (xg->xg_type) {
-	case XG_TYPE_AG:
-		return mp->m_ddev_targp->bt_bdev;
-	case XG_TYPE_RTG:
-		return mp->m_rtdev_targp->bt_bdev;
-	default:
-		ASSERT(0);
-		break;
-	}
-	return NULL;
-}
-
 /*
  * Walk the discard list and issue discards on all the busy extents in the
  * list. We plug and chain the bios so that we only need a single completion
  * call to clear all the busy extents once the discards are complete.
  */
-int
+void
 xfs_discard_extents(
 	struct xfs_mount	*mp,
 	struct xfs_busy_extents	*extents)
@@ -134,25 +116,19 @@ xfs_discard_extents(
 	struct xfs_extent_busy	*busyp;
 	struct bio		*bio = NULL;
 	struct blk_plug		plug;
-	int			error = 0;
 
 	blk_start_plug(&plug);
 	list_for_each_entry(busyp, &extents->extent_list, list) {
-		trace_xfs_discard_extent(busyp->group, busyp->bno,
-				busyp->length);
+		struct xfs_group	*xg = busyp->group;
+		struct xfs_buftarg	*btp =
+			xfs_group_type_buftarg(xg->xg_mount, xg->xg_type);
 
-		error = __blkdev_issue_discard(xfs_group_bdev(busyp->group),
-				xfs_gbno_to_daddr(busyp->group, busyp->bno),
+		trace_xfs_discard_extent(xg, busyp->bno, busyp->length);
+
+		__blkdev_issue_discard(btp->bt_bdev,
+				xfs_gbno_to_daddr(xg, busyp->bno),
 				XFS_FSB_TO_BB(mp, busyp->length),
 				GFP_KERNEL, &bio);
-		if (error && error != -EOPNOTSUPP) {
-			xfs_info(mp,
-	 "discard failed for extent [0x%llx,%u], error %d",
-				 (unsigned long long)busyp->bno,
-				 busyp->length,
-				 error);
-			break;
-		}
 	}
 
 	if (bio) {
@@ -163,10 +139,16 @@ xfs_discard_extents(
 		xfs_discard_endio_work(&extents->endio_work);
 	}
 	blk_finish_plug(&plug);
-
-	return error;
 }
 
+/*
+ * Care must be taken setting up the trim cursor as the perags may not have been
+ * initialised when the cursor is initialised. e.g. a clean mount which hasn't
+ * read in AGFs and the first operation run on the mounted fs is a trim. This
+ * can result in perag fields that aren't initialised until
+ * xfs_trim_gather_extents() calls xfs_alloc_read_agf() to lock down the AG for
+ * the free space search.
+ */
 struct xfs_trim_cur {
 	xfs_agblock_t	start;
 	xfs_extlen_t	count;
@@ -196,13 +178,19 @@ xfs_trim_gather_extents(
 	 */
 	xfs_log_force(mp, XFS_LOG_SYNC);
 
-	error = xfs_trans_alloc_empty(mp, &tp);
-	if (error)
-		return error;
+	tp = xfs_trans_alloc_empty(mp);
 
 	error = xfs_alloc_read_agf(pag, tp, 0, &agbp);
 	if (error)
 		goto out_trans_cancel;
+
+	/*
+	 * First time through tcur->count will not have been initialised as
+	 * pag->pagf_longest is not guaranteed to be valid before we read
+	 * the AGF buffer above.
+	 */
+	if (!tcur->count)
+		tcur->count = pag->pagf_longest;
 
 	if (tcur->by_bno) {
 		/* sub-AG discard request always starts at tcur->start */
@@ -350,7 +338,6 @@ xfs_trim_perag_extents(
 {
 	struct xfs_trim_cur	tcur = {
 		.start		= start,
-		.count		= pag->pagf_longest,
 		.end		= end,
 		.minlen		= minlen,
 	};
@@ -362,7 +349,7 @@ xfs_trim_perag_extents(
 	do {
 		struct xfs_busy_extents	*extents;
 
-		extents = kzalloc(sizeof(*extents), GFP_KERNEL);
+		extents = kzalloc_obj(*extents);
 		if (!extents) {
 			error = -ENOMEM;
 			break;
@@ -387,9 +374,7 @@ xfs_trim_perag_extents(
 		 * list  after this function call, as it may have been freed by
 		 * the time control returns to us.
 		 */
-		error = xfs_discard_extents(pag_mount(pag), extents);
-		if (error)
-			break;
+		xfs_discard_extents(pag_mount(pag), extents);
 
 		if (xfs_trim_should_stop())
 			break;
@@ -498,12 +483,10 @@ xfs_discard_rtdev_extents(
 
 		trace_xfs_discard_rtextent(mp, busyp->bno, busyp->length);
 
-		error = __blkdev_issue_discard(bdev,
+		__blkdev_issue_discard(bdev,
 				xfs_rtb_to_daddr(mp, busyp->bno),
 				XFS_FSB_TO_BB(mp, busyp->length),
 				GFP_NOFS, &bio);
-		if (error)
-			break;
 	}
 	xfs_discard_free_rtdev_extents(tr);
 
@@ -554,7 +537,7 @@ xfs_trim_gather_rtextent(
 		return 0;
 	}
 
-	busyp = kzalloc(sizeof(struct xfs_rtx_busy), GFP_KERNEL);
+	busyp = kzalloc_obj(struct xfs_rtx_busy);
 	if (!busyp)
 		return -ENOMEM;
 
@@ -583,9 +566,7 @@ xfs_trim_rtextents(
 	struct xfs_trans	*tp;
 	int			error;
 
-	error = xfs_trans_alloc_empty(mp, &tp);
-	if (error)
-		return error;
+	tp = xfs_trans_alloc_empty(mp);
 
 	/*
 	 * Walk the free ranges between low and high.  The query_range function
@@ -701,16 +682,14 @@ xfs_trim_rtgroup_extents(
 	struct xfs_trans	*tp;
 	int			error;
 
-	error = xfs_trans_alloc_empty(mp, &tp);
-	if (error)
-		return error;
+	tp = xfs_trans_alloc_empty(mp);
 
 	/*
 	 * Walk the free ranges between low and high.  The query_range function
 	 * trims the extents returned.
 	 */
 	do {
-		tr.extents = kzalloc(sizeof(*tr.extents), GFP_KERNEL);
+		tr.extents = kzalloc_obj(*tr.extents);
 		if (!tr.extents) {
 			error = -ENOMEM;
 			break;
@@ -732,8 +711,10 @@ xfs_trim_rtgroup_extents(
 			break;
 		}
 
-		if (!tr.queued)
+		if (!tr.queued) {
+			kfree(tr.extents);
 			break;
+		}
 
 		/*
 		 * We hand the extent list to the discard function here so the
@@ -745,9 +726,7 @@ xfs_trim_rtgroup_extents(
 		 * list  after this function call, as it may have been freed by
 		 * the time control returns to us.
 		 */
-		error = xfs_discard_extents(rtg_mount(rtg), tr.extents);
-		if (error)
-			break;
+		xfs_discard_extents(rtg_mount(rtg), tr.extents);
 
 		low = tr.restart_rtx;
 	} while (!xfs_trim_should_stop() && low <= high);
@@ -844,7 +823,8 @@ xfs_ioc_trim(
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
-	if (mp->m_rtdev_targp &&
+
+	if (mp->m_rtdev_targp && !xfs_has_zoned(mp) &&
 	    bdev_max_discard_sectors(mp->m_rtdev_targp->bt_bdev))
 		rt_bdev = mp->m_rtdev_targp->bt_bdev;
 	if (!bdev_max_discard_sectors(mp->m_ddev_targp->bt_bdev) && !rt_bdev)

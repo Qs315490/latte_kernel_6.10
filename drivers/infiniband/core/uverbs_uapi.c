@@ -445,8 +445,8 @@ static int uapi_finalize(struct uverbs_api *uapi)
 	uapi->notsupp_method.handler = ib_uverbs_notsupp;
 	uapi->num_write = max_write + 1;
 	uapi->num_write_ex = max_write_ex + 1;
-	data = kmalloc_array(uapi->num_write + uapi->num_write_ex,
-			     sizeof(*uapi->write_methods), GFP_KERNEL);
+	data = kmalloc_objs(*uapi->write_methods,
+			    uapi->num_write + uapi->num_write_ex);
 	if (!data)
 		return -ENOMEM;
 
@@ -631,6 +631,8 @@ static const struct uapi_definition uverbs_core_api[] = {
 	UAPI_DEF_CHAIN(uverbs_def_obj_cq),
 	UAPI_DEF_CHAIN(uverbs_def_obj_device),
 	UAPI_DEF_CHAIN(uverbs_def_obj_dm),
+	UAPI_DEF_CHAIN(uverbs_def_obj_dmabuf),
+	UAPI_DEF_CHAIN(uverbs_def_obj_dmah),
 	UAPI_DEF_CHAIN(uverbs_def_obj_flow_action),
 	UAPI_DEF_CHAIN(uverbs_def_obj_intf),
 	UAPI_DEF_CHAIN(uverbs_def_obj_mr),
@@ -646,7 +648,7 @@ struct uverbs_api *uverbs_alloc_api(struct ib_device *ibdev)
 	struct uverbs_api *uapi;
 	int rc;
 
-	uapi = kzalloc(sizeof(*uapi), GFP_KERNEL);
+	uapi = kzalloc_obj(*uapi);
 	if (!uapi)
 		return ERR_PTR(-ENOMEM);
 
@@ -716,12 +718,25 @@ void uverbs_disassociate_api(struct uverbs_api *uapi)
 		if (uapi_key_is_object(iter.index)) {
 			struct uverbs_api_object *object_elm =
 				rcu_dereference_protected(*slot, true);
+			const struct uverbs_obj_type *type_attrs =
+				object_elm->type_attrs;
 
 			/*
 			 * Some type_attrs are in the driver module. We don't
 			 * bother to keep track of which since there should be
 			 * no use of this after disassociate.
+			 *
+			 * release_cleanup is the exception because
+			 * uverbs_uobject_fd_release() needs it. In this case
+			 * the module reference held by the fops will guarentee
+			 * the type_class remains valid too.
 			 */
+			if (type_attrs &&
+			    type_attrs->type_class == &uverbs_fd_class &&
+			    container_of(type_attrs, struct uverbs_obj_fd_type,
+					 type)->release_cleanup)
+				continue;
+
 			object_elm->type_attrs = NULL;
 		} else if (uapi_key_is_attr(iter.index)) {
 			struct uverbs_api_attr *elm =

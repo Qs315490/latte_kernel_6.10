@@ -33,6 +33,7 @@
 
 #include <linux/anon_inodes.h>
 #include <linux/dma-fence.h>
+#include <linux/export.h>
 #include <linux/file.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -45,6 +46,7 @@
 #include <drm/drm_file.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_print.h>
+#include <drm/drm_debugfs.h>
 
 #include "drm_crtc_internal.h"
 #include "drm_internal.h"
@@ -134,7 +136,7 @@ struct drm_file *drm_file_alloc(struct drm_minor *minor)
 	struct drm_file *file;
 	int ret;
 
-	file = kzalloc(sizeof(*file), GFP_KERNEL);
+	file = kzalloc_obj(*file);
 	if (!file)
 		return ERR_PTR(-ENOMEM);
 
@@ -167,6 +169,9 @@ struct drm_file *drm_file_alloc(struct drm_minor *minor)
 
 	drm_prime_init_file_private(&file->prime);
 
+	if (!drm_core_check_feature(dev, DRIVER_COMPUTE_ACCEL))
+		drm_debugfs_clients_add(file);
+
 	if (dev->driver->open) {
 		ret = dev->driver->open(dev, file);
 		if (ret < 0)
@@ -181,6 +186,10 @@ out_prime_destroy:
 		drm_syncobj_release(file);
 	if (drm_core_check_feature(dev, DRIVER_GEM))
 		drm_gem_release(dev, file);
+
+	if (!drm_core_check_feature(dev, DRIVER_COMPUTE_ACCEL))
+		drm_debugfs_clients_remove(file);
+
 	put_pid(rcu_access_pointer(file->pid));
 	kfree(file);
 
@@ -234,6 +243,9 @@ void drm_file_free(struct drm_file *file)
 		     current->comm, task_pid_nr(current),
 		     (long)old_encode_dev(file->minor->kdev->devt),
 		     atomic_read(&dev->open_count));
+
+	if (!drm_core_check_feature(dev, DRIVER_COMPUTE_ACCEL))
+		drm_debugfs_clients_remove(file);
 
 	drm_events_release(file);
 
@@ -393,7 +405,7 @@ EXPORT_SYMBOL(drm_open);
 
 static void drm_lastclose(struct drm_device *dev)
 {
-	drm_client_dev_restore(dev);
+	drm_client_dev_restore(dev, false);
 
 	if (dev_is_pci(dev->dev))
 		vga_switcheroo_process_delayed_switch();
@@ -830,8 +842,11 @@ void drm_send_event(struct drm_device *dev, struct drm_pending_event *e)
 }
 EXPORT_SYMBOL(drm_send_event);
 
-static void print_size(struct drm_printer *p, const char *stat,
-		       const char *region, u64 sz)
+void drm_fdinfo_print_size(struct drm_printer *p,
+			   const char *prefix,
+			   const char *stat,
+			   const char *region,
+			   u64 sz)
 {
 	const char *units[] = {"", " KiB", " MiB"};
 	unsigned u;
@@ -842,8 +857,10 @@ static void print_size(struct drm_printer *p, const char *stat,
 		sz = div_u64(sz, SZ_1K);
 	}
 
-	drm_printf(p, "drm-%s-%s:\t%llu%s\n", stat, region, sz, units[u]);
+	drm_printf(p, "%s-%s-%s:\t%llu%s\n",
+		   prefix, stat, region, sz, units[u]);
 }
+EXPORT_SYMBOL(drm_fdinfo_print_size);
 
 int drm_memory_stats_is_zero(const struct drm_memory_stats *stats)
 {
@@ -868,17 +885,22 @@ void drm_print_memory_stats(struct drm_printer *p,
 			    enum drm_gem_object_status supported_status,
 			    const char *region)
 {
-	print_size(p, "total", region, stats->private + stats->shared);
-	print_size(p, "shared", region, stats->shared);
+	const char *prefix = "drm";
+
+	drm_fdinfo_print_size(p, prefix, "total", region,
+			      stats->private + stats->shared);
+	drm_fdinfo_print_size(p, prefix, "shared", region, stats->shared);
 
 	if (supported_status & DRM_GEM_OBJECT_ACTIVE)
-		print_size(p, "active", region, stats->active);
+		drm_fdinfo_print_size(p, prefix, "active", region, stats->active);
 
 	if (supported_status & DRM_GEM_OBJECT_RESIDENT)
-		print_size(p, "resident", region, stats->resident);
+		drm_fdinfo_print_size(p, prefix, "resident", region,
+				      stats->resident);
 
 	if (supported_status & DRM_GEM_OBJECT_PURGEABLE)
-		print_size(p, "purgeable", region, stats->purgeable);
+		drm_fdinfo_print_size(p, prefix, "purgeable", region,
+				      stats->purgeable);
 }
 EXPORT_SYMBOL(drm_print_memory_stats);
 
@@ -954,6 +976,10 @@ void drm_show_fdinfo(struct seq_file *m, struct file *f)
 	struct drm_file *file = f->private_data;
 	struct drm_device *dev = file->minor->dev;
 	struct drm_printer p = drm_seq_file_printer(m);
+	int idx;
+
+	if (!drm_dev_enter(dev, &idx))
+		return;
 
 	drm_printf(&p, "drm-driver:\t%s\n", dev->driver->name);
 	drm_printf(&p, "drm-client-id:\t%llu\n", file->client_id);
@@ -973,8 +999,46 @@ void drm_show_fdinfo(struct seq_file *m, struct file *f)
 
 	if (dev->driver->show_fdinfo)
 		dev->driver->show_fdinfo(&p, file);
+
+	drm_dev_exit(idx);
 }
 EXPORT_SYMBOL(drm_show_fdinfo);
+
+/**
+ * drm_file_err - log process name, pid and client_name associated with a drm_file
+ * @file_priv: context of interest for process name and pid
+ * @fmt: printf() like format string
+ *
+ * Helper function for clients which needs to log process details such
+ * as name and pid etc along with user logs.
+ */
+void drm_file_err(struct drm_file *file_priv, const char *fmt, ...)
+{
+	va_list args;
+	struct va_format vaf;
+	struct pid *pid;
+	struct task_struct *task;
+	struct drm_device *dev = file_priv->minor->dev;
+
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+
+	mutex_lock(&file_priv->client_name_lock);
+	rcu_read_lock();
+	pid = rcu_dereference(file_priv->pid);
+	task = pid_task(pid, PIDTYPE_TGID);
+
+	drm_err(dev, "comm: %s pid: %d client-id:%llu client: %s ... %pV",
+		task ? task->comm : "Unset",
+		task ? task->pid : 0, file_priv->client_id,
+		file_priv->client_name ?: "Unset", &vaf);
+
+	va_end(args);
+	rcu_read_unlock();
+	mutex_unlock(&file_priv->client_name_lock);
+}
+EXPORT_SYMBOL(drm_file_err);
 
 /**
  * mock_drm_getfile - Create a new struct file for the drm device

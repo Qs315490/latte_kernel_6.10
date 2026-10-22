@@ -73,7 +73,7 @@ static struct iscsi_param *iscsi_set_default_param(struct iscsi_param_list *para
 {
 	struct iscsi_param *param = NULL;
 
-	param = kzalloc(sizeof(struct iscsi_param), GFP_KERNEL);
+	param = kzalloc_obj(struct iscsi_param);
 	if (!param) {
 		pr_err("Unable to allocate memory for parameter.\n");
 		goto out;
@@ -148,7 +148,7 @@ int iscsi_create_default_params(struct iscsi_param_list **param_list_ptr)
 	struct iscsi_param *param = NULL;
 	struct iscsi_param_list *pl;
 
-	pl = kzalloc(sizeof(struct iscsi_param_list), GFP_KERNEL);
+	pl = kzalloc_obj(struct iscsi_param_list);
 	if (!pl) {
 		pr_err("Unable to allocate memory for"
 				" struct iscsi_param_list.\n");
@@ -519,7 +519,7 @@ int iscsi_copy_param_list(
 	struct iscsi_param *new_param = NULL;
 	struct iscsi_param_list *param_list = NULL;
 
-	param_list = kzalloc(sizeof(struct iscsi_param_list), GFP_KERNEL);
+	param_list = kzalloc_obj(struct iscsi_param_list);
 	if (!param_list) {
 		pr_err("Unable to allocate memory for struct iscsi_param_list.\n");
 		return -ENOMEM;
@@ -535,7 +535,7 @@ int iscsi_copy_param_list(
 				continue;
 		}
 
-		new_param = kzalloc(sizeof(struct iscsi_param), GFP_KERNEL);
+		new_param = kzalloc_obj(struct iscsi_param);
 		if (!new_param) {
 			pr_err("Unable to allocate memory for struct iscsi_param.\n");
 			goto err_out;
@@ -670,7 +670,7 @@ static int iscsi_add_notunderstood_response(
 		return -1;
 	}
 
-	extra_response = kzalloc(sizeof(struct iscsi_extra_response), GFP_KERNEL);
+	extra_response = kzalloc_obj(struct iscsi_extra_response);
 	if (!extra_response) {
 		pr_err("Unable to allocate memory for"
 			" struct iscsi_extra_response.\n");
@@ -1371,19 +1371,42 @@ free_buffer:
 	return -1;
 }
 
+/*
+ * Append "key=value" plus a trailing NUL into @textbuf at *@length.
+ * Returns 0 on success and advances *@length, or -EMSGSIZE if the
+ * record (including the NUL) would not fit in the remaining buffer.
+ */
+static int iscsi_encode_text_record(char *textbuf, u32 *length,
+				    u32 textbuf_size,
+				    const char *key, const char *value)
+{
+	int n;
+	u32 avail;
+
+	if (*length >= textbuf_size)
+		return -EMSGSIZE;
+
+	avail = textbuf_size - *length;
+	n = snprintf(textbuf + *length, avail, "%s=%s", key, value);
+	if (n < 0 || (u32)n + 1 > avail)
+		return -EMSGSIZE;
+
+	*length += n + 1;
+	return 0;
+}
+
 int iscsi_encode_text_output(
 	u8 phase,
 	u8 sender,
 	char *textbuf,
 	u32 *length,
+	u32 textbuf_size,
 	struct iscsi_param_list *param_list,
 	bool keys_workaround)
 {
-	char *output_buf = NULL;
 	struct iscsi_extra_response *er;
 	struct iscsi_param *param;
-
-	output_buf = textbuf + *length;
+	int ret;
 
 	if (iscsi_enforce_integrity_rules(phase, param_list) < 0)
 		return -1;
@@ -1395,10 +1418,12 @@ int iscsi_encode_text_output(
 		    !IS_PSTATE_RESPONSE_SENT(param) &&
 		    !IS_PSTATE_REPLY_OPTIONAL(param) &&
 		    (param->phase & phase)) {
-			*length += sprintf(output_buf, "%s=%s",
-				param->name, param->value);
-			*length += 1;
-			output_buf = textbuf + *length;
+			ret = iscsi_encode_text_record(textbuf, length,
+						       textbuf_size,
+						       param->name,
+						       param->value);
+			if (ret < 0)
+				goto err_overflow;
 			SET_PSTATE_RESPONSE_SENT(param);
 			pr_debug("Sending key: %s=%s\n",
 				param->name, param->value);
@@ -1408,10 +1433,12 @@ int iscsi_encode_text_output(
 		    !IS_PSTATE_ACCEPTOR(param) &&
 		    !IS_PSTATE_PROPOSER(param) &&
 		    (param->phase & phase)) {
-			*length += sprintf(output_buf, "%s=%s",
-				param->name, param->value);
-			*length += 1;
-			output_buf = textbuf + *length;
+			ret = iscsi_encode_text_record(textbuf, length,
+						       textbuf_size,
+						       param->name,
+						       param->value);
+			if (ret < 0)
+				goto err_overflow;
 			SET_PSTATE_PROPOSER(param);
 			iscsi_check_proposer_for_optional_reply(param,
 							        keys_workaround);
@@ -1421,14 +1448,21 @@ int iscsi_encode_text_output(
 	}
 
 	list_for_each_entry(er, &param_list->extra_response_list, er_list) {
-		*length += sprintf(output_buf, "%s=%s", er->key, er->value);
-		*length += 1;
-		output_buf = textbuf + *length;
+		ret = iscsi_encode_text_record(textbuf, length, textbuf_size,
+					       er->key, er->value);
+		if (ret < 0)
+			goto err_overflow;
 		pr_debug("Sending key: %s=%s\n", er->key, er->value);
 	}
 	iscsi_release_extra_responses(param_list);
 
 	return 0;
+
+err_overflow:
+	pr_err("iSCSI login response buffer (%u bytes) exhausted, dropping login.\n",
+	       textbuf_size);
+	iscsi_release_extra_responses(param_list);
+	return -1;
 }
 
 int iscsi_check_negotiated_keys(struct iscsi_param_list *param_list)

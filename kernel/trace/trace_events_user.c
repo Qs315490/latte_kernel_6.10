@@ -109,6 +109,9 @@ struct user_event_enabler {
 
 	/* Track enable bit, flags, etc. Aligned for bitops. */
 	unsigned long		values;
+
+	/* Defer the event put and enabler free past an RCU grace period. */
+	struct rcu_work		put_rwork;
 };
 
 /* Bits 0-5 are for the bit to update upon enable/disable (0-63 allowed) */
@@ -370,7 +373,7 @@ static struct user_event_group *user_event_group_create(void)
 {
 	struct user_event_group *group;
 
-	group = kzalloc(sizeof(*group), GFP_KERNEL);
+	group = kzalloc_obj(*group);
 
 	if (!group)
 		return NULL;
@@ -396,15 +399,37 @@ error:
 	return NULL;
 };
 
-static void user_event_enabler_destroy(struct user_event_enabler *enabler,
-				       bool locked)
+static void delayed_user_event_enabler_put(struct work_struct *work)
+{
+	struct user_event_enabler *enabler = container_of(to_rcu_work(work),
+			struct user_event_enabler, put_rwork);
+
+	/* No longer tracking the event via the enabler */
+	user_event_put(enabler->event, false);
+
+	/* Run from queue_rcu_work(), the RCU grace period has elapsed */
+	kfree(enabler);
+}
+
+static void user_event_enabler_destroy(struct user_event_enabler *enabler)
 {
 	list_del_rcu(&enabler->mm_enablers_link);
 
-	/* No longer tracking the event via the enabler */
-	user_event_put(enabler->event, locked);
-
-	kfree(enabler);
+	/*
+	 * The enabler is removed from an RCU-traversed list
+	 * (user_event_mm_dup() walks mm->enablers under rcu_read_lock() only),
+	 * and readers there dereference enabler->event and take a new ref on
+	 * it. Both the put of that event reference and the free of the enabler
+	 * therefore have to wait for a grace period so no reader can be looking
+	 * at the enabler or racing the last put of its event.
+	 *
+	 * The put itself must not run in RCU context: when it drops the last
+	 * reference user_event_put() takes event_mutex, which cannot be taken
+	 * from a softirq/RCU callback. Defer both to a work item scheduled
+	 * after a grace period via queue_rcu_work().
+	 */
+	INIT_RCU_WORK(&enabler->put_rwork, delayed_user_event_enabler_put);
+	queue_rcu_work(system_percpu_wq, &enabler->put_rwork);
 }
 
 static int user_event_mm_fault_in(struct user_event_mm *mm, unsigned long uaddr,
@@ -455,7 +480,7 @@ static void user_event_enabler_fault_fixup(struct work_struct *work)
 	if (ret && ret != -ENOENT) {
 		struct user_event *user = enabler->event;
 
-		pr_warn("user_events: Fault for mm: 0x%pK @ 0x%llx event: %s\n",
+		pr_warn("user_events: Fault for mm: 0x%p @ 0x%llx event: %s\n",
 			mm->mm, (unsigned long long)uaddr, EVENT_NAME(user));
 	}
 
@@ -464,7 +489,7 @@ static void user_event_enabler_fault_fixup(struct work_struct *work)
 
 	/* User asked for enabler to be removed during fault */
 	if (test_bit(ENABLE_VAL_FREEING_BIT, ENABLE_BITOPS(enabler))) {
-		user_event_enabler_destroy(enabler, true);
+		user_event_enabler_destroy(enabler);
 		goto out;
 	}
 
@@ -496,7 +521,7 @@ static bool user_event_enabler_queue_fault(struct user_event_mm *mm,
 {
 	struct user_event_enabler_fault *fault;
 
-	fault = kmem_cache_zalloc(fault_cache, GFP_NOWAIT | __GFP_NOWARN);
+	fault = kmem_cache_zalloc(fault_cache, GFP_NOWAIT);
 
 	if (!fault)
 		return false;
@@ -637,7 +662,7 @@ static bool user_event_enabler_dup(struct user_event_enabler *orig,
 	if (unlikely(test_bit(ENABLE_VAL_FREEING_BIT, ENABLE_BITOPS(orig))))
 		return true;
 
-	enabler = kzalloc(sizeof(*enabler), GFP_NOWAIT | __GFP_ACCOUNT);
+	enabler = kzalloc_obj(*enabler, GFP_NOWAIT | __GFP_ACCOUNT);
 
 	if (!enabler)
 		return false;
@@ -706,7 +731,7 @@ static struct user_event_mm *user_event_mm_alloc(struct task_struct *t)
 {
 	struct user_event_mm *user_mm;
 
-	user_mm = kzalloc(sizeof(*user_mm), GFP_KERNEL_ACCOUNT);
+	user_mm = kzalloc_obj(*user_mm, GFP_KERNEL_ACCOUNT);
 
 	if (!user_mm)
 		return NULL;
@@ -764,7 +789,7 @@ static void user_event_mm_destroy(struct user_event_mm *mm)
 	struct user_event_enabler *enabler, *next;
 
 	list_for_each_entry_safe(enabler, next, &mm->enablers, mm_enablers_link)
-		user_event_enabler_destroy(enabler, false);
+		user_event_enabler_destroy(enabler);
 
 	mmdrop(mm->mm);
 	kfree(mm);
@@ -835,7 +860,7 @@ void user_event_mm_remove(struct task_struct *t)
 	 * so we use a work queue after call_rcu() to run within.
 	 */
 	INIT_RCU_WORK(&mm->put_rwork, delayed_user_event_mm_put);
-	queue_rcu_work(system_wq, &mm->put_rwork);
+	queue_rcu_work(system_percpu_wq, &mm->put_rwork);
 }
 
 void user_event_mm_dup(struct task_struct *t, struct user_event_mm *old_mm)
@@ -892,7 +917,7 @@ static struct user_event_enabler
 	if (!user_mm)
 		return NULL;
 
-	enabler = kzalloc(sizeof(*enabler), GFP_KERNEL_ACCOUNT);
+	enabler = kzalloc_obj(*enabler, GFP_KERNEL_ACCOUNT);
 
 	if (!enabler)
 		goto out;
@@ -1041,7 +1066,7 @@ static int user_field_array_size(const char *type)
 
 static int user_field_size(const char *type)
 {
-	/* long is not allowed from a user, since it's ambigious in size */
+	/* long is not allowed from a user, since it's ambiguous in size */
 	if (strcmp(type, "s64") == 0)
 		return sizeof(s64);
 	if (strcmp(type, "u64") == 0)
@@ -1079,7 +1104,7 @@ static int user_field_size(const char *type)
 	if (str_has_prefix(type, "__rel_loc "))
 		return sizeof(u32);
 
-	/* Uknown basic type, error */
+	/* Unknown basic type, error */
 	return -EINVAL;
 }
 
@@ -1113,7 +1138,7 @@ static int user_event_add_field(struct user_event *user, const char *type,
 	struct ftrace_event_field *field;
 	int validator_flags = 0;
 
-	field = kmalloc(sizeof(*field), GFP_KERNEL_ACCOUNT);
+	field = kmalloc_obj(*field, GFP_KERNEL_ACCOUNT);
 
 	if (!field)
 		return -ENOMEM;
@@ -1132,7 +1157,7 @@ add_validator:
 	if (strstr(type, "char") != NULL)
 		validator_flags |= VALIDATOR_ENSURE_NULL;
 
-	validator = kmalloc(sizeof(*validator), GFP_KERNEL_ACCOUNT);
+	validator = kmalloc_obj(*validator, GFP_KERNEL_ACCOUNT);
 
 	if (!validator) {
 		kfree(field);
@@ -1449,12 +1474,7 @@ static struct trace_event_functions user_event_funcs = {
 
 static int user_event_set_call_visible(struct user_event *user, bool visible)
 {
-	int ret;
-	const struct cred *old_cred;
-	struct cred *cred;
-
-	cred = prepare_creds();
-
+	CLASS(prepare_creds, cred)();
 	if (!cred)
 		return -ENOMEM;
 
@@ -1469,17 +1489,12 @@ static int user_event_set_call_visible(struct user_event *user, bool visible)
 	 */
 	cred->fsuid = GLOBAL_ROOT_UID;
 
-	old_cred = override_creds(cred);
+	scoped_with_creds(cred) {
+		if (visible)
+			return trace_add_event_call(&user->call);
 
-	if (visible)
-		ret = trace_add_event_call(&user->call);
-	else
-		ret = trace_remove_event_call(&user->call);
-
-	revert_creds(old_cred);
-	put_cred(cred);
-
-	return ret;
+		return trace_remove_event_call(&user->call);
+	}
 }
 
 static int destroy_user_event(struct user_event *user)
@@ -2115,7 +2130,7 @@ static int user_event_parse(struct user_event_group *group, char *name,
 		return 0;
 	}
 
-	user = kzalloc(sizeof(*user), GFP_KERNEL_ACCOUNT);
+	user = kzalloc_obj(*user, GFP_KERNEL_ACCOUNT);
 
 	if (!user)
 		return -ENOMEM;
@@ -2325,7 +2340,7 @@ static int user_events_open(struct inode *node, struct file *file)
 	if (!group)
 		return -ENOENT;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL_ACCOUNT);
+	info = kzalloc_obj(*info, GFP_KERNEL_ACCOUNT);
 
 	if (!info)
 		return -ENOMEM;
@@ -2475,7 +2490,7 @@ static long user_events_ioctl_reg(struct user_event_file_info *info,
 	/*
 	 * Prevent users from using the same address and bit multiple times
 	 * within the same mm address space. This can cause unexpected behavior
-	 * for user processes that is far easier to debug if this is explictly
+	 * for user processes that is far easier to debug if this is explicitly
 	 * an error upon registering.
 	 */
 	if (current_user_event_enabler_exists((unsigned long)reg.enable_addr,
@@ -2655,7 +2670,7 @@ static long user_events_ioctl_unreg(unsigned long uarg)
 			flags |= enabler->values & ENABLE_VAL_COMPAT_MASK;
 
 			if (!test_bit(ENABLE_VAL_FAULTING_BIT, ENABLE_BITOPS(enabler)))
-				user_event_enabler_destroy(enabler, true);
+				user_event_enabler_destroy(enabler);
 
 			/* Removed at least one */
 			ret = 0;
@@ -2793,11 +2808,8 @@ static int user_seq_show(struct seq_file *m, void *p)
 
 		seq_printf(m, "%s", EVENT_TP_NAME(user));
 
-		if (status != 0)
-			seq_puts(m, " #");
-
 		if (status != 0) {
-			seq_puts(m, " Used by");
+			seq_puts(m, " # Used by");
 			if (status & EVENT_STATUS_FTRACE)
 				seq_puts(m, " ftrace");
 			if (status & EVENT_STATUS_PERF)

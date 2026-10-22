@@ -92,7 +92,6 @@ struct rtrs_permit {
  * rtrs_clt_io_req - describes one inflight IO request
  */
 struct rtrs_clt_io_req {
-	struct list_head        list;
 	struct rtrs_iu		*iu;
 	struct scatterlist	*sglist; /* list holding user data */
 	unsigned int		sg_cnt;
@@ -103,12 +102,10 @@ struct rtrs_clt_io_req {
 	bool			in_use;
 	enum rtrs_mp_policy     mp_policy;
 	struct rtrs_clt_con	*con;
-	struct rtrs_sg_desc	*desc;
 	struct ib_sge		*sge;
 	struct rtrs_permit	*permit;
 	enum dma_data_direction dir;
 	void			(*conf)(void *priv, int errno);
-	unsigned long		start_jiffies;
 
 	struct ib_mr		*mr;
 	struct ib_cqe		inv_cqe;
@@ -145,12 +142,12 @@ struct rtrs_clt_path {
 	u32			flags;
 	struct kobject		kobj;
 	u8			for_new_clt;
-	struct rtrs_clt_stats	*stats;
 	/* cache hca_port and hca_name to display in sysfs */
 	u8			hca_port;
 	char                    hca_name[IB_DEVICE_NAME_MAX];
 	struct list_head __percpu
 				*mp_skip_entry;
+	struct rtrs_clt_stats	stats[];
 };
 
 struct rtrs_clt_sess {

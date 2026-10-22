@@ -4,7 +4,7 @@
 //!
 //! C header: [`include/linux/seq_file.h`](srctree/include/linux/seq_file.h)
 
-use crate::{bindings, c_str, types::NotThreadSafe, types::Opaque};
+use crate::{bindings, fmt, str::CStrExt as _, types::NotThreadSafe, types::Opaque};
 
 /// A utility for generating the contents of a seq file.
 #[repr(transparent)]
@@ -18,7 +18,7 @@ impl SeqFile {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that for the duration of 'a the following is satisfied:
+    /// The caller must ensure that for the duration of `'a` the following is satisfied:
     /// * The pointer points at a valid `struct seq_file`.
     /// * The `struct seq_file` is not accessed from any other thread.
     pub unsafe fn from_raw<'a>(ptr: *mut bindings::seq_file) -> &'a SeqFile {
@@ -30,13 +30,14 @@ impl SeqFile {
     }
 
     /// Used by the [`seq_print`] macro.
-    pub fn call_printf(&self, args: core::fmt::Arguments<'_>) {
+    #[inline]
+    pub fn call_printf(&self, args: fmt::Arguments<'_>) {
         // SAFETY: Passing a void pointer to `Arguments` is valid for `%pA`.
         unsafe {
             bindings::seq_printf(
                 self.inner.get(),
-                c_str!("%pA").as_char_ptr(),
-                &args as *const _ as *const crate::ffi::c_void,
+                c"%pA".as_char_ptr(),
+                core::ptr::from_ref(&args).cast::<crate::ffi::c_void>(),
             );
         }
     }
@@ -46,7 +47,7 @@ impl SeqFile {
 #[macro_export]
 macro_rules! seq_print {
     ($m:expr, $($arg:tt)+) => (
-        $m.call_printf(format_args!($($arg)+))
+        $m.call_printf($crate::prelude::fmt!($($arg)+))
     );
 }
 pub use seq_print;

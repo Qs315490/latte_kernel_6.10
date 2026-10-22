@@ -62,8 +62,8 @@ static ssize_t ads7828_in_show(struct device *dev,
 	if (err < 0)
 		return err;
 
-	return sprintf(buf, "%d\n",
-		       DIV_ROUND_CLOSEST(regval * data->lsb_resol, 1000));
+	return sysfs_emit(buf, "%d\n",
+			  DIV_ROUND_CLOSEST(regval * data->lsb_resol, 1000));
 }
 
 static SENSOR_DEVICE_ATTR_RO(in0_input, ads7828_in, 0);
@@ -106,12 +106,11 @@ static int ads7828_probe(struct i2c_client *client)
 	struct ads7828_data *data;
 	struct device *hwmon_dev;
 	unsigned int vref_mv = ADS7828_INT_VREF_MV;
-	unsigned int vref_uv;
+	int vref_uv;
 	bool diff_input = false;
 	bool ext_vref = false;
 	unsigned int regval;
 	enum ads7828_chips chip;
-	struct regulator *reg;
 
 	data = devm_kzalloc(dev, sizeof(struct ads7828_data), GFP_KERNEL);
 	if (!data)
@@ -125,9 +124,11 @@ static int ads7828_probe(struct i2c_client *client)
 	} else if (dev->of_node) {
 		diff_input = of_property_read_bool(dev->of_node,
 						   "ti,differential-input");
-		reg = devm_regulator_get_optional(dev, "vref");
-		if (!IS_ERR(reg)) {
-			vref_uv = regulator_get_voltage(reg);
+		vref_uv = devm_regulator_get_enable_read_voltage(dev, "vref");
+		if (vref_uv < 0) {
+			if (vref_uv != -ENODEV)
+				return vref_uv;
+		} else {
 			vref_mv = DIV_ROUND_CLOSEST(vref_uv, 1000);
 			if (vref_mv < ADS7828_EXT_VREF_MV_MIN ||
 			    vref_mv > ADS7828_EXT_VREF_MV_MAX)
@@ -176,8 +177,8 @@ static int ads7828_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ads7828_device_ids[] = {
-	{ "ads7828", ads7828 },
-	{ "ads7830", ads7830 },
+	{ .name = "ads7828", .driver_data = ads7828 },
+	{ .name = "ads7830", .driver_data = ads7830 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ads7828_device_ids);

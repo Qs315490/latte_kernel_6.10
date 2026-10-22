@@ -407,9 +407,8 @@ int init_send_contexts(struct hfi1_devdata *dd)
 
 	dd->hw_to_sw = kmalloc_array(TXE_NUM_CONTEXTS, sizeof(u8),
 					GFP_KERNEL);
-	dd->send_contexts = kcalloc(dd->num_send_contexts,
-				    sizeof(struct send_context_info),
-				    GFP_KERNEL);
+	dd->send_contexts = kzalloc_objs(struct send_context_info,
+					 dd->num_send_contexts);
 	if (!dd->send_contexts || !dd->hw_to_sw) {
 		kfree(dd->hw_to_sw);
 		kfree(dd->send_contexts);
@@ -1361,16 +1360,6 @@ void sc_flush(struct send_context *sc)
 	sc_wait_for_packet_egress(sc, 1);
 }
 
-/* drop all packets on the context, no waiting until they are sent */
-void sc_drop(struct send_context *sc)
-{
-	if (!sc)
-		return;
-
-	dd_dev_info(sc->dd, "%s: context %u(%u) - not implemented\n",
-		    __func__, sc->sw_index, sc->hw_context);
-}
-
 /*
  * Start the software reaction to a context halt or SPC freeze:
  *	- mark the context as halted or frozen
@@ -1893,8 +1882,7 @@ int pio_map_init(struct hfi1_devdata *dd, u8 port, u8 num_vls, u8 *vl_scontexts)
 			vl_scontexts[i] = sc_per_vl + (extra > 0 ? 1 : 0);
 	}
 	/* build new map */
-	newmap = kzalloc(struct_size(newmap, map, roundup_pow_of_two(num_vls)),
-			 GFP_KERNEL);
+	newmap = kzalloc_flex(*newmap, map, roundup_pow_of_two(num_vls));
 	if (!newmap)
 		goto bail;
 	newmap->actual_vls = num_vls;
@@ -1908,9 +1896,7 @@ int pio_map_init(struct hfi1_devdata *dd, u8 port, u8 num_vls, u8 *vl_scontexts)
 			int sz = roundup_pow_of_two(vl_scontexts[i]);
 
 			/* only allocate once */
-			newmap->map[i] = kzalloc(struct_size(newmap->map[i],
-							     ksc, sz),
-						 GFP_KERNEL);
+			newmap->map[i] = kzalloc_flex(*newmap->map[i], ksc, sz);
 			if (!newmap->map[i])
 				goto bail;
 			newmap->map[i]->mask = (1 << ilog2(sz)) - 1;
@@ -1956,13 +1942,16 @@ bail:
 
 void free_pio_map(struct hfi1_devdata *dd)
 {
+	struct pio_vl_map *map;
+
 	/* Free PIO map if allocated */
 	if (rcu_access_pointer(dd->pio_map)) {
 		spin_lock_irq(&dd->pio_map_lock);
-		pio_map_free(rcu_access_pointer(dd->pio_map));
+		map = rcu_access_pointer(dd->pio_map);
 		RCU_INIT_POINTER(dd->pio_map, NULL);
 		spin_unlock_irq(&dd->pio_map_lock);
 		synchronize_rcu();
+		pio_map_free(map);
 	}
 	kfree(dd->kernel_send_context);
 	dd->kernel_send_context = NULL;
@@ -2064,10 +2053,8 @@ int init_credit_return(struct hfi1_devdata *dd)
 	int ret;
 	int i;
 
-	dd->cr_base = kcalloc(
-		node_affinity.num_possible_nodes,
-		sizeof(struct credit_return_base),
-		GFP_KERNEL);
+	dd->cr_base = kzalloc_objs(struct credit_return_base,
+				   node_affinity.num_possible_nodes);
 	if (!dd->cr_base) {
 		ret = -ENOMEM;
 		goto done;

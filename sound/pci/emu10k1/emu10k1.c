@@ -7,6 +7,7 @@
 
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/string.h>
 #include <linux/time.h>
 #include <linux/module.h>
 #include <sound/core.h>
@@ -57,10 +58,10 @@ MODULE_PARM_DESC(subsystem, "Force card subsystem model.");
  * Class 0401: 1102:0008 (rev 00) Subsystem: 1102:1001 -> Audigy2 Value  Model:SB0400
  */
 static const struct pci_device_id snd_emu10k1_ids[] = {
-	{ PCI_VDEVICE(CREATIVE, 0x0002), 0 },	/* EMU10K1 */
-	{ PCI_VDEVICE(CREATIVE, 0x0004), 1 },	/* Audigy */
-	{ PCI_VDEVICE(CREATIVE, 0x0008), 1 },	/* Audigy 2 Value SB0400 */
-	{ 0, }
+	{ PCI_VDEVICE(CREATIVE, 0x0002), .driver_data = 0 },	/* EMU10K1 */
+	{ PCI_VDEVICE(CREATIVE, 0x0004), .driver_data = 1 },	/* Audigy */
+	{ PCI_VDEVICE(CREATIVE, 0x0008), .driver_data = 1 },	/* Audigy 2 Value SB0400 */
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_emu10k1_ids);
@@ -154,7 +155,7 @@ static int snd_card_emu10k1_probe(struct pci_dev *pci,
 	} else {
 		struct snd_emu10k1_synth_arg *arg;
 		arg = SNDRV_SEQ_DEVICE_ARGPTR(wave);
-		strcpy(wave->name, "Emu-10k1 Synth");
+		strscpy(wave->name, "Emu-10k1 Synth");
 		arg->hwptr = emu;
 		arg->index = 1;
 		arg->seq_ports = seq_ports[dev];

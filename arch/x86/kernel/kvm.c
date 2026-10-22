@@ -29,6 +29,8 @@
 #include <linux/syscore_ops.h>
 #include <linux/cc_platform.h>
 #include <linux/efi.h>
+#include <linux/kvm_types.h>
+#include <linux/sched/cputime.h>
 #include <asm/timer.h>
 #include <asm/cpu.h>
 #include <asm/traps.h>
@@ -39,7 +41,9 @@
 #include <asm/hypervisor.h>
 #include <asm/mtrr.h>
 #include <asm/tlb.h>
+#include <asm/cpuid/api.h>
 #include <asm/cpuidle_haltpoll.h>
+#include <asm/msr.h>
 #include <asm/ptrace.h>
 #include <asm/reboot.h>
 #include <asm/svm.h>
@@ -72,12 +76,6 @@ DEFINE_PER_CPU_DECRYPTED(struct kvm_steal_time, steal_time) __aligned(64) __visi
 static int has_steal_clock = 0;
 
 static int has_guest_poll = 0;
-/*
- * No need for any "IO delay" on KVM
- */
-static void kvm_io_delay(void)
-{
-}
 
 #define KVM_TASK_SLEEP_HASHBITS 8
 #define KVM_TASK_SLEEP_HASHSIZE (1<<KVM_TASK_SLEEP_HASHBITS)
@@ -87,6 +85,7 @@ struct kvm_task_sleep_node {
 	struct swait_queue_head wq;
 	u32 token;
 	int cpu;
+	bool dummy;
 };
 
 static struct kvm_task_sleep_head {
@@ -118,15 +117,26 @@ static bool kvm_async_pf_queue_task(u32 token, struct kvm_task_sleep_node *n)
 	raw_spin_lock(&b->lock);
 	e = _find_apf_task(b, token);
 	if (e) {
-		/* dummy entry exist -> wake up was delivered ahead of PF */
-		hlist_del(&e->link);
+		struct kvm_task_sleep_node *dummy = NULL;
+
+		/*
+		 * The entry can either be a 'dummy' entry (which is put on the
+		 * list when wake-up happens ahead of APF handling completion)
+		 * or a token from another task which should not be touched.
+		 */
+		if (e->dummy) {
+			hlist_del(&e->link);
+			dummy = e;
+		}
+
 		raw_spin_unlock(&b->lock);
-		kfree(e);
+		kfree(dummy);
 		return false;
 	}
 
 	n->token = token;
 	n->cpu = smp_processor_id();
+	n->dummy = false;
 	init_swait_queue_head(&n->wq);
 	hlist_add_head(&n->link, &b->list);
 	raw_spin_unlock(&b->lock);
@@ -161,7 +171,7 @@ void kvm_async_pf_task_wait_schedule(u32 token)
 	}
 	finish_swait(&n.wq, &wait);
 }
-EXPORT_SYMBOL_GPL(kvm_async_pf_task_wait_schedule);
+EXPORT_SYMBOL_FOR_KVM(kvm_async_pf_task_wait_schedule);
 
 static void apf_task_wake_one(struct kvm_task_sleep_node *n)
 {
@@ -189,7 +199,7 @@ static void apf_task_wake_all(void)
 	}
 }
 
-void kvm_async_pf_task_wake(u32 token)
+static void kvm_async_pf_task_wake(u32 token)
 {
 	u32 key = hash_32(token, KVM_TASK_SLEEP_HASHBITS);
 	struct kvm_task_sleep_head *b = &async_pf_sleepers[key];
@@ -211,7 +221,7 @@ again:
 		 */
 		if (!dummy) {
 			raw_spin_unlock(&b->lock);
-			dummy = kzalloc(sizeof(*dummy), GFP_ATOMIC);
+			dummy = kzalloc_obj(*dummy, GFP_ATOMIC);
 
 			/*
 			 * Continue looping on allocation failure, eventually
@@ -229,6 +239,7 @@ again:
 		}
 		dummy->token = token;
 		dummy->cpu = smp_processor_id();
+		dummy->dummy = true;
 		init_swait_queue_head(&dummy->wq);
 		hlist_add_head(&dummy->link, &b->list);
 		dummy = NULL;
@@ -240,7 +251,6 @@ again:
 	/* A dummy token might be allocated and ultimately not used.  */
 	kfree(dummy);
 }
-EXPORT_SYMBOL_GPL(kvm_async_pf_task_wake);
 
 noinstr u32 kvm_read_and_reset_apf_flags(void)
 {
@@ -253,7 +263,7 @@ noinstr u32 kvm_read_and_reset_apf_flags(void)
 
 	return flags;
 }
-EXPORT_SYMBOL_GPL(kvm_read_and_reset_apf_flags);
+EXPORT_SYMBOL_FOR_KVM(kvm_read_and_reset_apf_flags);
 
 noinstr bool __kvm_handle_async_pf(struct pt_regs *regs, u32 token)
 {
@@ -295,13 +305,13 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_kvm_asyncpf_interrupt)
 
 	apic_eoi();
 
-	inc_irq_stat(irq_hv_callback_count);
+	inc_irq_stat(HYPERVISOR_CALLBACK);
 
 	if (__this_cpu_read(async_pf_enabled)) {
 		token = __this_cpu_read(apf_reason.token);
 		kvm_async_pf_task_wake(token);
 		__this_cpu_write(apf_reason.token, 0);
-		wrmsrl(MSR_KVM_ASYNC_PF_ACK, 1);
+		wrmsrq(MSR_KVM_ASYNC_PF_ACK, 1);
 	}
 
 	set_irq_regs(old_regs);
@@ -312,7 +322,7 @@ static void __init paravirt_ops_setup(void)
 	pv_info.name = "KVM";
 
 	if (kvm_para_has_feature(KVM_FEATURE_NOP_IO_DELAY))
-		pv_ops.cpu.io_delay = kvm_io_delay;
+		pv_info.io_delay = false;
 
 #ifdef CONFIG_X86_IO_APIC
 	no_timer_check = 1;
@@ -327,7 +337,7 @@ static void kvm_register_steal_time(void)
 	if (!has_steal_clock)
 		return;
 
-	wrmsrl(MSR_KVM_STEAL_TIME, (slow_virt_to_phys(st) | KVM_MSR_ENABLED));
+	wrmsrq(MSR_KVM_STEAL_TIME, (slow_virt_to_phys(st) | KVM_MSR_ENABLED));
 	pr_debug("stealtime: cpu %d, msr %llx\n", cpu,
 		(unsigned long long) slow_virt_to_phys(st));
 }
@@ -361,9 +371,9 @@ static void kvm_guest_cpu_init(void)
 		if (kvm_para_has_feature(KVM_FEATURE_ASYNC_PF_VMEXIT))
 			pa |= KVM_ASYNC_PF_DELIVERY_AS_PF_VMEXIT;
 
-		wrmsrl(MSR_KVM_ASYNC_PF_INT, HYPERVISOR_CALLBACK_VECTOR);
+		wrmsrq(MSR_KVM_ASYNC_PF_INT, HYPERVISOR_CALLBACK_VECTOR);
 
-		wrmsrl(MSR_KVM_ASYNC_PF_EN, pa);
+		wrmsrq(MSR_KVM_ASYNC_PF_EN, pa);
 		__this_cpu_write(async_pf_enabled, true);
 		pr_debug("setup async PF for cpu %d\n", smp_processor_id());
 	}
@@ -376,7 +386,7 @@ static void kvm_guest_cpu_init(void)
 		__this_cpu_write(kvm_apic_eoi, 0);
 		pa = slow_virt_to_phys(this_cpu_ptr(&kvm_apic_eoi))
 			| KVM_MSR_ENABLED;
-		wrmsrl(MSR_KVM_PV_EOI_EN, pa);
+		wrmsrq(MSR_KVM_PV_EOI_EN, pa);
 	}
 
 	if (has_steal_clock)
@@ -388,7 +398,7 @@ static void kvm_pv_disable_apf(void)
 	if (!__this_cpu_read(async_pf_enabled))
 		return;
 
-	wrmsrl(MSR_KVM_ASYNC_PF_EN, 0);
+	wrmsrq(MSR_KVM_ASYNC_PF_EN, 0);
 	__this_cpu_write(async_pf_enabled, false);
 
 	pr_debug("disable async PF for cpu %d\n", smp_processor_id());
@@ -399,7 +409,7 @@ static void kvm_disable_steal_time(void)
 	if (!has_steal_clock)
 		return;
 
-	wrmsr(MSR_KVM_STEAL_TIME, 0, 0);
+	wrmsrq(MSR_KVM_STEAL_TIME, 0);
 }
 
 static u64 kvm_steal_clock(int cpu)
@@ -419,7 +429,7 @@ static u64 kvm_steal_clock(int cpu)
 	return steal;
 }
 
-static inline void __set_percpu_decrypted(void *ptr, unsigned long size)
+static inline __init void __set_percpu_decrypted(void *ptr, unsigned long size)
 {
 	early_set_memory_decrypted((unsigned long) ptr, size);
 }
@@ -451,9 +461,9 @@ static void kvm_guest_cpu_offline(bool shutdown)
 {
 	kvm_disable_steal_time();
 	if (kvm_para_has_feature(KVM_FEATURE_PV_EOI))
-		wrmsrl(MSR_KVM_PV_EOI_EN, 0);
+		wrmsrq(MSR_KVM_PV_EOI_EN, 0);
 	if (kvm_para_has_feature(KVM_FEATURE_MIGRATION_CONTROL))
-		wrmsrl(MSR_KVM_MIGRATION_CONTROL, 0);
+		wrmsrq(MSR_KVM_MIGRATION_CONTROL, 0);
 	kvm_pv_disable_apf();
 	if (!shutdown)
 		apf_task_wake_all();
@@ -615,7 +625,7 @@ static int __init setup_efi_kvm_sev_migration(void)
 	}
 
 	pr_info("%s : live migration enabled in EFI\n", __func__);
-	wrmsrl(MSR_KVM_MIGRATION_CONTROL, KVM_MIGRATION_READY);
+	wrmsrq(MSR_KVM_MIGRATION_CONTROL, KVM_MIGRATION_READY);
 
 	return 1;
 }
@@ -720,7 +730,7 @@ static int kvm_cpu_down_prepare(unsigned int cpu)
 
 #endif
 
-static int kvm_suspend(void)
+static int kvm_suspend(void *data)
 {
 	u64 val = 0;
 
@@ -728,25 +738,29 @@ static int kvm_suspend(void)
 
 #ifdef CONFIG_ARCH_CPUIDLE_HALTPOLL
 	if (kvm_para_has_feature(KVM_FEATURE_POLL_CONTROL))
-		rdmsrl(MSR_KVM_POLL_CONTROL, val);
+		rdmsrq(MSR_KVM_POLL_CONTROL, val);
 	has_guest_poll = !(val & 1);
 #endif
 	return 0;
 }
 
-static void kvm_resume(void)
+static void kvm_resume(void *data)
 {
 	kvm_cpu_online(raw_smp_processor_id());
 
 #ifdef CONFIG_ARCH_CPUIDLE_HALTPOLL
 	if (kvm_para_has_feature(KVM_FEATURE_POLL_CONTROL) && has_guest_poll)
-		wrmsrl(MSR_KVM_POLL_CONTROL, 0);
+		wrmsrq(MSR_KVM_POLL_CONTROL, 0);
 #endif
 }
 
-static struct syscore_ops kvm_syscore_ops = {
+static const struct syscore_ops kvm_syscore_ops = {
 	.suspend	= kvm_suspend,
 	.resume		= kvm_resume,
+};
+
+static struct syscore kvm_syscore = {
+	.ops = &kvm_syscore_ops,
 };
 
 static void kvm_pv_guest_cpu_reboot(void *unused)
@@ -823,8 +837,10 @@ static void __init kvm_guest_init(void)
 		has_steal_clock = 1;
 		static_call_update(pv_steal_clock, kvm_steal_clock);
 
-		pv_ops.lock.vcpu_is_preempted =
+#ifdef CONFIG_PARAVIRT_SPINLOCKS
+		pv_ops_lock.vcpu_is_preempted =
 			PV_CALLEE_SAVE(__kvm_vcpu_is_preempted);
+#endif
 	}
 
 	if (kvm_para_has_feature(KVM_FEATURE_PV_EOI))
@@ -838,7 +854,6 @@ static void __init kvm_guest_init(void)
 #ifdef CONFIG_SMP
 	if (pv_tlb_flush_supported()) {
 		pv_ops.mmu.flush_tlb_multi = kvm_flush_tlb_multi;
-		pv_ops.mmu.tlb_remove_table = tlb_remove_table;
 		pr_info("KVM setup pv remote TLB flush\n");
 	}
 
@@ -859,7 +874,7 @@ static void __init kvm_guest_init(void)
 	machine_ops.crash_shutdown = kvm_crash_shutdown;
 #endif
 
-	register_syscore_ops(&kvm_syscore_ops);
+	register_syscore(&kvm_syscore);
 
 	/*
 	 * Hard lockup detection is enabled by default. Disable it, as guests
@@ -875,7 +890,7 @@ static noinline uint32_t __kvm_cpuid_base(void)
 		return 0;	/* So we don't blow up on old processors */
 
 	if (boot_cpu_has(X86_FEATURE_HYPERVISOR))
-		return hypervisor_cpuid_base(KVM_SIGNATURE, 0);
+		return cpuid_base_hypervisor(KVM_SIGNATURE, 0);
 
 	return 0;
 }
@@ -933,6 +948,19 @@ static void kvm_sev_hc_page_enc_status(unsigned long pfn, int npages, bool enc)
 
 static void __init kvm_init_platform(void)
 {
+	u64 tolud = PFN_PHYS(e820__end_of_low_ram_pfn());
+	/*
+	 * Note, hardware requires variable MTRR ranges to be power-of-2 sized
+	 * and naturally aligned.  But when forcing guest MTRR state, Linux
+	 * doesn't program the forced ranges into hardware.  Don't bother doing
+	 * the math to generate a technically-legal range.
+	 */
+	struct mtrr_var_range pci_hole = {
+		.base_lo = tolud | X86_MEMTYPE_UC,
+		.mask_lo = (u32)(~(SZ_4G - tolud - 1)) | MTRR_PHYSMASK_V,
+		.mask_hi = (BIT_ULL(boot_cpu_data.x86_phys_bits) - 1) >> 32,
+	};
+
 	if (cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT) &&
 	    kvm_para_has_feature(KVM_FEATURE_MIGRATION_CONTROL)) {
 		unsigned long nr_pages;
@@ -976,14 +1004,18 @@ static void __init kvm_init_platform(void)
 		 * If not booted using EFI, enable Live migration support.
 		 */
 		if (!efi_enabled(EFI_BOOT))
-			wrmsrl(MSR_KVM_MIGRATION_CONTROL,
+			wrmsrq(MSR_KVM_MIGRATION_CONTROL,
 			       KVM_MIGRATION_READY);
 	}
 	kvmclock_init();
 	x86_platform.apic_post_init = kvm_apic_init;
 
-	/* Set WB as the default cache mode for SEV-SNP and TDX */
-	guest_force_mtrr_state(NULL, 0, MTRR_TYPE_WRBACK);
+	/*
+	 * Set WB as the default cache mode for SEV-SNP and TDX, with a single
+	 * UC range for the legacy PCI hole, e.g. so that devices that expect
+	 * to get UC/WC mappings don't get surprised with WB.
+	 */
+	guest_force_mtrr_state(&pci_hole, 1, MTRR_TYPE_WRBACK);
 }
 
 #if defined(CONFIG_AMD_MEM_ENCRYPT)
@@ -1073,16 +1105,6 @@ static void kvm_wait(u8 *ptr, u8 val)
 void __init kvm_spinlock_init(void)
 {
 	/*
-	 * In case host doesn't support KVM_FEATURE_PV_UNHALT there is still an
-	 * advantage of keeping virt_spin_lock_key enabled: virt_spin_lock() is
-	 * preferred over native qspinlock when vCPU is preempted.
-	 */
-	if (!kvm_para_has_feature(KVM_FEATURE_PV_UNHALT)) {
-		pr_info("PV spinlocks disabled, no host support\n");
-		return;
-	}
-
-	/*
 	 * Disable PV spinlocks and use native qspinlock when dedicated pCPUs
 	 * are available.
 	 */
@@ -1101,14 +1123,24 @@ void __init kvm_spinlock_init(void)
 		goto out;
 	}
 
+	/*
+	 * In case host doesn't support KVM_FEATURE_PV_UNHALT there is still an
+	 * advantage of keeping virt_spin_lock_key enabled: virt_spin_lock() is
+	 * preferred over native qspinlock when vCPU is preempted.
+	 */
+	if (!kvm_para_has_feature(KVM_FEATURE_PV_UNHALT)) {
+		pr_info("PV spinlocks disabled, no host support\n");
+		return;
+	}
+
 	pr_info("PV spinlocks enabled\n");
 
 	__pv_init_lock_hash();
-	pv_ops.lock.queued_spin_lock_slowpath = __pv_queued_spin_lock_slowpath;
-	pv_ops.lock.queued_spin_unlock =
+	pv_ops_lock.queued_spin_lock_slowpath = __pv_queued_spin_lock_slowpath;
+	pv_ops_lock.queued_spin_unlock =
 		PV_CALLEE_SAVE(__pv_queued_spin_unlock);
-	pv_ops.lock.wait = kvm_wait;
-	pv_ops.lock.kick = kvm_kick_cpu;
+	pv_ops_lock.wait = kvm_wait;
+	pv_ops_lock.kick = kvm_kick_cpu;
 
 	/*
 	 * When PV spinlock is enabled which is preferred over
@@ -1125,12 +1157,12 @@ out:
 
 static void kvm_disable_host_haltpoll(void *i)
 {
-	wrmsrl(MSR_KVM_POLL_CONTROL, 0);
+	wrmsrq(MSR_KVM_POLL_CONTROL, 0);
 }
 
 static void kvm_enable_host_haltpoll(void *i)
 {
-	wrmsrl(MSR_KVM_POLL_CONTROL, 1);
+	wrmsrq(MSR_KVM_POLL_CONTROL, 1);
 }
 
 void arch_haltpoll_enable(unsigned int cpu)

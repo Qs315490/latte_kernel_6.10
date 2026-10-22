@@ -84,7 +84,7 @@ static int send4(struct wg_device *wg, struct sk_buff *skb,
 	skb->ignore_df = 1;
 	udp_tunnel_xmit_skb(rt, sock, skb, fl.saddr, fl.daddr, ds,
 			    ip4_dst_hoplimit(&rt->dst), 0, fl.fl4_sport,
-			    fl.fl4_dport, false, false);
+			    fl.fl4_dport, false, false, 0);
 	goto out;
 
 err:
@@ -136,8 +136,7 @@ static int send6(struct wg_device *wg, struct sk_buff *skb,
 			if (cache)
 				dst_cache_reset(cache);
 		}
-		dst = ipv6_stub->ipv6_dst_lookup_flow(sock_net(sock), sock, &fl,
-						      NULL);
+		dst = ip6_dst_lookup_flow(sock_net(sock), sock, &fl, NULL);
 		if (IS_ERR(dst)) {
 			ret = PTR_ERR(dst);
 			net_dbg_ratelimited("%s: No route to %pISpfsc, error %d\n",
@@ -151,7 +150,7 @@ static int send6(struct wg_device *wg, struct sk_buff *skb,
 	skb->ignore_df = 1;
 	udp_tunnel6_xmit_skb(dst, sock, skb, skb->dev, &fl.saddr, &fl.daddr, ds,
 			     ip6_dst_hoplimit(dst), 0, fl.fl6_sport,
-			     fl.fl6_dport, false);
+			     fl.fl6_dport, false, 0);
 	goto out;
 
 err:
@@ -336,7 +335,7 @@ static void sock_free(struct sock *sock)
 	if (unlikely(!sock))
 		return;
 	sk_clear_memalloc(sock);
-	udp_tunnel_sock_release(sock->sk_socket);
+	udp_tunnel_sock_release(sock);
 }
 
 static void set_sock_opts(struct socket *sock)
@@ -390,14 +389,14 @@ retry:
 		goto out;
 	}
 	set_sock_opts(new4);
-	setup_udp_tunnel_sock(net, new4, &cfg);
+	setup_udp_tunnel_sock(net, new4->sk, &cfg);
 
 #if IS_ENABLED(CONFIG_IPV6)
 	if (ipv6_mod_enabled()) {
 		port6.local_udp_port = inet_sk(new4->sk)->inet_sport;
 		ret = udp_sock_create(net, &port6, &new6);
 		if (ret < 0) {
-			udp_tunnel_sock_release(new4);
+			udp_tunnel_sock_release(new4->sk);
 			if (ret == -EADDRINUSE && !port && retries++ < 100)
 				goto retry;
 			pr_err("%s: Could not create IPv6 socket\n",
@@ -405,7 +404,7 @@ retry:
 			goto out;
 		}
 		set_sock_opts(new6);
-		setup_udp_tunnel_sock(net, new6, &cfg);
+		setup_udp_tunnel_sock(net, new6->sk, &cfg);
 	}
 #endif
 

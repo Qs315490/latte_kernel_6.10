@@ -38,7 +38,9 @@ enum dw_xpcs_pma_id {
 	DW_XPCS_PMA_GEN4_6G_ID,
 	DW_XPCS_PMA_GEN5_10G_ID,
 	DW_XPCS_PMA_GEN5_12G_ID,
-	WX_TXGBE_XPCS_PMA_10G_ID = 0x0018fc80,
+	WX_TXGBE_XPCS_PMA_10G_ID = 0xfc806000,
+	/* Meta Platforms OUI 88:25:08, model 0, revision 0 */
+	MP_FBNIC_XPCS_PMA_100G_ID = 0x46904000,
 };
 
 struct dw_xpcs_info {
@@ -50,8 +52,7 @@ struct dw_xpcs;
 
 struct phylink_pcs *xpcs_to_phylink_pcs(struct dw_xpcs *xpcs);
 int xpcs_get_an_mode(struct dw_xpcs *xpcs, phy_interface_t interface);
-int xpcs_config_eee(struct dw_xpcs *xpcs, int mult_fact_100ns,
-		    int enable);
+void xpcs_config_eee_mult_fact(struct dw_xpcs *xpcs, u8 mult_fact);
 struct dw_xpcs *xpcs_create_mdiodev(struct mii_bus *bus, int addr);
 struct dw_xpcs *xpcs_create_fwnode(struct fwnode_handle *fwnode);
 void xpcs_destroy(struct dw_xpcs *xpcs);

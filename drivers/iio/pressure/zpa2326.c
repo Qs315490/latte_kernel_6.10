@@ -582,11 +582,9 @@ static int zpa2326_fill_sample_buffer(struct iio_dev               *indio_dev,
 	struct {
 		u32 pressure;
 		u16 temperature;
-		u64 timestamp;
-	}   sample;
+		aligned_s64 timestamp;
+	} sample = { };
 	int err;
-
-	memset(&sample, 0, sizeof(sample));
 
 	if (test_bit(0, indio_dev->active_scan_mask)) {
 		/* Get current pressure from hardware FIFO. */
@@ -618,8 +616,8 @@ static int zpa2326_fill_sample_buffer(struct iio_dev               *indio_dev,
 	 */
 	zpa2326_dbg(indio_dev, "filling raw samples buffer");
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &sample,
-					   private->timestamp);
+	iio_push_to_buffers_with_ts(indio_dev, &sample, sizeof(sample),
+				    private->timestamp);
 
 	return 0;
 }
@@ -699,7 +697,6 @@ static void zpa2326_suspend(struct iio_dev *indio_dev)
 
 	zpa2326_sleep(indio_dev);
 
-	pm_runtime_mark_last_busy(parent);
 	pm_runtime_put_autosuspend(parent);
 }
 
@@ -710,7 +707,6 @@ static void zpa2326_init_runtime(struct device *parent)
 	pm_runtime_enable(parent);
 	pm_runtime_set_autosuspend_delay(parent, 1000);
 	pm_runtime_use_autosuspend(parent);
-	pm_runtime_mark_last_busy(parent);
 	pm_runtime_put_autosuspend(parent);
 }
 
@@ -844,7 +840,7 @@ static irqreturn_t zpa2326_handle_threaded_irq(int irq, void *data)
 
 complete:
 	/*
-	 * Wake up direct or externaly triggered buffer mode waiters: see
+	 * Wake up direct or externally triggered buffer mode waiters: see
 	 * zpa2326_sample_oneshot() and zpa2326_trigger_handler().
 	 */
 	complete(&priv->data_ready);
@@ -1062,9 +1058,8 @@ static int zpa2326_sample_oneshot(struct iio_dev     *indio_dev,
 	int                     ret;
 	struct zpa2326_private *priv;
 
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret)
-		return ret;
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
 
 	ret = zpa2326_resume(indio_dev);
 	if (ret < 0)
@@ -1120,7 +1115,7 @@ static int zpa2326_sample_oneshot(struct iio_dev     *indio_dev,
 suspend:
 	zpa2326_suspend(indio_dev);
 release:
-	iio_device_release_direct_mode(indio_dev);
+	iio_device_release_direct(indio_dev);
 
 	return ret;
 }
@@ -1438,7 +1433,6 @@ static int zpa2326_set_frequency(struct iio_dev *indio_dev, int hz)
 {
 	struct zpa2326_private *priv = iio_priv(indio_dev);
 	int                     freq;
-	int                     err;
 
 	/* Check if requested frequency is supported. */
 	for (freq = 0; freq < ARRAY_SIZE(zpa2326_sampling_frequencies); freq++)
@@ -1448,13 +1442,12 @@ static int zpa2326_set_frequency(struct iio_dev *indio_dev, int hz)
 		return -EINVAL;
 
 	/* Don't allow changing frequency if buffered sampling is ongoing. */
-	err = iio_device_claim_direct_mode(indio_dev);
-	if (err)
-		return err;
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
 
 	priv->frequency = &zpa2326_sampling_frequencies[freq];
 
-	iio_device_release_direct_mode(indio_dev);
+	iio_device_release_direct(indio_dev);
 
 	return 0;
 }

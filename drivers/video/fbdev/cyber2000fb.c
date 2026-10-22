@@ -1089,7 +1089,6 @@ void cyber2000fb_enable_extregs(struct cfb_info *cfb)
 		cyber2000_grphw(EXT_FUNC_CTL, old, cfb);
 	}
 }
-EXPORT_SYMBOL(cyber2000fb_enable_extregs);
 
 /*
  * Disable access to the extended registers
@@ -1109,41 +1108,6 @@ void cyber2000fb_disable_extregs(struct cfb_info *cfb)
 	else
 		cfb->func_use_count -= 1;
 }
-EXPORT_SYMBOL(cyber2000fb_disable_extregs);
-
-/*
- * Attach a capture/tv driver to the core CyberX0X0 driver.
- */
-int cyber2000fb_attach(struct cyberpro_info *info, int idx)
-{
-	if (int_cfb_info != NULL) {
-		info->dev	      = int_cfb_info->fb.device;
-#ifdef CONFIG_FB_CYBER2000_I2C
-		info->i2c	      = &int_cfb_info->i2c_adapter;
-#else
-		info->i2c	      = NULL;
-#endif
-		info->regs	      = int_cfb_info->regs;
-		info->irq             = int_cfb_info->irq;
-		info->fb	      = int_cfb_info->fb.screen_base;
-		info->fb_size	      = int_cfb_info->fb.fix.smem_len;
-		info->info	      = int_cfb_info;
-
-		strscpy(info->dev_name, int_cfb_info->fb.fix.id,
-			sizeof(info->dev_name));
-	}
-
-	return int_cfb_info != NULL;
-}
-EXPORT_SYMBOL(cyber2000fb_attach);
-
-/*
- * Detach a capture/tv driver from the core CyberX0X0 driver.
- */
-void cyber2000fb_detach(int idx)
-{
-}
-EXPORT_SYMBOL(cyber2000fb_detach);
 
 #ifdef CONFIG_FB_CYBER2000_DDC
 
@@ -1399,7 +1363,7 @@ static struct cfb_info *cyberpro_alloc_fb_info(unsigned int id, char *name)
 {
 	struct cfb_info *cfb;
 
-	cfb = kzalloc(sizeof(struct cfb_info), GFP_KERNEL);
+	cfb = kzalloc_obj(struct cfb_info);
 	if (!cfb)
 		return NULL;
 
@@ -1420,7 +1384,7 @@ static struct cfb_info *cyberpro_alloc_fb_info(unsigned int id, char *name)
 	else
 		cfb->divisors[3] = 6;
 
-	strcpy(cfb->fb.fix.id, name);
+	strscpy(cfb->fb.fix.id, name);
 
 	cfb->fb.fix.type	= FB_TYPE_PACKED_PIXELS;
 	cfb->fb.fix.type_aux	= 0;
@@ -1832,16 +1796,22 @@ static int __maybe_unused cyberpro_pci_resume(struct device *dev)
 
 static struct pci_device_id cyberpro_pci_table[] = {
 /*	Not yet
- *	{ PCI_VENDOR_ID_INTERG, PCI_DEVICE_ID_INTERG_1682,
- *		PCI_ANY_ID, PCI_ANY_ID, 0, 0, ID_IGA_1682 },
+ *	{
+ *		PCI_VDEVICE(INTERG, PCI_DEVICE_ID_INTERG_1682),
+ *		.driver_data = ID_IGA_1682,
+ *	},
  */
-	{ PCI_VENDOR_ID_INTERG, PCI_DEVICE_ID_INTERG_2000,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, ID_CYBERPRO_2000 },
-	{ PCI_VENDOR_ID_INTERG, PCI_DEVICE_ID_INTERG_2010,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, ID_CYBERPRO_2010 },
-	{ PCI_VENDOR_ID_INTERG, PCI_DEVICE_ID_INTERG_5000,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, ID_CYBERPRO_5000 },
-	{ 0, }
+	{
+		PCI_VDEVICE(INTERG, PCI_DEVICE_ID_INTERG_2000),
+		.driver_data = ID_CYBERPRO_2000,
+	}, {
+		PCI_VDEVICE(INTERG, PCI_DEVICE_ID_INTERG_2010),
+		.driver_data = ID_CYBERPRO_2010,
+	}, {
+		PCI_VDEVICE(INTERG, PCI_DEVICE_ID_INTERG_5000),
+		.driver_data = ID_CYBERPRO_5000,
+	},
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, cyberpro_pci_table);

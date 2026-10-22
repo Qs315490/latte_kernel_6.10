@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -399,12 +399,14 @@ static const struct xchk_meta_ops meta_scrub_ops[] = {
 	},
 	[XFS_SCRUB_TYPE_RTBITMAP] = {	/* realtime bitmap */
 		.type	= ST_RTGROUP,
+		.has	= xfs_has_nonzoned,
 		.setup	= xchk_setup_rtbitmap,
 		.scrub	= xchk_rtbitmap,
 		.repair	= xrep_rtbitmap,
 	},
 	[XFS_SCRUB_TYPE_RTSUM] = {	/* realtime summary */
 		.type	= ST_RTGROUP,
+		.has	= xfs_has_nonzoned,
 		.setup	= xchk_setup_rtsummary,
 		.scrub	= xchk_rtsummary,
 		.repair	= xrep_rtsummary,
@@ -630,9 +632,9 @@ xchk_scrub_create_subord(
 {
 	struct xfs_scrub_subord	*sub;
 
-	sub = kzalloc(sizeof(*sub), XCHK_GFP_FLAGS);
+	sub = kzalloc_obj(*sub, XCHK_GFP_FLAGS);
 	if (!sub)
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 
 	sub->old_smtype = sc->sm->sm_type;
 	sub->old_smflags = sc->sm->sm_flags;
@@ -678,9 +680,7 @@ xfs_scrub_metadata(
 	if (error)
 		goto out;
 
-	xfs_warn_experimental(mp, XFS_EXPERIMENTAL_SCRUB);
-
-	sc = kzalloc(sizeof(struct xfs_scrub), XCHK_GFP_FLAGS);
+	sc = kzalloc_obj(struct xfs_scrub, XCHK_GFP_FLAGS);
 	if (!sc) {
 		error = -ENOMEM;
 		goto out;
@@ -876,10 +876,7 @@ xchk_scrubv_open_by_handle(
 	struct xfs_inode		*ip;
 	int				error;
 
-	error = xfs_trans_alloc_empty(mp, &tp);
-	if (error)
-		return NULL;
-
+	tp = xfs_trans_alloc_empty(mp);
 	error = xfs_iget(mp, tp, head->svh_ino, XCHK_IGET_FLAGS, 0, &ip);
 	xfs_trans_cancel(tp);
 	if (error)
@@ -958,7 +955,7 @@ xfs_ioc_scrubv_metadata(
 	 * because each scrubber gets to decide its own strategy and return
 	 * values for getting an inode.
 	 */
-	if (head.svh_ino && head.svh_ino != ip_in->i_ino)
+	if (head.svh_ino && head.svh_ino != I_INO(ip_in))
 		handle_ip = xchk_scrubv_open_by_handle(mp, &head);
 
 	/* Run all the scrubbers. */

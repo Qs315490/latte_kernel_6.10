@@ -115,9 +115,7 @@ struct dtsplit {
 do {									\
 	BT_GETPAGE(IP, BN, MP, dtpage_t, SIZE, P, RC, i_dtroot);	\
 	if (!(RC)) {							\
-		if (((P)->header.nextindex >				\
-		     (((BN) == 0) ? DTROOTMAXSLOT : (P)->header.maxslot)) || \
-		    ((BN) && ((P)->header.maxslot > DTPAGEMAXSLOT))) {	\
+		if ((BN) && !check_dtpage(P)) {				\
 			BT_PUTPAGE(MP);					\
 			jfs_error((IP)->i_sb,				\
 				  "DT_GETPAGE: dtree page corrupt\n");	\
@@ -2612,7 +2610,7 @@ void dtInitRoot(tid_t tid, struct inode *ip, u32 idotdot)
  *	     fsck.jfs should really fix this, but it currently does not.
  *	     Called from jfs_readdir when bad index is detected.
  */
-static void add_missing_indices(struct inode *inode, s64 bn)
+static int add_missing_indices(struct inode *inode, s64 bn)
 {
 	struct ldtentry *d;
 	struct dt_lock *dtlck;
@@ -2621,7 +2619,7 @@ static void add_missing_indices(struct inode *inode, s64 bn)
 	struct lv *lv;
 	struct metapage *mp;
 	dtpage_t *p;
-	int rc;
+	int rc = 0;
 	s8 *stbl;
 	tid_t tid;
 	struct tlock *tlck;
@@ -2646,6 +2644,16 @@ static void add_missing_indices(struct inode *inode, s64 bn)
 
 	stbl = DT_GETSTBL(p);
 	for (i = 0; i < p->header.nextindex; i++) {
+		if (stbl[i] < 0) {
+			jfs_err("jfs: add_missing_indices: Invalid stbl[%d] = %d for inode %ld, block = %lld",
+				i, stbl[i], (long)inode->i_ino, (long long)bn);
+			rc = -EIO;
+
+			DT_PUTPAGE(mp);
+			txAbort(tid, 0);
+			goto end;
+		}
+
 		d = (struct ldtentry *) &p->slot[stbl[i]];
 		index = le32_to_cpu(d->index);
 		if ((index < 2) || (index >= JFS_IP(inode)->next_index)) {
@@ -2663,6 +2671,7 @@ static void add_missing_indices(struct inode *inode, s64 bn)
 	(void) txCommit(tid, 1, &inode, 0);
 end:
 	txEnd(tid);
+	return rc;
 }
 
 /*
@@ -2720,7 +2729,7 @@ int jfs_readdir(struct file *file, struct dir_context *ctx)
 	struct ldtentry *d;
 	struct dtslot *t;
 	int d_namleft, len, outlen;
-	unsigned long dirent_buf;
+	void *dirent_buf;
 	char *name_ptr;
 	u32 dir_index;
 	int do_index = 0;
@@ -2875,7 +2884,7 @@ int jfs_readdir(struct file *file, struct dir_context *ctx)
 		}
 	}
 
-	dirent_buf = __get_free_page(GFP_KERNEL);
+	dirent_buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (dirent_buf == 0) {
 		DT_PUTPAGE(mp);
 		jfs_warn("jfs_readdir: __get_free_page failed!");
@@ -2884,17 +2893,17 @@ int jfs_readdir(struct file *file, struct dir_context *ctx)
 	}
 
 	while (1) {
-		jfs_dirent = (struct jfs_dirent *) dirent_buf;
+		jfs_dirent = dirent_buf;
 		jfs_dirents = 0;
 		overflow = fix_page = 0;
 
 		stbl = DT_GETSTBL(p);
 
 		for (i = index; i < p->header.nextindex; i++) {
-			if (stbl[i] < 0 || stbl[i] > 127) {
+			if (stbl[i] < 0) {
 				jfs_err("JFS: Invalid stbl[%d] = %d for inode %ld, block = %lld",
 					i, stbl[i], (long)ip->i_ino, (long long)bn);
-				free_page(dirent_buf);
+				kfree(dirent_buf);
 				DT_PUTPAGE(mp);
 				return -EIO;
 			}
@@ -2902,7 +2911,7 @@ int jfs_readdir(struct file *file, struct dir_context *ctx)
 			d = (struct ldtentry *) & p->slot[stbl[i]];
 
 			if (((long) jfs_dirent + d->namlen + 1) >
-			    (dirent_buf + PAGE_SIZE)) {
+			    ((long)dirent_buf + PAGE_SIZE)) {
 				/* DBCS codepages could overrun dirent_buf */
 				index = i;
 				overflow = 1;
@@ -3005,7 +3014,7 @@ skip_one:
 		/* unpin previous leaf page */
 		DT_PUTPAGE(mp);
 
-		jfs_dirent = (struct jfs_dirent *) dirent_buf;
+		jfs_dirent = dirent_buf;
 		while (jfs_dirents--) {
 			ctx->pos = jfs_dirent->position;
 			if (!dir_emit(ctx, jfs_dirent->name,
@@ -3016,7 +3025,8 @@ skip_one:
 		}
 
 		if (fix_page) {
-			add_missing_indices(ip, bn);
+			if ((rc = add_missing_indices(ip, bn)))
+				goto out;
 			page_fixed = 1;
 		}
 
@@ -3027,13 +3037,13 @@ skip_one:
 
 		DT_GETPAGE(ip, bn, mp, PSIZE, p, rc);
 		if (rc) {
-			free_page(dirent_buf);
+			kfree(dirent_buf);
 			return rc;
 		}
 	}
 
       out:
-	free_page(dirent_buf);
+	kfree(dirent_buf);
 
 	return rc;
 }
@@ -3095,7 +3105,7 @@ static int dtReadFirst(struct inode *ip, struct btstack * btstack)
 		/* get the leftmost entry */
 		stbl = DT_GETSTBL(p);
 
-		if (stbl[0] < 0 || stbl[0] > 127) {
+		if (stbl[0] < 0) {
 			DT_PUTPAGE(mp);
 			jfs_error(ip->i_sb, "stbl[0] out of bound\n");
 			return -EIO;
@@ -4283,4 +4293,191 @@ int dtModify(tid_t tid, struct inode *ip,
 	DT_PUTPAGE(mp);
 
 	return 0;
+}
+
+bool check_dtroot(dtroot_t *p)
+{
+	DECLARE_BITMAP(bitmap, DTROOTMAXSLOT) = {0};
+	int i;
+
+	/* freecnt cannot be negative or exceed DTROOTMAXSLOT-1
+	 * (since slot[0] is occupied by the header).
+	 */
+	if (unlikely(p->header.freecnt < 0 ||
+				p->header.freecnt > DTROOTMAXSLOT - 1)) {
+		jfs_err("Bad freecnt:%d in dtroot\n", p->header.freecnt);
+		return false;
+	} else if (p->header.freecnt == 0) {
+		/* No free slots: freelist must be -1 */
+		if (unlikely(p->header.freelist != -1)) {
+			jfs_err("freecnt=0, but freelist=%d in dtroot\n",
+					p->header.freelist);
+			return false;
+		}
+	} else {
+		int fsi, i;
+		/* When there are free slots, freelist must be a valid slot index in
+		 * 1~DTROOTMAXSLOT-1(since slot[0] is occupied by the header).
+		 */
+		if (unlikely(p->header.freelist < 1 ||
+					p->header.freelist >= DTROOTMAXSLOT)) {
+			jfs_err("Bad freelist:%d in dtroot\n", p->header.freelist);
+			return false;
+		}
+
+		/* Traverse the free list to check validity of all node indices */
+		fsi = p->header.freelist;
+		for (i = 0; i < p->header.freecnt - 1; i++) {
+			/* Check for duplicate indices in the free list */
+			if (unlikely(__test_and_set_bit(fsi, bitmap))) {
+				jfs_err("duplicate index%d in slot in dtroot\n", fsi);
+				return false;
+			}
+			fsi = p->slot[fsi].next;
+
+			/* Ensure the next slot index in the free list is valid */
+			if (unlikely(fsi < 1 || fsi >= DTROOTMAXSLOT)) {
+				jfs_err("Bad index:%d in slot in dtroot\n", fsi);
+				return false;
+			}
+		}
+
+		/* The last node in the free list must terminate with next = -1 */
+		if (unlikely(p->slot[fsi].next != -1)) {
+			jfs_err("Bad next:%d of the last slot in dtroot\n",
+					p->slot[fsi].next);
+			return false;
+		}
+	}
+
+	/* Validate nextindex (next free entry index in stbl)
+	 * stbl array has size 8 (indices 0~7).
+	 * It may get set to 8 when the last free slot has been filled.
+	 */
+	if (unlikely(p->header.nextindex > ARRAY_SIZE(p->header.stbl))) {
+		jfs_err("Bad nextindex:%d in dtroot\n", p->header.nextindex);
+		return false;
+	}
+
+	/* Validate index validity of stbl array (8 elements)
+	 * Each entry in stbl is a slot index, with valid range: -1 (invalid)
+	 * or 0~8 (slot[0]~slot[8])
+	 */
+	for (i = 0; i < p->header.nextindex; i++) {
+		int idx = p->header.stbl[i];
+
+		if (unlikely(idx < 0 || idx >= 9)) {
+			jfs_err("Bad index:%d of stbl[%d] in dtroot\n", idx, i);
+			return false; /* stbl entry points out of slot array range */
+		}
+
+		/* Check for duplicate valid indices (skip check for idx=0) */
+		if (unlikely(idx && __test_and_set_bit(idx, bitmap))) {
+			jfs_err("Duplicate index:%d in stbl in dtroot\n", idx);
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool check_dtpage(dtpage_t *p)
+{
+	DECLARE_BITMAP(bitmap, DTPAGEMAXSLOT) = {0};
+	const int stblsize = ((PSIZE >> L2DTSLOTSIZE) + 31) >> L2DTSLOTSIZE;
+	int i;
+
+	/* Validate maxslot (maximum number of slots in the page)
+	 * dtpage_t slot array is defined to hold up to DTPAGEMAXSLOT (128) slots
+	 */
+	if (unlikely(p->header.maxslot != DTPAGEMAXSLOT)) {
+		jfs_err("Bad maxslot:%d in dtpage (expected %d)\n",
+				p->header.maxslot, DTPAGEMAXSLOT);
+		return false;
+	}
+
+	/* freecnt cannot be negative or exceed DTPAGEMAXSLOT-1
+	 * (since slot[0] is occupied by the header).
+	 */
+	if (unlikely(p->header.freecnt < 0 ||
+				p->header.freecnt > DTPAGEMAXSLOT - 1)) {
+		jfs_err("Bad freecnt:%d in dtpage\n", p->header.freecnt);
+		return false;
+	} else if (p->header.freecnt == 0) {
+		/* No free slots: freelist must be -1 */
+		if (unlikely(p->header.freelist != -1)) {
+			jfs_err("freecnt=0 but freelist=%d in dtpage\n",
+					p->header.freelist);
+			return false;
+		}
+	} else {
+		int fsi;
+
+		if (unlikely(p->header.freelist < 1)) {
+			jfs_err("Bad freelist:%d in dtpage\n", p->header.freelist);
+			return false;
+		}
+
+		/* Traverse the free list to check validity of all node indices */
+		fsi = p->header.freelist;
+		for (i = 0; i < p->header.freecnt - 1; i++) {
+			/* Check for duplicate indices in the free list */
+			if (unlikely(__test_and_set_bit(fsi, bitmap))) {
+				jfs_err("duplicate index%d in slot in dtpage\n", fsi);
+				return false;
+			}
+			fsi = p->slot[fsi].next;
+
+			/* Ensure the next slot index in the free list is valid */
+			if (unlikely(fsi < 1 || fsi >= DTPAGEMAXSLOT)) {
+				jfs_err("Bad index:%d in slot in dtpage\n", fsi);
+				return false;
+			}
+		}
+
+		/* The last node in the free list must terminate with next = -1 */
+		if (unlikely(p->slot[fsi].next != -1)) {
+			jfs_err("Bad next:%d of the last slot in dtpage\n",
+					p->slot[fsi].next);
+			return false;
+		}
+	}
+
+	/* stbl must be little then DTPAGEMAXSLOT */
+	if (unlikely(p->header.stblindex >= DTPAGEMAXSLOT - stblsize)) {
+		jfs_err("Bad stblindex:%d in dtpage (stbl size %d)\n",
+				p->header.stblindex, stblsize);
+		return false;
+	}
+
+	/* nextindex must be little then stblsize*32 */
+	if (unlikely(p->header.nextindex > (stblsize << L2DTSLOTSIZE))) {
+		jfs_err("Bad nextindex:%d in dtpage (stbl size %d)\n",
+				p->header.nextindex, stblsize);
+		return false;
+	}
+
+	/* Validate stbl entries
+	 * Each entry is a slot index, valid range: -1 (invalid) or
+	 * [0, nextindex-1] (valid data slots)
+	 * (stblindex and higher slots are reserved for stbl itself)
+	 */
+	for (i = 0; i < p->header.nextindex; i++) {
+		int idx = DT_GETSTBL(p)[i];
+
+		/* Check if index is out of valid data slot range */
+		if (unlikely(idx < 1 || idx >= DTPAGEMAXSLOT)) {
+			jfs_err("Bad stbl[%d] index:%d (stblindex %d) in dtpage\n",
+					i, idx, p->header.stblindex);
+			return false;
+		}
+
+		/* Check for duplicate valid indices (skip -1) */
+		if (unlikely(__test_and_set_bit(idx, bitmap))) {
+			jfs_err("Duplicate index:%d in stbl of dtpage\n", idx);
+			return false;
+		}
+	}
+
+	return true;
 }

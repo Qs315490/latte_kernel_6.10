@@ -6,11 +6,11 @@
 
 use crate::alloc::{AllocError, Flags};
 use crate::prelude::*;
+use crate::sync::atomic::{ordering, AtomicFlag};
 use crate::sync::{Arc, ArcBorrow, UniqueArc};
 use core::marker::PhantomPinned;
 use core::ops::Deref;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Declares that this type has some way to ensure that there is exactly one `ListArc` instance for
 /// this id.
@@ -74,7 +74,7 @@ pub unsafe trait TryNewListArc<const ID: u64 = 0>: ListArcSafe<ID> {
 ///
 /// * The `untracked` strategy does not actually keep track of whether a [`ListArc`] exists. When
 ///   using this strategy, the only way to create a [`ListArc`] is using a [`UniqueArc`].
-/// * The `tracked_by` strategy defers the tracking to a field of the struct. The user much specify
+/// * The `tracked_by` strategy defers the tracking to a field of the struct. The user must specify
 ///   which field to defer the tracking to. The field must implement [`ListArcSafe`]. If the field
 ///   implements [`TryNewListArc`], then the type will also implement [`TryNewListArc`].
 ///
@@ -82,6 +82,7 @@ pub unsafe trait TryNewListArc<const ID: u64 = 0>: ListArcSafe<ID> {
 /// [`AtomicTracker`]. However, it is also possible to defer the tracking to another struct
 /// using also using this macro.
 #[macro_export]
+#[doc(hidden)]
 macro_rules! impl_list_arc_safe {
     (impl$({$($generics:tt)*})? ListArcSafe<$num:tt> for $t:ty { untracked; } $($rest:tt)*) => {
         impl$(<$($generics)*>)? $crate::list::ListArcSafe<$num> for $t {
@@ -96,7 +97,7 @@ macro_rules! impl_list_arc_safe {
     } $($rest:tt)*) => {
         impl$(<$($generics)*>)? $crate::list::ListArcSafe<$num> for $t {
             unsafe fn on_create_list_arc_from_unique(self: ::core::pin::Pin<&mut Self>) {
-                $crate::assert_pinned!($t, $field, $fty, inline);
+                ::pin_init::assert_pinned!($t, $field, $fty, inline);
 
                 // SAFETY: This field is structurally pinned as per the above assertion.
                 let field = unsafe {
@@ -159,7 +160,7 @@ pub use impl_list_arc_safe;
 ///
 /// [`List`]: crate::list::List
 #[repr(transparent)]
-#[cfg_attr(CONFIG_RUSTC_HAS_COERCE_POINTEE, derive(core::marker::CoercePointee))]
+#[derive(core::marker::CoercePointee)]
 pub struct ListArc<T, const ID: u64 = 0>
 where
     T: ListArcSafe<ID> + ?Sized,
@@ -442,34 +443,14 @@ where
     }
 }
 
-// This is to allow coercion from `ListArc<T>` to `ListArc<U>` if `T` can be converted to the
-// dynamically-sized type (DST) `U`.
-#[cfg(not(CONFIG_RUSTC_HAS_COERCE_POINTEE))]
-impl<T, U, const ID: u64> core::ops::CoerceUnsized<ListArc<U, ID>> for ListArc<T, ID>
-where
-    T: ListArcSafe<ID> + core::marker::Unsize<U> + ?Sized,
-    U: ListArcSafe<ID> + ?Sized,
-{
-}
-
-// This is to allow `ListArc<U>` to be dispatched on when `ListArc<T>` can be coerced into
-// `ListArc<U>`.
-#[cfg(not(CONFIG_RUSTC_HAS_COERCE_POINTEE))]
-impl<T, U, const ID: u64> core::ops::DispatchFromDyn<ListArc<U, ID>> for ListArc<T, ID>
-where
-    T: ListArcSafe<ID> + core::marker::Unsize<U> + ?Sized,
-    U: ListArcSafe<ID> + ?Sized,
-{
-}
-
 /// A utility for tracking whether a [`ListArc`] exists using an atomic.
 ///
-/// # Invariant
+/// # Invariants
 ///
 /// If the boolean is `false`, then there is no [`ListArc`] for this value.
 #[repr(transparent)]
 pub struct AtomicTracker<const ID: u64 = 0> {
-    inner: AtomicBool,
+    inner: AtomicFlag,
     // This value needs to be pinned to justify the INVARIANT: comment in `AtomicTracker::new`.
     _pin: PhantomPinned,
 }
@@ -480,12 +461,12 @@ impl<const ID: u64> AtomicTracker<ID> {
         // INVARIANT: Pin-init initializers can't be used on an existing `Arc`, so this value will
         // not be constructed in an `Arc` that already has a `ListArc`.
         Self {
-            inner: AtomicBool::new(false),
+            inner: AtomicFlag::new(false),
             _pin: PhantomPinned,
         }
     }
 
-    fn project_inner(self: Pin<&mut Self>) -> &mut AtomicBool {
+    fn project_inner(self: Pin<&mut Self>) -> &mut AtomicFlag {
         // SAFETY: The `inner` field is not structurally pinned, so we may obtain a mutable
         // reference to it even if we only have a pinned reference to `self`.
         unsafe { &mut Pin::into_inner_unchecked(self).inner }
@@ -500,7 +481,7 @@ impl<const ID: u64> ListArcSafe<ID> for AtomicTracker<ID> {
 
     unsafe fn on_drop_list_arc(&self) {
         // INVARIANT: We just dropped a ListArc, so the boolean should be false.
-        self.inner.store(false, Ordering::Release);
+        self.inner.store(false, ordering::Release);
     }
 }
 
@@ -514,8 +495,6 @@ unsafe impl<const ID: u64> TryNewListArc<ID> for AtomicTracker<ID> {
     fn try_new_list_arc(&self) -> bool {
         // INVARIANT: If this method returns true, then the boolean used to be false, and is no
         // longer false, so it is okay for the caller to create a new [`ListArc`].
-        self.inner
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
+        self.inner.cmpxchg(false, true, ordering::Acquire).is_ok()
     }
 }

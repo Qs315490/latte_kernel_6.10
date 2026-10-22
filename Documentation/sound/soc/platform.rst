@@ -45,8 +45,8 @@ snd_soc_component_driver:-
 	...
   };
 
-Please refer to the ALSA driver documentation for details of audio DMA.
-https://www.kernel.org/doc/html/latest/sound/kernel-api/writing-an-alsa-driver.html
+Please refer to the :doc:`ALSA driver documentation
+<../kernel-api/writing-an-alsa-driver>` for details of audio DMA.
 
 An example DMA driver is soc/pxa/pxa2xx-pcm.c
 
@@ -75,4 +75,4 @@ Each SoC DSP driver usually supplies the following features :-
 3. DMA IO to/from DSP buffers (if applicable)
 4. Definition of DSP front end (FE) PCM devices.
 
-Please see DPCM.txt for a description of item 4.
+Please see dpcm.rst for a description of item 4.

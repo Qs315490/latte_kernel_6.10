@@ -60,7 +60,7 @@ struct i915_power_well_instance {
 	/* unique identifier for this power well */
 	enum i915_power_well_id id;
 	/*
-	 * Arbitraty data associated with this power well. Platform and power
+	 * Arbitrary data associated with this power well. Platform and power
 	 * well specific.
 	 */
 	union {
@@ -77,7 +77,7 @@ struct i915_power_well_instance {
 		struct {
 			/*
 			 * request/status flag index in the power well
-			 * constrol/status registers.
+			 * control/status registers.
 			 */
 			u8 idx;
 		} hsw;
@@ -103,8 +103,6 @@ struct i915_power_well_desc {
 	 * the well enabled.
 	 */
 	u16 fixed_enable_delay:1;
-	/* The pw is backing the VGA functionality */
-	u16 has_vga:1;
 	u16 has_fuses:1;
 	/*
 	 * The pw is for an ICL+ TypeC PHY port in

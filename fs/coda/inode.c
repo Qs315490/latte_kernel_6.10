@@ -230,7 +230,7 @@ static int coda_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_blocksize_bits = 12;
 	sb->s_magic = CODA_SUPER_MAGIC;
 	sb->s_op = &coda_super_operations;
-	sb->s_d_op = &coda_dentry_operations;
+	set_default_d_op(sb, &coda_dentry_operations);
 	sb->s_time_gran = 1;
 	sb->s_time_min = S64_MIN;
 	sb->s_time_max = S64_MAX;
@@ -257,7 +257,7 @@ static int coda_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto error;
 	} 
 
-	pr_info("%s: rootinode is %ld dev %s\n",
+	pr_info("%s: rootinode is %llu dev %s\n",
 		__func__, root->i_ino, root->i_sb->s_id);
 	sb->s_root = d_make_root(root);
 	if (!sb->s_root) {
@@ -381,7 +381,7 @@ static int coda_init_fs_context(struct fs_context *fc)
 {
 	struct coda_fs_context *ctx;
 
-	ctx = kzalloc(sizeof(struct coda_fs_context), GFP_KERNEL);
+	ctx = kzalloc_obj(struct coda_fs_context);
 	if (!ctx)
 		return -ENOMEM;
 

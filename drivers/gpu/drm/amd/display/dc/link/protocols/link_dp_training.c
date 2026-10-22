@@ -310,7 +310,7 @@ static void maximize_lane_settings(const struct link_training_settings *lt_setti
 	max_requested.FFE_PRESET = lane_settings[0].FFE_PRESET;
 
 	/* Determine what the maximum of the requested settings are*/
-	for (lane = 1; lane < lt_settings->link_settings.lane_count; lane++) {
+	for (lane = 1; lane < (uint32_t)lt_settings->link_settings.lane_count; lane++) {
 		if (lane_settings[lane].VOLTAGE_SWING > max_requested.VOLTAGE_SWING)
 			max_requested.VOLTAGE_SWING = lane_settings[lane].VOLTAGE_SWING;
 
@@ -554,6 +554,7 @@ enum link_training_result dp_check_link_loss_status(
 	struct dc_link *link,
 	const struct link_training_settings *link_training_setting)
 {
+	(void)link_training_setting;
 	enum link_training_result status = LINK_TRAINING_SUCCESS;
 	union lane_status lane_status;
 	union lane_align_status_updated dpcd_lane_status_updated;
@@ -567,7 +568,7 @@ enum link_training_result dp_check_link_loss_status(
 			sizeof(dpcd_buf));
 
 	/*parse lane status*/
-	for (lane = 0; lane < link->cur_link_settings.lane_count; lane++) {
+	for (lane = 0; lane < (uint32_t)link->cur_link_settings.lane_count; lane++) {
 		/*
 		 * check lanes status
 		 */
@@ -736,6 +737,8 @@ void override_training_settings(
 		lt_settings->pre_emphasis = overrides->pre_emphasis;
 	if (overrides->post_cursor2 != NULL)
 		lt_settings->post_cursor2 = overrides->post_cursor2;
+	if (link->wa_flags.force_dp_ffe_preset && !dp_is_lttpr_present(link))
+		lt_settings->ffe_preset = &link->forced_dp_ffe_preset;
 	if (overrides->ffe_preset != NULL)
 		lt_settings->ffe_preset = overrides->ffe_preset;
 	/* Override HW lane settings with BIOS forced values if present */
@@ -783,7 +786,6 @@ void override_training_settings(
 		lt_settings->lttpr_mode = LTTPR_MODE_NON_LTTPR;
 
 	dp_get_lttpr_mode_override(link, &lt_settings->lttpr_mode);
-
 }
 
 enum dc_dp_training_pattern decide_cr_training_pattern(
@@ -799,19 +801,23 @@ enum dc_dp_training_pattern decide_cr_training_pattern(
 }
 
 enum dc_dp_training_pattern decide_eq_training_pattern(struct dc_link *link,
+		const struct link_resource *link_res,
 		const struct dc_link_settings *link_settings)
 {
-	struct link_encoder *link_enc;
+	struct link_encoder *link_enc = link_res->dio_link_enc;
 	struct encoder_feature_support *enc_caps;
 	struct dpcd_caps *rx_caps = &link->dpcd_caps;
 	enum dc_dp_training_pattern pattern = DP_TRAINING_PATTERN_SEQUENCE_2;
 
-	link_enc = link_enc_cfg_get_link_enc(link);
-	ASSERT(link_enc);
-	enc_caps = &link_enc->features;
-
 	switch (link_dp_get_encoding_format(link_settings)) {
 	case DP_8b_10b_ENCODING:
+		if (!link->dc->config.unify_link_enc_assignment)
+			link_enc = link_enc_cfg_get_link_enc(link);
+
+		if (!link_enc)
+			break;
+
+		enc_caps = &link_enc->features;
 		if (enc_caps->flags.bits.IS_TPS4_CAPABLE &&
 				rx_caps->max_down_spread.bits.TPS4_SUPPORTED)
 			pattern = DP_TRAINING_PATTERN_SEQUENCE_4;
@@ -884,13 +890,14 @@ void dp_decide_lane_settings(
 
 void dp_decide_training_settings(
 		struct dc_link *link,
+		const struct link_resource *link_res,
 		const struct dc_link_settings *link_settings,
 		struct link_training_settings *lt_settings)
 {
 	if (link_dp_get_encoding_format(link_settings) == DP_8b_10b_ENCODING)
-		decide_8b_10b_training_settings(link, link_settings, lt_settings);
+		decide_8b_10b_training_settings(link, link_res, link_settings, lt_settings);
 	else if (link_dp_get_encoding_format(link_settings) == DP_128b_132b_ENCODING)
-		decide_128b_132b_training_settings(link, link_settings, lt_settings);
+		decide_128b_132b_training_settings(link, link_res, link_settings, lt_settings);
 }
 
 
@@ -1012,7 +1019,12 @@ static enum link_training_result dpcd_exit_training_mode(struct dc_link *link, e
 {
 	enum dc_status status;
 	uint8_t sink_status = 0;
-	uint8_t i;
+	uint32_t i;
+	uint8_t lttpr_count = dp_parse_lttpr_repeater_count(link->dpcd_caps.lttpr_caps.phy_repeater_cnt);
+	uint32_t intra_hop_disable_time_ms = (lttpr_count > 0 ? lttpr_count * 300 : 10);
+
+	// Each hop could theoretically take over 256ms (max 128b/132b AUX RD INTERVAL)
+	// To be safe, allow 300ms per LTTPR and 10ms for no LTTPR case
 
 	/* clear training pattern set */
 	status = dpcd_set_training_pattern(link, DP_TRAINING_PATTERN_VIDEOIDLE);
@@ -1022,7 +1034,7 @@ static enum link_training_result dpcd_exit_training_mode(struct dc_link *link, e
 
 	if (encoding == DP_128b_132b_ENCODING) {
 		/* poll for intra-hop disable */
-		for (i = 0; i < 10; i++) {
+		for (i = 0; i < intra_hop_disable_time_ms; i++) {
 			if ((core_link_read_dpcd(link, DP_SINK_STATUS, &sink_status, 1) == DC_OK) &&
 					(sink_status & DP_INTRA_HOP_AUX_REPLY_INDICATION) == 0)
 				break;
@@ -1376,6 +1388,7 @@ bool dp_set_hw_training_pattern(
 	enum dc_dp_training_pattern pattern,
 	uint32_t offset)
 {
+	(void)offset;
 	enum dp_test_pattern test_pattern = DP_TEST_PATTERN_UNSUPPORTED;
 
 	switch (pattern) {
@@ -1554,6 +1567,7 @@ enum link_training_result dp_perform_link_training(
 	/* decide training settings */
 	dp_decide_training_settings(
 			link,
+			link_res,
 			link_settings,
 			&lt_settings);
 
@@ -1567,7 +1581,8 @@ enum link_training_result dp_perform_link_training(
 
 	/* configure link prior to entering training mode */
 	dpcd_configure_lttpr_mode(link, &lt_settings);
-	dp_set_fec_ready(link, link_res, lt_settings.should_set_fec_ready);
+	if (link_dp_get_encoding_format(link_settings) == DP_8b_10b_ENCODING)
+		dp_set_fec_ready(link, link_res, lt_settings.should_set_fec_ready);
 	dpcd_configure_channel_coding(link, &lt_settings);
 
 	/* enter training mode:
@@ -1716,6 +1731,15 @@ bool perform_link_training_with_retries(
 				break;
 		}
 
+		if (link->ep_type == DISPLAY_ENDPOINT_USB4_DPIA &&
+				stream->signal == SIGNAL_TYPE_DISPLAY_PORT_MST &&
+				!link->dc->config.enable_dpia_pre_training) {
+			if (j == (attempts - 1))
+				do_fallback = true;
+			else
+				do_fallback = false;
+		}
+
 		if (j == (attempts - 1)) {
 			DC_LOG_WARNING(
 				"%s: Link(%d) training attempt %u of %d failed @ rate(%d) x lane(%d) @ spread = %x : fail reason:(%d)\n",
@@ -1780,13 +1804,10 @@ bool perform_link_training_with_retries(
 			is_link_bw_min = ((cur_link_settings.link_rate <= LINK_RATE_LOW) &&
 				(cur_link_settings.lane_count <= LANE_COUNT_ONE));
 
-			if (is_link_bw_low) {
+			if (is_link_bw_low)
 				DC_LOG_WARNING(
 					"%s: Link(%d) bandwidth too low after fallback req_bw(%d) > link_bw(%d)\n",
 					__func__, link->link_index, req_bw, link_bw);
-
-				return false;
-			}
 		}
 
 		msleep(delay_between_attempts);

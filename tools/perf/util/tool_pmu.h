@@ -22,6 +22,8 @@ enum tool_pmu_event {
 	TOOL_PMU__EVENT_SLOTS,
 	TOOL_PMU__EVENT_SMT_ON,
 	TOOL_PMU__EVENT_SYSTEM_TSC_FREQ,
+	TOOL_PMU__EVENT_CORE_WIDE,
+	TOOL_PMU__EVENT_TARGET_CPU,
 
 	TOOL_PMU__EVENT_MAX,
 };
@@ -34,7 +36,12 @@ enum tool_pmu_event tool_pmu__str_to_event(const char *str);
 bool tool_pmu__skip_event(const char *name);
 int tool_pmu__num_skip_events(void);
 
-bool tool_pmu__read_event(enum tool_pmu_event ev, u64 *result);
+bool tool_pmu__read_event(enum tool_pmu_event ev,
+			  struct evsel *evsel,
+			  bool system_wide,
+			  const char *user_requested_cpu_list,
+			  u64 *result);
+
 
 u64 tool_pmu__cpu_slots_per_cycle(void);
 
@@ -49,8 +56,12 @@ int evsel__tool_pmu_prepare_open(struct evsel *evsel,
 int evsel__tool_pmu_open(struct evsel *evsel,
 			 struct perf_thread_map *threads,
 			 int start_cpu_map_idx, int end_cpu_map_idx);
+int evsel__tool_pmu_enable_cpu(struct evsel *evsel, int cpu_map_idx);
+int evsel__tool_pmu_enable(struct evsel *evsel);
+int evsel__tool_pmu_disable_cpu(struct evsel *evsel, int cpu_map_idx);
+int evsel__tool_pmu_disable(struct evsel *evsel);
 int evsel__tool_pmu_read(struct evsel *evsel, int cpu_map_idx, int thread);
 
-struct perf_pmu *perf_pmus__tool_pmu(void);
+struct perf_pmu *tool_pmu__new(void);
 
 #endif /* __TOOL_PMU_H */

@@ -2,11 +2,10 @@
 /*
  * Intel Broxton SoC pinctrl/GPIO driver
  *
- * Copyright (C) 2015, 2016 Intel Corporation
+ * Copyright (C) 2015-2016 Intel Corporation
  * Author: Mika Westerberg <mika.westerberg@linux.intel.com>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
@@ -995,8 +994,8 @@ static const struct acpi_device_id bxt_pinctrl_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, bxt_pinctrl_acpi_match);
 
 static const struct platform_device_id bxt_pinctrl_platform_ids[] = {
-	{ "apollolake-pinctrl", (kernel_ulong_t)apl_pinctrl_soc_data },
-	{ "broxton-pinctrl", (kernel_ulong_t)bxt_pinctrl_soc_data },
+	{ .name = "apollolake-pinctrl", .driver_data = (kernel_ulong_t)apl_pinctrl_soc_data },
+	{ .name = "broxton-pinctrl", .driver_data = (kernel_ulong_t)bxt_pinctrl_soc_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, bxt_pinctrl_platform_ids);

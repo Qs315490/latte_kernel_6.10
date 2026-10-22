@@ -166,8 +166,8 @@ err_out:
 	return error;
 }
 
-static int coda_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-		      struct dentry *de, umode_t mode)
+static struct dentry *coda_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+				 struct dentry *de, umode_t mode)
 {
 	struct inode *inode;
 	struct coda_vattr attrs;
@@ -177,14 +177,14 @@ static int coda_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	struct CodaFid newfid;
 
 	if (is_root_inode(dir) && coda_iscontrol(name, len))
-		return -EPERM;
+		return ERR_PTR(-EPERM);
 
 	attrs.va_mode = mode;
-	error = venus_mkdir(dir->i_sb, coda_i2f(dir), 
+	error = venus_mkdir(dir->i_sb, coda_i2f(dir),
 			       name, len, &newfid, &attrs);
 	if (error)
 		goto err_out;
-         
+
 	inode = coda_iget(dir->i_sb, &newfid, &attrs);
 	if (IS_ERR(inode)) {
 		error = PTR_ERR(inode);
@@ -195,10 +195,10 @@ static int coda_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	coda_dir_inc_nlink(dir);
 	coda_dir_update_mtime(dir);
 	d_instantiate(de, inode);
-	return 0;
+	return NULL;
 err_out:
 	d_drop(de);
-	return error;
+	return ERR_PTR(error);
 }
 
 /* try to make de an entry in dir_inodde linked to source_de */ 
@@ -362,7 +362,7 @@ static int coda_venus_readdir(struct file *coda_file, struct dir_context *ctx)
 
 	cii = ITOC(file_inode(coda_file));
 
-	vdir = kmalloc(sizeof(*vdir), GFP_KERNEL);
+	vdir = kmalloc_obj(*vdir);
 	if (!vdir) return -ENOMEM;
 
 	if (!dir_emit_dots(coda_file, ctx))
@@ -429,17 +429,9 @@ static int coda_readdir(struct file *coda_file, struct dir_context *ctx)
 	cfi = coda_ftoc(coda_file);
 	host_file = cfi->cfi_container;
 
-	if (host_file->f_op->iterate_shared) {
-		struct inode *host_inode = file_inode(host_file);
-		ret = -ENOENT;
-		if (!IS_DEADDIR(host_inode)) {
-			inode_lock_shared(host_inode);
-			ret = host_file->f_op->iterate_shared(host_file, ctx);
-			file_accessed(host_file);
-			inode_unlock_shared(host_inode);
-		}
+	ret = iterate_dir(host_file, ctx);
+	if (ret != -ENOTDIR)
 		return ret;
-	}
 	/* Venus: we must read Venus dirents from a file */
 	return coda_venus_readdir(coda_file, ctx);
 }
@@ -457,8 +449,6 @@ static int coda_dentry_revalidate(struct inode *dir, const struct qstr *name,
 	inode = d_inode(de);
 	if (!inode || is_root_inode(inode))
 		goto out;
-	if (is_bad_inode(inode))
-		goto bad;
 
 	cii = ITOC(d_inode(de));
 	if (!(cii->c_flags & (C_PURGE | C_FLUSH)))
@@ -478,7 +468,6 @@ static int coda_dentry_revalidate(struct inode *dir, const struct qstr *name,
 	spin_lock(&cii->c_lock);
 	cii->c_flags &= ~(C_VATTR | C_PURGE | C_FLUSH);
 	spin_unlock(&cii->c_lock);
-bad:
 	return 0;
 out:
 	return 1;
@@ -490,18 +479,12 @@ out:
  */
 static int coda_dentry_delete(const struct dentry * dentry)
 {
-	struct inode *inode;
-	struct coda_inode_info *cii;
+	struct inode *inode = d_inode(dentry);
 
-	if (d_really_is_negative(dentry)) 
+	if (!inode)
 		return 0;
 
-	inode = d_inode(dentry);
-	if (!inode || is_bad_inode(inode))
-		return 1;
-
-	cii = ITOC(inode);
-	if (cii->c_flags & C_PURGE)
+	if (ITOC(inode)->c_flags & C_PURGE)
 		return 1;
 
 	return 0;
@@ -541,7 +524,7 @@ int coda_revalidate_inode(struct inode *inode)
 		coda_vattr_to_iattr(inode, &attr);
 
 		if ((old_mode & S_IFMT) != (inode->i_mode & S_IFMT)) {
-			pr_warn("inode %ld, fid %s changed type!\n",
+			pr_warn("inode %llu, fid %s changed type!\n",
 				inode->i_ino, coda_f2s(&(cii->c_fid)));
 		}
 

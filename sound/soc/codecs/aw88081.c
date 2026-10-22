@@ -779,7 +779,7 @@ static void aw88081_start(struct aw88081 *aw88081, bool sync_start)
 	if (sync_start == AW88081_SYNC_START)
 		aw88081_start_pa(aw88081);
 	else
-		queue_delayed_work(system_wq,
+		queue_delayed_work(system_dfl_wq,
 			&aw88081->start_work,
 			AW88081_START_WORK_DELAY_MS);
 }
@@ -808,7 +808,7 @@ static struct snd_soc_dai_driver aw88081_dai[] = {
 static int aw88081_get_fade_in_time(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(component);
 	struct aw_device *aw_dev = aw88081->aw_pa;
 
@@ -820,7 +820,7 @@ static int aw88081_get_fade_in_time(struct snd_kcontrol *kcontrol,
 static int aw88081_set_fade_in_time(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(component);
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
@@ -843,7 +843,7 @@ static int aw88081_set_fade_in_time(struct snd_kcontrol *kcontrol,
 static int aw88081_get_fade_out_time(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(component);
 	struct aw_device *aw_dev = aw88081->aw_pa;
 
@@ -855,7 +855,7 @@ static int aw88081_get_fade_out_time(struct snd_kcontrol *kcontrol,
 static int aw88081_set_fade_out_time(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(component);
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
@@ -891,7 +891,7 @@ static int aw88081_dev_set_profile_index(struct aw_device *aw_dev, int index)
 static int aw88081_profile_info(struct snd_kcontrol *kcontrol,
 			 struct snd_ctl_elem_info *uinfo)
 {
-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(codec);
 	char *prof_name;
 	int count, ret;
@@ -914,12 +914,11 @@ static int aw88081_profile_info(struct snd_kcontrol *kcontrol,
 
 	ret = aw88081_dev_get_prof_name(aw88081->aw_pa, count, &prof_name);
 	if (ret) {
-		strscpy(uinfo->value.enumerated.name, "null",
-						sizeof(uinfo->value.enumerated.name));
+		strscpy(uinfo->value.enumerated.name, "null");
 		return 0;
 	}
 
-	strscpy(uinfo->value.enumerated.name, prof_name, sizeof(uinfo->value.enumerated.name));
+	strscpy(uinfo->value.enumerated.name, prof_name);
 
 	return 0;
 }
@@ -927,7 +926,7 @@ static int aw88081_profile_info(struct snd_kcontrol *kcontrol,
 static int aw88081_profile_get(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(codec);
 
 	ucontrol->value.integer.value[0] = aw88081->aw_pa->prof_index;
@@ -938,7 +937,7 @@ static int aw88081_profile_get(struct snd_kcontrol *kcontrol,
 static int aw88081_profile_set(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(codec);
 	int ret;
 
@@ -964,7 +963,7 @@ static int aw88081_profile_set(struct snd_kcontrol *kcontrol,
 static int aw88081_volume_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(codec);
 	struct aw_volume_desc *vol_desc = &aw88081->aw_pa->volume_desc;
 
@@ -976,7 +975,7 @@ static int aw88081_volume_get(struct snd_kcontrol *kcontrol,
 static int aw88081_volume_set(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(codec);
 	struct aw_volume_desc *vol_desc = &aw88081->aw_pa->volume_desc;
 	struct soc_mixer_control *mc =
@@ -1004,7 +1003,7 @@ static int aw88081_volume_set(struct snd_kcontrol *kcontrol,
 static int aw88081_get_fade_step(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(codec);
 
 	ucontrol->value.integer.value[0] = aw88081->aw_pa->fade_step;
@@ -1015,7 +1014,7 @@ static int aw88081_get_fade_step(struct snd_kcontrol *kcontrol,
 static int aw88081_set_fade_step(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
 	struct aw88081 *aw88081 = snd_soc_component_get_drvdata(codec);
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
@@ -1138,6 +1137,7 @@ static int aw88081_dev_init(struct aw88081 *aw88081, struct aw_container *aw_cfg
 static int aw88081_request_firmware_file(struct aw88081 *aw88081)
 {
 	const struct firmware *cont = NULL;
+	struct aw_container *aw_cfg;
 	int ret;
 
 	aw88081->aw_pa->fw_status = AW88081_DEV_FW_FAILED;
@@ -1149,13 +1149,16 @@ static int aw88081_request_firmware_file(struct aw88081 *aw88081)
 	dev_dbg(aw88081->aw_pa->dev, "loaded %s - size: %zu\n",
 			AW88081_ACF_FILE, cont ? cont->size : 0);
 
-	aw88081->aw_cfg = devm_kzalloc(aw88081->aw_pa->dev, cont->size + sizeof(int), GFP_KERNEL);
-	if (!aw88081->aw_cfg) {
+	aw_cfg = devm_kzalloc(aw88081->aw_pa->dev, struct_size(aw_cfg, data, cont->size), GFP_KERNEL);
+	if (!aw_cfg) {
 		release_firmware(cont);
 		return -ENOMEM;
 	}
-	aw88081->aw_cfg->len = (int)cont->size;
-	memcpy(aw88081->aw_cfg->data, cont->data, cont->size);
+	aw_cfg->len = (int)cont->size;
+	memcpy(aw_cfg->data, cont->data, cont->size);
+
+	aw88081->aw_cfg = aw_cfg;
+
 	release_firmware(cont);
 
 	ret = aw88395_dev_load_acf_check(aw88081->aw_pa, aw88081->aw_cfg);
@@ -1241,8 +1244,8 @@ static const struct snd_soc_component_driver soc_codec_dev_aw88081 = {
 };
 
 static const struct i2c_device_id aw88081_i2c_id[] = {
-	{ AW88081_I2C_NAME, AW88081},
-	{ AW88083_I2C_NAME, AW88083},
+	{ .name = AW88081_I2C_NAME, .driver_data = AW88081 },
+	{ .name = AW88083_I2C_NAME, .driver_data = AW88083 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, aw88081_i2c_id);
@@ -1254,8 +1257,7 @@ static int aw88081_i2c_probe(struct i2c_client *i2c)
 	struct aw88081 *aw88081;
 	int ret;
 
-	ret = i2c_check_functionality(i2c->adapter, I2C_FUNC_I2C);
-	if (!ret)
+	if (!i2c_check_functionality(i2c->adapter, I2C_FUNC_I2C))
 		return dev_err_probe(&i2c->dev, -ENXIO, "check_functionality failed");
 
 	aw88081 = devm_kzalloc(&i2c->dev, sizeof(*aw88081), GFP_KERNEL);
@@ -1295,9 +1297,19 @@ static int aw88081_i2c_probe(struct i2c_client *i2c)
 			aw88081_dai, ARRAY_SIZE(aw88081_dai));
 }
 
+#if defined(CONFIG_OF)
+static const struct of_device_id aw88081_of_match[] = {
+	{ .compatible = "awinic,aw88081" },
+	{ .compatible = "awinic,aw88083" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, aw88081_of_match);
+#endif
+
 static struct i2c_driver aw88081_i2c_driver = {
 	.driver = {
 		.name = AW88081_I2C_NAME,
+		.of_match_table = of_match_ptr(aw88081_of_match),
 	},
 	.probe = aw88081_i2c_probe,
 	.id_table = aw88081_i2c_id,

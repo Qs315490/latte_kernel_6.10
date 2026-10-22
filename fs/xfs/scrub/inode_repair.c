@@ -3,7 +3,7 @@
  * Copyright (C) 2018-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -151,7 +151,7 @@ xrep_setup_inode(
 {
 	struct xrep_inode	*ri;
 
-	sc->buf = kzalloc(sizeof(struct xrep_inode), XCHK_GFP_FLAGS);
+	sc->buf = kzalloc_obj(struct xrep_inode, XCHK_GFP_FLAGS);
 	if (!sc->buf)
 		return -ENOMEM;
 
@@ -710,7 +710,9 @@ xrep_dinode_extsize_hints(
 					      XFS_DIFLAG_EXTSZINHERIT);
 	}
 
-	if (dip->di_version < 3)
+	if (dip->di_version < 3 ||
+	    (xfs_has_zoned(sc->mp) &&
+	     dip->di_metatype == cpu_to_be16(XFS_METAFILE_RTRMAP)))
 		return;
 
 	fa = xfs_inode_validate_cowextsize(mp, be32_to_cpu(dip->di_cowextsize),
@@ -919,7 +921,7 @@ xrep_dinode_bad_bmbt_fork(
 
 	if (nrecs == 0 || xfs_bmdr_space_calc(nrecs) > dfork_size)
 		return true;
-	if (level == 0 || level >= XFS_BM_MAXLEVELS(sc->mp, whichfork))
+	if (level == 0 || level > XFS_BM_MAXLEVELS(sc->mp, whichfork))
 		return true;
 
 	dmxr = xfs_bmdr_maxrecs(dfork_size, 0);
@@ -1545,6 +1547,7 @@ xrep_dinode_core(
 	struct xrep_inode	*ri)
 {
 	struct xfs_scrub	*sc = ri->sc;
+	struct xfs_mount	*mp = sc->mp;
 	struct xfs_buf		*bp;
 	struct xfs_dinode	*dip;
 	xfs_ino_t		ino = sc->sm->sm_ino;
@@ -1557,9 +1560,11 @@ xrep_dinode_core(
 		return error;
 
 	/* Read the inode cluster buffer. */
-	error = xfs_trans_read_buf(sc->mp, sc->tp, sc->mp->m_ddev_targp,
-			ri->imap.im_blkno, ri->imap.im_len, XBF_UNMAPPED, &bp,
-			NULL);
+	error = xfs_trans_read_buf(mp, sc->tp, mp->m_ddev_targp,
+			XFS_AGB_TO_DADDR(mp, XFS_INO_TO_AGNO(mp, ino),
+					ri->imap.im_agbno),
+			XFS_FSB_TO_BB(mp, M_IGEO(mp)->blocks_per_cluster),
+			0, &bp, NULL);
 	if (error)
 		return error;
 
@@ -1582,10 +1587,10 @@ xrep_dinode_core(
 write:
 	/* Write out the inode. */
 	trace_xrep_dinode_fixed(sc, dip);
-	xfs_dinode_calc_crc(sc->mp, dip);
+	xfs_dinode_calc_crc(mp, dip);
 	xfs_trans_buf_set_type(sc->tp, bp, XFS_BLFT_DINO_BUF);
 	xfs_trans_log_buf(sc->tp, bp, ri->imap.im_boffset,
-			ri->imap.im_boffset + sc->mp->m_sb.sb_inodesize - 1);
+			ri->imap.im_boffset + mp->m_sb.sb_inodesize - 1);
 
 	/*
 	 * In theory, we've fixed the ondisk inode record enough that we should
@@ -1752,7 +1757,7 @@ xrep_clamp_timestamp(
 	struct xfs_inode	*ip,
 	struct timespec64	*ts)
 {
-	ts->tv_nsec = clamp_t(long, ts->tv_nsec, 0, NSEC_PER_SEC);
+	ts->tv_nsec = clamp_t(long, ts->tv_nsec, 0, NSEC_PER_SEC - 1);
 	*ts = timestamp_truncate(*ts, VFS_I(ip));
 }
 
@@ -1792,10 +1797,10 @@ xrep_inode_flags(
 
 	/* Clear junk flags */
 	if (sc->ip->i_diflags & ~XFS_DIFLAG_ANY)
-		sc->ip->i_diflags &= ~XFS_DIFLAG_ANY;
+		sc->ip->i_diflags &= XFS_DIFLAG_ANY;
 
 	/* NEWRTBM only applies to realtime bitmaps */
-	if (sc->ip->i_ino == sc->mp->m_sb.sb_rbmino)
+	if (I_INO(sc->ip) == sc->mp->m_sb.sb_rbmino)
 		sc->ip->i_diflags |= XFS_DIFLAG_NEWRTBM;
 	else
 		sc->ip->i_diflags &= ~XFS_DIFLAG_NEWRTBM;
@@ -1823,7 +1828,7 @@ xrep_inode_flags(
 
 	/* Clear junk flags. */
 	if (sc->ip->i_diflags2 & ~XFS_DIFLAG2_ANY)
-		sc->ip->i_diflags2 &= ~XFS_DIFLAG2_ANY;
+		sc->ip->i_diflags2 &= XFS_DIFLAG2_ANY;
 
 	/* No reflink flag unless we support it and it's a file. */
 	if (!xfs_has_reflink(sc->mp) || !S_ISREG(mode))
@@ -1932,7 +1937,7 @@ xrep_inode_pptr(
 	 * Unlinked inodes that cannot be added to the directory tree will not
 	 * have a parent pointer.
 	 */
-	if (inode->i_nlink == 0 && !(inode->i_state & I_LINKABLE))
+	if (inode->i_nlink == 0 && !(inode_state_read_once(inode) & I_LINKABLE))
 		return 0;
 
 	/* Children of the superblock do not have parent pointers. */
@@ -1955,7 +1960,7 @@ xrep_inode_cowextsize(
 	/* Fix misaligned CoW extent size hints on a directory. */
 	if ((sc->ip->i_diflags & XFS_DIFLAG_RTINHERIT) &&
 	    (sc->ip->i_diflags2 & XFS_DIFLAG2_COWEXTSIZE) &&
-	    sc->ip->i_extsize % sc->mp->m_sb.sb_rextsize > 0) {
+	    xfs_extlen_to_rtxmod(sc->mp, sc->ip->i_cowextsize) > 0) {
 		sc->ip->i_cowextsize = 0;
 		sc->ip->i_diflags2 &= ~XFS_DIFLAG2_COWEXTSIZE;
 	}
@@ -2010,8 +2015,7 @@ xrep_inode_unlinked(
 		struct xfs_perag	*pag;
 		int			error;
 
-		pag = xfs_perag_get(sc->mp,
-				XFS_INO_TO_AGNO(sc->mp, sc->ip->i_ino));
+		pag = xfs_perag_get(sc->mp, XFS_INODE_TO_AGNO(sc->ip));
 		error = xfs_iunlink_remove(sc->tp, pag, sc->ip);
 		xfs_perag_put(pag);
 		if (error)

@@ -58,6 +58,31 @@ dtb-$(CONFIG_SOC_IMX53) += \
 	imx53-voipac-bsb.dtb
 imx53-qsb-hdmi-dtbs := imx53-qsb.dtb imx53-qsb-hdmi.dtbo
 imx53-qsrb-hdmi-dtbs := imx53-qsrb.dtb imx53-qsb-hdmi.dtbo
+
+imx6qdl-dhcom-pdk2-overlay-497-200-x12-dtbs := \
+	imx6q-dhcom-pdk2.dtb \
+	imx6qdl-dhcom-pdk2-overlay-497-200-x12.dtbo
+
+imx6qdl-dhcom-pdk2-overlay-505-200-x12-ch101olhlwh-dtbs := \
+	imx6q-dhcom-pdk2.dtb \
+	imx6qdl-dhcom-pdk2-overlay-505-200-x12-ch101olhlwh.dtbo
+
+imx6qdl-dhcom-pdk2-overlay-531-100-x21-dtbs := \
+	imx6q-dhcom-pdk2.dtb \
+	imx6qdl-dhcom-pdk2-overlay-531-100-x21.dtbo
+
+imx6qdl-dhcom-pdk2-overlay-531-100-x22-dtbs := \
+	imx6q-dhcom-pdk2.dtb \
+	imx6qdl-dhcom-pdk2-overlay-531-100-x22.dtbo
+
+imx6qdl-dhcom-pdk2-overlay-560-200-x12-dtbs := \
+	imx6q-dhcom-pdk2.dtb \
+	imx6qdl-dhcom-pdk2-overlay-560-200-x12.dtbo
+
+imx6qdl-dhcom-picoitx-overlay-626-100-x2-ch101olhlwh-dtbs := \
+	imx6q-dhcom-pdk2.dtb \
+	imx6qdl-dhcom-picoitx-overlay-626-100-x2-ch101olhlwh.dtbo
+
 dtb-$(CONFIG_SOC_IMX6Q) += \
 	imx6dl-alti6p.dtb \
 	imx6dl-apf6dev.dtb \
@@ -69,6 +94,10 @@ dtb-$(CONFIG_SOC_IMX6Q) += \
 	imx6dl-colibri-eval-v3.dtb \
 	imx6dl-colibri-iris.dtb \
 	imx6dl-colibri-iris-v2.dtb \
+	imx6dl-colibri-v1.2-aster.dtb \
+	imx6dl-colibri-v1.2-eval-v3.dtb \
+	imx6dl-colibri-v1.2-iris.dtb \
+	imx6dl-colibri-v1.2-iris-v2.dtb \
 	imx6dl-cubox-i.dtb \
 	imx6dl-cubox-i-emmc-som-v15.dtb \
 	imx6dl-cubox-i-som-v15.dtb \
@@ -158,6 +187,11 @@ dtb-$(CONFIG_SOC_IMX6Q) += \
 	imx6q-apalis-ixora.dtb \
 	imx6q-apalis-ixora-v1.1.dtb \
 	imx6q-apalis-ixora-v1.2.dtb \
+	imx6q-apalis-v1.2-eval.dtb \
+	imx6q-apalis-v1.2-eval-v1.2.dtb \
+	imx6q-apalis-v1.2-ixora.dtb \
+	imx6q-apalis-v1.2-ixora-v1.1.dtb \
+	imx6q-apalis-v1.2-ixora-v1.2.dtb \
 	imx6q-apf6dev.dtb \
 	imx6q-arm2.dtb \
 	imx6q-b450v3.dtb \
@@ -170,6 +204,18 @@ dtb-$(CONFIG_SOC_IMX6Q) += \
 	imx6q-cubox-i-som-v15.dtb \
 	imx6q-dfi-fs700-m60.dtb \
 	imx6q-dhcom-pdk2.dtb \
+	imx6qdl-dhcom-pdk2-overlay-497-200-x12.dtb \
+	imx6qdl-dhcom-pdk2-overlay-497-200-x12.dtbo \
+	imx6qdl-dhcom-pdk2-overlay-505-200-x12-ch101olhlwh.dtb \
+	imx6qdl-dhcom-pdk2-overlay-505-200-x12-ch101olhlwh.dtbo \
+	imx6qdl-dhcom-pdk2-overlay-531-100-x21.dtb \
+	imx6qdl-dhcom-pdk2-overlay-531-100-x21.dtbo \
+	imx6qdl-dhcom-pdk2-overlay-531-100-x22.dtb \
+	imx6qdl-dhcom-pdk2-overlay-531-100-x22.dtbo \
+	imx6qdl-dhcom-pdk2-overlay-560-200-x12.dtb \
+	imx6qdl-dhcom-pdk2-overlay-560-200-x12.dtbo \
+	imx6qdl-dhcom-picoitx-overlay-626-100-x2-ch101olhlwh.dtb \
+	imx6qdl-dhcom-picoitx-overlay-626-100-x2-ch101olhlwh.dtbo \
 	imx6q-display5-tianma-tm070-1280x768.dtb \
 	imx6q-dmo-edmqmx6.dtb \
 	imx6q-dms-ba16.dtb \
@@ -329,6 +375,8 @@ dtb-$(CONFIG_SOC_IMX6UL) += \
 	imx6ul-tx6ul-0010.dtb \
 	imx6ul-tx6ul-0011.dtb \
 	imx6ul-tx6ul-mainboard.dtb \
+	imx6ul-var-som-concerto.dtb \
+	imx6ul-var-som-concerto-full.dtb \
 	imx6ull-14x14-evk.dtb \
 	imx6ull-colibri-aster.dtb \
 	imx6ull-colibri-emmc-aster.dtb \
@@ -346,6 +394,9 @@ dtb-$(CONFIG_SOC_IMX6UL) += \
 	imx6ull-dhcom-pdk2.dtb \
 	imx6ull-dhcom-picoitx.dtb \
 	imx6ull-dhcor-maveo-box.dtb \
+	imx6ull-engicam-microgea-bmm.dtb \
+	imx6ull-engicam-microgea-gtw.dtb \
+	imx6ull-engicam-microgea-rmm.dtb \
 	imx6ull-jozacp.dtb \
 	imx6ull-kontron-bl.dtb \
 	imx6ull-myir-mys-6ulx-eval.dtb \
@@ -364,6 +415,8 @@ dtb-$(CONFIG_SOC_IMX6UL) += \
 	imx6ull-tqma6ull2-mba6ulx.dtb \
 	imx6ull-tqma6ull2l-mba6ulx.dtb \
 	imx6ull-uti260b.dtb \
+	imx6ull-var-som-concerto.dtb \
+	imx6ull-var-som-concerto-full.dtb \
 	imx6ulz-14x14-evk.dtb \
 	imx6ulz-bsh-smm-m2.dtb
 dtb-$(CONFIG_SOC_IMX7D) += \

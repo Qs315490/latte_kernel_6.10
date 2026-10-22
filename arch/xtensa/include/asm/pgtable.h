@@ -58,7 +58,6 @@
 #define PTRS_PER_PTE_SHIFT	10
 #define PTRS_PER_PGD		1024
 #define USER_PTRS_PER_PGD	(TASK_SIZE/PGDIR_SIZE)
-#define FIRST_USER_PGD_NR	(FIRST_USER_ADDRESS >> PGDIR_SHIFT)
 
 #ifdef CONFIG_MMU
 /*
@@ -203,16 +202,12 @@
  * What follows is the closest we can get by reasonable means..
  * See linux/mm/mmap.c for protection_map[] array that uses these definitions.
  */
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #define pte_ERROR(e) \
 	printk("%s:%d: bad pte %08lx.\n", __FILE__, __LINE__, pte_val(e))
 #define pgd_ERROR(e) \
 	printk("%s:%d: bad pgd entry %08lx.\n", __FILE__, __LINE__, pgd_val(e))
-
-extern unsigned long empty_zero_page[1024];
-
-#define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
 
 #ifdef CONFIG_MMU
 extern pgd_t swapper_pg_dir[PAGE_SIZE/sizeof(pgd_t)];
@@ -269,17 +264,11 @@ static inline pte_t pte_mkwrite_novma(pte_t pte)
 		((__pgprot((pgprot_val(prot) & ~_PAGE_CA_MASK) | \
 			   _PAGE_CA_BYPASS)))
 
-/*
- * Conversion functions: convert a page and protection to a page entry,
- * and a page entry and page directory to the page they refer to.
- */
-
 #define PFN_PTE_SHIFT		PAGE_SHIFT
 #define pte_pfn(pte)		(pte_val(pte) >> PAGE_SHIFT)
 #define pte_same(a,b)		(pte_val(a) == pte_val(b))
 #define pte_page(x)		pfn_to_page(pte_pfn(x))
 #define pfn_pte(pfn, prot)	__pte(((pfn) << PAGE_SHIFT) | pgprot_val(prot))
-#define mk_pte(page, prot)	pfn_pte(page_to_pfn(page), prot)
 
 static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
@@ -315,15 +304,14 @@ set_pmd(pmd_t *pmdp, pmd_t pmdval)
 
 struct vm_area_struct;
 
-static inline int
-ptep_test_and_clear_young(struct vm_area_struct *vma, unsigned long addr,
-			  pte_t *ptep)
+static inline bool ptep_test_and_clear_young(struct vm_area_struct *vma,
+		unsigned long addr, pte_t *ptep)
 {
 	pte_t pte = *ptep;
 	if (!pte_young(pte))
-		return 0;
+		return false;
 	update_pte(ptep, pte_mkold(pte));
-	return 1;
+	return true;
 }
 
 static inline pte_t
@@ -355,7 +343,7 @@ ptep_set_wrprotect(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 #define __pte_to_swp_entry(pte)	((swp_entry_t) { pte_val(pte) })
 #define __swp_entry_to_pte(x)	((pte_t) { (x).val })
 
-static inline int pte_swp_exclusive(pte_t pte)
+static inline bool pte_swp_exclusive(pte_t pte)
 {
 	return pte_val(pte) & _PAGE_SWP_EXCLUSIVE;
 }
@@ -372,10 +360,10 @@ static inline pte_t pte_swp_clear_exclusive(pte_t pte)
 	return pte;
 }
 
-#endif /*  !defined (__ASSEMBLY__) */
+#endif /*  !defined (__ASSEMBLER__) */
 
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 
 /* Assembly macro _PGD_INDEX is the same as C pgd_index(unsigned long),
  *                _PGD_OFFSET as C pgd_offset(struct mm_struct*, unsigned long),
@@ -414,7 +402,7 @@ void update_mmu_tlb_range(struct vm_area_struct *vma,
 		unsigned long address, pte_t *ptep, unsigned int nr);
 #define update_mmu_tlb_range update_mmu_tlb_range
 
-#endif /* !defined (__ASSEMBLY__) */
+#endif /* !defined (__ASSEMBLER__) */
 
 #define __HAVE_ARCH_PTEP_TEST_AND_CLEAR_YOUNG
 #define __HAVE_ARCH_PTEP_GET_AND_CLEAR

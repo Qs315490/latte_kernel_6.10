@@ -238,8 +238,7 @@ static int __init bcm6345_l1_init_one(struct device_node *dn,
 	else if (intc->n_words != n_words)
 		return -EINVAL;
 
-	cpu = intc->cpus[idx] = kzalloc(struct_size(cpu, enable_cache, n_words),
-					GFP_KERNEL);
+	cpu = intc->cpus[idx] = kzalloc_flex(*cpu, enable_cache, n_words);
 	if (!cpu)
 		return -ENOMEM;
 
@@ -296,7 +295,7 @@ static int __init bcm6345_l1_of_init(struct device_node *dn,
 	unsigned int idx;
 	int ret;
 
-	intc = kzalloc(sizeof(*intc), GFP_KERNEL);
+	intc = kzalloc_obj(*intc);
 	if (!intc)
 		return -ENOMEM;
 
@@ -316,7 +315,7 @@ static int __init bcm6345_l1_of_init(struct device_node *dn,
 
 	raw_spin_lock_init(&intc->lock);
 
-	intc->domain = irq_domain_add_linear(dn, IRQS_PER_WORD * intc->n_words,
+	intc->domain = irq_domain_create_linear(of_fwnode_handle(dn), IRQS_PER_WORD * intc->n_words,
 					     &bcm6345_l1_domain_ops,
 					     intc);
 	if (!intc->domain) {

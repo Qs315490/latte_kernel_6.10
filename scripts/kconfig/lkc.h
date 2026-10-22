@@ -51,7 +51,8 @@ static inline void xfwrite(const void *str, size_t len, size_t count, FILE *out)
 }
 
 /* util.c */
-const char *file_lookup(const char *name);
+const char *file_lookup(const char *name,
+			const char *parent_name, int parent_lineno);
 
 /* lexer.l */
 int yylex(void);
@@ -81,8 +82,8 @@ void _menu_init(void);
 void menu_warn(const struct menu *menu, const char *fmt, ...);
 struct menu *menu_add_menu(void);
 void menu_end_menu(void);
-void menu_add_entry(struct symbol *sym);
-void menu_add_dep(struct expr *dep);
+void menu_add_entry(struct symbol *sym, enum menu_type type);
+void menu_add_dep(struct expr *dep, struct expr *cond);
 void menu_add_visibility(struct expr *dep);
 struct property *menu_add_prompt(enum prop_type type, const char *prompt,
 				 struct expr *dep);
@@ -98,9 +99,11 @@ bool menu_is_visible(struct menu *menu);
 bool menu_has_prompt(const struct menu *menu);
 const char *menu_get_prompt(const struct menu *menu);
 struct menu *menu_get_parent_menu(struct menu *menu);
+struct menu *menu_get_menu_or_parent_menu(struct menu *menu);
 int get_jump_key_char(void);
 struct gstr get_relations_str(struct symbol **sym_arr, struct list_head *head);
 void menu_get_ext_help(struct menu *menu, struct gstr *help);
+void menu_dump(void);
 
 /* symbol.c */
 void sym_clear_all_valid(void);

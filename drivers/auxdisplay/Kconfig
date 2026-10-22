@@ -327,7 +327,7 @@ config PANEL_CHANGE_MESSAGE
 	  say 'N' and keep the default message with the version.
 
 config PANEL_BOOT_MESSAGE
-	depends on PANEL_CHANGE_MESSAGE="y"
+	depends on PANEL_CHANGE_MESSAGE
 	string "New initialization message"
 	default ""
 	help
@@ -503,6 +503,7 @@ config HT16K33
 config MAX6959
 	tristate "Maxim MAX6958/6959 7-segment LED controller"
 	depends on I2C
+	select BITREVERSE
 	select REGMAP_I2C
 	select LINEDISP
 	help

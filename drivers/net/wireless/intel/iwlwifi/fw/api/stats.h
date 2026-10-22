@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2012-2014, 2018, 2020 - 2021, 2023 - 2024 Intel Corporation
+ * Copyright (C) 2012-2014, 2018, 2020-2021, 2023-2026 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -26,7 +26,7 @@ struct mvm_statistics_div {
 } __packed; /* STATISTICS_SLOW_DIV_API_S_VER_2 */
 
 /**
- * struct mvm_statistics_rx_non_phy
+ * struct mvm_statistics_rx_non_phy - non-PHY RX statistics
  * @bogus_cts: CTS received when not expecting CTS
  * @bogus_ack: ACK received when not expecting ACK
  * @non_channel_beacons: beacons with our bss id but not on our serving channel
@@ -456,7 +456,7 @@ struct iwl_system_statistics_cmd {
 } __packed; /* STATISTICS_FW_CMD_API_S_VER_1 */
 
 /**
- * enum iwl_fw_statistics_type
+ * enum iwl_fw_statistics_type - statistics type
  *
  * @FW_STATISTICS_OPERATIONAL: operational statistics
  * @FW_STATISTICS_PHY: phy statistics
@@ -478,7 +478,7 @@ enum iwl_fw_statistics_type {
 
 #define IWL_STATISTICS_TYPE_MSK 0x7f
 /**
- * struct iwl_statistics_ntfy_hdr
+ * struct iwl_statistics_ntfy_hdr - statistics notification header
  *
  * @type: struct type
  * @version: version of the struct
@@ -491,7 +491,7 @@ struct iwl_statistics_ntfy_hdr {
 }; /* STATISTICS_NTFY_HDR_API_S_VER_1 */
 
 /**
- * struct iwl_stats_ntfy_per_link
+ * struct iwl_stats_ntfy_per_link - per-link statistics
  *
  * @beacon_filter_average_energy: Average energy [-dBm] of the 2
  *	 antennas.
@@ -514,7 +514,7 @@ struct iwl_stats_ntfy_per_link {
 } __packed; /* STATISTICS_NTFY_PER_LINK_API_S_VER_1 */
 
 /**
- * struct iwl_stats_ntfy_part1_per_link
+ * struct iwl_stats_ntfy_part1_per_link - part1 per link statistics
  *
  * @rx_time: rx time
  * @tx_time: tx time
@@ -533,7 +533,7 @@ struct iwl_stats_ntfy_part1_per_link {
 } __packed; /* STATISTICS_FW_NTFY_OPERATIONAL_PART1_PER_LINK_API_S_VER_1 */
 
 /**
- * struct iwl_stats_ntfy_per_mac
+ * struct iwl_stats_ntfy_per_mac - per MAC statistics
  *
  * @beacon_filter_average_energy: Average energy [-dBm] of the 2
  *	 antennas.
@@ -556,7 +556,8 @@ struct iwl_stats_ntfy_per_mac {
 } __packed; /* STATISTICS_NTFY_PER_MAC_API_S_VER_1 */
 
 #define IWL_STATS_MAX_BW_INDEX 5
-/** struct iwl_stats_ntfy_per_phy
+/**
+ * struct iwl_stats_ntfy_per_phy_v1 - per PHY statistics
  * @channel_load: channel load
  * @channel_load_by_us: device contribution to MCLM
  * @channel_load_not_by_us: other devices' contribution to MCLM
@@ -571,7 +572,7 @@ struct iwl_stats_ntfy_per_mac {
  *	per channel BW. note BACK counted as 1
  * @last_tx_ch_width_indx: last txed frame channel width index
  */
-struct iwl_stats_ntfy_per_phy {
+struct iwl_stats_ntfy_per_phy_v1 {
 	__le32 channel_load;
 	__le32 channel_load_by_us;
 	__le32 channel_load_not_by_us;
@@ -585,7 +586,71 @@ struct iwl_stats_ntfy_per_phy {
 } __packed; /* STATISTICS_NTFY_PER_PHY_API_S_VER_1 */
 
 /**
- * struct iwl_stats_ntfy_per_sta
+ * struct iwl_stats_ntfy_coex - coex statistics
+ *
+ * @wifi_kill_cnt: count of wifi frames killed by BT
+ * @wifi_tx_cts_kill_cnt: count of wifi Tx CTS frames killed by BT
+ * @ttc2_ppdu_error_count: Count PPDU errors on TTC2 - BT Tx indication rises
+ *	within wifi Tx packet on non-shared antenna and wifi is NOT killed by
+ *	PTA/TCL.
+ * @trc2_ppdu_error_count: count PPDU errors on TRC2 - BT Rx indication rises
+ *	within wifi Tx packet on non-shared antenna and wifi is  NOT killed by
+ *	PTA/TCL
+ * @rrc1_collision_count: count RRC1 - BT Rx indication rises within wifi Rx
+ *	packet on shared antenna
+ * @rrc2_collision_count: count RRC2 - BT Rx indication rises within wifi Rx
+ *	packet on non-shared antenna
+ * @rtc2_collision_count: count RTC2 - BT Tx indication rises within wifi Rx
+ *	packet on non-shared antenna
+ * @reserved: reserved
+ */
+struct iwl_stats_ntfy_coex {
+	__le16 wifi_kill_cnt;
+	__le16 wifi_tx_cts_kill_cnt;
+	__le16 ttc2_ppdu_error_count;
+	__le16 trc2_ppdu_error_count;
+	__le16 rrc1_collision_count;
+	__le16 rrc2_collision_count;
+	__le16 rtc2_collision_count;
+	__le16 reserved;
+} __packed; /* STATISTICS_FW_NTFY_COEX_TELEMETRY_API_S_VER_1 */
+
+/**
+ * struct iwl_stats_ntfy_per_phy - per PHY statistics
+ * @channel_load: channel load
+ * @channel_load_by_us: device contribution to MCLM
+ * @channel_load_not_by_us: other devices' contribution to MCLM
+ * @clt: CLT HW timer (TIM_CH_LOAD2)
+ * @act: active accumulator SW
+ * @elp: elapsed time accumulator SW
+ * @rx_detected_per_ch_width: number of deferred TX per channel width,
+ *	0 - 20, 1/2/3 - 40/80/160
+ * @success_per_ch_width: number of frames that got ACK/BACK/CTS
+ *	per channel BW. note, BACK counted as 1
+ * @fail_per_ch_width: number of frames that didn't get ACK/BACK/CTS
+ *	per channel BW. note BACK counted as 1
+ * @last_tx_ch_width_indx: last txed frame channel width index
+ * @coex: coex related data
+ */
+struct iwl_stats_ntfy_per_phy {
+	__le32 channel_load;
+	__le32 channel_load_by_us;
+	__le32 channel_load_not_by_us;
+	__le32 clt;
+	__le32 act;
+	__le32 elp;
+	__le32 rx_detected_per_ch_width[IWL_STATS_MAX_BW_INDEX];
+	__le32 success_per_ch_width[IWL_STATS_MAX_BW_INDEX];
+	__le32 fail_per_ch_width[IWL_STATS_MAX_BW_INDEX];
+	__le32 last_tx_ch_width_indx;
+	struct iwl_stats_ntfy_coex coex;
+} __packed; /* STATISTICS_NTFY_PER_PHY_API_S_VER_2 */
+
+/* unknown channel load (due to not being active on channel) */
+#define IWL_STATS_UNKNOWN_CHANNEL_LOAD	0xffffffff
+
+/**
+ * struct iwl_stats_ntfy_per_sta - per STA statistics
  *
  * @average_energy: in fact it is minus the energy..
  */
@@ -594,25 +659,39 @@ struct iwl_stats_ntfy_per_sta {
 } __packed; /* STATISTICS_NTFY_PER_STA_API_S_VER_1 */
 
 #define IWL_STATS_MAX_PHY_OPERATIONAL 3
-#define IWL_STATS_MAX_FW_LINKS	(IWL_FW_MAX_LINK_ID + 1)
 
 /**
- * struct iwl_system_statistics_notif_oper
+ * struct iwl_system_statistics_notif_oper_v3 - statistics notification
  *
  * @time_stamp: time when the notification is sent from firmware
  * @per_link: per link statistics, &struct iwl_stats_ntfy_per_link
- * @per_phy: per phy statistics, &struct iwl_stats_ntfy_per_phy
+ * @per_phy: per phy statistics, &struct iwl_stats_ntfy_per_phy_v1
  * @per_sta: per sta statistics, &struct iwl_stats_ntfy_per_sta
  */
-struct iwl_system_statistics_notif_oper {
+struct iwl_system_statistics_notif_oper_v3 {
 	__le32 time_stamp;
-	struct iwl_stats_ntfy_per_link per_link[IWL_STATS_MAX_FW_LINKS];
-	struct iwl_stats_ntfy_per_phy per_phy[IWL_STATS_MAX_PHY_OPERATIONAL];
+	struct iwl_stats_ntfy_per_link per_link[IWL_FW_MAX_LINKS];
+	struct iwl_stats_ntfy_per_phy_v1 per_phy[IWL_STATS_MAX_PHY_OPERATIONAL];
 	struct iwl_stats_ntfy_per_sta per_sta[IWL_STATION_COUNT_MAX];
 } __packed; /* STATISTICS_FW_NTFY_OPERATIONAL_API_S_VER_3 */
 
 /**
- * struct iwl_system_statistics_part1_notif_oper
+ * struct iwl_system_statistics_notif_oper - statistics notification
+ *
+ * @time_stamp: time when the notification is sent from firmware
+ * @per_link: per link statistics, &struct iwl_stats_ntfy_per_link
+ * @per_phy: per phy statistics, &struct iwl_stats_ntfy_per_phy_v1
+ * @per_sta: per sta statistics, &struct iwl_stats_ntfy_per_sta
+ */
+struct iwl_system_statistics_notif_oper {
+	__le32 time_stamp;
+	struct iwl_stats_ntfy_per_link per_link[IWL_FW_MAX_LINKS];
+	struct iwl_stats_ntfy_per_phy per_phy[IWL_STATS_MAX_PHY_OPERATIONAL];
+	struct iwl_stats_ntfy_per_sta per_sta[IWL_STATION_COUNT_MAX];
+} __packed; /* STATISTICS_FW_NTFY_OPERATIONAL_API_S_VER_4 */
+
+/**
+ * struct iwl_system_statistics_part1_notif_oper - part1 stats notification
  *
  * @time_stamp: time when the notification is sent from firmware
  * @per_link: per link statistics &struct iwl_stats_ntfy_part1_per_link
@@ -620,12 +699,12 @@ struct iwl_system_statistics_notif_oper {
  */
 struct iwl_system_statistics_part1_notif_oper {
 	__le32 time_stamp;
-	struct iwl_stats_ntfy_part1_per_link per_link[IWL_STATS_MAX_FW_LINKS];
+	struct iwl_stats_ntfy_part1_per_link per_link[IWL_FW_MAX_LINKS];
 	__le32 per_phy_crc_error_stats[IWL_STATS_MAX_PHY_OPERATIONAL];
 } __packed; /* STATISTICS_FW_NTFY_OPERATIONAL_PART1_API_S_VER_4 */
 
 /**
- * struct iwl_system_statistics_end_notif
+ * struct iwl_system_statistics_end_notif - statistics end notification
  *
  * @time_stamp: time when the notification is sent from firmware
  */
@@ -634,12 +713,12 @@ struct iwl_system_statistics_end_notif {
 } __packed; /* STATISTICS_FW_NTFY_END_API_S_VER_1 */
 
 /**
- * struct iwl_statistics_operational_ntfy
+ * struct iwl_statistics_operational_ntfy - operational stats notification
  *
  * @hdr: general statistics header
  * @flags: bitmap of possible notification structures
  * @per_mac: per mac statistics, &struct iwl_stats_ntfy_per_mac
- * @per_phy: per phy statistics, &struct iwl_stats_ntfy_per_phy
+ * @per_phy: per phy statistics, &struct iwl_stats_ntfy_per_phy_v1
  * @per_sta: per sta statistics, &struct iwl_stats_ntfy_per_sta
  * @rx_time: rx time
  * @tx_time: usec the radio is transmitting.
@@ -650,7 +729,7 @@ struct iwl_statistics_operational_ntfy {
 	struct iwl_statistics_ntfy_hdr hdr;
 	__le32 flags;
 	struct iwl_stats_ntfy_per_mac per_mac[MAC_INDEX_AUX];
-	struct iwl_stats_ntfy_per_phy per_phy[IWL_STATS_MAX_PHY_OPERATIONAL];
+	struct iwl_stats_ntfy_per_phy_v1 per_phy[IWL_STATS_MAX_PHY_OPERATIONAL];
 	struct iwl_stats_ntfy_per_sta per_sta[IWL_STATION_COUNT_MAX];
 	__le64 rx_time;
 	__le64 tx_time;
@@ -659,7 +738,7 @@ struct iwl_statistics_operational_ntfy {
 } __packed; /* STATISTICS_OPERATIONAL_NTFY_API_S_VER_15 */
 
 /**
- * struct iwl_statistics_operational_ntfy_ver_14
+ * struct iwl_statistics_operational_ntfy_ver_14 - operational stats notification
  *
  * @hdr: general statistics header
  * @flags: bitmap of possible notification structures
@@ -704,7 +783,7 @@ struct iwl_statistics_operational_ntfy_ver_14 {
 } __packed; /* STATISTICS_OPERATIONAL_NTFY_API_S_VER_14 */
 
 /**
- * struct iwl_statistics_phy_ntfy
+ * struct iwl_statistics_phy_ntfy - PHY statistics notification
  *
  * @hdr: general statistics header
  * RX PHY related statistics
@@ -805,7 +884,7 @@ struct iwl_statistics_phy_ntfy {
 } __packed; /* STATISTICS_PHY_NTFY_API_S_VER_1 */
 
 /**
- * struct iwl_statistics_mac_ntfy
+ * struct iwl_statistics_mac_ntfy - MAC statistics notification
  *
  * @hdr: general statistics header
  * @bcast_filter_passed_per_mac: bcast filter passed per mac
@@ -824,7 +903,7 @@ struct iwl_statistics_mac_ntfy {
 } __packed; /* STATISTICS_MAC_NTFY_API_S_VER_1 */
 
 /**
- * struct iwl_statistics_rx_ntfy
+ * struct iwl_statistics_rx_ntfy - RX statistics notification
  *
  * @hdr: general statistics header
  * @rx_agg_mpdu_cnt: aggregation frame count (number of
@@ -864,7 +943,7 @@ struct iwl_statistics_rx_ntfy {
 } __packed; /* STATISTICS_RX_NTFY_API_S_VER_1 */
 
 /**
- * struct iwl_statistics_tx_ntfy
+ * struct iwl_statistics_tx_ntfy - TX statistics notification
  *
  * @hdr: general statistics header
  * @cts_timeout: timeout when waiting for CTS
@@ -973,7 +1052,7 @@ struct iwl_statistics_tx_ntfy {
 } __packed; /* STATISTICS_TX_NTFY_API_S_VER_1 */
 
 /**
- * struct iwl_statistics_duration_ntfy
+ * struct iwl_statistics_duration_ntfy - burst/duration statistics
  *
  * @hdr: general statistics header
  * @cont_burst_chk_cnt: number of times continuation or
@@ -992,7 +1071,7 @@ struct iwl_statistics_duration_ntfy {
 } __packed; /* STATISTICS_DURATION_NTFY_API_S_VER_1 */
 
 /**
- * struct iwl_statistics_he_ntfy
+ * struct iwl_statistics_he_ntfy - HE statistics
  *
  * @hdr: general statistics header
  * received HE frames

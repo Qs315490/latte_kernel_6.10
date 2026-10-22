@@ -15,7 +15,7 @@
 #include "pmbus.h"
 
 static const struct regulator_desc __maybe_unused tda38640_reg_desc[] = {
-	PMBUS_REGULATOR_ONE("vout"),
+	PMBUS_REGULATOR_ONE_NODE("vout"),
 };
 
 struct tda38640_data {
@@ -195,8 +195,8 @@ static int tda38640_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tda38640_id[] = {
-	{"tda38640"},
-	{}
+	{ .name = "tda38640" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tda38640_id);
 

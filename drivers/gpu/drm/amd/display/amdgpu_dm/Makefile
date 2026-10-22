@@ -38,7 +38,10 @@ AMDGPUDM = \
 	amdgpu_dm_pp_smu.o \
 	amdgpu_dm_psr.o \
 	amdgpu_dm_replay.o \
-	amdgpu_dm_wb.o
+	amdgpu_dm_quirks.o \
+	amdgpu_dm_wb.o \
+	amdgpu_dm_colorop.o \
+	amdgpu_dm_ism.o
 
 ifdef CONFIG_DRM_AMD_DC_FP
 AMDGPUDM += dc_fpu.o
@@ -55,4 +58,12 @@ subdir-ccflags-y += -I$(FULL_AMD_DISPLAY_PATH)/dc
 AMDGPU_DM = $(addprefix $(AMDDALPATH)/amdgpu_dm/,$(AMDGPUDM))
 
 AMD_DISPLAY_FILES += $(AMDGPU_DM)
+endif
+
+# KUnit tests as separate module
+ifneq ($(CONFIG_DRM_AMD_DC_KUNIT_TEST),)
+obj-y += $(AMDDALPATH)/amdgpu_dm/tests/
+
+# Enable gcov for amdgpu_dm KUnit builds
+GCOV_PROFILE := y
 endif

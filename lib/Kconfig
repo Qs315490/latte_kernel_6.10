@@ -8,17 +8,6 @@ config BINARY_PRINTF
 
 menu "Library routines"
 
-config RAID6_PQ
-	tristate
-
-config RAID6_PQ_BENCHMARK
-	bool "Automatically choose fastest RAID6 PQ functions"
-	depends on RAID6_PQ
-	default y
-	help
-	  Benchmark all available RAID6 PQ functions on init and choose the
-	  fastest one.
-
 config LINEAR_RANGES
 	tristate
 
@@ -54,13 +43,26 @@ config PACKING_KUNIT_TEST
 
 config BITREVERSE
 	tristate
+	select GENERIC_BITREVERSE if !HAVE_ARCH_BITREVERSE
 
 config HAVE_ARCH_BITREVERSE
 	bool
 	default n
+	depends on BITREVERSE
 	help
 	  This option enables the use of hardware bit-reversal instructions on
 	  architectures which support such operations.
+
+config GENERIC_BITREVERSE
+	tristate
+	depends on BITREVERSE
+	help
+	  Generic bit reversal implementation. Drivers should never enable
+	  it explicitly. Instead, enable BITREVERSE.
+
+	  Architectures may want to select it as a fall-back option for
+	  HAVE_ARCH_BITREVERSE, when the hardware-accelerated bit reverse
+	  instruction set is optional, like RISC-V ZBKB extension.
 
 config ARCH_HAS_STRNCPY_FROM_USER
 	bool
@@ -136,120 +138,9 @@ config TRACE_MMIO_ACCESS
 	  Create tracepoints for MMIO read/write operations. These trace events
 	  can be used for logging all MMIO read/write operations.
 
+source "lib/crc/Kconfig"
 source "lib/crypto/Kconfig"
-
-config CRC_CCITT
-	tristate "CRC-CCITT functions"
-	help
-	  This option is provided for the case where no in-kernel-tree
-	  modules require CRC-CCITT functions, but a module built outside
-	  the kernel tree does. Such modules that use library CRC-CCITT
-	  functions require M here.
-
-config CRC16
-	tristate "CRC16 functions"
-	help
-	  This option is provided for the case where no in-kernel-tree
-	  modules require CRC16 functions, but a module built outside
-	  the kernel tree does. Such modules that use library CRC16
-	  functions require M here.
-
-config CRC_T10DIF
-	tristate "CRC calculation for the T10 Data Integrity Field"
-	help
-	  This option is only needed if a module that's not in the
-	  kernel tree needs to calculate CRC checks for use with the
-	  SCSI data integrity subsystem.
-
-config ARCH_HAS_CRC_T10DIF
-	bool
-
-config CRC_T10DIF_ARCH
-	tristate
-	default CRC_T10DIF if ARCH_HAS_CRC_T10DIF && CRC_OPTIMIZATIONS
-
-config CRC64_ROCKSOFT
-	tristate "CRC calculation for the Rocksoft model CRC64"
-	select CRC64
-	select CRYPTO
-	select CRYPTO_CRC64_ROCKSOFT
-	help
-	  This option provides a CRC64 API to a registered crypto driver.
-	  This is used with the block layer's data integrity subsystem.
-
-config CRC_ITU_T
-	tristate "CRC ITU-T V.41 functions"
-	help
-	  This option is provided for the case where no in-kernel-tree
-	  modules require CRC ITU-T V.41 functions, but a module built outside
-	  the kernel tree does. Such modules that use library CRC ITU-T V.41
-	  functions require M here.
-
-config CRC32
-	tristate "CRC32/CRC32c functions"
-	default y
-	select BITREVERSE
-	help
-	  This option is provided for the case where no in-kernel-tree
-	  modules require CRC32/CRC32c functions, but a module built outside
-	  the kernel tree does. Such modules that use library CRC32/CRC32c
-	  functions require M here.
-
-config ARCH_HAS_CRC32
-	bool
-
-config CRC32_ARCH
-	tristate
-	default CRC32 if ARCH_HAS_CRC32 && CRC_OPTIMIZATIONS
-
-config CRC64
-	tristate "CRC64 functions"
-	help
-	  This option is provided for the case where no in-kernel-tree
-	  modules require CRC64 functions, but a module built outside
-	  the kernel tree does. Such modules that use library CRC64
-	  functions require M here.
-
-config CRC4
-	tristate "CRC4 functions"
-	help
-	  This option is provided for the case where no in-kernel-tree
-	  modules require CRC4 functions, but a module built outside
-	  the kernel tree does. Such modules that use library CRC4
-	  functions require M here.
-
-config CRC7
-	tristate "CRC7 functions"
-	help
-	  This option is provided for the case where no in-kernel-tree
-	  modules require CRC7 functions, but a module built outside
-	  the kernel tree does. Such modules that use library CRC7
-	  functions require M here.
-
-config LIBCRC32C
-	tristate "CRC32c (Castagnoli, et al) Cyclic Redundancy-Check"
-	select CRC32
-	help
-	  This option just selects CRC32 and is provided for compatibility
-	  purposes until the users are updated to select CRC32 directly.
-
-config CRC8
-	tristate "CRC8 function"
-	help
-	  This option provides CRC8 function. Drivers may select this
-	  when they need to do cyclic redundancy check according CRC8
-	  algorithm. Module will be called crc8.
-
-config CRC_OPTIMIZATIONS
-	bool "Enable optimized CRC implementations" if EXPERT
-	default y
-	help
-	  Disabling this option reduces code size slightly by disabling the
-	  architecture-optimized implementations of any CRC variants that are
-	  enabled.  CRC checksumming performance may get much slower.
-
-	  Keep this enabled unless you're really trying to minimize the size of
-	  the kernel.
+source "lib/raid/Kconfig"
 
 config XXHASH
 	tristate
@@ -542,19 +433,6 @@ config GLOB
 	  are compiling an out-of tree driver which tells you that it
 	  depends on this.
 
-config GLOB_SELFTEST
-	tristate "glob self-test on init"
-	depends on GLOB
-	help
-	  This option enables a simple self-test of the glob_match
-	  function on startup.	It is primarily useful for people
-	  working on the code to ensure they haven't introduced any
-	  regressions.
-
-	  It only adds a little bit of code and slows kernel boot (or
-	  module load) by a small amount, so you're welcome to play with
-	  it, but you probably don't need it.
-
 #
 # Netlink attribute parsing support is select'ed if needed
 #
@@ -589,8 +467,7 @@ config MPILIB
 config SIGNATURE
 	tristate
 	depends on KEYS
-	select CRYPTO
-	select CRYPTO_SHA1
+	select CRYPTO_LIB_SHA1
 	select MPILIB
 	help
 	  Digital signature verification. Currently only RSA is supported.
@@ -655,6 +532,9 @@ config MEMREGION
 config ARCH_HAS_CPU_CACHE_INVALIDATE_MEMREGION
 	bool
 
+config GENERIC_CPU_CACHE_MAINTENANCE
+	bool
+
 config ARCH_HAS_MEMREMAP_COMPAT_ALIGN
 	bool
 
@@ -712,7 +592,7 @@ config OBJAGG
 config LWQ_TEST
 	bool "Boot-time test for lwq queuing"
 	help
-          Run boot-time test of light-weight queuing.
+	  Run boot-time test of light-weight queuing.
 
 endmenu
 
@@ -742,12 +622,10 @@ config GENERIC_LIB_DEVMEM_IS_ALLOWED
 
 config PLDMFW
 	bool
+	select CRC32
 	default n
 
 config ASN1_ENCODER
-       tristate
-
-config POLYNOMIAL
        tristate
 
 config FIRMWARE_TABLE

@@ -3,6 +3,7 @@
  * Helpers for IOMMU drivers implementing SVA
  */
 #include <linux/mmu_context.h>
+#include <linux/mmu_notifier.h>
 #include <linux/mutex.h>
 #include <linux/sched/mm.h>
 #include <linux/iommu.h>
@@ -10,6 +11,8 @@
 #include "iommu-priv.h"
 
 static DEFINE_MUTEX(iommu_sva_lock);
+static bool iommu_sva_present;
+static LIST_HEAD(iommu_sva_mms);
 static struct iommu_domain *iommu_sva_domain_alloc(struct device *dev,
 						   struct mm_struct *mm);
 
@@ -32,7 +35,7 @@ static struct iommu_mm_data *iommu_alloc_mm_data(struct mm_struct *mm, struct de
 		return iommu_mm;
 	}
 
-	iommu_mm = kzalloc(sizeof(struct iommu_mm_data), GFP_KERNEL);
+	iommu_mm = kzalloc_obj(struct iommu_mm_data);
 	if (!iommu_mm)
 		return ERR_PTR(-ENOMEM);
 
@@ -42,6 +45,7 @@ static struct iommu_mm_data *iommu_alloc_mm_data(struct mm_struct *mm, struct de
 		return ERR_PTR(-ENOSPC);
 	}
 	iommu_mm->pasid = pasid;
+	iommu_mm->mm = mm;
 	INIT_LIST_HEAD(&iommu_mm->sva_domains);
 	/*
 	 * Make sure the write to mm->iommu_mm is not reordered in front of
@@ -62,9 +66,6 @@ static struct iommu_mm_data *iommu_alloc_mm_data(struct mm_struct *mm, struct de
  * bond already exists between @device and @mm, an additional internal
  * reference is taken. Caller must call iommu_sva_unbind_device()
  * to release each reference.
- *
- * iommu_dev_enable_feature(dev, IOMMU_DEV_FEAT_SVA) must be called first, to
- * initialize the required SVA features.
  *
  * On error, returns an ERR_PTR value.
  */
@@ -107,7 +108,7 @@ struct iommu_sva *iommu_sva_bind_device(struct device *dev, struct mm_struct *mm
 		goto out_unlock;
 	}
 
-	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	handle = kzalloc_obj(*handle);
 	if (!handle) {
 		ret = -ENOMEM;
 		goto out_unlock;
@@ -135,8 +136,13 @@ struct iommu_sva *iommu_sva_bind_device(struct device *dev, struct mm_struct *mm
 	if (ret)
 		goto out_free_domain;
 	domain->users = 1;
-	list_add(&domain->next, &mm->iommu_mm->sva_domains);
 
+	if (list_empty(&iommu_mm->sva_domains)) {
+		if (list_empty(&iommu_sva_mms))
+			iommu_sva_present = true;
+		list_add(&iommu_mm->mm_list_elm, &iommu_sva_mms);
+	}
+	list_add(&domain->next, &iommu_mm->sva_domains);
 out:
 	refcount_set(&handle->users, 1);
 	mutex_unlock(&iommu_sva_lock);
@@ -176,8 +182,15 @@ void iommu_sva_unbind_device(struct iommu_sva *handle)
 	iommu_detach_device_pasid(domain, dev, iommu_mm->pasid);
 	if (--domain->users == 0) {
 		list_del(&domain->next);
+		if (list_empty(&iommu_mm->sva_domains)) {
+			list_del(&iommu_mm->mm_list_elm);
+			if (list_empty(&iommu_sva_mms))
+				iommu_sva_present = false;
+		}
+
 		iommu_domain_free(domain);
 	}
+
 	mutex_unlock(&iommu_sva_lock);
 	kfree(handle);
 }
@@ -299,21 +312,31 @@ static struct iommu_domain *iommu_sva_domain_alloc(struct device *dev,
 	const struct iommu_ops *ops = dev_iommu_ops(dev);
 	struct iommu_domain *domain;
 
-	if (ops->domain_alloc_sva) {
-		domain = ops->domain_alloc_sva(dev, mm);
-		if (IS_ERR(domain))
-			return domain;
-	} else {
-		domain = ops->domain_alloc(IOMMU_DOMAIN_SVA);
-		if (!domain)
-			return ERR_PTR(-ENOMEM);
-	}
+	if (!ops->domain_alloc_sva)
+		return ERR_PTR(-EOPNOTSUPP);
+
+	domain = ops->domain_alloc_sva(dev, mm);
+	if (IS_ERR(domain))
+		return domain;
 
 	domain->type = IOMMU_DOMAIN_SVA;
+	domain->cookie_type = IOMMU_COOKIE_SVA;
 	mmgrab(mm);
 	domain->mm = mm;
 	domain->owner = ops;
 	domain->iopf_handler = iommu_sva_iopf_handler;
 
 	return domain;
+}
+
+void iommu_sva_invalidate_kva_range(unsigned long start, unsigned long end)
+{
+	struct iommu_mm_data *iommu_mm;
+
+	guard(mutex)(&iommu_sva_lock);
+	if (!iommu_sva_present)
+		return;
+
+	list_for_each_entry(iommu_mm, &iommu_sva_mms, mm_list_elm)
+		mmu_notifier_arch_invalidate_secondary_tlbs(iommu_mm->mm, start, end);
 }

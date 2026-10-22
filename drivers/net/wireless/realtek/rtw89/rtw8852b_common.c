@@ -8,6 +8,7 @@
 #include "phy.h"
 #include "reg.h"
 #include "rtw8852b_common.h"
+#include "sar.h"
 #include "util.h"
 
 static const struct rtw89_reg3_def rtw8852bx_pmac_ht20_mcs7_tbl[] = {
@@ -171,14 +172,6 @@ static const struct rtw89_reg3_def rtw8852bx_btc_preagc_dis_defs[] = {
 
 static DECLARE_PHY_REG3_TBL(rtw8852bx_btc_preagc_dis_defs);
 
-static void rtw8852be_efuse_parsing(struct rtw89_efuse *efuse,
-				    struct rtw8852bx_efuse *map)
-{
-	ether_addr_copy(efuse->addr, map->e.mac_addr);
-	efuse->rfe_type = map->rfe_type;
-	efuse->xtal_cap = map->xtal_k;
-}
-
 static void rtw8852bx_efuse_parsing_tssi(struct rtw89_dev *rtwdev,
 					 struct rtw8852bx_efuse *map)
 {
@@ -213,9 +206,9 @@ static void rtw8852bx_efuse_parsing_tssi(struct rtw89_dev *rtwdev,
 static bool _decode_efuse_gain(u8 data, s8 *high, s8 *low)
 {
 	if (high)
-		*high = sign_extend32(FIELD_GET(GENMASK(7,  4), data), 3);
+		*high = FIELD_GET_SIGNED(GENMASK(7,  4), data);
 	if (low)
-		*low = sign_extend32(FIELD_GET(GENMASK(3,  0), data), 3);
+		*low = FIELD_GET_SIGNED(GENMASK(3,  0), data);
 
 	return data != 0xff;
 }
@@ -260,13 +253,17 @@ static int __rtw8852bx_read_efuse(struct rtw89_dev *rtwdev, u8 *log_map,
 
 	switch (rtwdev->hci.type) {
 	case RTW89_HCI_TYPE_PCIE:
-		rtw8852be_efuse_parsing(efuse, map);
+		ether_addr_copy(efuse->addr, map->e.mac_addr);
+		break;
+	case RTW89_HCI_TYPE_USB:
+		ether_addr_copy(efuse->addr, map->u.mac_addr);
 		break;
 	default:
 		return -EOPNOTSUPP;
 	}
 
-	rtw89_info(rtwdev, "chip rfe_type is %d\n", efuse->rfe_type);
+	efuse->rfe_type = map->rfe_type;
+	efuse->xtal_cap = map->xtal_k;
 
 	return 0;
 }
@@ -621,9 +618,9 @@ static void rtw8852bt_ext_loss_avg_update(struct rtw89_dev *rtwdev,
 	if (ext_loss_a == ext_loss_b) {
 		ext_loss_avg = ext_loss_a;
 	} else {
-		linear = rtw89_db_2_linear(abs(ext_loss_a - ext_loss_b)) + 1;
-		linear = DIV_ROUND_CLOSEST_ULL(linear / 2, 1 << RTW89_LINEAR_FRAC_BITS);
-		ext_loss_avg = rtw89_linear_2_db(linear);
+		linear = rtw89_db_to_linear(abs(ext_loss_a - ext_loss_b)) + 1;
+		linear /= 2;
+		ext_loss_avg = rtw89_linear_to_db(linear);
 		ext_loss_avg += min(ext_loss_a, ext_loss_b);
 	}
 
@@ -1234,6 +1231,7 @@ static u32 rtw8852bx_bb_cal_txpwr_ref(struct rtw89_dev *rtwdev,
 	       u32_encode_bits(ref, B_DPD_REF);
 }
 
+/* @pwr_ofst (unit: 1/8 dBm): power of path A minus power of path B */
 static void rtw8852bx_set_txpwr_ref(struct rtw89_dev *rtwdev,
 				    enum rtw89_phy_idx phy_idx, s16 pwr_ofst)
 {
@@ -1336,6 +1334,27 @@ static void rtw8852bx_set_tx_shape(struct rtw89_dev *rtwdev,
 			       tx_shape_ofdm);
 }
 
+static s16 rtw8852bx_get_txpwr_sar_diff(struct rtw89_dev *rtwdev,
+					const struct rtw89_chan *chan)
+{
+	struct rtw89_sar_parm sar_parm = {
+		.center_freq = chan->freq,
+		.force_path = true,
+	};
+	s16 sar_bb_a, sar_bb_b;
+	s8 sar_mac;
+
+	sar_parm.path = RF_PATH_A;
+	sar_mac = rtw89_query_sar(rtwdev, &sar_parm);
+	sar_bb_a = rtw89_phy_txpwr_mac_to_bb(rtwdev, sar_mac);
+
+	sar_parm.path = RF_PATH_B;
+	sar_mac = rtw89_query_sar(rtwdev, &sar_parm);
+	sar_bb_b = rtw89_phy_txpwr_mac_to_bb(rtwdev, sar_mac);
+
+	return sar_bb_a - sar_bb_b;
+}
+
 static void rtw8852bx_set_txpwr_diff(struct rtw89_dev *rtwdev,
 				     const struct rtw89_chan *chan,
 				     enum rtw89_phy_idx phy_idx)
@@ -1343,6 +1362,7 @@ static void rtw8852bx_set_txpwr_diff(struct rtw89_dev *rtwdev,
 	s16 pwr_ofst;
 
 	pwr_ofst = rtw89_phy_ant_gain_pwr_offset(rtwdev, chan);
+	pwr_ofst += rtw8852bx_get_txpwr_sar_diff(rtwdev, chan);
 	rtw8852bx_set_txpwr_ref(rtwdev, phy_idx, pwr_ofst);
 }
 
@@ -1725,11 +1745,15 @@ static void __rtw8852bx_bb_cfg_txrx_path(struct rtw89_dev *rtwdev)
 	struct rtw89_hal *hal = &rtwdev->hal;
 	const struct rtw89_chan *chan = rtw89_chan_get(rtwdev, RTW89_CHANCTX_0);
 	enum rtw89_rf_path_bit rx_path = hal->antenna_rx ? hal->antenna_rx : RF_AB;
+	u8 rx_nss = rtwdev->hal.rx_nss;
+
+	if (rx_path != RF_AB)
+		rx_nss = 1;
 
 	rtw8852bx_bb_ctrl_rx_path(rtwdev, rx_path, chan);
 	rtw8852bx_bb_ctrl_rf_mode_rx_path(rtwdev, rx_path);
 
-	if (rtwdev->hal.rx_nss == 1) {
+	if (rx_nss == 1) {
 		rtw89_phy_write32_mask(rtwdev, R_RXHT_MCS_LIMIT, B_RXHT_MCS_LIMIT, 0);
 		rtw89_phy_write32_mask(rtwdev, R_RXVHT_MCS_LIMIT, B_RXVHT_MCS_LIMIT, 0);
 		rtw89_phy_write32_mask(rtwdev, R_RXHE, B_RXHE_MAX_NSS, 0);

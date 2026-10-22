@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -43,15 +43,13 @@ xchk_setup_rtsummary(
 	struct xfs_scrub	*sc)
 {
 	struct xfs_mount	*mp = sc->mp;
-	char			*descr;
 	struct xchk_rtsummary	*rts;
 	int			error;
 
 	if (xchk_need_intent_drain(sc))
 		xchk_fsgates_enable(sc, XCHK_FSGATES_DRAIN);
 
-	rts = kvzalloc(struct_size(rts, words, mp->m_blockwsize),
-			XCHK_GFP_FLAGS);
+	rts = kvzalloc_flex(*rts, words, mp->m_blockwsize, XCHK_GFP_FLAGS);
 	if (!rts)
 		return -ENOMEM;
 	sc->buf = rts;
@@ -70,10 +68,8 @@ xchk_setup_rtsummary(
 	 * Create an xfile to construct a new rtsummary file.  The xfile allows
 	 * us to avoid pinning kernel memory for this purpose.
 	 */
-	descr = xchk_xfile_descr(sc, "realtime summary file");
-	error = xfile_create(descr, XFS_FSB_TO_B(mp, mp->m_rsumblocks),
-			&sc->xfile);
-	kfree(descr);
+	error = xfile_create("realtime summary file",
+			XFS_FSB_TO_B(mp, mp->m_rsumblocks), &sc->xfile);
 	if (error)
 		return error;
 
@@ -193,7 +189,7 @@ xchk_rtsum_record_free(
 	rtlen = xfs_rtxlen_to_extlen(mp, rec->ar_extcount);
 
 	if (!xfs_verify_rtbext(mp, rtbno, rtlen)) {
-		xchk_ino_xref_set_corrupt(sc, rtg_bitmap(rtg)->i_ino);
+		xchk_ip_xref_set_corrupt(sc, rtg_bitmap(rtg));
 		return -EFSCORRUPTED;
 	}
 
@@ -318,25 +314,25 @@ xchk_rtsummary(
 
 	/* Is sb_rextents correct? */
 	if (mp->m_sb.sb_rextents != rts->rextents) {
-		xchk_ino_set_corrupt(sc, rbmip->i_ino);
+		xchk_ip_set_corrupt(sc, rbmip);
 		return 0;
 	}
 
 	/* Is m_rsumlevels correct? */
 	if (mp->m_rsumlevels != rts->rsumlevels) {
-		xchk_ino_set_corrupt(sc, rsumip->i_ino);
+		xchk_ip_set_corrupt(sc, rsumip);
 		return 0;
 	}
 
 	/* Is m_rsumsize correct? */
 	if (mp->m_rsumblocks != rts->rsumblocks) {
-		xchk_ino_set_corrupt(sc, rsumip->i_ino);
+		xchk_ip_set_corrupt(sc, rsumip);
 		return 0;
 	}
 
 	/* The summary file length must be aligned to an fsblock. */
 	if (rsumip->i_disk_size & mp->m_blockmask) {
-		xchk_ino_set_corrupt(sc, rsumip->i_ino);
+		xchk_ip_set_corrupt(sc, rsumip);
 		return 0;
 	}
 
@@ -346,7 +342,7 @@ xchk_rtsummary(
 	 * the file can be larger than rsumsize.
 	 */
 	if (rsumip->i_disk_size < XFS_FSB_TO_B(mp, rts->rsumblocks)) {
-		xchk_ino_set_corrupt(sc, rsumip->i_ino);
+		xchk_ip_set_corrupt(sc, rsumip);
 		return 0;
 	}
 
@@ -362,7 +358,7 @@ xchk_rtsummary(
 		 * EFSCORRUPTED means the rtbitmap is corrupt, which is an xref
 		 * error since we're checking the summary file.
 		 */
-		xchk_ino_set_corrupt(sc, rbmip->i_ino);
+		xchk_ip_xref_set_corrupt(sc, rbmip);
 		return 0;
 	}
 	if (error)

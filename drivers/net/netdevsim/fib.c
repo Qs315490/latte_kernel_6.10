@@ -277,7 +277,7 @@ nsim_fib4_rt_create(struct nsim_fib_data *data,
 {
 	struct nsim_fib4_rt *fib4_rt;
 
-	fib4_rt = kzalloc(sizeof(*fib4_rt), GFP_KERNEL);
+	fib4_rt = kzalloc_obj(*fib4_rt);
 	if (!fib4_rt)
 		return NULL;
 
@@ -497,7 +497,7 @@ static int nsim_fib6_rt_nh_add(struct nsim_fib6_rt *fib6_rt,
 {
 	struct nsim_fib6_rt_nh *fib6_rt_nh;
 
-	fib6_rt_nh = kzalloc(sizeof(*fib6_rt_nh), GFP_KERNEL);
+	fib6_rt_nh = kzalloc_obj(*fib6_rt_nh);
 	if (!fib6_rt_nh)
 		return -ENOMEM;
 
@@ -544,7 +544,7 @@ nsim_fib6_rt_create(struct nsim_fib_data *data,
 	int i = 0;
 	int err;
 
-	fib6_rt = kzalloc(sizeof(*fib6_rt), GFP_KERNEL);
+	fib6_rt = kzalloc_obj(*fib6_rt);
 	if (!fib6_rt)
 		return ERR_PTR(-ENOMEM);
 
@@ -807,7 +807,7 @@ static int nsim_fib6_event_init(struct nsim_fib6_event *fib6_event,
 
 	nrt6 = fen6_info->nsiblings + 1;
 
-	rt_arr = kcalloc(nrt6, sizeof(struct fib6_info *), GFP_ATOMIC);
+	rt_arr = kzalloc_objs(struct fib6_info *, nrt6, GFP_ATOMIC);
 	if (!rt_arr)
 		return -ENOMEM;
 
@@ -987,7 +987,7 @@ static int nsim_fib_event_schedule_work(struct nsim_fib_data *data,
 		 */
 		return NOTIFY_DONE;
 
-	fib_event = kzalloc(sizeof(*fib_event), GFP_ATOMIC);
+	fib_event = kzalloc_obj(*fib_event, GFP_ATOMIC);
 	if (!fib_event)
 		goto err_fib_event_alloc;
 
@@ -1116,7 +1116,7 @@ static struct nsim_nexthop *nsim_nexthop_create(struct nsim_fib_data *data,
 	u64 occ = 0;
 	int i;
 
-	nexthop = kzalloc(sizeof(*nexthop), GFP_KERNEL);
+	nexthop = kzalloc_obj(*nexthop);
 	if (!nexthop)
 		return ERR_PTR(-ENOMEM);
 
@@ -1556,20 +1556,17 @@ struct nsim_fib_data *nsim_fib_create(struct devlink *devlink,
 	struct nsim_dev *nsim_dev;
 	int err;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return ERR_PTR(-ENOMEM);
 	data->devlink = devlink;
 
 	nsim_dev = devlink_priv(devlink);
-	err = nsim_fib_debugfs_init(data, nsim_dev);
-	if (err)
-		goto err_data_free;
 
 	mutex_init(&data->nh_lock);
 	err = rhashtable_init(&data->nexthop_ht, &nsim_nexthop_ht_params);
 	if (err)
-		goto err_debugfs_exit;
+		goto err_nh_lock_destroy;
 
 	mutex_init(&data->fib_lock);
 	INIT_LIST_HEAD(&data->fib_rt_list);
@@ -1600,6 +1597,10 @@ struct nsim_fib_data *nsim_fib_create(struct devlink *devlink,
 		goto err_nexthop_nb_unregister;
 	}
 
+	err = nsim_fib_debugfs_init(data, nsim_dev);
+	if (err)
+		goto err_fib_notifier_unregister;
+
 	devl_resource_occ_get_register(devlink,
 				       NSIM_RESOURCE_IPV4_FIB,
 				       nsim_fib_ipv4_resource_occ_get,
@@ -1622,6 +1623,8 @@ struct nsim_fib_data *nsim_fib_create(struct devlink *devlink,
 				       data);
 	return data;
 
+err_fib_notifier_unregister:
+	unregister_fib_notifier(devlink_net(devlink), &data->fib_nb);
 err_nexthop_nb_unregister:
 	unregister_nexthop_notifier(devlink_net(devlink), &data->nexthop_nb);
 err_rhashtable_fib_destroy:
@@ -1633,10 +1636,8 @@ err_rhashtable_nexthop_destroy:
 	rhashtable_free_and_destroy(&data->nexthop_ht, nsim_nexthop_free,
 				    data);
 	mutex_destroy(&data->fib_lock);
-err_debugfs_exit:
+err_nh_lock_destroy:
 	mutex_destroy(&data->nh_lock);
-	nsim_fib_debugfs_exit(data);
-err_data_free:
 	kfree(data);
 	return ERR_PTR(err);
 }
@@ -1653,6 +1654,7 @@ void nsim_fib_destroy(struct devlink *devlink, struct nsim_fib_data *data)
 					 NSIM_RESOURCE_IPV4_FIB_RULES);
 	devl_resource_occ_get_unregister(devlink,
 					 NSIM_RESOURCE_IPV4_FIB);
+	nsim_fib_debugfs_exit(data);
 	unregister_fib_notifier(devlink_net(devlink), &data->fib_nb);
 	unregister_nexthop_notifier(devlink_net(devlink), &data->nexthop_nb);
 	cancel_work_sync(&data->fib_flush_work);
@@ -1665,6 +1667,5 @@ void nsim_fib_destroy(struct devlink *devlink, struct nsim_fib_data *data)
 	WARN_ON_ONCE(!list_empty(&data->fib_rt_list));
 	mutex_destroy(&data->fib_lock);
 	mutex_destroy(&data->nh_lock);
-	nsim_fib_debugfs_exit(data);
 	kfree(data);
 }

@@ -236,7 +236,7 @@ int intel_th_msu_buffer_register(const struct msu_buffer *mbuf,
 	struct msu_buffer_entry *mbe;
 	int ret = 0;
 
-	mbe = kzalloc(sizeof(*mbe), GFP_KERNEL);
+	mbe = kzalloc_obj(*mbe);
 	if (!mbe)
 		return -ENOMEM;
 
@@ -450,7 +450,7 @@ static struct msc_iter *msc_iter_install(struct msc *msc)
 {
 	struct msc_iter *iter;
 
-	iter = kzalloc(sizeof(*iter), GFP_KERNEL);
+	iter = kzalloc_obj(*iter);
 	if (!iter)
 		return ERR_PTR(-ENOMEM);
 
@@ -976,7 +976,6 @@ static void msc_buffer_contig_free(struct msc *msc)
 	for (off = 0; off < msc->nr_pages << PAGE_SHIFT; off += PAGE_SIZE) {
 		struct page *page = virt_to_page(msc->base + off);
 
-		page->mapping = NULL;
 		__free_page(page);
 	}
 
@@ -1106,7 +1105,7 @@ static int msc_buffer_win_alloc(struct msc *msc, unsigned int nr_blocks)
 	if (!nr_blocks)
 		return 0;
 
-	win = kzalloc(sizeof(*win), GFP_KERNEL);
+	win = kzalloc_obj(*win);
 	if (!win)
 		return -ENOMEM;
 
@@ -1158,9 +1157,6 @@ static void __msc_buffer_win_free(struct msc *msc, struct msc_window *win)
 	int i;
 
 	for_each_sg(win->sgt->sgl, sg, win->nr_segs, i) {
-		struct page *page = msc_sg_page(sg);
-
-		page->mapping = NULL;
 		dma_free_coherent(msc_dev(win->msc)->parent->parent, PAGE_SIZE,
 				  sg_virt(sg), sg_dma_address(sg));
 	}
@@ -1494,8 +1490,10 @@ static int intel_th_msc_release(struct inode *inode, struct file *file)
 {
 	struct msc_iter *iter = file->private_data;
 	struct msc *msc = iter->msc;
+	struct intel_th_device *thdev = msc->thdev;
 
 	msc_iter_remove(iter, msc);
+	put_device(&thdev->dev);
 
 	return 0;
 }
@@ -1601,21 +1599,9 @@ static void msc_mmap_close(struct vm_area_struct *vma)
 {
 	struct msc_iter *iter = vma->vm_file->private_data;
 	struct msc *msc = iter->msc;
-	unsigned long pg;
 
 	if (!atomic_dec_and_mutex_lock(&msc->mmap_count, &msc->buf_mutex))
 		return;
-
-	/* drop page _refcounts */
-	for (pg = 0; pg < msc->nr_pages; pg++) {
-		struct page *page = msc_buffer_get_page(msc, pg);
-
-		if (WARN_ON_ONCE(!page))
-			continue;
-
-		if (page->mapping)
-			page->mapping = NULL;
-	}
 
 	/* last mapping -- drop user_count */
 	atomic_dec(&msc->user_count);
@@ -1626,16 +1612,14 @@ static vm_fault_t msc_mmap_fault(struct vm_fault *vmf)
 {
 	struct msc_iter *iter = vmf->vma->vm_file->private_data;
 	struct msc *msc = iter->msc;
+	struct page *page;
 
-	vmf->page = msc_buffer_get_page(msc, vmf->pgoff);
-	if (!vmf->page)
+	page = msc_buffer_get_page(msc, vmf->pgoff);
+	if (!page)
 		return VM_FAULT_SIGBUS;
 
-	get_page(vmf->page);
-	vmf->page->mapping = vmf->vma->vm_file->f_mapping;
-	vmf->page->index = vmf->pgoff;
-
-	return 0;
+	get_page(page);
+	return vmf_insert_mixed(vmf->vma, vmf->address, page_to_pfn(page));
 }
 
 static const struct vm_operations_struct msc_mmap_ops = {
@@ -1676,7 +1660,7 @@ out:
 		atomic_dec(&msc->user_count);
 
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTCOPY);
+	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTCOPY | VM_MIXEDMAP);
 	vma->vm_ops = &msc_mmap_ops;
 	return ret;
 }

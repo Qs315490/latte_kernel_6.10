@@ -8,9 +8,12 @@
  * Copyright (C) 2001 by various other people who didn't put their name here.
  */
 
+#define pr_fmt(fmt) "uml-vector: " fmt
+
 #include <linux/memblock.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
+#include <linux/hex.h>
 #include <linux/inetdevice.h>
 #include <linux/init.h>
 #include <linux/list.h>
@@ -27,7 +30,6 @@
 #include <init.h>
 #include <irq_kern.h>
 #include <irq_user.h>
-#include <net_kern.h>
 #include <os.h>
 #include "mconsole_kern.h"
 #include "vector_user.h"
@@ -513,7 +515,7 @@ static struct vector_queue *create_queue(
 	struct iovec *iov;
 	struct mmsghdr *mmsg_vector;
 
-	result = kmalloc(sizeof(struct vector_queue), GFP_KERNEL);
+	result = kmalloc_obj(struct vector_queue);
 	if (result == NULL)
 		return NULL;
 	result->max_depth = max_size;
@@ -542,15 +544,9 @@ static struct vector_queue *create_queue(
 	result->max_iov_frags = num_extra_frags;
 	for (i = 0; i < max_size; i++) {
 		if (vp->header_size > 0)
-			iov = kmalloc_array(3 + num_extra_frags,
-					    sizeof(struct iovec),
-					    GFP_KERNEL
-			);
+			iov = kmalloc_objs(struct iovec, 3 + num_extra_frags);
 		else
-			iov = kmalloc_array(2 + num_extra_frags,
-					    sizeof(struct iovec),
-					    GFP_KERNEL
-			);
+			iov = kmalloc_objs(struct iovec, 2 + num_extra_frags);
 		if (iov == NULL)
 			goto out_fail;
 		mmsg_vector->msg_hdr.msg_iov = iov;
@@ -999,6 +995,9 @@ static int vector_mmsg_rx(struct vector_private *vp, int budget)
 				 */
 					dev_kfree_skb_irq(skb);
 					vp->estats.rx_encaps_errors++;
+					(*skbuff_vector) = NULL;
+					mmsg_vector++;
+					skbuff_vector++;
 					continue;
 				}
 				if (header_check > 0) {
@@ -1112,7 +1111,7 @@ static int vector_net_close(struct net_device *dev)
 	struct vector_private *vp = netdev_priv(dev);
 
 	netif_stop_queue(dev);
-	del_timer(&vp->tl);
+	timer_delete(&vp->tl);
 
 	vp->opened = false;
 
@@ -1383,7 +1382,7 @@ static int vector_net_load_bpf_flash(struct net_device *dev,
 		kfree(vp->bpf->filter);
 		vp->bpf->filter = NULL;
 	} else {
-		vp->bpf = kmalloc(sizeof(struct sock_fprog), GFP_ATOMIC);
+		vp->bpf = kmalloc_obj(struct sock_fprog, GFP_ATOMIC);
 		if (vp->bpf == NULL) {
 			netdev_err(dev, "failed to allocate memory for firmware\n");
 			goto flash_fail;
@@ -1533,13 +1532,47 @@ static const struct net_device_ops vector_netdev_ops = {
 
 static void vector_timer_expire(struct timer_list *t)
 {
-	struct vector_private *vp = from_timer(vp, t, tl);
+	struct vector_private *vp = timer_container_of(vp, t, tl);
 
 	vp->estats.tx_kicks++;
 	napi_schedule(&vp->napi);
 }
 
+static void vector_setup_etheraddr(struct net_device *dev, char *str)
+{
+	u8 addr[ETH_ALEN];
 
+	if (str == NULL)
+		goto random;
+
+	if (!mac_pton(str, addr)) {
+		netdev_err(dev,
+			"Failed to parse '%s' as an ethernet address\n", str);
+		goto random;
+	}
+	if (is_multicast_ether_addr(addr)) {
+		netdev_err(dev,
+			"Attempt to assign a multicast ethernet address to a device disallowed\n");
+		goto random;
+	}
+	if (!is_valid_ether_addr(addr)) {
+		netdev_err(dev,
+			"Attempt to assign an invalid ethernet address to a device disallowed\n");
+		goto random;
+	}
+	if (!is_local_ether_addr(addr)) {
+		netdev_warn(dev, "Warning: Assigning a globally valid ethernet address to a device\n");
+		netdev_warn(dev, "You should set the 2nd rightmost bit in the first byte of the MAC,\n");
+		netdev_warn(dev, "i.e. %02x:%02x:%02x:%02x:%02x:%02x\n",
+			addr[0] | 0x02, addr[1], addr[2], addr[3], addr[4], addr[5]);
+	}
+	eth_hw_addr_set(dev, addr);
+	return;
+
+random:
+	netdev_info(dev, "Choosing a random ethernet address\n");
+	eth_hw_addr_random(dev);
+}
 
 static void vector_eth_configure(
 		int n,
@@ -1551,16 +1584,14 @@ static void vector_eth_configure(
 	struct vector_private *vp;
 	int err;
 
-	device = kzalloc(sizeof(*device), GFP_KERNEL);
+	device = kzalloc_obj(*device);
 	if (device == NULL) {
-		printk(KERN_ERR "eth_configure failed to allocate struct "
-				 "vector_device\n");
+		pr_err("Failed to allocate struct vector_device for vec%d\n", n);
 		return;
 	}
 	dev = alloc_etherdev(sizeof(struct vector_private));
 	if (dev == NULL) {
-		printk(KERN_ERR "eth_configure: failed to allocate struct "
-				 "net_device for vec%d\n", n);
+		pr_err("Failed to allocate struct net_device for vec%d\n", n);
 		goto out_free_device;
 	}
 
@@ -1574,7 +1605,7 @@ static void vector_eth_configure(
 	 * and fail.
 	 */
 	snprintf(dev->name, sizeof(dev->name), "vec%d", n);
-	uml_net_setup_etheraddr(dev, uml_vector_fetch_arg(def, "mac"));
+	vector_setup_etheraddr(dev, uml_vector_fetch_arg(def, "mac"));
 	vp = netdev_priv(dev);
 
 	/* sysfs register */
@@ -1592,35 +1623,19 @@ static void vector_eth_configure(
 
 	device->dev = dev;
 
-	*vp = ((struct vector_private)
-		{
-		.list			= LIST_HEAD_INIT(vp->list),
-		.dev			= dev,
-		.unit			= n,
-		.options		= get_transport_options(def),
-		.rx_irq			= 0,
-		.tx_irq			= 0,
-		.parsed			= def,
-		.max_packet		= get_mtu(def) + ETH_HEADER_OTHER,
-		/* TODO - we need to calculate headroom so that ip header
-		 * is 16 byte aligned all the time
-		 */
-		.headroom		= get_headroom(def),
-		.form_header		= NULL,
-		.verify_header		= NULL,
-		.header_rxbuffer	= NULL,
-		.header_txbuffer	= NULL,
-		.header_size		= 0,
-		.rx_header_size		= 0,
-		.rexmit_scheduled	= false,
-		.opened			= false,
-		.transport_data		= NULL,
-		.in_write_poll		= false,
-		.coalesce		= 2,
-		.req_size		= get_req_size(def),
-		.in_error		= false,
-		.bpf			= NULL
-	});
+	INIT_LIST_HEAD(&vp->list);
+	vp->dev		= dev;
+	vp->unit	= n;
+	vp->options	= get_transport_options(def);
+	vp->parsed	= def;
+	vp->max_packet	= get_mtu(def) + ETH_HEADER_OTHER;
+	/*
+	 * TODO - we need to calculate headroom so that ip header
+	 * is 16 byte aligned all the time
+	 */
+	vp->headroom	= get_headroom(def);
+	vp->coalesce	= 2;
+	vp->req_size	= get_req_size(def);
 
 	dev->features = dev->hw_features = (NETIF_F_SG | NETIF_F_FRAGLIST);
 	INIT_WORK(&vp->reset_tx, vector_reset_tx);
@@ -1690,8 +1705,7 @@ static int __init vector_setup(char *str)
 
 	err = vector_parse(str, &n, &str, &error);
 	if (err) {
-		printk(KERN_ERR "vector_setup - Couldn't parse '%s' : %s\n",
-				 str, error);
+		pr_err("Couldn't parse '%s': %s\n", str, error);
 		return 1;
 	}
 	new = memblock_alloc_or_panic(sizeof(*new), SMP_CACHE_BYTES);
@@ -1705,7 +1719,7 @@ static int __init vector_setup(char *str)
 __setup("vec", vector_setup);
 __uml_help(vector_setup,
 "vec[0-9]+:<option>=<value>,<option>=<value>\n"
-"	 Configure a vector io network device.\n\n"
+"    Configure a vector io network device.\n\n"
 );
 
 late_initcall(vector_init);

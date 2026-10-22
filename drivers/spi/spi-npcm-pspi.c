@@ -345,7 +345,7 @@ static int npcm_pspi_probe(struct platform_device *pdev)
 	int irq;
 	int ret;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*priv));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*priv));
 	if (!host)
 		return -ENOMEM;
 
@@ -356,21 +356,18 @@ static int npcm_pspi_probe(struct platform_device *pdev)
 	priv->is_save_param = false;
 
 	priv->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(priv->base)) {
-		ret = PTR_ERR(priv->base);
-		goto out_host_put;
-	}
+	if (IS_ERR(priv->base))
+		return PTR_ERR(priv->base);
 
 	priv->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(priv->clk)) {
 		dev_err(&pdev->dev, "failed to get clock\n");
-		ret = PTR_ERR(priv->clk);
-		goto out_host_put;
+		return PTR_ERR(priv->clk);
 	}
 
 	ret = clk_prepare_enable(priv->clk);
 	if (ret)
-		goto out_host_put;
+		return ret;
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
@@ -401,7 +398,6 @@ static int npcm_pspi_probe(struct platform_device *pdev)
 	host->max_speed_hz = DIV_ROUND_UP(clk_hz, NPCM_PSPI_MIN_CLK_DIVIDER);
 	host->min_speed_hz = DIV_ROUND_UP(clk_hz, NPCM_PSPI_MAX_CLK_DIVIDER);
 	host->mode_bits = SPI_CPHA | SPI_CPOL;
-	host->dev.of_node = pdev->dev.of_node;
 	host->bus_num = -1;
 	host->bits_per_word_mask = SPI_BPW_MASK(8) | SPI_BPW_MASK(16);
 	host->transfer_one = npcm_pspi_transfer_one;
@@ -414,7 +410,7 @@ static int npcm_pspi_probe(struct platform_device *pdev)
 	/* set to default clock rate */
 	npcm_pspi_set_baudrate(priv, NPCM_PSPI_DEFAULT_CLK);
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret)
 		goto out_disable_clk;
 
@@ -425,8 +421,6 @@ static int npcm_pspi_probe(struct platform_device *pdev)
 out_disable_clk:
 	clk_disable_unprepare(priv->clk);
 
-out_host_put:
-	spi_controller_put(host);
 	return ret;
 }
 
@@ -434,6 +428,8 @@ static void npcm_pspi_remove(struct platform_device *pdev)
 {
 	struct spi_controller *host = platform_get_drvdata(pdev);
 	struct npcm_pspi *priv = spi_controller_get_devdata(host);
+
+	spi_unregister_controller(host);
 
 	npcm_pspi_reset_hw(priv);
 	clk_disable_unprepare(priv->clk);

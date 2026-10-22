@@ -93,6 +93,8 @@ static int itg3200_read_raw(struct iio_dev *indio_dev,
 	case IIO_CHAN_INFO_RAW:
 		reg = (u8)chan->address;
 		ret = itg3200_read_reg_s16(indio_dev, reg, val);
+		if (ret)
+			return ret;
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
 		*val = 0;
@@ -387,7 +389,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(itg3200_pm_ops, itg3200_suspend,
 				itg3200_resume);
 
 static const struct i2c_device_id itg3200_id[] = {
-	{ "itg3200" },
+	{ .name = "itg3200" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, itg3200_id);

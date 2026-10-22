@@ -10,26 +10,7 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/slab.h>
-#include <linux/pagevec.h>
 #include "internal.h"
-
-static void __netfs_set_group(struct folio *folio, struct netfs_group *netfs_group)
-{
-	if (netfs_group)
-		folio_attach_private(folio, netfs_get_group(netfs_group));
-}
-
-static void netfs_set_group(struct folio *folio, struct netfs_group *netfs_group)
-{
-	void *priv = folio_get_private(folio);
-
-	if (unlikely(priv != netfs_group)) {
-		if (netfs_group && (!priv || priv == NETFS_FOLIO_COPY_TO_CACHE))
-			folio_attach_private(folio, netfs_get_group(netfs_group));
-		else if (!netfs_group && priv == NETFS_FOLIO_COPY_TO_CACHE)
-			folio_detach_private(folio);
-	}
-}
 
 /*
  * Grab a folio for writing and lock it.  Attempt to allocate as large a folio
@@ -53,30 +34,40 @@ static struct folio *netfs_grab_folio_for_write(struct address_space *mapping,
  * data written into the pagecache until we can find out from the server what
  * the values actually are.
  */
-static void netfs_update_i_size(struct netfs_inode *ctx, struct inode *inode,
-				loff_t i_size, loff_t pos, size_t copied)
+void netfs_update_i_size(struct netfs_inode *ctx, struct inode *inode,
+			 loff_t pos, size_t copied)
 {
+	loff_t i_size, end = pos + copied;
 	blkcnt_t add;
 	size_t gap;
 
+	if (end <= i_size_read(inode))
+		return;
+
 	if (ctx->ops->update_i_size) {
-		ctx->ops->update_i_size(inode, pos);
+		ctx->ops->update_i_size(inode, end);
 		return;
 	}
 
-	i_size_write(inode, pos);
+	spin_lock(&inode->i_lock);
+
+	i_size = i_size_read(inode);
+	if (end > i_size) {
+		i_size_write(inode, end);
 #if IS_ENABLED(CONFIG_FSCACHE)
-	fscache_update_cookie(ctx->cache, NULL, &pos);
+		fscache_update_cookie(ctx->cache, NULL, &end);
 #endif
 
-	gap = SECTOR_SIZE - (i_size & (SECTOR_SIZE - 1));
-	if (copied > gap) {
-		add = DIV_ROUND_UP(copied - gap, SECTOR_SIZE);
+		gap = SECTOR_SIZE - (i_size & (SECTOR_SIZE - 1));
+		if (copied > gap) {
+			add = DIV_ROUND_UP(copied - gap, SECTOR_SIZE);
 
-		inode->i_blocks = min_t(blkcnt_t,
-					DIV_ROUND_UP(pos, SECTOR_SIZE),
-					inode->i_blocks + add);
+			inode->i_blocks = min_t(blkcnt_t,
+						DIV_ROUND_UP(end, SECTOR_SIZE),
+						inode->i_blocks + add);
+		}
 	}
+	spin_unlock(&inode->i_lock);
 }
 
 /**
@@ -111,12 +102,11 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 	struct folio *folio = NULL, *writethrough = NULL;
 	unsigned int bdp_flags = (iocb->ki_flags & IOCB_NOWAIT) ? BDP_ASYNC : 0;
 	ssize_t written = 0, ret, ret2;
-	loff_t i_size, pos = iocb->ki_pos;
+	loff_t pos = iocb->ki_pos;
 	size_t max_chunk = mapping_max_folio_size(mapping);
 	bool maybe_trouble = false;
 
-	if (unlikely(test_bit(NETFS_ICTX_WRITETHROUGH, &ctx->flags) ||
-		     iocb->ki_flags & (IOCB_DSYNC | IOCB_SYNC))
+	if (unlikely(iocb->ki_flags & (IOCB_DSYNC | IOCB_SYNC))
 	    ) {
 		wbc_attach_fdatawrite_inode(&wbc, mapping->host);
 
@@ -141,6 +131,7 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 	}
 
 	do {
+		enum netfs_folio_trace trace;
 		struct netfs_folio *finfo;
 		struct netfs_group *group;
 		unsigned long long fpos;
@@ -148,6 +139,7 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 		size_t offset;	/* Offset into pagecache folio */
 		size_t part;	/* Bytes to write to folio */
 		size_t copied;	/* Bytes copied from user */
+		void *priv;
 
 		offset = pos & (max_chunk - 1);
 		part = min(max_chunk - offset, iov_iter_count(iter));
@@ -193,73 +185,99 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 			goto error_folio_unlock;
 		}
 
-		/* Decide how we should modify a folio.  We might be attempting
-		 * to do write-streaming, in which case we don't want to a
-		 * local RMW cycle if we can avoid it.  If we're doing local
-		 * caching or content crypto, we award that priority over
-		 * avoiding RMW.  If the file is open readably, then we also
-		 * assume that we may want to read what we wrote.
-		 */
 		finfo = netfs_folio_info(folio);
 		group = netfs_folio_group(folio);
 
+		/* If the requested group differs from the group set on the
+		 * page, then we need to flush out the folio if it has a group
+		 * set (ie. is non-NULL).  Note that COPY_TO_CACHE is a special
+		 * case, being a netfs annotation rather than an actual group.
+		 *
+		 * The filesystem isn't permitted to mix writes with groups and
+		 * writes without groups as the NULL group is used to indicate
+		 * that no group is set.
+		 */
 		if (unlikely(group != netfs_group) &&
-		    group != NETFS_FOLIO_COPY_TO_CACHE)
+		    group != NETFS_FOLIO_COPY_TO_CACHE &&
+		    group) {
+			WARN_ON_ONCE(!netfs_group);
 			goto flush_content;
+		}
 
+		/* Decide how we should modify a folio.  We might be attempting
+		 * to do write-streaming, as we don't want to a local RMW cycle
+		 * if we can avoid it.  If we're doing local caching or content
+		 * crypto, we award that priority over avoiding RMW.  If the
+		 * file is open readably, then we let ->read_folio() fill in
+		 * the gaps.
+		 */
 		if (folio_test_uptodate(folio)) {
 			if (mapping_writably_mapped(mapping))
 				flush_dcache_folio(folio);
 			copied = copy_folio_from_iter_atomic(folio, offset, part, iter);
 			if (unlikely(copied == 0))
 				goto copy_failed;
-			netfs_set_group(folio, netfs_group);
-			trace_netfs_folio(folio, netfs_folio_is_uptodate);
-			goto copied;
+			trace = netfs_folio_is_uptodate;
+			goto copied_uptodate;
 		}
 
 		/* If the page is above the zero-point then we assume that the
 		 * server would just return a block of zeros or a short read if
 		 * we try to read it.
 		 */
-		if (fpos >= ctx->zero_point) {
+		if (fpos >= netfs_read_zero_point(inode)) {
 			folio_zero_segment(folio, 0, offset);
 			copied = copy_folio_from_iter_atomic(folio, offset, part, iter);
 			if (unlikely(copied == 0))
 				goto copy_failed;
 			folio_zero_segment(folio, offset + copied, flen);
-			__netfs_set_group(folio, netfs_group);
-			folio_mark_uptodate(folio);
-			trace_netfs_folio(folio, netfs_modify_and_clear);
-			goto copied;
+			if (finfo)
+				trace = netfs_modify_and_clear_rm_finfo;
+			else
+				trace = netfs_modify_and_clear;
+			goto mark_uptodate;
 		}
 
 		/* See if we can write a whole folio in one go. */
 		if (!maybe_trouble && offset == 0 && part >= flen) {
 			copied = copy_folio_from_iter_atomic(folio, offset, part, iter);
-			if (unlikely(copied == 0))
+			if (likely(copied == part)) {
+				if (finfo)
+					trace = netfs_whole_folio_modify_filled;
+				else
+					trace = netfs_whole_folio_modify;
+				goto mark_uptodate;
+			}
+			if (copied == 0)
 				goto copy_failed;
-			if (unlikely(copied < part)) {
+			if (!finfo || copied <= finfo->dirty_offset) {
 				maybe_trouble = true;
 				iov_iter_revert(iter, copied);
 				copied = 0;
 				folio_unlock(folio);
 				goto retry;
 			}
-			__netfs_set_group(folio, netfs_group);
-			folio_mark_uptodate(folio);
-			trace_netfs_folio(folio, netfs_whole_folio_modify);
+
+			/* We overwrote some existing dirty data, so we have to
+			 * accept the partial write.
+			 */
+			finfo->dirty_len += finfo->dirty_offset;
+			if (finfo->dirty_len == flen) {
+				trace = netfs_whole_folio_modify_filled_efault;
+				goto mark_uptodate;
+			}
+			if (copied > finfo->dirty_len)
+				finfo->dirty_len = copied;
+			finfo->dirty_offset = 0;
+			trace = netfs_whole_folio_modify_efault;
 			goto copied;
 		}
 
 		/* We don't want to do a streaming write on a file that loses
 		 * caching service temporarily because the backing store got
-		 * culled and we don't really want to get a streaming write on
-		 * a file that's open for reading as ->read_folio() then has to
-		 * be able to flush it.
+		 * culled.
 		 */
-		if ((file->f_mode & FMODE_READ) ||
-		    netfs_is_cache_enabled(ctx)) {
+		if (netfs_is_cache_maybe_enabled(ctx)) {
 			if (finfo) {
 				netfs_stat(&netfs_n_wh_wstream_conflict);
 				goto flush_content;
@@ -274,11 +292,11 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 			copied = copy_folio_from_iter_atomic(folio, offset, part, iter);
 			if (unlikely(copied == 0))
 				goto copy_failed;
-			netfs_set_group(folio, netfs_group);
-			trace_netfs_folio(folio, netfs_just_prefetch);
-			goto copied;
+			trace = netfs_just_prefetch;
+			goto copied_uptodate;
 		}
 
+		/* Do a streaming write on a folio that has nothing in it yet. */
 		if (!finfo) {
 			ret = -EIO;
 			if (WARN_ON(folio_get_private(folio)))
@@ -287,13 +305,11 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 			if (unlikely(copied == 0))
 				goto copy_failed;
 			if (offset == 0 && copied == flen) {
-				__netfs_set_group(folio, netfs_group);
-				folio_mark_uptodate(folio);
-				trace_netfs_folio(folio, netfs_streaming_filled_page);
-				goto copied;
+				trace = netfs_streaming_filled_page;
+				goto mark_uptodate;
 			}
 
-			finfo = kzalloc(sizeof(*finfo), GFP_KERNEL);
+			finfo = kzalloc_obj(*finfo);
 			if (!finfo) {
 				iov_iter_revert(iter, copied);
 				ret = -ENOMEM;
@@ -304,7 +320,7 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 			finfo->dirty_len = copied;
 			folio_attach_private(folio, (void *)((unsigned long)finfo |
 							     NETFS_FOLIO_INFO));
-			trace_netfs_folio(folio, netfs_streaming_write);
+			trace = netfs_streaming_write;
 			goto copied;
 		}
 
@@ -318,16 +334,10 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 				goto copy_failed;
 			finfo->dirty_len += copied;
 			if (finfo->dirty_offset == 0 && finfo->dirty_len == flen) {
-				if (finfo->netfs_group)
-					folio_change_private(folio, finfo->netfs_group);
-				else
-					folio_detach_private(folio);
-				folio_mark_uptodate(folio);
-				kfree(finfo);
-				trace_netfs_folio(folio, netfs_streaming_cont_filled_page);
-			} else {
-				trace_netfs_folio(folio, netfs_streaming_write_cont);
+				trace = netfs_streaming_cont_filled_page;
+				goto mark_uptodate;
 			}
+			trace = netfs_streaming_write_cont;
 			goto copied;
 		}
 
@@ -338,17 +348,46 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 		folio_put(folio);
 		ret = filemap_write_and_wait_range(mapping, fpos, fpos + flen - 1);
 		if (ret < 0)
-			goto error_folio_unlock;
+			goto out;
 		continue;
 
+		/* Mark a folio as being up to data when we've filled it
+		 * completely.  If the folio has a group attached, then it must
+		 * be the same group, otherwise we should have flushed it out
+		 * above.  We have to get rid of the netfs_folio struct if
+		 * there was one.
+		 */
+	mark_uptodate:
+		folio_mark_uptodate(folio);
+
+	copied_uptodate:
+		priv = folio_get_private(folio);
+		if (likely(priv == netfs_group)) {
+			/* Already set correctly; no change required. */
+		} else if (priv == NETFS_FOLIO_COPY_TO_CACHE) {
+			if (!netfs_group)
+				folio_detach_private(folio);
+			else
+				folio_change_private(folio, netfs_get_group(netfs_group));
+		} else if (!priv) {
+			folio_attach_private(folio, netfs_get_group(netfs_group));
+		} else {
+			WARN_ON_ONCE(!finfo);
+			if (netfs_group)
+				/* finfo->netfs_group has a ref */
+				folio_change_private(folio, netfs_group);
+			else
+				folio_detach_private(folio);
+			kfree(finfo);
+		}
+
 	copied:
+		trace_netfs_folio(folio, trace);
 		flush_dcache_folio(folio);
 
 		/* Update the inode size if we moved the EOF marker */
+		netfs_update_i_size(ctx, inode, pos, copied);
 		pos += copied;
-		i_size = i_size_read(inode);
-		if (pos > i_size)
-			netfs_update_i_size(ctx, inode, i_size, pos, copied);
 		written += copied;
 
 		if (likely(!wreq)) {
@@ -386,7 +425,7 @@ out:
 		wbc_detach_inode(&wbc);
 		if (ret2 == -EIOCBQUEUED)
 			return ret2;
-		if (ret == 0)
+		if (ret == 0 && ret2 < 0)
 			ret = ret2;
 	}
 
@@ -504,6 +543,7 @@ vm_fault_t netfs_page_mkwrite(struct vm_fault *vmf, struct netfs_group *netfs_gr
 	struct inode *inode = file_inode(file);
 	struct netfs_inode *ictx = netfs_inode(inode);
 	vm_fault_t ret = VM_FAULT_NOPAGE;
+	void *priv;
 	int err;
 
 	_enter("%lx", folio->index);
@@ -524,11 +564,13 @@ vm_fault_t netfs_page_mkwrite(struct vm_fault *vmf, struct netfs_group *netfs_gr
 	}
 
 	group = netfs_folio_group(folio);
-	if (group != netfs_group && group != NETFS_FOLIO_COPY_TO_CACHE) {
+	if (group &&
+	    group != netfs_group &&
+	    group != NETFS_FOLIO_COPY_TO_CACHE) {
 		folio_unlock(folio);
 		err = filemap_fdatawrite_range(mapping,
 					       folio_pos(folio),
-					       folio_pos(folio) + folio_size(folio));
+					       folio_next_pos(folio));
 		switch (err) {
 		case 0:
 			ret = VM_FAULT_RETRY;
@@ -546,7 +588,19 @@ vm_fault_t netfs_page_mkwrite(struct vm_fault *vmf, struct netfs_group *netfs_gr
 		trace_netfs_folio(folio, netfs_folio_trace_mkwrite_plus);
 	else
 		trace_netfs_folio(folio, netfs_folio_trace_mkwrite);
-	netfs_set_group(folio, netfs_group);
+
+	priv = folio_get_private(folio);
+	if (priv != netfs_group) {
+		if (!netfs_group && priv == NETFS_FOLIO_COPY_TO_CACHE)
+			folio_detach_private(folio);
+		else if (netfs_group && priv == NETFS_FOLIO_COPY_TO_CACHE)
+			folio_change_private(folio, netfs_get_group(netfs_group));
+		else if (netfs_group && !priv)
+			folio_attach_private(folio, netfs_get_group(netfs_group));
+		else
+			WARN_ON_ONCE(1);
+	}
+
 	file_update_time(file);
 	set_bit(NETFS_ICTX_MODIFIED_ATTR, &ictx->flags);
 	if (ictx->ops->post_modify)

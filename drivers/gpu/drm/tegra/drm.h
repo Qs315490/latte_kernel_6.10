@@ -184,12 +184,9 @@ struct tegra_bo *tegra_fb_get_plane(struct drm_framebuffer *framebuffer,
 bool tegra_fb_is_bottom_up(struct drm_framebuffer *framebuffer);
 int tegra_fb_get_tiling(struct drm_framebuffer *framebuffer,
 			struct tegra_bo_tiling *tiling);
-struct drm_framebuffer *tegra_fb_alloc(struct drm_device *drm,
-				       const struct drm_mode_fb_cmd2 *mode_cmd,
-				       struct tegra_bo **planes,
-				       unsigned int num_planes);
 struct drm_framebuffer *tegra_fb_create(struct drm_device *drm,
 					struct drm_file *file,
+					const struct drm_format_info *info,
 					const struct drm_mode_fb_cmd2 *cmd);
 
 #ifdef CONFIG_DRM_FBDEV_EMULATION
@@ -212,5 +209,6 @@ extern struct platform_driver tegra_gr2d_driver;
 extern struct platform_driver tegra_gr3d_driver;
 extern struct platform_driver tegra_vic_driver;
 extern struct platform_driver tegra_nvdec_driver;
+extern struct platform_driver tegra_nvjpg_driver;
 
 #endif /* HOST1X_DRM_H */

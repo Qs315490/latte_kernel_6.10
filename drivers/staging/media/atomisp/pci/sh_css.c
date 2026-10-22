@@ -7,6 +7,7 @@
 /*! \file */
 #include <linux/mm.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 #include <linux/vmalloc.h>
 
 #include "hmm.h"
@@ -1478,7 +1479,7 @@ map_sp_threads(struct ia_css_stream *stream, bool map)
 	enum ia_css_pipe_id pipe_id;
 
 	IA_CSS_ENTER_PRIVATE("stream = %p, map = %s",
-			     stream, map ? "true" : "false");
+			     stream, str_true_false(map));
 
 	if (!stream) {
 		IA_CSS_LEAVE_ERR_PRIVATE(-EINVAL);
@@ -1880,7 +1881,7 @@ create_pipe(enum ia_css_pipe_mode mode,
 		return -EINVAL;
 	}
 
-	me = kmalloc(sizeof(*me), GFP_KERNEL);
+	me = kmalloc_obj(*me);
 	if (!me)
 		return -ENOMEM;
 
@@ -2001,10 +2002,6 @@ ia_css_uninit(void)
 	ia_css_debug_dtrace(IA_CSS_DEBUG_TRACE, "ia_css_uninit() enter: void\n");
 
 	sh_css_params_free_default_gdc_lut();
-
-	/* TODO: JB: implement decent check and handling of freeing mipi frames */
-	if (!mipi_is_free())
-		dev_warn(atomisp_dev, "mipi frames are not freed.\n");
 
 	/* cleanup generic data */
 	sh_css_params_uninit();
@@ -2260,8 +2257,7 @@ alloc_continuous_frames(struct ia_css_pipe *pipe, bool init_time)
 		ia_css_debug_dtrace(IA_CSS_DEBUG_TRACE_PRIVATE,
 				    "alloc_continuous_frames() IA_CSS_FRAME_FORMAT_RAW_PACKED\n");
 		ref_info.format = IA_CSS_FRAME_FORMAT_RAW_PACKED;
-	} else
-	{
+	} else {
 		ia_css_debug_dtrace(IA_CSS_DEBUG_TRACE_PRIVATE,
 				    "alloc_continuous_frames() IA_CSS_FRAME_FORMAT_RAW\n");
 		ref_info.format = IA_CSS_FRAME_FORMAT_RAW;
@@ -3743,23 +3739,6 @@ ia_css_pipe_dequeue_buffer(struct ia_css_pipe *pipe,
 			case IA_CSS_BUFFER_TYPE_INPUT_FRAME:
 			case IA_CSS_BUFFER_TYPE_OUTPUT_FRAME:
 			case IA_CSS_BUFFER_TYPE_SEC_OUTPUT_FRAME:
-				if (pipe && pipe->stop_requested) {
-					if (!IS_ISP2401) {
-						/*
-						 * free mipi frames only for old input
-						 * system for 2401 it is done in
-						 * ia_css_stream_destroy call
-						 */
-						return_err = free_mipi_frames(pipe);
-						if (return_err) {
-							IA_CSS_LOG("free_mipi_frames() failed");
-							IA_CSS_LEAVE_ERR(return_err);
-							return return_err;
-						}
-					}
-					pipe->stop_requested = false;
-				}
-				fallthrough;
 			case IA_CSS_BUFFER_TYPE_VF_OUTPUT_FRAME:
 			case IA_CSS_BUFFER_TYPE_SEC_VF_OUTPUT_FRAME:
 				frame = (struct ia_css_frame *)HOST_ADDRESS(ddr_buffer.kernel_ptr);
@@ -4095,8 +4074,6 @@ sh_css_pipe_start(struct ia_css_stream *stream)
 		return err;
 	}
 
-	pipe->stop_requested = false;
-
 	switch (pipe_id) {
 	case IA_CSS_PIPE_ID_PREVIEW:
 		err = preview_start(pipe);
@@ -4120,19 +4097,15 @@ sh_css_pipe_start(struct ia_css_stream *stream)
 		for (i = 1; i < stream->num_pipes && 0 == err ; i++) {
 			switch (stream->pipes[i]->mode) {
 			case IA_CSS_PIPE_ID_PREVIEW:
-				stream->pipes[i]->stop_requested = false;
 				err = preview_start(stream->pipes[i]);
 				break;
 			case IA_CSS_PIPE_ID_VIDEO:
-				stream->pipes[i]->stop_requested = false;
 				err = video_start(stream->pipes[i]);
 				break;
 			case IA_CSS_PIPE_ID_CAPTURE:
-				stream->pipes[i]->stop_requested = false;
 				err = capture_start(stream->pipes[i]);
 				break;
 			case IA_CSS_PIPE_ID_YUVPP:
-				stream->pipes[i]->stop_requested = false;
 				err = yuvpp_start(stream->pipes[i]);
 				break;
 			default:
@@ -4557,16 +4530,15 @@ static int load_video_binaries(struct ia_css_pipe *pipe)
 		if (err)
 			return err;
 		mycs->num_yuv_scaler = cas_scaler_descr.num_stage;
-		mycs->yuv_scaler_binary = kcalloc(cas_scaler_descr.num_stage,
-						  sizeof(struct ia_css_binary),
-						  GFP_KERNEL);
+		mycs->yuv_scaler_binary = kzalloc_objs(struct ia_css_binary,
+						       cas_scaler_descr.num_stage);
 		if (!mycs->yuv_scaler_binary) {
 			mycs->num_yuv_scaler = 0;
 			err = -ENOMEM;
 			return err;
 		}
-		mycs->is_output_stage = kcalloc(cas_scaler_descr.num_stage,
-						sizeof(bool), GFP_KERNEL);
+		mycs->is_output_stage = kzalloc_objs(bool,
+						     cas_scaler_descr.num_stage);
 		if (!mycs->is_output_stage) {
 			err = -ENOMEM;
 			return err;
@@ -5048,7 +5020,6 @@ static int load_primary_binaries(
 	struct ia_css_capture_settings *mycs;
 	unsigned int i;
 	bool need_extra_yuv_scaler = false;
-	struct ia_css_binary_descr prim_descr[MAX_NUM_PRIMARY_STAGES];
 
 	IA_CSS_ENTER_PRIVATE("");
 	assert(pipe);
@@ -5137,16 +5108,15 @@ static int load_primary_binaries(
 			return err;
 		}
 		mycs->num_yuv_scaler = cas_scaler_descr.num_stage;
-		mycs->yuv_scaler_binary = kcalloc(cas_scaler_descr.num_stage,
-						  sizeof(struct ia_css_binary),
-						  GFP_KERNEL);
+		mycs->yuv_scaler_binary = kzalloc_objs(struct ia_css_binary,
+						       cas_scaler_descr.num_stage);
 		if (!mycs->yuv_scaler_binary) {
 			err = -ENOMEM;
 			IA_CSS_LEAVE_ERR_PRIVATE(err);
 			return err;
 		}
-		mycs->is_output_stage = kcalloc(cas_scaler_descr.num_stage,
-						sizeof(bool), GFP_KERNEL);
+		mycs->is_output_stage = kzalloc_objs(bool,
+						     cas_scaler_descr.num_stage);
 		if (!mycs->is_output_stage) {
 			err = -ENOMEM;
 			IA_CSS_LEAVE_ERR_PRIVATE(err);
@@ -5218,15 +5188,16 @@ static int load_primary_binaries(
 
 	/* Primary */
 	for (i = 0; i < mycs->num_primary_stage; i++) {
+		struct ia_css_binary_descr prim_descr;
 		struct ia_css_frame_info *local_vf_info = NULL;
 
 		if (pipe->enable_viewfinder[IA_CSS_PIPE_OUTPUT_STAGE_0] &&
 		    (i == mycs->num_primary_stage - 1))
 			local_vf_info = &vf_info;
-		ia_css_pipe_get_primary_binarydesc(pipe, &prim_descr[i],
+		ia_css_pipe_get_primary_binarydesc(pipe, &prim_descr,
 						   &prim_in_info, &prim_out_info,
 						   local_vf_info, i);
-		err = ia_css_binary_find(&prim_descr[i], &mycs->primary_binary[i]);
+		err = ia_css_binary_find(&prim_descr, &mycs->primary_binary[i]);
 		if (err) {
 			IA_CSS_LEAVE_ERR_PRIVATE(err);
 			return err;
@@ -5848,36 +5819,37 @@ static int ia_css_pipe_create_cas_scaler_desc_single_output(
 		i *= max_scale_factor_per_stage;
 	}
 
-	descr->in_info = kmalloc(descr->num_stage *
-				 sizeof(struct ia_css_frame_info),
-				 GFP_KERNEL);
+	descr->in_info = kmalloc_objs(*descr->in_info,
+				      descr->num_stage,
+				      GFP_KERNEL);
 	if (!descr->in_info) {
 		err = -ENOMEM;
 		goto ERR;
 	}
-	descr->internal_out_info = kmalloc(descr->num_stage *
-					   sizeof(struct ia_css_frame_info),
-					   GFP_KERNEL);
+	descr->internal_out_info = kmalloc_objs(*descr->internal_out_info,
+						descr->num_stage,
+						GFP_KERNEL);
 	if (!descr->internal_out_info) {
 		err = -ENOMEM;
 		goto ERR;
 	}
-	descr->out_info = kmalloc(descr->num_stage *
-				  sizeof(struct ia_css_frame_info),
-				  GFP_KERNEL);
+	descr->out_info = kmalloc_objs(*descr->out_info,
+				       descr->num_stage,
+				       GFP_KERNEL);
 	if (!descr->out_info) {
 		err = -ENOMEM;
 		goto ERR;
 	}
-	descr->vf_info = kmalloc(descr->num_stage *
-				 sizeof(struct ia_css_frame_info),
-				 GFP_KERNEL);
+	descr->vf_info = kmalloc_objs(*descr->vf_info,
+				      descr->num_stage,
+				      GFP_KERNEL);
 	if (!descr->vf_info) {
 		err = -ENOMEM;
 		goto ERR;
 	}
-	descr->is_output_stage = kmalloc(descr->num_stage * sizeof(bool),
-					 GFP_KERNEL);
+	descr->is_output_stage = kmalloc_objs(*descr->is_output_stage,
+					      descr->num_stage,
+					      GFP_KERNEL);
 	if (!descr->is_output_stage) {
 		err = -ENOMEM;
 		goto ERR;
@@ -5997,36 +5969,37 @@ ia_css_pipe_create_cas_scaler_desc(struct ia_css_pipe *pipe,
 
 	descr->num_stage = num_stages;
 
-	descr->in_info = kmalloc_array(descr->num_stage,
-				       sizeof(struct ia_css_frame_info),
-				       GFP_KERNEL);
+	descr->in_info = kmalloc_objs(*descr->in_info,
+				      descr->num_stage,
+				      GFP_KERNEL);
 	if (!descr->in_info) {
 		err = -ENOMEM;
 		goto ERR;
 	}
-	descr->internal_out_info = kmalloc(descr->num_stage *
-					   sizeof(struct ia_css_frame_info),
-					   GFP_KERNEL);
+	descr->internal_out_info = kmalloc_objs(*descr->internal_out_info,
+						descr->num_stage,
+						GFP_KERNEL);
 	if (!descr->internal_out_info) {
 		err = -ENOMEM;
 		goto ERR;
 	}
-	descr->out_info = kmalloc(descr->num_stage *
-				  sizeof(struct ia_css_frame_info),
-				  GFP_KERNEL);
+	descr->out_info = kmalloc_objs(*descr->out_info,
+				       descr->num_stage,
+				       GFP_KERNEL);
 	if (!descr->out_info) {
 		err = -ENOMEM;
 		goto ERR;
 	}
-	descr->vf_info = kmalloc(descr->num_stage *
-				 sizeof(struct ia_css_frame_info),
-				 GFP_KERNEL);
+	descr->vf_info = kmalloc_objs(*descr->vf_info,
+				      descr->num_stage,
+				      GFP_KERNEL);
 	if (!descr->vf_info) {
 		err = -ENOMEM;
 		goto ERR;
 	}
-	descr->is_output_stage = kmalloc(descr->num_stage * sizeof(bool),
-					 GFP_KERNEL);
+	descr->is_output_stage = kmalloc_objs(*descr->is_output_stage,
+					      descr->num_stage,
+					      GFP_KERNEL);
 	if (!descr->is_output_stage) {
 		err = -ENOMEM;
 		goto ERR;
@@ -6170,15 +6143,14 @@ load_yuvpp_binaries(struct ia_css_pipe *pipe)
 			goto ERR;
 		mycs->num_output = cas_scaler_descr.num_output_stage;
 		mycs->num_yuv_scaler = cas_scaler_descr.num_stage;
-		mycs->yuv_scaler_binary = kcalloc(cas_scaler_descr.num_stage,
-						  sizeof(struct ia_css_binary),
-						  GFP_KERNEL);
+		mycs->yuv_scaler_binary = kzalloc_objs(struct ia_css_binary,
+						       cas_scaler_descr.num_stage);
 		if (!mycs->yuv_scaler_binary) {
 			err = -ENOMEM;
 			goto ERR;
 		}
-		mycs->is_output_stage = kcalloc(cas_scaler_descr.num_stage,
-						sizeof(bool), GFP_KERNEL);
+		mycs->is_output_stage = kzalloc_objs(bool,
+						     cas_scaler_descr.num_stage);
 		if (!mycs->is_output_stage) {
 			err = -ENOMEM;
 			goto ERR;
@@ -6277,9 +6249,7 @@ load_yuvpp_binaries(struct ia_css_pipe *pipe)
 
 		mycs->num_vf_pp = 1;
 	}
-	mycs->vf_pp_binary = kcalloc(mycs->num_vf_pp,
-				     sizeof(struct ia_css_binary),
-				     GFP_KERNEL);
+	mycs->vf_pp_binary = kzalloc_objs(struct ia_css_binary, mycs->num_vf_pp);
 	if (!mycs->vf_pp_binary) {
 		err = -ENOMEM;
 		goto ERR;
@@ -7889,8 +7859,7 @@ ia_css_stream_create(const struct ia_css_stream_config *stream_config,
 
 	/* check if mipi size specified */
 	if (stream_config->mode == IA_CSS_INPUT_MODE_BUFFERED_SENSOR)
-		if (!IS_ISP2401 || !stream_config->online)
-		{
+		if (!IS_ISP2401 || !stream_config->online) {
 			unsigned int port = (unsigned int)stream_config->source.port.port;
 
 			if (port >= N_MIPI_PORT_ID) {
@@ -7936,7 +7905,7 @@ ia_css_stream_create(const struct ia_css_stream_config *stream_config,
 	}
 
 	/* allocate the stream instance */
-	curr_stream = kzalloc(sizeof(struct ia_css_stream), GFP_KERNEL);
+	curr_stream = kzalloc_obj(struct ia_css_stream);
 	if (!curr_stream) {
 		err = -ENOMEM;
 		IA_CSS_LEAVE_ERR(err);
@@ -7947,7 +7916,7 @@ ia_css_stream_create(const struct ia_css_stream_config *stream_config,
 
 	/* allocate pipes */
 	curr_stream->num_pipes = num_pipes;
-	curr_stream->pipes = kcalloc(num_pipes, sizeof(struct ia_css_pipe *), GFP_KERNEL);
+	curr_stream->pipes = kzalloc_objs(struct ia_css_pipe *, num_pipes);
 	if (!curr_stream->pipes) {
 		curr_stream->num_pipes = 0;
 		kfree(curr_stream);
@@ -8222,6 +8191,48 @@ ERR:
 	return err;
 }
 
+static void ia_css_stream_destroy_isp2401(struct ia_css_stream *stream)
+{
+	int i, j;
+
+	for (i = 0; i < stream->num_pipes; i++) {
+		struct ia_css_pipe *entry = stream->pipes[i];
+		unsigned int sp_thread_id;
+		struct sh_css_sp_pipeline_terminal *terminal;
+
+		if (!entry)
+			continue;
+
+		if (!ia_css_pipeline_get_sp_thread_id(
+				ia_css_pipe_get_pipe_num(entry), &sp_thread_id))
+			continue;
+
+		terminal = &sh_css_sp_group.pipe_io[sp_thread_id].input;
+
+		for (j = 0; j < IA_CSS_STREAM_MAX_ISYS_STREAM_PER_CH; j++) {
+			ia_css_isys_stream_h isys_stream =
+				&terminal->context.virtual_input_system_stream[j];
+			if (stream->config.isys_config[j].valid && isys_stream->valid)
+				ia_css_isys_stream_destroy(isys_stream);
+		}
+	}
+
+	if (stream->config.mode == IA_CSS_INPUT_MODE_BUFFERED_SENSOR) {
+		for (i = 0; i < stream->num_pipes; i++) {
+			/*
+			 * free any mipi frames that are remaining:
+			 * some test stream create-destroy cycles do
+			 * not generate output frames
+			 * and the mipi buffer is not freed in the
+			 * deque function
+			 */
+			if (stream->pipes[i])
+				free_mipi_frames(stream->pipes[i]);
+		}
+	}
+	stream_unregister_with_csi_rx(stream);
+}
+
 int
 ia_css_stream_destroy(struct ia_css_stream *stream)
 {
@@ -8239,48 +8250,8 @@ ia_css_stream_destroy(struct ia_css_stream *stream)
 
 	if ((stream->last_pipe) &&
 	    ia_css_pipeline_is_mapped(stream->last_pipe->pipe_num)) {
-		if (IS_ISP2401) {
-			for (i = 0; i < stream->num_pipes; i++) {
-				struct ia_css_pipe *entry = stream->pipes[i];
-				unsigned int sp_thread_id;
-				struct sh_css_sp_pipeline_terminal *sp_pipeline_input_terminal;
-
-				assert(entry);
-				if (entry) {
-					/* get the SP thread id */
-					if (!ia_css_pipeline_get_sp_thread_id(
-							ia_css_pipe_get_pipe_num(entry), &sp_thread_id))
-						return -EINVAL;
-
-					/* get the target input terminal */
-					sp_pipeline_input_terminal =
-						&sh_css_sp_group.pipe_io[sp_thread_id].input;
-
-					for (i = 0; i < IA_CSS_STREAM_MAX_ISYS_STREAM_PER_CH; i++) {
-						ia_css_isys_stream_h isys_stream =
-							&sp_pipeline_input_terminal->context.virtual_input_system_stream[i];
-						if (stream->config.isys_config[i].valid && isys_stream->valid)
-							ia_css_isys_stream_destroy(isys_stream);
-					}
-				}
-			}
-
-			if (stream->config.mode == IA_CSS_INPUT_MODE_BUFFERED_SENSOR) {
-				for (i = 0; i < stream->num_pipes; i++) {
-					struct ia_css_pipe *entry = stream->pipes[i];
-					/*
-					 * free any mipi frames that are remaining:
-					 * some test stream create-destroy cycles do
-					 * not generate output frames
-					 * and the mipi buffer is not freed in the
-					 * deque function
-					 */
-					if (entry)
-						free_mipi_frames(entry);
-				}
-			}
-			stream_unregister_with_csi_rx(stream);
-		}
+		if (IS_ISP2401)
+			ia_css_stream_destroy_isp2401(stream);
 
 		for (i = 0; i < stream->num_pipes; i++) {
 			struct ia_css_pipe *curr_pipe = stream->pipes[i];

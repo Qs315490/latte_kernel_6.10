@@ -479,8 +479,8 @@ static int axg_tdm_iface_set_bias_level(struct snd_soc_component *component,
 					enum snd_soc_bias_level level)
 {
 	struct axg_tdm_iface *iface = snd_soc_component_get_drvdata(component);
-	enum snd_soc_bias_level now =
-		snd_soc_component_get_bias_level(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+	enum snd_soc_bias_level now = snd_soc_dapm_get_bias_level(dapm);
 	int ret = 0;
 
 	switch (level) {
@@ -529,7 +529,6 @@ static int axg_tdm_iface_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct snd_soc_dai_driver *dai_drv;
 	struct axg_tdm_iface *iface;
-	int i;
 
 	iface = devm_kzalloc(dev, sizeof(*iface), GFP_KERNEL);
 	if (!iface)
@@ -541,14 +540,10 @@ static int axg_tdm_iface_probe(struct platform_device *pdev)
 	 * We'll change the number of channel provided by DAI stream, so dpcm
 	 * channel merge can be done properly
 	 */
-	dai_drv = devm_kcalloc(dev, ARRAY_SIZE(axg_tdm_iface_dai_drv),
-			       sizeof(*dai_drv), GFP_KERNEL);
+	dai_drv = devm_kmemdup_array(dev, axg_tdm_iface_dai_drv, ARRAY_SIZE(axg_tdm_iface_dai_drv),
+				     sizeof(axg_tdm_iface_dai_drv[0]), GFP_KERNEL);
 	if (!dai_drv)
 		return -ENOMEM;
-
-	for (i = 0; i < ARRAY_SIZE(axg_tdm_iface_dai_drv); i++)
-		memcpy(&dai_drv[i], &axg_tdm_iface_dai_drv[i],
-		       sizeof(*dai_drv));
 
 	/* Bit clock provided on the pad */
 	iface->sclk = devm_clk_get(dev, "sclk");

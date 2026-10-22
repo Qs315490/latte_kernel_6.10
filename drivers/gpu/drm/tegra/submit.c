@@ -71,16 +71,16 @@ gather_bo_pin(struct device *dev, struct host1x_bo *bo, enum dma_data_direction 
 	struct host1x_bo_mapping *map;
 	int err;
 
-	map = kzalloc(sizeof(*map), GFP_KERNEL);
+	map = kzalloc_obj(*map);
 	if (!map)
 		return ERR_PTR(-ENOMEM);
 
 	kref_init(&map->ref);
-	map->bo = host1x_bo_get(bo);
+	map->bo = bo;
 	map->direction = direction;
 	map->dev = dev;
 
-	map->sgt = kzalloc(sizeof(*map->sgt), GFP_KERNEL);
+	map->sgt = kzalloc_obj(*map->sgt);
 	if (!map->sgt) {
 		err = -ENOMEM;
 		goto free;
@@ -117,7 +117,6 @@ static void gather_bo_unpin(struct host1x_bo_mapping *map)
 	dma_unmap_sgtable(map->dev, map->sgt, map->direction, 0);
 	sg_free_table(map->sgt);
 	kfree(map->sgt);
-	host1x_bo_put(map->bo);
 
 	kfree(map);
 }
@@ -193,7 +192,7 @@ static int submit_copy_gather_data(struct gather_bo **pbo, struct device *dev,
 		return -EINVAL;
 	}
 
-	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
+	bo = kzalloc_obj(*bo);
 	if (!bo) {
 		SUBMIT_ERR(context, "failed to allocate memory for bo info");
 		return -ENOMEM;
@@ -270,7 +269,7 @@ static int submit_process_bufs(struct tegra_drm_context *context, struct gather_
 		return PTR_ERR(bufs);
 	}
 
-	mappings = kcalloc(args->num_bufs, sizeof(*mappings), GFP_KERNEL);
+	mappings = kzalloc_objs(*mappings, args->num_bufs);
 	if (!mappings) {
 		SUBMIT_ERR(context, "failed to allocate memory for mapping info");
 		err = -ENOMEM;
@@ -560,7 +559,7 @@ int tegra_drm_ioctl_channel_submit(struct drm_device *drm, void *data,
 	if (err)
 		goto unlock;
 
-	job_data = kzalloc(sizeof(*job_data), GFP_KERNEL);
+	job_data = kzalloc_obj(*job_data);
 	if (!job_data) {
 		SUBMIT_ERR(context, "failed to allocate memory for job data");
 		err = -ENOMEM;

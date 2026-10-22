@@ -23,7 +23,7 @@
 #define XATTR_REPLACE	0x2	/* set value, fail if attr does not exist */
 
 struct xattr_args {
-	__aligned_u64 __user value;
+	__aligned_u64 value;
 	__u32 size;
 	__u32 flags;
 };
@@ -82,6 +82,10 @@ struct xattr_args {
 
 #define XATTR_CAPS_SUFFIX "capability"
 #define XATTR_NAME_CAPS XATTR_SECURITY_PREFIX XATTR_CAPS_SUFFIX
+
+#define XATTR_BPF_LSM_SUFFIX "bpf."
+#define XATTR_NAME_BPF_LSM (XATTR_SECURITY_PREFIX XATTR_BPF_LSM_SUFFIX)
+#define XATTR_NAME_BPF_LSM_LEN (sizeof(XATTR_NAME_BPF_LSM) - 1)
 
 #define XATTR_POSIX_ACL_ACCESS  "posix_acl_access"
 #define XATTR_NAME_POSIX_ACL_ACCESS XATTR_SYSTEM_PREFIX XATTR_POSIX_ACL_ACCESS

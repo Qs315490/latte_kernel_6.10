@@ -109,14 +109,21 @@ static void end_clone_bio(struct bio *clone)
 	 */
 	tio->completed += nr_bytes;
 
+	if (!is_last)
+		return;
+	/*
+	 * At this moment we know this is the last bio of the cloned request,
+	 * and all cloned bios have been released, so reset the clone request's
+	 * bio pointer to avoid double free.
+	 */
+	tio->clone->bio = NULL;
+ exit:
 	/*
 	 * Update the original request.
 	 * Do not use blk_mq_end_request() here, because it may complete
 	 * the original request before the clone, and break the ordering.
 	 */
-	if (is_last)
- exit:
-		blk_update_request(tio->orig, BLK_STS_OK, tio->completed);
+	blk_update_request(tio->orig, BLK_STS_OK, tio->completed);
 }
 
 static struct dm_rq_target_io *tio_from_request(struct request *rq)
@@ -217,10 +224,10 @@ static void dm_done(struct request *clone, blk_status_t error, bool mapped)
 	if (unlikely(error == BLK_STS_TARGET)) {
 		if (req_op(clone) == REQ_OP_DISCARD &&
 		    !clone->q->limits.max_discard_sectors)
-			disable_discard(tio->md);
+			blk_queue_disable_discard(tio->md->queue);
 		else if (req_op(clone) == REQ_OP_WRITE_ZEROES &&
 			 !clone->q->limits.max_write_zeroes_sectors)
-			disable_write_zeroes(tio->md);
+			blk_queue_disable_write_zeroes(tio->md->queue);
 	}
 
 	switch (r) {
@@ -278,8 +285,7 @@ static void dm_complete_request(struct request *rq, blk_status_t error)
 	struct dm_rq_target_io *tio = tio_from_request(rq);
 
 	tio->error = error;
-	if (likely(!blk_should_fake_timeout(rq->q)))
-		blk_mq_complete_request(rq);
+	blk_mq_complete_request(rq);
 }
 
 /*
@@ -295,7 +301,8 @@ static void dm_kill_unmapped_request(struct request *rq, blk_status_t error)
 }
 
 static enum rq_end_io_ret end_clone_request(struct request *clone,
-					    blk_status_t error)
+					    blk_status_t error,
+					    const struct io_comp_batch *iob)
 {
 	struct dm_rq_target_io *tio = clone->end_io_data;
 
@@ -455,7 +462,7 @@ static void dm_start_request(struct mapped_device *md, struct request *orig)
 }
 
 static int dm_mq_init_request(struct blk_mq_tag_set *set, struct request *rq,
-			      unsigned int hctx_idx, unsigned int numa_node)
+			      unsigned int hctx_idx, int numa_node)
 {
 	struct mapped_device *md = set->driver_data;
 	struct dm_rq_target_io *tio = blk_mq_rq_to_pdu(rq);

@@ -7,8 +7,8 @@
 #include "gateway_common.h"
 #include "main.h"
 
-#include <linux/atomic.h>
 #include <linux/byteorder/generic.h>
+#include <linux/compiler.h>
 #include <linux/stddef.h>
 #include <linux/types.h>
 #include <uapi/linux/batadv_packet.h>
@@ -20,15 +20,15 @@
 /**
  * batadv_gw_tvlv_container_update() - update the gw tvlv container after
  *  gateway setting change
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  */
 void batadv_gw_tvlv_container_update(struct batadv_priv *bat_priv)
 {
 	struct batadv_tvlv_gateway_data gw;
+	enum batadv_gw_modes gw_mode;
 	u32 down, up;
-	char gw_mode;
 
-	gw_mode = atomic_read(&bat_priv->gw.mode);
+	gw_mode = READ_ONCE(bat_priv->gw.mode);
 
 	switch (gw_mode) {
 	case BATADV_GW_MODE_OFF:
@@ -36,8 +36,8 @@ void batadv_gw_tvlv_container_update(struct batadv_priv *bat_priv)
 		batadv_tvlv_container_unregister(bat_priv, BATADV_TVLV_GW, 1);
 		break;
 	case BATADV_GW_MODE_SERVER:
-		down = atomic_read(&bat_priv->gw.bandwidth_down);
-		up = atomic_read(&bat_priv->gw.bandwidth_up);
+		down = READ_ONCE(bat_priv->gw.bandwidth_down);
+		up = READ_ONCE(bat_priv->gw.bandwidth_up);
 		gw.bandwidth_down = htonl(down);
 		gw.bandwidth_up = htonl(up);
 		batadv_tvlv_container_register(bat_priv, BATADV_TVLV_GW, 1,
@@ -48,7 +48,7 @@ void batadv_gw_tvlv_container_update(struct batadv_priv *bat_priv)
 
 /**
  * batadv_gw_tvlv_ogm_handler_v1() - process incoming gateway tvlv container
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig: the orig_node of the ogm
  * @flags: flags indicating the tvlv state (see batadv_tvlv_handler_flags)
  * @tvlv_value: tvlv buffer containing the gateway data
@@ -83,20 +83,20 @@ static void batadv_gw_tvlv_ogm_handler_v1(struct batadv_priv *bat_priv,
 
 	/* restart gateway selection */
 	if (gateway.bandwidth_down != 0 &&
-	    atomic_read(&bat_priv->gw.mode) == BATADV_GW_MODE_CLIENT)
+	    READ_ONCE(bat_priv->gw.mode) == BATADV_GW_MODE_CLIENT)
 		batadv_gw_check_election(bat_priv, orig);
 }
 
 /**
  * batadv_gw_init() - initialise the gateway handling internals
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  */
 void batadv_gw_init(struct batadv_priv *bat_priv)
 {
 	if (bat_priv->algo_ops->gw.init_sel_class)
 		bat_priv->algo_ops->gw.init_sel_class(bat_priv);
 	else
-		atomic_set(&bat_priv->gw.sel_class, 1);
+		WRITE_ONCE(bat_priv->gw.sel_class, 1);
 
 	batadv_tvlv_handler_register(bat_priv, batadv_gw_tvlv_ogm_handler_v1,
 				     NULL, NULL, BATADV_TVLV_GW, 1,
@@ -105,7 +105,7 @@ void batadv_gw_init(struct batadv_priv *bat_priv)
 
 /**
  * batadv_gw_free() - free the gateway handling internals
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  */
 void batadv_gw_free(struct batadv_priv *bat_priv)
 {

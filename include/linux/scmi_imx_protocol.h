@@ -11,9 +11,12 @@
 #include <linux/bitfield.h>
 #include <linux/device.h>
 #include <linux/notifier.h>
+#include <linux/scmi_protocol.h>
 #include <linux/types.h>
 
+#define SCMI_PROTOCOL_IMX_LMM	0x80
 #define	SCMI_PROTOCOL_IMX_BBM	0x81
+#define SCMI_PROTOCOL_IMX_CPU	0x82
 #define	SCMI_PROTOCOL_IMX_MISC	0x84
 
 #define SCMI_IMX_VENDOR		"NXP"
@@ -49,6 +52,17 @@ struct scmi_imx_misc_ctrl_notify_report {
 	unsigned int		flags;
 };
 
+
+#define MISC_EXT_INFO_LEN_MAX	4
+struct scmi_imx_misc_reset_reason {
+	bool valid:1;
+	bool orig_valid:1;
+	bool err_valid:1;
+	u32 reason;
+	u32 origin;
+	u32 errid;
+};
+
 struct scmi_imx_misc_proto_ops {
 	int (*misc_ctrl_set)(const struct scmi_protocol_handle *ph, u32 id,
 			     u32 num, u32 *val);
@@ -56,5 +70,49 @@ struct scmi_imx_misc_proto_ops {
 			     u32 *num, u32 *val);
 	int (*misc_ctrl_req_notify)(const struct scmi_protocol_handle *ph,
 				    u32 ctrl_id, u32 evt_id, u32 flags);
+	int (*misc_syslog)(const struct scmi_protocol_handle *ph, u16 *size,
+			   void *array);
+	int (*misc_reset_reason)(const struct scmi_protocol_handle *ph,
+				 bool system, struct scmi_imx_misc_reset_reason *boot_r,
+				 struct scmi_imx_misc_reset_reason *shut_r, u32 *extinfo);
+};
+
+/* See LMM_ATTRIBUTES in imx95.rst */
+#define	LMM_ID_DISCOVER	0xFFFFFFFFU
+#define	LMM_MAX_NAME	16
+
+enum scmi_imx_lmm_state {
+	LMM_STATE_LM_OFF,
+	LMM_STATE_LM_ON,
+	LMM_STATE_LM_SUSPEND,
+	LMM_STATE_LM_POWERED,
+};
+
+struct scmi_imx_lmm_info {
+	u32 lmid;
+	enum scmi_imx_lmm_state state;
+	u32 errstatus;
+	u8 name[LMM_MAX_NAME];
+};
+
+struct scmi_imx_lmm_proto_ops {
+	int (*lmm_power_boot)(const struct scmi_protocol_handle *ph, u32 lmid,
+			      bool boot);
+	int (*lmm_info)(const struct scmi_protocol_handle *ph, u32 lmid,
+			struct scmi_imx_lmm_info *info);
+	int (*lmm_reset_vector_set)(const struct scmi_protocol_handle *ph,
+				    u32 lmid, u32 cpuid, u32 flags, u64 vector);
+	int (*lmm_shutdown)(const struct scmi_protocol_handle *ph, u32 lmid,
+			    u32 flags);
+};
+
+struct scmi_imx_cpu_proto_ops {
+	int (*cpu_reset_vector_set)(const struct scmi_protocol_handle *ph,
+				    u32 cpuid, u64 vector, bool start,
+				    bool boot, bool resume);
+	int (*cpu_start)(const struct scmi_protocol_handle *ph, u32 cpuid,
+			 bool start);
+	int (*cpu_started)(const struct scmi_protocol_handle *ph, u32 cpuid,
+			   bool *started);
 };
 #endif

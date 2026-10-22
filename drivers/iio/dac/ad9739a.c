@@ -14,7 +14,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
@@ -442,13 +441,13 @@ static int ad9739a_probe(struct spi_device *spi)
 
 static const struct of_device_id ad9739a_of_match[] = {
 	{ .compatible = "adi,ad9739a" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ad9739a_of_match);
 
 static const struct spi_device_id ad9739a_id[] = {
 	{"ad9739a"},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad9739a_id);
 

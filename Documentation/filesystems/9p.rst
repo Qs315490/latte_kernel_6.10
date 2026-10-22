@@ -23,13 +23,10 @@ the 9p client is available in the form of a USENIX paper:
 Other applications are described in the following papers:
 
 	* XCPU & Clustering
-	  http://xcpu.org/papers/xcpu-talk.pdf
 	* KVMFS: control file system for KVM
-	  http://xcpu.org/papers/kvmfs.pdf
 	* CellFS: A New Programming Model for the Cell BE
-	  http://xcpu.org/papers/cellfs-talk.pdf
 	* PROSE I/O: Using 9p to enable Application Partitions
-	  http://plan9.escet.urjc.es/iwp9/cready/PROSE_iwp9_2006.pdf
+	  http://web.archive.org/web/20110101152020/http://plan9.escet.urjc.es/iwp9/cready/PROSE_iwp9_2006.pdf
 	* VirtFS: A Virtualization Aware File System pass-through
 	  https://kernel.org/doc/ols/2010/ols2010-pages-109-120.pdf
 
@@ -40,7 +37,7 @@ For remote file server::
 
 	mount -t 9p 10.10.1.2 /mnt/9
 
-For Plan 9 From User Space applications (http://swtch.com/plan9)::
+For Plan 9 From User Space applications (https://9fans.github.io/plan9port/)::
 
 	mount -t 9p `namespace`/acme /mnt/9 -o trans=unix,uname=$USER
 
@@ -90,7 +87,7 @@ Just start the 9pfs capable network server like diod/nfs-ganesha e.g.::
 
         $ diod -f -n -d 0 -S -l 0.0.0.0:9999 -e $PWD
 
-Optionaly scan your bus if there are more then one usbg gadgets to find their path::
+Optionally scan your bus if there are more then one usbg gadgets to find their path::
 
         $ python $kernel_dir/tools/usb/p9_fwd.py list
 
@@ -165,8 +162,8 @@ Options
 		do not necessarily validate cached values on the server.  In other
 		words changes on the server are not guaranteed to be reflected
 		on the client system.  Only use this mode of operation if you
-		have an exclusive mount and the server will modify the filesystem
-		underneath you.
+		have an exclusive mount and the server will not modify the
+		filesystem underneath you.
 
   debug=n	specifies debug level.  The debug level is a bitmask.
 
@@ -238,6 +235,11 @@ Options
   cachetag	cache tag to use the specified persistent cache.
 		cache tags for existing cache sessions can be listed at
 		/sys/fs/9p/caches. (applies only to cache=fscache)
+
+  negtimeout    the duration (in milliseconds) that negative dentries (paths
+                that do not actually exist) are retained in the cache. If
+                set to a negative value, those entries are kept indefinitely
+                until evicted by the buffer cache management system
   ============= ===============================================================
 
 Behavior

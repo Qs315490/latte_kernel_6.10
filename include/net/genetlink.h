@@ -62,7 +62,7 @@ struct genl_info;
  * @small_ops: the small-struct operations supported by this family
  * @n_small_ops: number of small-struct operations supported by this family
  * @split_ops: the split do/dump form of operation definition
- * @n_split_ops: number of entries in @split_ops, not that with split do/dump
+ * @n_split_ops: number of entries in @split_ops, note that with split do/dump
  *	ops the number of entries is not the same as number of commands
  * @sock_priv_size: the size of per-socket private memory
  * @sock_priv_init: the per-socket private memory initializer
@@ -489,8 +489,10 @@ genlmsg_multicast_netns_filtered(const struct genl_family *family,
 				 netlink_filter_fn filter,
 				 void *filter_data)
 {
-	if (WARN_ON_ONCE(group >= family->n_mcgrps))
+	if (WARN_ON_ONCE(group >= family->n_mcgrps)) {
+		nlmsg_free(skb);
 		return -EINVAL;
+	}
 	group = family->mcgrp_offset + group;
 	return nlmsg_multicast_filtered(net->genl_sock, skb, portid, group,
 					flags, filter, filter_data);

@@ -30,6 +30,8 @@
 #define TMDS_MIN_PIXEL_CLOCK 25000
 /* Maximum pixel clock, in KHz. For TMDS signal is 165.00 MHz */
 #define TMDS_MAX_PIXEL_CLOCK 165000
+/* Maximum pixel clock, in KHz. For HDMI2 TMDS signal is 600 MHz */
+#define HDMI2_TMDS_MAX_PIXEL_CLOCK 600000
 
 enum signal_type {
 	SIGNAL_TYPE_NONE		= 0L,		/* no signal */
@@ -41,6 +43,7 @@ enum signal_type {
 	SIGNAL_TYPE_DISPLAY_PORT	= (1 << 5),
 	SIGNAL_TYPE_DISPLAY_PORT_MST	= (1 << 6),
 	SIGNAL_TYPE_EDP			= (1 << 7),
+	SIGNAL_TYPE_HDMI_FRL		= (1 << 8),
 	SIGNAL_TYPE_VIRTUAL		= (1 << 9),	/* Virtual Display */
 };
 
@@ -65,6 +68,8 @@ static inline const char *signal_type_to_string(const int type)
 		return "Display Port: MST";
 	case SIGNAL_TYPE_EDP:
 		return "Embedded Display Port";
+	case SIGNAL_TYPE_HDMI_FRL:
+		return "HDMI: FRL";
 	case SIGNAL_TYPE_VIRTUAL:
 		return "Virtual";
 	default:
@@ -78,9 +83,14 @@ static inline bool dc_is_hdmi_tmds_signal(enum signal_type signal)
 	return (signal == SIGNAL_TYPE_HDMI_TYPE_A);
 }
 
+static inline bool dc_is_hdmi_frl_signal(enum signal_type signal)
+{
+	return ((signal == SIGNAL_TYPE_HDMI_FRL));
+}
+
 static inline bool dc_is_hdmi_signal(enum signal_type signal)
 {
-	return (signal == SIGNAL_TYPE_HDMI_TYPE_A);
+	return (dc_is_hdmi_tmds_signal(signal) || dc_is_hdmi_frl_signal(signal));
 }
 
 static inline bool dc_is_dp_sst_signal(enum signal_type signal)
@@ -116,6 +126,18 @@ static inline bool dc_is_dvi_signal(enum signal_type signal)
 	default:
 		return false;
 	}
+}
+
+/**
+ * dc_is_rgb_signal() - Whether the signal is analog RGB.
+ *
+ * Returns whether the given signal type is an analog RGB signal
+ * that is used with a DAC on VGA or DVI-I connectors.
+ * Not to be confused with other uses of "RGB", such as RGB color space.
+ */
+static inline bool dc_is_rgb_signal(enum signal_type signal)
+{
+	return (signal == SIGNAL_TYPE_RGB);
 }
 
 static inline bool dc_is_tmds_signal(enum signal_type signal)

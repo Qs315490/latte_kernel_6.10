@@ -11,7 +11,6 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <libgen.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -75,12 +74,14 @@ int e_snprintf(char *str, size_t size, const char *format, ...)
 }
 
 static struct machine *host_machine;
+static struct perf_env host_env;
 
 /* Initialize symbol maps and path of vmlinux/modules */
 int init_probe_symbol_maps(bool user_only)
 {
 	int ret;
 
+	perf_env__init(&host_env);
 	symbol_conf.allow_aliases = true;
 	ret = symbol__init(NULL);
 	if (ret < 0) {
@@ -94,7 +95,7 @@ int init_probe_symbol_maps(bool user_only)
 	if (symbol_conf.vmlinux_name)
 		pr_debug("Use vmlinux: %s\n", symbol_conf.vmlinux_name);
 
-	host_machine = machine__new_host();
+	host_machine = machine__new_host(&host_env);
 	if (!host_machine) {
 		pr_debug("machine__new_host() failed.\n");
 		symbol__exit();
@@ -111,6 +112,7 @@ void exit_probe_symbol_maps(void)
 	machine__delete(host_machine);
 	host_machine = NULL;
 	symbol__exit();
+	perf_env__exit(&host_env);
 }
 
 static struct ref_reloc_sym *kernel_get_ref_reloc_sym(struct map **pmap)
@@ -226,7 +228,7 @@ static int convert_exec_to_group(const char *exec, char **result)
 	if (!exec_copy)
 		return -ENOMEM;
 
-	ptr1 = basename(exec_copy);
+	ptr1 = (char *)perf_basename(exec_copy);
 	if (!ptr1) {
 		ret = -EINVAL;
 		goto out;
@@ -414,7 +416,7 @@ static int find_alternative_probe_point(struct debuginfo *dinfo,
 	map__for_each_symbol_by_name(map, pp->function, sym, idx) {
 		if (uprobes) {
 			address = sym->start;
-			if (sym->type == STT_GNU_IFUNC)
+			if (symbol__type(sym) == STT_GNU_IFUNC)
 				pr_warning("Warning: The probe function (%s) is a GNU indirect function.\n"
 					   "Consider identifying the final function used at run time and set the probe directly on that.\n",
 					   pp->function);
@@ -502,7 +504,7 @@ static struct debuginfo *open_from_debuginfod(struct dso *dso, struct nsinfo *ns
 	if (!c)
 		return NULL;
 
-	build_id__sprintf(dso__bid(dso), sbuild_id);
+	build_id__snprintf(dso__bid(dso), sbuild_id, sizeof(sbuild_id));
 	fd = debuginfod_find_debuginfo(c, (const unsigned char *)sbuild_id,
 					0, &path);
 	if (fd >= 0)
@@ -1063,7 +1065,6 @@ static int sprint_line_description(char *sbuf, size_t size, struct line_range *l
 static int __show_line_range(struct line_range *lr, const char *module,
 			     bool user)
 {
-	struct build_id bid;
 	int l = 1;
 	struct int_node *ln;
 	struct debuginfo *dinfo;
@@ -1088,8 +1089,10 @@ static int __show_line_range(struct line_range *lr, const char *module,
 			ret = -ENOENT;
 	}
 	if (dinfo->build_id) {
+		struct build_id bid;
+
 		build_id__init(&bid, dinfo->build_id, BUILD_ID_SIZE);
-		build_id__sprintf(&bid, sbuild_id);
+		build_id__snprintf(&bid, sbuild_id, sizeof(sbuild_id));
 	}
 	debuginfo__delete(dinfo);
 	if (ret == 0 || ret == -ENOENT) {
@@ -1846,7 +1849,7 @@ int parse_perf_probe_command(const char *cmd, struct perf_probe_event *pev)
 
 	/* Copy arguments and ensure return probe has no C argument */
 	pev->nargs = argc - 1;
-	pev->args = zalloc(sizeof(struct perf_probe_arg) * pev->nargs);
+	pev->args = calloc(pev->nargs, sizeof(struct perf_probe_arg));
 	if (pev->args == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -1996,7 +1999,7 @@ int parse_probe_trace_command(const char *cmd, struct probe_trace_event *tev)
 	}
 
 	tev->nargs = argc - 2;
-	tev->args = zalloc(sizeof(struct probe_trace_arg) * tev->nargs);
+	tev->args = calloc(tev->nargs, sizeof(struct probe_trace_arg));
 	if (tev->args == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -2369,7 +2372,7 @@ static int convert_to_perf_probe_event(struct probe_trace_event *tev,
 
 	/* Convert trace_arg to probe_arg */
 	pev->nargs = tev->nargs;
-	pev->args = zalloc(sizeof(struct perf_probe_arg) * pev->nargs);
+	pev->args = calloc(pev->nargs, sizeof(struct perf_probe_arg));
 	if (pev->args == NULL)
 		return -ENOMEM;
 	for (i = 0; i < tev->nargs && ret >= 0; i++) {
@@ -2415,6 +2418,7 @@ void clear_perf_probe_event(struct perf_probe_event *pev)
 	}
 	pev->nargs = 0;
 	zfree(&pev->args);
+	nsinfo__zput(pev->nsi);
 }
 
 #define strdup_or_goto(str, label)	\
@@ -2475,7 +2479,7 @@ int perf_probe_event__copy(struct perf_probe_event *dst,
 	if (perf_probe_point__copy(&dst->point, &src->point) < 0)
 		goto out_err;
 
-	dst->args = zalloc(sizeof(struct perf_probe_arg) * src->nargs);
+	dst->args = calloc(src->nargs, sizeof(struct perf_probe_arg));
 	if (!dst->args)
 		goto out_err;
 	dst->nargs = src->nargs;
@@ -3174,7 +3178,7 @@ static int find_probe_trace_events_from_map(struct perf_probe_event *pev,
 	}
 
 	/* Setup result trace-probe-events */
-	*tevs = zalloc(sizeof(*tev) * num_matched_functions);
+	*tevs = calloc(num_matched_functions, sizeof(*tev));
 	if (!*tevs) {
 		ret = -ENOMEM;
 		goto out;
@@ -3185,7 +3189,7 @@ static int find_probe_trace_events_from_map(struct perf_probe_event *pev,
 	for (j = 0; j < num_matched_functions; j++) {
 		sym = syms[j];
 
-		if (sym->type != STT_FUNC)
+		if (symbol__type(sym) != STT_FUNC)
 			continue;
 
 		/* There can be duplicated symbols in the map */
@@ -3246,8 +3250,7 @@ static int find_probe_trace_events_from_map(struct perf_probe_event *pev,
 		tev->uprobes = pev->uprobes;
 		tev->nargs = pev->nargs;
 		if (tev->nargs) {
-			tev->args = zalloc(sizeof(struct probe_trace_arg) *
-					   tev->nargs);
+			tev->args = calloc(tev->nargs, sizeof(struct probe_trace_arg));
 			if (tev->args == NULL)
 				goto nomem_out;
 		}
@@ -3358,7 +3361,7 @@ static int try_to_find_absolute_address(struct perf_probe_event *pev,
 	}
 
 	tev->nargs = pev->nargs;
-	tev->args = zalloc(sizeof(struct probe_trace_arg) * tev->nargs);
+	tev->args = calloc(tev->nargs, sizeof(struct probe_trace_arg));
 	if (!tev->args)
 		goto errout;
 
@@ -3544,7 +3547,7 @@ static int find_probe_trace_events_from_cache(struct perf_probe_event *pev,
 		goto out;
 	}
 
-	*tevs = zalloc(ret * sizeof(*tev));
+	*tevs = calloc(ret, sizeof(*tev));
 	if (!*tevs) {
 		ret = -ENOMEM;
 		goto out;
@@ -3763,12 +3766,11 @@ void cleanup_perf_probe_events(struct perf_probe_event *pevs, int npevs)
 	/* Loop 3: cleanup and free trace events  */
 	for (i = 0; i < npevs; i++) {
 		pev = &pevs[i];
-		for (j = 0; j < pevs[i].ntevs; j++)
-			clear_probe_trace_event(&pevs[i].tevs[j]);
-		zfree(&pevs[i].tevs);
-		pevs[i].ntevs = 0;
-		nsinfo__zput(pev->nsi);
-		clear_perf_probe_event(&pevs[i]);
+		for (j = 0; j < pev->ntevs; j++)
+			clear_probe_trace_event(&pev->tevs[j]);
+		zfree(&pev->tevs);
+		pev->ntevs = 0;
+		clear_perf_probe_event(pev);
 	}
 }
 

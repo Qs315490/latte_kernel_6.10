@@ -609,7 +609,7 @@ static int cxd2099_probe(struct i2c_client *client)
 	unsigned int val;
 	int ret;
 
-	ci = kzalloc(sizeof(*ci), GFP_KERNEL);
+	ci = kzalloc_obj(*ci);
 	if (!ci) {
 		ret = -ENOMEM;
 		goto err;
@@ -672,8 +672,8 @@ static void cxd2099_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id cxd2099_id[] = {
-	{ "cxd2099" },
-	{}
+	{ .name = "cxd2099" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cxd2099_id);
 

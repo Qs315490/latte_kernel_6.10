@@ -48,6 +48,11 @@ static unsigned int debug;
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug, "enable debug messages");
 
+static unsigned int disable_analog_video[8] = { 0, 0, 0, 0, 0, 0, 0, 0};
+static int disable_analog_argc;
+module_param_array(disable_analog_video, int, &disable_analog_argc, 0644);
+MODULE_PARM_DESC(disable_analog_video, "disable analog video for card type");
+
 static unsigned int card[]  = {[0 ... (CX23885_MAXBOARDS - 1)] = UNSET };
 module_param_array(card,  int, NULL, 0444);
 MODULE_PARM_DESC(card, "card type");
@@ -924,6 +929,13 @@ static int cx23885_dev_setup(struct cx23885_dev *dev)
 			dev->board = CX23885_BOARD_HAUPPAUGE_QUADHD_DVB_885;
 	}
 
+	for (i = 0; i < disable_analog_argc; i++) {
+		if (disable_analog_video[i] == dev->board) {
+			pr_warn("Disabling analog for board %d\n", dev->board);
+			dev->disable_analog = 1;
+		}
+	}
+
 	/* If the user specific a clk freq override, apply it */
 	if (cx23885_boards[dev->board].clk_freq > 0)
 		dev->clk_freq = cx23885_boards[dev->board].clk_freq;
@@ -990,8 +1002,12 @@ static int cx23885_dev_setup(struct cx23885_dev *dev)
 	}
 
 	/* PCIe stuff */
-	dev->lmmio = ioremap(pci_resource_start(dev->pci, 0),
-			     pci_resource_len(dev->pci, 0));
+	dev->lmmio = pci_ioremap_bar(dev->pci, 0);
+	if (!dev->lmmio) {
+		dev_err(&dev->pci->dev, "CORE %s: can't ioremap MMIO memory\n",
+			dev->name);
+		goto err_release_region;
+	}
 
 	dev->bmmio = (u8 __iomem *)dev->lmmio;
 
@@ -1043,7 +1059,8 @@ static int cx23885_dev_setup(struct cx23885_dev *dev)
 		cx23885_gpio_enable(dev, 0x300, 0);
 	}
 
-	if (cx23885_boards[dev->board].porta == CX23885_ANALOG_VIDEO) {
+	if (cx23885_boards[dev->board].porta == CX23885_ANALOG_VIDEO &&
+	    !dev->disable_analog) {
 		if (cx23885_video_register(dev) < 0) {
 			pr_err("%s() Failed to register analog video adapters on VID_A\n",
 			       __func__);
@@ -1096,6 +1113,12 @@ static int cx23885_dev_setup(struct cx23885_dev *dev)
 	}
 
 	return 0;
+
+err_release_region:
+	release_mem_region(pci_resource_start(dev->pci, 0),
+			   pci_resource_len(dev->pci, 0));
+	cx23885_devcount--;
+	return -ENODEV;
 }
 
 static void cx23885_dev_unregister(struct cx23885_dev *dev)
@@ -2124,7 +2147,7 @@ static int cx23885_initdev(struct pci_dev *pci_dev,
 	struct v4l2_ctrl_handler *hdl;
 	int err;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (NULL == dev)
 		return -ENOMEM;
 
@@ -2231,6 +2254,28 @@ static void cx23885_finidev(struct pci_dev *pci_dev)
 	kfree(dev);
 }
 
+static int __maybe_unused cx23885_suspend(struct device *dev_d)
+{
+	struct pci_dev *pci_dev = to_pci_dev(dev_d);
+	struct v4l2_device *v4l2_dev = pci_get_drvdata(pci_dev);
+	struct cx23885_dev *dev = to_cx23885(v4l2_dev);
+
+	cx23885_shutdown(dev);
+
+	return 0;
+}
+
+static int __maybe_unused cx23885_resume(struct device *dev_d)
+{
+	struct pci_dev *pci_dev = to_pci_dev(dev_d);
+	struct v4l2_device *v4l2_dev = pci_get_drvdata(pci_dev);
+	struct cx23885_dev *dev = to_cx23885(v4l2_dev);
+
+	cx23885_reset(dev);
+
+	return 0;
+}
+
 static const struct pci_device_id cx23885_pci_tbl[] = {
 	{
 		/* CX23885 */
@@ -2250,11 +2295,14 @@ static const struct pci_device_id cx23885_pci_tbl[] = {
 };
 MODULE_DEVICE_TABLE(pci, cx23885_pci_tbl);
 
+static SIMPLE_DEV_PM_OPS(cx23885_pm_ops, cx23885_suspend, cx23885_resume);
+
 static struct pci_driver cx23885_pci_driver = {
-	.name     = "cx23885",
-	.id_table = cx23885_pci_tbl,
-	.probe    = cx23885_initdev,
-	.remove   = cx23885_finidev,
+	.name      = "cx23885",
+	.id_table  = cx23885_pci_tbl,
+	.probe     = cx23885_initdev,
+	.remove    = cx23885_finidev,
+	.driver.pm = &cx23885_pm_ops,
 };
 
 static int __init cx23885_init(void)

@@ -414,7 +414,7 @@ static void garp_join_timer_arm(struct garp_applicant *app)
 
 static void garp_join_timer(struct timer_list *t)
 {
-	struct garp_applicant *app = from_timer(app, t, join_timer);
+	struct garp_applicant *app = timer_container_of(app, t, join_timer);
 
 	spin_lock(&app->lock);
 	garp_gid_event(app, GARP_EVENT_TRANSMIT_PDU);
@@ -452,8 +452,9 @@ static int garp_pdu_parse_attr(struct garp_applicant *app, struct sk_buff *skb,
 
 	if (!pskb_may_pull(skb, ga->len))
 		return -1;
+	ga = (struct garp_attr_hdr *)skb->data;
 	skb_pull(skb, ga->len);
-	dlen = sizeof(*ga) - ga->len;
+	dlen = ga->len - sizeof(*ga);
 
 	if (attrtype > app->app->maxattr)
 		return 0;
@@ -492,6 +493,7 @@ static int garp_pdu_parse_attr(struct garp_applicant *app, struct sk_buff *skb,
 static int garp_pdu_parse_msg(struct garp_applicant *app, struct sk_buff *skb)
 {
 	const struct garp_msg_hdr *gm;
+	u8 attrtype;
 
 	if (!pskb_may_pull(skb, sizeof(*gm)))
 		return -1;
@@ -499,9 +501,10 @@ static int garp_pdu_parse_msg(struct garp_applicant *app, struct sk_buff *skb)
 	if (gm->attrtype == 0)
 		return -1;
 	skb_pull(skb, sizeof(*gm));
+	attrtype = gm->attrtype;
 
 	while (skb->len > 0) {
-		if (garp_pdu_parse_attr(app, skb, gm->attrtype) < 0)
+		if (garp_pdu_parse_attr(app, skb, attrtype) < 0)
 			return -1;
 		if (garp_pdu_parse_end_mark(skb) < 0)
 			break;
@@ -547,7 +550,7 @@ static int garp_init_port(struct net_device *dev)
 {
 	struct garp_port *port;
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	port = kzalloc_obj(*port);
 	if (!port)
 		return -ENOMEM;
 	rcu_assign_pointer(dev->garp_port, port);
@@ -581,7 +584,7 @@ int garp_init_applicant(struct net_device *dev, struct garp_application *appl)
 	}
 
 	err = -ENOMEM;
-	app = kzalloc(sizeof(*app), GFP_KERNEL);
+	app = kzalloc_obj(*app);
 	if (!app)
 		goto err2;
 

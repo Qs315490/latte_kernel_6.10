@@ -12,6 +12,8 @@
 #include <arm64/renesas/r9a07g043.dtsi>
 
 / {
+	interrupt-parent = <&plic>;
+
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -52,7 +54,6 @@
 
 &soc {
 	dma-noncoherent;
-	interrupt-parent = <&plic>;
 
 	irqc: interrupt-controller@110a0000 {
 		compatible = "renesas,r9a07g043f-irqc";
@@ -143,7 +144,8 @@
 	};
 
 	l2cache: cache-controller@13400000 {
-		compatible = "andestech,ax45mp-cache", "cache";
+		compatible = "renesas,r9a07g043f-ax45mp-cache", "andestech,ax45mp-cache",
+			     "cache";
 		reg = <0x0 0x13400000 0x0 0x100000>;
 		interrupts = <SOC_PERIPHERAL_IRQ(476) IRQ_TYPE_LEVEL_HIGH>;
 		cache-size = <0x40000>;

@@ -16,13 +16,9 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
-#include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/mutex.h>
-#include <linux/uaccess.h>
-#include <asm/termbits.h>
 #include <linux/usb.h>
 #include <linux/serial_reg.h>
 #include <linux/serial.h>
@@ -278,8 +274,7 @@ static int whiteheat_attach(struct usb_serial *serial)
 		 serial->type->description,
 		 hw_info->sw_major_rev, hw_info->sw_minor_rev);
 
-	command_info = kmalloc(sizeof(struct whiteheat_command_private),
-								GFP_KERNEL);
+	command_info = kmalloc_obj(struct whiteheat_command_private);
 	if (!command_info)
 		goto no_command_private;
 
@@ -330,7 +325,7 @@ static int whiteheat_port_probe(struct usb_serial_port *port)
 {
 	struct whiteheat_private *info;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 

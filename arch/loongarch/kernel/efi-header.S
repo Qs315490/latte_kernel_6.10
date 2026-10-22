@@ -7,9 +7,13 @@
 #include <linux/sizes.h>
 
 	.macro	__EFI_PE_HEADER
-	.long	PE_MAGIC
+	.long	IMAGE_NT_SIGNATURE
 .Lcoff_header:
+#ifdef CONFIG_32BIT
+	.short	IMAGE_FILE_MACHINE_LOONGARCH32		/* Machine */
+#else
 	.short	IMAGE_FILE_MACHINE_LOONGARCH64		/* Machine */
+#endif
 	.short	.Lsection_count				/* NumberOfSections */
 	.long	0 					/* TimeDateStamp */
 	.long	0					/* PointerToSymbolTable */
@@ -20,7 +24,7 @@
 		IMAGE_FILE_LINE_NUMS_STRIPPED		/* Characteristics */
 
 .Loptional_header:
-	.short	PE_OPT_MAGIC_PE32PLUS			/* PE32+ format */
+	.short	IMAGE_NT_OPTIONAL_HDR64_MAGIC		/* PE32+ format */
 	.byte	0x02					/* MajorLinkerVersion */
 	.byte	0x14					/* MinorLinkerVersion */
 	.long	__inittext_end - .Lefi_header_end	/* SizeOfCode */

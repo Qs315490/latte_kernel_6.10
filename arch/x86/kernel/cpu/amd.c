@@ -1,19 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/export.h>
 #include <linux/bitops.h>
+#include <linux/dmi.h>
 #include <linux/elf.h>
 #include <linux/mm.h>
-
+#include <linux/kvm_types.h>
 #include <linux/io.h>
 #include <linux/sched.h>
 #include <linux/sched/clock.h>
 #include <linux/random.h>
 #include <linux/topology.h>
+#include <linux/platform_data/x86/amd-fch.h>
 #include <asm/processor.h>
 #include <asm/apic.h>
 #include <asm/cacheinfo.h>
 #include <asm/cpu.h>
 #include <asm/cpu_device_id.h>
+#include <asm/cpuid/api.h>
 #include <asm/spec-ctrl.h>
 #include <asm/smp.h>
 #include <asm/numa.h>
@@ -21,6 +24,7 @@
 #include <asm/delay.h>
 #include <asm/debugreg.h>
 #include <asm/resctrl.h>
+#include <asm/msr.h>
 #include <asm/sev.h>
 
 #ifdef CONFIG_X86_64
@@ -29,7 +33,9 @@
 
 #include "cpu.h"
 
-static inline int rdmsrl_amd_safe(unsigned msr, unsigned long long *p)
+u16 invlpgb_count_max __ro_after_init = 1;
+
+static inline int rdmsrq_amd_safe(unsigned msr, u64 *p)
 {
 	u32 gprs[8] = { 0 };
 	int err;
@@ -47,7 +53,7 @@ static inline int rdmsrl_amd_safe(unsigned msr, unsigned long long *p)
 	return err;
 }
 
-static inline int wrmsrl_amd_safe(unsigned msr, unsigned long long val)
+static inline int wrmsrq_amd_safe(unsigned msr, u64 val)
 {
 	u32 gprs[8] = { 0 };
 
@@ -373,6 +379,47 @@ static void bsp_determine_snp(struct cpuinfo_x86 *c)
 #endif
 }
 
+#define ZEN_MODEL_STEP_UCODE(fam, model, step, ucode) \
+	X86_MATCH_VFM_STEPS(VFM_MAKE(X86_VENDOR_AMD, fam, model), \
+			    step, step, ucode)
+
+static const struct x86_cpu_id amd_tsa_microcode[] = {
+	ZEN_MODEL_STEP_UCODE(0x19, 0x01, 0x1, 0x0a0011d7),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x01, 0x2, 0x0a00123b),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x08, 0x2, 0x0a00820d),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x11, 0x1, 0x0a10114c),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x11, 0x2, 0x0a10124c),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x18, 0x1, 0x0a108109),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x21, 0x0, 0x0a20102e),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x21, 0x2, 0x0a201211),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x44, 0x1, 0x0a404108),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x50, 0x0, 0x0a500012),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x61, 0x2, 0x0a60120a),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x74, 0x1, 0x0a704108),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x75, 0x2, 0x0a705208),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x78, 0x0, 0x0a708008),
+	ZEN_MODEL_STEP_UCODE(0x19, 0x7c, 0x0, 0x0a70c008),
+	ZEN_MODEL_STEP_UCODE(0x19, 0xa0, 0x2, 0x0aa00216),
+	{},
+};
+
+static void tsa_init(struct cpuinfo_x86 *c)
+{
+	if (cpu_has(c, X86_FEATURE_HYPERVISOR))
+		return;
+
+	if (cpu_has(c, X86_FEATURE_ZEN3) ||
+	    cpu_has(c, X86_FEATURE_ZEN4)) {
+		if (x86_match_min_microcode_rev(amd_tsa_microcode))
+			setup_force_cpu_cap(X86_FEATURE_VERW_CLEAR);
+		else
+			pr_debug("%s: current revision: 0x%x\n", __func__, c->microcode);
+	} else {
+		setup_force_cpu_cap(X86_FEATURE_TSA_SQ_NO);
+		setup_force_cpu_cap(X86_FEATURE_TSA_L1_NO);
+	}
+}
+
 static void bsp_init_amd(struct cpuinfo_x86 *c)
 {
 	if (cpu_has(c, X86_FEATURE_CONSTANT_TSC)) {
@@ -381,7 +428,7 @@ static void bsp_init_amd(struct cpuinfo_x86 *c)
 		    (c->x86 == 0x10 && c->x86_model >= 0x2)) {
 			u64 val;
 
-			rdmsrl(MSR_K7_HWCR, val);
+			rdmsrq(MSR_K7_HWCR, val);
 			if (!(val & BIT(24)))
 				pr_warn(FW_BUG "TSC doesn't count with P0 frequency!\n");
 		}
@@ -420,7 +467,7 @@ static void bsp_init_amd(struct cpuinfo_x86 *c)
 		 * Try to cache the base value so further operations can
 		 * avoid RMW. If that faults, do not enable SSBD.
 		 */
-		if (!rdmsrl_safe(MSR_AMD64_LS_CFG, &x86_amd_ls_cfg_base)) {
+		if (!rdmsrq_safe(MSR_AMD64_LS_CFG, &x86_amd_ls_cfg_base)) {
 			setup_force_cpu_cap(X86_FEATURE_LS_CFG_SSBD);
 			setup_force_cpu_cap(X86_FEATURE_SSBD);
 			x86_amd_ls_cfg_ssbd_mask = 1ULL << bit;
@@ -468,7 +515,14 @@ static void bsp_init_amd(struct cpuinfo_x86 *c)
 		case 0x00 ... 0x2f:
 		case 0x40 ... 0x4f:
 		case 0x60 ... 0x7f:
+		case 0xd0 ... 0xd7:
 			setup_force_cpu_cap(X86_FEATURE_ZEN5);
+			break;
+		case 0x50 ... 0x5f:
+		case 0x80 ... 0xaf:
+		case 0xc0 ... 0xcf:
+		case 0xd8 ... 0xef:
+			setup_force_cpu_cap(X86_FEATURE_ZEN6);
 			break;
 		default:
 			goto warn;
@@ -480,6 +534,11 @@ static void bsp_init_amd(struct cpuinfo_x86 *c)
 	}
 
 	bsp_determine_snp(c);
+	tsa_init(c);
+
+	if (cpu_has(c, X86_FEATURE_GP_ON_USER_CPUID))
+		setup_force_cpu_cap(X86_FEATURE_CPUID_FAULT);
+
 	return;
 
 warn:
@@ -489,6 +548,23 @@ warn:
 static void early_detect_mem_encrypt(struct cpuinfo_x86 *c)
 {
 	u64 msr;
+
+	/*
+	 * Mark using WBINVD is needed during kexec on processors that
+	 * support SME. This provides support for performing a successful
+	 * kexec when going from SME inactive to SME active (or vice-versa).
+	 *
+	 * The cache must be cleared so that if there are entries with the
+	 * same physical address, both with and without the encryption bit,
+	 * they don't race each other when flushed and potentially end up
+	 * with the wrong entry being committed to memory.
+	 *
+	 * Test the CPUID bit directly because with mem_encrypt=off the
+	 * BSP will clear the X86_FEATURE_SME bit and the APs will not
+	 * see it set after that.
+	 */
+	if (c->extended_cpuid_level >= 0x8000001f && (cpuid_eax(0x8000001f) & BIT(0)))
+		__this_cpu_write(cache_state_incoherent, true);
 
 	/*
 	 * BIOS support is required for SME and SEV.
@@ -506,7 +582,7 @@ static void early_detect_mem_encrypt(struct cpuinfo_x86 *c)
 	 */
 	if (cpu_has(c, X86_FEATURE_SME) || cpu_has(c, X86_FEATURE_SEV)) {
 		/* Check if memory encryption is enabled */
-		rdmsrl(MSR_AMD64_SYSCFG, msr);
+		rdmsrq(MSR_AMD64_SYSCFG, msr);
 		if (!(msr & MSR_AMD64_SYSCFG_MEM_ENCRYPT))
 			goto clear_all;
 
@@ -523,7 +599,7 @@ static void early_detect_mem_encrypt(struct cpuinfo_x86 *c)
 		if (!sme_me_mask)
 			setup_clear_cpu_cap(X86_FEATURE_SME);
 
-		rdmsrl(MSR_K7_HWCR, msr);
+		rdmsrq(MSR_K7_HWCR, msr);
 		if (!(msr & MSR_K7_HWCR_SMMLOCK))
 			goto clear_sev;
 
@@ -610,7 +686,7 @@ static void early_init_amd(struct cpuinfo_x86 *c)
 	if (!cpu_has(c, X86_FEATURE_HYPERVISOR) && !cpu_has(c, X86_FEATURE_IBPB_BRTYPE)) {
 		if (c->x86 == 0x17 && boot_cpu_has(X86_FEATURE_AMD_IBPB))
 			setup_force_cpu_cap(X86_FEATURE_IBPB_BRTYPE);
-		else if (c->x86 >= 0x19 && !wrmsrl_safe(MSR_IA32_PRED_CMD, PRED_CMD_SBPB)) {
+		else if (c->x86 >= 0x19 && !wrmsrq_safe(MSR_IA32_PRED_CMD, PRED_CMD_SBPB)) {
 			setup_force_cpu_cap(X86_FEATURE_IBPB_BRTYPE);
 			setup_force_cpu_cap(X86_FEATURE_SBPB);
 		}
@@ -632,16 +708,16 @@ static void init_amd_k8(struct cpuinfo_x86 *c)
 	 * (model = 0x14) and later actually support it.
 	 * (AMD Erratum #110, docId: 25759).
 	 */
-	if (c->x86_model < 0x14 && cpu_has(c, X86_FEATURE_LAHF_LM)) {
+	if (c->x86_model < 0x14 && cpu_has(c, X86_FEATURE_LAHF_LM) && !cpu_has(c, X86_FEATURE_HYPERVISOR)) {
 		clear_cpu_cap(c, X86_FEATURE_LAHF_LM);
-		if (!rdmsrl_amd_safe(0xc001100d, &value)) {
+		if (!rdmsrq_amd_safe(0xc001100d, &value)) {
 			value &= ~BIT_64(32);
-			wrmsrl_amd_safe(0xc001100d, value);
+			wrmsrq_amd_safe(0xc001100d, value);
 		}
 	}
 
 	if (!c->x86_model_id[0])
-		strcpy(c->x86_model_id, "Hammer");
+		strscpy(c->x86_model_id, "Hammer");
 
 #ifdef CONFIG_SMP
 	/*
@@ -786,9 +862,9 @@ static void init_amd_bd(struct cpuinfo_x86 *c)
 	 * Disable it on the affected CPUs.
 	 */
 	if ((c->x86_model >= 0x02) && (c->x86_model < 0x20)) {
-		if (!rdmsrl_safe(MSR_F15H_IC_CFG, &value) && !(value & 0x1E)) {
+		if (!rdmsrq_safe(MSR_F15H_IC_CFG, &value) && !(value & 0x1E)) {
 			value |= 0x1E;
-			wrmsrl_safe(MSR_F15H_IC_CFG, value);
+			wrmsrq_safe(MSR_F15H_IC_CFG, value);
 		}
 	}
 
@@ -801,8 +877,9 @@ static void init_amd_bd(struct cpuinfo_x86 *c)
 }
 
 static const struct x86_cpu_id erratum_1386_microcode[] = {
-	X86_MATCH_VFM_STEPS(VFM_MAKE(X86_VENDOR_AMD, 0x17, 0x01), 0x2, 0x2, 0x0800126e),
-	X86_MATCH_VFM_STEPS(VFM_MAKE(X86_VENDOR_AMD, 0x17, 0x31), 0x0, 0x0, 0x08301052),
+	ZEN_MODEL_STEP_UCODE(0x17, 0x01, 0x2, 0x0800126e),
+	ZEN_MODEL_STEP_UCODE(0x17, 0x31, 0x0, 0x08301052),
+	{}
 };
 
 static void fix_erratum_1386(struct cpuinfo_x86 *c)
@@ -827,20 +904,14 @@ static void fix_erratum_1386(struct cpuinfo_x86 *c)
 void init_spectral_chicken(struct cpuinfo_x86 *c)
 {
 #ifdef CONFIG_MITIGATION_UNRET_ENTRY
-	u64 value;
-
 	/*
 	 * On Zen2 we offer this chicken (bit) on the altar of Speculation.
 	 *
 	 * This suppresses speculation from the middle of a basic block, i.e. it
 	 * suppresses non-branch predictions.
 	 */
-	if (!cpu_has(c, X86_FEATURE_HYPERVISOR)) {
-		if (!rdmsrl_safe(MSR_ZEN2_SPECTRAL_CHICKEN, &value)) {
-			value |= MSR_ZEN2_SPECTRAL_CHICKEN_BIT;
-			wrmsrl_safe(MSR_ZEN2_SPECTRAL_CHICKEN, value);
-		}
-	}
+	if (!cpu_has(c, X86_FEATURE_HYPERVISOR))
+		msr_set_bit(MSR_ZEN2_SPECTRAL_CHICKEN, MSR_ZEN2_SPECTRAL_CHICKEN_BIT);
 #endif
 }
 
@@ -866,28 +937,29 @@ static void init_amd_zen1(struct cpuinfo_x86 *c)
 
 	pr_notice_once("AMD Zen1 DIV0 bug detected. Disable SMT for full protection.\n");
 	setup_force_cpu_bug(X86_BUG_DIV0);
-}
 
-static bool cpu_has_zenbleed_microcode(void)
-{
-	u32 good_rev = 0;
-
-	switch (boot_cpu_data.x86_model) {
-	case 0x30 ... 0x3f: good_rev = 0x0830107b; break;
-	case 0x60 ... 0x67: good_rev = 0x0860010c; break;
-	case 0x68 ... 0x6f: good_rev = 0x08608107; break;
-	case 0x70 ... 0x7f: good_rev = 0x08701033; break;
-	case 0xa0 ... 0xaf: good_rev = 0x08a00009; break;
-
-	default:
-		return false;
+	/*
+	 * Turn off the Instructions Retired free counter on machines that are
+	 * susceptible to erratum #1054 "Instructions Retired Performance
+	 * Counter May Be Inaccurate".
+	 */
+	if (c->x86_model < 0x30) {
+		msr_clear_bit(MSR_K7_HWCR, MSR_K7_HWCR_IRPERF_EN_BIT);
+		clear_cpu_cap(c, X86_FEATURE_IRPERF);
 	}
 
-	if (boot_cpu_data.microcode < good_rev)
-		return false;
-
-	return true;
+	pr_notice_once("AMD Zen1 FPDSS bug detected, enabling mitigation.\n");
+	msr_set_bit(MSR_AMD64_FP_CFG, MSR_AMD64_FP_CFG_ZEN1_DENORM_FIX_BIT);
 }
+
+static const struct x86_cpu_id amd_zenbleed_microcode[] = {
+	ZEN_MODEL_STEP_UCODE(0x17, 0x31, 0x0, 0x0830107b),
+	ZEN_MODEL_STEP_UCODE(0x17, 0x60, 0x1, 0x0860010c),
+	ZEN_MODEL_STEP_UCODE(0x17, 0x68, 0x1, 0x08608107),
+	ZEN_MODEL_STEP_UCODE(0x17, 0x71, 0x0, 0x08701033),
+	ZEN_MODEL_STEP_UCODE(0x17, 0xa0, 0x0, 0x08a00009),
+	{}
+};
 
 static void zen2_zenbleed_check(struct cpuinfo_x86 *c)
 {
@@ -897,7 +969,7 @@ static void zen2_zenbleed_check(struct cpuinfo_x86 *c)
 	if (!cpu_has(c, X86_FEATURE_AVX))
 		return;
 
-	if (!cpu_has_zenbleed_microcode()) {
+	if (!x86_match_min_microcode_rev(amd_zenbleed_microcode)) {
 		pr_notice_once("Zenbleed: please update your microcode for the most optimal fix\n");
 		msr_set_bit(MSR_AMD64_DE_CFG, MSR_AMD64_DE_CFG_ZEN2_FP_BACKUP_FIX_BIT);
 	} else {
@@ -910,6 +982,19 @@ static void init_amd_zen2(struct cpuinfo_x86 *c)
 	init_spectral_chicken(c);
 	fix_erratum_1386(c);
 	zen2_zenbleed_check(c);
+
+	/* Disable RDSEED on AMD Cyan Skillfish because of an error. */
+	if (c->x86_model == 0x47 && c->x86_stepping == 0x0) {
+		clear_cpu_cap(c, X86_FEATURE_RDSEED);
+		msr_clear_bit(MSR_AMD64_CPUID_FN_7, 18);
+		pr_emerg("RDSEED is not reliable on this platform; disabling.\n");
+	}
+
+	/* Correct misconfigured CPUID on some clients. */
+	clear_cpu_cap(c, X86_FEATURE_INVLPGB);
+
+	if (!cpu_has(c, X86_FEATURE_HYPERVISOR))
+		msr_set_bit(MSR_ZEN4_BP_CFG, MSR_ZEN2_BP_CFG_BUG_FIX_BIT);
 }
 
 static void init_amd_zen3(struct cpuinfo_x86 *c)
@@ -942,8 +1027,26 @@ static void init_amd_zen4(struct cpuinfo_x86 *c)
 	}
 }
 
+static const struct x86_cpu_id zen5_rdseed_microcode[] = {
+	ZEN_MODEL_STEP_UCODE(0x1a, 0x02, 0x1, 0x0b00215a),
+	ZEN_MODEL_STEP_UCODE(0x1a, 0x08, 0x1, 0x0b008121),
+	ZEN_MODEL_STEP_UCODE(0x1a, 0x11, 0x0, 0x0b101054),
+	ZEN_MODEL_STEP_UCODE(0x1a, 0x24, 0x0, 0x0b204037),
+	ZEN_MODEL_STEP_UCODE(0x1a, 0x44, 0x0, 0x0b404035),
+	ZEN_MODEL_STEP_UCODE(0x1a, 0x44, 0x1, 0x0b404108),
+	ZEN_MODEL_STEP_UCODE(0x1a, 0x60, 0x0, 0x0b600037),
+	ZEN_MODEL_STEP_UCODE(0x1a, 0x68, 0x0, 0x0b608038),
+	ZEN_MODEL_STEP_UCODE(0x1a, 0x70, 0x0, 0x0b700037),
+	{},
+};
+
 static void init_amd_zen5(struct cpuinfo_x86 *c)
 {
+	if (!x86_match_min_microcode_rev(zen5_rdseed_microcode)) {
+		clear_cpu_cap(c, X86_FEATURE_RDSEED);
+		msr_clear_bit(MSR_AMD64_CPUID_FN_7, 18);
+		pr_emerg_once("RDSEED32 is broken. Disabling the corresponding CPUID bit.\n");
+	}
 }
 
 static void init_amd(struct cpuinfo_x86 *c)
@@ -951,12 +1054,6 @@ static void init_amd(struct cpuinfo_x86 *c)
 	u64 vm_cr;
 
 	early_init_amd(c);
-
-	/*
-	 * Bit 31 in normal CPUID used for nonstandard 3DNow ID;
-	 * 3DNow is IDd by bit 31 in extended CPUID (1*32+31) anyway
-	 */
-	clear_cpu_cap(c, 0*32+31);
 
 	if (c->x86 >= 0x10)
 		set_cpu_cap(c, X86_FEATURE_REP_GOOD);
@@ -1012,7 +1109,7 @@ static void init_amd(struct cpuinfo_x86 *c)
 	init_amd_cacheinfo(c);
 
 	if (cpu_has(c, X86_FEATURE_SVM)) {
-		rdmsrl(MSR_VM_CR, vm_cr);
+		rdmsrq(MSR_VM_CR, vm_cr);
 		if (vm_cr & SVM_VM_CR_SVM_DIS_MASK) {
 			pr_notice_once("SVM disabled (by BIOS) in MSR_VM_CR\n");
 			clear_cpu_cap(c, X86_FEATURE_SVM);
@@ -1049,13 +1146,8 @@ static void init_amd(struct cpuinfo_x86 *c)
 	if (!cpu_feature_enabled(X86_FEATURE_XENPV))
 		set_cpu_bug(c, X86_BUG_SYSRET_SS_ATTRS);
 
-	/*
-	 * Turn on the Instructions Retired free counter on machines not
-	 * susceptible to erratum #1054 "Instructions Retired Performance
-	 * Counter May Be Inaccurate".
-	 */
-	if (cpu_has(c, X86_FEATURE_IRPERF) &&
-	    (boot_cpu_has(X86_FEATURE_ZEN1) && c->x86_model > 0x2f))
+	/* Enable the Instructions Retired free counter */
+	if (cpu_has(c, X86_FEATURE_IRPERF))
 		msr_set_bit(MSR_K7_HWCR, MSR_K7_HWCR_IRPERF_EN_BIT);
 
 	check_null_seg_clears_base(c);
@@ -1073,6 +1165,10 @@ static void init_amd(struct cpuinfo_x86 *c)
 
 	/* AMD CPUs don't need fencing after x2APIC/TSC_DEADLINE MSR writes. */
 	clear_cpu_cap(c, X86_FEATURE_APIC_MSRS_FENCE);
+
+	/* Enable Translation Cache Extension */
+	if (cpu_has(c, X86_FEATURE_TCE))
+		msr_set_bit(MSR_EFER, _EFER_TCE);
 }
 
 #ifdef CONFIG_X86_32
@@ -1105,8 +1201,8 @@ static void cpu_detect_tlb_amd(struct cpuinfo_x86 *c)
 
 	cpuid(0x80000006, &eax, &ebx, &ecx, &edx);
 
-	tlb_lld_4k[ENTRIES] = (ebx >> 16) & mask;
-	tlb_lli_4k[ENTRIES] = ebx & mask;
+	tlb_lld_4k = (ebx >> 16) & mask;
+	tlb_lli_4k = ebx & mask;
 
 	/*
 	 * K8 doesn't have 2M/4M entries in the L2 TLB so read out the L1 TLB
@@ -1119,26 +1215,30 @@ static void cpu_detect_tlb_amd(struct cpuinfo_x86 *c)
 
 	/* Handle DTLB 2M and 4M sizes, fall back to L1 if L2 is disabled */
 	if (!((eax >> 16) & mask))
-		tlb_lld_2m[ENTRIES] = (cpuid_eax(0x80000005) >> 16) & 0xff;
+		tlb_lld_2m = (cpuid_eax(0x80000005) >> 16) & 0xff;
 	else
-		tlb_lld_2m[ENTRIES] = (eax >> 16) & mask;
+		tlb_lld_2m = (eax >> 16) & mask;
 
 	/* a 4M entry uses two 2M entries */
-	tlb_lld_4m[ENTRIES] = tlb_lld_2m[ENTRIES] >> 1;
+	tlb_lld_4m = tlb_lld_2m >> 1;
 
 	/* Handle ITLB 2M and 4M sizes, fall back to L1 if L2 is disabled */
 	if (!(eax & mask)) {
 		/* Erratum 658 */
 		if (c->x86 == 0x15 && c->x86_model <= 0x1f) {
-			tlb_lli_2m[ENTRIES] = 1024;
+			tlb_lli_2m = 1024;
 		} else {
 			cpuid(0x80000005, &eax, &ebx, &ecx, &edx);
-			tlb_lli_2m[ENTRIES] = eax & 0xff;
+			tlb_lli_2m = eax & 0xff;
 		}
 	} else
-		tlb_lli_2m[ENTRIES] = eax & mask;
+		tlb_lli_2m = eax & mask;
 
-	tlb_lli_4m[ENTRIES] = tlb_lli_2m[ENTRIES] >> 1;
+	tlb_lli_4m = tlb_lli_2m >> 1;
+
+	/* Max number of pages INVLPGB can invalidate in one shot */
+	if (cpu_has(c, X86_FEATURE_INVLPGB))
+		invlpgb_count_max = (cpuid_edx(0x80000008) & 0xffff) + 1;
 }
 
 static const struct cpu_dev amd_cpu_dev = {
@@ -1190,7 +1290,7 @@ void amd_set_dr_addr_mask(unsigned long mask, unsigned int dr)
 	if (per_cpu(amd_dr_addr_mask, cpu)[dr] == mask)
 		return;
 
-	wrmsr(amd_msr_dr_addr_masks[dr], mask, 0);
+	wrmsrq(amd_msr_dr_addr_masks[dr], mask);
 	per_cpu(amd_dr_addr_mask, cpu)[dr] = mask;
 }
 
@@ -1204,7 +1304,7 @@ unsigned long amd_get_dr_addr_mask(unsigned int dr)
 
 	return per_cpu(amd_dr_addr_mask[dr], smp_processor_id());
 }
-EXPORT_SYMBOL_GPL(amd_get_dr_addr_mask);
+EXPORT_SYMBOL_FOR_KVM(amd_get_dr_addr_mask);
 
 static void zenbleed_check_cpu(void *unused)
 {
@@ -1221,3 +1321,120 @@ void amd_check_microcode(void)
 	if (cpu_feature_enabled(X86_FEATURE_ZEN2))
 		on_each_cpu(zenbleed_check_cpu, NULL, 1);
 }
+
+static const char * const s5_reset_reason_txt[] = {
+	[0]  = "thermal pin BP_THERMTRIP_L was tripped",
+	[1]  = "power button was pressed for 4 seconds",
+	[2]  = "shutdown pin was tripped",
+	[4]  = "remote ASF power off command was received",
+	[9]  = "internal CPU thermal limit was tripped",
+	[16] = "system reset pin BP_SYS_RST_L was tripped",
+	[17] = "software issued PCI reset",
+	[18] = "software wrote 0x4 to reset control register 0xCF9",
+	[19] = "software wrote 0x6 to reset control register 0xCF9",
+	[20] = "software wrote 0xE to reset control register 0xCF9",
+	[21] = "ACPI power state transition occurred",
+	[22] = "keyboard reset pin KB_RST_L was tripped",
+	[23] = "internal CPU shutdown event occurred",
+	[24] = "system failed to boot before failed boot timer expired",
+	[25] = "hardware watchdog timer expired",
+	[26] = "remote ASF reset command was received",
+	[27] = "an uncorrected error caused a data fabric sync flood event",
+	[29] = "FCH and MP1 failed warm reset handshake",
+	[30] = "a parity error occurred",
+	[31] = "a software sync flood event occurred",
+};
+
+static __init int print_s5_reset_status_mmio(void)
+{
+	void __iomem *addr;
+	u32 value;
+	int i;
+
+	if (!cpu_feature_enabled(X86_FEATURE_ZEN))
+		return 0;
+
+	addr = ioremap(FCH_PM_BASE + FCH_PM_S5_RESET_STATUS, sizeof(value));
+	if (!addr)
+		return 0;
+
+	value = ioread32(addr);
+
+	/* Value with "all bits set" is an error response and should be ignored. */
+	if (value == U32_MAX) {
+		iounmap(addr);
+		return 0;
+	}
+
+	/*
+	 * Clear all reason bits so they won't be retained if the next reset
+	 * does not update the register. Besides, some bits are never cleared by
+	 * hardware so it's software's responsibility to clear them.
+	 *
+	 * Writing the value back effectively clears all reason bits as they are
+	 * write-1-to-clear.
+	 */
+	iowrite32(value, addr);
+	iounmap(addr);
+
+	for (i = 0; i < ARRAY_SIZE(s5_reset_reason_txt); i++) {
+		if (!(value & BIT(i)))
+			continue;
+
+		if (s5_reset_reason_txt[i]) {
+			pr_info("x86/amd: Previous system reset reason [0x%08x]: %s\n",
+				value, s5_reset_reason_txt[i]);
+		}
+	}
+
+	return 0;
+}
+late_initcall(print_s5_reset_status_mmio);
+
+static void __init dmi_scan_additional(const struct dmi_header *d, void *p)
+{
+	struct dmi_a_info *info = (struct dmi_a_info *)d;
+	void *next, *end;
+
+	if (!IS_ENABLED(CONFIG_DMI))
+		return;
+
+	if (info->header.type != DMI_ENTRY_ADDITIONAL ||
+	    info->header.length < DMI_A_INFO_MIN_SIZE ||
+	    info->count < 1)
+		return;
+
+	next = (void *)(info + 1);
+	end  = (void *)info + info->header.length;
+
+	do {
+		struct dmi_a_info_entry *entry;
+		const char *string_ptr;
+
+		entry = (struct dmi_a_info_entry *)next;
+
+		/*
+		 * Not much can be done to validate data. At least the entry
+		 * length shouldn't be 0.
+		 */
+		if (!entry->length)
+			return;
+
+		string_ptr = dmi_string_nosave(&info->header, entry->str_num);
+
+		/* Sample string: AGESA!V9 StrixKrackanPI-FP8 1.1.0.0c */
+		if (!strncmp(string_ptr, "AGESA", 5)) {
+			pr_info("AGESA: %s\n", string_ptr);
+			break;
+		}
+
+		next += entry->length;
+	} while (end - next >= DMI_A_INFO_ENT_MIN_SIZE);
+}
+
+static __init int print_dmi_agesa(void)
+{
+	dmi_walk(dmi_scan_additional, NULL);
+	return 0;
+}
+late_initcall(print_dmi_agesa);

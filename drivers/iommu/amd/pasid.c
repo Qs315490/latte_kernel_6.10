@@ -71,7 +71,7 @@ static void sva_arch_invalidate_secondary_tlbs(struct mmu_notifier *mn,
 	for_each_pdom_dev_data(pdom_dev_data, sva_pdom) {
 		amd_iommu_dev_flush_pasid_pages(pdom_dev_data->dev_data,
 						pdom_dev_data->pasid,
-						start, end - start);
+						start, end - 1);
 	}
 
 	spin_unlock_irqrestore(&sva_pdom->lock, flags);
@@ -121,7 +121,7 @@ int iommu_sva_set_dev_pasid(struct iommu_domain *domain,
 		return ret;
 
 	/* Add PASID to protection domain pasid list */
-	pdom_dev_data = kzalloc(sizeof(*pdom_dev_data), GFP_KERNEL);
+	pdom_dev_data = kzalloc_obj(*pdom_dev_data);
 	if (pdom_dev_data == NULL)
 		return ret;
 
@@ -195,7 +195,7 @@ struct iommu_domain *amd_iommu_domain_alloc_sva(struct device *dev,
 
 	ret = mmu_notifier_register(&pdom->mn, mm);
 	if (ret) {
-		protection_domain_free(pdom);
+		amd_iommu_domain_free(&pdom->domain);
 		return ERR_PTR(ret);
 	}
 

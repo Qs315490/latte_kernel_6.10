@@ -1,19 +1,23 @@
 include $(srctree)/tools/scripts/Makefile.include
 include $(srctree)/tools/scripts/utilities.mak
 
+perf-util-y += annotate-arch/
 perf-util-y += arm64-frame-pointer-unwind-support.o
+perf-util-y += addr2line.o
 perf-util-y += addr_location.o
 perf-util-y += annotate.o
+perf-util-y += aslr.o
+perf-util-y += blake2s.o
 perf-util-y += block-info.o
 perf-util-y += block-range.o
 perf-util-y += build-id.o
 perf-util-y += cacheline.o
+perf-util-$(CONFIG_LIBCAPSTONE) += capstone.o
 perf-util-y += config.o
 perf-util-y += copyfile.o
 perf-util-y += ctype.o
 perf-util-y += db-export.o
 perf-util-y += disasm.o
-perf-util-y += disasm_bpf.o
 perf-util-y += env.o
 perf-util-y += event.o
 perf-util-y += evlist.o
@@ -23,8 +27,9 @@ perf-util-y += evsel_fprintf.o
 perf-util-y += perf_event_attr_fprintf.o
 perf-util-y += evswitch.o
 perf-util-y += find_bit.o
-perf-util-y += get_current_dir_name.o
 perf-util-y += levenshtein.o
+perf-util-$(CONFIG_LIBBFD) += libbfd.o
+perf-util-y += llvm.o
 perf-util-y += mmap.o
 perf-util-y += memswap.o
 perf-util-y += parse-events.o
@@ -67,10 +72,11 @@ perf-util-y += maps.o
 perf-util-y += pstack.o
 perf-util-y += session.o
 perf-util-y += tool.o
+perf-util-y += sample.o
 perf-util-y += sample-raw.o
 perf-util-y += s390-sample-raw.o
 perf-util-y += amd-sample-raw.o
-perf-util-$(CONFIG_TRACE) += syscalltbl.o
+
 perf-util-y += ordered-events.o
 perf-util-y += namespaces.o
 perf-util-y += comm.o
@@ -83,8 +89,10 @@ perf-util-y += pmu.o
 perf-util-y += pmus.o
 perf-util-y += pmu-flex.o
 perf-util-y += pmu-bison.o
+perf-util-y += drm_pmu.o
 perf-util-y += hwmon_pmu.o
 perf-util-y += tool_pmu.o
+perf-util-y += tp_pmu.o
 perf-util-y += svghelper.o
 perf-util-y += trace-event-info.o
 perf-util-y += trace-event-scripting.o
@@ -121,26 +129,27 @@ perf-util-y += spark.o
 perf-util-y += topdown.o
 perf-util-y += iostat.o
 perf-util-y += stream.o
-perf-util-y += kvm-stat.o
+perf-util-$(CONFIG_LIBTRACEEVENT) += kvm-stat.o
+perf-util-y += kvm-stat-arch/
 perf-util-y += lock-contention.o
-perf-util-$(CONFIG_AUXTRACE) += auxtrace.o
+perf-util-y += auxtrace.o
 perf-util-y += intel-pt-decoder/
-perf-util-$(CONFIG_AUXTRACE) += intel-pt.o
-perf-util-$(CONFIG_AUXTRACE) += intel-bts.o
-perf-util-$(CONFIG_AUXTRACE) += arm-spe.o
-perf-util-$(CONFIG_AUXTRACE) += arm-spe-decoder/
-perf-util-$(CONFIG_AUXTRACE) += hisi-ptt.o
-perf-util-$(CONFIG_AUXTRACE) += hisi-ptt-decoder/
-perf-util-$(CONFIG_AUXTRACE) += s390-cpumsf.o
+perf-util-y += intel-pt.o
+perf-util-y += intel-bts.o
+perf-util-y += arm-spe.o
+perf-util-y += arm-spe-decoder/
+perf-util-y += hisi-ptt.o
+perf-util-y += hisi-ptt-decoder/
+perf-util-y += s390-cpumsf.o
+perf-util-y += powerpc-vpadtl.o
 
 ifdef CONFIG_LIBOPENCSD
-perf-util-$(CONFIG_AUXTRACE) += cs-etm.o
-perf-util-$(CONFIG_AUXTRACE) += cs-etm-decoder/
+perf-util-y += cs-etm.o
+perf-util-y += cs-etm-decoder/
 endif
-perf-util-$(CONFIG_AUXTRACE) += cs-etm-base.o
+perf-util-y += cs-etm-base.o
 
 perf-util-y += parse-branch-options.o
-perf-util-y += dump-insn.o
 perf-util-y += parse-regs-options.o
 perf-util-y += parse-sublevel-options.o
 perf-util-y += term.o
@@ -160,9 +169,8 @@ perf-util-y += clockid.o
 perf-util-y += list_sort.o
 perf-util-y += mutex.o
 perf-util-y += sharded_mutex.o
-perf-util-$(CONFIG_X86_64) += intel-tpebs.o
+perf-util-y += intel-tpebs.o
 
-perf-util-$(CONFIG_LIBBPF) += bpf_map.o
 perf-util-$(CONFIG_PERF_BPF_SKEL) += bpf_counter.o
 perf-util-$(CONFIG_PERF_BPF_SKEL) += bpf_counter_cgroup.o
 perf-util-$(CONFIG_PERF_BPF_SKEL) += bpf_ftrace.o
@@ -171,6 +179,11 @@ perf-util-$(CONFIG_PERF_BPF_SKEL) += bpf-filter.o
 perf-util-$(CONFIG_PERF_BPF_SKEL) += bpf-filter-flex.o
 perf-util-$(CONFIG_PERF_BPF_SKEL) += bpf-filter-bison.o
 perf-util-$(CONFIG_PERF_BPF_SKEL) += btf.o
+
+ifeq ($(CONFIG_TRACE),y)
+  perf-util-$(CONFIG_PERF_BPF_SKEL) += bpf-trace-summary.o
+  perf-util-$(CONFIG_PERF_BPF_SKEL) += bpf_trace_augment.o
+endif
 
 ifeq ($(CONFIG_LIBTRACEEVENT),y)
   perf-util-$(CONFIG_PERF_BPF_SKEL) += bpf_lock_contention.o
@@ -204,23 +217,21 @@ ifndef CONFIG_SETNS
 perf-util-y += setns.o
 endif
 
+perf-util-y += unwind.o
 perf-util-$(CONFIG_LIBDW) += probe-finder.o
 perf-util-$(CONFIG_LIBDW) += dwarf-aux.o
 perf-util-$(CONFIG_LIBDW) += dwarf-regs.o
-perf-util-$(CONFIG_LIBDW) += dwarf-regs-csky.o
-perf-util-$(CONFIG_LIBDW) += dwarf-regs-powerpc.o
-perf-util-$(CONFIG_LIBDW) += dwarf-regs-x86.o
+perf-util-$(CONFIG_LIBDW) += dwarf-regs-arch/
 perf-util-$(CONFIG_LIBDW) += debuginfo.o
 perf-util-$(CONFIG_LIBDW) += annotate-data.o
+perf-util-$(CONFIG_LIBDW) += libdw.o
+perf-util-$(CONFIG_LIBDW) += unwind-libdw.o
 
-perf-util-$(CONFIG_LIBDW_DWARF_UNWIND) += unwind-libdw.o
-perf-util-$(CONFIG_LOCAL_LIBUNWIND)    += unwind-libunwind-local.o
 perf-util-$(CONFIG_LIBUNWIND)          += unwind-libunwind.o
-perf-util-$(CONFIG_LIBUNWIND_X86)      += libunwind/x86_32.o
-perf-util-$(CONFIG_LIBUNWIND_AARCH64)  += libunwind/arm64.o
+perf-util-$(CONFIG_LIBUNWIND)          += libunwind-arch/
 
 ifeq ($(CONFIG_LIBTRACEEVENT),y)
-  perf-util-$(CONFIG_LIBBABELTRACE) += data-convert-bt.o
+  perf-util-$(CONFIG_BABELTRACE2_CTF_WRITER) += data-convert-bt.o
 endif
 
 perf-util-y += data-convert-json.o
@@ -236,8 +247,11 @@ perf-util-y += cap.o
 perf-util-$(CONFIG_CXX_DEMANGLE) += demangle-cxx.o
 perf-util-y += demangle-ocaml.o
 perf-util-y += demangle-java.o
-perf-util-y += demangle-rust.o
+perf-util-y += demangle-rust-v0.o
 perf-util-$(CONFIG_LIBLLVM) += llvm-c-helpers.o
+
+CFLAGS_demangle-rust-v0.o += -Wno-shadow -Wno-declaration-after-statement \
+    -Wno-switch-default -Wno-switch-enum -Wno-missing-field-initializers
 
 ifdef CONFIG_JITDUMP
 perf-util-$(CONFIG_LIBELF) += jitdump.o
@@ -403,16 +417,42 @@ $(OUTPUT)util/list_sort.o: ../lib/list_sort.c FORCE
 	$(call rule_mkdir)
 	$(call if_changed_dep,cc_o_c)
 
-ifdef SHELLCHECK
-  SHELL_TESTS := generate-cmdlist.sh
-  TEST_LOGS := $(SHELL_TESTS:%=%.shellcheck_log)
+PY_TESTS := setup.py
+ifdef MYPY
+  MYPY_TEST_LOGS := $(PY_TESTS:%=%.mypy_log)
 else
-  SHELL_TESTS :=
-  TEST_LOGS :=
+  MYPY_TEST_LOGS :=
 endif
 
-$(OUTPUT)%.shellcheck_log: %
+$(OUTPUT)%.mypy_log: %
 	$(call rule_mkdir)
-	$(Q)$(call echo-cmd,test)shellcheck -a -S warning "$<" > $@ || (cat $@ && rm $@ && false)
+	$(Q)$(call echo-cmd,test)mypy "$<" > $@ || (cat $@ && rm $@ && false)
 
-perf-util-y += $(TEST_LOGS)
+perf-util-y += $(MYPY_TEST_LOGS)
+
+ifdef PYLINT
+  PYLINT_TEST_LOGS := $(PY_TESTS:%=%.pylint_log)
+else
+  PYLINT_TEST_LOGS :=
+endif
+
+$(OUTPUT)%.pylint_log: %
+	$(call rule_mkdir)
+	$(Q)$(call echo-cmd,test)pylint "$<" > $@ || (cat $@ && rm $@ && false)
+
+perf-util-y += $(PYLINT_TEST_LOGS)
+
+ifeq ($(CONFIG_PERF_BPF_SKEL),y)
+include $(srctree)/tools/perf/bpf_skel.mak
+
+$(OUTPUT)util/bpf_ftrace.o: $(SKEL_OUT)/func_latency.skel.h
+$(OUTPUT)util/bpf-filter.o: $(SKEL_OUT)/sample_filter.skel.h
+$(OUTPUT)util/bpf_kwork_top.o: $(SKEL_OUT)/kwork_top.skel.h
+$(OUTPUT)util/bpf_off_cpu.o: $(SKEL_OUT)/off_cpu.skel.h
+$(OUTPUT)util/bpf-trace-summary.o: $(SKEL_OUT)/syscall_summary.skel.h
+$(OUTPUT)util/bpf_counter_cgroup.o: $(SKEL_OUT)/bperf_cgroup.skel.h
+$(OUTPUT)util/bpf_trace_augment.o: $(SKEL_OUT)/augmented_raw_syscalls.skel.h
+$(OUTPUT)util/bpf_counter.o: $(SKEL_OUT)/bpf_prog_profiler.skel.h $(SKEL_OUT)/bperf_leader.skel.h $(SKEL_OUT)/bperf_follower.skel.h
+$(OUTPUT)util/bpf_lock_contention.o: $(SKEL_OUT)/lock_contention.skel.h
+$(OUTPUT)util/bpf_kwork.o: $(SKEL_OUT)/kwork_trace.skel.h
+endif

@@ -142,11 +142,6 @@ static void snd_msnd_eval_dsp_msg(struct snd_msnd *chip, u16 wMessage)
 		}
 		break;
 
-	case HIMT_MIDI_IN_UCHAR:
-		if (chip->msndmidi_mpu)
-			snd_msndmidi_input_read(chip->msndmidi_mpu);
-		break;
-
 	default:
 		dev_dbg(chip->card->dev, LOGNAME ": HIMT message %d 0x%02x\n",
 			HIBYTE(wMessage), HIBYTE(wMessage));
@@ -226,8 +221,8 @@ static int snd_msnd_probe(struct snd_card *card)
 	}
 
 #ifdef MSND_CLASSIC
-	strcpy(card->shortname, "Classic/Tahiti/Monterey");
-	strcpy(card->longname, "Turtle Beach Multisound");
+	strscpy(card->shortname, "Classic/Tahiti/Monterey");
+	strscpy(card->longname, "Turtle Beach Multisound");
 	dev_info(card->dev, LOGNAME ": %s, "
 	       "I/O 0x%lx-0x%lx, IRQ %d, memory mapped to 0x%lX-0x%lX\n",
 	       card->shortname,
@@ -256,38 +251,38 @@ static int snd_msnd_probe(struct snd_card *card)
 	switch (info & 0x7) {
 	case 0x0:
 		rev = "I";
-		strcpy(card->shortname, pin);
+		strscpy(card->shortname, pin);
 		break;
 	case 0x1:
 		rev = "F";
-		strcpy(card->shortname, pin);
+		strscpy(card->shortname, pin);
 		break;
 	case 0x2:
 		rev = "G";
-		strcpy(card->shortname, pin);
+		strscpy(card->shortname, pin);
 		break;
 	case 0x3:
 		rev = "H";
-		strcpy(card->shortname, pin);
+		strscpy(card->shortname, pin);
 		break;
 	case 0x4:
 		rev = "E";
-		strcpy(card->shortname, fiji);
+		strscpy(card->shortname, fiji);
 		break;
 	case 0x5:
 		rev = "C";
-		strcpy(card->shortname, fiji);
+		strscpy(card->shortname, fiji);
 		break;
 	case 0x6:
 		rev = "D";
-		strcpy(card->shortname, fiji);
+		strscpy(card->shortname, fiji);
 		break;
 	case 0x7:
 		rev = "A-B (Fiji) or A-E (Pinnacle)";
-		strcpy(card->shortname, pinfiji);
+		strscpy(card->shortname, pinfiji);
 		break;
 	}
-	strcpy(card->longname, "Turtle Beach Multisound Pinnacle");
+	strscpy(card->longname, "Turtle Beach Multisound Pinnacle");
 	dev_info(card->dev, LOGNAME ": %s revision %s, Xilinx version %s, "
 	       "I/O 0x%lx-0x%lx, IRQ %d, memory mapped to 0x%lX-0x%lX\n",
 	       card->shortname,
@@ -305,7 +300,6 @@ static int snd_msnd_init_sma(struct snd_msnd *chip)
 {
 	static int initted;
 	u16 mastVolLeft, mastVolRight;
-	unsigned long flags;
 
 #ifdef MSND_CLASSIC
 	outb(chip->memid, chip->io + HP_MEMM);
@@ -322,11 +316,11 @@ static int snd_msnd_init_sma(struct snd_msnd *chip)
 	memset_io(chip->mappedbase, 0, 0x8000);
 
 	/* Critical section: bank 1 access */
-	spin_lock_irqsave(&chip->lock, flags);
-	outb(HPBLKSEL_1, chip->io + HP_BLKS);
-	memset_io(chip->mappedbase, 0, 0x8000);
-	outb(HPBLKSEL_0, chip->io + HP_BLKS);
-	spin_unlock_irqrestore(&chip->lock, flags);
+	scoped_guard(spinlock_irqsave, &chip->lock) {
+		outb(HPBLKSEL_1, chip->io + HP_BLKS);
+		memset_io(chip->mappedbase, 0, 0x8000);
+		outb(HPBLKSEL_0, chip->io + HP_BLKS);
+	}
 
 	/* Digital audio play queue */
 	chip->DAPQ = chip->mappedbase + DAPQ_OFFSET;
@@ -518,6 +512,19 @@ static void snd_msnd_mpu401_close(struct snd_mpu401 *mpu)
 	snd_msnd_send_dsp_cmd(mpu->private_data, HDEX_MIDI_IN_STOP);
 	snd_msnd_disable_irq(mpu->private_data);
 }
+
+#ifdef CONFIG_PM
+static u8 snd_msnd_pm_recsrc(struct snd_msnd *chip)
+{
+	/* Convert recsrc to the Capture Source selector: 0=Analog, 1=MASS, 2=SPDIF. */
+	if (chip->recsrc & BIT(4))
+		return 1;
+	if ((chip->recsrc & BIT(17)) &&
+	    test_bit(F_HAVEDIGITAL, &chip->flags))
+		return 2;
+	return 0;
+}
+#endif
 
 static long mpu_io[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;
 static int mpu_irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;
@@ -1007,10 +1014,73 @@ static int snd_msnd_isa_probe(struct device *pdev, unsigned int idx)
 	return 0;
 }
 
+#ifdef CONFIG_PM
+static int snd_msnd_card_suspend(struct snd_card *card)
+{
+	struct snd_msnd *chip = card->private_data;
+	struct snd_mpu401 *mpu;
+	int err;
+
+	mpu = chip->rmidi ? chip->rmidi->private_data : NULL;
+	chip->pm_recsrc = snd_msnd_pm_recsrc(chip);
+	chip->pm_mpu_input = mpu && test_bit(MPU401_MODE_BIT_INPUT, &mpu->mode);
+	if (chip->pm_mpu_input)
+		snd_msnd_send_dsp_cmd(chip, HDEX_MIDI_IN_STOP);
+
+	err = snd_msnd_force_irq(chip, false);
+	if (err < 0) {
+		if (chip->pm_mpu_input)
+			snd_msnd_send_dsp_cmd(chip, HDEX_MIDI_IN_START);
+		return err;
+	}
+
+	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
+	return 0;
+}
+
+static int snd_msnd_card_resume(struct snd_card *card)
+{
+	struct snd_msnd *chip = card->private_data;
+	int err;
+
+	err = snd_msnd_initialize(card);
+	if (err < 0)
+		return err;
+
+	snd_msnd_calibrate_adc(chip, chip->play_sample_rate);
+	snd_msndmix_force_recsrc(chip, chip->pm_recsrc);
+
+	err = snd_msnd_force_irq(chip, true);
+	if (err < 0)
+		return err;
+
+	if (chip->pm_mpu_input)
+		snd_msnd_send_dsp_cmd(chip, HDEX_MIDI_IN_START);
+
+	chip->nresets = 0;
+	snd_power_change_state(card, SNDRV_CTL_POWER_D0);
+	return 0;
+}
+
+static int snd_msnd_isa_suspend(struct device *dev, unsigned int idx,
+				pm_message_t state)
+{
+	return snd_msnd_card_suspend(dev_get_drvdata(dev));
+}
+
+static int snd_msnd_isa_resume(struct device *dev, unsigned int idx)
+{
+	return snd_msnd_card_resume(dev_get_drvdata(dev));
+}
+#endif
+
 static struct isa_driver snd_msnd_driver = {
 	.match		= snd_msnd_isa_match,
 	.probe		= snd_msnd_isa_probe,
-	/* FIXME: suspend, resume */
+#ifdef CONFIG_PM
+	.suspend	= snd_msnd_isa_suspend,
+	.resume		= snd_msnd_isa_resume,
+#endif
 	.driver		= {
 		.name	= DEV_NAME
 	},
@@ -1117,8 +1187,20 @@ static int snd_msnd_pnp_detect(struct pnp_card_link *pcard,
 	return 0;
 }
 
-static int isa_registered;
-static int pnp_registered;
+#ifdef CONFIG_PM
+static int snd_msnd_pnp_suspend(struct pnp_card_link *pcard, pm_message_t state)
+{
+	return snd_msnd_card_suspend(pnp_get_card_drvdata(pcard));
+}
+
+static int snd_msnd_pnp_resume(struct pnp_card_link *pcard)
+{
+	return snd_msnd_card_resume(pnp_get_card_drvdata(pcard));
+}
+#endif
+
+static int isa_registered __ro_after_init;
+static int pnp_registered __ro_after_init;
 
 static const struct pnp_card_device_id msnd_pnpids[] = {
 	/* Pinnacle PnP */
@@ -1133,6 +1215,10 @@ static struct pnp_card_driver msnd_pnpc_driver = {
 	.name = "msnd_pinnacle",
 	.id_table = msnd_pnpids,
 	.probe = snd_msnd_pnp_detect,
+#ifdef CONFIG_PM
+	.suspend = snd_msnd_pnp_suspend,
+	.resume = snd_msnd_pnp_resume,
+#endif
 };
 #endif /* CONFIG_PNP */
 
@@ -1167,4 +1253,3 @@ static void __exit snd_msnd_exit(void)
 
 module_init(snd_msnd_init);
 module_exit(snd_msnd_exit);
-

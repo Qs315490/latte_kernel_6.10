@@ -1688,12 +1688,12 @@ static int fman_config(struct fman *fman)
 
 	base_addr = fman->dts_params.base_addr;
 
-	fman->state = kzalloc(sizeof(*fman->state), GFP_KERNEL);
+	fman->state = kzalloc_obj(*fman->state);
 	if (!fman->state)
 		goto err_fm_state;
 
 	/* Allocate the FM driver's parameters structure */
-	fman->cfg = kzalloc(sizeof(*fman->cfg), GFP_KERNEL);
+	fman->cfg = kzalloc_obj(*fman->cfg);
 	if (!fman->cfg)
 		goto err_fm_drv;
 
@@ -1995,8 +1995,10 @@ static int fman_init(struct fman *fman)
 
 	/* Init KeyGen */
 	fman->keygen = keygen_init(fman->kg_regs);
-	if (!fman->keygen)
+	if (!fman->keygen) {
+		free_init_resources(fman);
 		return -EINVAL;
+	}
 
 	err = enable(fman, cfg);
 	if (err != 0)
@@ -2697,7 +2699,7 @@ static struct fman *read_dts_node(struct platform_device *of_dev)
 	struct clk *clk;
 	u32 clk_rate;
 
-	fman = kzalloc(sizeof(*fman), GFP_KERNEL);
+	fman = kzalloc_obj(*fman);
 	if (!fman)
 		return ERR_PTR(-ENOMEM);
 

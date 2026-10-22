@@ -114,16 +114,19 @@
 		cb_intosc_hs_div2_clk: cb-intosc-hs-div2-clk {
 			#clock-cells = <0>;
 			compatible = "fixed-clock";
+			clock-frequency = <200000000>;
 		};
 
 		cb_intosc_ls_clk: cb-intosc-ls-clk {
 			#clock-cells = <0>;
 			compatible = "fixed-clock";
+			clock-frequency = <400000000>;
 		};
 
 		f2s_free_clk: f2s-free-clk {
 			#clock-cells = <0>;
 			compatible = "fixed-clock";
+			clock-frequency = <100000000>;
 		};
 
 		osc1: osc1 {
@@ -164,6 +167,7 @@
 			compatible = "intel,agilex-clkmgr";
 			reg = <0xffd10000 0x1000>;
 			#clock-cells = <1>;
+			clocks = <&osc1>;
 		};
 
 		gmac0: ethernet@ff800000 {
@@ -457,6 +461,8 @@
 			reg-io-width = <4>;
 			num-cs = <4>;
 			clocks = <&clkmgr AGILEX_L4_MAIN_CLK>;
+			dmas = <&pdma 16>, <&pdma 17>;
+			dma-names = "tx", "rx";
 			status = "disabled";
 		};
 
@@ -471,6 +477,8 @@
 			reg-io-width = <4>;
 			num-cs = <4>;
 			clocks = <&clkmgr AGILEX_L4_MAIN_CLK>;
+			dmas = <&pdma 20>, <&pdma 21>;
+			dma-names = "tx", "rx";
 			status = "disabled";
 		};
 

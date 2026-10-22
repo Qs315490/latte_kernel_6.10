@@ -40,7 +40,7 @@ static const struct reg_default max9768_default_regs[] = {
 static int max9768_get_gpio(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *c = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
 	struct max9768 *max9768 = snd_soc_component_get_drvdata(c);
 	int val = gpiod_get_value_cansleep(max9768->mute);
 
@@ -52,7 +52,7 @@ static int max9768_get_gpio(struct snd_kcontrol *kcontrol,
 static int max9768_set_gpio(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *c = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
 	struct max9768 *max9768 = snd_soc_component_get_drvdata(c);
 	bool val = !ucontrol->value.integer.value[0];
 	int ret;
@@ -213,7 +213,7 @@ static int max9768_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max9768_i2c_id[] = {
-	{ "max9768" },
+	{ .name = "max9768" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max9768_i2c_id);

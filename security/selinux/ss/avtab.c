@@ -20,48 +20,15 @@
 #include <linux/errno.h>
 #include "avtab.h"
 #include "policydb.h"
+#include "hash.h"
 
 static struct kmem_cache *avtab_node_cachep __ro_after_init;
 static struct kmem_cache *avtab_xperms_cachep __ro_after_init;
 
-/* Based on MurmurHash3, written by Austin Appleby and placed in the
- * public domain.
- */
 static inline u32 avtab_hash(const struct avtab_key *keyp, u32 mask)
 {
-	static const u32 c1 = 0xcc9e2d51;
-	static const u32 c2 = 0x1b873593;
-	static const u32 r1 = 15;
-	static const u32 r2 = 13;
-	static const u32 m = 5;
-	static const u32 n = 0xe6546b64;
-
-	u32 hash = 0;
-
-#define mix(input)                                         \
-	do {                                               \
-		u32 v = input;                             \
-		v *= c1;                                   \
-		v = (v << r1) | (v >> (32 - r1));          \
-		v *= c2;                                   \
-		hash ^= v;                                 \
-		hash = (hash << r2) | (hash >> (32 - r2)); \
-		hash = hash * m + n;                       \
-	} while (0)
-
-	mix(keyp->target_class);
-	mix(keyp->target_type);
-	mix(keyp->source_type);
-
-#undef mix
-
-	hash ^= hash >> 16;
-	hash *= 0x85ebca6b;
-	hash ^= hash >> 13;
-	hash *= 0xc2b2ae35;
-	hash ^= hash >> 16;
-
-	return hash & mask;
+	return av_hash((u32)keyp->target_class, (u32)keyp->target_type,
+		       (u32)keyp->source_type, mask);
 }
 
 static struct avtab_node *avtab_insert_node(struct avtab *h,
@@ -349,7 +316,7 @@ int avtab_read_item(struct avtab *a, struct policy_file *fp, struct policydb *po
 	struct avtab_extended_perms xperms;
 	__le32 buf32[ARRAY_SIZE(xperms.perms.p)];
 	int rc;
-	unsigned int set, vers = pol->policyvers;
+	unsigned int vers = pol->policyvers;
 
 	memset(&key, 0, sizeof(struct avtab_key));
 	memset(&datum, 0, sizeof(struct avtab_datum));
@@ -360,9 +327,12 @@ int avtab_read_item(struct avtab *a, struct policy_file *fp, struct policydb *po
 			pr_err("SELinux: avtab: truncated entry\n");
 			return rc;
 		}
+		/* Read five or more items: source type, target type,
+		 * target class, AV type, and at least one datum.
+		 */
 		items2 = le32_to_cpu(buf32[0]);
-		if (items2 > ARRAY_SIZE(buf32)) {
-			pr_err("SELinux: avtab: entry overflow\n");
+		if (items2 < 5 || items2 > ARRAY_SIZE(buf32)) {
+			pr_err("SELinux: avtab: invalid item count\n");
 			return -EINVAL;
 		}
 		rc = next_entry(buf32, fp, sizeof(u32) * items2);
@@ -391,6 +361,13 @@ int avtab_read_item(struct avtab *a, struct policy_file *fp, struct policydb *po
 			return -EINVAL;
 		}
 
+		if (!policydb_type_isvalid(pol, key.source_type) ||
+		    !policydb_type_isvalid(pol, key.target_type) ||
+		    !policydb_class_isvalid(pol, key.target_class)) {
+			pr_err("SELinux: avtab: invalid type or class\n");
+			return -EINVAL;
+		}
+
 		val = le32_to_cpu(buf32[items++]);
 		enabled = (val & AVTAB_ENABLED_OLD) ? AVTAB_ENABLED : 0;
 
@@ -409,8 +386,20 @@ int avtab_read_item(struct avtab *a, struct policy_file *fp, struct policydb *po
 
 		for (i = 0; i < ARRAY_SIZE(spec_order); i++) {
 			if (val & spec_order[i]) {
+				if (items >= items2) {
+					pr_err("SELinux: avtab: entry has too many items (%d/%d)\n",
+					       items + 1, items2);
+					return -EINVAL;
+				}
 				key.specified = spec_order[i] | enabled;
 				datum.u.data = le32_to_cpu(buf32[items++]);
+
+				if ((key.specified & AVTAB_TYPE) &&
+				    !policydb_simpletype_isvalid(pol, datum.u.data)) {
+					pr_err("SELinux: avtab: invalid type\n");
+					return -EINVAL;
+				}
+
 				rc = insertf(a, &key, &datum, p);
 				if (rc)
 					return rc;
@@ -444,9 +433,13 @@ int avtab_read_item(struct avtab *a, struct policy_file *fp, struct policydb *po
 		return -EINVAL;
 	}
 
-	set = hweight16(key.specified & (AVTAB_XPERMS | AVTAB_TYPE | AVTAB_AV));
-	if (!set || set > 1) {
-		pr_err("SELinux:  avtab:  more than one specifier\n");
+	if (hweight16(key.specified & ~AVTAB_ENABLED) != 1) {
+		pr_err("SELinux:  avtab:  not exactly one specifier\n");
+		return -EINVAL;
+	}
+
+	if (key.specified & ~AVTAB_SPECIFIER_MASK) {
+		pr_err("SELinux:  avtab:  invalid specifier\n");
 		return -EINVAL;
 	}
 
@@ -471,6 +464,10 @@ int avtab_read_item(struct avtab *a, struct policy_file *fp, struct policydb *po
 			pr_err("SELinux: avtab: truncated entry\n");
 			return rc;
 		}
+		if (!avtab_is_valid_xperm_specified(xperms.specified))
+			pr_warn_once_policyload(pol,
+						"SELinux: avtab: unsupported xperm specifier %#x\n",
+						xperms.specified);
 		rc = next_entry(&xperms.driver, fp, sizeof(u8));
 		if (rc) {
 			pr_err("SELinux: avtab: truncated entry\n");
@@ -494,7 +491,7 @@ int avtab_read_item(struct avtab *a, struct policy_file *fp, struct policydb *po
 		datum.u.data = le32_to_cpu(*buf32);
 	}
 	if ((key.specified & AVTAB_TYPE) &&
-	    !policydb_type_isvalid(pol, datum.u.data)) {
+	    !policydb_simpletype_isvalid(pol, datum.u.data)) {
 		pr_err("SELinux: avtab: invalid type\n");
 		return -EINVAL;
 	}
@@ -524,6 +521,11 @@ int avtab_read(struct avtab *a, struct policy_file *fp, struct policydb *pol)
 		rc = -EINVAL;
 		goto bad;
 	}
+
+	/* avtab_read_item() reads at least 96 bytes for any valid entry */
+	rc = size_check(3 * sizeof(u32), nel, fp);
+	if (rc)
+		goto bad;
 
 	rc = avtab_alloc(a, nel);
 	if (rc)

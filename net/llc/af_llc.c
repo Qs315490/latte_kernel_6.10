@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * af_llc.c - LLC User Interface SAPs
  * Description:
@@ -12,13 +13,6 @@
  *
  * Copyright (c) 2001 by Jay Schulist <jschlst@samba.org>
  *		 2002-2003 by Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- * This program can be redistributed or modified under the terms of the
- * GNU General Public License as published by the Free Software Foundation.
- * This program is distributed without any warranty or implied warranty
- * of merchantability or fitness for a particular purpose.
- *
- * See the GNU General Public License for more details.
  */
 #include <linux/compiler.h>
 #include <linux/kernel.h>
@@ -27,6 +21,7 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
+#include <linux/uio.h>
 
 #include <net/llc.h>
 #include <net/llc_sap.h>
@@ -210,7 +205,7 @@ static int llc_ui_release(struct socket *sock)
 	dprintk("%s: closing local(%02X) remote(%02X)\n", __func__,
 		llc->laddr.lsap, llc->daddr.lsap);
 	if (!llc_send_disc(sk))
-		llc_ui_wait_for_disc(sk, sk->sk_rcvtimeo);
+		llc_ui_wait_for_disc(sk, READ_ONCE(sk->sk_rcvtimeo));
 	if (!sock_flag(sk, SOCK_ZAPPED)) {
 		struct llc_sap *sap = llc->sap;
 
@@ -317,6 +312,7 @@ static int llc_ui_autobind(struct socket *sock, struct sockaddr_llc *addr)
 	/* assign new connection to its SAP */
 	llc_sap_add_socket(sap, sk);
 	sock_reset_flag(sk, SOCK_ZAPPED);
+	llc_sap_put(sap);
 	rc = 0;
 out:
 	dev_put(dev);
@@ -337,7 +333,7 @@ out:
  *	otherwise all hell will break loose.
  *	Returns: 0 upon success, negative otherwise.
  */
-static int llc_ui_bind(struct socket *sock, struct sockaddr *uaddr, int addrlen)
+static int llc_ui_bind(struct socket *sock, struct sockaddr_unsized *uaddr, int addrlen)
 {
 	struct sockaddr_llc *addr = (struct sockaddr_llc *)uaddr;
 	struct sock *sk = sock->sk;
@@ -455,7 +451,7 @@ static int llc_ui_shutdown(struct socket *sock, int how)
 		goto out;
 	rc = llc_send_disc(sk);
 	if (!rc)
-		rc = llc_ui_wait_for_disc(sk, sk->sk_rcvtimeo);
+		rc = llc_ui_wait_for_disc(sk, READ_ONCE(sk->sk_rcvtimeo));
 	/* Wake up anyone sleeping in poll */
 	sk->sk_state_change(sk);
 out:
@@ -477,7 +473,7 @@ out:
  *	This function will autobind if user did not previously call bind.
  *	Returns: 0 upon success, negative otherwise.
  */
-static int llc_ui_connect(struct socket *sock, struct sockaddr *uaddr,
+static int llc_ui_connect(struct socket *sock, struct sockaddr_unsized *uaddr,
 			  int addrlen, int flags)
 {
 	struct sock *sk = sock->sk;
@@ -520,8 +516,10 @@ static int llc_ui_connect(struct socket *sock, struct sockaddr *uaddr,
 	if (sk->sk_state == TCP_SYN_SENT) {
 		const long timeo = sock_sndtimeo(sk, flags & O_NONBLOCK);
 
-		if (!timeo || !llc_ui_wait_for_conn(sk, timeo))
+		if (!timeo || !llc_ui_wait_for_conn(sk, timeo)) {
+			rc = -EINPROGRESS;
 			goto out;
+		}
 
 		rc = sock_intr_errno(timeo);
 		if (signal_pending(current))
@@ -712,7 +710,7 @@ static int llc_ui_accept(struct socket *sock, struct socket *newsock,
 		goto out;
 	/* wait for a connection to arrive. */
 	if (skb_queue_empty(&sk->sk_receive_queue)) {
-		rc = llc_wait_data(sk, sk->sk_rcvtimeo);
+		rc = llc_wait_data(sk, READ_ONCE(sk->sk_rcvtimeo));
 		if (rc)
 			goto out;
 	}
@@ -887,15 +885,15 @@ static int llc_ui_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 		if (sk->sk_type != SOCK_STREAM)
 			goto copy_uaddr;
 
+		/* Partial read */
+		if (used + offset < skb_len)
+			continue;
+
 		if (!(flags & MSG_PEEK)) {
 			skb_unlink(skb, &sk->sk_receive_queue);
 			kfree_skb(skb);
 			*seq = 0;
 		}
-
-		/* Partial read */
-		if (used + offset < skb_len)
-			continue;
 	} while (len > 0);
 
 out:
@@ -1164,25 +1162,21 @@ out:
  *	@sock: Socket to get information from.
  *	@level: Socket level user is requesting operations on.
  *	@optname: Operation name.
- *	@optval: Variable to return operation data in.
- *	@optlen: Length of optval.
+ *	@opt: sockopt context with iterator and length for returning data.
  *
  *	Get connection specific socket information.
  */
 static int llc_ui_getsockopt(struct socket *sock, int level, int optname,
-			     char __user *optval, int __user *optlen)
+			     sockopt_t *opt)
 {
 	struct sock *sk = sock->sk;
 	struct llc_sock *llc = llc_sk(sk);
-	int val = 0, len = 0, rc = -EINVAL;
+	int val = 0, len, rc = -EINVAL;
 
 	lock_sock(sk);
 	if (unlikely(level != SOL_LLC))
 		goto out;
-	rc = get_user(len, optlen);
-	if (rc)
-		goto out;
-	rc = -EINVAL;
+	len = opt->optlen;
 	if (len != sizeof(int))
 		goto out;
 	switch (optname) {
@@ -1210,7 +1204,8 @@ static int llc_ui_getsockopt(struct socket *sock, int level, int optname,
 		goto out;
 	}
 	rc = 0;
-	if (put_user(len, optlen) || copy_to_user(optval, &val, len))
+	opt->optlen = len;
+	if (copy_to_iter(&val, len, &opt->iter_out) != len)
 		rc = -EFAULT;
 out:
 	release_sock(sk);
@@ -1237,7 +1232,7 @@ static const struct proto_ops llc_ui_ops = {
 	.listen      = llc_ui_listen,
 	.shutdown    = llc_ui_shutdown,
 	.setsockopt  = llc_ui_setsockopt,
-	.getsockopt  = llc_ui_getsockopt,
+	.getsockopt_iter = llc_ui_getsockopt,
 	.sendmsg     = llc_ui_sendmsg,
 	.recvmsg     = llc_ui_recvmsg,
 	.mmap	     = sock_no_mmap,

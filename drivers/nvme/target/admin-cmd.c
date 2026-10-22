@@ -63,14 +63,9 @@ static void nvmet_execute_create_sq(struct nvmet_req *req)
 	if (status != NVME_SC_SUCCESS)
 		goto complete;
 
-	/*
-	 * Note: The NVMe specification allows multiple SQs to use the same CQ.
-	 * However, the target code does not really support that. So for now,
-	 * prevent this and fail the command if sqid and cqid are different.
-	 */
-	if (!cqid || cqid != sqid) {
-		pr_err("SQ %u: Unsupported CQID %u\n", sqid, cqid);
-		status = NVME_SC_CQ_INVALID | NVME_STATUS_DNR;
+	status = nvmet_check_io_cqid(ctrl, cqid, false);
+	if (status != NVME_SC_SUCCESS) {
+		pr_err("SQ %u: Invalid CQID %u\n", sqid, cqid);
 		goto complete;
 	}
 
@@ -79,7 +74,7 @@ static void nvmet_execute_create_sq(struct nvmet_req *req)
 		goto complete;
 	}
 
-	status = ctrl->ops->create_sq(ctrl, sqid, sq_flags, qsize, prp1);
+	status = ctrl->ops->create_sq(ctrl, sqid, cqid, sq_flags, qsize, prp1);
 
 complete:
 	nvmet_req_complete(req, status);
@@ -96,14 +91,15 @@ static void nvmet_execute_delete_cq(struct nvmet_req *req)
 		goto complete;
 	}
 
-	if (!cqid) {
+	status = nvmet_check_io_cqid(ctrl, cqid, false);
+	if (status != NVME_SC_SUCCESS)
+		goto complete;
+
+	if (!ctrl->cqs[cqid] || nvmet_cq_in_use(ctrl->cqs[cqid])) {
+		/* Some SQs are still using this CQ */
 		status = NVME_SC_QID_INVALID | NVME_STATUS_DNR;
 		goto complete;
 	}
-
-	status = nvmet_check_cqid(ctrl, cqid);
-	if (status != NVME_SC_SUCCESS)
-		goto complete;
 
 	status = ctrl->ops->delete_cq(ctrl, cqid);
 
@@ -127,12 +123,7 @@ static void nvmet_execute_create_cq(struct nvmet_req *req)
 		goto complete;
 	}
 
-	if (!cqid) {
-		status = NVME_SC_QID_INVALID | NVME_STATUS_DNR;
-		goto complete;
-	}
-
-	status = nvmet_check_cqid(ctrl, cqid);
+	status = nvmet_check_io_cqid(ctrl, cqid, true);
 	if (status != NVME_SC_SUCCESS)
 		goto complete;
 
@@ -212,7 +203,7 @@ static void nvmet_execute_get_supported_log_pages(struct nvmet_req *req)
 	struct nvme_supported_log *logs;
 	u16 status;
 
-	logs = kzalloc(sizeof(*logs), GFP_KERNEL);
+	logs = kzalloc_obj(*logs);
 	if (!logs) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -307,7 +298,7 @@ static void nvmet_execute_get_log_page_rmi(struct nvmet_req *req)
 	if (status)
 		goto out;
 
-	if (!req->ns->bdev || bdev_nonrot(req->ns->bdev)) {
+	if (!req->ns->bdev || !bdev_rot(req->ns->bdev)) {
 		status = NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
 		goto out;
 	}
@@ -317,7 +308,7 @@ static void nvmet_execute_get_log_page_rmi(struct nvmet_req *req)
 		goto out;
 	}
 
-	log = kzalloc(sizeof(*log), GFP_KERNEL);
+	log = kzalloc_obj(*log);
 	if (!log)
 		goto out;
 
@@ -343,7 +334,7 @@ static void nvmet_execute_get_log_page_smart(struct nvmet_req *req)
 	if (req->transfer_len != sizeof(*log))
 		goto out;
 
-	log = kzalloc(sizeof(*log), GFP_KERNEL);
+	log = kzalloc_obj(*log);
 	if (!log)
 		goto out;
 
@@ -418,7 +409,7 @@ static void nvmet_execute_get_log_cmd_effects_ns(struct nvmet_req *req)
 	struct nvme_effects_log *log;
 	u16 status = NVME_SC_SUCCESS;
 
-	log = kzalloc(sizeof(*log), GFP_KERNEL);
+	log = kzalloc_obj(*log);
 	if (!log) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -513,7 +504,7 @@ static void nvmet_execute_get_log_page_endgrp(struct nvmet_req *req)
 	if (status)
 		goto out;
 
-	log = kzalloc(sizeof(*log), GFP_KERNEL);
+	log = kzalloc_obj(*log);
 	if (!log) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -551,8 +542,7 @@ static void nvmet_execute_get_log_page_ana(struct nvmet_req *req)
 	u16 status;
 
 	status = NVME_SC_INTERNAL;
-	desc = kmalloc(struct_size(desc, nsids, NVMET_MAX_NAMESPACES),
-		       GFP_KERNEL);
+	desc = kmalloc_flex(*desc, nsids, NVMET_MAX_NAMESPACES);
 	if (!desc)
 		goto out;
 
@@ -590,7 +580,7 @@ static void nvmet_execute_get_log_page_features(struct nvmet_req *req)
 	struct nvme_supported_features_log *features;
 	u16 status;
 
-	features = kzalloc(sizeof(*features), GFP_KERNEL);
+	features = kzalloc_obj(*features);
 	if (!features) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -669,7 +659,7 @@ static void nvmet_execute_identify_ctrl(struct nvmet_req *req)
 		mutex_unlock(&subsys->lock);
 	}
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -697,12 +687,8 @@ static void nvmet_execute_identify_ctrl(struct nvmet_req *req)
 	id->cmic = NVME_CTRL_CMIC_MULTI_PORT | NVME_CTRL_CMIC_MULTI_CTRL |
 		NVME_CTRL_CMIC_ANA;
 
-	/* Limit MDTS according to transport capability */
-	if (ctrl->ops->get_mdts)
-		id->mdts = ctrl->ops->get_mdts(ctrl);
-	else
-		id->mdts = 0;
-
+	/* Limit MDTS according to port config or transport capability */
+	id->mdts = nvmet_ctrl_mdts(req);
 	id->cntlid = cpu_to_le16(ctrl->cntlid);
 	id->ver = cpu_to_le32(ctrl->subsys->ver);
 
@@ -717,7 +703,7 @@ static void nvmet_execute_identify_ctrl(struct nvmet_req *req)
 
 	/*
 	 * We don't really have a practical limit on the number of abort
-	 * comands.  But we don't do anything useful for abort either, so
+	 * commands.  But we don't do anything useful for abort either, so
 	 * no point in allowing more abort commands than the spec requires.
 	 */
 	id->acl = 3;
@@ -818,7 +804,7 @@ static void nvmet_execute_identify_ns(struct nvmet_req *req)
 		goto out;
 	}
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -1062,11 +1048,13 @@ static void nvme_execute_identify_ns_nvm(struct nvmet_req *req)
 	if (status)
 		goto out;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id) {
 		status = NVME_SC_INTERNAL;
 		goto out;
 	}
+	if (req->ns->bdev)
+		nvmet_bdev_set_nvm_limits(req->ns->bdev, id);
 	status = nvmet_copy_to_sgl(req, 0, id, sizeof(*id));
 	kfree(id);
 out:
@@ -1082,7 +1070,7 @@ static void nvmet_execute_id_cs_indep(struct nvmet_req *req)
 	if (status)
 		goto out;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -1093,7 +1081,7 @@ static void nvmet_execute_id_cs_indep(struct nvmet_req *req)
 	id->nmic = NVME_NS_NMIC_SHARED;
 	if (req->ns->readonly)
 		id->nsattr |= NVME_NS_ATTR_RO;
-	if (req->ns->bdev && !bdev_nonrot(req->ns->bdev))
+	if (req->ns->bdev && bdev_rot(req->ns->bdev))
 		id->nsfeat |= NVME_NS_ROTATIONAL;
 	/*
 	 * We need flush command to flush the file's metadata,
@@ -1174,7 +1162,7 @@ static void nvmet_execute_identify(struct nvmet_req *req)
  * A "minimum viable" abort implementation: the command is mandatory in the
  * spec, but we are not required to do any useful work.  We couldn't really
  * do a useful abort, so don't bother even with waiting for the command
- * to be exectuted and return immediately telling the command to abort
+ * to be executed and return immediately telling the command to abort
  * wasn't found.
  */
 static void nvmet_execute_abort(struct nvmet_req *req)
@@ -1595,7 +1583,7 @@ void nvmet_execute_async_event(struct nvmet_req *req)
 	ctrl->async_event_cmds[ctrl->nr_async_event_cmds++] = req;
 	mutex_unlock(&ctrl->lock);
 
-	queue_work(nvmet_wq, &ctrl->async_event_work);
+	queue_work(nvmet_aen_wq, &ctrl->async_event_work);
 }
 
 void nvmet_execute_keep_alive(struct nvmet_req *req)
@@ -1613,7 +1601,7 @@ void nvmet_execute_keep_alive(struct nvmet_req *req)
 
 	pr_debug("ctrl %d update keep-alive timer for %d secs\n",
 		ctrl->cntlid, ctrl->kato);
-	mod_delayed_work(system_wq, &ctrl->ka_work, ctrl->kato * HZ);
+	mod_delayed_work(system_percpu_wq, &ctrl->ka_work, ctrl->kato * HZ);
 out:
 	nvmet_req_complete(req, status);
 }

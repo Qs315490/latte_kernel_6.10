@@ -13,7 +13,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
@@ -28,9 +27,6 @@
 #include <linux/iio/trigger.h>
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
-
-#define BMA180_DRV_NAME "bma180"
-#define BMA180_IRQ_NAME "bma180_event"
 
 enum chip_ids {
 	BMA023,
@@ -142,11 +138,6 @@ struct bma180_data {
 	int scale;
 	int bw;
 	bool pmode;
-	/* Ensure timestamp is naturally aligned */
-	struct {
-		s16 chan[4];
-		aligned_s64 timestamp;
-	} scan;
 };
 
 enum bma180_chan {
@@ -540,14 +531,13 @@ static int bma180_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 
 		mutex_lock(&data->mutex);
 		ret = bma180_get_data_reg(data, chan->scan_index);
 		mutex_unlock(&data->mutex);
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 		if (ret < 0)
 			return ret;
 		if (chan->scan_type.sign == 's') {
@@ -874,6 +864,10 @@ static irqreturn_t bma180_trigger_handler(int irq, void *p)
 	struct bma180_data *data = iio_priv(indio_dev);
 	s64 time_ns = iio_get_time_ns(indio_dev);
 	int bit, ret, i = 0;
+	struct {
+		s16 chan[4];
+		aligned_s64 timestamp;
+	} scan = { };
 
 	mutex_lock(&data->mutex);
 
@@ -883,12 +877,12 @@ static irqreturn_t bma180_trigger_handler(int irq, void *p)
 			mutex_unlock(&data->mutex);
 			goto err;
 		}
-		data->scan.chan[i++] = ret;
+		scan.chan[i++] = ret;
 	}
 
 	mutex_unlock(&data->mutex);
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan, time_ns);
+	iio_push_to_buffers_with_ts(indio_dev, &scan, sizeof(scan), time_ns);
 err:
 	iio_trigger_notify_done(indio_dev->trig);
 
@@ -991,8 +985,9 @@ static int bma180_probe(struct i2c_client *client)
 		}
 
 		ret = devm_request_irq(dev, client->irq,
-			iio_trigger_generic_data_rdy_poll, IRQF_TRIGGER_RISING,
-			"bma180_event", data->trig);
+				       iio_trigger_generic_data_rdy_poll,
+				       IRQF_TRIGGER_RISING | IRQF_NO_THREAD,
+				       "bma180_event", data->trig);
 		if (ret) {
 			dev_err(dev, "unable to request IRQ\n");
 			goto err_trigger_free;
@@ -1087,11 +1082,11 @@ static int bma180_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(bma180_pm_ops, bma180_suspend, bma180_resume);
 
 static const struct i2c_device_id bma180_ids[] = {
-	{ "bma023", (kernel_ulong_t)&bma180_part_info[BMA023] },
-	{ "bma150", (kernel_ulong_t)&bma180_part_info[BMA150] },
-	{ "bma180", (kernel_ulong_t)&bma180_part_info[BMA180] },
-	{ "bma250", (kernel_ulong_t)&bma180_part_info[BMA250] },
-	{ "smb380", (kernel_ulong_t)&bma180_part_info[BMA150] },
+	{ .name = "bma023", .driver_data = (kernel_ulong_t)&bma180_part_info[BMA023] },
+	{ .name = "bma150", .driver_data = (kernel_ulong_t)&bma180_part_info[BMA150] },
+	{ .name = "bma180", .driver_data = (kernel_ulong_t)&bma180_part_info[BMA180] },
+	{ .name = "bma250", .driver_data = (kernel_ulong_t)&bma180_part_info[BMA250] },
+	{ .name = "smb380", .driver_data = (kernel_ulong_t)&bma180_part_info[BMA150] },
 	{ }
 };
 

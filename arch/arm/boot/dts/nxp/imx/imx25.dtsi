@@ -195,7 +195,7 @@
 				status = "disabled";
 			};
 
-			iomuxc: iomuxc@43fac000 {
+			iomuxc: pinmux@43fac000 {
 				compatible = "fsl,imx25-iomuxc";
 				reg = <0x43fac000 0x4000>;
 			};
@@ -305,7 +305,7 @@
 					status = "disabled";
 				};
 
-				tsc: tcq@50030400 {
+				tsc: touchscreen@50030400 {
 					compatible = "fsl,imx25-tcq";
 					reg = <0x50030400 0x60>;
 					interrupt-parent = <&tscadc>;
@@ -611,14 +611,13 @@
 			reg = <0x80000000 0x3b002000>;
 			ranges;
 
-			nfc: nand@bb000000 {
+			nfc: nand-controller@bb000000 {
 				#address-cells = <1>;
 				#size-cells = <1>;
 
 				compatible = "fsl,imx25-nand";
 				reg = <0xbb000000 0x2000>;
 				clocks = <&clks 50>;
-				clock-names = "";
 				interrupts = <33>;
 				status = "disabled";
 			};

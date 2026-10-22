@@ -8,6 +8,16 @@
 #define BTF_MAGIC	0xeB9F
 #define BTF_VERSION	1
 
+/*
+ * BTF layout section consists of a struct btf_layout for each known
+ * kind at BTF encoding time.
+ */
+struct btf_layout {
+	__u8 info_sz;		/* size of singular element after btf_type */
+	__u8 elem_sz;		/* size of each of btf_vlen(t) elements */
+	__u16 flags;		/* currently unused */
+};
+
 struct btf_header {
 	__u16	magic;
 	__u8	version;
@@ -19,24 +29,29 @@ struct btf_header {
 	__u32	type_len;	/* length of type section	*/
 	__u32	str_off;	/* offset of string section	*/
 	__u32	str_len;	/* length of string section	*/
+	__u32	layout_off;	/* offset of layout section	*/
+	__u32	layout_len;	/* length of layout section	*/
 };
 
-/* Max # of type identifier */
-#define BTF_MAX_TYPE	0x000fffff
-/* Max offset into the string section */
-#define BTF_MAX_NAME_OFFSET	0x00ffffff
-/* Max # of struct/union/enum members or func args */
-#define BTF_MAX_VLEN	0xffff
+enum btf_max {
+	/* Max possible kind */
+	BTF_MAX_KIND =		0x0000007f,
+	/* Max # of type identifier */
+	BTF_MAX_TYPE =		0x000fffff,
+	/* Max offset into the string section */
+	BTF_MAX_NAME_OFFSET =	0x00ffffff,
+	/* Max # of struct/union/enum members or func args */
+	BTF_MAX_VLEN =		0x00ffffff,
+};
 
 struct btf_type {
 	__u32 name_off;
 	/* "info" bits arrangement
-	 * bits  0-15: vlen (e.g. # of struct's members)
-	 * bits 16-23: unused
-	 * bits 24-28: kind (e.g. int, ptr, array...etc)
-	 * bits 29-30: unused
+	 * bits  0-23: vlen (e.g. # of struct's members)
+	 * bits 24-30: kind (e.g. int, ptr, array...etc)
 	 * bit     31: kind_flag, currently used by
-	 *             struct, union, enum, fwd and enum64
+	 *             struct, union, enum, fwd, enum64,
+	 *             decl_tag and type_tag
 	 */
 	__u32 info;
 	/* "size" is used by INT, ENUM, STRUCT, UNION, DATASEC and ENUM64.
@@ -52,8 +67,8 @@ struct btf_type {
 	};
 };
 
-#define BTF_INFO_KIND(info)	(((info) >> 24) & 0x1f)
-#define BTF_INFO_VLEN(info)	((info) & 0xffff)
+#define BTF_INFO_KIND(info)	(((info) >> 24) & 0x7f)
+#define BTF_INFO_VLEN(info)	((info) & 0xffffff)
 #define BTF_INFO_KFLAG(info)	((info) >> 31)
 
 enum {

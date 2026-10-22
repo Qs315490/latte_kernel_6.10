@@ -31,6 +31,7 @@
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_modeset_helper_vtables.h>
+#include <drm/drm_print.h>
 #include <drm/drm_simple_kms_helper.h>
 
 #include "cdv_device.h"
@@ -222,7 +223,7 @@ static int cdv_hdmi_get_modes(struct drm_connector *connector)
 }
 
 static enum drm_mode_status cdv_hdmi_mode_valid(struct drm_connector *connector,
-				 struct drm_display_mode *mode)
+				 const struct drm_display_mode *mode)
 {
 	if (mode->clock > 165000)
 		return MODE_CLOCK_HIGH;
@@ -283,15 +284,15 @@ void cdv_hdmi_init(struct drm_device *dev,
 	int ddc_reg;
 	int ret;
 
-	gma_encoder = kzalloc(sizeof(struct gma_encoder), GFP_KERNEL);
+	gma_encoder = kzalloc_obj(struct gma_encoder);
 	if (!gma_encoder)
 		return;
 
-	gma_connector = kzalloc(sizeof(struct gma_connector), GFP_KERNEL);
+	gma_connector = kzalloc_obj(struct gma_connector);
 	if (!gma_connector)
 		goto err_free_encoder;
 
-	hdmi_priv = kzalloc(sizeof(struct mid_intel_hdmi_priv), GFP_KERNEL);
+	hdmi_priv = kzalloc_obj(struct mid_intel_hdmi_priv);
 	if (!hdmi_priv)
 		goto err_free_connector;
 

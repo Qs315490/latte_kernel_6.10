@@ -13,6 +13,24 @@
  */
 int max_lock_depth = 1024;
 
+static const struct ctl_table rtmutex_sysctl_table[] = {
+	{
+		.procname	= "max_lock_depth",
+		.data		= &max_lock_depth,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+};
+
+static int __init init_rtmutex_sysctl(void)
+{
+	register_sysctl_init("kernel", rtmutex_sysctl_table);
+	return 0;
+}
+
+subsys_initcall(init_rtmutex_sysctl);
+
 /*
  * Debug aware fast / slowpath lock,trylock,unlock
  *
@@ -23,6 +41,7 @@ static __always_inline int __rt_mutex_lock_common(struct rt_mutex *lock,
 						  unsigned int state,
 						  struct lockdep_map *nest_lock,
 						  unsigned int subclass)
+	__cond_acquires(0, lock)
 {
 	int ret;
 
@@ -49,13 +68,27 @@ EXPORT_SYMBOL(rt_mutex_base_init);
  */
 void __sched rt_mutex_lock_nested(struct rt_mutex *lock, unsigned int subclass)
 {
-	__rt_mutex_lock_common(lock, TASK_UNINTERRUPTIBLE, NULL, subclass);
+	if (__rt_mutex_lock_common(lock, TASK_UNINTERRUPTIBLE, NULL, subclass) == 0)
+		return;
+	/*
+	 * The code below is never reached because __rt_mutex_lock_common() only
+	 * returns an error code if interrupted by a signal or upon a timeout.
+	 */
+	WARN_ON_ONCE(true);
+	__acquire(lock);
 }
 EXPORT_SYMBOL_GPL(rt_mutex_lock_nested);
 
 void __sched _rt_mutex_lock_nest_lock(struct rt_mutex *lock, struct lockdep_map *nest_lock)
 {
-	__rt_mutex_lock_common(lock, TASK_UNINTERRUPTIBLE, nest_lock, 0);
+	if (__rt_mutex_lock_common(lock, TASK_UNINTERRUPTIBLE, nest_lock, 0) == 0)
+		return;
+	/*
+	 * The code below is never reached because __rt_mutex_lock_common() only
+	 * returns an error code if interrupted by a signal or upon a timeout.
+	 */
+	WARN_ON_ONCE(true);
+	__acquire(lock);
 }
 EXPORT_SYMBOL_GPL(_rt_mutex_lock_nest_lock);
 
@@ -68,7 +101,14 @@ EXPORT_SYMBOL_GPL(_rt_mutex_lock_nest_lock);
  */
 void __sched rt_mutex_lock(struct rt_mutex *lock)
 {
-	__rt_mutex_lock_common(lock, TASK_UNINTERRUPTIBLE, NULL, 0);
+	if (__rt_mutex_lock_common(lock, TASK_UNINTERRUPTIBLE, NULL, 0) == 0)
+		return;
+	/*
+	 * The code below is never reached because __rt_mutex_lock_common() only
+	 * returns an error code if interrupted by a signal or upon a timeout.
+	 */
+	WARN_ON_ONCE(true);
+	__acquire(lock);
 }
 EXPORT_SYMBOL_GPL(rt_mutex_lock);
 #endif
@@ -139,6 +179,7 @@ void __sched rt_mutex_unlock(struct rt_mutex *lock)
 {
 	mutex_release(&lock->dep_map, _RET_IP_);
 	__rt_mutex_unlock(&lock->rtmutex);
+	__release(lock);
 }
 EXPORT_SYMBOL_GPL(rt_mutex_unlock);
 
@@ -164,6 +205,7 @@ int __sched __rt_mutex_futex_trylock(struct rt_mutex_base *lock)
  */
 bool __sched __rt_mutex_futex_unlock(struct rt_mutex_base *lock,
 				     struct rt_wake_q_head *wqh)
+	__must_hold(&lock->wait_lock)
 {
 	lockdep_assert_held(&lock->wait_lock);
 
@@ -294,6 +336,7 @@ int __sched __rt_mutex_start_proxy_lock(struct rt_mutex_base *lock,
 					struct rt_mutex_waiter *waiter,
 					struct task_struct *task,
 					struct wake_q_head *wake_q)
+	__must_hold(&lock->wait_lock)
 {
 	int ret;
 
@@ -347,7 +390,7 @@ int __sched rt_mutex_start_proxy_lock(struct rt_mutex_base *lock,
 
 	raw_spin_lock_irq(&lock->wait_lock);
 	ret = __rt_mutex_start_proxy_lock(lock, waiter, task, &wake_q);
-	if (unlikely(ret))
+	if (unlikely(ret < 0))
 		remove_waiter(lock, waiter);
 	preempt_disable();
 	raw_spin_unlock_irq(&lock->wait_lock);
@@ -497,19 +540,18 @@ void rt_mutex_debug_task_free(struct task_struct *task)
 
 #ifdef CONFIG_PREEMPT_RT
 /* Mutexes */
-void __mutex_rt_init(struct mutex *mutex, const char *name,
-		     struct lock_class_key *key)
+static void __mutex_rt_init_generic(struct mutex *mutex)
 {
+	rt_mutex_base_init(&mutex->rtmutex);
 	debug_check_no_locks_freed((void *)mutex, sizeof(*mutex));
-	lockdep_init_map_wait(&mutex->dep_map, name, key, 0, LD_WAIT_SLEEP);
 }
-EXPORT_SYMBOL(__mutex_rt_init);
 
 static __always_inline int __mutex_lock_common(struct mutex *lock,
 					       unsigned int state,
 					       unsigned int subclass,
 					       struct lockdep_map *nest_lock,
 					       unsigned long ip)
+	__acquires(lock) __no_context_analysis
 {
 	int ret;
 
@@ -524,6 +566,13 @@ static __always_inline int __mutex_lock_common(struct mutex *lock,
 }
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
+void mutex_rt_init_lockdep(struct mutex *mutex, const char *name, struct lock_class_key *key)
+{
+	__mutex_rt_init_generic(mutex);
+	lockdep_init_map_wait(&mutex->dep_map, name, key, 0, LD_WAIT_SLEEP);
+}
+EXPORT_SYMBOL(mutex_rt_init_lockdep);
+
 void __sched mutex_lock_nested(struct mutex *lock, unsigned int subclass)
 {
 	__mutex_lock_common(lock, TASK_UNINTERRUPTIBLE, subclass, NULL, _RET_IP_);
@@ -544,12 +593,12 @@ int __sched mutex_lock_interruptible_nested(struct mutex *lock,
 }
 EXPORT_SYMBOL_GPL(mutex_lock_interruptible_nested);
 
-int __sched mutex_lock_killable_nested(struct mutex *lock,
-					    unsigned int subclass)
+int __sched _mutex_lock_killable(struct mutex *lock, unsigned int subclass,
+				 struct lockdep_map *nest_lock)
 {
-	return __mutex_lock_common(lock, TASK_KILLABLE, subclass, NULL, _RET_IP_);
+	return __mutex_lock_common(lock, TASK_KILLABLE, subclass, nest_lock, _RET_IP_);
 }
-EXPORT_SYMBOL_GPL(mutex_lock_killable_nested);
+EXPORT_SYMBOL_GPL(_mutex_lock_killable);
 
 void __sched mutex_lock_io_nested(struct mutex *lock, unsigned int subclass)
 {
@@ -563,7 +612,28 @@ void __sched mutex_lock_io_nested(struct mutex *lock, unsigned int subclass)
 }
 EXPORT_SYMBOL_GPL(mutex_lock_io_nested);
 
+int __sched _mutex_trylock_nest_lock(struct mutex *lock,
+				     struct lockdep_map *nest_lock)
+{
+	int ret;
+
+	if (IS_ENABLED(CONFIG_DEBUG_RT_MUTEXES) && WARN_ON_ONCE(!in_task()))
+		return 0;
+
+	ret = __rt_mutex_trylock(&lock->rtmutex);
+	if (ret)
+		mutex_acquire_nest(&lock->dep_map, 0, 1, nest_lock, _RET_IP_);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(_mutex_trylock_nest_lock);
 #else /* CONFIG_DEBUG_LOCK_ALLOC */
+
+void mutex_rt_init_generic(struct mutex *mutex)
+{
+	__mutex_rt_init_generic(mutex);
+}
+EXPORT_SYMBOL(mutex_rt_init_generic);
 
 void __sched mutex_lock(struct mutex *lock)
 {
@@ -591,24 +661,19 @@ void __sched mutex_lock_io(struct mutex *lock)
 	io_schedule_finish(token);
 }
 EXPORT_SYMBOL(mutex_lock_io);
-#endif /* !CONFIG_DEBUG_LOCK_ALLOC */
 
 int __sched mutex_trylock(struct mutex *lock)
 {
-	int ret;
-
 	if (IS_ENABLED(CONFIG_DEBUG_RT_MUTEXES) && WARN_ON_ONCE(!in_task()))
 		return 0;
 
-	ret = __rt_mutex_trylock(&lock->rtmutex);
-	if (ret)
-		mutex_acquire(&lock->dep_map, 0, 1, _RET_IP_);
-
-	return ret;
+	return __rt_mutex_trylock(&lock->rtmutex);
 }
 EXPORT_SYMBOL(mutex_trylock);
+#endif /* !CONFIG_DEBUG_LOCK_ALLOC */
 
 void __sched mutex_unlock(struct mutex *lock)
+	__releases(lock) __no_context_analysis
 {
 	mutex_release(&lock->dep_map, _RET_IP_);
 	__rt_mutex_unlock(&lock->rtmutex);

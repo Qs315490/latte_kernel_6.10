@@ -40,7 +40,7 @@ static inline void tegra30_audio_write(u32 reg, u32 val)
 	regmap_write(ahub->regmap_ahub, reg, val);
 }
 
-static __maybe_unused int tegra30_ahub_runtime_suspend(struct device *dev)
+static int tegra30_ahub_runtime_suspend(struct device *dev)
 {
 	regcache_cache_only(ahub->regmap_apbif, true);
 	regcache_cache_only(ahub->regmap_ahub, true);
@@ -61,7 +61,7 @@ static __maybe_unused int tegra30_ahub_runtime_suspend(struct device *dev)
  * stopping streams should dynamically adjust the clock as required.  However,
  * this is not yet implemented.
  */
-static __maybe_unused int tegra30_ahub_runtime_resume(struct device *dev)
+static int tegra30_ahub_runtime_resume(struct device *dev)
 {
 	int ret;
 
@@ -509,6 +509,7 @@ static const struct of_device_id tegra30_ahub_of_match[] = {
 	{ .compatible = "nvidia,tegra30-ahub",  .data = &soc_data_tegra30 },
 	{},
 };
+MODULE_DEVICE_TABLE(of, tegra30_ahub_of_match);
 
 static int tegra30_ahub_probe(struct platform_device *pdev)
 {
@@ -600,10 +601,9 @@ static void tegra30_ahub_remove(struct platform_device *pdev)
 }
 
 static const struct dev_pm_ops tegra30_ahub_pm_ops = {
-	SET_RUNTIME_PM_OPS(tegra30_ahub_runtime_suspend,
-			   tegra30_ahub_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	RUNTIME_PM_OPS(tegra30_ahub_runtime_suspend,
+		       tegra30_ahub_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver tegra30_ahub_driver = {
@@ -612,7 +612,7 @@ static struct platform_driver tegra30_ahub_driver = {
 	.driver = {
 		.name = DRV_NAME,
 		.of_match_table = tegra30_ahub_of_match,
-		.pm = &tegra30_ahub_pm_ops,
+		.pm = pm_ptr(&tegra30_ahub_pm_ops),
 	},
 };
 module_platform_driver(tegra30_ahub_driver);
@@ -685,4 +685,3 @@ MODULE_AUTHOR("Stephen Warren <swarren@nvidia.com>");
 MODULE_DESCRIPTION("Tegra30 AHUB driver");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:" DRV_NAME);
-MODULE_DEVICE_TABLE(of, tegra30_ahub_of_match);

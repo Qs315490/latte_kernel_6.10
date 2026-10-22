@@ -132,7 +132,7 @@ static int pseries_pci_sriov_enable(struct pci_dev *pdev, u16 num_vfs)
 
 	/* First integer stores max config */
 	max_config_vfs = of_read_number(&max_vfs[0], 1);
-	if (max_config_vfs < num_vfs && num_vfs > MAX_VFS_FOR_MAP_PE) {
+	if (max_config_vfs < num_vfs || num_vfs > MAX_VFS_FOR_MAP_PE) {
 		dev_err(&pdev->dev,
 			"Num VFs %x > %x Configurable VFs\n",
 			num_vfs, (num_vfs > MAX_VFS_FOR_MAP_PE) ?
@@ -141,9 +141,7 @@ static int pseries_pci_sriov_enable(struct pci_dev *pdev, u16 num_vfs)
 	}
 
 	pdn = pci_get_pdn(pdev);
-	pdn->pe_num_map = kmalloc_array(num_vfs,
-					sizeof(*pdn->pe_num_map),
-					GFP_KERNEL);
+	pdn->pe_num_map = kmalloc_objs(*pdn->pe_num_map, num_vfs);
 	if (!pdn->pe_num_map)
 		return -ENOMEM;
 

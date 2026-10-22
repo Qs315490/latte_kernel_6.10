@@ -168,14 +168,14 @@ static bool event_interrupt_isr_v10(struct kfd_node *dev,
 	    client_id != SOC15_IH_CLIENTID_SE3SH)
 		return false;
 
-	pr_debug("client id 0x%x, source id %d, vmid %d, pasid 0x%x. raw data:\n",
-		 client_id, source_id, vmid, pasid);
-	pr_debug("%8X, %8X, %8X, %8X, %8X, %8X, %8X, %8X.\n",
-		 data[0], data[1], data[2], data[3],
-		 data[4], data[5], data[6], data[7]);
+	dev_dbg(dev->adev->dev,
+		"client id 0x%x, source id %d, vmid %d, pasid 0x%x. raw data:\n",
+		client_id, source_id, vmid, pasid);
+	dev_dbg(dev->adev->dev, "%8X, %8X, %8X, %8X, %8X, %8X, %8X, %8X.\n",
+		data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+		data[7]);
 
-	/* If there is no valid PASID, it's likely a bug */
-	if (WARN_ONCE(pasid == 0, "Bug: No PASID in KFD interrupt"))
+	if (pasid == 0)
 		return 0;
 
 	/* Interrupt types we care about: various signals and faults.
@@ -211,43 +211,72 @@ static void event_interrupt_wq_v10(struct kfd_node *dev,
 	    client_id == SOC15_IH_CLIENTID_SE2SH ||
 	    client_id == SOC15_IH_CLIENTID_SE3SH) {
 		if (source_id == SOC15_INTSRC_CP_END_OF_PIPE)
-			kfd_signal_event_interrupt(pasid, context_id0, 32);
+			kfd_signal_event_interrupt(pasid, context_id0, 32, true);
 		else if (source_id == SOC15_INTSRC_SQ_INTERRUPT_MSG) {
 			encoding = REG_GET_FIELD(context_id1,
 						SQ_INTERRUPT_WORD_WAVE_CTXID1, ENCODING);
 			switch (encoding) {
 			case SQ_INTERRUPT_WORD_ENCODING_AUTO:
-				pr_debug_ratelimited(
+				dev_dbg_ratelimited(
+					dev->adev->dev,
 					"sq_intr: auto, se %d, ttrace %d, wlt %d, ttrac_buf0_full %d, ttrac_buf1_full %d, ttrace_utc_err %d\n",
-					REG_GET_FIELD(context_id1, SQ_INTERRUPT_WORD_AUTO_CTXID1,
-							SE_ID),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_AUTO_CTXID0,
-							THREAD_TRACE),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_AUTO_CTXID0,
-							WLT),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_AUTO_CTXID0,
-							THREAD_TRACE_BUF0_FULL),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_AUTO_CTXID0,
-							THREAD_TRACE_BUF1_FULL),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_AUTO_CTXID0,
-							THREAD_TRACE_UTC_ERROR));
+					REG_GET_FIELD(
+						context_id1,
+						SQ_INTERRUPT_WORD_AUTO_CTXID1,
+						SE_ID),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_AUTO_CTXID0,
+						THREAD_TRACE),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_AUTO_CTXID0,
+						WLT),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_AUTO_CTXID0,
+						THREAD_TRACE_BUF0_FULL),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_AUTO_CTXID0,
+						THREAD_TRACE_BUF1_FULL),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_AUTO_CTXID0,
+						THREAD_TRACE_UTC_ERROR));
 				break;
 			case SQ_INTERRUPT_WORD_ENCODING_INST:
-				pr_debug_ratelimited("sq_intr: inst, se %d, data 0x%x, sa %d, priv %d, wave_id %d, simd_id %d, wgp_id %d\n",
-					REG_GET_FIELD(context_id1, SQ_INTERRUPT_WORD_WAVE_CTXID1,
-							SE_ID),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_WAVE_CTXID0,
-							DATA),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_WAVE_CTXID0,
-							SA_ID),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_WAVE_CTXID0,
-							PRIV),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_WAVE_CTXID0,
-							WAVE_ID),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_WAVE_CTXID0,
-							SIMD_ID),
-					REG_GET_FIELD(context_id1, SQ_INTERRUPT_WORD_WAVE_CTXID1,
-							WGP_ID));
+				dev_dbg_ratelimited(
+					dev->adev->dev,
+					"sq_intr: inst, se %d, data 0x%x, sa %d, priv %d, wave_id %d, simd_id %d, wgp_id %d\n",
+					REG_GET_FIELD(
+						context_id1,
+						SQ_INTERRUPT_WORD_WAVE_CTXID1,
+						SE_ID),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_WAVE_CTXID0,
+						DATA),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_WAVE_CTXID0,
+						SA_ID),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_WAVE_CTXID0,
+						PRIV),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_WAVE_CTXID0,
+						WAVE_ID),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_WAVE_CTXID0,
+						SIMD_ID),
+					REG_GET_FIELD(
+						context_id1,
+						SQ_INTERRUPT_WORD_WAVE_CTXID1,
+						WGP_ID));
 				if (context_id0 & SQ_INTERRUPT_WORD_WAVE_CTXID0__PRIV_MASK) {
 					if (kfd_set_dbg_ev_from_interrupt(dev, pasid,
 							KFD_DEBUG_DOORBELL_ID(context_id0),
@@ -259,27 +288,43 @@ static void event_interrupt_wq_v10(struct kfd_node *dev,
 			case SQ_INTERRUPT_WORD_ENCODING_ERROR:
 				sq_intr_err_type = REG_GET_FIELD(context_id0, KFD_CTXID0,
 								ERR_TYPE);
-				pr_warn_ratelimited("sq_intr: error, se %d, data 0x%x, sa %d, priv %d, wave_id %d, simd_id %d, wgp_id %d, err_type %d\n",
-					REG_GET_FIELD(context_id1, SQ_INTERRUPT_WORD_WAVE_CTXID1,
-							SE_ID),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_WAVE_CTXID0,
-							DATA),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_WAVE_CTXID0,
-							SA_ID),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_WAVE_CTXID0,
-							PRIV),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_WAVE_CTXID0,
-							WAVE_ID),
-					REG_GET_FIELD(context_id0, SQ_INTERRUPT_WORD_WAVE_CTXID0,
-							SIMD_ID),
-					REG_GET_FIELD(context_id1, SQ_INTERRUPT_WORD_WAVE_CTXID1,
-							WGP_ID),
+				dev_warn_ratelimited(
+					dev->adev->dev,
+					"sq_intr: error, se %d, data 0x%x, sa %d, priv %d, wave_id %d, simd_id %d, wgp_id %d, err_type %d\n",
+					REG_GET_FIELD(
+						context_id1,
+						SQ_INTERRUPT_WORD_WAVE_CTXID1,
+						SE_ID),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_WAVE_CTXID0,
+						DATA),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_WAVE_CTXID0,
+						SA_ID),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_WAVE_CTXID0,
+						PRIV),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_WAVE_CTXID0,
+						WAVE_ID),
+					REG_GET_FIELD(
+						context_id0,
+						SQ_INTERRUPT_WORD_WAVE_CTXID0,
+						SIMD_ID),
+					REG_GET_FIELD(
+						context_id1,
+						SQ_INTERRUPT_WORD_WAVE_CTXID1,
+						WGP_ID),
 					sq_intr_err_type);
 				break;
 			default:
 				break;
 			}
-			kfd_signal_event_interrupt(pasid, context_id0 & 0x7fffff, 23);
+			kfd_signal_event_interrupt(pasid, context_id0 & 0x7fffff, 23, true);
 		} else if (source_id == SOC15_INTSRC_CP_BAD_OPCODE &&
 			   KFD_DBG_EC_TYPE_IS_PACKET(KFD_DEBUG_CP_BAD_OP_ECODE(context_id0))) {
 			kfd_set_dbg_ev_from_interrupt(dev, pasid,
@@ -299,7 +344,7 @@ static void event_interrupt_wq_v10(struct kfd_node *dev,
 		   client_id == SOC15_IH_CLIENTID_SDMA6 ||
 		   client_id == SOC15_IH_CLIENTID_SDMA7) {
 		if (source_id == SOC15_INTSRC_SDMA_TRAP) {
-			kfd_signal_event_interrupt(pasid, context_id0 & 0xfffffff, 28);
+			kfd_signal_event_interrupt(pasid, context_id0 & 0xfffffff, 28, true);
 		}
 	} else if (client_id == SOC15_IH_CLIENTID_VMC ||
 		   client_id == SOC15_IH_CLIENTID_VMC1 ||

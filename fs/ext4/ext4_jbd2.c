@@ -63,12 +63,14 @@ static void ext4_put_nojournal(handle_t *handle)
  */
 static int ext4_journal_check_start(struct super_block *sb)
 {
+	int ret;
 	journal_t *journal;
 
 	might_sleep();
 
-	if (unlikely(ext4_forced_shutdown(sb)))
-		return -EIO;
+	ret = ext4_emergency_state(sb);
+	if (unlikely(ret))
+		return ret;
 
 	if (WARN_ON_ONCE(sb_rdonly(sb)))
 		return -EROFS;
@@ -244,7 +246,8 @@ int __ext4_journal_get_write_access(const char *where, unsigned int line,
 		}
 	} else
 		ext4_check_bdev_write_error(sb);
-	if (trigger_type == EXT4_JTR_NONE || !ext4_has_metadata_csum(sb))
+	if (trigger_type == EXT4_JTR_NONE ||
+	    !ext4_has_feature_metadata_csum(sb))
 		return 0;
 	BUG_ON(trigger_type >= EXT4_JOURNAL_TRIGGER_COUNT);
 	jbd2_journal_set_triggers(bh,
@@ -276,9 +279,16 @@ int __ext4_forget(const char *where, unsigned int line, handle_t *handle,
 		  bh, is_metadata, inode->i_mode,
 		  test_opt(inode->i_sb, DATA_FLAGS));
 
-	/* In the no journal case, we can just do a bforget and return */
+	/*
+	 * In the no journal case, we should wait for the ongoing buffer
+	 * to complete and do a forget.
+	 */
 	if (!ext4_handle_valid(handle)) {
-		bforget(bh);
+		if (bh) {
+			clear_buffer_dirty(bh);
+			wait_on_buffer(bh);
+			__bforget(bh);
+		}
 		return 0;
 	}
 
@@ -331,7 +341,8 @@ int __ext4_journal_get_create_access(const char *where, unsigned int line,
 					  err);
 		return err;
 	}
-	if (trigger_type == EXT4_JTR_NONE || !ext4_has_metadata_csum(sb))
+	if (trigger_type == EXT4_JTR_NONE ||
+	    !ext4_has_feature_metadata_csum(sb))
 		return 0;
 	BUG_ON(trigger_type >= EXT4_JOURNAL_TRIGGER_COUNT);
 	jbd2_journal_set_triggers(bh,
@@ -379,7 +390,8 @@ int __ext4_handle_dirty_metadata(const char *where, unsigned int line,
 		}
 	} else {
 		if (inode)
-			mark_buffer_dirty_inode(bh, inode);
+			mmb_mark_buffer_dirty(bh,
+					      &EXT4_I(inode)->i_metadata_bhs);
 		else
 			mark_buffer_dirty(bh);
 		if (inode && inode_needs_sync(inode)) {

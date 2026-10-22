@@ -394,7 +394,6 @@ static void tsi721_db_dpc(struct work_struct *work)
 						    idb_work);
 	struct rio_mport *mport;
 	struct rio_dbell *dbell;
-	int found = 0;
 	u32 wr_ptr, rd_ptr;
 	u64 *idb_entry;
 	u32 regval;
@@ -412,6 +411,8 @@ static void tsi721_db_dpc(struct work_struct *work)
 	rd_ptr = ioread32(priv->regs + TSI721_IDQ_RP(IDB_QUEUE)) % IDB_QSIZE;
 
 	while (wr_ptr != rd_ptr) {
+		int found = 0;
+
 		idb_entry = (u64 *)(priv->idb_base +
 					(TSI721_IDB_ENTRY_SIZE * rd_ptr));
 		rd_ptr++;
@@ -1145,7 +1146,7 @@ static int tsi721_rio_map_inb_mem(struct rio_mport *mport, dma_addr_t lstart,
 
 		loc_start = ibw_start;
 
-		map = kzalloc(sizeof(struct tsi721_ib_win_mapping), GFP_ATOMIC);
+		map = kzalloc_obj(struct tsi721_ib_win_mapping, GFP_ATOMIC);
 		if (map == NULL)
 			return -ENOMEM;
 
@@ -2774,7 +2775,7 @@ static int tsi721_probe(struct pci_dev *pdev,
 	struct tsi721_device *priv;
 	int err;
 
-	priv = kzalloc(sizeof(struct tsi721_device), GFP_KERNEL);
+	priv = kzalloc_obj(struct tsi721_device);
 	if (!priv) {
 		err = -ENOMEM;
 		goto err_exit;

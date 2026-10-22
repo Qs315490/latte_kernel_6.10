@@ -3,7 +3,7 @@
  * Copyright (c) 2022 Fujitsu.  All Rights Reserved.
  */
 
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
 #include "xfs_log_format.h"
@@ -22,10 +22,12 @@
 #include "xfs_notify_failure.h"
 #include "xfs_rtgroup.h"
 #include "xfs_rtrmap_btree.h"
+#include "xfs_healthmon.h"
 
 #include <linux/mm.h>
 #include <linux/dax.h>
 #include <linux/fs.h>
+#include <linux/fserror.h>
 
 struct xfs_failure_info {
 	xfs_agblock_t		startblock;
@@ -116,6 +118,9 @@ xfs_dax_failure_fn(
 		invalidate_inode_pages2_range(mapping, pgoff,
 					      pgoff + pgcnt - 1);
 
+	fserror_report_data_lost(VFS_I(ip), (u64)pgoff << PAGE_SHIFT,
+			(u64)pgcnt << PAGE_SHIFT, GFP_NOFS);
+
 	xfs_irele(ip);
 	return error;
 }
@@ -127,7 +132,7 @@ xfs_dax_notify_failure_freeze(
 	struct super_block	*sb = mp->m_super;
 	int			error;
 
-	error = freeze_super(sb, FREEZE_HOLDER_KERNEL);
+	error = freeze_super(sb, FREEZE_HOLDER_KERNEL, NULL);
 	if (error)
 		xfs_emerg(mp, "already frozen by kernel, err=%d", error);
 
@@ -143,7 +148,7 @@ xfs_dax_notify_failure_thaw(
 	int			error;
 
 	if (kernel_frozen) {
-		error = thaw_super(sb, FREEZE_HOLDER_KERNEL);
+		error = thaw_super(sb, FREEZE_HOLDER_KERNEL, NULL);
 		if (error)
 			xfs_emerg(mp, "still frozen after notify failure, err=%d",
 				error);
@@ -153,7 +158,7 @@ xfs_dax_notify_failure_thaw(
 	 * Also thaw userspace call anyway because the device is about to be
 	 * removed immediately.
 	 */
-	thaw_super(sb, FREEZE_HOLDER_USERSPACE);
+	thaw_super(sb, FREEZE_HOLDER_USERSPACE, NULL);
 }
 
 static int
@@ -165,7 +170,7 @@ xfs_dax_translate_range(
 	uint64_t		*bblen)
 {
 	u64			dev_start = btp->bt_dax_part_off;
-	u64			dev_len = bdev_nr_bytes(btp->bt_bdev);
+	u64			dev_len = BBTOB(btp->bt_nr_sectors);
 	u64			dev_end = dev_start + dev_len - 1;
 
 	/* Notify failure on the whole device. */
@@ -215,6 +220,8 @@ xfs_dax_notify_logdev_failure(
 	if (error)
 		return error;
 
+	xfs_healthmon_report_media(mp, XFS_DEV_LOG, daddr, bblen);
+
 	/*
 	 * In the pre-remove case the failure notification is attempting to
 	 * trigger a force unmount.  The expectation is that the device is
@@ -248,16 +255,19 @@ xfs_dax_notify_dev_failure(
 	uint64_t		bblen;
 	struct xfs_group	*xg = NULL;
 
+	error = xfs_dax_translate_range(xfs_group_type_buftarg(mp, type),
+			offset, len, &daddr, &bblen);
+	if (error)
+		return error;
+
+	xfs_healthmon_report_media(mp,
+			type == XG_TYPE_RTG ?  XFS_DEV_RT : XFS_DEV_DATA,
+			daddr, bblen);
+
 	if (!xfs_has_rmapbt(mp)) {
 		xfs_debug(mp, "notify_failure() needs rmapbt enabled!");
 		return -EOPNOTSUPP;
 	}
-
-	error = xfs_dax_translate_range(type == XG_TYPE_RTG ?
-			mp->m_rtdev_targp : mp->m_ddev_targp,
-			offset, len, &daddr, &bblen);
-	if (error)
-		return error;
 
 	if (type == XG_TYPE_RTG) {
 		start_bno = xfs_daddr_to_rtb(mp, daddr);
@@ -280,10 +290,7 @@ xfs_dax_notify_dev_failure(
 		kernel_frozen = xfs_dax_notify_failure_freeze(mp) == 0;
 	}
 
-	error = xfs_trans_alloc_empty(mp, &tp);
-	if (error)
-		goto out;
-
+	tp = xfs_trans_alloc_empty(mp);
 	start_gno = xfs_fsb_to_gno(mp, start_bno, type);
 	end_gno = xfs_fsb_to_gno(mp, end_bno, type);
 	while ((xg = xfs_group_next_range(mp, xg, start_gno, end_gno, type))) {
@@ -297,7 +304,7 @@ xfs_dax_notify_dev_failure(
 
 			error = xfs_alloc_read_agf(pag, tp, 0, &agf_bp);
 			if (error) {
-				xfs_perag_put(pag);
+				xfs_perag_rele(pag);
 				break;
 			}
 
@@ -333,7 +340,7 @@ xfs_dax_notify_dev_failure(
 		if (rtg)
 			xfs_rtgroup_unlock(rtg, XFS_RTGLOCK_RMAP);
 		if (error) {
-			xfs_group_put(xg);
+			xfs_group_rele(xg);
 			break;
 		}
 	}
@@ -343,7 +350,7 @@ xfs_dax_notify_dev_failure(
 	/*
 	 * Shutdown fs from a force umount in pre-remove case which won't fail,
 	 * so errors can be ignored.  Otherwise, shutdown the filesystem with
-	 * CORRUPT flag if error occured or notify.want_shutdown was set during
+	 * CORRUPT flag if error occurred or notify.want_shutdown was set during
 	 * RMAP querying.
 	 */
 	if (mf_flags & MF_MEM_PRE_REMOVE)
@@ -354,7 +361,6 @@ xfs_dax_notify_dev_failure(
 			error = -EFSCORRUPTED;
 	}
 
-out:
 	/* Thaw the fs if it has been frozen before. */
 	if (mf_flags & MF_MEM_PRE_REMOVE)
 		xfs_dax_notify_failure_thaw(mp, kernel_frozen);

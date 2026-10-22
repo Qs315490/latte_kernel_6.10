@@ -253,7 +253,6 @@ static int al_pcie_config_prepare(struct al_pcie *pcie)
 	u8 subordinate_bus;
 	u8 secondary_bus;
 	u32 cfg_control;
-	u32 reg;
 
 	ft = resource_list_first_type(&pp->bridge->windows, IORESOURCE_BUS);
 	if (!ft)
@@ -285,14 +284,9 @@ static int al_pcie_config_prepare(struct al_pcie *pcie)
 			     CFG_CONTROL;
 
 	cfg_control = al_pcie_controller_readl(pcie, cfg_control_offset);
-
-	reg = cfg_control &
-	      ~(CFG_CONTROL_SEC_BUS_MASK | CFG_CONTROL_SUBBUS_MASK);
-
-	reg |= FIELD_PREP(CFG_CONTROL_SUBBUS_MASK, subordinate_bus) |
-	       FIELD_PREP(CFG_CONTROL_SEC_BUS_MASK, secondary_bus);
-
-	al_pcie_controller_writel(pcie, cfg_control_offset, reg);
+	FIELD_MODIFY(CFG_CONTROL_SUBBUS_MASK, &cfg_control, subordinate_bus);
+	FIELD_MODIFY(CFG_CONTROL_SEC_BUS_MASK, &cfg_control, secondary_bus);
+	al_pcie_controller_writel(pcie, cfg_control_offset, cfg_control);
 
 	return 0;
 }
@@ -352,6 +346,7 @@ static int al_pcie_probe(struct platform_device *pdev)
 		return -ENOENT;
 	}
 	al_pcie->ecam_size = resource_size(ecam_res);
+	pci->pp.native_ecam = true;
 
 	controller_res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 						      "controller");

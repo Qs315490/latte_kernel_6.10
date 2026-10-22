@@ -771,7 +771,6 @@ int is_bx(struct hfi1_devdata *dd);
 bool is_urg_masked(struct hfi1_ctxtdata *rcd);
 u32 read_physical_state(struct hfi1_devdata *dd);
 u32 chip_to_opa_pstate(struct hfi1_devdata *dd, u32 chip_pstate);
-const char *opa_lstate_name(u32 lstate);
 const char *opa_pstate_name(u32 pstate);
 u32 driver_pstate(struct hfi1_pportdata *ppd);
 u32 driver_lstate(struct hfi1_pportdata *ppd);
@@ -1393,8 +1392,6 @@ int hfi1_set_ctxt_pkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *ctxt,
 		       u16 pkey);
 int hfi1_clear_ctxt_pkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *ctxt);
 void hfi1_read_link_quality(struct hfi1_devdata *dd, u8 *link_quality);
-void hfi1_init_vnic_rsm(struct hfi1_devdata *dd);
-void hfi1_deinit_vnic_rsm(struct hfi1_devdata *dd);
 
 irqreturn_t general_interrupt(int irq, void *data);
 irqreturn_t sdma_interrupt(int irq, void *data);

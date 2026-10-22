@@ -8,6 +8,7 @@
 #include "main.h"
 
 #include <linux/atomic.h>
+#include <linux/build_bug.h>
 #include <linux/byteorder/generic.h>
 #include <linux/compiler.h>
 #include <linux/errno.h>
@@ -30,10 +31,9 @@
 #include "fragmentation.h"
 #include "hard-interface.h"
 #include "log.h"
-#include "network-coding.h"
+#include "mesh-interface.h"
 #include "originator.h"
 #include "send.h"
-#include "soft-interface.h"
 #include "tp_meter.h"
 #include "translation-table.h"
 #include "tvlv.h"
@@ -43,7 +43,7 @@ static int batadv_route_unicast_packet(struct sk_buff *skb,
 
 /**
  * _batadv_update_route() - set the router for this originator
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: orig node which is to be configured
  * @recv_if: the receive interface for which this route is set
  * @neigh_node: neighbor which should be the next router
@@ -106,7 +106,7 @@ static void _batadv_update_route(struct batadv_priv *bat_priv,
 
 /**
  * batadv_update_route() - set the router for this originator
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: orig node which is to be configured
  * @recv_if: the receive interface for which this route is set
  * @neigh_node: neighbor which should be the next router
@@ -133,7 +133,7 @@ out:
 /**
  * batadv_window_protected() - checks whether the host restarted and is in the
  *  protection time.
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @seq_num_diff: difference between the current/received sequence number and
  *  the last sequence number
  * @seq_old_max_diff: maximum age of sequence number not considered as restart
@@ -206,8 +206,61 @@ bool batadv_check_management_packet(struct sk_buff *skb,
 }
 
 /**
+ * batadv_skb_decrement_ttl() - decrement ttl in a batman-adv header, csum-safe
+ * @skb: the received packet with @skb->data pointing to the batman-adv header
+ *
+ * Supports the following packet types, all of which carry the TTL at offset 2:
+ *
+ * - batadv_ogm_packet
+ * - batadv_ogm2_packet
+ * - batadv_icmp_header
+ * - batadv_icmp_packet
+ * - batadv_icmp_tp_packet
+ * - batadv_icmp_packet_rr
+ * - batadv_unicast_packet
+ * - batadv_frag_packet
+ * - batadv_bcast_packet
+ * - batadv_mcast_packet
+ * - batadv_coded_packet
+ * - batadv_unicast_tvlv_packet
+ *
+ * Return: true if the packet may be forwarded (ttl decremented),
+ *  false if it must be dropped (ttl would expire)
+ */
+static bool batadv_skb_decrement_ttl(struct sk_buff *skb)
+{
+	static const size_t ttl_offset = 2;
+	u8 *ttl_pos;
+
+	BUILD_BUG_ON(offsetof(struct batadv_ogm_packet, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_ogm2_packet, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_icmp_header, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_icmp_packet, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_icmp_tp_packet, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_icmp_packet_rr, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_unicast_packet, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_frag_packet, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_bcast_packet, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_mcast_packet, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_coded_packet, ttl) != ttl_offset);
+	BUILD_BUG_ON(offsetof(struct batadv_unicast_tvlv_packet, ttl) != ttl_offset);
+
+	ttl_pos = skb->data + ttl_offset;
+
+	/* would expire on this hop -> drop, leave header + csum untouched */
+	if (*ttl_pos < 2)
+		return false;
+
+	skb_postpull_rcsum(skb, ttl_pos, 1);
+	(*ttl_pos)--;
+	skb_postpush_rcsum(skb, ttl_pos, 1);
+
+	return true;
+}
+
+/**
  * batadv_recv_my_icmp_packet() - receive an icmp packet locally
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @skb: icmp packet to process
  *
  * Return: NET_RX_SUCCESS if the packet has been consumed or NET_RX_DROP
@@ -338,7 +391,7 @@ out:
 int batadv_recv_icmp_packet(struct sk_buff *skb,
 			    struct batadv_hard_iface *recv_if)
 {
-	struct batadv_priv *bat_priv = netdev_priv(recv_if->soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(recv_if->mesh_iface);
 	struct batadv_icmp_header *icmph;
 	struct batadv_icmp_packet_rr *icmp_packet_rr;
 	struct ethhdr *ethhdr;
@@ -428,7 +481,7 @@ free_skb:
 
 /**
  * batadv_check_unicast_packet() - Check for malformed unicast packets
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @skb: packet to check
  * @hdr_size: size of header to pull
  *
@@ -511,7 +564,7 @@ batadv_last_bonding_replace(struct batadv_orig_node *orig_node,
 
 /**
  * batadv_find_router() - find a suitable router for this originator
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: the destination node
  * @recv_if: pointer to interface this packet was received on
  *
@@ -544,7 +597,7 @@ batadv_find_router(struct batadv_priv *bat_priv,
 	/* only consider bonding for recv_if == BATADV_IF_DEFAULT (first hop)
 	 * and if activated.
 	 */
-	if (!(recv_if == BATADV_IF_DEFAULT && atomic_read(&bat_priv->bonding)))
+	if (!(recv_if == BATADV_IF_DEFAULT && READ_ONCE(bat_priv->bonding)))
 		return router;
 
 	/* bonding: loop through the list of possible routers found
@@ -656,7 +709,7 @@ next:
 static int batadv_route_unicast_packet(struct sk_buff *skb,
 				       struct batadv_hard_iface *recv_if)
 {
-	struct batadv_priv *bat_priv = netdev_priv(recv_if->soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(recv_if->mesh_iface);
 	struct batadv_orig_node *orig_node = NULL;
 	struct batadv_unicast_packet *unicast_packet;
 	struct ethhdr *ethhdr = eth_hdr(skb);
@@ -727,7 +780,7 @@ free_skb:
 
 /**
  * batadv_reroute_unicast_packet() - update the unicast header for re-routing
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @skb: unicast packet to process
  * @unicast_packet: the unicast header to be updated
  * @dst_addr: the payload destination
@@ -766,7 +819,7 @@ batadv_reroute_unicast_packet(struct batadv_priv *bat_priv, struct sk_buff *skb,
 			goto out;
 
 		orig_addr = orig_node->orig;
-		orig_ttvn = (u8)atomic_read(&orig_node->last_ttvn);
+		orig_ttvn = READ_ONCE(orig_node->last_ttvn);
 	}
 
 	/* update the packet header */
@@ -802,8 +855,8 @@ static bool batadv_check_unicast_ttvn(struct batadv_priv *bat_priv,
 	if (skb_cow(skb, sizeof(*unicast_packet)) < 0)
 		return false;
 
-	unicast_packet = (struct batadv_unicast_packet *)skb->data;
 	vid = batadv_get_vid(skb, hdr_len);
+	unicast_packet = (struct batadv_unicast_packet *)skb->data;
 	ethhdr = (struct ethhdr *)(skb->data + hdr_len);
 
 	/* do not reroute multicast frames in a unicast header */
@@ -846,7 +899,7 @@ static bool batadv_check_unicast_ttvn(struct batadv_priv *bat_priv,
 		if (!orig_node)
 			return false;
 
-		curr_ttvn = (u8)atomic_read(&orig_node->last_ttvn);
+		curr_ttvn = READ_ONCE(orig_node->last_ttvn);
 		batadv_orig_node_put(orig_node);
 	}
 
@@ -879,7 +932,7 @@ static bool batadv_check_unicast_ttvn(struct batadv_priv *bat_priv,
 		return false;
 
 	/* update the header in order to let the packet be delivered to this
-	 * node's soft interface
+	 * node's mesh interface
 	 */
 	primary_if = batadv_primary_if_get_selected(bat_priv);
 	if (!primary_if)
@@ -909,7 +962,7 @@ int batadv_recv_unhandled_unicast_packet(struct sk_buff *skb,
 					 struct batadv_hard_iface *recv_if)
 {
 	struct batadv_unicast_packet *unicast_packet;
-	struct batadv_priv *bat_priv = netdev_priv(recv_if->soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(recv_if->mesh_iface);
 	int check, hdr_size = sizeof(*unicast_packet);
 
 	check = batadv_check_unicast_packet(bat_priv, skb, hdr_size);
@@ -938,7 +991,7 @@ free_skb:
 int batadv_recv_unicast_packet(struct sk_buff *skb,
 			       struct batadv_hard_iface *recv_if)
 {
-	struct batadv_priv *bat_priv = netdev_priv(recv_if->soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(recv_if->mesh_iface);
 	struct batadv_unicast_packet *unicast_packet;
 	struct batadv_unicast_4addr_packet *unicast_4addr_packet;
 	u8 *orig_addr, *orig_addr_gw;
@@ -956,15 +1009,9 @@ int batadv_recv_unicast_packet(struct sk_buff *skb,
 
 	/* function returns -EREMOTE for promiscuous packets */
 	check = batadv_check_unicast_packet(bat_priv, skb, hdr_size);
-
-	/* Even though the packet is not for us, we might save it to use for
-	 * decoding a later received coded packet
-	 */
-	if (check == -EREMOTE)
-		batadv_nc_skb_store_sniffed_unicast(bat_priv, skb);
-
 	if (check < 0)
 		goto free_skb;
+
 	if (!batadv_check_unicast_ttvn(bat_priv, skb, hdr_size))
 		goto free_skb;
 
@@ -982,6 +1029,7 @@ int batadv_recv_unicast_packet(struct sk_buff *skb,
 							  hdr_size);
 			batadv_orig_node_put(orig_node_gw);
 			if (is_gw) {
+				orig_addr_gw = eth_hdr(skb)->h_source;
 				batadv_dbg(BATADV_DBG_BLA, bat_priv,
 					   "%s(): Dropped unicast pkt received from another backbone gw %pM.\n",
 					   __func__, orig_addr_gw);
@@ -1017,7 +1065,7 @@ int batadv_recv_unicast_packet(struct sk_buff *skb,
 
 		batadv_dat_snoop_incoming_dhcp_ack(bat_priv, skb, hdr_size);
 
-		batadv_interface_rx(recv_if->soft_iface, skb, hdr_size,
+		batadv_interface_rx(recv_if->mesh_iface, skb, hdr_size,
 				    orig_node);
 
 rx_success:
@@ -1047,7 +1095,7 @@ free_skb:
 int batadv_recv_unicast_tvlv(struct sk_buff *skb,
 			     struct batadv_hard_iface *recv_if)
 {
-	struct batadv_priv *bat_priv = netdev_priv(recv_if->soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(recv_if->mesh_iface);
 	struct batadv_unicast_tvlv_packet *unicast_tvlv_packet;
 	unsigned char *tvlv_buff;
 	u16 tvlv_buff_len;
@@ -1103,7 +1151,7 @@ free_skb:
 int batadv_recv_frag_packet(struct sk_buff *skb,
 			    struct batadv_hard_iface *recv_if)
 {
-	struct batadv_priv *bat_priv = netdev_priv(recv_if->soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(recv_if->mesh_iface);
 	struct batadv_orig_node *orig_node_src = NULL;
 	struct batadv_frag_packet *frag_packet;
 	int ret = NET_RX_DROP;
@@ -1121,10 +1169,9 @@ int batadv_recv_frag_packet(struct sk_buff *skb,
 
 	/* Route the fragment if it is not for us and too big to be merged. */
 	if (!batadv_is_my_mac(bat_priv, frag_packet->dest) &&
-	    batadv_frag_skb_fwd(skb, recv_if, orig_node_src)) {
+	    batadv_frag_skb_fwd(skb, recv_if, orig_node_src, &ret)) {
 		/* skb was consumed */
 		skb = NULL;
-		ret = NET_RX_SUCCESS;
 		goto put_orig_node;
 	}
 
@@ -1165,7 +1212,7 @@ free_skb:
 int batadv_recv_bcast_packet(struct sk_buff *skb,
 			     struct batadv_hard_iface *recv_if)
 {
-	struct batadv_priv *bat_priv = netdev_priv(recv_if->soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(recv_if->mesh_iface);
 	struct batadv_orig_node *orig_node = NULL;
 	struct batadv_bcast_packet *bcast_packet;
 	struct ethhdr *ethhdr;
@@ -1198,7 +1245,13 @@ int batadv_recv_bcast_packet(struct sk_buff *skb,
 	if (batadv_is_my_mac(bat_priv, bcast_packet->orig))
 		goto free_skb;
 
-	if (bcast_packet->ttl-- < 2)
+	/* create a copy of the skb, if needed, to modify it. */
+	if (skb_cow(skb, ETH_HLEN) < 0)
+		goto free_skb;
+
+	bcast_packet = (struct batadv_bcast_packet *)skb->data;
+
+	if (!batadv_skb_decrement_ttl(skb))
 		goto free_skb;
 
 	orig_node = batadv_orig_hash_find(bat_priv, bcast_packet->orig);
@@ -1255,7 +1308,7 @@ int batadv_recv_bcast_packet(struct sk_buff *skb,
 	batadv_dat_snoop_incoming_dhcp_ack(bat_priv, skb, hdr_size);
 
 	/* broadcast for me */
-	batadv_interface_rx(recv_if->soft_iface, skb, hdr_size, orig_node);
+	batadv_interface_rx(recv_if->mesh_iface, skb, hdr_size, orig_node);
 
 rx_success:
 	ret = NET_RX_SUCCESS;
@@ -1279,14 +1332,14 @@ out:
  *
  * Parses the given, received batman-adv multicast packet. Depending on the
  * contents of its TVLV forwards it and/or decapsulates it to hand it to the
- * soft interface.
+ * mesh interface.
  *
  * Return: NET_RX_DROP if the skb is not consumed, NET_RX_SUCCESS otherwise.
  */
 int batadv_recv_mcast_packet(struct sk_buff *skb,
 			     struct batadv_hard_iface *recv_if)
 {
-	struct batadv_priv *bat_priv = netdev_priv(recv_if->soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(recv_if->mesh_iface);
 	struct batadv_mcast_packet *mcast_packet;
 	int hdr_size = sizeof(*mcast_packet);
 	unsigned char *tvlv_buff;
@@ -1305,13 +1358,19 @@ int batadv_recv_mcast_packet(struct sk_buff *skb,
 		goto free_skb;
 
 	mcast_packet = (struct batadv_mcast_packet *)skb->data;
-	if (mcast_packet->ttl-- < 2)
+	if (!batadv_skb_decrement_ttl(skb))
 		goto free_skb;
 
 	tvlv_buff = (unsigned char *)(skb->data + hdr_size);
 	tvlv_buff_len = ntohs(mcast_packet->tvlv_len);
 
 	if (tvlv_buff_len > skb->len - hdr_size)
+		goto free_skb;
+
+	/* the fields of an multicast payload are accessed assuming (at least)
+	 * 2-byte alignment, so a following packet must start at an even offset.
+	 */
+	if (tvlv_buff_len & 1)
 		goto free_skb;
 
 	ret = batadv_tvlv_containers_process(bat_priv, BATADV_MCAST, NULL, skb,
@@ -1329,7 +1388,7 @@ int batadv_recv_mcast_packet(struct sk_buff *skb,
 		batadv_add_counter(bat_priv, BATADV_CNT_MCAST_RX_LOCAL_BYTES,
 				   skb->len - hdr_size);
 
-		batadv_interface_rx(bat_priv->soft_iface, skb, hdr_size, NULL);
+		batadv_interface_rx(bat_priv->mesh_iface, skb, hdr_size, NULL);
 		/* skb was consumed */
 		skb = NULL;
 	}

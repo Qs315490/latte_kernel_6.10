@@ -159,7 +159,7 @@ void ioat_stop(struct ioatdma_chan *ioat_chan)
 	}
 
 	/* flush inflight timers */
-	del_timer_sync(&ioat_chan->timer);
+	timer_delete_sync(&ioat_chan->timer);
 
 	/* flush inflight tasklet runs */
 	tasklet_kill(&ioat_chan->cleanup_task);
@@ -378,7 +378,7 @@ ioat_alloc_ring(struct dma_chan *c, int order, gfp_t flags)
 	int i, chunks;
 
 	/* allocate the array to hold the software ring */
-	ring = kcalloc(total_descs, sizeof(*ring), flags);
+	ring = kzalloc_objs(*ring, total_descs, flags);
 	if (!ring)
 		return NULL;
 
@@ -901,7 +901,8 @@ static void ioat_reboot_chan(struct ioatdma_chan *ioat_chan)
 
 void ioat_timer_event(struct timer_list *t)
 {
-	struct ioatdma_chan *ioat_chan = from_timer(ioat_chan, t, timer);
+	struct ioatdma_chan *ioat_chan = timer_container_of(ioat_chan, t,
+							    timer);
 	dma_addr_t phys_complete;
 	u64 status;
 

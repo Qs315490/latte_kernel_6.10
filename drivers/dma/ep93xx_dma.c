@@ -20,7 +20,6 @@
 #include <linux/dma-mapping.h>
 #include <linux/dmaengine.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of_dma.h>
 #include <linux/overflow.h>
 #include <linux/platform_device.h>
@@ -966,7 +965,7 @@ static int ep93xx_dma_alloc_chan_resources(struct dma_chan *chan)
 	for (i = 0; i < DMA_MAX_CHAN_DESCRIPTORS; i++) {
 		struct ep93xx_dma_desc *desc;
 
-		desc = kzalloc(sizeof(*desc), GFP_KERNEL);
+		desc = kzalloc_obj(*desc);
 		if (!desc) {
 			dev_warn(chan2dev(edmac), "not enough descriptors\n");
 			break;
@@ -1587,18 +1586,11 @@ static const struct of_device_id ep93xx_dma_of_ids[] = {
 };
 MODULE_DEVICE_TABLE(of, ep93xx_dma_of_ids);
 
-static const struct platform_device_id ep93xx_dma_driver_ids[] = {
-	{ "ep93xx-dma-m2p", 0 },
-	{ "ep93xx-dma-m2m", 1 },
-	{ },
-};
-
 static struct platform_driver ep93xx_dma_driver = {
 	.driver		= {
 		.name	= "ep93xx-dma",
 		.of_match_table = ep93xx_dma_of_ids,
 	},
-	.id_table	= ep93xx_dma_driver_ids,
 	.probe		= ep93xx_dma_probe,
 };
 

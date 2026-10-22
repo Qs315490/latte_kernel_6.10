@@ -3,7 +3,7 @@
  * Copyright (c) 2023-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -81,8 +81,12 @@ xchk_dirtree_buf_cleanup(
 		kfree(path);
 	}
 
-	xfblob_destroy(dl->path_names);
-	xfarray_destroy(dl->path_steps);
+	if (dl->path_names)
+		xfblob_destroy(dl->path_names);
+	dl->path_names = NULL;
+	if (dl->path_steps)
+		xfarray_destroy(dl->path_steps);
+	dl->path_steps = NULL;
 	mutex_destroy(&dl->lock);
 }
 
@@ -92,7 +96,6 @@ xchk_setup_dirtree(
 	struct xfs_scrub	*sc)
 {
 	struct xchk_dirtree	*dl;
-	char			*descr;
 	int			error;
 
 	xchk_fsgates_enable(sc, XCHK_FSGATES_DIRENTS);
@@ -103,7 +106,7 @@ xchk_setup_dirtree(
 			return error;
 	}
 
-	dl = kvzalloc(sizeof(struct xchk_dirtree), XCHK_GFP_FLAGS);
+	dl = kvzalloc_obj(struct xchk_dirtree, XCHK_GFP_FLAGS);
 	if (!dl)
 		return -ENOMEM;
 	dl->sc = sc;
@@ -116,16 +119,12 @@ xchk_setup_dirtree(
 
 	mutex_init(&dl->lock);
 
-	descr = xchk_xfile_ino_descr(sc, "dirtree path steps");
-	error = xfarray_create(descr, 0, sizeof(struct xchk_dirpath_step),
-			&dl->path_steps);
-	kfree(descr);
+	error = xfarray_create("dirtree path steps", 0,
+			sizeof(struct xchk_dirpath_step), &dl->path_steps);
 	if (error)
 		goto out_dl;
 
-	descr = xchk_xfile_ino_descr(sc, "dirtree path names");
-	error = xfblob_create(descr, &dl->path_names);
-	kfree(descr);
+	error = xfblob_create("dirtree path names", &dl->path_names);
 	if (error)
 		goto out_steps;
 
@@ -176,7 +175,7 @@ xchk_dirpath_append(
 	if (error)
 		return error;
 
-	error = xino_bitmap_set(&path->seen_inodes, ip->i_ino);
+	error = xino_bitmap_set(&path->seen_inodes, I_INO(ip));
 	if (error)
 		return error;
 
@@ -239,7 +238,7 @@ xchk_dirtree_create_path(
 	 * Create a new xchk_path structure to remember this parent pointer
 	 * and record the first name step.
 	 */
-	path = kmalloc(sizeof(struct xchk_dirpath), XCHK_GFP_FLAGS);
+	path = kmalloc_obj(struct xchk_dirpath, XCHK_GFP_FLAGS);
 	if (!path)
 		return -ENOMEM;
 
@@ -384,6 +383,14 @@ xchk_dirpath_step_up(
 		goto out_scanlock;
 	}
 
+	/* The handle encoded in the parent pointer must match. */
+	if (VFS_I(dp)->i_generation != be32_to_cpu(dl->pptr_rec.p_gen)) {
+		trace_xchk_dirpath_badgen(dl->sc, dp, path->path_nr,
+				path->nr_steps, &dl->xname, &dl->pptr_rec);
+		error = -EFSCORRUPTED;
+		goto out_scanlock;
+	}
+
 	/* We've reached the root directory; the path is ok. */
 	if (parent_ino == dl->root_ino) {
 		xchk_dirpath_set_outcome(dl, path, XCHK_DIRPATH_OK);
@@ -395,7 +402,7 @@ xchk_dirpath_step_up(
 	 * The inode being scanned is its own distant ancestor!  Get rid of
 	 * this path.
 	 */
-	if (parent_ino == sc->ip->i_ino) {
+	if (parent_ino == I_INO(sc->ip)) {
 		xchk_dirpath_set_outcome(dl, path, XCHK_DIRPATH_DELETE);
 		error = 0;
 		goto out_scanlock;
@@ -409,14 +416,6 @@ xchk_dirpath_step_up(
 	if (xino_bitmap_test(&path->seen_inodes, parent_ino)) {
 		xchk_dirpath_set_outcome(dl, path, XCHK_DIRPATH_LOOP);
 		error = 0;
-		goto out_scanlock;
-	}
-
-	/* The handle encoded in the parent pointer must match. */
-	if (VFS_I(dp)->i_generation != be32_to_cpu(dl->pptr_rec.p_gen)) {
-		trace_xchk_dirpath_badgen(dl->sc, dp, path->path_nr,
-				path->nr_steps, &dl->xname, &dl->pptr_rec);
-		error = -EFSCORRUPTED;
 		goto out_scanlock;
 	}
 
@@ -534,7 +533,7 @@ xchk_dirpath_walk_upwards(
 	 * The inode being scanned is its own direct ancestor!
 	 * Get rid of this path.
 	 */
-	if (be64_to_cpu(dl->pptr_rec.p_ino) == sc->ip->i_ino) {
+	if (be64_to_cpu(dl->pptr_rec.p_ino) == I_INO(sc->ip)) {
 		xchk_dirpath_set_outcome(dl, path, XCHK_DIRPATH_DELETE);
 		return 0;
 	}
@@ -611,7 +610,7 @@ xchk_dirpath_step_is_stale(
 	 * If the parent and child being updated are not the ones mentioned in
 	 * this path step, the scan data is still ok.
 	 */
-	if (p->ip->i_ino != child_ino || p->dp->i_ino != *cursor)
+	if (I_INO(p->ip) != child_ino || I_INO(p->dp) != *cursor)
 		return 0;
 
 	/*
@@ -633,13 +632,13 @@ xchk_dirpath_step_is_stale(
 	 * If the update comes from the repair code itself, walk the state
 	 * machine forward.
 	 */
-	if (p->ip->i_ino == dl->scan_ino &&
+	if (I_INO(p->ip) == dl->scan_ino &&
 	    path->outcome == XREP_DIRPATH_ADOPTING) {
 		xchk_dirpath_set_outcome(dl, path, XREP_DIRPATH_ADOPTED);
 		return 0;
 	}
 
-	if (p->ip->i_ino == dl->scan_ino &&
+	if (I_INO(p->ip) == dl->scan_ino &&
 	    path->outcome == XREP_DIRPATH_DELETING) {
 		xchk_dirpath_set_outcome(dl, path, XREP_DIRPATH_DELETED);
 		return 0;
@@ -670,7 +669,7 @@ xchk_dirpath_is_stale(
 	 * The child being updated has not been seen by this path at all; this
 	 * path cannot be stale.
 	 */
-	if (!xino_bitmap_test(&path->seen_inodes, p->ip->i_ino))
+	if (!xino_bitmap_test(&path->seen_inodes, I_INO(p->ip)))
 		return 0;
 
 	ret = xchk_dirpath_step_is_stale(dl, path, 0, idx, p, &cursor);
@@ -929,7 +928,7 @@ xchk_dirtree(
 	 * released during teardown.
 	 */
 	dl->root_ino = xchk_inode_rootdir_inum(sc->ip);
-	dl->scan_ino = sc->ip->i_ino;
+	dl->scan_ino = I_INO(sc->ip);
 
 	trace_xchk_dirtree_start(sc->ip, sc->sm, 0);
 
@@ -955,7 +954,7 @@ xchk_dirtree(
 		 * parent pointers are corrupt; this scan cannot be completed
 		 * without full information.
 		 */
-		xchk_ino_xref_set_corrupt(sc, sc->ip->i_ino);
+		xchk_ip_xref_set_corrupt(sc, sc->ip);
 		error = 0;
 		goto out_scanlock;
 	}
@@ -980,12 +979,12 @@ xchk_dirtree(
 	xchk_dirtree_evaluate(dl, &oc);
 	if (xchk_dirtree_parentless(dl)) {
 		if (oc.good || oc.bad || oc.suspect)
-			xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+			xchk_ip_set_corrupt(sc, sc->ip);
 	} else {
 		if (oc.bad || oc.good + oc.suspect != 1)
-			xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+			xchk_ip_set_corrupt(sc, sc->ip);
 		if (oc.suspect)
-			xchk_ino_xref_set_corrupt(sc, sc->ip->i_ino);
+			xchk_ip_xref_set_corrupt(sc, sc->ip);
 	}
 
 out_scanlock:

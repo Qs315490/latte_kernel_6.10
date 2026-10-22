@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
 /* Copyright 2014-2016 Freescale Semiconductor Inc.
- * Copyright 2016-2022 NXP
+ * Copyright 2016-2022, 2024-2026 NXP
  */
 
 #include <linux/net_tstamp.h>
@@ -10,7 +10,7 @@
 #include "dpaa2-eth.h"
 
 /* To be kept in sync with DPNI statistics */
-static char dpaa2_ethtool_stats[][ETH_GSTRING_LEN] = {
+static const char dpaa2_ethtool_stats[][ETH_GSTRING_LEN] = {
 	"[hw] rx frames",
 	"[hw] rx bytes",
 	"[hw] rx mcast frames",
@@ -37,7 +37,7 @@ static char dpaa2_ethtool_stats[][ETH_GSTRING_LEN] = {
 
 #define DPAA2_ETH_NUM_STATS	ARRAY_SIZE(dpaa2_ethtool_stats)
 
-static char dpaa2_ethtool_extras[][ETH_GSTRING_LEN] = {
+static const char dpaa2_ethtool_extras[][ETH_GSTRING_LEN] = {
 	/* per-cpu stats */
 	"[drv] tx conf frames",
 	"[drv] tx conf bytes",
@@ -711,6 +711,13 @@ static int dpaa2_eth_update_cls_rule(struct net_device *net_dev,
 	return 0;
 }
 
+static u32 dpaa2_eth_get_rx_ring_count(struct net_device *net_dev)
+{
+	struct dpaa2_eth_priv *priv = netdev_priv(net_dev);
+
+	return dpaa2_eth_queue_count(priv);
+}
+
 static int dpaa2_eth_get_rxnfc(struct net_device *net_dev,
 			       struct ethtool_rxnfc *rxnfc, u32 *rule_locs)
 {
@@ -719,16 +726,6 @@ static int dpaa2_eth_get_rxnfc(struct net_device *net_dev,
 	int i, j = 0;
 
 	switch (rxnfc->cmd) {
-	case ETHTOOL_GRXFH:
-		/* we purposely ignore cmd->flow_type for now, because the
-		 * classifier only supports a single set of fields for all
-		 * protocols
-		 */
-		rxnfc->data = priv->rx_hash_fields;
-		break;
-	case ETHTOOL_GRXRINGS:
-		rxnfc->data = dpaa2_eth_queue_count(priv);
-		break;
 	case ETHTOOL_GRXCLSRLCNT:
 		rxnfc->rule_cnt = 0;
 		rxnfc->rule_cnt = dpaa2_eth_num_cls_rules(priv);
@@ -767,11 +764,6 @@ static int dpaa2_eth_set_rxnfc(struct net_device *net_dev,
 	int err = 0;
 
 	switch (rxnfc->cmd) {
-	case ETHTOOL_SRXFH:
-		if ((rxnfc->data & DPAA2_RXH_SUPPORTED) != rxnfc->data)
-			return -EOPNOTSUPP;
-		err = dpaa2_eth_set_hash(net_dev, rxnfc->data);
-		break;
 	case ETHTOOL_SRXCLSRLINS:
 		err = dpaa2_eth_update_cls_rule(net_dev, &rxnfc->fs, rxnfc->fs.location);
 		break;
@@ -783,6 +775,28 @@ static int dpaa2_eth_set_rxnfc(struct net_device *net_dev,
 	}
 
 	return err;
+}
+
+static int dpaa2_eth_get_rxfh_fields(struct net_device *net_dev,
+				     struct ethtool_rxfh_fields *rxnfc)
+{
+	struct dpaa2_eth_priv *priv = netdev_priv(net_dev);
+
+	/* we purposely ignore cmd->flow_type for now, because the
+	 * classifier only supports a single set of fields for all
+	 * protocols
+	 */
+	rxnfc->data = priv->rx_hash_fields;
+	return 0;
+}
+
+static int dpaa2_eth_set_rxfh_fields(struct net_device *net_dev,
+				     const struct ethtool_rxfh_fields *rxnfc,
+				     struct netlink_ext_ack *extack)
+{
+	if ((rxnfc->data & DPAA2_RXH_SUPPORTED) != rxnfc->data)
+		return -EOPNOTSUPP;
+	return dpaa2_eth_set_hash(net_dev, rxnfc->data);
 }
 
 int dpaa2_phc_index = -1;
@@ -924,6 +938,61 @@ static void dpaa2_eth_get_channels(struct net_device *net_dev,
 				   channels->other_count;
 }
 
+static void
+dpaa2_eth_get_rmon_stats(struct net_device *net_dev,
+			 struct ethtool_rmon_stats *rmon_stats,
+			 const struct ethtool_rmon_hist_range **ranges)
+{
+	struct dpaa2_eth_priv *priv = netdev_priv(net_dev);
+
+	mutex_lock(&priv->mac_lock);
+
+	if (dpaa2_eth_has_mac(priv))
+		dpaa2_mac_get_rmon_stats(priv->mac, rmon_stats, ranges);
+
+	mutex_unlock(&priv->mac_lock);
+}
+
+static void dpaa2_eth_get_pause_stats(struct net_device *net_dev,
+				      struct ethtool_pause_stats *pause_stats)
+{
+	struct dpaa2_eth_priv *priv = netdev_priv(net_dev);
+
+	mutex_lock(&priv->mac_lock);
+
+	if (dpaa2_eth_has_mac(priv))
+		dpaa2_mac_get_pause_stats(priv->mac, pause_stats);
+
+	mutex_unlock(&priv->mac_lock);
+}
+
+static void dpaa2_eth_get_ctrl_stats(struct net_device *net_dev,
+				     struct ethtool_eth_ctrl_stats *ctrl_stats)
+{
+	struct dpaa2_eth_priv *priv = netdev_priv(net_dev);
+
+	mutex_lock(&priv->mac_lock);
+
+	if (dpaa2_eth_has_mac(priv))
+		dpaa2_mac_get_ctrl_stats(priv->mac, ctrl_stats);
+
+	mutex_unlock(&priv->mac_lock);
+}
+
+static void
+dpaa2_eth_get_eth_mac_stats(struct net_device *net_dev,
+			    struct ethtool_eth_mac_stats *eth_mac_stats)
+{
+	struct dpaa2_eth_priv *priv = netdev_priv(net_dev);
+
+	mutex_lock(&priv->mac_lock);
+
+	if (dpaa2_eth_has_mac(priv))
+		dpaa2_mac_get_eth_mac_stats(priv->mac, eth_mac_stats);
+
+	mutex_unlock(&priv->mac_lock);
+}
+
 const struct ethtool_ops dpaa2_ethtool_ops = {
 	.supported_coalesce_params = ETHTOOL_COALESCE_RX_USECS |
 				     ETHTOOL_COALESCE_USE_ADAPTIVE_RX,
@@ -939,10 +1008,17 @@ const struct ethtool_ops dpaa2_ethtool_ops = {
 	.get_strings = dpaa2_eth_get_strings,
 	.get_rxnfc = dpaa2_eth_get_rxnfc,
 	.set_rxnfc = dpaa2_eth_set_rxnfc,
+	.get_rx_ring_count = dpaa2_eth_get_rx_ring_count,
+	.get_rxfh_fields = dpaa2_eth_get_rxfh_fields,
+	.set_rxfh_fields = dpaa2_eth_set_rxfh_fields,
 	.get_ts_info = dpaa2_eth_get_ts_info,
 	.get_tunable = dpaa2_eth_get_tunable,
 	.set_tunable = dpaa2_eth_set_tunable,
 	.get_coalesce = dpaa2_eth_get_coalesce,
 	.set_coalesce = dpaa2_eth_set_coalesce,
 	.get_channels = dpaa2_eth_get_channels,
+	.get_rmon_stats = dpaa2_eth_get_rmon_stats,
+	.get_pause_stats = dpaa2_eth_get_pause_stats,
+	.get_eth_ctrl_stats = dpaa2_eth_get_ctrl_stats,
+	.get_eth_mac_stats = dpaa2_eth_get_eth_mac_stats,
 };

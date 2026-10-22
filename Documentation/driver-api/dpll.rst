@@ -65,35 +65,43 @@ request, where user provides attributes that result in single pin match.
 Pin selection
 =============
 
-In general, selected pin (the one which signal is driving the dpll
-device) can be obtained from ``DPLL_A_PIN_STATE`` attribute, and only
-one pin shall be in ``DPLL_PIN_STATE_CONNECTED`` state for any dpll
-device.
+Pin state (``DPLL_A_PIN_STATE``) reflects the administrative intent set
+by the user. Pin operational state (``DPLL_A_PIN_OPERSTATE``) reflects
+what the hardware is actually doing with the pin.
 
 Pin selection can be done either manually or automatically, depending
 on hardware capabilities and active dpll device work mode
 (``DPLL_A_MODE`` attribute). The consequence is that there are
-differences for each mode in terms of available pin states, as well as
-for the states the user can request for a dpll device.
+differences for each mode in terms of available pin states the user can
+request for a dpll device.
 
-In manual mode (``DPLL_MODE_MANUAL``) the user can request or receive
-one of following pin states:
+In manual mode (``DPLL_MODE_MANUAL``) the user can request one of
+following pin states:
 
-- ``DPLL_PIN_STATE_CONNECTED`` - the pin is used to drive dpll device
-- ``DPLL_PIN_STATE_DISCONNECTED`` - the pin is not used to drive dpll
+- ``DPLL_PIN_STATE_CONNECTED`` - the pin is selected to drive dpll
   device
+- ``DPLL_PIN_STATE_DISCONNECTED`` - the pin is not selected to drive
+  dpll device
 
-In automatic mode (``DPLL_MODE_AUTOMATIC``) the user can request or
-receive one of following pin states:
+In automatic mode (``DPLL_MODE_AUTOMATIC``) the user can request one of
+following pin states:
 
 - ``DPLL_PIN_STATE_SELECTABLE`` - the pin shall be considered as valid
   input for automatic selection algorithm
 - ``DPLL_PIN_STATE_DISCONNECTED`` - the pin shall be not considered as
   a valid input for automatic selection algorithm
 
-In automatic mode (``DPLL_MODE_AUTOMATIC``) the user can only receive
-pin state ``DPLL_PIN_STATE_CONNECTED`` once automatic selection
-algorithm locks a dpll device with one of the inputs.
+The actual hardware status of a pin is reported via the operational
+state (``DPLL_A_PIN_OPERSTATE``) attribute nested under the parent
+device:
+
+- ``DPLL_PIN_OPERSTATE_ACTIVE`` - pin is qualified and actively used
+  by the DPLL
+- ``DPLL_PIN_OPERSTATE_STANDBY`` - pin is qualified but not actively
+  used by the DPLL
+- ``DPLL_PIN_OPERSTATE_NO_SIGNAL`` - pin does not have a valid signal
+- ``DPLL_PIN_OPERSTATE_QUAL_FAILED`` - pin signal failed qualification
+  checks
 
 Shared pins
 ===========
@@ -179,29 +187,47 @@ Phase offset measurement and adjustment
 Device may provide ability to measure a phase difference between signals
 on a pin and its parent dpll device. If pin-dpll phase offset measurement
 is supported, it shall be provided with ``DPLL_A_PIN_PHASE_OFFSET``
-attribute for each parent dpll device.
+attribute for each parent dpll device. The reported phase offset may be
+computed as the average of prior values and the current measurement, using
+the following formula:
+
+.. math::
+   curr\_avg = prev\_avg * \frac{2^N-1}{2^N} + new\_val * \frac{1}{2^N}
+
+where `curr_avg` is the current reported phase offset, `prev_avg` is the
+previously reported value, `new_val` is the current measurement, and `N` is
+the averaging factor. Configured averaging factor value is provided with
+``DPLL_A_PHASE_OFFSET_AVG_FACTOR`` attribute of a device and value change can
+be requested with the same attribute with ``DPLL_CMD_DEVICE_SET`` command.
+
+  ================================== ======================================
+  ``DPLL_A_PHASE_OFFSET_AVG_FACTOR`` attr configured value of phase offset
+                                     averaging factor
+  ================================== ======================================
 
 Device may also provide ability to adjust a signal phase on a pin.
-If pin phase adjustment is supported, minimal and maximal values that pin
-handle shall be provide to the user on ``DPLL_CMD_PIN_GET`` respond
-with ``DPLL_A_PIN_PHASE_ADJUST_MIN`` and ``DPLL_A_PIN_PHASE_ADJUST_MAX``
+If pin phase adjustment is supported, minimal and maximal values and
+granularity that pin handle shall be provided to the user on
+``DPLL_CMD_PIN_GET`` respond with ``DPLL_A_PIN_PHASE_ADJUST_MIN``,
+``DPLL_A_PIN_PHASE_ADJUST_MAX`` and ``DPLL_A_PIN_PHASE_ADJUST_GRAN``
 attributes. Configured phase adjust value is provided with
 ``DPLL_A_PIN_PHASE_ADJUST`` attribute of a pin, and value change can be
 requested with the same attribute with ``DPLL_CMD_PIN_SET`` command.
 
-  =============================== ======================================
-  ``DPLL_A_PIN_ID``               configured pin id
-  ``DPLL_A_PIN_PHASE_ADJUST_MIN`` attr minimum value of phase adjustment
-  ``DPLL_A_PIN_PHASE_ADJUST_MAX`` attr maximum value of phase adjustment
-  ``DPLL_A_PIN_PHASE_ADJUST``     attr configured value of phase
-                                  adjustment on parent dpll device
-  ``DPLL_A_PIN_PARENT_DEVICE``    nested attribute for requesting
-                                  configuration on given parent dpll
-                                  device
-    ``DPLL_A_PIN_PARENT_ID``      parent dpll device id
-    ``DPLL_A_PIN_PHASE_OFFSET``   attr measured phase difference
-                                  between a pin and parent dpll device
-  =============================== ======================================
+  ================================ ==========================================
+  ``DPLL_A_PIN_ID``                configured pin id
+  ``DPLL_A_PIN_PHASE_ADJUST_GRAN`` attr granularity of phase adjustment value
+  ``DPLL_A_PIN_PHASE_ADJUST_MIN``  attr minimum value of phase adjustment
+  ``DPLL_A_PIN_PHASE_ADJUST_MAX``  attr maximum value of phase adjustment
+  ``DPLL_A_PIN_PHASE_ADJUST``      attr configured value of phase
+                                   adjustment on parent dpll device
+  ``DPLL_A_PIN_PARENT_DEVICE``     nested attribute for requesting
+                                   configuration on given parent dpll
+                                   device
+    ``DPLL_A_PIN_PARENT_ID``       parent dpll device id
+    ``DPLL_A_PIN_PHASE_OFFSET``    attr measured phase difference
+                                   between a pin and parent dpll device
+  ================================ ==========================================
 
 All phase related values are provided in pico seconds, which represents
 time difference between signals phase. The negative value means that
@@ -213,6 +239,62 @@ Phase adjust (also min and max) values are integers, but measured phase
 offset values are fractional with 3-digit decimal places and shell be
 divided with ``DPLL_PIN_PHASE_OFFSET_DIVIDER`` to get integer part and
 modulo divided to get fractional part.
+
+Phase offset monitor
+====================
+
+Phase offset measurement is typically performed against the current active
+source. However, some DPLL (Digital Phase-Locked Loop) devices may offer
+the capability to monitor phase offsets across all available inputs.
+The attribute and current feature state shall be included in the response
+message of the ``DPLL_CMD_DEVICE_GET`` command for supported DPLL devices.
+In such cases, users can also control the feature using the
+``DPLL_CMD_DEVICE_SET`` command by setting the ``enum dpll_feature_state``
+values for the attribute.
+Once enabled the phase offset measurements for the input shall be returned
+in the ``DPLL_A_PIN_PHASE_OFFSET`` attribute.
+
+  =============================== ========================
+  ``DPLL_A_PHASE_OFFSET_MONITOR`` attr state of a feature
+  =============================== ========================
+
+Fractional frequency offset
+===========================
+
+The fractional frequency offset (FFO) is reported through two attributes
+that carry the same measurement at different precisions:
+
+- ``DPLL_A_PIN_FRACTIONAL_FREQUENCY_OFFSET`` in PPM (parts per million)
+- ``DPLL_A_PIN_FRACTIONAL_FREQUENCY_OFFSET_PPT`` in PPT (parts per trillion)
+
+Both attributes appear at the top level of a pin and inside each
+``pin-parent-device`` nest. Two FFO types are defined:
+
+- ``DPLL_FFO_PORT_RXTX_RATE`` - RX vs TX symbol rate offset (top-level)
+- ``DPLL_FFO_PIN_DEVICE`` - pin vs parent DPLL offset (per-parent)
+
+The driver declares which types it supports via the ``supported_ffo``
+bitmask in ``struct dpll_pin_ops``. The core only calls the ``ffo_get``
+callback for types the driver has opted into. The requested type is
+passed to the driver in the ``struct dpll_ffo_param``.
+
+Frequency monitor
+=================
+
+Some DPLL devices may offer the capability to measure the actual
+frequency of all available input pins. The attribute and current feature state
+shall be included in the response message of the ``DPLL_CMD_DEVICE_GET``
+command for supported DPLL devices. In such cases, users can also control
+the feature using the ``DPLL_CMD_DEVICE_SET`` command by setting the
+``enum dpll_feature_state`` values for the attribute.
+Once enabled the measured input frequency for each input pin shall be
+returned in the ``DPLL_A_PIN_MEASURED_FREQUENCY`` attribute. The value
+is in millihertz (mHz), using ``DPLL_PIN_MEASURED_FREQUENCY_DIVIDER``
+as the divider.
+
+  =============================== ========================
+  ``DPLL_A_FREQUENCY_MONITOR``    attr state of a feature
+  =============================== ========================
 
 Embedded SYNC
 =============
@@ -234,6 +316,31 @@ the pin.
     ``DPLL_A_PIN_FREQUENCY_MAX``            attr maximum value of frequency
   ``DPLL_A_PIN_ESYNC_PULSE``                pulse type of Embedded SYNC
   ========================================= =================================
+
+Reference SYNC
+==============
+
+The device may support the Reference SYNC feature, which allows the combination
+of two inputs into a input pair. In this configuration, clock signals
+from both inputs are used to synchronize the DPLL device. The higher frequency
+signal is utilized for the loop bandwidth of the DPLL, while the lower frequency
+signal is used to syntonize the output signal of the DPLL device. This feature
+enables the provision of a high-quality loop bandwidth signal from an external
+source.
+
+A capable input provides a list of inputs that can be bound with to create
+Reference SYNC. To control this feature, the user must request a desired
+state for a target pin: use ``DPLL_PIN_STATE_CONNECTED`` to enable or
+``DPLL_PIN_STATE_DISCONNECTED`` to disable the feature. An input pin can be
+bound to only one other pin at any given time.
+
+  ============================== ==========================================
+  ``DPLL_A_PIN_REFERENCE_SYNC``  nested attribute for providing info or
+                                 requesting configuration of the Reference
+                                 SYNC feature
+    ``DPLL_A_PIN_ID``            target pin id for Reference SYNC feature
+    ``DPLL_A_PIN_STATE``         state of Reference SYNC connection
+  ============================== ==========================================
 
 Configuration commands group
 ============================
@@ -325,6 +432,8 @@ according to attribute purpose.
                                        frequencies
       ``DPLL_A_PIN_ANY_FREQUENCY_MIN`` attr minimum value of frequency
       ``DPLL_A_PIN_ANY_FREQUENCY_MAX`` attr maximum value of frequency
+    ``DPLL_A_PIN_PHASE_ADJUST_GRAN``   attr granularity of phase
+                                       adjustment value
     ``DPLL_A_PIN_PHASE_ADJUST_MIN``    attr minimum value of phase
                                        adjustment
     ``DPLL_A_PIN_PHASE_ADJUST_MAX``    attr maximum value of phase
@@ -348,6 +457,8 @@ according to attribute purpose.
       ``DPLL_A_PIN_STATE``             attr state of pin on the parent
                                        pin
     ``DPLL_A_PIN_CAPABILITIES``        attr bitmask of pin capabilities
+    ``DPLL_A_PIN_MEASURED_FREQUENCY``  attr measured frequency of
+                                       an input pin in mHz
   ==================================== ==================================
 
   ==================================== =================================

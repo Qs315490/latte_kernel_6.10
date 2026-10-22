@@ -16,9 +16,7 @@
 #include <net/udp.h>
 #include "ar-internal.h"
 
-extern int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
-
-static ssize_t do_udp_sendmsg(struct socket *socket, struct msghdr *msg, size_t len)
+ssize_t do_udp_sendmsg(struct socket *socket, struct msghdr *msg, size_t len)
 {
 	struct sockaddr *sa = msg->msg_name;
 	struct sock *sk = socket->sk;
@@ -275,7 +273,7 @@ static void rxrpc_send_ack_packet(struct rxrpc_call *call, int nr_kv, size_t len
 	rxrpc_local_dont_fragment(conn->local, why == rxrpc_propose_ack_ping_for_mtu_probe);
 
 	ret = do_udp_sendmsg(conn->local->socket, &msg, len);
-	call->peer->last_tx_at = ktime_get_seconds();
+	rxrpc_peer_mark_tx(call->peer);
 	if (ret < 0) {
 		trace_rxrpc_tx_fail(call->debug_id, serial, ret,
 				    rxrpc_tx_point_call_ack);
@@ -411,7 +409,7 @@ int rxrpc_send_abort_packet(struct rxrpc_call *call)
 
 	iov_iter_kvec(&msg.msg_iter, WRITE, iov, 1, sizeof(pkt));
 	ret = do_udp_sendmsg(conn->local->socket, &msg, sizeof(pkt));
-	conn->peer->last_tx_at = ktime_get_seconds();
+	rxrpc_peer_mark_tx(conn->peer);
 	if (ret < 0)
 		trace_rxrpc_tx_fail(call->debug_id, serial, ret,
 				    rxrpc_tx_point_call_abort);
@@ -479,6 +477,8 @@ static size_t rxrpc_prepare_data_subpacket(struct rxrpc_call *call,
 		why = rxrpc_reqack_old_rtt;
 	else if (!last && !after(READ_ONCE(call->send_top), txb->seq))
 		why = rxrpc_reqack_app_stall;
+	else if (call->tx_winsize <= (2 * req->n) || call->cong_cwnd <= (2 * req->n))
+		why = rxrpc_reqack_jumbo_win;
 	else
 		goto dont_set_request_ack;
 
@@ -698,7 +698,7 @@ void rxrpc_send_data_packet(struct rxrpc_call *call, struct rxrpc_send_data_req 
 			ret = 0;
 			trace_rxrpc_tx_data(call, txb->seq, txb->serial, txb->flags,
 					    rxrpc_txdata_inject_loss);
-			conn->peer->last_tx_at = ktime_get_seconds();
+			rxrpc_peer_mark_tx(conn->peer);
 			goto done;
 		}
 	}
@@ -711,7 +711,7 @@ void rxrpc_send_data_packet(struct rxrpc_call *call, struct rxrpc_send_data_req 
 	 */
 	rxrpc_inc_stat(call->rxnet, stat_tx_data_send);
 	ret = do_udp_sendmsg(conn->local->socket, &msg, len);
-	conn->peer->last_tx_at = ktime_get_seconds();
+	rxrpc_peer_mark_tx(conn->peer);
 
 	if (ret == -EMSGSIZE) {
 		rxrpc_inc_stat(call->rxnet, stat_tx_data_send_msgsize);
@@ -797,7 +797,7 @@ void rxrpc_send_conn_abort(struct rxrpc_connection *conn)
 
 	trace_rxrpc_tx_packet(conn->debug_id, &whdr, rxrpc_tx_point_conn_abort);
 
-	conn->peer->last_tx_at = ktime_get_seconds();
+	rxrpc_peer_mark_tx(conn->peer);
 }
 
 /*
@@ -814,6 +814,9 @@ void rxrpc_reject_packet(struct rxrpc_local *local, struct sk_buff *skb)
 	__be32 code;
 	int ret, ioc;
 
+	if (sp->hdr.type == RXRPC_PACKET_TYPE_ABORT)
+		return; /* Never abort an abort. */
+
 	rxrpc_see_skb(skb, rxrpc_skb_see_reject);
 
 	iov[0].iov_base = &whdr;
@@ -826,7 +829,13 @@ void rxrpc_reject_packet(struct rxrpc_local *local, struct sk_buff *skb)
 	msg.msg_controllen = 0;
 	msg.msg_flags = 0;
 
-	memset(&whdr, 0, sizeof(whdr));
+	whdr = (struct rxrpc_wire_header) {
+		.epoch		= htonl(sp->hdr.epoch),
+		.cid		= htonl(sp->hdr.cid),
+		.callNumber	= htonl(sp->hdr.callNumber),
+		.serviceId	= htons(sp->hdr.serviceId),
+		.flags		= ~sp->hdr.flags & RXRPC_CLIENT_INITIATED,
+	};
 
 	switch (skb->mark) {
 	case RXRPC_SKB_MARK_REJECT_BUSY:
@@ -834,6 +843,9 @@ void rxrpc_reject_packet(struct rxrpc_local *local, struct sk_buff *skb)
 		size = sizeof(whdr);
 		ioc = 1;
 		break;
+	case RXRPC_SKB_MARK_REJECT_CONN_ABORT:
+		whdr.callNumber	= 0;
+		fallthrough;
 	case RXRPC_SKB_MARK_REJECT_ABORT:
 		whdr.type = RXRPC_PACKET_TYPE_ABORT;
 		code = htonl(skb->priority);
@@ -846,14 +858,6 @@ void rxrpc_reject_packet(struct rxrpc_local *local, struct sk_buff *skb)
 
 	if (rxrpc_extract_addr_from_skb(&srx, skb) == 0) {
 		msg.msg_namelen = srx.transport_len;
-
-		whdr.epoch	= htonl(sp->hdr.epoch);
-		whdr.cid	= htonl(sp->hdr.cid);
-		whdr.callNumber	= htonl(sp->hdr.callNumber);
-		whdr.serviceId	= htons(sp->hdr.serviceId);
-		whdr.flags	= sp->hdr.flags;
-		whdr.flags	^= RXRPC_CLIENT_INITIATED;
-		whdr.flags	&= RXRPC_CLIENT_INITIATED;
 
 		iov_iter_kvec(&msg.msg_iter, WRITE, iov, ioc, size);
 		ret = do_udp_sendmsg(local->socket, &msg, size);
@@ -913,6 +917,67 @@ void rxrpc_send_keepalive(struct rxrpc_peer *peer)
 		trace_rxrpc_tx_packet(peer->debug_id, &whdr,
 				      rxrpc_tx_point_version_keepalive);
 
-	peer->last_tx_at = ktime_get_seconds();
+	rxrpc_peer_mark_tx(peer);
 	_leave("");
+}
+
+/*
+ * Send a RESPONSE message.
+ */
+void rxrpc_send_response(struct rxrpc_connection *conn, struct sk_buff *response)
+{
+	struct rxrpc_skb_priv *sp = rxrpc_skb(response);
+	struct scatterlist sg[16];
+	struct bio_vec *bvec = conn->local->bvec;
+	struct msghdr msg;
+	size_t len = sp->resp.len;
+	__be32 wserial;
+	u32 serial = 0;
+	int ret, nr_sg;
+
+	_enter("C=%x,%x", conn->debug_id, sp->resp.challenge_serial);
+
+	sg_init_table(sg, ARRAY_SIZE(sg));
+	ret = skb_to_sgvec(response, sg, 0, len);
+	if (ret < 0)
+		goto fail;
+	nr_sg = ret;
+	ret = -EIO;
+	if (WARN_ON_ONCE(nr_sg > ARRAY_SIZE(conn->local->bvec)))
+		goto fail;
+
+	for (int i = 0; i < nr_sg; i++)
+		bvec_set_page(&bvec[i], sg_page(&sg[i]), sg[i].length, sg[i].offset);
+
+	iov_iter_bvec(&msg.msg_iter, WRITE, bvec, nr_sg, len);
+
+	msg.msg_name	= &conn->peer->srx.transport;
+	msg.msg_namelen	= conn->peer->srx.transport_len;
+	msg.msg_control	= NULL;
+	msg.msg_controllen = 0;
+	msg.msg_flags	= MSG_SPLICE_PAGES;
+
+	serial = rxrpc_get_next_serials(conn, 1);
+	wserial = htonl(serial);
+
+	trace_rxrpc_tx_response(conn, serial, sp);
+
+	ret = skb_store_bits(response, offsetof(struct rxrpc_wire_header, serial),
+			     &wserial, sizeof(wserial));
+	if (ret < 0)
+		goto fail;
+
+	rxrpc_local_dont_fragment(conn->local, false);
+
+	ret = do_udp_sendmsg(conn->local->socket, &msg, len);
+	if (ret < 0)
+		goto fail;
+
+	rxrpc_peer_mark_tx(conn->peer);
+	return;
+
+fail:
+	trace_rxrpc_tx_fail(conn->debug_id, serial, ret,
+			    rxrpc_tx_point_response);
+	kleave(" = %d", ret);
 }

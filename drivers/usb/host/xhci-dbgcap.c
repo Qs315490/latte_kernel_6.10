@@ -29,6 +29,12 @@
 #include "xhci-trace.h"
 #include "xhci-dbgcap.h"
 
+static const struct dbc_str dbc_str_default = {
+	.manufacturer = "Linux Foundation",
+	.product = "Linux USB Debug Target",
+	.serial = "0001",
+};
+
 static void dbc_free_ctx(struct device *dev, struct xhci_container_ctx *ctx)
 {
 	if (!ctx)
@@ -52,89 +58,107 @@ static void dbc_ring_free(struct device *dev, struct xhci_ring *ring)
 	kfree(ring);
 }
 
-static u32 xhci_dbc_populate_strings(struct dbc_str_descs *strings)
+static void xhci_dbc_init_ep_contexts(struct xhci_dbc *dbc)
 {
-	struct usb_string_descriptor	*s_desc;
-	u32				string_length;
+	struct xhci_ep_ctx      *ep_ctx;
+	unsigned int		max_burst;
+	dma_addr_t		deq;
 
-	/* Serial string: */
-	s_desc = (struct usb_string_descriptor *)strings->serial;
-	utf8s_to_utf16s(DBC_STRING_SERIAL, strlen(DBC_STRING_SERIAL),
-			UTF16_LITTLE_ENDIAN, (wchar_t *)s_desc->wData,
-			DBC_MAX_STRING_LENGTH);
+	max_burst               = DBC_CTRL_MAXBURST(readl(&dbc->regs->control));
 
-	s_desc->bLength		= (strlen(DBC_STRING_SERIAL) + 1) * 2;
-	s_desc->bDescriptorType	= USB_DT_STRING;
-	string_length		= s_desc->bLength;
-	string_length		<<= 8;
+	/* Populate bulk out endpoint context: */
+	ep_ctx                  = dbc_bulkout_ctx(dbc);
+	deq                     = dbc_bulkout_enq(dbc);
+	ep_ctx->ep_info         = 0;
+	ep_ctx->ep_info2        = dbc_epctx_info2(BULK_OUT_EP, 1024, max_burst);
+	ep_ctx->deq             = cpu_to_le64(deq | dbc->ring_out->cycle_state);
 
-	/* Product string: */
-	s_desc = (struct usb_string_descriptor *)strings->product;
-	utf8s_to_utf16s(DBC_STRING_PRODUCT, strlen(DBC_STRING_PRODUCT),
-			UTF16_LITTLE_ENDIAN, (wchar_t *)s_desc->wData,
-			DBC_MAX_STRING_LENGTH);
-
-	s_desc->bLength		= (strlen(DBC_STRING_PRODUCT) + 1) * 2;
-	s_desc->bDescriptorType	= USB_DT_STRING;
-	string_length		+= s_desc->bLength;
-	string_length		<<= 8;
-
-	/* Manufacture string: */
-	s_desc = (struct usb_string_descriptor *)strings->manufacturer;
-	utf8s_to_utf16s(DBC_STRING_MANUFACTURER,
-			strlen(DBC_STRING_MANUFACTURER),
-			UTF16_LITTLE_ENDIAN, (wchar_t *)s_desc->wData,
-			DBC_MAX_STRING_LENGTH);
-
-	s_desc->bLength		= (strlen(DBC_STRING_MANUFACTURER) + 1) * 2;
-	s_desc->bDescriptorType	= USB_DT_STRING;
-	string_length		+= s_desc->bLength;
-	string_length		<<= 8;
-
-	/* String0: */
-	strings->string0[0]	= 4;
-	strings->string0[1]	= USB_DT_STRING;
-	strings->string0[2]	= 0x09;
-	strings->string0[3]	= 0x04;
-	string_length		+= 4;
-
-	return string_length;
+	/* Populate bulk in endpoint context: */
+	ep_ctx                  = dbc_bulkin_ctx(dbc);
+	deq                     = dbc_bulkin_enq(dbc);
+	ep_ctx->ep_info         = 0;
+	ep_ctx->ep_info2        = dbc_epctx_info2(BULK_IN_EP, 1024, max_burst);
+	ep_ctx->deq             = cpu_to_le64(deq | dbc->ring_in->cycle_state);
 }
 
-static void xhci_dbc_init_contexts(struct xhci_dbc *dbc, u32 string_length)
+static u8 get_str_desc_len(const char *desc)
+{
+	return ((struct usb_string_descriptor *)desc)->bLength;
+}
+
+static u32 dbc_prepare_info_context_str_len(struct dbc_str_descs *descs)
+{
+	u32 len;
+
+	len = get_str_desc_len(descs->serial);
+	len <<= 8;
+	len += get_str_desc_len(descs->product);
+	len <<= 8;
+	len += get_str_desc_len(descs->manufacturer);
+	len <<= 8;
+	len += get_str_desc_len(descs->string0);
+
+	return len;
+}
+
+static int xhci_dbc_populate_str_desc(char *desc, const char *src)
+{
+	struct usb_string_descriptor	*s_desc;
+	int				len;
+
+	s_desc = (struct usb_string_descriptor *)desc;
+
+	/* len holds number of 2 byte UTF-16 characters */
+	len = utf8s_to_utf16s(src, strlen(src), UTF16_LITTLE_ENDIAN,
+			      (wchar_t *)s_desc->wData, USB_MAX_STRING_LEN * 2);
+	if (len < 0)
+		return len;
+
+	s_desc->bLength		= len * 2 + 2;
+	s_desc->bDescriptorType	= USB_DT_STRING;
+
+	return s_desc->bLength;
+}
+
+static void xhci_dbc_populate_str_descs(struct dbc_str_descs *str_descs,
+					struct dbc_str *str)
+{
+	/* Serial string: */
+	xhci_dbc_populate_str_desc(str_descs->serial, str->serial);
+
+	/* Product string: */
+	xhci_dbc_populate_str_desc(str_descs->product, str->product);
+
+	/* Manufacturer string: */
+	xhci_dbc_populate_str_desc(str_descs->manufacturer, str->manufacturer);
+
+	/* String0: */
+	str_descs->string0[0]	= 4;
+	str_descs->string0[1]	= USB_DT_STRING;
+	str_descs->string0[2]	= 0x09;
+	str_descs->string0[3]	= 0x04;
+}
+
+static void xhci_dbc_init_contexts(struct xhci_dbc *dbc)
 {
 	struct dbc_info_context	*info;
-	struct xhci_ep_ctx	*ep_ctx;
 	u32			dev_info;
-	dma_addr_t		deq, dma;
-	unsigned int		max_burst;
+	dma_addr_t		dma;
 
 	if (!dbc)
 		return;
 
 	/* Populate info Context: */
 	info			= (struct dbc_info_context *)dbc->ctx->bytes;
-	dma			= dbc->string_dma;
+	dma			= dbc->str_descs_dma;
 	info->string0		= cpu_to_le64(dma);
-	info->manufacturer	= cpu_to_le64(dma + DBC_MAX_STRING_LENGTH);
-	info->product		= cpu_to_le64(dma + DBC_MAX_STRING_LENGTH * 2);
-	info->serial		= cpu_to_le64(dma + DBC_MAX_STRING_LENGTH * 3);
-	info->length		= cpu_to_le32(string_length);
+	info->manufacturer	= cpu_to_le64(dma + USB_MAX_STRING_DESC_LEN);
+	info->product		= cpu_to_le64(dma + USB_MAX_STRING_DESC_LEN * 2);
+	info->serial		= cpu_to_le64(dma + USB_MAX_STRING_DESC_LEN * 3);
+	info->length		= cpu_to_le32(dbc_prepare_info_context_str_len(dbc->str_descs));
 
-	/* Populate bulk out endpoint context: */
-	ep_ctx			= dbc_bulkout_ctx(dbc);
-	max_burst		= DBC_CTRL_MAXBURST(readl(&dbc->regs->control));
-	deq			= dbc_bulkout_enq(dbc);
-	ep_ctx->ep_info		= 0;
-	ep_ctx->ep_info2	= dbc_epctx_info2(BULK_OUT_EP, 1024, max_burst);
-	ep_ctx->deq		= cpu_to_le64(deq | dbc->ring_out->cycle_state);
-
-	/* Populate bulk in endpoint context: */
-	ep_ctx			= dbc_bulkin_ctx(dbc);
-	deq			= dbc_bulkin_enq(dbc);
-	ep_ctx->ep_info		= 0;
-	ep_ctx->ep_info2	= dbc_epctx_info2(BULK_IN_EP, 1024, max_burst);
-	ep_ctx->deq		= cpu_to_le64(deq | dbc->ring_in->cycle_state);
+	/* Populate bulk in and out endpoint contexts: */
+	xhci_dbc_init_ep_contexts(dbc);
 
 	/* Set DbC context and info registers: */
 	lo_hi_writeq(dbc->ctx->dma, &dbc->regs->dccp);
@@ -214,7 +238,7 @@ dbc_alloc_request(struct xhci_dbc *dbc, unsigned int direction, gfp_t flags)
 	if (!dbc)
 		return NULL;
 
-	req = kzalloc(sizeof(*req), flags);
+	req = kzalloc_obj(*req, flags);
 	if (!req)
 		return NULL;
 
@@ -251,7 +275,6 @@ xhci_dbc_queue_trb(struct xhci_ring *ring, u32 field1,
 	trace_xhci_dbc_gadget_ep_queue(ring, &trb->generic,
 				       xhci_trb_virt_to_dma(ring->enq_seg,
 							    ring->enqueue));
-	ring->num_trbs_free--;
 	next = ++(ring->enqueue);
 	if (TRB_TYPE_LINK_LE32(next->link.control)) {
 		next->link.control ^= cpu_to_le32(TRB_CYCLE);
@@ -272,7 +295,7 @@ static int xhci_dbc_queue_bulk_tx(struct dbc_ep *dep,
 
 	num_trbs = count_trbs(req->dma, req->length);
 	WARN_ON(num_trbs != 1);
-	if (ring->num_trbs_free < num_trbs)
+	if (xhci_num_trbs_free(ring) <= num_trbs)
 		return -EBUSY;
 
 	addr	= req->dma;
@@ -365,7 +388,7 @@ int dbc_ep_queue(struct dbc_request *req)
 		ret = dbc_ep_do_queue(req);
 	spin_unlock_irqrestore(&dbc->lock, flags);
 
-	mod_delayed_work(system_wq, &dbc->event_work, 0);
+	mod_delayed_work(system_percpu_wq, &dbc->event_work, 0);
 
 	trace_xhci_dbc_queue_request(req);
 
@@ -422,7 +445,7 @@ dbc_alloc_ctx(struct device *dev, gfp_t flags)
 {
 	struct xhci_container_ctx *ctx;
 
-	ctx = kzalloc(sizeof(*ctx), flags);
+	ctx = kzalloc_obj(*ctx, flags);
 	if (!ctx)
 		return NULL;
 
@@ -436,6 +459,42 @@ dbc_alloc_ctx(struct device *dev, gfp_t flags)
 	return ctx;
 }
 
+static void xhci_dbc_ring_init(struct xhci_ring *ring)
+{
+	struct xhci_segment *seg = ring->first_seg;
+
+	/* clear all trbs on ring in case of old ring */
+	memset(seg->trbs, 0, TRB_SEGMENT_SIZE);
+
+	/* Only event ring does not use link TRB */
+	if (ring->type != TYPE_EVENT) {
+		union xhci_trb *trb = &seg->trbs[TRBS_PER_SEGMENT - 1];
+
+		trb->link.segment_ptr = cpu_to_le64(ring->first_seg->dma);
+		trb->link.control = cpu_to_le32(LINK_TOGGLE | TRB_TYPE(TRB_LINK));
+	}
+	xhci_initialize_ring_info(ring);
+}
+
+static int xhci_dbc_reinit_ep_rings(struct xhci_dbc *dbc)
+{
+	struct xhci_ring *in_ring = dbc->eps[BULK_IN].ring;
+	struct xhci_ring *out_ring = dbc->eps[BULK_OUT].ring;
+
+	if (!in_ring || !out_ring || !dbc->ctx) {
+		dev_warn(dbc->dev, "Can't re-init unallocated endpoints\n");
+		return -ENODEV;
+	}
+
+	xhci_dbc_ring_init(in_ring);
+	xhci_dbc_ring_init(out_ring);
+
+	/* set ep context enqueue, dequeue, and cycle to initial values */
+	xhci_dbc_init_ep_contexts(dbc);
+
+	return 0;
+}
+
 static struct xhci_ring *
 xhci_dbc_ring_alloc(struct device *dev, enum xhci_ring_type type, gfp_t flags)
 {
@@ -443,14 +502,14 @@ xhci_dbc_ring_alloc(struct device *dev, enum xhci_ring_type type, gfp_t flags)
 	struct xhci_segment *seg;
 	dma_addr_t dma;
 
-	ring = kzalloc(sizeof(*ring), flags);
+	ring = kzalloc_obj(*ring, flags);
 	if (!ring)
 		return NULL;
 
 	ring->num_segs = 1;
 	ring->type = type;
 
-	seg = kzalloc(sizeof(*seg), flags);
+	seg = kzalloc_obj(*seg, flags);
 	if (!seg)
 		goto seg_fail;
 
@@ -464,15 +523,10 @@ xhci_dbc_ring_alloc(struct device *dev, enum xhci_ring_type type, gfp_t flags)
 
 	seg->dma = dma;
 
-	/* Only event ring does not use link TRB */
-	if (type != TYPE_EVENT) {
-		union xhci_trb *trb = &seg->trbs[TRBS_PER_SEGMENT - 1];
-
-		trb->link.segment_ptr = cpu_to_le64(dma);
-		trb->link.control = cpu_to_le32(LINK_TOGGLE | TRB_TYPE(TRB_LINK));
-	}
 	INIT_LIST_HEAD(&ring->td_list);
-	xhci_initialize_ring_info(ring);
+
+	xhci_dbc_ring_init(ring);
+
 	return ring;
 dma_fail:
 	kfree(seg);
@@ -485,7 +539,6 @@ static int xhci_dbc_mem_init(struct xhci_dbc *dbc, gfp_t flags)
 {
 	int			ret;
 	dma_addr_t		deq;
-	u32			string_length;
 	struct device		*dev = dbc->dev;
 
 	/* Allocate various rings for events and transfers: */
@@ -512,11 +565,11 @@ static int xhci_dbc_mem_init(struct xhci_dbc *dbc, gfp_t flags)
 		goto ctx_fail;
 
 	/* Allocate the string table: */
-	dbc->string_size = sizeof(*dbc->string);
-	dbc->string = dma_alloc_coherent(dev, dbc->string_size,
-					 &dbc->string_dma, flags);
-	if (!dbc->string)
-		goto string_fail;
+	dbc->str_descs_size = sizeof(*dbc->str_descs);
+	dbc->str_descs = dma_alloc_coherent(dev, dbc->str_descs_size,
+					    &dbc->str_descs_dma, flags);
+	if (!dbc->str_descs)
+		goto str_descs_fail;
 
 	/* Setup ERST register: */
 	writel(dbc->erst.num_entries, &dbc->regs->ersts);
@@ -526,16 +579,16 @@ static int xhci_dbc_mem_init(struct xhci_dbc *dbc, gfp_t flags)
 				   dbc->ring_evt->dequeue);
 	lo_hi_writeq(deq, &dbc->regs->erdp);
 
-	/* Setup strings and contexts: */
-	string_length = xhci_dbc_populate_strings(dbc->string);
-	xhci_dbc_init_contexts(dbc, string_length);
+	/* Setup string descriptors and contexts: */
+	xhci_dbc_populate_str_descs(dbc->str_descs, &dbc->str);
+	xhci_dbc_init_contexts(dbc);
 
 	xhci_dbc_eps_init(dbc);
 	dbc->state = DS_INITIALIZED;
 
 	return 0;
 
-string_fail:
+str_descs_fail:
 	dbc_free_ctx(dev, dbc->ctx);
 	dbc->ctx = NULL;
 ctx_fail:
@@ -560,8 +613,8 @@ static void xhci_dbc_mem_cleanup(struct xhci_dbc *dbc)
 
 	xhci_dbc_eps_exit(dbc);
 
-	dma_free_coherent(dbc->dev, dbc->string_size, dbc->string, dbc->string_dma);
-	dbc->string = NULL;
+	dma_free_coherent(dbc->dev, dbc->str_descs_size, dbc->str_descs, dbc->str_descs_dma);
+	dbc->str_descs = NULL;
 
 	dbc_free_ctx(dbc->dev, dbc->ctx);
 	dbc->ctx = NULL;
@@ -575,18 +628,61 @@ static void xhci_dbc_mem_cleanup(struct xhci_dbc *dbc)
 	dbc->ring_evt = NULL;
 }
 
+static int xhci_dbc_enable_dce(struct xhci_dbc *dbc, bool enable)
+{
+	u32 done_state = 0;
+	u32 ctrl = 0;
+
+	if (enable) {
+		ctrl = readl(&dbc->regs->control);
+		ctrl |= DBC_CTRL_DBC_ENABLE | DBC_CTRL_PORT_ENABLE;
+		done_state =  DBC_CTRL_DBC_ENABLE;
+	}
+
+	writel(ctrl, &dbc->regs->control);
+	return xhci_handshake(&dbc->regs->control, DBC_CTRL_DBC_ENABLE,
+			      done_state, 1000);
+}
+
+static void xhci_dbc_set_state(struct xhci_dbc *dbc, enum dbc_state new_state)
+{
+	if (dbc->state == new_state)
+		return;
+
+	switch (new_state) {
+	case DS_ENABLED:
+		/*
+		 * DbC pm usage is 1 here, both when moved from disconnect or
+		 * configured states, or when setting initial DbC enable state.
+		 * Just enable pending put
+		 */
+		dev_dbg(dbc->dev, "DbC set pending_rpm_put = 1\n");
+		dbc->pending_rpm_put = 1;
+		break;
+	case DS_CONNECTED:
+		if (dbc->pending_rpm_put)
+			/* DbC pm usage still 1, just remove pending put */
+			dbc->pending_rpm_put = 0;
+		else
+			/* DbC pm usage was put to 0, call get */
+			pm_runtime_get(dbc->dev);
+		break;
+	default:
+		break;
+	}
+
+	dbc->state_timestamp = jiffies;
+	dbc->state = new_state;
+}
+
 static int xhci_do_dbc_start(struct xhci_dbc *dbc)
 {
 	int			ret;
-	u32			ctrl;
 
 	if (dbc->state != DS_DISABLED)
 		return -EINVAL;
 
-	writel(0, &dbc->regs->control);
-	ret = xhci_handshake(&dbc->regs->control,
-			     DBC_CTRL_DBC_ENABLE,
-			     0, 1000);
+	ret = xhci_dbc_enable_dce(dbc, false);
 	if (ret)
 		return ret;
 
@@ -594,27 +690,11 @@ static int xhci_do_dbc_start(struct xhci_dbc *dbc)
 	if (ret)
 		return ret;
 
-	ctrl = readl(&dbc->regs->control);
-	writel(ctrl | DBC_CTRL_DBC_ENABLE | DBC_CTRL_PORT_ENABLE,
-	       &dbc->regs->control);
-	ret = xhci_handshake(&dbc->regs->control,
-			     DBC_CTRL_DBC_ENABLE,
-			     DBC_CTRL_DBC_ENABLE, 1000);
+	ret = xhci_dbc_enable_dce(dbc, true);
 	if (ret)
 		return ret;
 
-	dbc->state = DS_ENABLED;
-
-	return 0;
-}
-
-static int xhci_do_dbc_stop(struct xhci_dbc *dbc)
-{
-	if (dbc->state == DS_DISABLED)
-		return -EINVAL;
-
-	writel(0, &dbc->regs->control);
-	dbc->state = DS_DISABLED;
+	xhci_dbc_set_state(dbc, DS_ENABLED);
 
 	return 0;
 }
@@ -626,49 +706,71 @@ static int xhci_dbc_start(struct xhci_dbc *dbc)
 
 	WARN_ON(!dbc);
 
-	pm_runtime_get_sync(dbc->dev); /* note this was self.controller */
+	pm_runtime_get(dbc->dev);
 
 	spin_lock_irqsave(&dbc->lock, flags);
 	ret = xhci_do_dbc_start(dbc);
+	if (ret)
+		goto err_unlock;
+
 	spin_unlock_irqrestore(&dbc->lock, flags);
 
-	if (ret) {
-		pm_runtime_put(dbc->dev); /* note this was self.controller */
-		return ret;
-	}
+	mod_delayed_work(system_percpu_wq, &dbc->event_work,
+			 msecs_to_jiffies(dbc->poll_interval));
 
-	return mod_delayed_work(system_wq, &dbc->event_work,
-				msecs_to_jiffies(dbc->poll_interval));
+	return 0;
+
+err_unlock:
+
+	spin_unlock_irqrestore(&dbc->lock, flags);
+	pm_runtime_put(dbc->dev); /* note this was self.controller */
+
+	return ret;
 }
 
 static void xhci_dbc_stop(struct xhci_dbc *dbc)
 {
-	int ret;
 	unsigned long		flags;
+	bool			need_rpm_put = false;
 
 	WARN_ON(!dbc);
 
+	spin_lock(&dbc->lock);
+
 	switch (dbc->state) {
 	case DS_DISABLED:
+		spin_unlock(&dbc->lock);
 		return;
 	case DS_CONFIGURED:
+		xhci_dbc_flush_requests(dbc);
+		spin_unlock(&dbc->lock);
+
 		if (dbc->driver->disconnect)
 			dbc->driver->disconnect(dbc);
 		break;
 	default:
+		spin_unlock(&dbc->lock);
 		break;
 	}
 
 	cancel_delayed_work_sync(&dbc->event_work);
 
 	spin_lock_irqsave(&dbc->lock, flags);
-	ret = xhci_do_dbc_stop(dbc);
+	writel(0, &dbc->regs->control);
+
+	if (dbc->state == DS_CONNECTED || dbc->state == DS_CONFIGURED ||
+	    dbc->pending_rpm_put)
+		need_rpm_put = true;
+
+	dbc->pending_rpm_put = 0;
+
+	xhci_dbc_set_state(dbc, DS_DISABLED);
 	spin_unlock_irqrestore(&dbc->lock, flags);
-	if (ret)
-		return;
 
 	xhci_dbc_mem_cleanup(dbc);
-	pm_runtime_put_sync(dbc->dev); /* note, was self.controller */
+
+	if (need_rpm_put)
+		pm_runtime_put(dbc->dev);
 }
 
 static void
@@ -738,7 +840,6 @@ static void dbc_handle_xfer_event(struct xhci_dbc *dbc, union xhci_trb *event)
 		}
 		if (r->status == -COMP_STALL_ERROR) {
 			dev_warn(dbc->dev, "Give back stale stalled req\n");
-			ring->num_trbs_free++;
 			xhci_dbc_giveback(r, 0);
 		}
 	}
@@ -803,7 +904,6 @@ static void dbc_handle_xfer_event(struct xhci_dbc *dbc, union xhci_trb *event)
 		break;
 	}
 
-	ring->num_trbs_free++;
 	req->actual = req->length - remain_length;
 	xhci_dbc_giveback(req, status);
 }
@@ -823,6 +923,7 @@ static enum evtreturn xhci_dbc_do_handle_events(struct xhci_dbc *dbc)
 {
 	dma_addr_t		deq;
 	union xhci_trb		*evt;
+	enum evtreturn		ret = EVT_DONE;
 	u32			ctrl, portsc;
 	bool			update_erdp = false;
 
@@ -834,20 +935,53 @@ static enum evtreturn xhci_dbc_do_handle_events(struct xhci_dbc *dbc)
 		return EVT_ERR;
 	case DS_ENABLED:
 		portsc = readl(&dbc->regs->portsc);
+		ctrl = readl(&dbc->regs->control);
+
 		if (portsc & DBC_PORTSC_CONN_STATUS) {
-			dbc->state = DS_CONNECTED;
+			xhci_dbc_set_state(dbc, DS_CONNECTED);
 			dev_info(dbc->dev, "DbC connected\n");
+		} else if (!(ctrl & DBC_CTRL_DBC_ENABLE)) {
+			dev_err(dbc->dev, "unexpected DbC disable, xHC reset?\n");
+		} else if (dbc->pending_rpm_put &&
+			   time_is_before_jiffies(dbc->state_timestamp +
+				msecs_to_jiffies(DBC_AUTOSUSPEND_DELAY))) {
+			dbc->pending_rpm_put = 0;
+			dev_dbg(dbc->dev, "DbC Enabled state for 15 seconds, allow rpm suspend\n");
+			pm_runtime_put(dbc->dev);
 		}
 
 		return EVT_DONE;
 	case DS_CONNECTED:
 		ctrl = readl(&dbc->regs->control);
+		portsc = readl(&dbc->regs->portsc);
 		if (ctrl & DBC_CTRL_DBC_RUN) {
-			dbc->state = DS_CONFIGURED;
+			xhci_dbc_set_state(dbc, DS_CONFIGURED);
 			dev_info(dbc->dev, "DbC configured\n");
-			portsc = readl(&dbc->regs->portsc);
 			writel(portsc, &dbc->regs->portsc);
-			return EVT_GSER;
+			ret = EVT_GSER;
+			break;
+		}
+
+		/* Connection lost */
+		if (!(portsc & DBC_PORTSC_CONN_STATUS)) {
+			/* covers DCE == 0 as it also sets CONN_STATUS to 0 */
+			dev_warn(dbc->dev, "DbC connection lost mid enumeration\n");
+			xhci_dbc_set_state(dbc, DS_ENABLED);
+
+			return EVT_DONE;
+		}
+
+		/* Enumeration timeout */
+		if (time_is_before_jiffies(dbc->state_timestamp +
+				msecs_to_jiffies(DBC_ENUMERATION_TIMEOUT))) {
+			dev_err(dbc->dev, "DbC enumeration timeout, re-enabling DbC\n");
+			dev_dbg(dbc->dev, "dcctrl %x, dcportsc %x\n", ctrl, portsc);
+
+			/* Toggle DCE to retry enumeration */
+			ret = xhci_dbc_enable_dce(dbc, false);
+			udelay(100);
+			ret = xhci_dbc_enable_dce(dbc, true);
+			xhci_dbc_set_state(dbc, DS_ENABLED);
 		}
 
 		return EVT_DONE;
@@ -857,9 +991,9 @@ static enum evtreturn xhci_dbc_do_handle_events(struct xhci_dbc *dbc)
 		if (!(portsc & DBC_PORTSC_PORT_ENABLED) &&
 		    !(portsc & DBC_PORTSC_CONN_STATUS)) {
 			dev_info(dbc->dev, "DbC cable unplugged\n");
-			dbc->state = DS_ENABLED;
+			xhci_dbc_set_state(dbc, DS_ENABLED);
 			xhci_dbc_flush_requests(dbc);
-
+			xhci_dbc_reinit_ep_rings(dbc);
 			return EVT_DISC;
 		}
 
@@ -867,9 +1001,9 @@ static enum evtreturn xhci_dbc_do_handle_events(struct xhci_dbc *dbc)
 		if (portsc & DBC_PORTSC_RESET_CHANGE) {
 			dev_info(dbc->dev, "DbC port reset\n");
 			writel(portsc, &dbc->regs->portsc);
-			dbc->state = DS_ENABLED;
+			xhci_dbc_set_state(dbc, DS_ENABLED);
 			xhci_dbc_flush_requests(dbc);
-
+			xhci_dbc_reinit_ep_rings(dbc);
 			return EVT_DISC;
 		}
 
@@ -909,6 +1043,8 @@ static enum evtreturn xhci_dbc_do_handle_events(struct xhci_dbc *dbc)
 			break;
 		case TRB_TYPE(TRB_TRANSFER):
 			dbc_handle_xfer_event(dbc, evt);
+			if (ret != EVT_GSER)
+				ret = EVT_XFER_DONE;
 			break;
 		default:
 			break;
@@ -927,7 +1063,7 @@ static enum evtreturn xhci_dbc_do_handle_events(struct xhci_dbc *dbc)
 		lo_hi_writeq(deq, &dbc->regs->erdp);
 	}
 
-	return EVT_DONE;
+	return ret;
 }
 
 static void xhci_dbc_handle_events(struct work_struct *work)
@@ -936,6 +1072,7 @@ static void xhci_dbc_handle_events(struct work_struct *work)
 	struct xhci_dbc		*dbc;
 	unsigned long		flags;
 	unsigned int		poll_interval;
+	unsigned long		busypoll_timelimit;
 
 	dbc = container_of(to_delayed_work(work), struct xhci_dbc, event_work);
 	poll_interval = dbc->poll_interval;
@@ -954,17 +1091,27 @@ static void xhci_dbc_handle_events(struct work_struct *work)
 			dbc->driver->disconnect(dbc);
 		break;
 	case EVT_DONE:
-		/* set fast poll rate if there are pending data transfers */
+		/*
+		 * Set fast poll rate if there are pending out transfers, or
+		 * a transfer was recently processed
+		 */
+		busypoll_timelimit = dbc->xfer_timestamp +
+			msecs_to_jiffies(DBC_XFER_INACTIVITY_TIMEOUT);
+
 		if (!list_empty(&dbc->eps[BULK_OUT].list_pending) ||
-		    !list_empty(&dbc->eps[BULK_IN].list_pending))
+		    time_is_after_jiffies(busypoll_timelimit))
 			poll_interval = 0;
+		break;
+	case EVT_XFER_DONE:
+		dbc->xfer_timestamp = jiffies;
+		poll_interval = 0;
 		break;
 	default:
 		dev_info(dbc->dev, "stop handling dbc events\n");
 		return;
 	}
 
-	mod_delayed_work(system_wq, &dbc->event_work,
+	mod_delayed_work(system_percpu_wq, &dbc->event_work,
 			 msecs_to_jiffies(poll_interval));
 }
 
@@ -989,6 +1136,9 @@ static ssize_t dbc_show(struct device *dev,
 	if (dbc->state >= ARRAY_SIZE(dbc_state_strings))
 		return sysfs_emit(buf, "unknown\n");
 
+	if (dbc->resume_required)
+		return sysfs_emit(buf, "suspended\n");
+
 	return sysfs_emit(buf, "%s\n", dbc_state_strings[dbc->state]);
 }
 
@@ -1002,12 +1152,30 @@ static ssize_t dbc_store(struct device *dev,
 	xhci = hcd_to_xhci(dev_get_drvdata(dev));
 	dbc = xhci->dbc;
 
-	if (sysfs_streq(buf, "enable"))
+	if (sysfs_streq(buf, "enable")) {
+		pm_runtime_get_sync(dbc->dev);
+
+		mutex_lock(&dbc->enable_mutex);
+		/*
+		 * DbC may already be enabled here if xhci was suspended with
+		 * dbc->resume_required set, and resumed by pm_runtime_get_sync()
+		 * above. In this case we end up calling xhci_dbc_start() twice,
+		 * second time returns an error but is harmless
+		 */
 		xhci_dbc_start(dbc);
-	else if (sysfs_streq(buf, "disable"))
+
+		mutex_unlock(&dbc->enable_mutex);
+		pm_runtime_put(dbc->dev);
+	} else if (sysfs_streq(buf, "disable")) {
+		mutex_lock(&dbc->enable_mutex);
+
+		dbc->resume_required = 0;
 		xhci_dbc_stop(dbc);
-	else
+
+		mutex_unlock(&dbc->enable_mutex);
+	} else {
 		return -EINVAL;
+	}
 
 	return count;
 }
@@ -1137,6 +1305,108 @@ static ssize_t dbc_bcdDevice_store(struct device *dev,
 	return size;
 }
 
+static ssize_t dbc_manufacturer_show(struct device *dev,
+				      struct device_attribute *attr,
+				      char *buf)
+{
+	struct xhci_hcd	*xhci = hcd_to_xhci(dev_get_drvdata(dev));
+	struct xhci_dbc	*dbc = xhci->dbc;
+
+	return sysfs_emit(buf, "%s\n", dbc->str.manufacturer);
+}
+
+static ssize_t dbc_manufacturer_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t size)
+{
+	struct xhci_hcd	*xhci = hcd_to_xhci(dev_get_drvdata(dev));
+	struct xhci_dbc	*dbc = xhci->dbc;
+	size_t len;
+
+	if (dbc->state != DS_DISABLED)
+		return -EBUSY;
+
+	len = strcspn(buf, "\n");
+	if (!len)
+		return -EINVAL;
+
+	if (len > USB_MAX_STRING_LEN)
+		return -E2BIG;
+
+	memcpy(dbc->str.manufacturer, buf, len);
+	dbc->str.manufacturer[len] = '\0';
+
+	return size;
+}
+
+static ssize_t dbc_product_show(struct device *dev,
+				 struct device_attribute *attr,
+				 char *buf)
+{
+	struct xhci_hcd	*xhci = hcd_to_xhci(dev_get_drvdata(dev));
+	struct xhci_dbc	*dbc = xhci->dbc;
+
+	return sysfs_emit(buf, "%s\n", dbc->str.product);
+}
+
+static ssize_t dbc_product_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t size)
+{
+	struct xhci_hcd	*xhci = hcd_to_xhci(dev_get_drvdata(dev));
+	struct xhci_dbc	*dbc = xhci->dbc;
+	size_t len;
+
+	if (dbc->state != DS_DISABLED)
+		return -EBUSY;
+
+	len = strcspn(buf, "\n");
+	if (!len)
+		return -EINVAL;
+
+	if (len > USB_MAX_STRING_LEN)
+		return -E2BIG;
+
+	memcpy(dbc->str.product, buf, len);
+	dbc->str.product[len] = '\0';
+
+	return size;
+}
+
+static ssize_t dbc_serial_show(struct device *dev,
+			    struct device_attribute *attr,
+			    char *buf)
+{
+	struct xhci_hcd	*xhci = hcd_to_xhci(dev_get_drvdata(dev));
+	struct xhci_dbc	*dbc = xhci->dbc;
+
+	return sysfs_emit(buf, "%s\n", dbc->str.serial);
+}
+
+static ssize_t dbc_serial_store(struct device *dev,
+			     struct device_attribute *attr,
+			     const char *buf, size_t size)
+{
+	struct xhci_hcd	*xhci = hcd_to_xhci(dev_get_drvdata(dev));
+	struct xhci_dbc	*dbc = xhci->dbc;
+	size_t len;
+
+	if (dbc->state != DS_DISABLED)
+		return -EBUSY;
+
+	len = strcspn(buf, "\n");
+	if (!len)
+		return -EINVAL;
+
+	if (len > USB_MAX_STRING_LEN)
+		return -E2BIG;
+
+	memcpy(dbc->str.serial, buf, len);
+	dbc->str.serial[len] = '\0';
+
+	return size;
+}
+
 static ssize_t dbc_bInterfaceProtocol_show(struct device *dev,
 				 struct device_attribute *attr,
 				 char *buf)
@@ -1215,7 +1485,7 @@ static ssize_t dbc_poll_interval_ms_store(struct device *dev,
 
 	dbc->poll_interval = value;
 
-	mod_delayed_work(system_wq, &dbc->event_work, 0);
+	mod_delayed_work(system_percpu_wq, &dbc->event_work, 0);
 
 	return size;
 }
@@ -1224,6 +1494,9 @@ static DEVICE_ATTR_RW(dbc);
 static DEVICE_ATTR_RW(dbc_idVendor);
 static DEVICE_ATTR_RW(dbc_idProduct);
 static DEVICE_ATTR_RW(dbc_bcdDevice);
+static DEVICE_ATTR_RW(dbc_serial);
+static DEVICE_ATTR_RW(dbc_product);
+static DEVICE_ATTR_RW(dbc_manufacturer);
 static DEVICE_ATTR_RW(dbc_bInterfaceProtocol);
 static DEVICE_ATTR_RW(dbc_poll_interval_ms);
 
@@ -1232,6 +1505,9 @@ static struct attribute *dbc_dev_attrs[] = {
 	&dev_attr_dbc_idVendor.attr,
 	&dev_attr_dbc_idProduct.attr,
 	&dev_attr_dbc_bcdDevice.attr,
+	&dev_attr_dbc_serial.attr,
+	&dev_attr_dbc_product.attr,
+	&dev_attr_dbc_manufacturer.attr,
 	&dev_attr_dbc_bInterfaceProtocol.attr,
 	&dev_attr_dbc_poll_interval_ms.attr,
 	NULL
@@ -1244,7 +1520,7 @@ xhci_alloc_dbc(struct device *dev, void __iomem *base, const struct dbc_driver *
 	struct xhci_dbc		*dbc;
 	int			ret;
 
-	dbc = kzalloc(sizeof(*dbc), GFP_KERNEL);
+	dbc = kzalloc_obj(*dbc);
 	if (!dbc)
 		return NULL;
 
@@ -1257,11 +1533,15 @@ xhci_alloc_dbc(struct device *dev, void __iomem *base, const struct dbc_driver *
 	dbc->bInterfaceProtocol = DBC_PROTOCOL;
 	dbc->poll_interval = DBC_POLL_INTERVAL_DEFAULT;
 
+	/* initialize serial, product and manufacturer with default values */
+	dbc->str = dbc_str_default;
+
 	if (readl(&dbc->regs->control) & DBC_CTRL_DBC_ENABLE)
 		goto err;
 
 	INIT_DELAYED_WORK(&dbc->event_work, xhci_dbc_handle_events);
 	spin_lock_init(&dbc->lock);
+	mutex_init(&dbc->enable_mutex);
 
 	ret = sysfs_create_groups(&dev->kobj, dbc_dev_groups);
 	if (ret)
@@ -1279,8 +1559,9 @@ void xhci_dbc_remove(struct xhci_dbc *dbc)
 	if (!dbc)
 		return;
 	/* stop hw, stop wq and call dbc->ops->stop() */
+	mutex_lock(&dbc->enable_mutex);
 	xhci_dbc_stop(dbc);
-
+	mutex_unlock(&dbc->enable_mutex);
 	/* remove sysfs files */
 	sysfs_remove_groups(&dbc->dev->kobj, dbc_dev_groups);
 
@@ -1333,10 +1614,20 @@ int xhci_dbc_suspend(struct xhci_hcd *xhci)
 	if (!dbc)
 		return 0;
 
-	if (dbc->state == DS_CONFIGURED)
+	mutex_lock(&dbc->enable_mutex);
+
+	switch (dbc->state) {
+	case DS_ENABLED:
+	case DS_CONNECTED:
+	case DS_CONFIGURED:
 		dbc->resume_required = 1;
+		break;
+	default:
+		break;
+	}
 
 	xhci_dbc_stop(dbc);
+	mutex_unlock(&dbc->enable_mutex);
 
 	return 0;
 }
@@ -1349,10 +1640,14 @@ int xhci_dbc_resume(struct xhci_hcd *xhci)
 	if (!dbc)
 		return 0;
 
+	mutex_lock(&dbc->enable_mutex);
+
 	if (dbc->resume_required) {
 		dbc->resume_required = 0;
 		xhci_dbc_start(dbc);
 	}
+
+	mutex_unlock(&dbc->enable_mutex);
 
 	return ret;
 }

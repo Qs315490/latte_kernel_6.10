@@ -24,6 +24,77 @@
 
 #define UFS_QCOM_LIMIT_HS_RATE		PA_HS_MODE_B
 
+/* bit and mask definitions for PA_VS_CLK_CFG_REG attribute */
+#define PA_VS_CLK_CFG_REG      0x9004
+#define PA_VS_CLK_CFG_REG_MASK GENMASK(8, 0)
+
+/* bit and mask definitions for DL_VS_CLK_CFG attribute */
+#define DL_VS_CLK_CFG          0xA00B
+#define DL_VS_CLK_CFG_MASK GENMASK(9, 0)
+#define DME_VS_CORE_CLK_CTRL_DME_HW_CGC_EN             BIT(9)
+
+#define UFS_QCOM_EOM_VOLTAGE_STEPS_MAX		127
+#define UFS_QCOM_EOM_TIMING_STEPS_MAX		63
+#define UFS_QCOM_EOM_TARGET_TEST_COUNT_MIN	8
+#define UFS_QCOM_EOM_TARGET_TEST_COUNT_G6	0x3F
+
+#define SW_RX_FOM_EOM_COORDS		23
+#define SW_RX_FOM_EOM_COORDS_WEIGHT	(127 / SW_RX_FOM_EOM_COORDS)
+
+struct ufs_eom_coord {
+	int t_step;
+	int v_step;
+	u8 eye_mask;
+};
+
+static const struct ufs_eom_coord sw_rx_fom_eom_coords_g6[SW_RX_FOM_EOM_COORDS] = {
+	[0] = { -2, -15, UFS_EOM_EYE_MASK_M },
+	[1] = { 0, -15, UFS_EOM_EYE_MASK_M },
+	[2] = { 2, -15, UFS_EOM_EYE_MASK_M },
+	[3] = { -4, -10, UFS_EOM_EYE_MASK_M },
+	[4] = { -2, -10, UFS_EOM_EYE_MASK_M },
+	[5] = { 0, -10, UFS_EOM_EYE_MASK_M },
+	[6] = { 2, -10, UFS_EOM_EYE_MASK_M },
+	[7] = { 4, -10, UFS_EOM_EYE_MASK_M },
+	[8] = { -6, 0, UFS_EOM_EYE_MASK_M },
+	[9] = { -4, 0, UFS_EOM_EYE_MASK_M },
+	[10] = { -2, 0, UFS_EOM_EYE_MASK_M },
+	[11] = { 0, 0, UFS_EOM_EYE_MASK_M },
+	[12] = { 2, 0, UFS_EOM_EYE_MASK_M },
+	[13] = { 4, 0, UFS_EOM_EYE_MASK_M },
+	[14] = { 6, 0, UFS_EOM_EYE_MASK_M },
+	[15] = { -4, 10, UFS_EOM_EYE_MASK_M },
+	[16] = { -2, 10, UFS_EOM_EYE_MASK_M },
+	[17] = { 0, 10, UFS_EOM_EYE_MASK_M },
+	[18] = { 2, 10, UFS_EOM_EYE_MASK_M },
+	[19] = { 4, 10, UFS_EOM_EYE_MASK_M },
+	[20] = { -2, 15, UFS_EOM_EYE_MASK_M },
+	[21] = { 0, 15, UFS_EOM_EYE_MASK_M },
+	[22] = { 2, 15, UFS_EOM_EYE_MASK_M },
+};
+
+/* Qualcomm MCQ Configuration */
+#define UFS_QCOM_MCQCAP_QCFGPTR     224  /* 0xE0 in hex */
+#define UFS_QCOM_MCQ_CONFIG_OFFSET  (UFS_QCOM_MCQCAP_QCFGPTR * 0x200)  /* 0x1C000 */
+
+/* Doorbell offsets within MCQ region (relative to MCQ_CONFIG_BASE) */
+#define UFS_QCOM_MCQ_SQD_OFFSET     0x5000
+#define UFS_QCOM_MCQ_CQD_OFFSET     0x5080
+#define UFS_QCOM_MCQ_SQIS_OFFSET    0x5040
+#define UFS_QCOM_MCQ_CQIS_OFFSET    0x50C0
+#define UFS_QCOM_MCQ_STRIDE         0x100
+
+/* Calculated doorbell address offsets (relative to mmio_base) */
+#define UFS_QCOM_SQD_ADDR_OFFSET    (UFS_QCOM_MCQ_CONFIG_OFFSET + UFS_QCOM_MCQ_SQD_OFFSET)
+#define UFS_QCOM_CQD_ADDR_OFFSET    (UFS_QCOM_MCQ_CONFIG_OFFSET + UFS_QCOM_MCQ_CQD_OFFSET)
+#define UFS_QCOM_SQIS_ADDR_OFFSET   (UFS_QCOM_MCQ_CONFIG_OFFSET + UFS_QCOM_MCQ_SQIS_OFFSET)
+#define UFS_QCOM_CQIS_ADDR_OFFSET   (UFS_QCOM_MCQ_CONFIG_OFFSET + UFS_QCOM_MCQ_CQIS_OFFSET)
+#define REG_UFS_MCQ_STRIDE          UFS_QCOM_MCQ_STRIDE
+
+/* MCQ Vendor specific address offsets (relative to MCQ_CONFIG_BASE) */
+#define UFS_MEM_VS_BASE 0x4000
+#define UFS_MEM_CQIS_VS 0x4008
+
 /* QCOM UFS host controller vendor specific registers */
 enum {
 	REG_UFS_SYS1CLK_1US                 = 0xC0,
@@ -50,6 +121,11 @@ enum {
 	 */
 	UFS_AH8_CFG				= 0xFC,
 
+	UFS_RD_REG_MCQ				= 0xD00,
+	UFS_MEM_ICE_CFG				= 0x2600,
+	REG_UFS_MEM_ICE_CONFIG			= 0x260C,
+	REG_UFS_MEM_ICE_NUM_CORE		= 0x2664,
+
 	REG_UFS_CFG3				= 0x271C,
 
 	REG_UFS_DEBUG_SPARE_CFG			= 0x284C,
@@ -72,8 +148,13 @@ enum {
 	UFS_UFS_DBG_RD_EDTL_RAM			= 0x1900,
 };
 
+/* QCOM UFS HC vendor specific Hibern8 count registers */
 enum {
-	UFS_MEM_CQIS_VS		= 0x8,
+	REG_UFS_HW_H8_ENTER_CNT			= 0x2700,
+	REG_UFS_SW_H8_ENTER_CNT			= 0x2704,
+	REG_UFS_SW_AFTER_HW_H8_ENTER_CNT	= 0x2708,
+	REG_UFS_HW_H8_EXIT_CNT			= 0x270C,
+	REG_UFS_SW_H8_EXIT_CNT			= 0x2710,
 };
 
 #define UFS_CNTLR_2_x_x_VEN_REGS_OFFSET(x)	(0x000 + x)
@@ -110,14 +191,20 @@ enum {
 /* bit definition for UFS_UFS_TEST_BUS_CTRL_n */
 #define TEST_BUS_SUB_SEL_MASK	GENMASK(4, 0)  /* All XXX_SEL fields are 5 bits wide */
 
+/* bit definition for UFS Shared ICE config */
+#define UFS_QCOM_CAP_ICE_CONFIG BIT(0)
+
 #define REG_UFS_CFG2_CGC_EN_ALL (UAWM_HW_CGC_EN | UARM_HW_CGC_EN |\
 				 TXUC_HW_CGC_EN | RXUC_HW_CGC_EN |\
 				 DFC_HW_CGC_EN | TRLUT_HW_CGC_EN |\
 				 TMRLUT_HW_CGC_EN | OCSC_HW_CGC_EN)
 
 /* QUniPro Vendor specific attributes */
+#define PA_TX_HSG1_SYNC_LENGTH	0x1552
 #define PA_VS_CONFIG_REG1	0x9000
 #define DME_VS_CORE_CLK_CTRL	0xD002
+#define TX_HS_EQUALIZER		0x0037
+
 /* bit and mask definitions for DME_VS_CORE_CLK_CTRL attribute */
 #define CLK_1US_CYCLES_MASK_V4				GENMASK(27, 16)
 #define CLK_1US_CYCLES_MASK				GENMASK(7, 0)
@@ -134,6 +221,63 @@ enum {
 #define UNIPRO_CORE_CLK_FREQ_300_MHZ           300
 #define UNIPRO_CORE_CLK_FREQ_201_5_MHZ         202
 #define UNIPRO_CORE_CLK_FREQ_403_MHZ           403
+
+/* TX_HSG1_SYNC_LENGTH attr value */
+#define PA_TX_HSG1_SYNC_LENGTH_VAL	0x4A
+
+/*
+ * Some ufs device vendors need a different TSync length.
+ * Enable this quirk to give an additional TX_HS_SYNC_LENGTH.
+ */
+#define UFS_DEVICE_QUIRK_PA_TX_HSG1_SYNC_LENGTH		BIT(16)
+
+/*
+ * Some ufs device vendors need a different Deemphasis setting.
+ * Enable this quirk to tune TX Deemphasis parameters.
+ */
+#define UFS_DEVICE_QUIRK_PA_TX_DEEMPHASIS_TUNING	BIT(17)
+
+/* ICE allocator type to share AES engines among TX stream and RX stream */
+#define ICE_ALLOCATOR_TYPE 2
+
+/*
+ * Number of cores allocated for RX stream when Read data block received and
+ * Write data block is not in progress
+ */
+#define NUM_RX_R1W0 28
+
+/*
+ * Number of cores allocated for TX stream when Device asked to send write
+ * data block and Read data block is not in progress
+ */
+#define NUM_TX_R0W1 28
+
+/*
+ * Number of cores allocated for RX stream when Read data block received and
+ * Write data block is in progress
+ * OR
+ * Device asked to send write data block and Read data block is in progress
+ */
+#define NUM_RX_R1W1 15
+
+/*
+ * Number of cores allocated for TX stream (UFS write) when Read data block
+ * received and Write data block is in progress
+ * OR
+ * Device asked to send write data block and Read data block is in progress
+ */
+#define NUM_TX_R1W1 13
+
+/* bit definitions for UFS_AH8_CFG register */
+#define CC_UFS_SYS_CLK_REQ_EN          BIT(2)
+#define CC_UFS_ICE_CORE_CLK_REQ_EN     BIT(3)
+#define CC_UFS_UNIPRO_CORE_CLK_REQ_EN  BIT(4)
+#define CC_UFS_AUXCLK_REQ_EN           BIT(5)
+
+#define UFS_HW_CLK_CTRL_EN	(CC_UFS_SYS_CLK_REQ_EN |\
+				CC_UFS_ICE_CORE_CLK_REQ_EN |\
+				CC_UFS_UNIPRO_CORE_CLK_REQ_EN |\
+				CC_UFS_AUXCLK_REQ_EN)
 
 static inline void
 ufs_qcom_get_controller_revision(struct ufs_hba *hba,
@@ -196,7 +340,7 @@ struct ufs_qcom_host {
 #ifdef CONFIG_SCSI_UFS_CRYPTO
 	struct qcom_ice *ice;
 #endif
-
+	u32 caps;
 	void __iomem *dev_ref_clk_ctrl_mmio;
 	bool is_dev_ref_clk_enabled;
 	struct ufs_hw_version hw_ver;
@@ -215,11 +359,14 @@ struct ufs_qcom_host {
 	u32 phy_gear;
 
 	bool esi_enabled;
+
+	u32 saved_tx_eq_g1_setting;
 };
 
 struct ufs_qcom_drvdata {
 	enum ufshcd_quirks quirks;
 	bool no_phy_retention;
+	const struct ufs_hba_variant_ops *vops;
 };
 
 static inline u32

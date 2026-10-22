@@ -24,13 +24,28 @@ struct pinctrl_pin_desc;
 					fname##_groups,		\
 					ARRAY_SIZE(fname##_groups))
 
+#define IPQ_GPIO_PIN_FUNCTION(fname)					\
+	[IPQ_MUX_##fname] = PINCTRL_GPIO_PINFUNCTION(#fname,		\
+					fname##_groups,		\
+					ARRAY_SIZE(fname##_groups))
+
 #define MSM_PIN_FUNCTION(fname) 				\
 	[msm_mux_##fname] = PINCTRL_PINFUNCTION(#fname,		\
 					fname##_groups,		\
 					ARRAY_SIZE(fname##_groups))
 
+#define MSM_GPIO_PIN_FUNCTION(fname)				\
+	[msm_mux_##fname] = PINCTRL_GPIO_PINFUNCTION(#fname,	\
+					fname##_groups,		\
+					ARRAY_SIZE(fname##_groups))
+
 #define QCA_PIN_FUNCTION(fname)					\
 	[qca_mux_##fname] = PINCTRL_PINFUNCTION(#fname,		\
+					fname##_groups,		\
+					ARRAY_SIZE(fname##_groups))
+
+#define QCA_GPIO_PIN_FUNCTION(fname)				\
+	[qca_mux_##fname] = PINCTRL_GPIO_PINFUNCTION(#fname,	\
 					fname##_groups,		\
 					ARRAY_SIZE(fname##_groups))
 
@@ -47,7 +62,11 @@ struct pinctrl_pin_desc;
  * @intr_cfg_reg:         Offset of the register holding interrupt configuration bits.
  * @intr_status_reg:      Offset of the register holding the status bits for this group.
  * @intr_target_reg:      Offset of the register specifying routing of the interrupts
- *                        from this group.
+ *                        from this group. On most SoCs this register is the same as
+ *                        @intr_cfg_reg; leaving this field as zero causes the driver
+ *                        to fall back to @intr_cfg_reg automatically. Only set this
+ *                        explicitly on older SoCs where the interrupt target routing
+ *                        lives in a separate register (e.g. APQ8064, MSM8960).
  * @mux_bit:              Offset in @ctl_reg for the pinmux function selection.
  * @pull_bit:             Offset in @ctl_reg for the bias configuration.
  * @drv_bit:              Offset in @ctl_reg for the drive strength configuration.
@@ -171,6 +190,5 @@ extern const struct dev_pm_ops msm_pinctrl_dev_pm_ops;
 
 int msm_pinctrl_probe(struct platform_device *pdev,
 		      const struct msm_pinctrl_soc_data *soc_data);
-void msm_pinctrl_remove(struct platform_device *pdev);
 
 #endif

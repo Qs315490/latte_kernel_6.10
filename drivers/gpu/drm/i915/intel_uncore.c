@@ -21,17 +21,22 @@
  * IN THE SOFTWARE.
  */
 
-#include <drm/drm_managed.h>
 #include <linux/pm_runtime.h>
 
-#include "gt/intel_gt.h"
+#include <drm/drm_managed.h>
+#include <drm/drm_print.h>
+
+#include "display/intel_display_core.h"
 #include "gt/intel_engine_regs.h"
+#include "gt/intel_gt.h"
 #include "gt/intel_gt_regs.h"
 
 #include "i915_drv.h"
 #include "i915_iosf_mbi.h"
 #include "i915_reg.h"
 #include "i915_vgpu.h"
+#include "i915_wait_util.h"
+#include "i915_mmio_range.h"
 #include "intel_uncore_trace.h"
 
 #define FORCEWAKE_ACK_TIMEOUT_MS 50
@@ -127,8 +132,8 @@ intel_uncore_forcewake_domain_to_str(const enum forcewake_domain_id id)
 }
 
 #define fw_ack(d) readl((d)->reg_ack)
-#define fw_set(d, val) writel(_MASKED_BIT_ENABLE((val)), (d)->reg_set)
-#define fw_clear(d, val) writel(_MASKED_BIT_DISABLE((val)), (d)->reg_set)
+#define fw_set(d, val) writel(REG_MASKED_FIELD_ENABLE((val)), (d)->reg_set)
+#define fw_clear(d, val) writel(REG_MASKED_FIELD_DISABLE((val)), (d)->reg_set)
 
 static inline void
 fw_domain_reset(const struct intel_uncore_forcewake_domain *d)
@@ -394,6 +399,35 @@ static void fw_domains_get_with_thread_status(struct intel_uncore *uncore,
 	__gen6_gt_wait_for_thread_c0(uncore);
 }
 
+static void
+gen6_check_for_fifo_debug(struct intel_uncore *uncore)
+{
+	u32 fifodbg;
+
+	fifodbg = __raw_uncore_read32(uncore, GTFIFODBG);
+
+	if (unlikely(fifodbg)) {
+		drm_dbg(&uncore->i915->drm, "GTFIFODBG = 0x08%x\n", fifodbg);
+		__raw_uncore_write32(uncore, GTFIFODBG, fifodbg);
+	}
+}
+
+static void
+fw_domains_get_normal_fifo(struct intel_uncore *uncore,
+			   enum forcewake_domains fw_domains)
+{
+	gen6_check_for_fifo_debug(uncore);
+	fw_domains_get_normal(uncore, fw_domains);
+}
+
+static void
+fw_domains_get_with_thread_status_fifo(struct intel_uncore *uncore,
+				       enum forcewake_domains fw_domains)
+{
+	gen6_check_for_fifo_debug(uncore);
+	fw_domains_get_with_thread_status(uncore, fw_domains);
+}
+
 static inline u32 fifo_free_entries(struct intel_uncore *uncore)
 {
 	u32 count = __raw_uncore_read32(uncore, GTFIFOCTL);
@@ -557,21 +591,6 @@ vlv_check_for_unclaimed_mmio(struct intel_uncore *uncore)
 }
 
 static bool
-gen6_check_for_fifo_debug(struct intel_uncore *uncore)
-{
-	u32 fifodbg;
-
-	fifodbg = __raw_uncore_read32(uncore, GTFIFODBG);
-
-	if (unlikely(fifodbg)) {
-		drm_dbg(&uncore->i915->drm, "GTFIFODBG = 0x08%x\n", fifodbg);
-		__raw_uncore_write32(uncore, GTFIFODBG, fifodbg);
-	}
-
-	return fifodbg;
-}
-
-static bool
 check_for_unclaimed_mmio(struct intel_uncore *uncore)
 {
 	bool ret = false;
@@ -586,9 +605,6 @@ check_for_unclaimed_mmio(struct intel_uncore *uncore)
 
 	if (intel_uncore_has_dbg_unclaimed(uncore))
 		ret |= vlv_check_for_unclaimed_mmio(uncore);
-
-	if (intel_uncore_has_fifo(uncore))
-		ret |= gen6_check_for_fifo_debug(uncore);
 
 	return ret;
 }
@@ -605,6 +621,9 @@ static void forcewake_early_sanitize(struct intel_uncore *uncore,
 				     GT_FIFO_CTL_BLOCK_ALL_POLICY_STALL |
 				     GT_FIFO_CTL_RC6_POLICY_STALL);
 	}
+
+	if (intel_uncore_has_fifo(uncore))
+		gen6_check_for_fifo_debug(uncore);
 
 	iosf_mbi_punit_acquire();
 	intel_uncore_forcewake_reset(uncore);
@@ -996,7 +1015,7 @@ find_fw_domain(struct intel_uncore *uncore, u32 offset)
  * scanned for obvious mistakes or typos by the selftests.
  */
 
-static const struct i915_range gen8_shadowed_regs[] = {
+static const struct i915_mmio_range gen8_shadowed_regs[] = {
 	{ .start =  0x2030, .end =  0x2030 },
 	{ .start =  0xA008, .end =  0xA00C },
 	{ .start = 0x12030, .end = 0x12030 },
@@ -1004,7 +1023,7 @@ static const struct i915_range gen8_shadowed_regs[] = {
 	{ .start = 0x22030, .end = 0x22030 },
 };
 
-static const struct i915_range gen11_shadowed_regs[] = {
+static const struct i915_mmio_range gen11_shadowed_regs[] = {
 	{ .start =   0x2030, .end =   0x2030 },
 	{ .start =   0x2550, .end =   0x2550 },
 	{ .start =   0xA008, .end =   0xA00C },
@@ -1031,7 +1050,7 @@ static const struct i915_range gen11_shadowed_regs[] = {
 	{ .start = 0x1D8510, .end = 0x1D8550 },
 };
 
-static const struct i915_range gen12_shadowed_regs[] = {
+static const struct i915_mmio_range gen12_shadowed_regs[] = {
 	{ .start =   0x2030, .end =   0x2030 },
 	{ .start =   0x2510, .end =   0x2550 },
 	{ .start =   0xA008, .end =   0xA00C },
@@ -1075,7 +1094,7 @@ static const struct i915_range gen12_shadowed_regs[] = {
 	{ .start = 0x1F8510, .end = 0x1F8550 },
 };
 
-static const struct i915_range dg2_shadowed_regs[] = {
+static const struct i915_mmio_range dg2_shadowed_regs[] = {
 	{ .start =   0x2030, .end =   0x2030 },
 	{ .start =   0x2510, .end =   0x2550 },
 	{ .start =   0xA008, .end =   0xA00C },
@@ -1114,7 +1133,7 @@ static const struct i915_range dg2_shadowed_regs[] = {
 	{ .start = 0x1F8510, .end = 0x1F8550 },
 };
 
-static const struct i915_range mtl_shadowed_regs[] = {
+static const struct i915_mmio_range mtl_shadowed_regs[] = {
 	{ .start =   0x2030, .end =   0x2030 },
 	{ .start =   0x2510, .end =   0x2550 },
 	{ .start =   0xA008, .end =   0xA00C },
@@ -1132,7 +1151,7 @@ static const struct i915_range mtl_shadowed_regs[] = {
 	{ .start =  0x22510, .end =  0x22550 },
 };
 
-static const struct i915_range xelpmp_shadowed_regs[] = {
+static const struct i915_mmio_range xelpmp_shadowed_regs[] = {
 	{ .start = 0x1C0030, .end = 0x1C0030 },
 	{ .start = 0x1C0510, .end = 0x1C0550 },
 	{ .start = 0x1C8030, .end = 0x1C8030 },
@@ -1153,7 +1172,7 @@ static const struct i915_range xelpmp_shadowed_regs[] = {
 	{ .start = 0x38CFD4, .end = 0x38CFDC },
 };
 
-static int mmio_range_cmp(u32 key, const struct i915_range *range)
+static int mmio_range_cmp(u32 key, const struct i915_mmio_range *range)
 {
 	if (key < range->start)
 		return -1;
@@ -2067,10 +2086,7 @@ static int __fw_domain_init(struct intel_uncore *uncore,
 	GEM_BUG_ON(domain_id >= FW_DOMAIN_ID_COUNT);
 	GEM_BUG_ON(uncore->fw_domain[domain_id]);
 
-	if (i915_inject_probe_failure(uncore->i915))
-		return -ENOMEM;
-
-	d = kzalloc(sizeof(*d), GFP_KERNEL);
+	d = kzalloc_obj(*d);
 	if (!d)
 		return -ENOMEM;
 
@@ -2103,8 +2119,7 @@ static int __fw_domain_init(struct intel_uncore *uncore,
 
 	d->mask = BIT(domain_id);
 
-	hrtimer_init(&d->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	d->timer.function = intel_uncore_fw_release_timer;
+	hrtimer_setup(&d->timer, intel_uncore_fw_release_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
 	uncore->fw_domains |= BIT(domain_id);
 
@@ -2114,6 +2129,7 @@ static int __fw_domain_init(struct intel_uncore *uncore,
 
 	return 0;
 }
+ALLOW_ERROR_INJECTION(__fw_domain_init, ERRNO);
 
 static void fw_domain_fini(struct intel_uncore *uncore,
 			   enum forcewake_domain_id domain_id)
@@ -2151,6 +2167,14 @@ static const struct intel_uncore_fw_get uncore_get_normal = {
 
 static const struct intel_uncore_fw_get uncore_get_thread_status = {
 	.force_wake_get = fw_domains_get_with_thread_status
+};
+
+static const struct intel_uncore_fw_get uncore_get_normal_fifo = {
+	.force_wake_get = fw_domains_get_normal_fifo,
+};
+
+static const struct intel_uncore_fw_get uncore_get_thread_status_fifo = {
+	.force_wake_get = fw_domains_get_with_thread_status_fifo
 };
 
 static int intel_uncore_fw_domains_init(struct intel_uncore *uncore)
@@ -2216,13 +2240,19 @@ static int intel_uncore_fw_domains_init(struct intel_uncore *uncore)
 		fw_domain_init(uncore, FW_DOMAIN_ID_MEDIA,
 			       FORCEWAKE_MEDIA_GEN9, FORCEWAKE_ACK_MEDIA_GEN9);
 	} else if (IS_VALLEYVIEW(i915) || IS_CHERRYVIEW(i915)) {
-		uncore->fw_get_funcs = &uncore_get_normal;
+		if (intel_uncore_has_fifo(uncore))
+			uncore->fw_get_funcs = &uncore_get_normal_fifo;
+		else
+			uncore->fw_get_funcs = &uncore_get_normal;
 		fw_domain_init(uncore, FW_DOMAIN_ID_RENDER,
 			       FORCEWAKE_VLV, FORCEWAKE_ACK_VLV);
 		fw_domain_init(uncore, FW_DOMAIN_ID_MEDIA,
 			       FORCEWAKE_MEDIA_VLV, FORCEWAKE_ACK_MEDIA_VLV);
 	} else if (IS_HASWELL(i915) || IS_BROADWELL(i915)) {
-		uncore->fw_get_funcs = &uncore_get_thread_status;
+		if (intel_uncore_has_fifo(uncore))
+			uncore->fw_get_funcs = &uncore_get_thread_status_fifo;
+		else
+			uncore->fw_get_funcs = &uncore_get_thread_status;
 		fw_domain_init(uncore, FW_DOMAIN_ID_RENDER,
 			       FORCEWAKE_MT, FORCEWAKE_ACK_HSW);
 	} else if (IS_IVYBRIDGE(i915)) {
@@ -2237,7 +2267,7 @@ static int intel_uncore_fw_domains_init(struct intel_uncore *uncore)
 		 * (correctly) interpreted by the test below as MT
 		 * forcewake being disabled.
 		 */
-		uncore->fw_get_funcs = &uncore_get_thread_status;
+		uncore->fw_get_funcs = &uncore_get_thread_status_fifo;
 
 		/* We need to init first for ECOBUS access and then
 		 * determine later if we want to reinit, in case of MT access is
@@ -2268,7 +2298,7 @@ static int intel_uncore_fw_domains_init(struct intel_uncore *uncore)
 				       FORCEWAKE, FORCEWAKE_ACK);
 		}
 	} else if (GRAPHICS_VER(i915) == 6) {
-		uncore->fw_get_funcs = &uncore_get_thread_status;
+		uncore->fw_get_funcs = &uncore_get_thread_status_fifo;
 		fw_domain_init(uncore, FW_DOMAIN_ID_RENDER,
 			       FORCEWAKE, FORCEWAKE_ACK);
 	}
@@ -2477,7 +2507,7 @@ static int sanity_check_mmio_access(struct intel_uncore *uncore)
 
 	/*
 	 * Sanitycheck that MMIO access to the device is working properly.  If
-	 * the CPU is unable to communcate with a PCI device, BAR reads will
+	 * the CPU is unable to communicate with a PCI device, BAR reads will
 	 * return 0xFFFFFFFF.  Let's make sure the device isn't in this state
 	 * before we start trying to access registers.
 	 *
@@ -2501,6 +2531,7 @@ static int sanity_check_mmio_access(struct intel_uncore *uncore)
 int intel_uncore_init_mmio(struct intel_uncore *uncore)
 {
 	struct drm_i915_private *i915 = uncore->i915;
+	struct intel_display *display = i915->display;
 	int ret;
 
 	ret = sanity_check_mmio_access(uncore);
@@ -2535,7 +2566,7 @@ int intel_uncore_init_mmio(struct intel_uncore *uncore)
 	GEM_BUG_ON(intel_uncore_has_forcewake(uncore) != !!uncore->funcs.read_fw_domains);
 	GEM_BUG_ON(intel_uncore_has_forcewake(uncore) != !!uncore->funcs.write_fw_domains);
 
-	if (HAS_FPGA_DBG_UNCLAIMED(i915))
+	if (HAS_FPGA_DBG_UNCLAIMED(display))
 		uncore->flags |= UNCORE_HAS_FPGA_DBG_UNCLAIMED;
 
 	if (IS_VALLEYVIEW(i915) || IS_CHERRYVIEW(i915))
@@ -2643,7 +2674,7 @@ static void driver_initiated_flr(struct intel_uncore *uncore)
 	 * is still pending (unless the HW is totally dead), but better to be
 	 * safe in case something unexpected happens
 	 */
-	ret = intel_wait_for_register_fw(uncore, GU_CNTL, DRIVERFLR, 0, flr_timeout_ms);
+	ret = intel_wait_for_register_fw(uncore, GU_CNTL, DRIVERFLR, 0, flr_timeout_ms, NULL);
 	if (ret) {
 		drm_err(&i915->drm,
 			"Failed to wait for Driver-FLR bit to clear! %d\n",
@@ -2658,7 +2689,7 @@ static void driver_initiated_flr(struct intel_uncore *uncore)
 	/* Wait for hardware teardown to complete */
 	ret = intel_wait_for_register_fw(uncore, GU_CNTL,
 					 DRIVERFLR, 0,
-					 flr_timeout_ms);
+					 flr_timeout_ms, NULL);
 	if (ret) {
 		drm_err(&i915->drm, "Driver-FLR-teardown wait completion failed! %d\n", ret);
 		return;
@@ -2667,7 +2698,7 @@ static void driver_initiated_flr(struct intel_uncore *uncore)
 	/* Wait for hardware/firmware re-init to complete */
 	ret = intel_wait_for_register_fw(uncore, GU_DEBUG,
 					 DRIVERFLR_STATUS, DRIVERFLR_STATUS,
-					 flr_timeout_ms);
+					 flr_timeout_ms, NULL);
 	if (ret) {
 		drm_err(&i915->drm, "Driver-FLR-reinit wait completion failed! %d\n", ret);
 		return;

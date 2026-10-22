@@ -9,7 +9,7 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/ap.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <asm/facility.h>
@@ -96,7 +96,7 @@ static int vfio_ap_matrix_dev_create(void)
 	if (ret)
 		goto bus_register_err;
 
-	matrix_dev = kzalloc(sizeof(*matrix_dev), GFP_KERNEL);
+	matrix_dev = kzalloc_obj(*matrix_dev);
 	if (!matrix_dev) {
 		ret = -ENOMEM;
 		goto matrix_alloc_err;

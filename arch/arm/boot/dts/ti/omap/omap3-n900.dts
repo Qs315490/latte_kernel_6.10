@@ -508,7 +508,7 @@
 	};
 
 	twl_power: power {
-		compatible = "ti,twl4030-power-n900", "ti,twl4030-power-idle-osc-off";
+		compatible = "ti,twl4030-power-idle-osc-off";
 		ti,use_poweroff;
 	};
 };
@@ -816,8 +816,6 @@
 		reg = <0x0c>;
 
 		VANA-supply = <&vaux4>;
-
-		#io-channel-cells = <0>;
 	};
 };
 

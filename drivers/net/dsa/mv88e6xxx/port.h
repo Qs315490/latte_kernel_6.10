@@ -254,7 +254,10 @@
 #define MV88E6XXX_PORT_ATU_CTL		0x0c
 
 /* Offset 0x0D: Priority Override Register */
-#define MV88E6XXX_PORT_PRI_OVERRIDE	0x0d
+#define MV88E6XXX_PORT_PRI_OVERRIDE			0x0d
+#define MV88E6XXX_PORT_PRI_OVERRIDE_TCAM_MODE_MASK	0x0003
+#define MV88E6XXX_PORT_PRI_OVERRIDE_TCAM_MODE_48_BYTE	0x0001
+#define MV88E6XXX_PORT_PRI_OVERRIDE_TCAM_MODE_96_BYTE	0x0002
 
 /* Offset 0x0E: Policy Control Register */
 #define MV88E6XXX_PORT_POLICY_CTL		0x0e
@@ -490,6 +493,8 @@ int mv88e6185_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 				    int speed, int duplex);
 int mv88e6250_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 				    int speed, int duplex);
+int mv88e6320_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
+				    int speed, int duplex);
 int mv88e6341_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 				    int speed, int duplex);
 int mv88e6352_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
@@ -500,15 +505,6 @@ int mv88e6390x_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 				     int speed, int duplex);
 int mv88e6393x_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 				     int speed, int duplex);
-
-phy_interface_t mv88e6341_port_max_speed_mode(struct mv88e6xxx_chip *chip,
-					      int port);
-phy_interface_t mv88e6390_port_max_speed_mode(struct mv88e6xxx_chip *chip,
-					      int port);
-phy_interface_t mv88e6390x_port_max_speed_mode(struct mv88e6xxx_chip *chip,
-					       int port);
-phy_interface_t mv88e6393x_port_max_speed_mode(struct mv88e6xxx_chip *chip,
-					       int port);
 
 int mv88e6xxx_port_set_state(struct mv88e6xxx_chip *chip, int port, u8 state);
 
@@ -607,5 +603,7 @@ int mv88e6xxx_port_hidden_write(struct mv88e6xxx_chip *chip, int block,
 int mv88e6xxx_port_hidden_wait(struct mv88e6xxx_chip *chip);
 int mv88e6xxx_port_hidden_read(struct mv88e6xxx_chip *chip, int block, int port,
 			       int reg, u16 *val);
+
+int mv88e6xxx_port_enable_tcam(struct mv88e6xxx_chip *chip, int port);
 
 #endif /* _MV88E6XXX_PORT_H */

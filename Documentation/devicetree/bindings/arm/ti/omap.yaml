@@ -107,6 +107,7 @@ properties:
               - compulab,cm-t335
               - moxa,uc-8100-me-t
               - novatech,am335x-lxm
+              - seeed,am335x-bone-green-eco
               - ti,am335x-bone
               - ti,am335x-evm
               - ti,am3359-icev2
@@ -128,6 +129,13 @@ properties:
           - const: phytec,am335x-phycore-som
           - const: ti,am33xx
 
+      - description: TQ-Systems TQMa335x[L] SoM
+        items:
+          - enum:
+              - tq,tqma3359-mba335x # MBa335x carrier board
+          - const: tq,tqma3359
+          - const: ti,am33xx
+
       - description: TI OMAP4430 SoC based platforms
         items:
           - enum:
@@ -136,8 +144,17 @@ properties:
               - motorola,droid-bionic   # Motorola Droid Bionic XT875
               - motorola,xyboard-mz609
               - motorola,xyboard-mz617
+              - samsung,espresso7
+              - samsung,espresso10
               - ti,omap4-panda
               - ti,omap4-sdp
+          - const: ti,omap4430
+          - const: ti,omap4
+
+      - description: OMAP4 PandaBoard Revision A4 and later
+        items:
+          - const: ti,omap4-panda-a4
+          - const: ti,omap4-panda
           - const: ti,omap4430
           - const: ti,omap4
 

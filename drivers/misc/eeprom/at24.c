@@ -14,12 +14,9 @@
 #include <linux/init.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/nvmem-provider.h>
-#include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -217,42 +214,42 @@ AT24_CHIP_DATA(at24_data_24c2048, 2097152 / 8, AT24_FLAG_ADDR16);
 AT24_CHIP_DATA(at24_data_INT3499, 8192 / 8, 0);
 
 static const struct i2c_device_id at24_ids[] = {
-	{ "24c00",	(kernel_ulong_t)&at24_data_24c00 },
-	{ "24c01",	(kernel_ulong_t)&at24_data_24c01 },
-	{ "24cs01",	(kernel_ulong_t)&at24_data_24cs01 },
-	{ "24c02",	(kernel_ulong_t)&at24_data_24c02 },
-	{ "24cs02",	(kernel_ulong_t)&at24_data_24cs02 },
-	{ "24mac402",	(kernel_ulong_t)&at24_data_24mac402 },
-	{ "24mac602",	(kernel_ulong_t)&at24_data_24mac602 },
-	{ "24aa025e48",	(kernel_ulong_t)&at24_data_24aa025e48 },
-	{ "24aa025e64",	(kernel_ulong_t)&at24_data_24aa025e64 },
-	{ "spd",	(kernel_ulong_t)&at24_data_spd },
-	{ "24c02-vaio",	(kernel_ulong_t)&at24_data_24c02_vaio },
-	{ "24c04",	(kernel_ulong_t)&at24_data_24c04 },
-	{ "24cs04",	(kernel_ulong_t)&at24_data_24cs04 },
-	{ "24c08",	(kernel_ulong_t)&at24_data_24c08 },
-	{ "24cs08",	(kernel_ulong_t)&at24_data_24cs08 },
-	{ "24c16",	(kernel_ulong_t)&at24_data_24c16 },
-	{ "24cs16",	(kernel_ulong_t)&at24_data_24cs16 },
-	{ "24c32",	(kernel_ulong_t)&at24_data_24c32 },
-	{ "24c32d-wl",	(kernel_ulong_t)&at24_data_24c32d_wlp },
-	{ "24cs32",	(kernel_ulong_t)&at24_data_24cs32 },
-	{ "24c64",	(kernel_ulong_t)&at24_data_24c64 },
-	{ "24c64-wl",	(kernel_ulong_t)&at24_data_24c64d_wlp },
-	{ "24cs64",	(kernel_ulong_t)&at24_data_24cs64 },
-	{ "24c128",	(kernel_ulong_t)&at24_data_24c128 },
-	{ "24c256",	(kernel_ulong_t)&at24_data_24c256 },
-	{ "24256e-wl",	(kernel_ulong_t)&at24_data_24256e_wlp },
-	{ "24c512",	(kernel_ulong_t)&at24_data_24c512 },
-	{ "24c1024",	(kernel_ulong_t)&at24_data_24c1024 },
-	{ "24c1025",	(kernel_ulong_t)&at24_data_24c1025 },
-	{ "24c2048",    (kernel_ulong_t)&at24_data_24c2048 },
-	{ "at24",	0 },
+	{ .name = "24c00",	.driver_data = (kernel_ulong_t)&at24_data_24c00 },
+	{ .name = "24c01",	.driver_data = (kernel_ulong_t)&at24_data_24c01 },
+	{ .name = "24cs01",	.driver_data = (kernel_ulong_t)&at24_data_24cs01 },
+	{ .name = "24c02",	.driver_data = (kernel_ulong_t)&at24_data_24c02 },
+	{ .name = "24cs02",	.driver_data = (kernel_ulong_t)&at24_data_24cs02 },
+	{ .name = "24mac402",	.driver_data = (kernel_ulong_t)&at24_data_24mac402 },
+	{ .name = "24mac602",	.driver_data = (kernel_ulong_t)&at24_data_24mac602 },
+	{ .name = "24aa025e48",	.driver_data = (kernel_ulong_t)&at24_data_24aa025e48 },
+	{ .name = "24aa025e64",	.driver_data = (kernel_ulong_t)&at24_data_24aa025e64 },
+	{ .name = "spd",	.driver_data = (kernel_ulong_t)&at24_data_spd },
+	{ .name = "24c02-vaio",	.driver_data = (kernel_ulong_t)&at24_data_24c02_vaio },
+	{ .name = "24c04",	.driver_data = (kernel_ulong_t)&at24_data_24c04 },
+	{ .name = "24cs04",	.driver_data = (kernel_ulong_t)&at24_data_24cs04 },
+	{ .name = "24c08",	.driver_data = (kernel_ulong_t)&at24_data_24c08 },
+	{ .name = "24cs08",	.driver_data = (kernel_ulong_t)&at24_data_24cs08 },
+	{ .name = "24c16",	.driver_data = (kernel_ulong_t)&at24_data_24c16 },
+	{ .name = "24cs16",	.driver_data = (kernel_ulong_t)&at24_data_24cs16 },
+	{ .name = "24c32",	.driver_data = (kernel_ulong_t)&at24_data_24c32 },
+	{ .name = "24c32d-wl",	.driver_data = (kernel_ulong_t)&at24_data_24c32d_wlp },
+	{ .name = "24cs32",	.driver_data = (kernel_ulong_t)&at24_data_24cs32 },
+	{ .name = "24c64",	.driver_data = (kernel_ulong_t)&at24_data_24c64 },
+	{ .name = "24c64-wl",	.driver_data = (kernel_ulong_t)&at24_data_24c64d_wlp },
+	{ .name = "24cs64",	.driver_data = (kernel_ulong_t)&at24_data_24cs64 },
+	{ .name = "24c128",	.driver_data = (kernel_ulong_t)&at24_data_24c128 },
+	{ .name = "24c256",	.driver_data = (kernel_ulong_t)&at24_data_24c256 },
+	{ .name = "24256e-wl",	.driver_data = (kernel_ulong_t)&at24_data_24256e_wlp },
+	{ .name = "24c512",	.driver_data = (kernel_ulong_t)&at24_data_24c512 },
+	{ .name = "24c1024",	.driver_data = (kernel_ulong_t)&at24_data_24c1024 },
+	{ .name = "24c1025",	.driver_data = (kernel_ulong_t)&at24_data_24c1025 },
+	{ .name = "24c2048",	.driver_data = (kernel_ulong_t)&at24_data_24c2048 },
+	{ .name = "at24",	.driver_data = 0 },
 	{ /* END OF LIST */ }
 };
 MODULE_DEVICE_TABLE(i2c, at24_ids);
 
-static const struct of_device_id __maybe_unused at24_of_match[] = {
+static const struct of_device_id at24_of_match[] = {
 	{ .compatible = "atmel,24c00",		.data = &at24_data_24c00 },
 	{ .compatible = "atmel,24c01",		.data = &at24_data_24c01 },
 	{ .compatible = "atmel,24cs01",		.data = &at24_data_24cs01 },
@@ -286,7 +283,7 @@ static const struct of_device_id __maybe_unused at24_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, at24_of_match);
 
-static const struct acpi_device_id __maybe_unused at24_acpi_ids[] = {
+static const struct acpi_device_id at24_acpi_ids[] = {
 	{ "INT3499",	(kernel_ulong_t)&at24_data_INT3499 },
 	{ "TPF0001",	(kernel_ulong_t)&at24_data_24c1024 },
 	{ /* END OF LIST */ }
@@ -659,10 +656,8 @@ static int at24_probe(struct i2c_client *client)
 	if (!i2c_fn_i2c && !i2c_fn_block)
 		page_size = 1;
 
-	if (!page_size) {
-		dev_err(dev, "page_size must not be 0!\n");
-		return -EINVAL;
-	}
+	if (!page_size)
+		return dev_err_probe(dev, -EINVAL, "page_size must not be 0!\n");
 
 	if (!is_power_of_2(page_size))
 		dev_warn(dev, "page_size looks suspicious (no power of 2)!\n");
@@ -676,11 +671,9 @@ static int at24_probe(struct i2c_client *client)
 				(flags & AT24_FLAG_ADDR16) ? 65536 : 256);
 	}
 
-	if ((flags & AT24_FLAG_SERIAL) && (flags & AT24_FLAG_MAC)) {
-		dev_err(dev,
-			"invalid device data - cannot have both AT24_FLAG_SERIAL & AT24_FLAG_MAC.");
-		return -EINVAL;
-	}
+	if ((flags & AT24_FLAG_SERIAL) && (flags & AT24_FLAG_MAC))
+		return dev_err_probe(dev, -EINVAL,
+				     "invalid device data - cannot have both AT24_FLAG_SERIAL & AT24_FLAG_MAC.");
 
 	regmap_config.val_bits = 8;
 	regmap_config.reg_bits = (flags & AT24_FLAG_ADDR16) ? 16 : 8;
@@ -761,10 +754,8 @@ static int at24_probe(struct i2c_client *client)
 	full_power = acpi_dev_state_d0(&client->dev);
 	if (full_power) {
 		err = regulator_enable(at24->vcc_reg);
-		if (err) {
-			dev_err(dev, "Failed to enable vcc regulator\n");
-			return err;
-		}
+		if (err)
+			return dev_err_probe(dev, err, "Failed to enable vcc regulator\n");
 
 		pm_runtime_set_active(dev);
 	}
@@ -848,8 +839,8 @@ static struct i2c_driver at24_driver = {
 	.driver = {
 		.name = "at24",
 		.pm = &at24_pm_ops,
-		.of_match_table = of_match_ptr(at24_of_match),
-		.acpi_match_table = ACPI_PTR(at24_acpi_ids),
+		.of_match_table = at24_of_match,
+		.acpi_match_table = at24_acpi_ids,
 	},
 	.probe = at24_probe,
 	.remove = at24_remove,

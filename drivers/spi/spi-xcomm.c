@@ -44,8 +44,8 @@ struct spi_xcomm {
 	u8 buf[63];
 };
 
-static void spi_xcomm_gpio_set_value(struct gpio_chip *chip,
-				     unsigned int offset, int val)
+static int spi_xcomm_gpio_set_value(struct gpio_chip *chip,
+				    unsigned int offset, int val)
 {
 	struct spi_xcomm *spi_xcomm = gpiochip_get_data(chip);
 	unsigned char buf[2];
@@ -53,7 +53,7 @@ static void spi_xcomm_gpio_set_value(struct gpio_chip *chip,
 	buf[0] = SPI_XCOMM_CMD_GPIO_SET;
 	buf[1] = !!val;
 
-	i2c_master_send(spi_xcomm->i2c, buf, 2);
+	return i2c_master_send(spi_xcomm->i2c, buf, 2);
 }
 
 static int spi_xcomm_gpio_get_direction(struct gpio_chip *chip,
@@ -260,7 +260,6 @@ static int spi_xcomm_probe(struct i2c_client *i2c)
 	host->bits_per_word_mask = SPI_BPW_MASK(8);
 	host->flags = SPI_CONTROLLER_HALF_DUPLEX;
 	host->transfer_one_message = spi_xcomm_transfer_one;
-	host->dev.of_node = i2c->dev.of_node;
 
 	ret = devm_spi_register_controller(&i2c->dev, host);
 	if (ret < 0)
@@ -270,8 +269,8 @@ static int spi_xcomm_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id spi_xcomm_ids[] = {
-	{ "spi-xcomm" },
-	{ },
+	{ .name = "spi-xcomm" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, spi_xcomm_ids);
 

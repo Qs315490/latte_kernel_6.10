@@ -296,7 +296,7 @@ static const struct iio_map da9150_gpadc_default_maps[] = {
 	IIO_MAP("VBUS", "da9150-charger", "CHAN_VBUS"),
 	IIO_MAP("TJUNC_CORE", "da9150-charger", "CHAN_TJUNC"),
 	IIO_MAP("VBAT", "da9150-charger", "CHAN_VBAT"),
-	{},
+	{ }
 };
 
 static int da9150_gpadc_probe(struct platform_device *pdev)
@@ -308,10 +308,9 @@ static int da9150_gpadc_probe(struct platform_device *pdev)
 	int irq, ret;
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(*gpadc));
-	if (!indio_dev) {
-		dev_err(&pdev->dev, "Failed to allocate IIO device\n");
+	if (!indio_dev)
 		return -ENOMEM;
-	}
+
 	gpadc = iio_priv(indio_dev);
 
 	gpadc->da9150 = da9150;

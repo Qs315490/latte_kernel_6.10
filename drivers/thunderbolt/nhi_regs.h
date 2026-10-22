@@ -21,6 +21,12 @@ enum ring_flags {
 
 /**
  * struct ring_desc - TX/RX ring entry
+ * @phys: DMA mapped address of the frame
+ * @length: Size of the ring
+ * @eof: End of frame protocol defined field
+ * @sof: Start of frame protocol defined field
+ * @flags: Ring descriptor flags
+ * @time: Fill with zero
  *
  * For TX set length/eof/sof.
  * For RX length/eof/sof are set by the NHI.
@@ -95,7 +101,8 @@ struct ring_desc {
 
 #define REG_RING_INTERRUPT_MASK_CLEAR_BASE	0x38208
 
-#define REG_INT_THROTTLING_RATE	0x38c00
+#define REG_INT_THROTTLING_RATE			0x38c00
+#define REG_INT_THROTTLING_RATE_INTERVAL_MASK	GENMASK(15, 0)
 
 /* Interrupt Vector Allocation */
 #define REG_INT_VEC_ALLOC_BASE	0x38c40

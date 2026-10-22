@@ -13,7 +13,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/leds.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/regmap.h>
@@ -379,7 +378,7 @@ static void aw200xx_enable(const struct aw200xx *const chip)
 
 static void aw200xx_disable(const struct aw200xx *const chip)
 {
-	return gpiod_set_value_cansleep(chip->hwen, 0);
+	gpiod_set_value_cansleep(chip->hwen, 0);
 }
 
 static int aw200xx_probe_get_display_rows(struct device *dev,
@@ -637,11 +636,11 @@ static const struct aw200xx_chipdef aw20108_cdef = {
 };
 
 static const struct i2c_device_id aw200xx_id[] = {
-	{ "aw20036" },
-	{ "aw20054" },
-	{ "aw20072" },
-	{ "aw20108" },
-	{}
+	{ .name = "aw20036" },
+	{ .name = "aw20054" },
+	{ .name = "aw20072" },
+	{ .name = "aw20108" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, aw200xx_id);
 

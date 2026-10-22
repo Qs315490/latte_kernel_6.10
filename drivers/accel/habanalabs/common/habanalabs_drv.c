@@ -181,7 +181,7 @@ int hl_device_open(struct drm_device *ddev, struct drm_file *file_priv)
 	struct hl_fpriv *hpriv;
 	int rc;
 
-	hpriv = kzalloc(sizeof(*hpriv), GFP_KERNEL);
+	hpriv = kzalloc_obj(*hpriv);
 	if (!hpriv)
 		return -ENOMEM;
 
@@ -291,7 +291,7 @@ int hl_device_open_ctrl(struct inode *inode, struct file *filp)
 		return -ENXIO;
 	}
 
-	hpriv = kzalloc(sizeof(*hpriv), GFP_KERNEL);
+	hpriv = kzalloc_obj(*hpriv);
 	if (!hpriv)
 		return -ENOMEM;
 
@@ -386,7 +386,7 @@ static int fixup_device_params(struct hl_device *hdev)
 	hdev->fw_comms_poll_interval_usec = HL_FW_STATUS_POLL_INTERVAL_USEC;
 
 	if (tmp_timeout)
-		hdev->timeout_jiffies = msecs_to_jiffies(tmp_timeout * MSEC_PER_SEC);
+		hdev->timeout_jiffies = secs_to_jiffies(tmp_timeout);
 	else
 		hdev->timeout_jiffies = MAX_SCHEDULE_TIMEOUT;
 

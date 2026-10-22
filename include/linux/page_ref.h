@@ -71,6 +71,12 @@ static inline int page_ref_count(const struct page *page)
  * folio_ref_count - The reference count on this folio.
  * @folio: The folio.
  *
+ * Folios contain a reference count.  When that reference count reaches
+ * zero, the folio is referred to as frozen.  At this point, it will
+ * usually be returned to the memory allocator, but some parts of the
+ * kernel freeze folios in order to perform unusual operations on them
+ * such as splitting or migration.
+ *
  * The refcount is usually incremented by calls to folio_get() and
  * decremented by calls to folio_put().  Some typical users of the
  * folio refcount:
@@ -81,6 +87,18 @@ static inline int page_ref_count(const struct page *page)
  * - The LRU list
  * - Pipes
  * - Direct IO which references this page in the process address space
+ *
+ * The reference count has three components: expected, temporary and
+ * spurious.  The expected reference count of a folio is that which
+ * we would logically expect it to be from just reading the code.
+ * Temporary refcounts are gained by threads which need a temporary
+ * reference to make sure the folio isn't reallocated while they use it.
+ * Spurious refcounts are gained by threads which, thanks to RCU walks
+ * of the page tables or file cache, find a stale pointer to a folio.
+ * These threads will drop the refcount after discoveering the pointer
+ * is stale, but it can surprise other users to see the spurious refcount
+ * on a freshly allocated folio (eg they may see a refcount of 2 instead
+ * of 1).
  *
  * Return: The number of references to this folio.
  */
@@ -228,24 +246,18 @@ static inline int folio_ref_dec_return(struct folio *folio)
 	return page_ref_dec_return(&folio->page);
 }
 
-static inline bool page_ref_add_unless(struct page *page, int nr, int u)
+static inline bool page_ref_add_unless_zero(struct page *page, int nr)
 {
-	bool ret = false;
-
-	rcu_read_lock();
-	/* avoid writing to the vmemmap area being remapped */
-	if (!page_is_fake_head(page) && page_ref_count(page) != u)
-		ret = atomic_add_unless(&page->_refcount, nr, u);
-	rcu_read_unlock();
+	bool ret = atomic_add_unless(&page->_refcount, nr, 0);
 
 	if (page_ref_tracepoint_active(page_ref_mod_unless))
 		__page_ref_mod_unless(page, nr, ret);
 	return ret;
 }
 
-static inline bool folio_ref_add_unless(struct folio *folio, int nr, int u)
+static inline bool folio_ref_add_unless_zero(struct folio *folio, int nr)
 {
-	return page_ref_add_unless(&folio->page, nr, u);
+	return page_ref_add_unless_zero(&folio->page, nr);
 }
 
 /**
@@ -261,12 +273,12 @@ static inline bool folio_ref_add_unless(struct folio *folio, int nr, int u)
  */
 static inline bool folio_try_get(struct folio *folio)
 {
-	return folio_ref_add_unless(folio, 1, 0);
+	return folio_ref_add_unless_zero(folio, 1);
 }
 
 static inline bool folio_ref_try_add(struct folio *folio, int count)
 {
-	return folio_ref_add_unless(folio, count, 0);
+	return folio_ref_add_unless_zero(folio, count);
 }
 
 static inline int page_ref_freeze(struct page *page, int count)

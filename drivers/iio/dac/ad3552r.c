@@ -167,8 +167,7 @@ static int ad3552r_read_raw(struct iio_dev *indio_dev,
 		mutex_unlock(&dac->lock);
 		if (err < 0)
 			return err;
-		*val = !((tmp_val & AD3552R_MASK_CH_DAC_POWERDOWN(ch)) >>
-			  __ffs(AD3552R_MASK_CH_DAC_POWERDOWN(ch)));
+		*val = !field_get(AD3552R_MASK_CH_DAC_POWERDOWN(ch), tmp_val);
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
 		*val = dac->ch_data[ch].scale_int;
@@ -293,10 +292,9 @@ static irqreturn_t ad3552r_trigger_handler(int irq, void *p)
 	struct iio_buffer *buf = indio_dev->buffer;
 	struct ad3552r_desc *dac = iio_priv(indio_dev);
 	/* Maximum size of a scan */
-	u8 buff[AD3552R_MAX_CH * AD3552R_MAX_REG_SIZE];
+	u8 buff[AD3552R_MAX_CH * AD3552R_MAX_REG_SIZE] = { };
 	int err;
 
-	memset(buff, 0, sizeof(buff));
 	err = iio_pop_from_buffer(buf, buff);
 	if (err)
 		goto end;
@@ -630,7 +628,9 @@ static int ad3552r_probe(struct spi_device *spi)
 	if (!dac->model_data)
 		return -EINVAL;
 
-	mutex_init(&dac->lock);
+	err = devm_mutex_init(&spi->dev, &dac->lock);
+	if (err)
+		return err;
 
 	err = ad3552r_init(dac);
 	if (err)
@@ -654,42 +654,6 @@ static int ad3552r_probe(struct spi_device *spi)
 
 	return devm_iio_device_register(&spi->dev, indio_dev);
 }
-
-static const struct ad3552r_model_data ad3541r_model_data = {
-	.model_name = "ad3541r",
-	.chip_id = AD3541R_ID,
-	.num_hw_channels = 1,
-	.ranges_table = ad3542r_ch_ranges,
-	.num_ranges = ARRAY_SIZE(ad3542r_ch_ranges),
-	.requires_output_range = true,
-};
-
-static const struct ad3552r_model_data ad3542r_model_data = {
-	.model_name = "ad3542r",
-	.chip_id = AD3542R_ID,
-	.num_hw_channels = 2,
-	.ranges_table = ad3542r_ch_ranges,
-	.num_ranges = ARRAY_SIZE(ad3542r_ch_ranges),
-	.requires_output_range = true,
-};
-
-static const struct ad3552r_model_data ad3551r_model_data = {
-	.model_name = "ad3551r",
-	.chip_id = AD3551R_ID,
-	.num_hw_channels = 1,
-	.ranges_table = ad3552r_ch_ranges,
-	.num_ranges = ARRAY_SIZE(ad3552r_ch_ranges),
-	.requires_output_range = false,
-};
-
-static const struct ad3552r_model_data ad3552r_model_data = {
-	.model_name = "ad3552r",
-	.chip_id = AD3552R_ID,
-	.num_hw_channels = 2,
-	.ranges_table = ad3552r_ch_ranges,
-	.num_ranges = ARRAY_SIZE(ad3552r_ch_ranges),
-	.requires_output_range = false,
-};
 
 static const struct spi_device_id ad3552r_id[] = {
 	{

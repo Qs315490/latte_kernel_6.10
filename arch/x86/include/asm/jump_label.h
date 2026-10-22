@@ -7,7 +7,7 @@
 #include <asm/asm.h>
 #include <asm/nops.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/stringify.h>
 #include <linux/types.h>
@@ -15,6 +15,7 @@
 #define JUMP_TABLE_ENTRY(key, label)			\
 	".pushsection __jump_table,  \"aw\" \n\t"	\
 	_ASM_ALIGN "\n\t"				\
+	ANNOTATE_DATA_SPECIAL "\n"			\
 	".long 1b - . \n\t"				\
 	".long " label " - . \n\t"			\
 	_ASM_PTR " " key " - . \n\t"			\
@@ -55,6 +56,6 @@ l_yes:
 
 extern int arch_jump_entry_size(struct jump_entry *entry);
 
-#endif	/* __ASSEMBLY__ */
+#endif	/* __ASSEMBLER__ */
 
 #endif

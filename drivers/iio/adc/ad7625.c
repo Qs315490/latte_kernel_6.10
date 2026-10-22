@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
+// SPDX-License-Identifier: (GPL-2.0-only)
 /*
  * Analog Devices Inc. AD7625 ADC driver
  *
@@ -17,7 +17,6 @@
 #include <linux/iio/backend.h>
 #include <linux/iio/iio.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
@@ -175,12 +174,12 @@ enum ad7960_mode {
 
 static int ad7625_set_sampling_freq(struct ad7625_state *st, u32 freq)
 {
-	u32 target;
 	struct pwm_waveform clk_gate_wf = { }, cnv_wf = { };
+	unsigned long target;
 	int ret;
 
 	target = DIV_ROUND_UP(NSEC_PER_SEC, freq);
-	cnv_wf.period_length_ns = clamp(target, 100, 10 * KILO);
+	cnv_wf.period_length_ns = clamp(target, 100UL, 10UL * NSEC_PER_USEC);
 
 	/*
 	 * Use the maximum conversion time t_CNVH from the datasheet as
@@ -248,12 +247,15 @@ static int ad7625_write_raw(struct iio_dev *indio_dev,
 			    int val, int val2, long info)
 {
 	struct ad7625_state *st = iio_priv(indio_dev);
+	int ret;
 
 	switch (info) {
 	case IIO_CHAN_INFO_SAMP_FREQ:
-		iio_device_claim_direct_scoped(return -EBUSY, indio_dev)
-			return ad7625_set_sampling_freq(st, val);
-		unreachable();
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
+		ret = ad7625_set_sampling_freq(st, val);
+		iio_device_release_direct(indio_dev);
+		return ret;
 	default:
 		return -EINVAL;
 	}
@@ -680,5 +682,5 @@ module_platform_driver(ad7625_driver);
 
 MODULE_AUTHOR("Trevor Gamblin <tgamblin@baylibre.com>");
 MODULE_DESCRIPTION("Analog Devices AD7625 ADC");
-MODULE_LICENSE("Dual BSD/GPL");
+MODULE_LICENSE("GPL");
 MODULE_IMPORT_NS("IIO_BACKEND");

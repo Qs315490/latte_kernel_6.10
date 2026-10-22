@@ -37,7 +37,7 @@ struct amdgpu_job;
 struct amdgpu_vm;
 
 /* max number of rings */
-#define AMDGPU_MAX_RINGS		124
+#define AMDGPU_MAX_RINGS		149
 #define AMDGPU_MAX_HWIP_RINGS		64
 #define AMDGPU_MAX_GFX_RINGS		2
 #define AMDGPU_MAX_SW_GFX_RINGS         2
@@ -62,6 +62,8 @@ enum amdgpu_ring_priority_level {
 #define AMDGPU_FENCE_FLAG_64BIT         (1 << 0)
 #define AMDGPU_FENCE_FLAG_INT           (1 << 1)
 #define AMDGPU_FENCE_FLAG_TC_WB_ONLY    (1 << 2)
+
+/* Ensure the execution in case of preemption or reset */
 #define AMDGPU_FENCE_FLAG_EXEC          (1 << 3)
 
 #define to_amdgpu_ring(s) container_of((s), struct amdgpu_ring, sched)
@@ -82,6 +84,8 @@ enum amdgpu_ring_type {
 	AMDGPU_RING_TYPE_KIQ,
 	AMDGPU_RING_TYPE_MES,
 	AMDGPU_RING_TYPE_UMSCH_MM,
+	AMDGPU_RING_TYPE_CPER,
+	AMDGPU_RING_TYPE_MAX,
 };
 
 enum amdgpu_ib_pool_type {
@@ -113,7 +117,7 @@ struct amdgpu_sched {
  */
 struct amdgpu_fence_driver {
 	uint64_t			gpu_addr;
-	volatile uint32_t		*cpu_addr;
+	uint32_t			*cpu_addr;
 	/* sync_seq is protected by ring emission lock */
 	uint32_t			sync_seq;
 	atomic_t			last_seq;
@@ -126,11 +130,39 @@ struct amdgpu_fence_driver {
 	struct dma_fence		**fences;
 };
 
+/*
+ * Fences mark an event in the GPUs pipeline and are used
+ * for GPU/CPU synchronization.  When the fence is written,
+ * it is expected that all buffers associated with that fence
+ * are no longer in use by the associated ring on the GPU and
+ * that the relevant GPU caches have been flushed.
+ */
+
+struct amdgpu_fence {
+	struct dma_fence base;
+
+	/* RB, DMA, etc. */
+	struct amdgpu_ring		*ring;
+	ktime_t				start_timestamp;
+
+	/* location and size of the IB */
+	u64				ib_wptr;
+	unsigned int			ib_dw_size;
+	unsigned int			skip_ib_dw_start_offset;
+	unsigned int			skip_ib_dw_end_offset;
+	/* fence context for resets */
+	u64				context;
+	/* idx for ring backups */
+	unsigned int			backup_idx;
+};
+
 extern const struct drm_sched_backend_ops amdgpu_sched_ops;
 
-void amdgpu_fence_driver_clear_job_fences(struct amdgpu_ring *ring);
 void amdgpu_fence_driver_set_error(struct amdgpu_ring *ring, int error);
-void amdgpu_fence_driver_force_completion(struct amdgpu_ring *ring);
+void amdgpu_fence_driver_force_completion(struct amdgpu_ring *ring,
+					  struct dma_fence *timedout_fence);
+void amdgpu_ring_set_fence_errors_and_reemit(struct amdgpu_ring *ring,
+					     struct amdgpu_fence *guilty_fence);
 
 int amdgpu_fence_driver_init_ring(struct amdgpu_ring *ring);
 int amdgpu_fence_driver_start_ring(struct amdgpu_ring *ring,
@@ -140,8 +172,8 @@ void amdgpu_fence_driver_hw_init(struct amdgpu_device *adev);
 void amdgpu_fence_driver_hw_fini(struct amdgpu_device *adev);
 int amdgpu_fence_driver_sw_init(struct amdgpu_device *adev);
 void amdgpu_fence_driver_sw_fini(struct amdgpu_device *adev);
-int amdgpu_fence_emit(struct amdgpu_ring *ring, struct dma_fence **fence, struct amdgpu_job *job,
-		      unsigned flags);
+void amdgpu_fence_emit(struct amdgpu_ring *ring, struct amdgpu_fence *af,
+		       unsigned int flags);
 int amdgpu_fence_emit_polling(struct amdgpu_ring *ring, uint32_t *s,
 			      uint32_t timeout);
 bool amdgpu_fence_process(struct amdgpu_ring *ring);
@@ -163,13 +195,40 @@ void amdgpu_fence_update_start_timestamp(struct amdgpu_ring *ring, uint32_t seq,
 
 /* provided by hw blocks that expose a ring buffer for commands */
 struct amdgpu_ring_funcs {
+	/**
+	 * @type:
+	 *
+	 * GFX, Compute, SDMA, UVD, VCE, VCN, VPE, KIQ, MES, UMSCH, and CPER
+	 * use ring buffers. The type field just identifies which component the
+	 * ring buffer is associated with.
+	 */
 	enum amdgpu_ring_type	type;
 	uint32_t		align_mask;
+
+	/**
+	 * @nop:
+	 *
+	 * Every block in the amdgpu has no-op instructions (e.g., GFX 10
+	 * uses PACKET3(PACKET3_NOP, 0x3FFF), VCN 5 uses VCN_ENC_CMD_NO_OP,
+	 * etc). This field receives the specific no-op for the component
+	 * that initializes the ring.
+	 */
 	u32			nop;
 	bool			support_64bit_ptrs;
 	bool			no_user_fence;
 	bool			secure_submission_supported;
-	unsigned		extra_dw;
+
+	/**
+	 * @extra_bytes:
+	 *
+	 * Optional extra space in bytes that is added to the ring size
+	 * when allocating the BO that holds the contents of the ring.
+	 * This space isn't used for command submission to the ring,
+	 * but is just there to satisfy some hardware requirements or
+	 * implement workarounds. It's up to the implementation of each
+	 * specific ring to initialize this space.
+	 */
+	unsigned		extra_bytes;
 
 	/* ring read/write ptr handling */
 	u64 (*get_rptr)(struct amdgpu_ring *ring);
@@ -235,10 +294,14 @@ struct amdgpu_ring_funcs {
 	void (*patch_cntl)(struct amdgpu_ring *ring, unsigned offset);
 	void (*patch_ce)(struct amdgpu_ring *ring, unsigned offset);
 	void (*patch_de)(struct amdgpu_ring *ring, unsigned offset);
-	int (*reset)(struct amdgpu_ring *ring, unsigned int vmid);
+	int (*reset)(struct amdgpu_ring *ring, unsigned int vmid,
+		     struct amdgpu_fence *timedout_fence);
 	void (*emit_cleaner_shader)(struct amdgpu_ring *ring);
 };
 
+/**
+ * amdgpu_ring - Holds ring information
+ */
 struct amdgpu_ring {
 	struct amdgpu_device		*adev;
 	const struct amdgpu_ring_funcs	*funcs;
@@ -247,16 +310,68 @@ struct amdgpu_ring {
 
 	struct amdgpu_bo	*ring_obj;
 	uint32_t		*ring;
+	/* backups for resets */
+	uint32_t		*ring_backup;
+	unsigned int		ring_backup_entries_to_copy;
+	bool			reemit;
 	unsigned		rptr_offs;
 	u64			rptr_gpu_addr;
-	volatile u32		*rptr_cpu_addr;
+	u32			*rptr_cpu_addr;
+
+	/**
+	 * @wptr:
+	 *
+	 * This is part of the Ring buffer implementation and represents the
+	 * write pointer. The wptr determines where the host has written.
+	 */
 	u64			wptr;
+
+	/**
+	 * @wptr_old:
+	 *
+	 * Before update wptr with the new value, usually the old value is
+	 * stored in the wptr_old.
+	 */
 	u64			wptr_old;
 	unsigned		ring_size;
+
+	/**
+	 * @max_dw:
+	 *
+	 * Maximum number of DWords for ring allocation. This information is
+	 * provided at the ring initialization time, and each IP block can
+	 * specify a specific value. Check places that invoke
+	 * amdgpu_ring_init() to see the maximum size per block.
+	 */
 	unsigned		max_dw;
+
+	/**
+	 * @count_dw:
+	 *
+	 * This value starts with the maximum amount of DWords supported by the
+	 * ring. This value is updated based on the ring manipulation.
+	 */
 	int			count_dw;
 	uint64_t		gpu_addr;
+
+	/**
+	 * @ptr_mask:
+	 *
+	 * Some IPs provide support for 64-bit pointers and others for 32-bit
+	 * only; this behavior is component-specific and defined by the field
+	 * support_64bit_ptr. If the IP block supports 64-bits, the mask
+	 * 0xffffffffffffffff is set; otherwise, this value assumes buf_mask.
+	 * Notice that this field is used to keep wptr under a valid range.
+	 */
 	uint64_t		ptr_mask;
+
+	/**
+	 * @buf_mask:
+	 *
+	 * Buffer mask is a value used to keep wptr count under its
+	 * thresholding. Buffer mask initialized during the ring buffer
+	 * initialization time, and it is defined as (ring_size / 4) -1.
+	 */
 	uint32_t		buf_mask;
 	u32			idx;
 	u32			xcc_id;
@@ -274,19 +389,26 @@ struct amdgpu_ring {
 	bool			use_pollmem;
 	unsigned		wptr_offs;
 	u64			wptr_gpu_addr;
-	volatile u32		*wptr_cpu_addr;
+
+	/**
+	 * @wptr_cpu_addr:
+	 *
+	 * This is the CPU address pointer in the writeback slot. This is used
+	 * to commit changes to the GPU.
+	 */
+	u32			*wptr_cpu_addr;
 	unsigned		fence_offs;
 	u64			fence_gpu_addr;
-	volatile u32		*fence_cpu_addr;
+	u32			*fence_cpu_addr;
 	uint64_t		current_ctx;
 	char			name[16];
 	u32                     trail_seq;
 	unsigned		trail_fence_offs;
 	u64			trail_fence_gpu_addr;
-	volatile u32		*trail_fence_cpu_addr;
+	u32			*trail_fence_cpu_addr;
 	unsigned		cond_exe_offs;
 	u64			cond_exe_gpu_addr;
-	volatile u32		*cond_exe_cpu_addr;
+	u32			*cond_exe_cpu_addr;
 	unsigned int		set_q_mode_offs;
 	u32			*set_q_mode_ptr;
 	u64			set_q_mode_token;
@@ -295,18 +417,15 @@ struct amdgpu_ring {
 	struct dma_fence	*vmid_wait;
 	bool			has_compute_vm_bug;
 	bool			no_scheduler;
+	bool			no_user_submission;
 	int			hw_prio;
 	unsigned 		num_hw_submission;
 	atomic_t		*sched_score;
 
-	/* used for mes */
-	bool			is_mes_queue;
-	uint32_t		hw_queue_id;
-	struct amdgpu_mes_ctx_data *mes_ctx;
-
 	bool            is_sw_ring;
 	unsigned int    entry_index;
-
+	/* store the cached rptr to restore after reset */
+	uint64_t cached_rptr;
 };
 
 #define amdgpu_ring_parse_cs(r, p, job, ib) ((r)->funcs->parse_cs((p), (job), (ib)))
@@ -336,7 +455,7 @@ struct amdgpu_ring {
 #define amdgpu_ring_patch_cntl(r, o) ((r)->funcs->patch_cntl((r), (o)))
 #define amdgpu_ring_patch_ce(r, o) ((r)->funcs->patch_ce((r), (o)))
 #define amdgpu_ring_patch_de(r, o) ((r)->funcs->patch_de((r), (o)))
-#define amdgpu_ring_reset(r, v) (r)->funcs->reset((r), (v))
+#define amdgpu_ring_reset(r, v, f) (r)->funcs->reset((r), (v), (f))
 
 unsigned int amdgpu_ring_max_ibs(enum amdgpu_ring_type type);
 int amdgpu_ring_alloc(struct amdgpu_ring *ring, unsigned ndw);
@@ -369,10 +488,7 @@ static inline void amdgpu_ring_set_preempt_cond_exec(struct amdgpu_ring *ring,
 
 static inline void amdgpu_ring_clear_ring(struct amdgpu_ring *ring)
 {
-	int i = 0;
-	while (i <= ring->buf_mask)
-		ring->ring[i++] = ring->funcs->nop;
-
+	memset32(ring->ring, ring->funcs->nop, ring->buf_mask + 1);
 }
 
 static inline void amdgpu_ring_write(struct amdgpu_ring *ring, uint32_t v)
@@ -407,6 +523,17 @@ static inline void amdgpu_ring_write_multiple(struct amdgpu_ring *ring,
 	ring->count_dw -= count_dw;
 }
 
+static inline unsigned int amdgpu_ring_get_dw_distance(struct amdgpu_ring *ring,
+						       u64 start_wptr, u64 end_wptr)
+{
+	unsigned int start = start_wptr & ring->buf_mask;
+	unsigned int end = end_wptr & ring->buf_mask;
+
+	if (end < start)
+		end += ring->ring_size >> 2;
+	return end - start;
+}
+
 /**
  * amdgpu_ring_patch_cond_exec - patch dw count of conditional execute
  * @ring: amdgpu_ring structure
@@ -417,28 +544,14 @@ static inline void amdgpu_ring_write_multiple(struct amdgpu_ring *ring,
 static inline void amdgpu_ring_patch_cond_exec(struct amdgpu_ring *ring,
 					       unsigned int offset)
 {
-	unsigned cur;
-
 	if (!ring->funcs->init_cond_exec)
 		return;
 
 	WARN_ON(offset > ring->buf_mask);
 	WARN_ON(ring->ring[offset] != 0);
 
-	cur = (ring->wptr - 1) & ring->buf_mask;
-	if (cur < offset)
-		cur += ring->ring_size >> 2;
-	ring->ring[offset] = cur - offset;
+	ring->ring[offset] = amdgpu_ring_get_dw_distance(ring, offset, ring->wptr - 1);
 }
-
-#define amdgpu_mes_ctx_get_offs_gpu_addr(ring, offset)			\
-	(ring->is_mes_queue && ring->mes_ctx ?				\
-	 (ring->mes_ctx->meta_data_gpu_addr + offset) : 0)
-
-#define amdgpu_mes_ctx_get_offs_cpu_addr(ring, offset)			\
-	(ring->is_mes_queue && ring->mes_ctx ?				\
-	 (void *)((uint8_t *)(ring->mes_ctx->meta_data_ptr) + offset) : \
-	 NULL)
 
 int amdgpu_ring_test_helper(struct amdgpu_ring *ring);
 
@@ -447,15 +560,18 @@ void amdgpu_debugfs_ring_init(struct amdgpu_device *adev,
 
 int amdgpu_ring_init_mqd(struct amdgpu_ring *ring);
 
-static inline u32 amdgpu_ib_get_value(struct amdgpu_ib *ib, int idx)
+static inline u32 amdgpu_ib_get_value(struct amdgpu_ib *ib, uint32_t idx)
 {
-	return ib->ptr[idx];
+	if (idx < ib->length_dw)
+		return ib->ptr[idx];
+	return 0;
 }
 
-static inline void amdgpu_ib_set_value(struct amdgpu_ib *ib, int idx,
+static inline void amdgpu_ib_set_value(struct amdgpu_ib *ib, uint32_t idx,
 				       uint32_t value)
 {
-	ib->ptr[idx] = value;
+	if (idx < ib->length_dw)
+		ib->ptr[idx] = value;
 }
 
 int amdgpu_ib_get(struct amdgpu_device *adev, struct amdgpu_vm *vm,
@@ -470,4 +586,12 @@ int amdgpu_ib_pool_init(struct amdgpu_device *adev);
 void amdgpu_ib_pool_fini(struct amdgpu_device *adev);
 int amdgpu_ib_ring_tests(struct amdgpu_device *adev);
 bool amdgpu_ring_sched_ready(struct amdgpu_ring *ring);
+void amdgpu_ring_backup_unprocessed_commands(struct amdgpu_ring *ring,
+					     struct amdgpu_fence *guilty_fence);
+void amdgpu_ring_reset_helper_begin(struct amdgpu_ring *ring,
+				    struct amdgpu_fence *guilty_fence);
+int amdgpu_ring_reset_helper_end(struct amdgpu_ring *ring,
+				 struct amdgpu_fence *guilty_fence);
+bool amdgpu_ring_is_reset_type_supported(struct amdgpu_ring *ring,
+					 u32 reset_type);
 #endif

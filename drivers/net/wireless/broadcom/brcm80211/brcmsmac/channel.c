@@ -331,7 +331,7 @@ struct brcms_cm_info *brcms_c_channel_mgr_attach(struct brcms_c_info *wlc)
 	const char *ccode = sprom->alpha2;
 	int ccode_len = sizeof(sprom->alpha2);
 
-	wlc_cm = kzalloc(sizeof(*wlc_cm), GFP_ATOMIC);
+	wlc_cm = kzalloc_obj(*wlc_cm, GFP_ATOMIC);
 	if (wlc_cm == NULL)
 		return NULL;
 	wlc_cm->pub = pub;
@@ -445,7 +445,7 @@ brcms_c_channel_reg_limits(struct brcms_cm_info *wlc_cm, u16 chanspec,
 
 		/*
 		 * OFDM 40 MHz SISO has the same power as the corresponding
-		 * MCS0-7 rate unless overriden by the locale specific code.
+		 * MCS0-7 rate unless overridden by the locale specific code.
 		 * We set this value to 0 as a flag (presumably 0 dBm isn't
 		 * a possibility) and then copy the MCS0-7 value to the 40 MHz
 		 * value if it wasn't explicitly set.
@@ -479,7 +479,7 @@ brcms_c_channel_reg_limits(struct brcms_cm_info *wlc_cm, u16 chanspec,
 
 		/*
 		 * 20 MHz has the same power as the corresponding OFDM rate
-		 * unless overriden by the locale specific code.
+		 * unless overridden by the locale specific code.
 		 */
 		txpwr->mcs_20_siso[i] = txpwr->ofdm[i];
 		txpwr->mcs_40_siso[i] = 0;

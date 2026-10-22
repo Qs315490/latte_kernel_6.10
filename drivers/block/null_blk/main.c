@@ -223,7 +223,7 @@ MODULE_PARM_DESC(discard, "Support discard operations (requires memory-backed nu
 
 static unsigned long g_cache_size;
 module_param_named(cache_size, g_cache_size, ulong, 0444);
-MODULE_PARM_DESC(mbps, "Cache size in MiB for memory-backed device. Default: 0 (none)");
+MODULE_PARM_DESC(cache_size, "Cache size in MiB for memory-backed device. Default: 0 (none)");
 
 static bool g_fua = true;
 module_param_named(fua, g_fua, bool, 0444);
@@ -473,6 +473,8 @@ NULLB_DEVICE_ATTR(shared_tags, bool, NULL);
 NULLB_DEVICE_ATTR(shared_tag_bitmap, bool, NULL);
 NULLB_DEVICE_ATTR(fua, bool, NULL);
 NULLB_DEVICE_ATTR(rotational, bool, NULL);
+NULLB_DEVICE_ATTR(badblocks_once, bool, NULL);
+NULLB_DEVICE_ATTR(badblocks_partial_io, bool, NULL);
 
 static ssize_t nullb_device_power_show(struct config_item *item, char *page)
 {
@@ -559,14 +561,14 @@ static ssize_t nullb_device_badblocks_store(struct config_item *item,
 		goto out;
 	/* enable badblocks */
 	cmpxchg(&t_dev->badblocks.shift, -1, 0);
-	if (buf[0] == '+')
-		ret = badblocks_set(&t_dev->badblocks, start,
-			end - start + 1, 1);
-	else
-		ret = badblocks_clear(&t_dev->badblocks, start,
-			end - start + 1);
-	if (ret == 0)
+	if (buf[0] == '+') {
+		if (badblocks_set(&t_dev->badblocks, start,
+				  end - start + 1, 1))
+			ret = count;
+	} else if (badblocks_clear(&t_dev->badblocks, start,
+				   end - start + 1)) {
 		ret = count;
+	}
 out:
 	kfree(orig);
 	return ret;
@@ -592,41 +594,43 @@ static ssize_t nullb_device_zone_offline_store(struct config_item *item,
 CONFIGFS_ATTR_WO(nullb_device_, zone_offline);
 
 static struct configfs_attribute *nullb_device_attrs[] = {
-	&nullb_device_attr_size,
-	&nullb_device_attr_completion_nsec,
-	&nullb_device_attr_submit_queues,
-	&nullb_device_attr_poll_queues,
-	&nullb_device_attr_home_node,
-	&nullb_device_attr_queue_mode,
+	&nullb_device_attr_badblocks,
+	&nullb_device_attr_badblocks_once,
+	&nullb_device_attr_badblocks_partial_io,
+	&nullb_device_attr_blocking,
 	&nullb_device_attr_blocksize,
-	&nullb_device_attr_max_sectors,
-	&nullb_device_attr_irqmode,
+	&nullb_device_attr_cache_size,
+	&nullb_device_attr_completion_nsec,
+	&nullb_device_attr_discard,
+	&nullb_device_attr_fua,
+	&nullb_device_attr_home_node,
 	&nullb_device_attr_hw_queue_depth,
 	&nullb_device_attr_index,
-	&nullb_device_attr_blocking,
-	&nullb_device_attr_use_per_node_hctx,
-	&nullb_device_attr_power,
-	&nullb_device_attr_memory_backed,
-	&nullb_device_attr_discard,
+	&nullb_device_attr_irqmode,
+	&nullb_device_attr_max_sectors,
 	&nullb_device_attr_mbps,
-	&nullb_device_attr_cache_size,
-	&nullb_device_attr_badblocks,
-	&nullb_device_attr_zoned,
-	&nullb_device_attr_zone_size,
-	&nullb_device_attr_zone_capacity,
-	&nullb_device_attr_zone_nr_conv,
-	&nullb_device_attr_zone_max_open,
-	&nullb_device_attr_zone_max_active,
-	&nullb_device_attr_zone_append_max_sectors,
-	&nullb_device_attr_zone_readonly,
-	&nullb_device_attr_zone_offline,
-	&nullb_device_attr_zone_full,
-	&nullb_device_attr_virt_boundary,
+	&nullb_device_attr_memory_backed,
 	&nullb_device_attr_no_sched,
-	&nullb_device_attr_shared_tags,
-	&nullb_device_attr_shared_tag_bitmap,
-	&nullb_device_attr_fua,
+	&nullb_device_attr_poll_queues,
+	&nullb_device_attr_power,
+	&nullb_device_attr_queue_mode,
 	&nullb_device_attr_rotational,
+	&nullb_device_attr_shared_tag_bitmap,
+	&nullb_device_attr_shared_tags,
+	&nullb_device_attr_size,
+	&nullb_device_attr_submit_queues,
+	&nullb_device_attr_use_per_node_hctx,
+	&nullb_device_attr_virt_boundary,
+	&nullb_device_attr_zone_append_max_sectors,
+	&nullb_device_attr_zone_capacity,
+	&nullb_device_attr_zone_full,
+	&nullb_device_attr_zone_max_active,
+	&nullb_device_attr_zone_max_open,
+	&nullb_device_attr_zone_nr_conv,
+	&nullb_device_attr_zone_offline,
+	&nullb_device_attr_zone_readonly,
+	&nullb_device_attr_zone_size,
+	&nullb_device_attr_zoned,
 	NULL,
 };
 
@@ -638,7 +642,7 @@ static void nullb_device_release(struct config_item *item)
 	null_free_dev(dev);
 }
 
-static struct configfs_item_operations nullb_device_ops = {
+static const struct configfs_item_operations nullb_device_ops = {
 	.release	= nullb_device_release,
 };
 
@@ -661,12 +665,22 @@ static void nullb_add_fault_config(struct nullb_device *dev)
 	configfs_add_default_group(&dev->init_hctx_fault_config.group, &dev->group);
 }
 
+static void nullb_del_fault_config(struct nullb_device *dev)
+{
+	config_item_put(&dev->init_hctx_fault_config.group.cg_item);
+	config_item_put(&dev->requeue_config.group.cg_item);
+	config_item_put(&dev->timeout_config.group.cg_item);
+}
+
 #else
 
 static void nullb_add_fault_config(struct nullb_device *dev)
 {
 }
 
+static void nullb_del_fault_config(struct nullb_device *dev)
+{
+}
 #endif
 
 static struct
@@ -698,22 +712,34 @@ nullb_group_drop_item(struct config_group *group, struct config_item *item)
 		null_del_dev(dev->nullb);
 		mutex_unlock(&lock);
 	}
-
+	nullb_del_fault_config(dev);
 	config_item_put(item);
 }
 
 static ssize_t memb_group_features_show(struct config_item *item, char *page)
 {
-	return snprintf(page, PAGE_SIZE,
-			"badblocks,blocking,blocksize,cache_size,fua,"
-			"completion_nsec,discard,home_node,hw_queue_depth,"
-			"irqmode,max_sectors,mbps,memory_backed,no_sched,"
-			"poll_queues,power,queue_mode,shared_tag_bitmap,"
-			"shared_tags,size,submit_queues,use_per_node_hctx,"
-			"virt_boundary,zoned,zone_capacity,zone_max_active,"
-			"zone_max_open,zone_nr_conv,zone_offline,zone_readonly,"
-			"zone_size,zone_append_max_sectors,zone_full,"
-			"rotational\n");
+
+	struct configfs_attribute **entry;
+	char delimiter = ',';
+	size_t left = PAGE_SIZE;
+	size_t written = 0;
+	int ret;
+
+	for (entry = &nullb_device_attrs[0]; *entry && left > 0; entry++) {
+		if (!*(entry + 1))
+			delimiter = '\n';
+		ret = snprintf(page + written, left, "%s%c", (*entry)->ca_name,
+			       delimiter);
+		if (ret >= left) {
+			WARN_ONCE(1, "Too many null_blk features to print\n");
+			memzero_explicit(page, PAGE_SIZE);
+			return -ENOBUFS;
+		}
+		left -= ret;
+		written += ret;
+	}
+
+	return written;
 }
 
 CONFIGFS_ATTR_RO(memb_group_, features);
@@ -723,7 +749,7 @@ static struct configfs_attribute *nullb_group_attrs[] = {
 	NULL,
 };
 
-static struct configfs_group_operations nullb_group_ops = {
+static const struct configfs_group_operations nullb_group_ops = {
 	.make_group	= nullb_group_make_group,
 	.drop_item	= nullb_group_drop_item,
 };
@@ -752,7 +778,7 @@ static struct nullb_device *null_alloc_dev(void)
 {
 	struct nullb_device *dev;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return NULL;
 
@@ -841,7 +867,7 @@ static struct nullb_page *null_alloc_page(void)
 {
 	struct nullb_page *t_page;
 
-	t_page = kmalloc(sizeof(struct nullb_page), GFP_NOIO);
+	t_page = kmalloc_obj(struct nullb_page, GFP_NOIO);
 	if (!t_page)
 		return NULL;
 
@@ -1113,26 +1139,28 @@ again:
 	return 0;
 }
 
-static int copy_to_nullb(struct nullb *nullb, struct page *source,
-	unsigned int off, sector_t sector, size_t n, bool is_fua)
+static blk_status_t copy_to_nullb(struct nullb *nullb, void *source,
+				  loff_t pos, size_t n, bool is_fua)
 {
 	size_t temp, count = 0;
-	unsigned int offset;
 	struct nullb_page *t_page;
+	sector_t sector;
 
 	while (count < n) {
-		temp = min_t(size_t, nullb->dev->blocksize, n - count);
+		temp = min3(nullb->dev->blocksize, n - count,
+			    PAGE_SIZE - offset_in_page(pos));
+		sector = pos >> SECTOR_SHIFT;
 
 		if (null_cache_active(nullb) && !is_fua)
 			null_make_cache_space(nullb, PAGE_SIZE);
 
-		offset = (sector & SECTOR_MASK) << SECTOR_SHIFT;
 		t_page = null_insert_page(nullb, sector,
 			!null_cache_active(nullb) || is_fua);
 		if (!t_page)
-			return -ENOSPC;
+			return BLK_STS_NOSPC;
 
-		memcpy_page(t_page->page, offset, source, off + count, temp);
+		memcpy_to_page(t_page->page, offset_in_page(pos),
+			       source + count, temp);
 
 		__set_bit(sector & SECTOR_MASK, t_page->bitmap);
 
@@ -1140,41 +1168,34 @@ static int copy_to_nullb(struct nullb *nullb, struct page *source,
 			null_free_sector(nullb, sector, true);
 
 		count += temp;
-		sector += temp >> SECTOR_SHIFT;
+		pos += temp;
 	}
-	return 0;
+	return BLK_STS_OK;
 }
 
-static int copy_from_nullb(struct nullb *nullb, struct page *dest,
-	unsigned int off, sector_t sector, size_t n)
+static void copy_from_nullb(struct nullb *nullb, void *dest, loff_t pos,
+			    size_t n)
 {
 	size_t temp, count = 0;
-	unsigned int offset;
 	struct nullb_page *t_page;
+	sector_t sector;
 
 	while (count < n) {
-		temp = min_t(size_t, nullb->dev->blocksize, n - count);
+		temp = min3(nullb->dev->blocksize, n - count,
+			    PAGE_SIZE - offset_in_page(pos));
+		sector = pos >> SECTOR_SHIFT;
 
-		offset = (sector & SECTOR_MASK) << SECTOR_SHIFT;
 		t_page = null_lookup_page(nullb, sector, false,
 			!null_cache_active(nullb));
-
 		if (t_page)
-			memcpy_page(dest, off + count, t_page->page, offset,
-				    temp);
+			memcpy_from_page(dest + count, t_page->page,
+					 offset_in_page(pos), temp);
 		else
-			zero_user(dest, off + count, temp);
+			memset(dest + count, 0, temp);
 
 		count += temp;
-		sector += temp >> SECTOR_SHIFT;
+		pos += temp;
 	}
-	return 0;
-}
-
-static void nullb_fill_pattern(struct nullb *nullb, struct page *page,
-			       unsigned int len, unsigned int off)
-{
-	memset_page(page, off, 0xff, len);
 }
 
 blk_status_t null_handle_discard(struct nullb_device *dev,
@@ -1218,60 +1239,77 @@ static blk_status_t null_handle_flush(struct nullb *nullb)
 	return errno_to_blk_status(err);
 }
 
-static int null_transfer(struct nullb *nullb, struct page *page,
-	unsigned int len, unsigned int off, bool is_write, sector_t sector,
+static blk_status_t null_transfer(struct nullb *nullb, struct page *page,
+	unsigned int len, unsigned int off, bool is_write, loff_t pos,
 	bool is_fua)
 {
 	struct nullb_device *dev = nullb->dev;
+	blk_status_t err = BLK_STS_OK;
 	unsigned int valid_len = len;
-	int err = 0;
+	void *p;
 
+	p = kmap_local_page(page) + off;
 	if (!is_write) {
-		if (dev->zoned)
+		if (dev->zoned) {
 			valid_len = null_zone_valid_read_len(nullb,
-				sector, len);
+				pos >> SECTOR_SHIFT, len);
+			if (valid_len && valid_len != len)
+				valid_len -= pos & (SECTOR_SIZE - 1);
+		}
 
 		if (valid_len) {
-			err = copy_from_nullb(nullb, page, off,
-				sector, valid_len);
+			copy_from_nullb(nullb, p, pos, valid_len);
 			off += valid_len;
 			len -= valid_len;
 		}
 
 		if (len)
-			nullb_fill_pattern(nullb, page, len, off);
+			memset(p + valid_len, 0xff, len);
 		flush_dcache_page(page);
 	} else {
 		flush_dcache_page(page);
-		err = copy_to_nullb(nullb, page, off, sector, len, is_fua);
+		err = copy_to_nullb(nullb, p, pos, len, is_fua);
 	}
 
+	kunmap_local(p);
 	return err;
 }
 
-static blk_status_t null_handle_rq(struct nullb_cmd *cmd)
+/*
+ * Transfer data for the given request. The transfer size is capped with the
+ * nr_sectors argument.
+ */
+static blk_status_t null_handle_data_transfer(struct nullb_cmd *cmd,
+					      sector_t nr_sectors)
 {
 	struct request *rq = blk_mq_rq_from_pdu(cmd);
 	struct nullb *nullb = cmd->nq->dev->nullb;
-	int err = 0;
+	blk_status_t err = BLK_STS_OK;
 	unsigned int len;
-	sector_t sector = blk_rq_pos(rq);
+	loff_t pos = blk_rq_pos(rq) << SECTOR_SHIFT;
+	unsigned int max_bytes = nr_sectors << SECTOR_SHIFT;
+	unsigned int transferred_bytes = 0;
 	struct req_iterator iter;
 	struct bio_vec bvec;
 
 	spin_lock_irq(&nullb->lock);
 	rq_for_each_segment(bvec, rq, iter) {
 		len = bvec.bv_len;
+		if (transferred_bytes + len > max_bytes)
+			len = max_bytes - transferred_bytes;
 		err = null_transfer(nullb, bvec.bv_page, len, bvec.bv_offset,
-				     op_is_write(req_op(rq)), sector,
+				     op_is_write(req_op(rq)), pos,
 				     rq->cmd_flags & REQ_FUA);
 		if (err)
 			break;
-		sector += len >> SECTOR_SHIFT;
+		pos += len;
+		transferred_bytes += len;
+		if (transferred_bytes >= max_bytes)
+			break;
 	}
 	spin_unlock_irq(&nullb->lock);
 
-	return errno_to_blk_status(err);
+	return err;
 }
 
 static inline blk_status_t null_handle_throttled(struct nullb_cmd *cmd)
@@ -1295,31 +1333,51 @@ static inline blk_status_t null_handle_throttled(struct nullb_cmd *cmd)
 	return sts;
 }
 
-static inline blk_status_t null_handle_badblocks(struct nullb_cmd *cmd,
-						 sector_t sector,
-						 sector_t nr_sectors)
+/*
+ * Check if the command should fail for the badblocks. If so, return
+ * BLK_STS_IOERR and return number of partial I/O sectors to be written or read,
+ * which may be less than the requested number of sectors.
+ *
+ * @cmd:        The command to handle.
+ * @sector:     The start sector for I/O.
+ * @nr_sectors: Specifies number of sectors to write or read, and returns the
+ *              number of sectors to be written or read.
+ */
+blk_status_t null_handle_badblocks(struct nullb_cmd *cmd, sector_t sector,
+				   unsigned int *nr_sectors)
 {
 	struct badblocks *bb = &cmd->nq->dev->badblocks;
-	sector_t first_bad;
-	int bad_sectors;
+	struct nullb_device *dev = cmd->nq->dev;
+	unsigned int block_sectors = dev->blocksize >> SECTOR_SHIFT;
+	sector_t first_bad, bad_sectors;
+	unsigned int partial_io_sectors = 0;
 
-	if (badblocks_check(bb, sector, nr_sectors, &first_bad, &bad_sectors))
-		return BLK_STS_IOERR;
+	if (!badblocks_check(bb, sector, *nr_sectors, &first_bad, &bad_sectors))
+		return BLK_STS_OK;
 
-	return BLK_STS_OK;
+	if (cmd->nq->dev->badblocks_once)
+		badblocks_clear(bb, first_bad, bad_sectors);
+
+	if (cmd->nq->dev->badblocks_partial_io) {
+		if (!IS_ALIGNED(first_bad, block_sectors))
+			first_bad = ALIGN_DOWN(first_bad, block_sectors);
+		if (sector < first_bad)
+			partial_io_sectors = first_bad - sector;
+	}
+	*nr_sectors = partial_io_sectors;
+
+	return BLK_STS_IOERR;
 }
 
-static inline blk_status_t null_handle_memory_backed(struct nullb_cmd *cmd,
-						     enum req_op op,
-						     sector_t sector,
-						     sector_t nr_sectors)
+blk_status_t null_handle_memory_backed(struct nullb_cmd *cmd, enum req_op op,
+				       sector_t sector, sector_t nr_sectors)
 {
 	struct nullb_device *dev = cmd->nq->dev;
 
 	if (op == REQ_OP_DISCARD)
 		return null_handle_discard(dev, sector, nr_sectors);
 
-	return null_handle_rq(cmd);
+	return null_handle_data_transfer(cmd, nr_sectors);
 }
 
 static void nullb_zero_read_cmd_buffer(struct nullb_cmd *cmd)
@@ -1366,18 +1424,19 @@ blk_status_t null_process_cmd(struct nullb_cmd *cmd, enum req_op op,
 			      sector_t sector, unsigned int nr_sectors)
 {
 	struct nullb_device *dev = cmd->nq->dev;
+	blk_status_t badblocks_ret = BLK_STS_OK;
 	blk_status_t ret;
 
-	if (dev->badblocks.shift != -1) {
-		ret = null_handle_badblocks(cmd, sector, nr_sectors);
+	if (dev->badblocks.shift != -1)
+		badblocks_ret = null_handle_badblocks(cmd, sector, &nr_sectors);
+
+	if (dev->memory_backed && nr_sectors) {
+		ret = null_handle_memory_backed(cmd, op, sector, nr_sectors);
 		if (ret != BLK_STS_OK)
 			return ret;
 	}
 
-	if (dev->memory_backed)
-		return null_handle_memory_backed(cmd, op, sector, nr_sectors);
-
-	return BLK_STS_OK;
+	return badblocks_ret;
 }
 
 static void null_handle_cmd(struct nullb_cmd *cmd, sector_t sector,
@@ -1426,8 +1485,7 @@ static void nullb_setup_bwtimer(struct nullb *nullb)
 {
 	ktime_t timer_interval = ktime_set(0, TIMER_INTERVAL);
 
-	hrtimer_init(&nullb->bw_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	nullb->bw_timer.function = nullb_bwtimer_fn;
+	hrtimer_setup(&nullb->bw_timer, nullb_bwtimer_fn, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	atomic_long_set(&nullb->cur_bytes, mb_per_tick(nullb->dev->mbps));
 	hrtimer_start(&nullb->bw_timer, timer_interval, HRTIMER_MODE_REL);
 }
@@ -1604,8 +1662,8 @@ static blk_status_t null_queue_rq(struct blk_mq_hw_ctx *hctx,
 	might_sleep_if(hctx->flags & BLK_MQ_F_BLOCKING);
 
 	if (!is_poll && nq->dev->irqmode == NULL_IRQ_TIMER) {
-		hrtimer_init(&cmd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-		cmd->timer.function = null_cmd_timer_expired;
+		hrtimer_setup(&cmd->timer, null_cmd_timer_expired, CLOCK_MONOTONIC,
+			      HRTIMER_MODE_REL);
 	}
 	cmd->error = BLK_STS_OK;
 	cmd->nq = nq;
@@ -1760,8 +1818,7 @@ static int setup_queues(struct nullb *nullb)
 	if (g_poll_queues)
 		nqueues += g_poll_queues;
 
-	nullb->queues = kcalloc(nqueues, sizeof(struct nullb_queue),
-				GFP_KERNEL);
+	nullb->queues = kzalloc_objs(struct nullb_queue, nqueues);
 	if (!nullb->queues)
 		return -ENOMEM;
 
@@ -1901,6 +1958,7 @@ static int null_add_dev(struct nullb_device *dev)
 		.logical_block_size	= dev->blocksize,
 		.physical_block_size	= dev->blocksize,
 		.max_hw_sectors		= dev->max_sectors,
+		.dma_alignment		= 1,
 	};
 
 	struct nullb *nullb;
@@ -1983,7 +2041,7 @@ static int null_add_dev(struct nullb_device *dev)
 	nullb->disk->minors = 1;
 	nullb->disk->fops = &null_ops;
 	nullb->disk->private_data = nullb;
-	strscpy_pad(nullb->disk->disk_name, nullb->disk_name, DISK_NAME_LEN);
+	strscpy(nullb->disk->disk_name, nullb->disk_name);
 
 	if (nullb->dev->zoned) {
 		rv = null_register_zoned_dev(nullb);

@@ -92,8 +92,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #define DRV_NAME	"8139too"
-#define DRV_VERSION	"0.9.28"
-
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -114,8 +112,6 @@
 #include <linux/gfp.h>
 #include <linux/if_vlan.h>
 #include <asm/irq.h>
-
-#define RTL8139_DRIVER_NAME   DRV_NAME " Fast Ethernet driver " DRV_VERSION
 
 /* Default Message level */
 #define RTL8139_DEF_MSG_ENABLE   (NETIF_MSG_DRV   | \
@@ -239,44 +235,44 @@ static const struct {
 
 
 static const struct pci_device_id rtl8139_pci_tbl[] = {
-	{0x10ec, 0x8139, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x10ec, 0x8138, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x1113, 0x1211, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x1500, 0x1360, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x4033, 0x1360, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x1186, 0x1300, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x1186, 0x1340, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x13d1, 0xab06, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x1259, 0xa117, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x1259, 0xa11e, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x14ea, 0xab06, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x14ea, 0xab07, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x11db, 0x1234, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x1432, 0x9130, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x02ac, 0x1012, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x018a, 0x0106, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x126c, 0x1211, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x1743, 0x8139, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x021b, 0x8139, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
-	{0x16ec, 0xab06, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
+	{ PCI_DEVICE(0x10ec, 0x8139), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x10ec, 0x8138), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x1113, 0x1211), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x1500, 0x1360), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x4033, 0x1360), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x1186, 0x1300), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x1186, 0x1340), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x13d1, 0xab06), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x1259, 0xa117), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x1259, 0xa11e), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x14ea, 0xab06), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x14ea, 0xab07), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x11db, 0x1234), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x1432, 0x9130), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x02ac, 0x1012), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x018a, 0x0106), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x126c, 0x1211), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x1743, 0x8139), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x021b, 0x8139), .driver_data = RTL8139 },
+	{ PCI_DEVICE(0x16ec, 0xab06), .driver_data = RTL8139 },
 
 #ifdef CONFIG_SH_SECUREEDGE5410
 	/* Bogus 8139 silicon reports 8129 without external PROM :-( */
-	{0x10ec, 0x8129, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8139 },
+	{ PCI_DEVICE(0x10ec, 0x8129), .driver_data = RTL8139 },
 #endif
 #ifdef CONFIG_8139TOO_8129
-	{0x10ec, 0x8129, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RTL8129 },
+	{ PCI_DEVICE(0x10ec, 0x8129), .driver_data = RTL8129 },
 #endif
 
 	/* some crazy cards report invalid vendor ids like
 	 * 0x0001 here.  The other ids are valid and constant,
 	 * so we simply don't match on the main vendor id.
 	 */
-	{PCI_ANY_ID, 0x8139, 0x10ec, 0x8139, 0, 0, RTL8139 },
-	{PCI_ANY_ID, 0x8139, 0x1186, 0x1300, 0, 0, RTL8139 },
-	{PCI_ANY_ID, 0x8139, 0x13d1, 0xab06, 0, 0, RTL8139 },
+	{ PCI_DEVICE_SUB(PCI_ANY_ID, 0x8139, 0x10ec, 0x8139), .driver_data = RTL8139 },
+	{ PCI_DEVICE_SUB(PCI_ANY_ID, 0x8139, 0x1186, 0x1300), .driver_data = RTL8139 },
+	{ PCI_DEVICE_SUB(PCI_ANY_ID, 0x8139, 0x13d1, 0xab06), .driver_data = RTL8139 },
 
-	{0,}
+	{ }
 };
 MODULE_DEVICE_TABLE (pci, rtl8139_pci_tbl);
 
@@ -623,7 +619,6 @@ struct rtl8139_private {
 MODULE_AUTHOR ("Jeff Garzik <jgarzik@pobox.com>");
 MODULE_DESCRIPTION ("RealTek RTL-8139 Fast Ethernet driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION(DRV_VERSION);
 
 module_param(use_io, bool, 0);
 MODULE_PARM_DESC(use_io, "Force use of I/O access mode. 0=MMIO 1=PIO");
@@ -954,17 +949,6 @@ static int rtl8139_init_one(struct pci_dev *pdev,
 	assert (ent != NULL);
 
 	board_idx++;
-
-	/* when we're built into the kernel, the driver version message
-	 * is only printed if at least one 8139 board has been found
-	 */
-#ifndef MODULE
-	{
-		static int printed_version;
-		if (!printed_version++)
-			pr_info(RTL8139_DRIVER_NAME "\n");
-	}
-#endif
 
 	if (pdev->vendor == PCI_VENDOR_ID_REALTEK &&
 	    pdev->device == PCI_DEVICE_ID_REALTEK_8139 && pdev->revision >= 0x20) {
@@ -2383,7 +2367,6 @@ static void rtl8139_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *
 {
 	struct rtl8139_private *tp = netdev_priv(dev);
 	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
-	strscpy(info->version, DRV_VERSION, sizeof(info->version));
 	strscpy(info->bus_info, pci_name(tp->pci_dev), sizeof(info->bus_info));
 }
 
@@ -2656,25 +2639,4 @@ static struct pci_driver rtl8139_pci_driver = {
 	.driver.pm	= &rtl8139_pm_ops,
 };
 
-
-static int __init rtl8139_init_module (void)
-{
-	/* when we're a module, we always print a version message,
-	 * even if no 8139 board is found.
-	 */
-#ifdef MODULE
-	pr_info(RTL8139_DRIVER_NAME "\n");
-#endif
-
-	return pci_register_driver(&rtl8139_pci_driver);
-}
-
-
-static void __exit rtl8139_cleanup_module (void)
-{
-	pci_unregister_driver (&rtl8139_pci_driver);
-}
-
-
-module_init(rtl8139_init_module);
-module_exit(rtl8139_cleanup_module);
+module_pci_driver(rtl8139_pci_driver);

@@ -9,12 +9,12 @@
 #include <linux/completion.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/reset.h>
 
+#include <linux/iio/adc-helpers.h>
 #include <linux/iio/iio.h>
 
 #define SUN20I_GPADC_DRIVER_NAME	"sun20i-gpadc"
@@ -54,7 +54,7 @@ struct sun20i_gpadc_iio {
 	 * of register writes, then a wait for a completion callback,
 	 * and finally a register read, during which userspace could issue
 	 * another read request. This lock protects a read access from
-	 * ocurring before another one has finished.
+	 * occurring before another one has finished.
 	 */
 	struct mutex		lock;
 };
@@ -138,8 +138,23 @@ static irqreturn_t sun20i_gpadc_irq_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static int
+sun20i_gpadc_fwnode_xlate(struct iio_dev *indio_dev,
+			  const struct fwnode_reference_args *iiospec)
+{
+	if (iiospec->nargs != 1)
+		return -EINVAL;
+
+	for (unsigned int i = 0; i < indio_dev->num_channels; i++)
+		if (indio_dev->channels[i].channel == iiospec->args[0])
+			return i;
+
+	return -EINVAL;
+}
+
 static const struct iio_info sun20i_gpadc_iio_info = {
 	.read_raw = sun20i_gpadc_read_raw,
+	.fwnode_xlate = sun20i_gpadc_fwnode_xlate,
 };
 
 static void sun20i_gpadc_reset_assert(void *data)
@@ -149,36 +164,23 @@ static void sun20i_gpadc_reset_assert(void *data)
 	reset_control_assert(rst);
 }
 
+static const struct iio_chan_spec sun20i_gpadc_chan_template = {
+	.type = IIO_VOLTAGE,
+	.indexed = 1,
+	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
+};
+
 static int sun20i_gpadc_alloc_channels(struct iio_dev *indio_dev,
 				       struct device *dev)
 {
-	unsigned int channel;
-	int num_channels, i, ret;
+	int num_channels;
 	struct iio_chan_spec *channels;
 
-	num_channels = device_get_child_node_count(dev);
-	if (num_channels == 0)
-		return dev_err_probe(dev, -ENODEV, "no channel children\n");
-
-	channels = devm_kcalloc(dev, num_channels, sizeof(*channels),
-				GFP_KERNEL);
-	if (!channels)
-		return -ENOMEM;
-
-	i = 0;
-	device_for_each_child_node_scoped(dev, node) {
-		ret = fwnode_property_read_u32(node, "reg", &channel);
-		if (ret)
-			return dev_err_probe(dev, ret, "invalid channel number\n");
-
-		channels[i].type = IIO_VOLTAGE;
-		channels[i].indexed = 1;
-		channels[i].channel = channel;
-		channels[i].info_mask_separate = BIT(IIO_CHAN_INFO_RAW);
-		channels[i].info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE);
-
-		i++;
-	}
+	num_channels = devm_iio_adc_device_alloc_chaninfo_se(dev,
+				&sun20i_gpadc_chan_template, -1, &channels);
+	if (num_channels < 0)
+		return num_channels;
 
 	indio_dev->channels = channels;
 	indio_dev->num_channels = num_channels;
@@ -189,10 +191,10 @@ static int sun20i_gpadc_alloc_channels(struct iio_dev *indio_dev,
 static int sun20i_gpadc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct iio_dev *indio_dev;
 	struct sun20i_gpadc_iio *info;
+	struct clk_bulk_data *clks;
 	struct reset_control *rst;
-	struct clk *clk;
+	struct iio_dev *indio_dev;
 	int irq;
 	int ret;
 
@@ -217,9 +219,11 @@ static int sun20i_gpadc_probe(struct platform_device *pdev)
 	if (IS_ERR(info->regs))
 		return PTR_ERR(info->regs);
 
-	clk = devm_clk_get_enabled(dev, NULL);
-	if (IS_ERR(clk))
-		return dev_err_probe(dev, PTR_ERR(clk), "failed to enable bus clock\n");
+	ret = devm_clk_bulk_get_all_enabled(dev, &clks);
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "failed to enable clocks\n");
+	if (ret == 0)
+		return dev_err_probe(dev, -ENODEV, "needs at least one clocks\n");
 
 	rst = devm_reset_control_get_exclusive(dev, NULL);
 	if (IS_ERR(rst))
@@ -255,7 +259,8 @@ static int sun20i_gpadc_probe(struct platform_device *pdev)
 
 static const struct of_device_id sun20i_gpadc_of_id[] = {
 	{ .compatible = "allwinner,sun20i-d1-gpadc" },
-	{ /* sentinel */ }
+	{ .compatible = "allwinner,sun55i-a523-gpadc" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, sun20i_gpadc_of_id);
 
@@ -271,3 +276,4 @@ module_platform_driver(sun20i_gpadc_driver);
 MODULE_DESCRIPTION("ADC driver for sunxi platforms");
 MODULE_AUTHOR("Maksim Kiselev <bigunclemax@gmail.com>");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_DRIVER");

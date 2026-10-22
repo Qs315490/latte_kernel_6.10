@@ -289,7 +289,7 @@ static int mxl301rf_probe(struct i2c_client *client)
 	struct mxl301rf_config *cfg;
 	struct dvb_frontend *fe;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (!state)
 		return -ENOMEM;
 
@@ -317,8 +317,8 @@ static void mxl301rf_remove(struct i2c_client *client)
 
 
 static const struct i2c_device_id mxl301rf_id[] = {
-	{ "mxl301rf" },
-	{}
+	{ .name = "mxl301rf" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mxl301rf_id);
 

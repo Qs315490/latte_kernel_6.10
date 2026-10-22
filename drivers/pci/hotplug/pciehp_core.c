@@ -55,7 +55,7 @@ static int init_slot(struct controller *ctrl)
 	int retval;
 
 	/* Setup hotplug slot ops */
-	ops = kzalloc(sizeof(*ops), GFP_KERNEL);
+	ops = kzalloc_obj(*ops);
 	if (!ops)
 		return -ENOMEM;
 
@@ -79,7 +79,8 @@ static int init_slot(struct controller *ctrl)
 	snprintf(name, SLOT_NAME_SIZE, "%u", PSN(ctrl));
 
 	retval = pci_hp_initialize(&ctrl->hotplug_slot,
-				   ctrl->pcie->port->subordinate, 0, name);
+				   ctrl->pcie->port->subordinate,
+				   PCI_SLOT_ALL_DEVICES, name);
 	if (retval) {
 		ctrl_err(ctrl, "pci_hp_initialize failed: error %d\n", retval);
 		kfree(ops);
@@ -282,32 +283,6 @@ static int pciehp_suspend(struct pcie_device *dev)
 
 	pciehp_disable_interrupt(dev);
 	return 0;
-}
-
-static bool pciehp_device_replaced(struct controller *ctrl)
-{
-	struct pci_dev *pdev __free(pci_dev_put);
-	u32 reg;
-
-	pdev = pci_get_slot(ctrl->pcie->port->subordinate, PCI_DEVFN(0, 0));
-	if (!pdev)
-		return true;
-
-	if (pci_read_config_dword(pdev, PCI_VENDOR_ID, &reg) ||
-	    reg != (pdev->vendor | (pdev->device << 16)) ||
-	    pci_read_config_dword(pdev, PCI_CLASS_REVISION, &reg) ||
-	    reg != (pdev->revision | (pdev->class << 8)))
-		return true;
-
-	if (pdev->hdr_type == PCI_HEADER_TYPE_NORMAL &&
-	    (pci_read_config_dword(pdev, PCI_SUBSYSTEM_VENDOR_ID, &reg) ||
-	     reg != (pdev->subsystem_vendor | (pdev->subsystem_device << 16))))
-		return true;
-
-	if (pci_get_dsn(pdev) != ctrl->dsn)
-		return true;
-
-	return false;
 }
 
 static int pciehp_resume_noirq(struct pcie_device *dev)

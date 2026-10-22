@@ -573,7 +573,7 @@ static void wait_for_xmitr(struct uart_pxa_port *up)
 	} while (!uart_lsr_tx_empty(status));
 
 	/* Wait up to 1s for flow control if necessary */
-	if (up->port.flags & UPF_CONS_FLOW) {
+	if (uart_cons_flow_enabled(&up->port)) {
 		tmout = 1000000;
 		while (--tmout &&
 		       ((serial_in(up, UART_MSR) & UART_MSR_CTS) == 0))
@@ -811,7 +811,7 @@ static int serial_pxa_probe(struct platform_device *dev)
 	if (irq < 0)
 		return irq;
 
-	sport = kzalloc(sizeof(struct uart_pxa_port), GFP_KERNEL);
+	sport = kzalloc_obj(struct uart_pxa_port);
 	if (!sport)
 		return -ENOMEM;
 

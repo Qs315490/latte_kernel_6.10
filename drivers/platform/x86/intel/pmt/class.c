@@ -9,11 +9,14 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/log2.h>
 #include <linux/intel_vsec.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
+#include <linux/sysfs.h>
 
 #include "class.h"
 
@@ -58,11 +61,11 @@ pmt_memcpy64_fromio(void *to, const u64 __iomem *from, size_t count)
 	return count;
 }
 
-int pmt_telem_read_mmio(struct pci_dev *pdev, struct pmt_callbacks *cb, u32 guid, void *buf,
+int pmt_telem_read_mmio(struct device *dev, struct pmt_callbacks *cb, u32 guid, void *buf,
 			void __iomem *addr, loff_t off, u32 count)
 {
 	if (cb && cb->read_telem)
-		return cb->read_telem(pdev, guid, buf, off, count);
+		return cb->read_telem(dev, guid, buf, off, count);
 
 	addr += off;
 
@@ -97,7 +100,7 @@ intel_pmt_read(struct file *filp, struct kobject *kobj,
 	if (count > entry->size - off)
 		count = entry->size - off;
 
-	count = pmt_telem_read_mmio(entry->ep->pcidev, entry->cb, entry->header.guid, buf,
+	count = pmt_telem_read_mmio(entry->ep->dev, entry->cb, entry->header.guid, buf,
 				    entry->base, off, count);
 
 	return count;
@@ -138,7 +141,7 @@ guid_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct intel_pmt_entry *entry = dev_get_drvdata(dev);
 
-	return sprintf(buf, "0x%x\n", entry->guid);
+	return sysfs_emit(buf, "0x%x\n", entry->guid);
 }
 static DEVICE_ATTR_RO(guid);
 
@@ -147,7 +150,7 @@ static ssize_t size_show(struct device *dev, struct device_attribute *attr,
 {
 	struct intel_pmt_entry *entry = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%zu\n", entry->size);
+	return sysfs_emit(buf, "%zu\n", entry->size);
 }
 static DEVICE_ATTR_RO(size);
 
@@ -156,7 +159,7 @@ offset_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct intel_pmt_entry *entry = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%lu\n", offset_in_page(entry->base_addr));
+	return sysfs_emit(buf, "%lu\n", offset_in_page(entry->base_addr));
 }
 static DEVICE_ATTR_RO(offset);
 
@@ -166,20 +169,50 @@ static struct attribute *intel_pmt_attrs[] = {
 	&dev_attr_offset.attr,
 	NULL
 };
-ATTRIBUTE_GROUPS(intel_pmt);
 
-static struct class intel_pmt_class = {
+static umode_t intel_pmt_attr_visible(struct kobject *kobj,
+				      struct attribute *attr, int n)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+	struct auxiliary_device *auxdev = to_auxiliary_dev(dev->parent);
+	struct intel_vsec_device *ivdev = auxdev_to_ivdev(auxdev);
+
+	/*
+	 * Place the discovery features folder in /sys/class/intel_pmt, but
+	 * exclude the common attributes as they are not applicable.
+	 */
+	if (ivdev->cap_id == ilog2(VSEC_CAP_DISCOVERY))
+		return 0;
+
+	return attr->mode;
+}
+
+static bool intel_pmt_group_visible(struct kobject *kobj)
+{
+	return true;
+}
+DEFINE_SYSFS_GROUP_VISIBLE(intel_pmt);
+
+static const struct attribute_group intel_pmt_group = {
+	.attrs = intel_pmt_attrs,
+	.is_visible = SYSFS_GROUP_VISIBLE(intel_pmt),
+};
+__ATTRIBUTE_GROUPS(intel_pmt);
+
+struct class intel_pmt_class = {
 	.name = "intel_pmt",
 	.dev_groups = intel_pmt_groups,
 };
+EXPORT_SYMBOL_GPL(intel_pmt_class);
 
-static int intel_pmt_populate_entry(struct intel_pmt_entry *entry,
-				    struct intel_vsec_device *ivdev,
-				    struct resource *disc_res)
+static int pmt_resolve_access_pci(struct intel_pmt_entry *entry,
+				  struct intel_vsec_device *ivdev,
+				  int idx)
 {
-	struct pci_dev *pci_dev = ivdev->pcidev;
+	struct pci_dev *pci_dev = to_pci_dev(ivdev->dev);
 	struct device *dev = &ivdev->auxdev.dev;
 	struct intel_pmt_header *header = &entry->header;
+	struct resource *disc_res;
 	u8 bir;
 
 	/*
@@ -204,6 +237,7 @@ static int intel_pmt_populate_entry(struct intel_pmt_entry *entry,
 		 * For access_type LOCAL, the base address is as follows:
 		 * base address = end of discovery region + base offset
 		 */
+		disc_res = &ivdev->resource[idx];
 		entry->base_addr = disc_res->end + 1 + header->base_offset;
 
 		/*
@@ -252,6 +286,82 @@ static int intel_pmt_populate_entry(struct intel_pmt_entry *entry,
 		return -EINVAL;
 	}
 
+	entry->pcidev = pci_dev;
+
+	return 0;
+}
+
+static int pmt_resolve_access_acpi(struct intel_pmt_entry *entry,
+				   struct intel_vsec_device *ivdev)
+{
+	struct pci_dev *pci_dev = NULL;
+	struct device *dev = &ivdev->auxdev.dev;
+	struct intel_pmt_header *header = &entry->header;
+	u8 bir;
+
+	if (dev_is_pci(ivdev->dev))
+		pci_dev = to_pci_dev(ivdev->dev);
+
+	/*
+	 * The base offset should always be 8 byte aligned.
+	 *
+	 * For non-local access types the lower 3 bits of base offset
+	 * contains the index of the base address register where the
+	 * telemetry can be found.
+	 */
+	bir = GET_BIR(header->base_offset);
+
+	switch (header->access_type) {
+	case ACCESS_BARID:
+		/* ACPI platform drivers use base_addr */
+		if (ivdev->base_addr) {
+			entry->base_addr = ivdev->base_addr +
+					   GET_ADDRESS(header->base_offset);
+			break;
+		}
+
+		/* If base_addr is not provided, then this is an ACPI companion device */
+		if (!pci_dev) {
+			dev_err(dev, "ACCESS_BARID requires PCI BAR resources or base_addr\n");
+			return -EINVAL;
+		}
+
+		entry->base_addr = pci_resource_start(pci_dev, bir) +
+				   GET_ADDRESS(header->base_offset);
+		break;
+	default:
+		dev_err(dev, "Unsupported access type %d for ACPI based PMT\n",
+			header->access_type);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int intel_pmt_populate_entry(struct intel_pmt_entry *entry,
+				    struct intel_vsec_device *ivdev,
+				    int idx)
+{
+	struct intel_pmt_header *header = &entry->header;
+	struct device *dev = &ivdev->auxdev.dev;
+	int ret;
+
+	switch (ivdev->src) {
+	case INTEL_VSEC_DISC_PCI:
+		ret = pmt_resolve_access_pci(entry, ivdev, idx);
+		if (ret)
+			return ret;
+		break;
+	case INTEL_VSEC_DISC_ACPI:
+		ret = pmt_resolve_access_acpi(entry, ivdev);
+		if (ret)
+			return ret;
+		break;
+	default:
+		dev_err(dev, "Unknown discovery source: %d\n", ivdev->src);
+		return -EINVAL;
+	}
+
 	entry->guid = header->guid;
 	entry->size = header->size;
 	entry->cb = ivdev->priv_data;
@@ -284,8 +394,8 @@ static int intel_pmt_dev_register(struct intel_pmt_entry *entry,
 
 	entry->kobj = &dev->kobj;
 
-	if (ns->attr_grp) {
-		ret = sysfs_create_group(entry->kobj, ns->attr_grp);
+	if (entry->attr_grp) {
+		ret = sysfs_create_group(entry->kobj, entry->attr_grp);
 		if (ret)
 			goto fail_sysfs_create_group;
 	}
@@ -308,7 +418,7 @@ static int intel_pmt_dev_register(struct intel_pmt_entry *entry,
 	entry->pmt_bin_attr.attr.name = ns->name;
 	entry->pmt_bin_attr.attr.mode = 0440;
 	entry->pmt_bin_attr.mmap = intel_pmt_mmap;
-	entry->pmt_bin_attr.read_new = intel_pmt_read;
+	entry->pmt_bin_attr.read = intel_pmt_read;
 	entry->pmt_bin_attr.size = entry->size;
 
 	ret = sysfs_create_bin_file(&dev->kobj, &entry->pmt_bin_attr);
@@ -326,8 +436,8 @@ static int intel_pmt_dev_register(struct intel_pmt_entry *entry,
 fail_add_endpoint:
 	sysfs_remove_bin_file(entry->kobj, &entry->pmt_bin_attr);
 fail_ioremap:
-	if (ns->attr_grp)
-		sysfs_remove_group(entry->kobj, ns->attr_grp);
+	if (entry->attr_grp)
+		sysfs_remove_group(entry->kobj, entry->attr_grp);
 fail_sysfs_create_group:
 	device_unregister(dev);
 fail_dev_create:
@@ -336,24 +446,84 @@ fail_dev_create:
 	return ret;
 }
 
+static int pmt_get_headers(struct intel_vsec_device *ivdev, int idx,
+			   struct intel_pmt_entry *entry)
+{
+	struct device *dev = &ivdev->auxdev.dev;
+	size_t header_bytes = sizeof(entry->disc_header);
+
+	switch (ivdev->src) {
+	case INTEL_VSEC_DISC_PCI: {
+		struct resource *disc_res = &ivdev->resource[idx];
+		void __iomem *disc_table;
+
+		disc_table = devm_ioremap_resource(dev, disc_res);
+		if (IS_ERR(disc_table))
+			return PTR_ERR(disc_table);
+
+		/*
+		 * The mapped resource is sized by the namespace's DVSEC
+		 * entry_size (in dwords), which can be less than the default
+		 * size (e.g. telemetry uses entry_size = 3, 12 bytes). Cap the
+		 * copy to resource_size() to avoid reading past the mapped
+		 * region.
+		 */
+		memset(entry->disc_header, 0, header_bytes);
+		memcpy_fromio(entry->disc_header, disc_table,
+			      min(header_bytes, resource_size(disc_res)));
+
+		/* Used by crashlog driver */
+		entry->disc_table = disc_table;
+
+		return 0;
+	}
+	case INTEL_VSEC_DISC_ACPI: {
+		memcpy(entry->disc_header, &ivdev->acpi_disc[idx][0], header_bytes);
+		/*
+		 * No MMIO mapping exists on the ACPI source path; the cached
+		 * headers are the only view of the discovery record. Consumers
+		 * that dereference disc_table (e.g. crashlog) must therefore
+		 * only be wired to namespaces backed by INTEL_VSEC_DISC_PCI.
+		 */
+		entry->disc_table = NULL;
+
+		return 0;
+	}
+	default:
+		dev_err(dev, "Unknown discovery source type: %d\n", ivdev->src);
+		break;
+	}
+
+	return -EINVAL;
+}
+
 int intel_pmt_dev_create(struct intel_pmt_entry *entry, struct intel_pmt_namespace *ns,
 			 struct intel_vsec_device *intel_vsec_dev, int idx)
 {
 	struct device *dev = &intel_vsec_dev->auxdev.dev;
-	struct resource	*disc_res;
 	int ret;
 
-	disc_res = &intel_vsec_dev->resource[idx];
+	ret = pmt_get_headers(intel_vsec_dev, idx, entry);
+	if (ret)
+		return ret;
 
-	entry->disc_table = devm_ioremap_resource(dev, disc_res);
-	if (IS_ERR(entry->disc_table))
-		return PTR_ERR(entry->disc_table);
+	if (ns->pmt_pre_decode) {
+		ret = ns->pmt_pre_decode(intel_vsec_dev, entry);
+		if (ret)
+			return ret;
+	}
 
 	ret = ns->pmt_header_decode(entry, dev);
 	if (ret)
 		return ret;
 
-	ret = intel_pmt_populate_entry(entry, intel_vsec_dev, disc_res);
+	if (ns->pmt_post_decode) {
+		ret = ns->pmt_post_decode(intel_vsec_dev, entry);
+		if (ret)
+			return ret;
+	}
+
+	ret = intel_pmt_populate_entry(entry, intel_vsec_dev, idx);
 	if (ret)
 		return ret;
 
@@ -369,8 +539,8 @@ void intel_pmt_dev_destroy(struct intel_pmt_entry *entry,
 	if (entry->size)
 		sysfs_remove_bin_file(entry->kobj, &entry->pmt_bin_attr);
 
-	if (ns->attr_grp)
-		sysfs_remove_group(entry->kobj, ns->attr_grp);
+	if (entry->attr_grp)
+		sysfs_remove_group(entry->kobj, entry->attr_grp);
 
 	device_unregister(dev);
 	xa_erase(ns->xa, entry->devid);

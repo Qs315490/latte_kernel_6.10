@@ -3,10 +3,10 @@
  * HID Sensors Driver
  * Copyright (c) 2012, Intel Corporation.
  */
+#include <linux/bitops.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/hid-sensor-hub.h>
 #include <linux/iio/iio.h>
@@ -42,7 +42,7 @@ static const u32 gyro_3d_addresses[GYRO_3D_CHANNEL_MAX] = {
 	HID_USAGE_SENSOR_ANGL_VELOCITY_Z_AXIS
 };
 
-static const u32 gryo_3d_sensitivity_addresses[] = {
+static const u32 gyro_3d_sensitivity_addresses[] = {
 	HID_USAGE_SENSOR_DATA_ANGL_VELOCITY,
 };
 
@@ -81,17 +81,6 @@ static const struct iio_chan_spec gyro_3d_channels[] = {
 	},
 	IIO_CHAN_SOFT_TIMESTAMP(CHANNEL_SCAN_INDEX_TIMESTAMP)
 };
-
-/* Adjust channel real bits based on report descriptor */
-static void gyro_3d_adjust_channel_bit_mask(struct iio_chan_spec *channels,
-						int channel, int size)
-{
-	channels[channel].scan_type.sign = 's';
-	/* Real storage bits will change based on the report desc. */
-	channels[channel].scan_type.realbits = size * 8;
-	/* Maximum size of a sample to capture is u32 */
-	channels[channel].scan_type.storagebits = sizeof(u32) * 8;
-}
 
 /* Channel read_raw handler */
 static int gyro_3d_read_raw(struct iio_dev *indio_dev,
@@ -248,19 +237,20 @@ static int gyro_3d_parse_report(struct platform_device *pdev,
 				struct gyro_3d_state *st)
 {
 	int ret;
-	int i;
 
-	for (i = 0; i <= CHANNEL_SCAN_INDEX_Z; ++i) {
+	for (unsigned int ch = CHANNEL_SCAN_INDEX_X; ch <= CHANNEL_SCAN_INDEX_Z; ch++) {
 		ret = sensor_hub_input_get_attribute_info(hsdev,
 				HID_INPUT_REPORT,
 				usage_id,
-				HID_USAGE_SENSOR_ANGL_VELOCITY_X_AXIS + i,
-				&st->gyro[CHANNEL_SCAN_INDEX_X + i]);
+				HID_USAGE_SENSOR_ANGL_VELOCITY_X_AXIS + ch,
+				&st->gyro[ch]);
 		if (ret < 0)
 			break;
-		gyro_3d_adjust_channel_bit_mask(channels,
-				CHANNEL_SCAN_INDEX_X + i,
-				st->gyro[CHANNEL_SCAN_INDEX_X + i].size);
+		channels[ch].scan_type = (struct iio_scan_type) {
+			.format = 's',
+			.realbits = BYTES_TO_BITS(st->gyro[ch].size),
+			.storagebits = BITS_PER_TYPE(u32),
+		};
 	}
 	dev_dbg(&pdev->dev, "gyro_3d %x:%x, %x:%x, %x:%x\n",
 			st->gyro[0].index,
@@ -297,8 +287,8 @@ static int hid_gyro_3d_probe(struct platform_device *pdev)
 	ret = hid_sensor_parse_common_attributes(hsdev,
 						HID_USAGE_SENSOR_GYRO_3D,
 						&gyro_state->common_attributes,
-						gryo_3d_sensitivity_addresses,
-						ARRAY_SIZE(gryo_3d_sensitivity_addresses));
+						gyro_3d_sensitivity_addresses,
+						ARRAY_SIZE(gyro_3d_sensitivity_addresses));
 	if (ret) {
 		dev_err(&pdev->dev, "failed to setup common attributes\n");
 		return ret;
@@ -375,7 +365,7 @@ static const struct platform_device_id hid_gyro_3d_ids[] = {
 		/* Format: HID-SENSOR-usage_id_in_hex_lowercase */
 		.name = "HID-SENSOR-200076",
 	},
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, hid_gyro_3d_ids);
 

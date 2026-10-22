@@ -252,6 +252,7 @@ v4l2_hdmi_rx_colorimetry(const struct hdmi_avi_infoframe *avi,
 			 const struct hdmi_vendor_infoframe *hdmi,
 			 unsigned int height);
 
+unsigned int v4l2_num_edid_blocks(const u8 *edid, unsigned int max_blocks);
 u16 v4l2_get_edid_phys_addr(const u8 *edid, unsigned int size,
 			    unsigned int *offset);
 void v4l2_set_edid_phys_addr(u8 *edid, unsigned int size, u16 phys_addr);
@@ -274,6 +275,7 @@ int v4l2_phys_addr_validate(u16 phys_addr, u16 *parent, u16 *port);
 #define V4L2_DEBUGFS_IF_AUDIO	BIT(1)
 #define V4L2_DEBUGFS_IF_SPD	BIT(2)
 #define V4L2_DEBUGFS_IF_HDMI	BIT(3)
+#define V4L2_DEBUGFS_IF_DRM	BIT(4)
 
 typedef ssize_t (*v4l2_debugfs_if_read_t)(u32 type, void *priv,
 					  struct file *filp, char __user *ubuf,

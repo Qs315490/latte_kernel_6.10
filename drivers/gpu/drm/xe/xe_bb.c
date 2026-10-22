@@ -7,10 +7,9 @@
 
 #include "instructions/xe_mi_commands.h"
 #include "xe_assert.h"
-#include "xe_device.h"
+#include "xe_device_types.h"
 #include "xe_exec_queue_types.h"
 #include "xe_gt.h"
-#include "xe_hw_fence.h"
 #include "xe_sa.h"
 #include "xe_sched_job.h"
 #include "xe_vm_types.h"
@@ -19,7 +18,7 @@ static int bb_prefetch(struct xe_gt *gt)
 {
 	struct xe_device *xe = gt_to_xe(gt);
 
-	if (GRAPHICS_VERx100(xe) >= 1250 && !xe_gt_is_media_type(gt))
+	if (GRAPHICS_VERx100(xe) >= 1250 && xe_gt_is_main_type(gt))
 		/*
 		 * RCS and CCS require 1K, although other engines would be
 		 * okay with 512.
@@ -32,7 +31,7 @@ static int bb_prefetch(struct xe_gt *gt)
 struct xe_bb *xe_bb_new(struct xe_gt *gt, u32 dwords, bool usm)
 {
 	struct xe_tile *tile = gt_to_tile(gt);
-	struct xe_bb *bb = kmalloc(sizeof(*bb), GFP_KERNEL);
+	struct xe_bb *bb = kmalloc_obj(*bb);
 	int err;
 
 	if (!bb)
@@ -58,6 +57,68 @@ struct xe_bb *xe_bb_new(struct xe_gt *gt, u32 dwords, bool usm)
 err:
 	kfree(bb);
 	return ERR_PTR(err);
+}
+
+/**
+ * xe_bb_alloc() - Allocate a new batch buffer structure
+ * @gt: the &xe_gt
+ *
+ * Allocates and initializes a new xe_bb structure with an associated
+ * uninitialized suballoc object.
+ *
+ * Returns: Batch buffer structure or an ERR_PTR(-ENOMEM).
+ */
+struct xe_bb *xe_bb_alloc(struct xe_gt *gt)
+{
+	struct xe_bb *bb = kmalloc_obj(*bb);
+	int err;
+
+	if (!bb)
+		return ERR_PTR(-ENOMEM);
+
+	bb->bo = xe_sa_bo_alloc(GFP_KERNEL);
+	if (IS_ERR(bb->bo)) {
+		err = PTR_ERR(bb->bo);
+		goto err;
+	}
+
+	return bb;
+
+err:
+	kfree(bb);
+	return ERR_PTR(err);
+}
+
+/**
+ * xe_bb_init() - Initialize a batch buffer with memory from a sub-allocator pool
+ * @bb: Batch buffer structure to initialize
+ * @bb_pool: Suballoc memory pool to allocate from
+ * @dwords: Number of dwords to be allocated
+ *
+ * Initializes the batch buffer by allocating memory from the specified
+ * suballoc pool.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int xe_bb_init(struct xe_bb *bb, struct xe_sa_manager *bb_pool, u32 dwords)
+{
+	int err;
+
+	/*
+	 * We need to allocate space for the requested number of dwords &
+	 * one additional MI_BATCH_BUFFER_END dword. Since the whole SA
+	 * is submitted to HW, we need to make sure that the last instruction
+	 * is not over written when the last chunk of SA is allocated for BB.
+	 * So, this extra DW acts as a guard here.
+	 */
+	err = xe_sa_bo_init(bb_pool, bb->bo, 4 * (dwords + 1));
+	if (err)
+		return err;
+
+	bb->cs = xe_sa_bo_cpu_addr(bb->bo);
+	bb->len = 0;
+
+	return 0;
 }
 
 static struct xe_sched_job *

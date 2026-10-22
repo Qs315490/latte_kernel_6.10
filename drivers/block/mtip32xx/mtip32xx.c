@@ -2040,11 +2040,12 @@ static int mtip_hw_ioctl(struct driver_data *dd, unsigned int cmd,
  * @dir      Direction (read or write)
  *
  * return value
- *	None
+ *	0	The IO completed successfully.
+ *	-ENOMEM	The DMA mapping failed.
  */
-static void mtip_hw_submit_io(struct driver_data *dd, struct request *rq,
-			      struct mtip_cmd *command,
-			      struct blk_mq_hw_ctx *hctx)
+static int mtip_hw_submit_io(struct driver_data *dd, struct request *rq,
+			     struct mtip_cmd *command,
+			     struct blk_mq_hw_ctx *hctx)
 {
 	struct mtip_cmd_hdr *hdr =
 		dd->port->command_list + sizeof(struct mtip_cmd_hdr) * rq->tag;
@@ -2056,12 +2057,14 @@ static void mtip_hw_submit_io(struct driver_data *dd, struct request *rq,
 	unsigned int nents;
 
 	/* Map the scatter list for DMA access */
-	nents = blk_rq_map_sg(hctx->queue, rq, command->sg);
-	nents = dma_map_sg(&dd->pdev->dev, command->sg, nents, dma_dir);
+	command->scatter_ents = blk_rq_map_sg(rq, command->sg);
+	nents = dma_map_sg(&dd->pdev->dev, command->sg,
+			   command->scatter_ents, dma_dir);
+	if (!nents)
+		return -ENOMEM;
+
 
 	prefetch(&port->flags);
-
-	command->scatter_ents = nents;
 
 	/*
 	 * The number of retries for this command before it is
@@ -2112,11 +2115,13 @@ static void mtip_hw_submit_io(struct driver_data *dd, struct request *rq,
 	if (unlikely(port->flags & MTIP_PF_PAUSE_IO)) {
 		set_bit(rq->tag, port->cmds_to_issue);
 		set_bit(MTIP_PF_ISSUE_CMDS_BIT, &port->flags);
-		return;
+		return 0;
 	}
 
 	/* Issue the command to the hardware */
 	mtip_issue_ncq_command(port, rq->tag);
+
+	return 0;
 }
 
 /*
@@ -3143,17 +3148,17 @@ static int mtip_block_compat_ioctl(struct block_device *dev,
  * that each partition is also 4KB aligned. Non-aligned partitions adversely
  * affects performance.
  *
- * @dev Pointer to the block_device strucutre.
+ * @disk Pointer to the gendisk strucutre.
  * @geo Pointer to a hd_geometry structure.
  *
  * return value
  *	0       Operation completed successfully.
  *	-ENOTTY An error occurred while reading the drive capacity.
  */
-static int mtip_block_getgeo(struct block_device *dev,
+static int mtip_block_getgeo(struct gendisk *disk,
 				struct hd_geometry *geo)
 {
-	struct driver_data *dd = dev->bd_disk->private_data;
+	struct driver_data *dd = disk->private_data;
 	sector_t capacity;
 
 	if (!dd)
@@ -3315,7 +3320,9 @@ static blk_status_t mtip_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	blk_mq_start_request(rq);
 
-	mtip_hw_submit_io(dd, rq, cmd, hctx);
+	if (mtip_hw_submit_io(dd, rq, cmd, hctx))
+		return BLK_STS_IOERR;
+
 	return BLK_STS_OK;
 }
 
@@ -3333,7 +3340,7 @@ static void mtip_free_cmd(struct blk_mq_tag_set *set, struct request *rq,
 }
 
 static int mtip_init_cmd(struct blk_mq_tag_set *set, struct request *rq,
-			 unsigned int hctx_idx, unsigned int numa_node)
+			 unsigned int hctx_idx, int numa_node)
 {
 	struct driver_data *dd = set->driver_data;
 	struct mtip_cmd *cmd = blk_mq_rq_to_pdu(rq);
@@ -3398,6 +3405,7 @@ static int mtip_block_initialize(struct driver_data *dd)
 		.max_segment_size	= 0x400000,
 	};
 	int rv = 0, wait_for_rebuild = 0;
+	bool disk_added = false;
 	sector_t capacity;
 	unsigned int index = 0;
 
@@ -3431,6 +3439,7 @@ static int mtip_block_initialize(struct driver_data *dd)
 		dev_err(&dd->pdev->dev,
 			"Unable to allocate request queue\n");
 		rv = -ENOMEM;
+		dd->disk = NULL;
 		goto block_queue_alloc_init_error;
 	}
 	dd->queue		= dd->disk->queue;
@@ -3489,6 +3498,7 @@ skip_create_disk:
 	rv = device_add_disk(&dd->pdev->dev, dd->disk, mtip_disk_attr_groups);
 	if (rv)
 		goto read_capacity_error;
+	disk_added = true;
 
 	if (dd->mtip_svc_handler) {
 		set_bit(MTIP_DDF_INIT_DONE_BIT, &dd->dd_flag);
@@ -3504,7 +3514,9 @@ start_service_thread:
 		dev_err(&dd->pdev->dev, "service thread failed to start\n");
 		dd->mtip_svc_handler = NULL;
 		rv = -EFAULT;
-		goto kthread_run_error;
+		if (disk_added)
+			goto kthread_run_error;
+		goto read_capacity_error;
 	}
 	wake_up_process(dd->mtip_svc_handler);
 	if (wait_for_rebuild == MTIP_FTL_REBUILD_MAGIC)
@@ -3515,6 +3527,10 @@ start_service_thread:
 kthread_run_error:
 	/* Delete our gendisk. This also removes the device from /dev */
 	del_gendisk(dd->disk);
+	mtip_hw_debugfs_exit(dd);
+	blk_mq_free_tag_set(&dd->tags);
+	mtip_hw_exit(dd);
+	return rv;
 read_capacity_error:
 init_hw_cmds_error:
 	mtip_hw_debugfs_exit(dd);
@@ -3522,6 +3538,7 @@ disk_index_error:
 	ida_free(&rssd_index_ida, index);
 ida_get_error:
 	put_disk(dd->disk);
+	dd->disk = NULL;
 block_queue_alloc_init_error:
 	blk_mq_free_tag_set(&dd->tags);
 block_queue_alloc_tag_error:
@@ -3717,7 +3734,7 @@ static int mtip_pci_probe(struct pci_dev *pdev,
 	rv = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (rv) {
 		dev_warn(&pdev->dev, "64-bit DMA enable failed\n");
-		goto setmask_err;
+		goto iomap_err;
 	}
 
 	/* Copy the info we may need later into the private data structure. */
@@ -3733,7 +3750,7 @@ static int mtip_pci_probe(struct pci_dev *pdev,
 	if (!dd->isr_workq) {
 		dev_warn(&pdev->dev, "Can't create wq %d\n", dd->instance);
 		rv = -ENOMEM;
-		goto setmask_err;
+		goto iomap_err;
 	}
 
 	memset(cpu_list, 0, sizeof(cpu_list));
@@ -3830,11 +3847,12 @@ msi_initialize_err:
 		drop_cpu(dd->work[1].cpu_binding);
 		drop_cpu(dd->work[2].cpu_binding);
 	}
-setmask_err:
-	pcim_iounmap_regions(pdev, 1 << MTIP_ABAR);
 
 iomap_err:
-	kfree(dd);
+	if (dd->disk)
+		put_disk(dd->disk);
+	else
+		kfree(dd);
 	pci_set_drvdata(pdev, NULL);
 	return rv;
 done:
@@ -3907,7 +3925,6 @@ static void mtip_pci_remove(struct pci_dev *pdev)
 
 	pci_disable_msi(pdev);
 
-	pcim_iounmap_regions(pdev, 1 << MTIP_ABAR);
 	pci_set_drvdata(pdev, NULL);
 
 	put_disk(dd->disk);

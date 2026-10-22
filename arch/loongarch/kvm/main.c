@@ -5,6 +5,7 @@
 
 #include <linux/err.h>
 #include <linux/module.h>
+#include <linux/mod_devicetable.h>
 #include <linux/kvm_host.h>
 #include <asm/cacheflush.h>
 #include <asm/cpufeature.h>
@@ -192,6 +193,14 @@ static void kvm_init_gcsr_flag(void)
 	set_gcsr_sw_flag(LOONGARCH_CSR_PERFCNTR2);
 	set_gcsr_sw_flag(LOONGARCH_CSR_PERFCTRL3);
 	set_gcsr_sw_flag(LOONGARCH_CSR_PERFCNTR3);
+
+	if (cpu_has_msgint) {
+		set_gcsr_hw_flag(LOONGARCH_CSR_IPR);
+		set_gcsr_hw_flag(LOONGARCH_CSR_ISR0);
+		set_gcsr_hw_flag(LOONGARCH_CSR_ISR1);
+		set_gcsr_hw_flag(LOONGARCH_CSR_ISR2);
+		set_gcsr_hw_flag(LOONGARCH_CSR_ISR3);
+	}
 }
 
 static void kvm_update_vpid(struct kvm_vcpu *vcpu, int cpu)
@@ -263,11 +272,11 @@ void kvm_check_vpid(struct kvm_vcpu *vcpu)
 		 * memory with new address is changed on other VCPUs.
 		 */
 		set_gcsr_llbctl(CSR_LLBCTL_WCLLB);
-	}
 
-	/* Restore GSTAT(0x50).vpid */
-	vpid = (vcpu->arch.vpid & vpid_mask) << CSR_GSTAT_GID_SHIFT;
-	change_csr_gstat(vpid_mask << CSR_GSTAT_GID_SHIFT, vpid);
+		/* Restore GSTAT(0x50).vpid */
+		vpid = (vcpu->arch.vpid & vpid_mask) << CSR_GSTAT_GID_SHIFT;
+		change_csr_gstat(vpid_mask << CSR_GSTAT_GID_SHIFT, vpid);
+	}
 }
 
 void kvm_init_vmcs(struct kvm *kvm)
@@ -296,10 +305,10 @@ int kvm_arch_enable_virtualization_cpu(void)
 	/*
 	 * Enable virtualization features granting guest direct control of
 	 * certain features:
-	 * GCI=2:       Trap on init or unimplement cache instruction.
+	 * GCI=2:       Trap on init or unimplemented cache instruction.
 	 * TORU=0:      Trap on Root Unimplement.
 	 * CACTRL=1:    Root control cache.
-	 * TOP=0:       Trap on Previlege.
+	 * TOP=0:       Trap on Privilege.
 	 * TOE=0:       Trap on Exception.
 	 * TIT=0:       Trap on Timer.
 	 */
@@ -340,8 +349,7 @@ void kvm_arch_disable_virtualization_cpu(void)
 
 static int kvm_loongarch_env_init(void)
 {
-	int cpu, order, ret;
-	void *addr;
+	int cpu, ret;
 	struct kvm_context *context;
 
 	vmcs = alloc_percpu(struct kvm_context);
@@ -350,37 +358,15 @@ static int kvm_loongarch_env_init(void)
 		return -ENOMEM;
 	}
 
-	kvm_loongarch_ops = kzalloc(sizeof(*kvm_loongarch_ops), GFP_KERNEL);
+	kvm_loongarch_ops = kzalloc_obj(*kvm_loongarch_ops);
 	if (!kvm_loongarch_ops) {
 		free_percpu(vmcs);
 		vmcs = NULL;
 		return -ENOMEM;
 	}
 
-	/*
-	 * PGD register is shared between root kernel and kvm hypervisor.
-	 * So world switch entry should be in DMW area rather than TLB area
-	 * to avoid page fault reenter.
-	 *
-	 * In future if hardware pagetable walking is supported, we won't
-	 * need to copy world switch code to DMW area.
-	 */
-	order = get_order(kvm_exception_size + kvm_enter_guest_size);
-	addr = (void *)__get_free_pages(GFP_KERNEL, order);
-	if (!addr) {
-		free_percpu(vmcs);
-		vmcs = NULL;
-		kfree(kvm_loongarch_ops);
-		kvm_loongarch_ops = NULL;
-		return -ENOMEM;
-	}
-
-	memcpy(addr, kvm_exc_entry, kvm_exception_size);
-	memcpy(addr + kvm_exception_size, kvm_enter_guest, kvm_enter_guest_size);
-	flush_icache_range((unsigned long)addr, (unsigned long)addr + kvm_exception_size + kvm_enter_guest_size);
-	kvm_loongarch_ops->exc_entry = addr;
-	kvm_loongarch_ops->enter_guest = addr + kvm_exception_size;
-	kvm_loongarch_ops->page_order = order;
+	kvm_loongarch_ops->exc_entry = (void *)kvm_exc_entry;
+	kvm_loongarch_ops->enter_guest = (void *)kvm_enter_guest;
 
 	vpid_mask = read_csr_gstat();
 	vpid_mask = (vpid_mask & CSR_GSTAT_GIDBIT) >> CSR_GSTAT_GIDBIT_SHIFT;
@@ -394,6 +380,7 @@ static int kvm_loongarch_env_init(void)
 	}
 
 	kvm_init_gcsr_flag();
+	kvm_register_perf_callbacks();
 
 	/* Register LoongArch IPI interrupt controller interface. */
 	ret = kvm_loongarch_register_ipi_device();
@@ -407,24 +394,26 @@ static int kvm_loongarch_env_init(void)
 
 	/* Register LoongArch PCH-PIC interrupt controller interface. */
 	ret = kvm_loongarch_register_pch_pic_device();
+	if (ret)
+		return ret;
+
+	/* Register LoongArch DMSINTC interrupt contrroller interface */
+	if (cpu_has_msgint)
+		ret = kvm_loongarch_register_dmsintc_device();
 
 	return ret;
 }
 
 static void kvm_loongarch_env_exit(void)
 {
-	unsigned long addr;
-
 	if (vmcs)
 		free_percpu(vmcs);
 
 	if (kvm_loongarch_ops) {
-		if (kvm_loongarch_ops->exc_entry) {
-			addr = (unsigned long)kvm_loongarch_ops->exc_entry;
-			free_pages(addr, kvm_loongarch_ops->page_order);
-		}
 		kfree(kvm_loongarch_ops);
 	}
+
+	kvm_unregister_perf_callbacks();
 }
 
 static int kvm_loongarch_init(void)

@@ -1,32 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0 OR MIT
 /**************************************************************************
  *
- * Copyright (c) 2009-2024 Broadcom. All Rights Reserved. The term
+ * Copyright (c) 2009-2025 Broadcom. All Rights Reserved. The term
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sub license, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * The above copyright notice and this permission notice (including the
- * next paragraph) shall be included in all copies or substantial portions
- * of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE COPYRIGHT HOLDERS, AUTHORS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
  *
  **************************************************************************/
 
 #include "vmwgfx_bo.h"
+#include "vmwgfx_cursor_plane.h"
 #include "vmwgfx_drv.h"
 #include "vmwgfx_resource_priv.h"
 #include "vmwgfx_so.h"
@@ -34,6 +15,7 @@
 #include "vmw_surface_cache.h"
 #include "device_include/svga3d_surfacedefs.h"
 
+#include <drm/drm_dumb_buffers.h>
 #include <drm/ttm/ttm_placement.h>
 
 #define SVGA3D_FLAGS_64(upper32, lower32) (((uint64_t)upper32 << 32) | lower32)
@@ -96,7 +78,7 @@ static int vmw_gb_surface_unbind(struct vmw_resource *res,
 static int vmw_gb_surface_destroy(struct vmw_resource *res);
 static int
 vmw_gb_surface_define_internal(struct drm_device *dev,
-			       struct drm_vmw_gb_surface_create_ext_req *req,
+			       const  struct drm_vmw_gb_surface_create_ext_req *req,
 			       struct drm_vmw_gb_surface_create_rep *rep,
 			       struct drm_file *file_priv);
 static int
@@ -658,7 +640,7 @@ static void vmw_user_surface_free(struct vmw_resource *res)
 	struct vmw_user_surface *user_srf =
 	    container_of(srf, struct vmw_user_surface, srf);
 
-	WARN_ON_ONCE(res->dirty);
+	WARN_ON(res->dirty);
 	if (user_srf->master)
 		drm_master_put(&user_srf->master);
 	kfree(srf->offsets);
@@ -689,8 +671,7 @@ static void vmw_user_surface_base_release(struct ttm_base_object **p_base)
 	 * Dumb buffers own the resource and they'll unref the
 	 * resource themselves
 	 */
-	if (res && res->guest_memory_bo && res->guest_memory_bo->is_dumb)
-		return;
+	WARN_ON(res && res->guest_memory_bo && res->guest_memory_bo->is_dumb);
 
 	vmw_resource_unreference(&res);
 }
@@ -760,7 +741,7 @@ int vmw_surface_define_ioctl(struct drm_device *dev, void *data,
 		return -EINVAL;
 	}
 
-	user_srf = kzalloc(sizeof(*user_srf), GFP_KERNEL);
+	user_srf = kzalloc_obj(*user_srf);
 	if (unlikely(!user_srf)) {
 		ret = -ENOMEM;
 		goto out_unlock;
@@ -786,8 +767,7 @@ int vmw_surface_define_ioctl(struct drm_device *dev, void *data,
 		ret = PTR_ERR(metadata->sizes);
 		goto out_no_sizes;
 	}
-	srf->offsets = kmalloc_array(metadata->num_sizes, sizeof(*srf->offsets),
-				     GFP_KERNEL);
+	srf->offsets = kmalloc_objs(*srf->offsets, metadata->num_sizes);
 	if (unlikely(!srf->offsets)) {
 		ret = -ENOMEM;
 		goto out_no_offsets;
@@ -818,25 +798,11 @@ int vmw_surface_define_ioctl(struct drm_device *dev, void *data,
 		}
 	}
 	res->guest_memory_size = cur_bo_offset;
-	if (!file_priv->atomic &&
-	    metadata->scanout &&
-	    metadata->num_sizes == 1 &&
-	    metadata->sizes[0].width == VMW_CURSOR_SNOOP_WIDTH &&
-	    metadata->sizes[0].height == VMW_CURSOR_SNOOP_HEIGHT &&
-	    metadata->format == VMW_CURSOR_SNOOP_FORMAT) {
-		const struct SVGA3dSurfaceDesc *desc =
-			vmw_surface_get_desc(VMW_CURSOR_SNOOP_FORMAT);
-		const u32 cursor_size_bytes = VMW_CURSOR_SNOOP_WIDTH *
-					      VMW_CURSOR_SNOOP_HEIGHT *
-					      desc->pitchBytesPerBlock;
-		srf->snooper.image = kzalloc(cursor_size_bytes, GFP_KERNEL);
-		if (!srf->snooper.image) {
-			DRM_ERROR("Failed to allocate cursor_image\n");
-			ret = -ENOMEM;
-			goto out_no_copy;
-		}
-	} else {
-		srf->snooper.image = NULL;
+
+	srf->snooper.image = vmw_cursor_snooper_create(file_priv, metadata);
+	if (IS_ERR(srf->snooper.image)) {
+		ret = PTR_ERR(srf->snooper.image);
+		goto out_no_copy;
 	}
 
 	if (drm_is_primary_client(file_priv))
@@ -864,14 +830,17 @@ int vmw_surface_define_ioctl(struct drm_device *dev, void *data,
 			.pin = false
 		};
 
-		ret = vmw_gem_object_create(dev_priv,
-					    &params,
-					    &res->guest_memory_bo);
+		ret = vmw_bo_create(dev_priv, &params, &res->guest_memory_bo);
 		if (unlikely(ret != 0)) {
 			vmw_resource_unreference(&res);
 			goto out_unlock;
 		}
-		vmw_bo_add_detached_resource(res->guest_memory_bo, res);
+
+		ret = vmw_bo_add_detached_resource(res->guest_memory_bo, res);
+		if (unlikely(ret != 0)) {
+			vmw_resource_unreference(&res);
+			goto out_unlock;
+		}
 	}
 
 	tmp = vmw_resource_reference(&srf->res);
@@ -1534,7 +1503,7 @@ int vmw_gb_surface_reference_ext_ioctl(struct drm_device *dev, void *data,
  */
 static int
 vmw_gb_surface_define_internal(struct drm_device *dev,
-			       struct drm_vmw_gb_surface_create_ext_req *req,
+			       const  struct drm_vmw_gb_surface_create_ext_req *req,
 			       struct drm_vmw_gb_surface_create_rep *rep,
 			       struct drm_file *file_priv)
 {
@@ -1552,9 +1521,21 @@ vmw_gb_surface_define_internal(struct drm_device *dev,
 				req->base.svga3d_flags);
 
 	/* array_size must be null for non-GL3 host. */
-	if (req->base.array_size > 0 && !has_sm4_context(dev_priv)) {
-		VMW_DEBUG_USER("SM4 surface not supported.\n");
-		return -EINVAL;
+	if (req->base.array_size > 0) {
+		if (has_sm5_context(dev_priv)) {
+			if (req->base.array_size > SVGA3D_SM5_MAX_SURFACE_ARRAYSIZE) {
+				VMW_DEBUG_USER("Invalid Surface Array Size.\n");
+				return -EINVAL;
+			}
+		} else if (has_sm4_context(dev_priv)) {
+			if (req->base.array_size > SVGA3D_SM4_MAX_SURFACE_ARRAYSIZE) {
+				VMW_DEBUG_USER("Invalid Surface Array Size.\n");
+				return -EINVAL;
+			}
+		} else {
+			VMW_DEBUG_USER("SM4+ surface not supported.\n");
+			return -EINVAL;
+		}
 	}
 
 	if (!has_sm4_1_context(dev_priv)) {
@@ -1670,6 +1651,14 @@ vmw_gb_surface_define_internal(struct drm_device *dev,
 
 	}
 
+	if (res->guest_memory_bo) {
+		ret = vmw_bo_add_detached_resource(res->guest_memory_bo, res);
+		if (unlikely(ret != 0)) {
+			vmw_resource_unreference(&res);
+			goto out_unlock;
+		}
+	}
+
 	tmp = vmw_resource_reference(res);
 	ret = ttm_prime_object_init(tfile, res->guest_memory_size, &user_srf->prime,
 				    VMW_RES_SURFACE,
@@ -1684,7 +1673,6 @@ vmw_gb_surface_define_internal(struct drm_device *dev,
 	rep->handle      = user_srf->prime.base.handle;
 	rep->backup_size = res->guest_memory_size;
 	if (res->guest_memory_bo) {
-		vmw_bo_add_detached_resource(res->guest_memory_bo, res);
 		rep->buffer_map_handle =
 			drm_vma_node_offset_addr(&res->guest_memory_bo->tbo.base.vma_node);
 		rep->buffer_size = res->guest_memory_bo->tbo.base.size;
@@ -2167,7 +2155,7 @@ int vmw_gb_surface_define(struct vmw_private *dev_priv,
 	if (req->sizes != NULL)
 		return -EINVAL;
 
-	user_srf = kzalloc(sizeof(*user_srf), GFP_KERNEL);
+	user_srf = kzalloc_obj(*user_srf);
 	if (unlikely(!user_srf)) {
 		ret = -ENOMEM;
 		goto out_unlock;
@@ -2291,23 +2279,9 @@ int vmw_dumb_create(struct drm_file *file_priv,
 	 * contents is going to be rendered guest side.
 	 */
 	if (!dev_priv->has_mob || !vmw_supports_3d(dev_priv)) {
-		int cpp = DIV_ROUND_UP(args->bpp, 8);
-
-		switch (cpp) {
-		case 1: /* DRM_FORMAT_C8 */
-		case 2: /* DRM_FORMAT_RGB565 */
-		case 4: /* DRM_FORMAT_XRGB8888 */
-			break;
-		default:
-			/*
-			 * Dumb buffers don't allow anything else.
-			 * This is tested via IGT's dumb_buffers
-			 */
-			return -EINVAL;
-		}
-
-		args->pitch = args->width * cpp;
-		args->size = ALIGN(args->pitch * args->height, PAGE_SIZE);
+		ret = drm_mode_size_dumb(dev, args, 0, 0);
+		if (ret)
+			return ret;
 
 		ret = vmw_gem_object_create_with_handle(dev_priv, file_priv,
 							args->size, &args->handle,
@@ -2358,12 +2332,19 @@ int vmw_dumb_create(struct drm_file *file_priv,
 	vbo = res->guest_memory_bo;
 	vbo->is_dumb = true;
 	vbo->dumb_surface = vmw_res_to_srf(res);
-
+	drm_gem_object_put(&vbo->tbo.base);
+	/*
+	 * Unset the user surface dtor since this in not actually exposed
+	 * to userspace. The suface is owned via the dumb_buffer's GEM handle
+	 */
+	struct vmw_user_surface *usurf = container_of(vbo->dumb_surface,
+						struct vmw_user_surface, srf);
+	usurf->prime.base.refcount_release = NULL;
 err:
 	if (res)
 		vmw_resource_unreference(&res);
-	if (ret)
-		ttm_ref_object_base_unref(tfile, arg.rep.handle);
+
+	ttm_ref_object_base_unref(tfile, arg.rep.handle);
 
 	return ret;
 }

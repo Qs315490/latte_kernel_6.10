@@ -639,7 +639,7 @@ static void ir_do_keyup(struct rc_dev *dev, bool sync)
 		return;
 
 	dev_dbg(&dev->dev, "keyup key 0x%04x\n", dev->last_keycode);
-	del_timer(&dev->timer_repeat);
+	timer_delete(&dev->timer_repeat);
 	input_report_key(dev->input_dev, dev->last_keycode, 0);
 	led_trigger_event(led_feedback, LED_OFF);
 	if (sync)
@@ -674,7 +674,7 @@ EXPORT_SYMBOL_GPL(rc_keyup);
  */
 static void ir_timer_keyup(struct timer_list *t)
 {
-	struct rc_dev *dev = from_timer(dev, t, timer_keyup);
+	struct rc_dev *dev = timer_container_of(dev, t, timer_keyup);
 	unsigned long flags;
 
 	/*
@@ -703,7 +703,7 @@ static void ir_timer_keyup(struct timer_list *t)
  */
 static void ir_timer_repeat(struct timer_list *t)
 {
-	struct rc_dev *dev = from_timer(dev, t, timer_repeat);
+	struct rc_dev *dev = timer_container_of(dev, t, timer_repeat);
 	struct input_dev *input = dev->input_dev;
 	unsigned long flags;
 
@@ -1611,6 +1611,7 @@ static void rc_dev_release(struct device *device)
 {
 	struct rc_dev *dev = to_rc_dev(device);
 
+	ir_raw_event_free(dev);
 	kfree(dev);
 }
 
@@ -1701,7 +1702,7 @@ struct rc_dev *rc_allocate_device(enum rc_driver_type type)
 {
 	struct rc_dev *dev;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return NULL;
 
@@ -1773,7 +1774,6 @@ struct rc_dev *devm_rc_allocate_device(struct device *dev,
 	}
 
 	rc->dev.parent = dev;
-	rc->managed_alloc = true;
 	*dr = rc;
 	devres_add(dev, dr);
 
@@ -2021,8 +2021,8 @@ void rc_unregister_device(struct rc_dev *dev)
 	if (dev->driver_type == RC_DRIVER_IR_RAW)
 		ir_raw_event_unregister(dev);
 
-	del_timer_sync(&dev->timer_keyup);
-	del_timer_sync(&dev->timer_repeat);
+	timer_delete_sync(&dev->timer_keyup);
+	timer_delete_sync(&dev->timer_repeat);
 
 	mutex_lock(&dev->lock);
 	if (dev->users && dev->close)
@@ -2042,11 +2042,7 @@ void rc_unregister_device(struct rc_dev *dev)
 	device_del(&dev->dev);
 
 	ida_free(&rc_ida, dev->minor);
-
-	if (!dev->managed_alloc)
-		rc_free_device(dev);
 }
-
 EXPORT_SYMBOL_GPL(rc_unregister_device);
 
 /*

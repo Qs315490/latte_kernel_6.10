@@ -22,19 +22,13 @@ static int rxe_query_device(struct ib_device *ibdev,
 	struct rxe_dev *rxe = to_rdev(ibdev);
 	int err;
 
-	if (udata->inlen || udata->outlen) {
-		rxe_dbg_dev(rxe, "malformed udata\n");
-		err = -EINVAL;
-		goto err_out;
-	}
+	err = ib_is_udata_in_empty(udata);
+	if (err)
+		return err;
 
 	memcpy(attr, &rxe->attr, sizeof(*attr));
 
-	return 0;
-
-err_out:
-	rxe_err_dev(rxe, "returned err = %d\n", err);
-	return err;
+	return ib_respond_empty_udata(udata);
 }
 
 static int rxe_query_port(struct ib_device *ibdev,
@@ -50,7 +44,7 @@ static int rxe_query_port(struct ib_device *ibdev,
 		goto err_out;
 	}
 
-	ndev = rxe_ib_device_get_netdev(ibdev);
+	ndev = ib_device_get_netdev(ibdev, 1);
 	if (!ndev) {
 		err = -ENODEV;
 		goto err_out;
@@ -65,7 +59,7 @@ static int rxe_query_port(struct ib_device *ibdev,
 	attr->state = ib_get_curr_port_state(ndev);
 	if (attr->state == IB_PORT_ACTIVE)
 		attr->phys_state = IB_PORT_PHYS_STATE_LINK_UP;
-	else if (dev_get_flags(ndev) & IFF_UP)
+	else if (netif_get_flags(ndev) & IFF_UP)
 		attr->phys_state = IB_PORT_PHYS_STATE_POLLING;
 	else
 		attr->phys_state = IB_PORT_PHYS_STATE_DISABLED;
@@ -78,6 +72,18 @@ static int rxe_query_port(struct ib_device *ibdev,
 err_out:
 	rxe_err_dev(rxe, "returned err = %d\n", err);
 	return err;
+}
+
+static int rxe_query_gid(struct ib_device *ibdev, u32 port, int idx,
+			 union ib_gid *gid)
+{
+	struct rxe_dev *rxe = to_rdev(ibdev);
+
+	/* subnet_prefix == interface_id == 0; */
+	memset(gid, 0, sizeof(*gid));
+	memcpy(gid->raw, rxe->raw_gid, ETH_ALEN);
+
+	return 0;
 }
 
 static int rxe_query_pkey(struct ib_device *ibdev,
@@ -440,18 +446,9 @@ static int rxe_modify_srq(struct ib_srq *ibsrq, struct ib_srq_attr *attr,
 	int err;
 
 	if (udata) {
-		if (udata->inlen < sizeof(cmd)) {
-			err = -EINVAL;
-			rxe_dbg_srq(srq, "malformed udata\n");
+		err = ib_copy_validate_udata_in(udata, cmd, mmap_info_addr);
+		if (err)
 			goto err_out;
-		}
-
-		err = ib_copy_from_udata(&cmd, udata, sizeof(cmd));
-		if (err) {
-			err = -EFAULT;
-			rxe_dbg_srq(srq, "unable to read udata\n");
-			goto err_out;
-		}
 	}
 
 	err = rxe_srq_chk_attr(rxe, srq, attr, mask);
@@ -1085,11 +1082,8 @@ static int rxe_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 		goto err_out;
 	}
 
-	err = rxe_cq_chk_attr(rxe, NULL, attr->cqe, attr->comp_vector);
-	if (err) {
-		rxe_dbg_dev(rxe, "bad init attributes, err = %d\n", err);
-		goto err_out;
-	}
+	if (attr->cqe > rxe->attr.max_cqe)
+		return -EINVAL;
 
 	err = rxe_add_to_pool(&rxe->cq_pool, cq);
 	if (err) {
@@ -1115,7 +1109,8 @@ err_out:
 	return err;
 }
 
-static int rxe_resize_cq(struct ib_cq *ibcq, int cqe, struct ib_udata *udata)
+static int rxe_resize_cq(struct ib_cq *ibcq, unsigned int cqe,
+			 struct ib_udata *udata)
 {
 	struct rxe_cq *cq = to_rcq(ibcq);
 	struct rxe_dev *rxe = to_rdev(ibcq->device);
@@ -1131,11 +1126,9 @@ static int rxe_resize_cq(struct ib_cq *ibcq, int cqe, struct ib_udata *udata)
 		uresp = udata->outbuf;
 	}
 
-	err = rxe_cq_chk_attr(rxe, cq, cqe, 0);
-	if (err) {
-		rxe_dbg_cq(cq, "bad attr, err = %d\n", err);
-		goto err_out;
-	}
+	if (cqe > rxe->attr.max_cqe ||
+	    cqe < queue_count(cq->queue, QUEUE_TYPE_TO_CLIENT))
+		return -EINVAL;
 
 	err = rxe_cq_resize_queue(cq, cqe, uresp, udata);
 	if (err) {
@@ -1233,7 +1226,7 @@ static struct ib_mr *rxe_get_dma_mr(struct ib_pd *ibpd, int access)
 	struct rxe_mr *mr;
 	int err;
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 
@@ -1259,6 +1252,7 @@ err_free:
 
 static struct ib_mr *rxe_reg_user_mr(struct ib_pd *ibpd, u64 start,
 				     u64 length, u64 iova, int access,
+				     struct ib_dmah *dmah,
 				     struct ib_udata *udata)
 {
 	struct rxe_dev *rxe = to_rdev(ibpd->device);
@@ -1266,13 +1260,16 @@ static struct ib_mr *rxe_reg_user_mr(struct ib_pd *ibpd, u64 start,
 	struct rxe_mr *mr;
 	int err, cleanup_err;
 
+	if (dmah)
+		return ERR_PTR(-EOPNOTSUPP);
+
 	if (access & ~RXE_ACCESS_SUPPORTED_MR) {
 		rxe_err_pd(pd, "access = %#x not supported (%#x)\n", access,
 				RXE_ACCESS_SUPPORTED_MR);
 		return ERR_PTR(-EOPNOTSUPP);
 	}
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 
@@ -1286,7 +1283,10 @@ static struct ib_mr *rxe_reg_user_mr(struct ib_pd *ibpd, u64 start,
 	mr->ibmr.pd = ibpd;
 	mr->ibmr.device = ibpd->device;
 
-	err = rxe_mr_init_user(rxe, start, length, access, mr);
+	if (access & IB_ACCESS_ON_DEMAND)
+		err = rxe_odp_mr_init_user(rxe, start, length, iova, access, mr);
+	else
+		err = rxe_mr_init_user(rxe, start, length, access, mr);
 	if (err) {
 		rxe_dbg_mr(mr, "reg_user_mr failed, err = %d\n", err);
 		goto err_cleanup;
@@ -1313,6 +1313,7 @@ static struct ib_mr *rxe_rereg_user_mr(struct ib_mr *ibmr, int flags,
 	struct rxe_mr *mr = to_rmr(ibmr);
 	struct rxe_pd *old_pd = to_rpd(ibmr->pd);
 	struct rxe_pd *pd = to_rpd(ibpd);
+	int err;
 
 	/* for now only support the two easy cases:
 	 * rereg_pd and rereg_access
@@ -1321,6 +1322,10 @@ static struct ib_mr *rxe_rereg_user_mr(struct ib_mr *ibmr, int flags,
 		rxe_err_mr(mr, "flags = %#x not supported\n", flags);
 		return ERR_PTR(-EOPNOTSUPP);
 	}
+
+	err = ib_umem_check_rereg(mr->umem, flags, access);
+	if (err)
+		return ERR_PTR(err);
 
 	if (flags & IB_MR_REREG_PD) {
 		rxe_put(old_pd);
@@ -1354,7 +1359,7 @@ static struct ib_mr *rxe_alloc_mr(struct ib_pd *ibpd, enum ib_mr_type mr_type,
 		goto err_out;
 	}
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 
@@ -1435,7 +1440,7 @@ static int rxe_enable_driver(struct ib_device *ib_dev)
 	struct rxe_dev *rxe = container_of(ib_dev, struct rxe_dev, ib_dev);
 	struct net_device *ndev;
 
-	ndev = rxe_ib_device_get_netdev(ib_dev);
+	ndev = ib_device_get_netdev(ib_dev, 1);
 	if (!ndev)
 		return -ENODEV;
 
@@ -1490,16 +1495,18 @@ static const struct ib_device_ops rxe_dev_ops = {
 	.post_recv = rxe_post_recv,
 	.post_send = rxe_post_send,
 	.post_srq_recv = rxe_post_srq_recv,
+	.process_mad = rxe_process_mad,
 	.query_ah = rxe_query_ah,
 	.query_device = rxe_query_device,
 	.query_pkey = rxe_query_pkey,
+	.query_gid = rxe_query_gid,
 	.query_port = rxe_query_port,
 	.query_qp = rxe_query_qp,
 	.query_srq = rxe_query_srq,
 	.reg_user_mr = rxe_reg_user_mr,
 	.req_notify_cq = rxe_req_notify_cq,
 	.rereg_user_mr = rxe_rereg_user_mr,
-	.resize_cq = rxe_resize_cq,
+	.resize_user_cq = rxe_resize_cq,
 
 	INIT_RDMA_OBJ_SIZE(ib_ah, rxe_ah, ibah),
 	INIT_RDMA_OBJ_SIZE(ib_cq, rxe_cq, ibcq),
@@ -1523,17 +1530,13 @@ int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name,
 	dev->num_comp_vectors = num_possible_cpus();
 	dev->local_dma_lkey = 0;
 	addrconf_addr_eui48((unsigned char *)&dev->node_guid,
-			    ndev->dev_addr);
+			    rxe->raw_gid);
 
 	dev->uverbs_cmd_mask |= BIT_ULL(IB_USER_VERBS_CMD_POST_SEND) |
 				BIT_ULL(IB_USER_VERBS_CMD_REQ_NOTIFY_CQ);
 
 	ib_set_device_ops(dev, &rxe_dev_ops);
 	err = ib_device_set_netdev(&rxe->ib_dev, ndev, 1);
-	if (err)
-		return err;
-
-	err = rxe_icrc_init(rxe);
 	if (err)
 		return err;
 

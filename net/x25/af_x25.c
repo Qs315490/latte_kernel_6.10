@@ -53,6 +53,7 @@
 #include <linux/init.h>
 #include <linux/compat.h>
 #include <linux/ctype.h>
+#include <linux/uio.h>
 
 #include <net/x25.h>
 #include <net/compat.h>
@@ -359,9 +360,10 @@ static void __x25_destroy_socket(struct sock *);
  */
 static void x25_destroy_timer(struct timer_list *t)
 {
-	struct sock *sk = from_timer(sk, t, sk_timer);
+	struct sock *sk = timer_container_of(sk, t, sk_timer);
 
 	x25_destroy_socket_from_timer(sk);
+	sock_put(sk);
 }
 
 /*
@@ -397,9 +399,8 @@ static void __x25_destroy_socket(struct sock *sk)
 
 	if (sk_has_allocations(sk)) {
 		/* Defer: outstanding buffers */
-		sk->sk_timer.expires  = jiffies + 10 * HZ;
 		sk->sk_timer.function = x25_destroy_timer;
-		add_timer(&sk->sk_timer);
+		sk_reset_timer(sk, &sk->sk_timer, jiffies + 10 * HZ);
 	} else {
 		/* drop last reference so sock_put will free */
 		__sock_put(sk);
@@ -448,7 +449,7 @@ out:
 }
 
 static int x25_getsockopt(struct socket *sock, int level, int optname,
-			  char __user *optval, int __user *optlen)
+			  sockopt_t *opt)
 {
 	struct sock *sk = sock->sk;
 	int val, len, rc = -ENOPROTOOPT;
@@ -456,22 +457,17 @@ static int x25_getsockopt(struct socket *sock, int level, int optname,
 	if (level != SOL_X25 || optname != X25_QBITINCL)
 		goto out;
 
-	rc = -EFAULT;
-	if (get_user(len, optlen))
-		goto out;
+	len = opt->optlen;
 
 	rc = -EINVAL;
 	if (len < 0)
 		goto out;
 
 	len = min_t(unsigned int, len, sizeof(int));
-
-	rc = -EFAULT;
-	if (put_user(len, optlen))
-		goto out;
+	opt->optlen = len;
 
 	val = test_bit(X25_Q_BIT_FLAG, &x25_sk(sk)->flags);
-	rc = copy_to_user(optval, &val, len) ? -EFAULT : 0;
+	rc = copy_to_iter(&val, len, &opt->iter_out) != len ? -EFAULT : 0;
 out:
 	return rc;
 }
@@ -670,7 +666,7 @@ out:
 	return 0;
 }
 
-static int x25_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+static int x25_bind(struct socket *sock, struct sockaddr_unsized *uaddr, int addr_len)
 {
 	struct sock *sk = sock->sk;
 	struct sockaddr_x25 *addr = (struct sockaddr_x25 *)uaddr;
@@ -743,7 +739,7 @@ static int x25_wait_for_connection_establishment(struct sock *sk)
 	return rc;
 }
 
-static int x25_connect(struct socket *sock, struct sockaddr *uaddr,
+static int x25_connect(struct socket *sock, struct sockaddr_unsized *uaddr,
 		       int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
@@ -891,7 +887,7 @@ static int x25_accept(struct socket *sock, struct socket *newsock,
 	if (sk->sk_state != TCP_LISTEN)
 		goto out2;
 
-	rc = x25_wait_for_data(sk, sk->sk_rcvtimeo);
+	rc = x25_wait_for_data(sk, READ_ONCE(sk->sk_rcvtimeo));
 	if (rc)
 		goto out2;
 	skb = skb_dequeue(&sk->sk_receive_queue);
@@ -1753,7 +1749,7 @@ static const struct proto_ops x25_proto_ops = {
 	.listen =	x25_listen,
 	.shutdown =	sock_no_shutdown,
 	.setsockopt =	x25_setsockopt,
-	.getsockopt =	x25_getsockopt,
+	.getsockopt_iter = x25_getsockopt,
 	.sendmsg =	x25_sendmsg,
 	.recvmsg =	x25_recvmsg,
 	.mmap =		sock_no_mmap,
@@ -1772,15 +1768,19 @@ void x25_kill_by_neigh(struct x25_neigh *nb)
 {
 	struct sock *s;
 
+again:
 	write_lock_bh(&x25_list_lock);
 
 	sk_for_each(s, &x25_list) {
 		if (x25_sk(s)->neighbour == nb) {
+			sock_hold(s);
 			write_unlock_bh(&x25_list_lock);
 			lock_sock(s);
-			x25_disconnect(s, ENETUNREACH, 0, 0);
+			if (x25_sk(s)->neighbour == nb)
+				x25_disconnect(s, ENETUNREACH, 0, 0);
 			release_sock(s);
-			write_lock_bh(&x25_list_lock);
+			sock_put(s);
+			goto again;
 		}
 	}
 	write_unlock_bh(&x25_list_lock);

@@ -9,11 +9,17 @@
 //
 // Hash part based on omap-sham.c driver.
 
+#include <crypto/aes.h>
+#include <crypto/ctr.h>
+#include <crypto/internal/hash.h>
+#include <crypto/internal/skcipher.h>
+#include <crypto/md5.h>
+#include <crypto/scatterwalk.h>
+#include <crypto/sha1.h>
+#include <crypto/sha2.h>
 #include <linux/clk.h>
-#include <linux/crypto.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
-#include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -22,17 +28,9 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
-
-#include <crypto/ctr.h>
-#include <crypto/aes.h>
-#include <crypto/algapi.h>
-#include <crypto/scatterwalk.h>
-
-#include <crypto/hash.h>
-#include <crypto/md5.h>
-#include <crypto/sha1.h>
-#include <crypto/sha2.h>
-#include <crypto/internal/hash.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/string.h>
 
 #define _SBF(s, v)			((v) << (s))
 
@@ -458,19 +456,6 @@ static void s5p_free_sg_cpy(struct s5p_aes_dev *dev, struct scatterlist **sg)
 	*sg = NULL;
 }
 
-static void s5p_sg_copy_buf(void *buf, struct scatterlist *sg,
-			    unsigned int nbytes, int out)
-{
-	struct scatter_walk walk;
-
-	if (!nbytes)
-		return;
-
-	scatterwalk_start(&walk, sg);
-	scatterwalk_copychunks(buf, &walk, nbytes, out);
-	scatterwalk_done(&walk, out, 0);
-}
-
 static void s5p_sg_done(struct s5p_aes_dev *dev)
 {
 	struct skcipher_request *req = dev->req;
@@ -480,8 +465,8 @@ static void s5p_sg_done(struct s5p_aes_dev *dev)
 		dev_dbg(dev->dev,
 			"Copying %d bytes of output data back to original place\n",
 			dev->req->cryptlen);
-		s5p_sg_copy_buf(sg_virt(dev->sg_dst_cpy), dev->req->dst,
-				dev->req->cryptlen, 1);
+		memcpy_to_sglist(dev->req->dst, 0, sg_virt(dev->sg_dst_cpy),
+				 dev->req->cryptlen);
 	}
 	s5p_free_sg_cpy(dev, &dev->sg_src_cpy);
 	s5p_free_sg_cpy(dev, &dev->sg_dst_cpy);
@@ -514,7 +499,7 @@ static int s5p_make_sg_cpy(struct s5p_aes_dev *dev, struct scatterlist *src,
 	void *pages;
 	int len;
 
-	*dst = kmalloc(sizeof(**dst), GFP_ATOMIC);
+	*dst = kmalloc_obj(**dst, GFP_ATOMIC);
 	if (!*dst)
 		return -ENOMEM;
 
@@ -526,7 +511,7 @@ static int s5p_make_sg_cpy(struct s5p_aes_dev *dev, struct scatterlist *src,
 		return -ENOMEM;
 	}
 
-	s5p_sg_copy_buf(pages, src, dev->req->cryptlen, 0);
+	memcpy_from_sglist(pages, src, 0, dev->req->cryptlen);
 
 	sg_init_table(*dst, 1);
 	sg_set_buf(*dst, pages, len);
@@ -1035,8 +1020,7 @@ static int s5p_hash_copy_sgs(struct s5p_hash_reqctx *ctx,
 	if (ctx->bufcnt)
 		memcpy(buf, ctx->dd->xmit_buf, ctx->bufcnt);
 
-	scatterwalk_map_and_copy(buf + ctx->bufcnt, sg, ctx->skip,
-				 new_len, 0);
+	memcpy_from_sglist(buf + ctx->bufcnt, sg, ctx->skip, new_len);
 	sg_init_table(ctx->sgl, 1);
 	sg_set_buf(ctx->sgl, buf, len);
 	ctx->sg = ctx->sgl;
@@ -1072,7 +1056,7 @@ static int s5p_hash_copy_sg_lists(struct s5p_hash_reqctx *ctx,
 	if (ctx->bufcnt)
 		n++;
 
-	ctx->sg = kmalloc_array(n, sizeof(*sg), GFP_KERNEL);
+	ctx->sg = kmalloc_objs(*sg, n);
 	if (!ctx->sg) {
 		ctx->error = true;
 		return -ENOMEM;
@@ -1229,8 +1213,7 @@ static int s5p_hash_prepare_request(struct ahash_request *req, bool update)
 		if (len > nbytes)
 			len = nbytes;
 
-		scatterwalk_map_and_copy(ctx->buffer + ctx->bufcnt, req->src,
-					 0, len, 0);
+		memcpy_from_sglist(ctx->buffer + ctx->bufcnt, req->src, 0, len);
 		ctx->bufcnt += len;
 		nbytes -= len;
 		ctx->skip = len;
@@ -1253,9 +1236,8 @@ static int s5p_hash_prepare_request(struct ahash_request *req, bool update)
 		hash_later = ctx->total - xmit_len;
 		/* copy hash_later bytes from end of req->src */
 		/* previous bytes are in xmit_buf, so no overwrite */
-		scatterwalk_map_and_copy(ctx->buffer, req->src,
-					 req->nbytes - hash_later,
-					 hash_later, 0);
+		memcpy_from_sglist(ctx->buffer, req->src,
+				   req->nbytes - hash_later, hash_later);
 	}
 
 	if (xmit_len > BUFLEN) {
@@ -1267,8 +1249,8 @@ static int s5p_hash_prepare_request(struct ahash_request *req, bool update)
 		/* have buffered data only */
 		if (unlikely(!ctx->bufcnt)) {
 			/* first update didn't fill up buffer */
-			scatterwalk_map_and_copy(ctx->dd->xmit_buf, req->src,
-						 0, xmit_len, 0);
+			memcpy_from_sglist(ctx->dd->xmit_buf, req->src,
+					   0, xmit_len);
 		}
 
 		sg_init_table(ctx->sgl, 1);
@@ -1506,8 +1488,8 @@ static int s5p_hash_update(struct ahash_request *req)
 		return 0;
 
 	if (ctx->bufcnt + req->nbytes <= BUFLEN) {
-		scatterwalk_map_and_copy(ctx->buffer + ctx->bufcnt, req->src,
-					 0, req->nbytes, 0);
+		memcpy_from_sglist(ctx->buffer + ctx->bufcnt, req->src,
+				   0, req->nbytes);
 		ctx->bufcnt += req->nbytes;
 		return 0;
 	}
@@ -2149,7 +2131,7 @@ static struct skcipher_alg algs[] = {
 static int s5p_aes_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	int i, j, err;
+	int i, err;
 	const struct samsung_aes_variant *variant;
 	struct s5p_aes_dev *pdata;
 	struct resource *res;
@@ -2255,8 +2237,11 @@ static int s5p_aes_probe(struct platform_device *pdev)
 
 	for (i = 0; i < ARRAY_SIZE(algs); i++) {
 		err = crypto_register_skcipher(&algs[i]);
-		if (err)
+		if (err) {
+			dev_err(dev, "can't register '%s': %d\n",
+				algs[i].base.cra_name, err);
 			goto err_algs;
+		}
 	}
 
 	if (pdata->use_hash) {
@@ -2283,20 +2268,12 @@ static int s5p_aes_probe(struct platform_device *pdev)
 	return 0;
 
 err_hash:
-	for (j = hash_i - 1; j >= 0; j--)
-		crypto_unregister_ahash(&algs_sha1_md5_sha256[j]);
-
+	crypto_unregister_ahashes(algs_sha1_md5_sha256, hash_i);
 	tasklet_kill(&pdata->hash_tasklet);
 	res->end -= 0x300;
 
 err_algs:
-	if (i < ARRAY_SIZE(algs))
-		dev_err(dev, "can't register '%s': %d\n", algs[i].base.cra_name,
-			err);
-
-	for (j = 0; j < i; j++)
-		crypto_unregister_skcipher(&algs[j]);
-
+	crypto_unregister_skciphers(algs, i);
 	tasklet_kill(&pdata->tasklet);
 
 err_irq:
@@ -2312,15 +2289,13 @@ err_clk:
 static void s5p_aes_remove(struct platform_device *pdev)
 {
 	struct s5p_aes_dev *pdata = platform_get_drvdata(pdev);
-	int i;
 
-	for (i = 0; i < ARRAY_SIZE(algs); i++)
-		crypto_unregister_skcipher(&algs[i]);
+	crypto_unregister_skciphers(algs, ARRAY_SIZE(algs));
 
 	tasklet_kill(&pdata->tasklet);
 	if (pdata->use_hash) {
-		for (i = ARRAY_SIZE(algs_sha1_md5_sha256) - 1; i >= 0; i--)
-			crypto_unregister_ahash(&algs_sha1_md5_sha256[i]);
+		crypto_unregister_ahashes(algs_sha1_md5_sha256,
+					  ARRAY_SIZE(algs_sha1_md5_sha256));
 
 		pdata->res->end -= 0x300;
 		tasklet_kill(&pdata->hash_tasklet);

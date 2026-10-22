@@ -11,7 +11,6 @@
  * Author: Thomas Richard <thomas.richard@bootlin.com>
  */
 
-#include <linux/acpi.h>
 #include <linux/bitfield.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -19,7 +18,6 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/upboard-fpga.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -311,7 +309,7 @@ MODULE_DEVICE_TABLE(acpi, upboard_fpga_acpi_match);
 static struct platform_driver upboard_fpga_driver = {
 	.driver = {
 		.name = "upboard-fpga",
-		.acpi_match_table = ACPI_PTR(upboard_fpga_acpi_match),
+		.acpi_match_table = upboard_fpga_acpi_match,
 		.dev_groups	= upboard_fpga_groups,
 	},
 	.probe = upboard_fpga_probe,

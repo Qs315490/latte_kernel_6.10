@@ -14,7 +14,6 @@
 #include <linux/platform_device.h>
 #include <linux/irq.h>
 #include <linux/io.h>
-#include <linux/timb_gpio.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
 
@@ -80,10 +79,9 @@ static int timbgpio_gpio_direction_output(struct gpio_chip *gpio,
 	return timbgpio_update_bit(gpio, nr, TGPIODIR, false);
 }
 
-static void timbgpio_gpio_set(struct gpio_chip *gpio,
-				unsigned nr, int val)
+static int timbgpio_gpio_set(struct gpio_chip *gpio, unsigned int nr, int val)
 {
-	timbgpio_update_bit(gpio, nr, TGPIOVAL, val != 0);
+	return timbgpio_update_bit(gpio, nr, TGPIOVAL, val != 0);
 }
 
 static int timbgpio_to_irq(struct gpio_chip *gpio, unsigned offset)
@@ -103,19 +101,25 @@ static void timbgpio_irq_disable(struct irq_data *d)
 {
 	struct timbgpio *tgpio = irq_data_get_irq_chip_data(d);
 	int offset = d->irq - tgpio->irq_base;
+	irq_hw_number_t hwirq = irqd_to_hwirq(d);
 	unsigned long flags;
 
 	spin_lock_irqsave(&tgpio->lock, flags);
 	tgpio->last_ier &= ~(1UL << offset);
 	iowrite32(tgpio->last_ier, tgpio->membase + TGPIO_IER);
 	spin_unlock_irqrestore(&tgpio->lock, flags);
+
+	gpiochip_disable_irq(&tgpio->gpio, hwirq);
 }
 
 static void timbgpio_irq_enable(struct irq_data *d)
 {
 	struct timbgpio *tgpio = irq_data_get_irq_chip_data(d);
 	int offset = d->irq - tgpio->irq_base;
+	irq_hw_number_t hwirq = irqd_to_hwirq(d);
 	unsigned long flags;
+
+	gpiochip_enable_irq(&tgpio->gpio, hwirq);
 
 	spin_lock_irqsave(&tgpio->lock, flags);
 	tgpio->last_ier |= 1UL << offset;
@@ -132,7 +136,7 @@ static int timbgpio_irq_type(struct irq_data *d, unsigned trigger)
 	u32 ver;
 	int ret = 0;
 
-	if (offset < 0 || offset > tgpio->gpio.ngpio)
+	if (offset < 0 || offset >= tgpio->gpio.ngpio)
 		return -EINVAL;
 
 	ver = ioread32(tgpio->membase + TGPIO_VER);
@@ -205,11 +209,13 @@ static void timbgpio_irq(struct irq_desc *desc)
 	iowrite32(tgpio->last_ier, tgpio->membase + TGPIO_IER);
 }
 
-static struct irq_chip timbgpio_irqchip = {
+static const struct irq_chip timbgpio_irqchip = {
 	.name		= "GPIO",
 	.irq_enable	= timbgpio_irq_enable,
 	.irq_disable	= timbgpio_irq_disable,
 	.irq_set_type	= timbgpio_irq_type,
+	.flags = IRQCHIP_IMMUTABLE,
+	GPIOCHIP_IRQ_RESOURCE_HELPERS,
 };
 
 static int timbgpio_probe(struct platform_device *pdev)
@@ -218,27 +224,27 @@ static int timbgpio_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct gpio_chip *gc;
 	struct timbgpio *tgpio;
-	struct timbgpio_platform_data *pdata = dev_get_platdata(&pdev->dev);
 	int irq = platform_get_irq(pdev, 0);
-
-	if (!pdata || pdata->nr_pins > 32) {
-		dev_err(dev, "Invalid platform data\n");
-		return -EINVAL;
-	}
 
 	tgpio = devm_kzalloc(dev, sizeof(*tgpio), GFP_KERNEL);
 	if (!tgpio)
-		return -EINVAL;
+		return -ENOMEM;
 
-	tgpio->irq_base = pdata->irq_base;
+	gc = &tgpio->gpio;
+
+	err = device_property_read_u32(dev, "irq-base", &tgpio->irq_base);
+	if (err)
+		return err;
+
+	err = device_property_read_u32(dev, "gpio-base", &gc->base);
+	if (err)
+		return err;
 
 	spin_lock_init(&tgpio->lock);
 
 	tgpio->membase = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(tgpio->membase))
 		return PTR_ERR(tgpio->membase);
-
-	gc = &tgpio->gpio;
 
 	gc->label = dev_name(&pdev->dev);
 	gc->owner = THIS_MODULE;
@@ -249,13 +255,14 @@ static int timbgpio_probe(struct platform_device *pdev)
 	gc->set = timbgpio_gpio_set;
 	gc->to_irq = (irq >= 0 && tgpio->irq_base > 0) ? timbgpio_to_irq : NULL;
 	gc->dbg_show = NULL;
-	gc->base = pdata->gpio_base;
-	gc->ngpio = pdata->nr_pins;
 	gc->can_sleep = false;
 
 	err = devm_gpiochip_add_data(&pdev->dev, gc, tgpio);
 	if (err)
 		return err;
+
+	if (gc->ngpio > 32)
+		return dev_err_probe(dev, -EINVAL, "Invalid number of pins\n");
 
 	/* make sure to disable interrupts */
 	iowrite32(0x0, tgpio->membase + TGPIO_IER);
@@ -263,7 +270,7 @@ static int timbgpio_probe(struct platform_device *pdev)
 	if (irq < 0 || tgpio->irq_base <= 0)
 		return 0;
 
-	for (i = 0; i < pdata->nr_pins; i++) {
+	for (i = 0; i < gc->ngpio; i++) {
 		irq_set_chip_and_handler(tgpio->irq_base + i,
 			&timbgpio_irqchip, handle_simple_irq);
 		irq_set_chip_data(tgpio->irq_base + i, tgpio);

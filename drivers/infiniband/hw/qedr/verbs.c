@@ -39,9 +39,9 @@
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_user_verbs.h>
 #include <rdma/iw_cm.h>
-#include <rdma/ib_umem.h>
 #include <rdma/ib_addr.h>
 #include <rdma/ib_cache.h>
+#include <rdma/iter.h>
 #include <rdma/uverbs_ioctl.h>
 
 #include <linux/qed/common_hsi.h>
@@ -63,14 +63,6 @@ enum {
 	QEDR_USER_MMAP_IO_WC = 0,
 	QEDR_USER_MMAP_PHYS_PAGE,
 };
-
-static inline int qedr_ib_copy_to_udata(struct ib_udata *udata, void *src,
-					size_t len)
-{
-	size_t min_len = min_t(size_t, len, udata->outlen);
-
-	return ib_copy_to_udata(udata, src, min_len);
-}
 
 int qedr_query_pkey(struct ib_device *ibdev, u32 port, u16 index, u16 *pkey)
 {
@@ -113,6 +105,7 @@ int qedr_query_device(struct ib_device *ibdev,
 {
 	struct qedr_dev *dev = get_qedr_dev(ibdev);
 	struct qedr_device_attr *qattr = &dev->attr;
+	int rc;
 
 	if (!dev->rdma_ctx) {
 		DP_ERR(dev,
@@ -120,6 +113,10 @@ int qedr_query_device(struct ib_device *ibdev,
 		       dev->rdma_ctx);
 		return -EINVAL;
 	}
+
+	rc = ib_is_udata_in_empty(udata);
+	if (rc)
+		return rc;
 
 	memset(attr, 0, sizeof(*attr));
 
@@ -163,7 +160,7 @@ int qedr_query_device(struct ib_device *ibdev,
 	attr->max_pkeys = qattr->max_pkey;
 	attr->max_ah = qattr->max_ah;
 
-	return 0;
+	return ib_respond_empty_udata(udata);
 }
 
 static inline void get_link_speed_and_width(int speed, u16 *ib_speed,
@@ -264,7 +261,7 @@ int qedr_alloc_ucontext(struct ib_ucontext *uctx, struct ib_udata *udata)
 	int rc;
 	struct qedr_ucontext *ctx = get_qedr_ucontext(uctx);
 	struct qedr_alloc_ucontext_resp uresp = {};
-	struct qedr_alloc_ucontext_req ureq = {};
+	struct qedr_alloc_ucontext_req ureq;
 	struct qedr_dev *dev = get_qedr_dev(ibdev);
 	struct qed_rdma_add_user_out_params oparams;
 	struct qedr_user_mmap_entry *entry;
@@ -273,12 +270,9 @@ int qedr_alloc_ucontext(struct ib_ucontext *uctx, struct ib_udata *udata)
 		return -EFAULT;
 
 	if (udata->inlen) {
-		rc = ib_copy_from_udata(&ureq, udata,
-					min(sizeof(ureq), udata->inlen));
-		if (rc) {
-			DP_ERR(dev, "Problem copying data from user space\n");
-			return -EFAULT;
-		}
+		rc = ib_copy_validate_udata_in(udata, ureq, reserved);
+		if (rc)
+			return rc;
 		ctx->edpm_mode = !!(ureq.context_flags &
 				    QEDR_ALLOC_UCTX_EDPM_MODE);
 		ctx->db_rec = !!(ureq.context_flags & QEDR_ALLOC_UCTX_DB_REC);
@@ -296,7 +290,7 @@ int qedr_alloc_ucontext(struct ib_ucontext *uctx, struct ib_udata *udata)
 	ctx->dpi_addr = oparams.dpi_addr;
 	ctx->dpi_phys_addr = oparams.dpi_phys_addr;
 	ctx->dpi_size = oparams.dpi_size;
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc_obj(*entry);
 	if (!entry) {
 		rc = -ENOMEM;
 		goto err;
@@ -343,7 +337,7 @@ int qedr_alloc_ucontext(struct ib_ucontext *uctx, struct ib_udata *udata)
 	uresp.sges_per_srq_wr = dev->attr.max_srq_sge;
 	uresp.max_cqes = QEDR_MAX_CQES;
 
-	rc = qedr_ib_copy_to_udata(udata, &uresp, sizeof(uresp));
+	rc = ib_respond_udata(udata, uresp);
 	if (rc)
 		goto err;
 
@@ -462,9 +456,8 @@ int qedr_alloc_pd(struct ib_pd *ibpd, struct ib_udata *udata)
 		struct qedr_ucontext *context = rdma_udata_to_drv_context(
 			udata, struct qedr_ucontext, ibucontext);
 
-		rc = qedr_ib_copy_to_udata(udata, &uresp, sizeof(uresp));
+		rc = ib_respond_udata(udata, uresp);
 		if (rc) {
-			DP_ERR(dev, "copy error pd_id=0x%x.\n", pd_id);
 			dev->ops->rdma_dealloc_pd(dev->rdma_ctx, pd_id);
 			return rc;
 		}
@@ -537,7 +530,7 @@ static struct qedr_pbl *qedr_alloc_pbl_tbl(struct qedr_dev *dev,
 	void *va;
 	int i;
 
-	pbl_table = kcalloc(pbl_info->num_pbls, sizeof(*pbl_table), flags);
+	pbl_table = kzalloc_objs(*pbl_table, pbl_info->num_pbls, flags);
 	if (!pbl_table)
 		return ERR_PTR(-ENOMEM);
 
@@ -699,14 +692,10 @@ static void qedr_db_recovery_del(struct qedr_dev *dev,
 	dev->ops->common->db_recovery_del(dev->cdev, db_addr, db_data);
 }
 
-static int qedr_copy_cq_uresp(struct qedr_dev *dev,
-			      struct qedr_cq *cq, struct ib_udata *udata,
+static int qedr_copy_cq_uresp(struct qedr_cq *cq, struct ib_udata *udata,
 			      u32 db_offset)
 {
-	struct qedr_create_cq_uresp uresp;
-	int rc;
-
-	memset(&uresp, 0, sizeof(uresp));
+	struct qedr_create_cq_uresp uresp = {};
 
 	uresp.db_offset = db_offset;
 	uresp.icid = cq->icid;
@@ -714,11 +703,7 @@ static int qedr_copy_cq_uresp(struct qedr_dev *dev,
 		uresp.db_rec_addr =
 			rdma_user_mmap_get_offset(cq->q.db_mmap_entry);
 
-	rc = qedr_ib_copy_to_udata(udata, &uresp, sizeof(uresp));
-	if (rc)
-		DP_ERR(dev, "copy error cqid=0x%x.\n", cq->icid);
-
-	return rc;
+	return ib_respond_udata(udata, uresp);
 }
 
 static void consume_cqe(struct qedr_cq *cq)
@@ -761,7 +746,7 @@ static int qedr_init_user_db_rec(struct ib_udata *udata,
 		return -ENOMEM;
 	}
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc_obj(*entry);
 	if (!entry)
 		goto err_free_db_data;
 
@@ -799,9 +784,9 @@ static inline int qedr_init_user_queue(struct ib_udata *udata,
 
 	q->buf_addr = buf_addr;
 	q->buf_len = buf_len;
-	q->umem = ib_umem_get(&dev->ibdev, q->buf_addr, q->buf_len, access);
+	q->umem = ib_umem_get_va(&dev->ibdev, q->buf_addr, q->buf_len, access);
 	if (IS_ERR(q->umem)) {
-		DP_ERR(dev, "create user queue: failed ib_umem_get, got %ld\n",
+		DP_ERR(dev, "create user queue: failed ib_umem_get_va, got %ld\n",
 		       PTR_ERR(q->umem));
 		return PTR_ERR(q->umem);
 	}
@@ -820,7 +805,7 @@ static inline int qedr_init_user_queue(struct ib_udata *udata,
 		qedr_populate_pbls(dev, q->umem, q->pbl_tbl, &q->pbl_info,
 				   FW_PAGE_SHIFT);
 	} else {
-		q->pbl_tbl = kzalloc(sizeof(*q->pbl_tbl), GFP_KERNEL);
+		q->pbl_tbl = kzalloc_obj(*q->pbl_tbl);
 		if (!q->pbl_tbl) {
 			rc = -ENOMEM;
 			goto err0;
@@ -916,7 +901,7 @@ int qedr_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 	};
 	struct qedr_dev *dev = get_qedr_dev(ibdev);
 	struct qed_rdma_create_cq_in_params params;
-	struct qedr_create_cq_ureq ureq = {};
+	struct qedr_create_cq_ureq ureq;
 	int vector = attr->comp_vector;
 	int entries = attr->cqe;
 	struct qedr_cq *cq = get_qedr_cq(ibcq);
@@ -949,12 +934,9 @@ int qedr_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 	db_offset = DB_ADDR_SHIFT(DQ_PWM_OFFSET_UCM_RDMA_CQ_CONS_32BIT);
 
 	if (udata) {
-		if (ib_copy_from_udata(&ureq, udata, min(sizeof(ureq),
-							 udata->inlen))) {
-			DP_ERR(dev,
-			       "create cq: problem copying data from user space\n");
-			goto err0;
-		}
+		rc = ib_copy_validate_udata_in(udata, ureq, len);
+		if (rc)
+			return rc;
 
 		if (!ureq.len) {
 			DP_ERR(dev,
@@ -1000,7 +982,7 @@ int qedr_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 	spin_lock_init(&cq->cq_lock);
 
 	if (udata) {
-		rc = qedr_copy_cq_uresp(dev, cq, udata, db_offset);
+		rc = qedr_copy_cq_uresp(cq, udata, db_offset);
 		if (rc)
 			goto err2;
 
@@ -1257,15 +1239,10 @@ static int qedr_copy_srq_uresp(struct qedr_dev *dev,
 			       struct qedr_srq *srq, struct ib_udata *udata)
 {
 	struct qedr_create_srq_uresp uresp = {};
-	int rc;
 
 	uresp.srq_id = srq->srq_id;
 
-	rc = ib_copy_to_udata(udata, &uresp, sizeof(uresp));
-	if (rc)
-		DP_ERR(dev, "create srq: problem copying data to user space\n");
-
-	return rc;
+	return ib_respond_udata(udata, uresp);
 }
 
 static void qedr_copy_rq_uresp(struct qedr_dev *dev,
@@ -1309,10 +1286,6 @@ static int qedr_copy_qp_uresp(struct qedr_dev *dev,
 			      struct qedr_qp *qp, struct ib_udata *udata,
 			      struct qedr_create_qp_uresp *uresp)
 {
-	int rc;
-
-	memset(uresp, 0, sizeof(*uresp));
-
 	if (qedr_qp_has_sq(qp))
 		qedr_copy_sq_uresp(dev, uresp, qp);
 
@@ -1322,13 +1295,7 @@ static int qedr_copy_qp_uresp(struct qedr_dev *dev,
 	uresp->atomic_supported = dev->atomic_cap != IB_ATOMIC_NONE;
 	uresp->qp_id = qp->qp_id;
 
-	rc = qedr_ib_copy_to_udata(udata, uresp, sizeof(*uresp));
-	if (rc)
-		DP_ERR(dev,
-		       "create qp: failed a copy to user space with qp icid=0x%x.\n",
-		       qp->icid);
-
-	return rc;
+	return ib_respond_udata(udata, *uresp);
 }
 
 static void qedr_reset_qp_hwq_info(struct qedr_qp_hwq_info *qph)
@@ -1477,13 +1444,14 @@ static int qedr_init_srq_user_params(struct ib_udata *udata,
 	if (rc)
 		return rc;
 
-	srq->prod_umem = ib_umem_get(srq->ibsrq.device, ureq->prod_pair_addr,
-				     sizeof(struct rdma_srq_producers), access);
+	srq->prod_umem = ib_umem_get_va(srq->ibsrq.device, ureq->prod_pair_addr,
+					sizeof(struct rdma_srq_producers),
+					access);
 	if (IS_ERR(srq->prod_umem)) {
 		qedr_free_pbl(srq->dev, &srq->usrq.pbl_info, srq->usrq.pbl_tbl);
 		ib_umem_release(srq->usrq.umem);
 		DP_ERR(srq->dev,
-		       "create srq: failed ib_umem_get for producer, got %ld\n",
+		       "create srq: failed ib_umem_get_va for producer, got %ld\n",
 		       PTR_ERR(srq->prod_umem));
 		return PTR_ERR(srq->prod_umem);
 	}
@@ -1547,7 +1515,7 @@ int qedr_create_srq(struct ib_srq *ibsrq, struct ib_srq_init_attr *init_attr,
 	struct qedr_dev *dev = get_qedr_dev(ibsrq->device);
 	struct qed_rdma_create_srq_out_params out_params;
 	struct qedr_pd *pd = get_qedr_pd(ibsrq->pd);
-	struct qedr_create_srq_ureq ureq = {};
+	struct qedr_create_srq_ureq ureq;
 	u64 pbl_base_addr, phy_prod_pair_addr;
 	struct qedr_srq_hwq_info *hw_srq;
 	u32 page_cnt, page_size;
@@ -1575,12 +1543,9 @@ int qedr_create_srq(struct ib_srq *ibsrq, struct ib_srq_init_attr *init_attr,
 	hw_srq->max_sges = init_attr->attr.max_sge;
 
 	if (udata) {
-		if (ib_copy_from_udata(&ureq, udata, min(sizeof(ureq),
-							 udata->inlen))) {
-			DP_ERR(dev,
-			       "create srq: problem copying data from user space\n");
-			goto err0;
-		}
+		rc = ib_copy_validate_udata_in(udata, ureq, srq_len);
+		if (rc)
+			return rc;
 
 		rc = qedr_init_srq_user_params(udata, srq, &ureq, 0);
 		if (rc)
@@ -1846,7 +1811,7 @@ static int qedr_create_user_qp(struct qedr_dev *dev,
 	struct qed_rdma_create_qp_in_params in_params;
 	struct qed_rdma_create_qp_out_params out_params;
 	struct qedr_create_qp_uresp uresp = {};
-	struct qedr_create_qp_ureq ureq = {};
+	struct qedr_create_qp_ureq ureq;
 	int alloc_and_init = rdma_protocol_roce(&dev->ibdev, 1);
 	struct qedr_ucontext *ctx = NULL;
 	struct qedr_pd *pd = NULL;
@@ -1860,12 +1825,9 @@ static int qedr_create_user_qp(struct qedr_dev *dev,
 	}
 
 	if (udata) {
-		rc = ib_copy_from_udata(&ureq, udata, min(sizeof(ureq),
-					udata->inlen));
-		if (rc) {
-			DP_ERR(dev, "Problem copying data from user space\n");
+		rc = ib_copy_validate_udata_in(udata, ureq, rq_len);
+		if (rc)
 			return rc;
-		}
 	}
 
 	if (qedr_qp_has_sq(qp)) {
@@ -2187,8 +2149,7 @@ static int qedr_create_kernel_qp(struct qedr_dev *dev,
 	qp->sq.max_wr = min_t(u32, attrs->cap.max_send_wr * dev->wq_multiplier,
 			      dev->attr.max_sqe);
 
-	qp->wqe_wr_id = kcalloc(qp->sq.max_wr, sizeof(*qp->wqe_wr_id),
-				GFP_KERNEL);
+	qp->wqe_wr_id = kzalloc_objs(*qp->wqe_wr_id, qp->sq.max_wr);
 	if (!qp->wqe_wr_id) {
 		DP_ERR(dev, "create qp: failed SQ shadow memory allocation\n");
 		return -ENOMEM;
@@ -2205,8 +2166,7 @@ static int qedr_create_kernel_qp(struct qedr_dev *dev,
 	qp->rq.max_wr = (u16) max_t(u32, attrs->cap.max_recv_wr, 1);
 
 	/* Allocate driver internal RQ array */
-	qp->rqe_wr_id = kcalloc(qp->rq.max_wr, sizeof(*qp->rqe_wr_id),
-				GFP_KERNEL);
+	qp->rqe_wr_id = kzalloc_objs(*qp->rqe_wr_id, qp->rq.max_wr);
 	if (!qp->rqe_wr_id) {
 		DP_ERR(dev,
 		       "create qp: failed RQ shadow memory allocation\n");
@@ -2953,12 +2913,16 @@ done:
 }
 
 struct ib_mr *qedr_reg_user_mr(struct ib_pd *ibpd, u64 start, u64 len,
-			       u64 usr_addr, int acc, struct ib_udata *udata)
+			       u64 usr_addr, int acc, struct ib_dmah *dmah,
+			       struct ib_udata *udata)
 {
 	struct qedr_dev *dev = get_qedr_dev(ibpd->device);
 	struct qedr_mr *mr;
 	struct qedr_pd *pd;
 	int rc = -ENOMEM;
+
+	if (dmah)
+		return ERR_PTR(-EOPNOTSUPP);
 
 	pd = get_qedr_pd(ibpd);
 	DP_DEBUG(dev, QEDR_MSG_MR,
@@ -2968,13 +2932,13 @@ struct ib_mr *qedr_reg_user_mr(struct ib_pd *ibpd, u64 start, u64 len,
 	if (acc & IB_ACCESS_REMOTE_WRITE && !(acc & IB_ACCESS_LOCAL_WRITE))
 		return ERR_PTR(-EINVAL);
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(rc);
 
 	mr->type = QEDR_MR_USER;
 
-	mr->umem = ib_umem_get(ibpd->device, start, len, acc);
+	mr->umem = ib_umem_get_va(ibpd->device, start, len, acc);
 	if (IS_ERR(mr->umem)) {
 		rc = -EFAULT;
 		goto err0;
@@ -3076,7 +3040,7 @@ static struct qedr_mr *__qedr_alloc_mr(struct ib_pd *ibpd,
 		 "qedr_alloc_frmr pd = %d max_page_list_len= %d\n", pd->pd_id,
 		 max_page_list_len);
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(rc);
 
@@ -3217,7 +3181,7 @@ struct ib_mr *qedr_get_dma_mr(struct ib_pd *ibpd, int acc)
 	struct qedr_mr *mr;
 	int rc;
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 

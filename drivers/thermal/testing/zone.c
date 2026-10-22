@@ -13,7 +13,6 @@
 #include <linux/idr.h>
 #include <linux/list.h>
 #include <linux/thermal.h>
-#include <linux/workqueue.h>
 
 #include "thermal_testing.h"
 
@@ -184,15 +183,13 @@ static void tt_add_tz_work_fn(struct work_struct *work)
 
 int tt_add_tz(void)
 {
-	struct tt_thermal_zone *tt_zone __free(kfree);
-	struct tt_work *tt_work __free(kfree) = NULL;
 	int ret;
 
-	tt_zone = kzalloc(sizeof(*tt_zone), GFP_KERNEL);
+	struct tt_thermal_zone *tt_zone __free(kfree) = kzalloc_obj(*tt_zone);
 	if (!tt_zone)
 		return -ENOMEM;
 
-	tt_work = kzalloc(sizeof(*tt_work), GFP_KERNEL);
+	struct tt_work *tt_work __free(kfree) = kzalloc_obj(*tt_work);
 	if (!tt_work)
 		return -ENOMEM;
 
@@ -209,7 +206,7 @@ int tt_add_tz(void)
 
 	INIT_WORK(&tt_work->work, tt_add_tz_work_fn);
 	tt_work->tt_zone = no_free_ptr(tt_zone);
-	schedule_work(&(no_free_ptr(tt_work)->work));
+	tt_queue_work(&(no_free_ptr(tt_work)->work));
 
 	return 0;
 }
@@ -237,16 +234,15 @@ static void tt_zone_unregister_tz(struct tt_thermal_zone *tt_zone)
 
 int tt_del_tz(const char *arg)
 {
-	struct tt_work *tt_work __free(kfree) = NULL;
 	struct tt_thermal_zone *tt_zone, *aux;
 	int ret;
 	int id;
 
-	ret = sscanf(arg, "%d", &id);
-	if (ret != 1)
-		return -EINVAL;
+	ret = kstrtoint(arg, 10, &id);
+	if (ret < 0)
+		return ret;
 
-	tt_work = kzalloc(sizeof(*tt_work), GFP_KERNEL);
+	struct tt_work *tt_work __free(kfree) = kzalloc_obj(*tt_work);
 	if (!tt_work)
 		return -ENOMEM;
 
@@ -272,7 +268,7 @@ int tt_del_tz(const char *arg)
 
 	INIT_WORK(&tt_work->work, tt_del_tz_work_fn);
 	tt_work->tt_zone = tt_zone;
-	schedule_work(&(no_free_ptr(tt_work)->work));
+	tt_queue_work(&(no_free_ptr(tt_work)->work));
 
 	return 0;
 }
@@ -282,9 +278,9 @@ static struct tt_thermal_zone *tt_get_tt_zone(const char *arg)
 	struct tt_thermal_zone *tt_zone;
 	int ret, id;
 
-	ret = sscanf(arg, "%d", &id);
-	if (ret != 1)
-		return ERR_PTR(-EINVAL);
+	ret = kstrtoint(arg, 10, &id);
+	if (ret < 0)
+		return ERR_PTR(ret);
 
 	guard(mutex)(&tt_thermal_zones_lock);
 
@@ -330,20 +326,17 @@ static void tt_zone_add_trip_work_fn(struct work_struct *work)
 
 int tt_zone_add_trip(const char *arg)
 {
-	struct tt_thermal_zone *tt_zone __free(put_tt_zone) = NULL;
-	struct tt_trip *tt_trip __free(kfree) = NULL;
-	struct tt_work *tt_work __free(kfree);
 	int id;
 
-	tt_work = kzalloc(sizeof(*tt_work), GFP_KERNEL);
+	struct tt_work *tt_work __free(kfree) = kzalloc_obj(*tt_work);
 	if (!tt_work)
 		return -ENOMEM;
 
-	tt_trip = kzalloc(sizeof(*tt_trip), GFP_KERNEL);
+	struct tt_trip *tt_trip __free(kfree) = kzalloc_obj(*tt_trip);
 	if (!tt_trip)
 		return -ENOMEM;
 
-	tt_zone = tt_get_tt_zone(arg);
+	struct tt_thermal_zone *tt_zone __free(put_tt_zone) = tt_get_tt_zone(arg);
 	if (IS_ERR(tt_zone))
 		return PTR_ERR(tt_zone);
 
@@ -364,7 +357,7 @@ int tt_zone_add_trip(const char *arg)
 	INIT_WORK(&tt_work->work, tt_zone_add_trip_work_fn);
 	tt_work->tt_zone = no_free_ptr(tt_zone);
 	tt_work->tt_trip = no_free_ptr(tt_trip);
-	schedule_work(&(no_free_ptr(tt_work)->work));
+	tt_queue_work(&(no_free_ptr(tt_work)->work));
 
 	return 0;
 }
@@ -381,13 +374,12 @@ static int tt_zone_get_temp(struct thermal_zone_device *tz, int *temp)
 	return 0;
 }
 
-static struct thermal_zone_device_ops tt_zone_ops = {
+static const struct thermal_zone_device_ops tt_zone_ops = {
 	.get_temp = tt_zone_get_temp,
 };
 
 static int tt_zone_register_tz(struct tt_thermal_zone *tt_zone)
 {
-	struct thermal_trip *trips __free(kfree) = NULL;
 	struct thermal_zone_device *tz;
 	struct tt_trip *tt_trip;
 	int i;
@@ -397,7 +389,8 @@ static int tt_zone_register_tz(struct tt_thermal_zone *tt_zone)
 	if (tt_zone->tz)
 		return -EINVAL;
 
-	trips = kcalloc(tt_zone->num_trips, sizeof(*trips), GFP_KERNEL);
+	struct thermal_trip *trips __free(kfree) = kzalloc_objs(*trips,
+								tt_zone->num_trips);
 	if (!trips)
 		return -ENOMEM;
 
@@ -421,9 +414,7 @@ static int tt_zone_register_tz(struct tt_thermal_zone *tt_zone)
 
 int tt_zone_reg(const char *arg)
 {
-	struct tt_thermal_zone *tt_zone __free(put_tt_zone);
-
-	tt_zone = tt_get_tt_zone(arg);
+	struct tt_thermal_zone *tt_zone __free(put_tt_zone) = tt_get_tt_zone(arg);
 	if (IS_ERR(tt_zone))
 		return PTR_ERR(tt_zone);
 
@@ -432,9 +423,7 @@ int tt_zone_reg(const char *arg)
 
 int tt_zone_unreg(const char *arg)
 {
-	struct tt_thermal_zone *tt_zone __free(put_tt_zone);
-
-	tt_zone = tt_get_tt_zone(arg);
+	struct tt_thermal_zone *tt_zone __free(put_tt_zone) = tt_get_tt_zone(arg);
 	if (IS_ERR(tt_zone))
 		return PTR_ERR(tt_zone);
 

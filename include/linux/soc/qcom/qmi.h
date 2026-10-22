@@ -24,9 +24,9 @@ struct socket;
  */
 struct qmi_header {
 	u8 type;
-	u16 txn_id;
-	u16 msg_id;
-	u16 msg_len;
+	__le16 txn_id;
+	__le16 msg_id;
+	__le16 msg_len;
 } __packed;
 
 #define QMI_REQUEST	0
@@ -91,6 +91,18 @@ struct qmi_elem_info {
 #define QMI_ERR_DISABLED_V01                    69
 #define QMI_ERR_INCOMPATIBLE_STATE_V01		90
 #define QMI_ERR_NOT_SUPPORTED_V01		94
+
+/*
+ * Enumerate the IDs of the QMI services
+ */
+#define QMI_SERVICE_ID_TEST		0x0f	/*   15 */
+#define QMI_SERVICE_ID_SSCTL		0x2b	/*   43 */
+#define QMI_SERVICE_ID_IPA		0x31	/*   49 */
+#define QMI_SERVICE_ID_SERVREG_LOC	0x40	/*   64 */
+#define QMI_SERVICE_ID_SERVREG_NOTIF	0x42	/*   66 */
+#define QMI_SERVICE_ID_WLFW		0x45	/*   69 */
+#define QMI_SERVICE_ID_SLIMBUS		0x301	/*  769 */
+#define QMI_SERVICE_ID_USB_AUDIO_STREAM 0x41d	/* 1053 */
 
 /**
  * struct qmi_response_type_v01 - common response header (decoded)

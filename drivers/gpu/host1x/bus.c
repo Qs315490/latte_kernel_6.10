@@ -41,10 +41,9 @@ static int host1x_subdev_add(struct host1x_device *device,
 			     struct device_node *np)
 {
 	struct host1x_subdev *subdev;
-	struct device_node *child;
 	int err;
 
-	subdev = kzalloc(sizeof(*subdev), GFP_KERNEL);
+	subdev = kzalloc_obj(*subdev);
 	if (!subdev)
 		return -ENOMEM;
 
@@ -56,13 +55,12 @@ static int host1x_subdev_add(struct host1x_device *device,
 	mutex_unlock(&device->subdevs_lock);
 
 	/* recursively add children */
-	for_each_child_of_node(np, child) {
+	for_each_child_of_node_scoped(np, child) {
 		if (of_match_node(driver->subdevs, child) &&
 		    of_device_is_available(child)) {
 			err = host1x_subdev_add(device, driver, child);
 			if (err < 0) {
 				/* XXX cleanup? */
-				of_node_put(child);
 				return err;
 			}
 		}
@@ -90,17 +88,14 @@ static void host1x_subdev_del(struct host1x_subdev *subdev)
 static int host1x_device_parse_dt(struct host1x_device *device,
 				  struct host1x_driver *driver)
 {
-	struct device_node *np;
 	int err;
 
-	for_each_child_of_node(device->dev.parent->of_node, np) {
+	for_each_child_of_node_scoped(device->dev.parent->of_node, np) {
 		if (of_match_node(driver->subdevs, np) &&
 		    of_device_is_available(np)) {
 			err = host1x_subdev_add(device, driver, np);
-			if (err < 0) {
-				of_node_put(np);
+			if (err < 0)
 				return err;
-			}
 		}
 	}
 
@@ -226,7 +221,7 @@ int host1x_device_init(struct host1x_device *device)
 
 teardown:
 	list_for_each_entry_continue_reverse(client, &device->clients, list)
-		if (client->ops->exit)
+		if (client->ops && client->ops->exit)
 			client->ops->exit(client);
 
 	/* reset client to end of list for late teardown */
@@ -234,7 +229,7 @@ teardown:
 
 teardown_late:
 	list_for_each_entry_continue_reverse(client, &device->clients, list)
-		if (client->ops->late_exit)
+		if (client->ops && client->ops->late_exit)
 			client->ops->late_exit(client);
 
 	mutex_unlock(&device->clients_lock);
@@ -351,6 +346,36 @@ static int host1x_device_uevent(const struct device *dev,
 	return 0;
 }
 
+static int host1x_device_probe(struct device *dev)
+{
+	struct host1x_driver *driver = to_host1x_driver(dev->driver);
+	struct host1x_device *device = to_host1x_device(dev);
+
+	if (driver->probe)
+		return driver->probe(device);
+
+	return 0;
+}
+
+static void host1x_device_remove(struct device *dev)
+{
+	struct host1x_driver *driver = to_host1x_driver(dev->driver);
+	struct host1x_device *device = to_host1x_device(dev);
+
+	if (driver->remove)
+		driver->remove(device);
+}
+
+static void host1x_device_shutdown(struct device *dev)
+{
+	struct host1x_driver *driver = to_host1x_driver(dev->driver);
+	struct host1x_device *device = to_host1x_device(dev);
+
+	if (dev->driver && driver->shutdown)
+		driver->shutdown(device);
+}
+
+
 static const struct dev_pm_ops host1x_device_pm_ops = {
 	.suspend = pm_generic_suspend,
 	.resume = pm_generic_resume,
@@ -364,6 +389,9 @@ const struct bus_type host1x_bus_type = {
 	.name = "host1x",
 	.match = host1x_device_match,
 	.uevent = host1x_device_uevent,
+	.probe = host1x_device_probe,
+	.remove = host1x_device_remove,
+	.shutdown = host1x_device_shutdown,
 	.pm = &host1x_device_pm_ops,
 };
 
@@ -431,7 +459,7 @@ static int host1x_device_add(struct host1x *host1x,
 	struct host1x_device *device;
 	int err;
 
-	device = kzalloc(sizeof(*device), GFP_KERNEL);
+	device = kzalloc_obj(*device);
 	if (!device)
 		return -ENOMEM;
 
@@ -457,7 +485,7 @@ static int host1x_device_add(struct host1x *host1x,
 
 	err = host1x_device_parse_dt(device, driver);
 	if (err < 0) {
-		kfree(device);
+		put_device(&device->dev);
 		return err;
 	}
 
@@ -475,6 +503,18 @@ static int host1x_device_add(struct host1x *host1x,
 	}
 
 	mutex_unlock(&clients_lock);
+
+	/*
+	 * Add device even if there are no subdevs to ensure syncpoint functionality
+	 * is available regardless of whether any engine subdevices are present
+	 */
+	if (list_empty(&device->subdevs)) {
+		err = device_add(&device->dev);
+		if (err < 0)
+			dev_err(&device->dev, "failed to add device: %d\n", err);
+		else
+			device->registered = true;
+	}
 
 	return 0;
 }
@@ -616,37 +656,6 @@ int host1x_unregister(struct host1x *host1x)
 	return 0;
 }
 
-static int host1x_device_probe(struct device *dev)
-{
-	struct host1x_driver *driver = to_host1x_driver(dev->driver);
-	struct host1x_device *device = to_host1x_device(dev);
-
-	if (driver->probe)
-		return driver->probe(device);
-
-	return 0;
-}
-
-static int host1x_device_remove(struct device *dev)
-{
-	struct host1x_driver *driver = to_host1x_driver(dev->driver);
-	struct host1x_device *device = to_host1x_device(dev);
-
-	if (driver->remove)
-		return driver->remove(device);
-
-	return 0;
-}
-
-static void host1x_device_shutdown(struct device *dev)
-{
-	struct host1x_driver *driver = to_host1x_driver(dev->driver);
-	struct host1x_device *device = to_host1x_device(dev);
-
-	if (driver->shutdown)
-		driver->shutdown(device);
-}
-
 /**
  * host1x_driver_register_full() - register a host1x driver
  * @driver: host1x driver
@@ -677,9 +686,6 @@ int host1x_driver_register_full(struct host1x_driver *driver,
 
 	driver->driver.bus = &host1x_bus_type;
 	driver->driver.owner = owner;
-	driver->driver.probe = host1x_device_probe;
-	driver->driver.remove = host1x_device_remove;
-	driver->driver.shutdown = host1x_device_shutdown;
 
 	return driver_register(&driver->driver);
 }
@@ -881,6 +887,20 @@ unlock:
 }
 EXPORT_SYMBOL(host1x_client_resume);
 
+/**
+ * host1x_bo_pin() - Create a DMA mapping for the buffer object
+ * @dev: Device onto which DMA map to
+ * @bo: Buffer object to map
+ * @dir: DMA direction
+ * @cache: Cache in which to store mapping, or NULL
+ *
+ * Creates a DMA mapping pointing to @bo for @dev. The refcount of @bo is incremented
+ * until host1x_bo_unpin is called.
+ *
+ * If @cache is specified, the mapping is also stored in the cache and not released
+ * until @bo is freed (refcount drops to zero). This improves performance when a buffer
+ * is pinned and unpinned frequently as in the case of display use.
+ */
 struct host1x_bo_mapping *host1x_bo_pin(struct device *dev, struct host1x_bo *bo,
 					enum dma_data_direction dir,
 					struct host1x_bo_cache *cache)
@@ -893,6 +913,7 @@ struct host1x_bo_mapping *host1x_bo_pin(struct device *dev, struct host1x_bo *bo
 		list_for_each_entry(mapping, &cache->mappings, entry) {
 			if (mapping->bo == bo && mapping->direction == dir) {
 				kref_get(&mapping->ref);
+				host1x_bo_get(bo);
 				goto unlock;
 			}
 		}
@@ -901,6 +922,8 @@ struct host1x_bo_mapping *host1x_bo_pin(struct device *dev, struct host1x_bo *bo
 	mapping = bo->ops->pin(dev, bo, dir);
 	if (IS_ERR(mapping))
 		goto unlock;
+
+	host1x_bo_get(bo);
 
 	spin_lock(&mapping->bo->lock);
 	list_add_tail(&mapping->list, &bo->mappings);
@@ -912,7 +935,12 @@ struct host1x_bo_mapping *host1x_bo_pin(struct device *dev, struct host1x_bo *bo
 
 		list_add_tail(&mapping->entry, &cache->mappings);
 
-		/* bump reference count to track the copy in the cache */
+		/*
+		 * Bump the mapping reference count to track the mapping in the cache,
+		 * but do not bump the BO's refcount. This allows the BO to still get freed,
+		 * triggering the release of the cache mapping through
+		 * host1x_bo_clear_cached_mappings.
+		 */
 		kref_get(&mapping->ref);
 	}
 
@@ -942,9 +970,17 @@ static void __host1x_bo_unpin(struct kref *ref)
 	mapping->bo->ops->unpin(mapping);
 }
 
+/**
+ * host1x_bo_unpin() - Release an established DMA mapping of a buffer object
+ * @mapping: Mapping to release
+ *
+ * Unmaps the given @mapping, unless it is cached. Decreases the refcount on
+ * the underlying buffer object.
+ */
 void host1x_bo_unpin(struct host1x_bo_mapping *mapping)
 {
 	struct host1x_bo_cache *cache = mapping->cache;
+	struct host1x_bo *bo = mapping->bo;
 
 	if (cache)
 		mutex_lock(&cache->lock);
@@ -953,5 +989,33 @@ void host1x_bo_unpin(struct host1x_bo_mapping *mapping)
 
 	if (cache)
 		mutex_unlock(&cache->lock);
+
+	host1x_bo_put(bo);
 }
 EXPORT_SYMBOL(host1x_bo_unpin);
+
+/**
+ * host1x_bo_clear_cached_mappings() - Remove all cached mappings pointing at a bo
+ * @bo: Buffer object to release mappings of
+ *
+ * Drops references to any mappings pointing to @bo left in any caches. This must
+ * be called by any host1x_bo implementers that may be pinned with caching enabled
+ * before freeing the bo.
+ */
+void host1x_bo_clear_cached_mappings(struct host1x_bo *bo)
+{
+	struct host1x_bo_mapping *mapping, *tmp;
+	struct host1x_bo_cache *cache;
+
+	list_for_each_entry_safe(mapping, tmp, &bo->mappings, list) {
+		cache = mapping->cache;
+		if (WARN_ON(!cache))
+			continue;
+
+		mutex_lock(&cache->lock);
+		WARN_ON(kref_read(&mapping->ref) != 1);
+		__host1x_bo_unpin(&mapping->ref);
+		mutex_unlock(&cache->lock);
+	}
+}
+EXPORT_SYMBOL(host1x_bo_clear_cached_mappings);

@@ -44,8 +44,7 @@ static ssize_t sm_attr_show(struct device *dev, struct device_attribute *attr,
 	struct sm_sysfs_attribute *sm_attr =
 		container_of(attr, struct sm_sysfs_attribute, dev_attr);
 
-	strncpy(buf, sm_attr->data, sm_attr->len);
-	return sm_attr->len;
+	return sysfs_emit(buf, "%.*s", sm_attr->len, sm_attr->data);
 }
 
 
@@ -65,7 +64,7 @@ static struct attribute_group *sm_create_sysfs_attributes(struct sm_ftl *ftl)
 
 	/* Initialize sysfs attributes */
 	vendor_attribute =
-		kzalloc(sizeof(struct sm_sysfs_attribute), GFP_KERNEL);
+		kzalloc_obj(struct sm_sysfs_attribute);
 	if (!vendor_attribute)
 		goto error2;
 
@@ -79,14 +78,13 @@ static struct attribute_group *sm_create_sysfs_attributes(struct sm_ftl *ftl)
 
 
 	/* Create array of pointers to the attributes */
-	attributes = kcalloc(NUM_ATTRIBUTES + 1, sizeof(struct attribute *),
-								GFP_KERNEL);
+	attributes = kzalloc_objs(struct attribute *, NUM_ATTRIBUTES + 1);
 	if (!attributes)
 		goto error3;
 	attributes[0] = &vendor_attribute->dev_attr.attr;
 
 	/* Finally create the attribute group */
-	attr_group = kzalloc(sizeof(struct attribute_group), GFP_KERNEL);
+	attr_group = kzalloc_obj(struct attribute_group);
 	if (!attr_group)
 		goto error4;
 	attr_group->attrs = attributes;
@@ -157,7 +155,7 @@ static int sm_read_lba(struct sm_oob *oob)
 	if (!memcmp(oob, erased_pattern, SM_OOB_SIZE))
 		return -1;
 
-	/* Now check is both copies of the LBA differ too much */
+	/* Now check if both copies of the LBA differ too much */
 	lba_test = *(uint16_t *)oob->lba_copy1 ^ *(uint16_t*)oob->lba_copy2;
 	if (lba_test && !is_power_of_2(lba_test))
 		return -2;
@@ -993,7 +991,7 @@ restart:
 /* flush timer, runs a second after last write */
 static void sm_cache_flush_timer(struct timer_list *t)
 {
-	struct sm_ftl *ftl = from_timer(ftl, t, timer);
+	struct sm_ftl *ftl = timer_container_of(ftl, t, timer);
 	queue_work(cache_flush_workqueue, &ftl->flush_work);
 }
 
@@ -1067,7 +1065,7 @@ static int sm_write(struct mtd_blktrans_dev *dev,
 	sm_break_offset(ftl, sec_no << 9, &zone_num, &block, &boffset);
 
 	/* No need in flush thread running now */
-	del_timer(&ftl->timer);
+	timer_delete(&ftl->timer);
 	mutex_lock(&ftl->mutex);
 
 	zone = sm_get_zone(ftl, zone_num);
@@ -1111,7 +1109,7 @@ static void sm_release(struct mtd_blktrans_dev *dev)
 {
 	struct sm_ftl *ftl = dev->priv;
 
-	del_timer_sync(&ftl->timer);
+	timer_delete_sync(&ftl->timer);
 	cancel_work_sync(&ftl->flush_work);
 	mutex_lock(&ftl->mutex);
 	sm_cache_flush(ftl);
@@ -1135,7 +1133,7 @@ static void sm_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 	struct sm_ftl *ftl;
 
 	/* Allocate & initialize our private structure */
-	ftl = kzalloc(sizeof(struct sm_ftl), GFP_KERNEL);
+	ftl = kzalloc_flex(*ftl, cis_buffer, SM_SECTOR_SIZE);
 	if (!ftl)
 		goto error1;
 
@@ -1147,34 +1145,28 @@ static void sm_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 	/* Read media information */
 	if (sm_get_media_info(ftl, mtd)) {
 		dbg("found unsupported mtd device, aborting");
-		goto error2;
+		goto error1;
 	}
 
 
-	/* Allocate temporary CIS buffer for read retry support */
-	ftl->cis_buffer = kzalloc(SM_SECTOR_SIZE, GFP_KERNEL);
-	if (!ftl->cis_buffer)
-		goto error2;
-
 	/* Allocate zone array, it will be initialized on demand */
-	ftl->zones = kcalloc(ftl->zone_count, sizeof(struct ftl_zone),
-								GFP_KERNEL);
+	ftl->zones = kzalloc_objs(struct ftl_zone, ftl->zone_count);
 	if (!ftl->zones)
-		goto error3;
+		goto error2;
 
 	/* Allocate the cache*/
 	ftl->cache_data = kzalloc(ftl->block_size, GFP_KERNEL);
 
 	if (!ftl->cache_data)
-		goto error4;
+		goto error3;
 
 	sm_cache_init(ftl);
 
 
 	/* Allocate upper layer structure and initialize it */
-	trans = kzalloc(sizeof(struct mtd_blktrans_dev), GFP_KERNEL);
+	trans = kzalloc_obj(struct mtd_blktrans_dev);
 	if (!trans)
-		goto error5;
+		goto error4;
 
 	ftl->trans = trans;
 	trans->priv = ftl;
@@ -1187,12 +1179,12 @@ static void sm_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 
 	if (sm_find_cis(ftl)) {
 		dbg("CIS not found on mtd device, aborting");
-		goto error6;
+		goto error5;
 	}
 
 	ftl->disk_attributes = sm_create_sysfs_attributes(ftl);
 	if (!ftl->disk_attributes)
-		goto error6;
+		goto error5;
 	trans->disk_attributes = ftl->disk_attributes;
 
 	sm_printk("Found %d MiB xD/SmartMedia FTL on mtd%d",
@@ -1209,17 +1201,15 @@ static void sm_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 	/* Register device*/
 	if (add_mtd_blktrans_dev(trans)) {
 		dbg("error in mtdblktrans layer");
-		goto error6;
+		goto error5;
 	}
 	return;
-error6:
-	kfree(trans);
 error5:
-	kfree(ftl->cache_data);
+	kfree(trans);
 error4:
-	kfree(ftl->zones);
+	kfree(ftl->cache_data);
 error3:
-	kfree(ftl->cis_buffer);
+	kfree(ftl->zones);
 error2:
 	kfree(ftl);
 error1:
@@ -1245,7 +1235,6 @@ static void sm_remove_dev(struct mtd_blktrans_dev *dev)
 	}
 
 	sm_delete_sysfs_attributes(ftl);
-	kfree(ftl->cis_buffer);
 	kfree(ftl->zones);
 	kfree(ftl->cache_data);
 	kfree(ftl);

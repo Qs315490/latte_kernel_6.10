@@ -29,6 +29,77 @@ backup_only - BOOLEAN
 	If set, disable the director function while the server is
 	in backup mode to avoid packet loops for DR/TUN methods.
 
+conn_lfactor - INTEGER
+	Possible values: -8 (larger table) .. 8 (smaller table)
+
+	Default: -4
+
+	Controls the sizing of the connection hash table based on the
+	load factor (number of connections per table buckets):
+
+		2^conn_lfactor = nodes / buckets
+
+	As result, the table grows if load increases and shrinks when
+	load decreases in the range of 2^8 - 2^conn_tab_bits (module
+	parameter).
+	The value is a shift count where negative values select
+	buckets = (connection hash nodes << -value) while positive
+	values select buckets = (connection hash nodes >> value). The
+	negative values reduce the collisions and reduce the time for
+	lookups but increase the table size. Positive values will
+	tolerate load above 100% when using smaller table is
+	preferred with the cost of more collisions. If using NAT
+	connections consider decreasing the value with one because
+	they add two nodes in the hash table.
+
+	Example:
+	-4: grow if load goes above 6% (buckets = nodes * 16)
+	2: grow if load goes above 400% (buckets = nodes / 4)
+
+conn_max - INTEGER
+	Limit for number of connections, per netns.
+
+	Controls the soft and hard limit for number of connections.
+	Initially, the platform specific limit is assigned for init_net.
+	The value can be changed and later the soft limit propagated
+	to other networking namespaces.
+
+	Privileged admin can change both limits up to the value of the
+	platform limit while the unprivileged admin can change only the
+	soft limit up to the value of the hard limit.
+
+	For setups using conntrack=1 (CONFIG_IP_VS_NFCT for
+	Netfilter connection tracking) the connections can be
+	limited also by nf_conntrack_max.
+
+	Limits for init_net:
+
+	======================= =============== =============
+	\			soft limit	hard limit
+	======================= =============== =============
+	create netns		platform	platform
+	priv admin		0 .. platform	0 .. platform
+	======================= =============== =============
+
+	Limits for new netns:
+
+	======================= =============== =============
+	\			soft limit	hard limit
+	======================= =============== =============
+	create netns		init_net:soft	init_net:soft
+	priv admin		0 .. platform	0 .. platform
+	unpriv admin		0 .. hard	N/A
+	======================= =============== =============
+
+	Limits per platform:
+
+	- 1,073,741,824 (2^30 for 64-bit)
+	- 16,777,216 (2^24 for 32-bit)
+
+	Possible values: 0 .. platform limit
+
+	Default: platform limit
+
 conn_reuse_mode - INTEGER
 	1 - default
 
@@ -218,6 +289,16 @@ secure_tcp - INTEGER
 
 	The value definition is the same as that of drop_entry and
 	drop_packet.
+
+svc_lfactor - INTEGER
+	Possible values: -8 (larger table) .. 8 (smaller table)
+
+	Default: -3
+
+	Controls the sizing of the service hash table based on the
+	load factor (number of services per table buckets). The table
+	will grow and shrink in the range of 2^4 - 2^20.
+	See conn_lfactor for explanation.
 
 sync_threshold - vector of 2 INTEGERs: sync_threshold, sync_period
 	default 3 50

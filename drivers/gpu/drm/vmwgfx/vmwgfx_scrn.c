@@ -277,7 +277,7 @@ static void vmw_sou_crtc_helper_prepare(struct drm_crtc *crtc)
  * @state: Unused
  */
 static void vmw_sou_crtc_atomic_disable(struct drm_crtc *crtc,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct vmw_private *dev_priv;
 	struct vmw_screen_object_unit *sou;
@@ -445,7 +445,7 @@ vmw_sou_primary_plane_prepare_fb(struct drm_plane *plane,
 	 * resume the overlays, this is preferred to failing to alloc.
 	 */
 	vmw_overlay_pause_all(dev_priv);
-	ret = vmw_gem_object_create(dev_priv, &bo_params, &vps->uo.buffer);
+	ret = vmw_bo_create(dev_priv, &bo_params, &vps->uo.buffer);
 	vmw_overlay_resume_all(dev_priv);
 	if (ret)
 		return ret;
@@ -719,7 +719,7 @@ static int vmw_sou_plane_update_surface(struct vmw_private *dev_priv,
 
 static void
 vmw_sou_primary_plane_atomic_update(struct drm_plane *plane,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state, plane);
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state, plane);
@@ -764,7 +764,7 @@ static const struct drm_plane_funcs vmw_sou_plane_funcs = {
 static const struct drm_plane_funcs vmw_sou_cursor_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
-	.destroy = vmw_du_cursor_plane_destroy,
+	.destroy = vmw_cursor_plane_destroy,
 	.reset = vmw_du_plane_reset,
 	.atomic_duplicate_state = vmw_du_plane_duplicate_state,
 	.atomic_destroy_state = vmw_du_plane_destroy_state,
@@ -775,10 +775,10 @@ static const struct drm_plane_funcs vmw_sou_cursor_funcs = {
  */
 static const struct
 drm_plane_helper_funcs vmw_sou_cursor_plane_helper_funcs = {
-	.atomic_check = vmw_du_cursor_plane_atomic_check,
-	.atomic_update = vmw_du_cursor_plane_atomic_update,
-	.prepare_fb = vmw_du_cursor_plane_prepare_fb,
-	.cleanup_fb = vmw_du_cursor_plane_cleanup_fb,
+	.atomic_check = vmw_cursor_plane_atomic_check,
+	.atomic_update = vmw_cursor_plane_atomic_update,
+	.prepare_fb = vmw_cursor_plane_prepare_fb,
+	.cleanup_fb = vmw_cursor_plane_cleanup_fb,
 };
 
 static const struct
@@ -797,6 +797,7 @@ static const struct drm_crtc_helper_funcs vmw_sou_crtc_helper_funcs = {
 	.atomic_flush = vmw_vkms_crtc_atomic_flush,
 	.atomic_enable = vmw_vkms_crtc_atomic_enable,
 	.atomic_disable = vmw_sou_crtc_atomic_disable,
+	.handle_vblank_timeout  = vmw_vkms_handle_vblank_timeout,
 };
 
 
@@ -811,7 +812,7 @@ static int vmw_sou_init(struct vmw_private *dev_priv, unsigned unit)
 	struct drm_crtc *crtc;
 	int ret;
 
-	sou = kzalloc(sizeof(*sou), GFP_KERNEL);
+	sou = kzalloc_obj(*sou);
 	if (!sou)
 		return -ENOMEM;
 

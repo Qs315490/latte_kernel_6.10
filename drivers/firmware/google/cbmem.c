@@ -12,6 +12,7 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/kobject.h>
+#include <linux/device-id/coreboot.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -86,7 +87,7 @@ static const struct bin_attribute *const bin_attrs[] = {
 
 static const struct attribute_group cbmem_entry_group = {
 	.attrs = attrs,
-	.bin_attrs_new = bin_attrs,
+	.bin_attrs = bin_attrs,
 };
 
 static const struct attribute_group *dev_groups[] = {

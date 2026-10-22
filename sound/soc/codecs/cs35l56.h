@@ -10,6 +10,7 @@
 #define CS35L56_H
 
 #include <linux/completion.h>
+#include <linux/container_of.h>
 #include <linux/regulator/consumer.h>
 #include <linux/pm_runtime.h>
 #include <linux/workqueue.h>
@@ -19,8 +20,6 @@
 #define CS35L56_SDW_GEN_INT_STAT_1	0xc0
 #define CS35L56_SDW_GEN_INT_MASK_1	0xc1
 #define CS35L56_SDW_INT_MASK_CODEC_IRQ	BIT(0)
-
-#define CS35L56_SDW_INVALID_BUS_SCALE	0xf
 
 #define CS35L56_RX_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE)
 #define CS35L56_TX_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE \
@@ -38,6 +37,8 @@ struct cs35l56_private {
 	struct snd_soc_component *component;
 	struct regulator_bulk_data supplies[CS35L56_NUM_BULK_SUPPLIES];
 	struct sdw_slave *sdw_peripheral;
+	struct regmap *sdw_bus_regmap;
+	const char *fallback_fw_suffix;
 	struct work_struct sdw_irq_work;
 	bool sdw_irq_no_unmask;
 	bool soft_resetting;
@@ -51,9 +52,23 @@ struct cs35l56_private {
 	u8 asp_slot_count;
 	bool tdm_mode;
 	bool sysclk_set;
+	u8 sdw_link_num;
+	u8 sdw_unique_id;
+
+	u8 ambient_ctl_value;
 };
 
+static inline struct cs35l56_private *cs35l56_private_from_base(struct cs35l56_base *cs35l56_base)
+{
+	return container_of(cs35l56_base, struct cs35l56_private, base);
+}
+
 extern const struct dev_pm_ops cs35l56_pm_ops_i2c_spi;
+
+void cs35l56_mask_soundwire_interrupts(struct sdw_slave *peripheral);
+void cs35l56_unmask_soundwire_interrupts(struct sdw_slave *peripheral);
+void cs35l56_disable_sdw_interrupts(struct cs35l56_private *cs35l56);
+void cs35l56_enable_sdw_interrupts(struct cs35l56_private *cs35l56);
 
 int cs35l56_system_suspend(struct device *dev);
 int cs35l56_system_suspend_late(struct device *dev);
@@ -66,5 +81,12 @@ int cs35l56_irq_request(struct cs35l56_base *cs35l56_base, int irq);
 int cs35l56_common_probe(struct cs35l56_private *cs35l56);
 int cs35l56_init(struct cs35l56_private *cs35l56);
 void cs35l56_remove(struct cs35l56_private *cs35l56);
+
+#if IS_ENABLED(CONFIG_KUNIT)
+int cs35l56_set_fw_suffix(struct cs35l56_private *cs35l56);
+int cs35l56_set_fw_name(struct snd_soc_component *component);
+int cs35l56_process_xu_properties(struct cs35l56_private *cs35l56);
+int cs35l56_get_firmware_uid(struct cs35l56_private *cs35l56);
+#endif
 
 #endif /* ifndef CS35L56_H */

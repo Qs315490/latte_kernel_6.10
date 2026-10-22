@@ -172,27 +172,20 @@ static struct mtd_info *cfi_staa_setup(struct map_info *map)
 	int i,j;
 	unsigned long devsize = (1<<cfi->cfiq->DevSize) * cfi->interleave;
 
-	mtd = kzalloc(sizeof(*mtd), GFP_KERNEL);
+	mtd = kzalloc_obj(*mtd);
 	//printk(KERN_DEBUG "number of CFI chips: %d\n", cfi->numchips);
-
-	if (!mtd) {
-		kfree(cfi->cmdset_priv);
-		return NULL;
-	}
+	if (!mtd)
+		goto free_cmdset_priv;
 
 	mtd->priv = map;
 	mtd->type = MTD_NORFLASH;
 	mtd->size = devsize * cfi->numchips;
 
 	mtd->numeraseregions = cfi->cfiq->NumEraseRegions * cfi->numchips;
-	mtd->eraseregions = kmalloc_array(mtd->numeraseregions,
-					  sizeof(struct mtd_erase_region_info),
-					  GFP_KERNEL);
-	if (!mtd->eraseregions) {
-		kfree(cfi->cmdset_priv);
-		kfree(mtd);
-		return NULL;
-	}
+	mtd->eraseregions = kmalloc_objs(struct mtd_erase_region_info,
+					 mtd->numeraseregions);
+	if (!mtd->eraseregions)
+		goto free_mtd;
 
 	for (i=0; i<cfi->cfiq->NumEraseRegions; i++) {
 		unsigned long ernum, ersize;
@@ -214,9 +207,7 @@ static struct mtd_info *cfi_staa_setup(struct map_info *map)
 		/* Argh */
 		printk(KERN_WARNING "Sum of regions (%lx) != total size of set of interleaved chips (%lx)\n", offset, devsize);
 		kfree(mtd->eraseregions);
-		kfree(cfi->cmdset_priv);
-		kfree(mtd);
-		return NULL;
+		goto free_mtd;
 	}
 
 	for (i=0; i<mtd->numeraseregions;i++){
@@ -243,6 +234,12 @@ static struct mtd_info *cfi_staa_setup(struct map_info *map)
 	__module_get(THIS_MODULE);
 	mtd->name = map->name;
 	return mtd;
+
+free_mtd:
+	kfree(mtd);
+free_cmdset_priv:
+	kfree(cfi->cmdset_priv);
+	return NULL;
 }
 
 

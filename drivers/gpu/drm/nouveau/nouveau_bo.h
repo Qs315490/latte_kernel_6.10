@@ -9,6 +9,7 @@ struct nouveau_channel;
 struct nouveau_cli;
 struct nouveau_drm;
 struct nouveau_fence;
+struct nouveau_vma;
 
 struct nouveau_bo {
 	struct ttm_buffer_object bo;
@@ -56,7 +57,7 @@ nouveau_bo(struct ttm_buffer_object *bo)
 static inline void
 nouveau_bo_fini(struct nouveau_bo *bo)
 {
-	ttm_bo_put(&bo->bo);
+	ttm_bo_fini(&bo->bo);
 }
 
 extern struct ttm_device_funcs nouveau_bo_driver;
@@ -88,6 +89,12 @@ void nouveau_bo_sync_for_device(struct nouveau_bo *nvbo);
 void nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo);
 void nouveau_bo_add_io_reserve_lru(struct ttm_buffer_object *bo);
 void nouveau_bo_del_io_reserve_lru(struct ttm_buffer_object *bo);
+
+int nouveau_bo_new_pin(struct nouveau_cli *, u32 domain, u32 size, struct nouveau_bo **);
+int nouveau_bo_new_map(struct nouveau_cli *, u32 domain, u32 size, struct nouveau_bo **);
+int nouveau_bo_new_map_gpu(struct nouveau_cli *, u32 domain, u32 size,
+			   struct nouveau_bo **, struct nouveau_vma **);
+void nouveau_bo_unpin_del(struct nouveau_bo **);
 
 /* TODO: submit equivalent to TTM generic API upstream? */
 static inline void __iomem *

@@ -12,7 +12,7 @@
 #include <sys/mount.h>
 #include <unistd.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 
 #include <linux/types.h>
 #include <linux/mount.h>
@@ -156,7 +156,7 @@ TEST_F_TIMEOUT(file_stressor, slab_typesafe_by_rcu, 900 * 2)
 			ssize_t nr_read;
 
 			/*
-			 * Concurrently read /proc/<pid>/fd/ which rougly does:
+			 * Concurrently read /proc/<pid>/fd/ which roughly does:
 			 *
 			 * f = fget_task_next(p, &fd);
 			 * if (!f)

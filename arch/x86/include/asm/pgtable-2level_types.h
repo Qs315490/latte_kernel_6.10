@@ -2,7 +2,7 @@
 #ifndef _ASM_X86_PGTABLE_2LEVEL_DEFS_H
 #define _ASM_X86_PGTABLE_2LEVEL_DEFS_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <linux/types.h>
 
 typedef unsigned long	pteval_t;
@@ -16,9 +16,7 @@ typedef union {
 	pteval_t pte;
 	pteval_t pte_low;
 } pte_t;
-#endif	/* !__ASSEMBLY__ */
-
-#define SHARED_KERNEL_PMD	0
+#endif	/* !__ASSEMBLER__ */
 
 #define ARCH_PAGE_TABLE_SYNC_MASK	PGTBL_PMD_MODIFIED
 

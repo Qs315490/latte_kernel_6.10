@@ -10,6 +10,7 @@
 #include <linux/acpi.h>
 #include <linux/mod_devicetable.h>
 #include <linux/soundwire/sdw.h>
+#include <sound/soc.h>
 
 struct snd_soc_acpi_package_context {
 	char *name;           /* package name */
@@ -113,8 +114,8 @@ struct snd_soc_acpi_endpoint {
  * @name_prefix: string used for codec controls
  */
 struct snd_soc_acpi_adr_device {
-	const u64 adr;
-	const u8 num_endpoints;
+	u64 adr;
+	u8 num_endpoints;
 	const struct snd_soc_acpi_endpoint *endpoints;
 	const char *name_prefix;
 };
@@ -130,8 +131,8 @@ struct snd_soc_acpi_adr_device {
  */
 
 struct snd_soc_acpi_link_adr {
-	const u32 mask;
-	const u32 num_adr;
+	u32 mask;
+	u32 num_adr;
 	const struct snd_soc_acpi_adr_device *adr_d;
 };
 
@@ -193,6 +194,17 @@ struct snd_soc_acpi_link_adr {
  *  is not constant since this field may be updated at run-time
  * @sof_tplg_filename: Sound Open Firmware topology file name, if enabled
  * @tplg_quirk_mask: quirks to select different topology files dynamically
+ * @get_function_tplg_files: This is an optional callback, if specified then instead of
+ *	the single sof_tplg_filename the callback will return the list of function topology
+ *	files to be loaded.
+ *	Return value: The number of the files or negative ERRNO. 0 means that the single topology
+ *		      file should be used, no function topology split can be used on the machine.
+ *	@card: the pointer of the card
+ *	@mach: the pointer of the machine driver
+ *	@prefix: the prefix of the topology file name. Typically, it is the path.
+ *	@tplg_files: the pointer of the array of the topology file names.
+ *	@best_effort: ignore non supported links and try to build the card in best effort
+ *		      with supported links
  */
 /* Descriptor for SST ASoC machine driver */
 struct snd_soc_acpi_mach {
@@ -212,6 +224,10 @@ struct snd_soc_acpi_mach {
 	struct snd_soc_acpi_mach_params mach_params;
 	const char *sof_tplg_filename;
 	const u32 tplg_quirk_mask;
+	int (*get_function_tplg_files)(struct snd_soc_card *card,
+				       const struct snd_soc_acpi_mach *mach,
+				       const char *prefix, const char ***tplg_files,
+				       bool best_effort);
 };
 
 #define SND_SOC_ACPI_MAX_CODECS 3

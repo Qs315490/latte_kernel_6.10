@@ -16,6 +16,7 @@
 #include <linux/nfs3.h>
 #include <linux/nfs_fs.h>
 #include <linux/nfs_page.h>
+#include <linux/filelock.h>
 #include <linux/lockd/bind.h>
 #include <linux/nfs_mount.h>
 #include <linux/freezer.h>
@@ -39,7 +40,7 @@ nfs3_rpc_wrapper(struct rpc_clnt *clnt, struct rpc_message *msg, int flags)
 		__set_current_state(TASK_KILLABLE|TASK_FREEZABLE_UNSAFE);
 		schedule_timeout(NFS_JUKEBOX_RETRY_TIME);
 		res = -ERESTARTSYS;
-	} while (!fatal_signal_pending(current));
+	} while (!fatal_signal_pending(current) && !nfs_current_task_exiting());
 	return res;
 }
 
@@ -299,7 +300,7 @@ static struct nfs3_createdata *nfs3_alloc_createdata(void)
 {
 	struct nfs3_createdata *data;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (data != NULL) {
 		data->msg.rpc_argp = &data->arg;
 		data->msg.rpc_resp = &data->res;
@@ -392,8 +393,13 @@ nfs3_proc_create(struct inode *dir, struct dentry *dentry, struct iattr *sattr,
 	if (status != 0)
 		goto out_release_acls;
 
-	if (d_alias)
+	if (d_alias) {
+		if (d_is_dir(d_alias)) {
+			status = -EISDIR;
+			goto out_dput;
+		}
 		dentry = d_alias;
+	}
 
 	/* When we created the file with exclusive semantics, make
 	 * sure we set the attributes afterwards. */
@@ -483,7 +489,8 @@ nfs3_proc_unlink_done(struct rpc_task *task, struct inode *dir)
 static void
 nfs3_proc_rename_setup(struct rpc_message *msg,
 		struct dentry *old_dentry,
-		struct dentry *new_dentry)
+		struct dentry *new_dentry,
+		struct inode *same_parent)
 {
 	msg->rpc_proc = &nfs3_procedures[NFS3PROC_RENAME];
 }
@@ -578,13 +585,13 @@ out:
 	return status;
 }
 
-static int
+static struct dentry *
 nfs3_proc_mkdir(struct inode *dir, struct dentry *dentry, struct iattr *sattr)
 {
 	struct posix_acl *default_acl, *acl;
 	struct nfs3_createdata *data;
-	struct dentry *d_alias;
-	int status = -ENOMEM;
+	struct dentry *ret = ERR_PTR(-ENOMEM);
+	int status;
 
 	dprintk("NFS call  mkdir %pd\n", dentry);
 
@@ -592,8 +599,9 @@ nfs3_proc_mkdir(struct inode *dir, struct dentry *dentry, struct iattr *sattr)
 	if (data == NULL)
 		goto out;
 
-	status = posix_acl_create(dir, &sattr->ia_mode, &default_acl, &acl);
-	if (status)
+	ret = ERR_PTR(posix_acl_create(dir, &sattr->ia_mode,
+				       &default_acl, &acl));
+	if (IS_ERR(ret))
 		goto out;
 
 	data->msg.rpc_proc = &nfs3_procedures[NFS3PROC_MKDIR];
@@ -602,25 +610,27 @@ nfs3_proc_mkdir(struct inode *dir, struct dentry *dentry, struct iattr *sattr)
 	data->arg.mkdir.len = dentry->d_name.len;
 	data->arg.mkdir.sattr = sattr;
 
-	d_alias = nfs3_do_create(dir, dentry, data);
-	status = PTR_ERR_OR_ZERO(d_alias);
+	ret = nfs3_do_create(dir, dentry, data);
 
-	if (status != 0)
+	if (IS_ERR(ret))
 		goto out_release_acls;
 
-	if (d_alias)
-		dentry = d_alias;
+	if (ret)
+		dentry = ret;
 
 	status = nfs3_proc_setacls(d_inode(dentry), acl, default_acl);
+	if (status) {
+		dput(ret);
+		ret = ERR_PTR(status);
+	}
 
-	dput(d_alias);
 out_release_acls:
 	posix_acl_release(acl);
 	posix_acl_release(default_acl);
 out:
 	nfs3_free_createdata(data);
-	dprintk("NFS reply mkdir: %d\n", status);
-	return status;
+	dprintk("NFS reply mkdir: %d\n", PTR_ERR_OR_ZERO(ret));
+	return ret;
 }
 
 static int
@@ -1023,11 +1033,10 @@ static int nfs3_have_delegation(struct inode *inode, fmode_t type, int flags)
 	return 0;
 }
 
-static int nfs3_return_delegation(struct inode *inode)
+static void nfs3_return_delegation(struct inode *inode)
 {
 	if (S_ISREG(inode->i_mode))
 		nfs_wb_all(inode);
-	return 0;
 }
 
 static const struct inode_operations nfs3_dir_inode_operations = {
@@ -1044,6 +1053,7 @@ static const struct inode_operations nfs3_dir_inode_operations = {
 	.permission	= nfs_permission,
 	.getattr	= nfs_getattr,
 	.setattr	= nfs_setattr,
+	.fileattr_get	= nfs_fileattr_get,
 #ifdef CONFIG_NFS_V3_ACL
 	.listxattr	= nfs3_listxattr,
 	.get_inode_acl	= nfs3_get_acl,
@@ -1055,6 +1065,7 @@ static const struct inode_operations nfs3_file_inode_operations = {
 	.permission	= nfs_permission,
 	.getattr	= nfs_getattr,
 	.setattr	= nfs_setattr,
+	.fileattr_get	= nfs_fileattr_get,
 #ifdef CONFIG_NFS_V3_ACL
 	.listxattr	= nfs3_listxattr,
 	.get_inode_acl	= nfs3_get_acl,

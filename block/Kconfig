@@ -63,7 +63,7 @@ config BLK_DEV_BSGLIB
 config BLK_DEV_INTEGRITY
 	bool "Block layer data integrity support"
 	select CRC_T10DIF
-	select CRC64_ROCKSOFT
+	select CRC64
 	help
 	Some storage devices allow extra information to be
 	stored/retrieved to help protect the data.  The block layer
@@ -211,14 +211,6 @@ config BLK_INLINE_ENCRYPTION_FALLBACK
 
 source "block/partitions/Kconfig"
 
-config BLK_MQ_PCI
-	def_bool PCI
-
-config BLK_MQ_VIRTIO
-	bool
-	depends on VIRTIO
-	default y
-
 config BLK_PM
 	def_bool PM
 
@@ -228,6 +220,14 @@ config BLOCK_HOLDER_DEPRECATED
 
 config BLK_MQ_STACKING
 	bool
+
+config BLK_ERROR_INJECTION
+	bool "Enable block layer error injection"
+	select JUMP_LABEL if HAVE_ARCH_JUMP_LABEL
+	help
+	  Enable inserting arbitrary block errors through a debugfs interface.
+
+	  See Documentation/block/error-injection.rst for details.
 
 source "block/Kconfig.iosched"
 

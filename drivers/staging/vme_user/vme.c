@@ -253,7 +253,7 @@ struct vme_resource *vme_slave_request(struct vme_dev *vdev, u32 address,
 {
 	struct vme_bridge *bridge;
 	struct vme_slave_resource *allocated_image = NULL;
-	struct vme_slave_resource *slave_image = NULL;
+	struct vme_slave_resource *slave_image;
 	struct vme_resource *resource = NULL;
 
 	bridge = vdev->bridge;
@@ -274,7 +274,7 @@ struct vme_resource *vme_slave_request(struct vme_dev *vdev, u32 address,
 		mutex_lock(&slave_image->mtx);
 		if (((slave_image->address_attr & address) == address) &&
 		    ((slave_image->cycle_attr & cycle) == cycle) &&
-		    (slave_image->locked == 0)) {
+		    !slave_image->locked) {
 			slave_image->locked = 1;
 			mutex_unlock(&slave_image->mtx);
 			allocated_image = slave_image;
@@ -287,7 +287,7 @@ struct vme_resource *vme_slave_request(struct vme_dev *vdev, u32 address,
 	if (!allocated_image)
 		goto err_image;
 
-	resource = kmalloc(sizeof(*resource), GFP_KERNEL);
+	resource = kmalloc_obj(*resource);
 	if (!resource)
 		goto err_alloc;
 
@@ -419,7 +419,7 @@ void vme_slave_free(struct vme_resource *resource)
 
 	/* Unlock image */
 	mutex_lock(&slave_image->mtx);
-	if (slave_image->locked == 0)
+	if (!slave_image->locked)
 		dev_err(bridge->parent, "Image is already free\n");
 
 	slave_image->locked = 0;
@@ -447,7 +447,7 @@ struct vme_resource *vme_master_request(struct vme_dev *vdev, u32 address,
 {
 	struct vme_bridge *bridge;
 	struct vme_master_resource *allocated_image = NULL;
-	struct vme_master_resource *master_image = NULL;
+	struct vme_master_resource *master_image;
 	struct vme_resource *resource = NULL;
 
 	bridge = vdev->bridge;
@@ -469,7 +469,7 @@ struct vme_resource *vme_master_request(struct vme_dev *vdev, u32 address,
 		if (((master_image->address_attr & address) == address) &&
 		    ((master_image->cycle_attr & cycle) == cycle) &&
 		    ((master_image->width_attr & dwidth) == dwidth) &&
-		    (master_image->locked == 0)) {
+		    !master_image->locked) {
 			master_image->locked = 1;
 			spin_unlock(&master_image->lock);
 			allocated_image = master_image;
@@ -484,7 +484,7 @@ struct vme_resource *vme_master_request(struct vme_dev *vdev, u32 address,
 		goto err_image;
 	}
 
-	resource = kmalloc(sizeof(*resource), GFP_KERNEL);
+	resource = kmalloc_obj(*resource);
 	if (!resource)
 		goto err_alloc;
 
@@ -735,9 +735,9 @@ unsigned int vme_master_rmw(struct vme_resource *resource, unsigned int mask,
 EXPORT_SYMBOL(vme_master_rmw);
 
 /**
- * vme_master_mmap - Mmap region of VME master window.
+ * vme_master_mmap_prepare - Mmap region of VME master window.
  * @resource: Pointer to VME master resource.
- * @vma: Pointer to definition of user mapping.
+ * @desc: Pointer to descriptor of user mapping.
  *
  * Memory map a region of the VME master window into user space.
  *
@@ -745,12 +745,13 @@ EXPORT_SYMBOL(vme_master_rmw);
  *         resource or -EFAULT if map exceeds window size. Other generic mmap
  *         errors may also be returned.
  */
-int vme_master_mmap(struct vme_resource *resource, struct vm_area_struct *vma)
+int vme_master_mmap_prepare(struct vme_resource *resource,
+			    struct vm_area_desc *desc)
 {
+	const unsigned long vma_size = vma_desc_size(desc);
 	struct vme_bridge *bridge = find_bridge(resource);
 	struct vme_master_resource *image;
 	phys_addr_t phys_addr;
-	unsigned long vma_size;
 
 	if (resource->type != VME_MASTER) {
 		dev_err(bridge->parent, "Not a master resource\n");
@@ -758,19 +759,18 @@ int vme_master_mmap(struct vme_resource *resource, struct vm_area_struct *vma)
 	}
 
 	image = list_entry(resource->entry, struct vme_master_resource, list);
-	phys_addr = image->bus_resource.start + (vma->vm_pgoff << PAGE_SHIFT);
-	vma_size = vma->vm_end - vma->vm_start;
+	phys_addr = image->bus_resource.start + (desc->pgoff << PAGE_SHIFT);
 
 	if (phys_addr + vma_size > image->bus_resource.end + 1) {
 		dev_err(bridge->parent, "Map size cannot exceed the window size\n");
 		return -EFAULT;
 	}
 
-	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-
-	return vm_iomap_memory(vma, phys_addr, vma->vm_end - vma->vm_start);
+	desc->page_prot = pgprot_noncached(desc->page_prot);
+	mmap_action_simple_ioremap(desc, phys_addr, vma_size);
+	return 0;
 }
-EXPORT_SYMBOL(vme_master_mmap);
+EXPORT_SYMBOL(vme_master_mmap_prepare);
 
 /**
  * vme_master_free - Free VME master window
@@ -793,7 +793,7 @@ void vme_master_free(struct vme_resource *resource)
 
 	/* Unlock image */
 	spin_lock(&master_image->lock);
-	if (master_image->locked == 0)
+	if (!master_image->locked)
 		dev_err(bridge->parent, "Image is already free\n");
 
 	master_image->locked = 0;
@@ -809,7 +809,7 @@ EXPORT_SYMBOL(vme_master_free);
  * @vdev: Pointer to VME device struct vme_dev assigned to driver instance.
  * @route: Required src/destination combination.
  *
- * Request a VME DMA controller with capability to perform transfers bewteen
+ * Request a VME DMA controller with capability to perform transfers between
  * requested source/destination combination.
  *
  * Return: Pointer to VME DMA resource on success, NULL on failure.
@@ -818,7 +818,7 @@ struct vme_resource *vme_dma_request(struct vme_dev *vdev, u32 route)
 {
 	struct vme_bridge *bridge;
 	struct vme_dma_resource *allocated_ctrlr = NULL;
-	struct vme_dma_resource *dma_ctrlr = NULL;
+	struct vme_dma_resource *dma_ctrlr;
 	struct vme_resource *resource = NULL;
 
 	/* XXX Not checking resource attributes */
@@ -841,7 +841,7 @@ struct vme_resource *vme_dma_request(struct vme_dev *vdev, u32 route)
 		/* Find an unlocked and compatible controller */
 		mutex_lock(&dma_ctrlr->mtx);
 		if (((dma_ctrlr->route_attr & route) == route) &&
-		    (dma_ctrlr->locked == 0)) {
+		    !dma_ctrlr->locked) {
 			dma_ctrlr->locked = 1;
 			mutex_unlock(&dma_ctrlr->mtx);
 			allocated_ctrlr = dma_ctrlr;
@@ -854,7 +854,7 @@ struct vme_resource *vme_dma_request(struct vme_dev *vdev, u32 route)
 	if (!allocated_ctrlr)
 		goto err_ctrlr;
 
-	resource = kmalloc(sizeof(*resource), GFP_KERNEL);
+	resource = kmalloc_obj(*resource);
 	if (!resource)
 		goto err_alloc;
 
@@ -894,7 +894,7 @@ struct vme_dma_list *vme_new_dma_list(struct vme_resource *resource)
 		return NULL;
 	}
 
-	dma_list = kmalloc(sizeof(*dma_list), GFP_KERNEL);
+	dma_list = kmalloc_obj(*dma_list);
 	if (!dma_list)
 		return NULL;
 
@@ -924,11 +924,11 @@ struct vme_dma_attr *vme_dma_pattern_attribute(u32 pattern, u32 type)
 	struct vme_dma_attr *attributes;
 	struct vme_dma_pattern *pattern_attr;
 
-	attributes = kmalloc(sizeof(*attributes), GFP_KERNEL);
+	attributes = kmalloc_obj(*attributes);
 	if (!attributes)
 		goto err_attr;
 
-	pattern_attr = kmalloc(sizeof(*pattern_attr), GFP_KERNEL);
+	pattern_attr = kmalloc_obj(*pattern_attr);
 	if (!pattern_attr)
 		goto err_pat;
 
@@ -964,11 +964,11 @@ struct vme_dma_attr *vme_dma_pci_attribute(dma_addr_t address)
 
 	/* XXX Run some sanity checks here */
 
-	attributes = kmalloc(sizeof(*attributes), GFP_KERNEL);
+	attributes = kmalloc_obj(*attributes);
 	if (!attributes)
 		goto err_attr;
 
-	pci_attr = kmalloc(sizeof(*pci_attr), GFP_KERNEL);
+	pci_attr = kmalloc_obj(*pci_attr);
 	if (!pci_attr)
 		goto err_pci;
 
@@ -1005,11 +1005,11 @@ struct vme_dma_attr *vme_dma_vme_attribute(unsigned long long address,
 	struct vme_dma_attr *attributes;
 	struct vme_dma_vme *vme_attr;
 
-	attributes = kmalloc(sizeof(*attributes), GFP_KERNEL);
+	attributes = kmalloc_obj(*attributes);
 	if (!attributes)
 		goto err_attr;
 
-	vme_attr = kmalloc(sizeof(*vme_attr), GFP_KERNEL);
+	vme_attr = kmalloc_obj(*vme_attr);
 	if (!vme_attr)
 		goto err_vme;
 
@@ -1045,7 +1045,7 @@ void vme_dma_free_attribute(struct vme_dma_attr *attributes)
 EXPORT_SYMBOL(vme_dma_free_attribute);
 
 /**
- * vme_dma_list_add - Add enty to a VME DMA list.
+ * vme_dma_list_add - Add entry to a VME DMA list.
  * @list: Pointer to VME list.
  * @src: Pointer to DMA list attribute to use as source.
  * @dest: Pointer to DMA list attribute to use as destination.
@@ -1233,7 +1233,7 @@ struct vme_error_handler *vme_register_error_handler(struct vme_bridge *bridge, 
 {
 	struct vme_error_handler *handler;
 
-	handler = kmalloc(sizeof(*handler), GFP_ATOMIC);
+	handler = kmalloc_obj(*handler, GFP_ATOMIC);
 	if (!handler)
 		return NULL;
 
@@ -1288,7 +1288,7 @@ EXPORT_SYMBOL(vme_irq_handler);
  *         already in use. Hardware specific errors also possible.
  */
 int vme_irq_request(struct vme_dev *vdev, int level, int statid,
-		    void (*callback)(int, int, void *),
+		    void (*callback)(int level, int statid, void *priv_data),
 		    void *priv_data)
 {
 	struct vme_bridge *bridge;
@@ -1365,7 +1365,7 @@ void vme_irq_free(struct vme_dev *vdev, int level, int statid)
 	bridge->irq[level - 1].count--;
 
 	/* Disable IRQ level if no more interrupts attached at this level*/
-	if (bridge->irq[level - 1].count == 0)
+	if (!bridge->irq[level - 1].count)
 		bridge->irq_set(bridge, level, 0, 1);
 
 	bridge->irq[level - 1].callback[statid].func = NULL;
@@ -1426,7 +1426,7 @@ struct vme_resource *vme_lm_request(struct vme_dev *vdev)
 {
 	struct vme_bridge *bridge;
 	struct vme_lm_resource *allocated_lm = NULL;
-	struct vme_lm_resource *lm = NULL;
+	struct vme_lm_resource *lm;
 	struct vme_resource *resource = NULL;
 
 	bridge = vdev->bridge;
@@ -1445,7 +1445,7 @@ struct vme_resource *vme_lm_request(struct vme_dev *vdev)
 
 		/* Find an unlocked controller */
 		mutex_lock(&lm->mtx);
-		if (lm->locked == 0) {
+		if (!lm->locked) {
 			lm->locked = 1;
 			mutex_unlock(&lm->mtx);
 			allocated_lm = lm;
@@ -1458,7 +1458,7 @@ struct vme_resource *vme_lm_request(struct vme_dev *vdev)
 	if (!allocated_lm)
 		goto err_lm;
 
-	resource = kmalloc(sizeof(*resource), GFP_KERNEL);
+	resource = kmalloc_obj(*resource);
 	if (!resource)
 		goto err_alloc;
 
@@ -1766,7 +1766,7 @@ int vme_register_bridge(struct vme_bridge *bridge)
 
 	mutex_lock(&vme_buses_lock);
 	for (i = 0; i < sizeof(vme_bus_numbers) * 8; i++) {
-		if ((vme_bus_numbers & (1 << i)) == 0) {
+		if (!(vme_bus_numbers & (1 << i))) {
 			vme_bus_numbers |= (1 << i);
 			bridge->num = i;
 			INIT_LIST_HEAD(&bridge->devices);
@@ -1810,7 +1810,7 @@ static int __vme_register_driver_bus(struct vme_driver *drv,
 	struct vme_dev *tmp;
 
 	for (i = 0; i < ndevs; i++) {
-		vdev = kzalloc(sizeof(*vdev), GFP_KERNEL);
+		vdev = kzalloc_obj(*vdev);
 		if (!vdev) {
 			err = -ENOMEM;
 			goto err_devalloc;
@@ -1925,7 +1925,7 @@ EXPORT_SYMBOL(vme_unregister_driver);
 
 static int vme_bus_match(struct device *dev, const struct device_driver *drv)
 {
-	struct vme_driver *vme_drv;
+	const struct vme_driver *vme_drv;
 
 	vme_drv = container_of(drv, struct vme_driver, driver);
 

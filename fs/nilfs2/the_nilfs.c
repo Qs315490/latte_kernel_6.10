@@ -56,7 +56,7 @@ struct the_nilfs *alloc_nilfs(struct super_block *sb)
 {
 	struct the_nilfs *nilfs;
 
-	nilfs = kzalloc(sizeof(*nilfs), GFP_KERNEL);
+	nilfs = kzalloc_obj(*nilfs);
 	if (!nilfs)
 		return NULL;
 
@@ -705,8 +705,6 @@ int init_nilfs(struct the_nilfs *nilfs, struct super_block *sb)
 	int blocksize;
 	int err;
 
-	down_write(&nilfs->ns_sem);
-
 	blocksize = sb_min_blocksize(sb, NILFS_MIN_BLOCK_SIZE);
 	if (!blocksize) {
 		nilfs_err(sb, "unable to set blocksize");
@@ -779,7 +777,6 @@ int init_nilfs(struct the_nilfs *nilfs, struct super_block *sb)
 	set_nilfs_init(nilfs);
 	err = 0;
  out:
-	up_write(&nilfs->ns_sem);
 	return err;
 
  failed_sbh:
@@ -880,7 +877,7 @@ nilfs_find_or_create_root(struct the_nilfs *nilfs, __u64 cno)
 	if (root)
 		return root;
 
-	new = kzalloc(sizeof(*root), GFP_KERNEL);
+	new = kzalloc_obj(*root);
 	if (!new)
 		return NULL;
 

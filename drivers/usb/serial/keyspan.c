@@ -29,11 +29,9 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-#include <linux/uaccess.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 #include <linux/usb/ezusb.h>
@@ -1187,6 +1185,10 @@ static void usa49wg_indat_callback(struct urb *urb)
 	len = 0;
 
 	while (i < urb->actual_length) {
+		if (urb->actual_length - i < 3) {
+			dev_warn_ratelimited(&urb->dev->dev, "malformed indat packet\n");
+			break;
+		}
 
 		/* Check port number from message */
 		if (data[i] >= serial->num_ports) {
@@ -2789,7 +2791,7 @@ static int keyspan_startup(struct usb_serial *serial)
 	}
 
 	/* Setup private data for serial driver */
-	s_priv = kzalloc(sizeof(struct keyspan_serial_private), GFP_KERNEL);
+	s_priv = kzalloc_obj(struct keyspan_serial_private);
 	if (!s_priv)
 		return -ENOMEM;
 
@@ -2886,7 +2888,7 @@ static int keyspan_port_probe(struct usb_serial_port *port)
 	s_priv = usb_get_serial_data(serial);
 	d_details = s_priv->device_details;
 
-	p_priv = kzalloc(sizeof(*p_priv), GFP_KERNEL);
+	p_priv = kzalloc_obj(*p_priv);
 	if (!p_priv)
 		return -ENOMEM;
 

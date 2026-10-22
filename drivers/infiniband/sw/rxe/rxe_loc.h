@@ -18,9 +18,6 @@ void rxe_av_fill_ip_info(struct rxe_av *av, struct rdma_ah_attr *attr);
 struct rxe_av *rxe_get_av(struct rxe_pkt_info *pkt, struct rxe_ah **ahp);
 
 /* rxe_cq.c */
-int rxe_cq_chk_attr(struct rxe_dev *rxe, struct rxe_cq *cq,
-		    int cqe, int comp_vector);
-
 int rxe_cq_from_init(struct rxe_dev *rxe, struct rxe_cq *cq, int cqe,
 		     int comp_vector, struct ib_udata *udata,
 		     struct rxe_create_cq_resp __user *uresp);
@@ -58,6 +55,7 @@ int rxe_mmap(struct ib_ucontext *context, struct vm_area_struct *vma);
 
 /* rxe_mr.c */
 u8 rxe_get_next_key(u32 last_key);
+void rxe_mr_init(int access, struct rxe_mr *mr);
 void rxe_mr_init_dma(int access, struct rxe_mr *mr);
 int rxe_mr_init_user(struct rxe_dev *rxe, u64 start, u64 length,
 		     int access, struct rxe_mr *mr);
@@ -69,9 +67,9 @@ int copy_data(struct rxe_pd *pd, int access, struct rxe_dma_info *dma,
 	      void *addr, int length, enum rxe_mr_copy_dir dir);
 int rxe_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
 		  int sg_nents, unsigned int *sg_offset);
-int rxe_mr_do_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
-			u64 compare, u64 swap_add, u64 *orig_val);
-int rxe_mr_do_atomic_write(struct rxe_mr *mr, u64 iova, u64 value);
+enum resp_states rxe_mr_do_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
+				     u64 compare, u64 swap_add, u64 *orig_val);
+enum resp_states rxe_mr_do_atomic_write(struct rxe_mr *mr, u64 iova, u64 value);
 struct rxe_mr *lookup_mr(struct rxe_pd *pd, int access, u32 key,
 			 enum rxe_mr_lookup_type type);
 int mr_check_range(struct rxe_mr *mr, u64 iova, size_t length);
@@ -79,6 +77,9 @@ int advance_dma_data(struct rxe_dma_info *dma, unsigned int length);
 int rxe_invalidate_mr(struct rxe_qp *qp, u32 key);
 int rxe_reg_fast_mr(struct rxe_qp *qp, struct rxe_send_wqe *wqe);
 void rxe_mr_cleanup(struct rxe_pool_elem *elem);
+
+/* defined in rxe_mr.c; used in rxe_mr.c and rxe_odp.c */
+extern spinlock_t atomic_ops_lock;
 
 /* rxe_mw.c */
 int rxe_alloc_mw(struct ib_mw *ibmw, struct ib_udata *udata);
@@ -136,6 +137,12 @@ static inline int qp_mtu(struct rxe_qp *qp)
 		return IB_MTU_4096;
 }
 
+static inline bool is_odp_mr(struct rxe_mr *mr)
+{
+	return IS_ENABLED(CONFIG_INFINIBAND_ON_DEMAND_PAGING) && mr->umem &&
+	       mr->umem->is_odp;
+}
+
 void free_rd_atomic_resource(struct resp_res *res);
 
 static inline void rxe_advance_resp_resource(struct rxe_qp *qp)
@@ -168,7 +175,6 @@ int rxe_sender(struct rxe_qp *qp);
 int rxe_receiver(struct rxe_qp *qp);
 
 /* rxe_icrc.c */
-int rxe_icrc_init(struct rxe_dev *rxe);
 int rxe_icrc_check(struct sk_buff *skb, struct rxe_pkt_info *pkt);
 void rxe_icrc_generate(struct sk_buff *skb, struct rxe_pkt_info *pkt);
 
@@ -180,5 +186,66 @@ static inline unsigned int wr_opcode_mask(int opcode, struct rxe_qp *qp)
 {
 	return rxe_wr_opcode_info[opcode].mask[qp->ibqp.qp_type];
 }
+
+/* rxe_odp.c */
+extern const struct mmu_interval_notifier_ops rxe_mn_ops;
+
+#if defined CONFIG_INFINIBAND_ON_DEMAND_PAGING
+int rxe_odp_mr_init_user(struct rxe_dev *rxe, u64 start, u64 length,
+			 u64 iova, int access_flags, struct rxe_mr *mr);
+int rxe_odp_mr_copy(struct rxe_mr *mr, u64 iova, void *addr, int length,
+		    enum rxe_mr_copy_dir dir);
+enum resp_states rxe_odp_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
+				   u64 compare, u64 swap_add, u64 *orig_val);
+int rxe_odp_flush_pmem_iova(struct rxe_mr *mr, u64 iova,
+			    unsigned int length);
+enum resp_states rxe_odp_do_atomic_write(struct rxe_mr *mr, u64 iova, u64 value);
+int rxe_ib_advise_mr(struct ib_pd *pd, enum ib_uverbs_advise_mr_advice advice,
+		     u32 flags, struct ib_sge *sg_list, u32 num_sge,
+		     struct uverbs_attr_bundle *attrs);
+#else /* CONFIG_INFINIBAND_ON_DEMAND_PAGING */
+static inline int
+rxe_odp_mr_init_user(struct rxe_dev *rxe, u64 start, u64 length, u64 iova,
+		     int access_flags, struct rxe_mr *mr)
+{
+	return -EOPNOTSUPP;
+}
+static inline int rxe_odp_mr_copy(struct rxe_mr *mr, u64 iova, void *addr,
+				  int length, enum rxe_mr_copy_dir dir)
+{
+	return -EOPNOTSUPP;
+}
+static inline enum resp_states
+rxe_odp_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
+		  u64 compare, u64 swap_add, u64 *orig_val)
+{
+	return RESPST_ERR_UNSUPPORTED_OPCODE;
+}
+static inline int rxe_odp_flush_pmem_iova(struct rxe_mr *mr, u64 iova,
+					  unsigned int length)
+{
+	return -EOPNOTSUPP;
+}
+static inline enum resp_states rxe_odp_do_atomic_write(struct rxe_mr *mr,
+						       u64 iova, u64 value)
+{
+	return RESPST_ERR_UNSUPPORTED_OPCODE;
+}
+static inline int rxe_ib_advise_mr(struct ib_pd *pd,
+				   enum ib_uverbs_advise_mr_advice advice,
+				   u32 flags, struct ib_sge *sg_list,
+				   u32 num_sge,
+				   struct uverbs_attr_bundle *attrs)
+{
+	return -EOPNOTSUPP;
+}
+
+#endif /* CONFIG_INFINIBAND_ON_DEMAND_PAGING */
+
+/* rxe-mad.c */
+int rxe_process_mad(struct ib_device *ibdev, int mad_flags, u32 port_num,
+		    const struct ib_wc *in_wc, const struct ib_grh *in_grh,
+		    const struct ib_mad *in, struct ib_mad *out,
+		    size_t *out_mad_size, u16 *out_mad_pkey_index);
 
 #endif /* RXE_LOC_H */

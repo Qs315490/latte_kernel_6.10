@@ -84,6 +84,22 @@ void dpp30_read_state(struct dpp *dpp_base, struct dcn_dpp_state *s)
 	}
 }
 
+void dpp30_read_reg_state(struct dpp *dpp_base, struct dcn_dpp_reg_state *dpp_reg_state)
+{
+	struct dcn3_dpp *dpp = TO_DCN30_DPP(dpp_base);
+
+	dpp_reg_state->recout_start = REG_READ(RECOUT_START);
+	dpp_reg_state->recout_size = REG_READ(RECOUT_SIZE);
+	dpp_reg_state->scl_horz_filter_scale_ratio = REG_READ(SCL_HORZ_FILTER_SCALE_RATIO);
+	dpp_reg_state->scl_vert_filter_scale_ratio = REG_READ(SCL_VERT_FILTER_SCALE_RATIO);
+	dpp_reg_state->scl_mode = REG_READ(SCL_MODE);
+	dpp_reg_state->cm_control = REG_READ(CM_CONTROL);
+	dpp_reg_state->dpp_control = REG_READ(DPP_CONTROL);
+	dpp_reg_state->dscl_control = REG_READ(DSCL_CONTROL);
+	dpp_reg_state->obuf_control = REG_READ(OBUF_CONTROL);
+	dpp_reg_state->mpc_size = REG_READ(MPC_SIZE);
+}
+
 /*program post scaler scs block in dpp CM*/
 void dpp3_program_post_csc(
 		struct dpp *dpp_base,
@@ -360,10 +376,10 @@ void dpp3_cnv_setup (
 
 		tbl_entry.color_space = input_color_space;
 
-		if (color_space >= COLOR_SPACE_YCBCR601)
-			select = INPUT_CSC_SELECT_ICSC;
-		else
+		if (dpp3_should_bypass_post_csc_for_colorspace(color_space))
 			select = INPUT_CSC_SELECT_BYPASS;
+		else
+			select = INPUT_CSC_SELECT_ICSC;
 
 		dpp3_program_post_csc(dpp_base, color_space, select,
 				      &tbl_entry);
@@ -396,17 +412,21 @@ void dpp3_set_cursor_attributes(
 		}
 	}
 
-	REG_UPDATE_3(CURSOR0_CONTROL,
-			CUR0_MODE, color_format,
-			CUR0_EXPANSION_MODE, 0,
-			CUR0_ROM_EN, cur_rom_en);
+	if (!dpp_base->cursor_offload)
+		REG_UPDATE_3(CURSOR0_CONTROL,
+				CUR0_MODE, color_format,
+				CUR0_EXPANSION_MODE, 0,
+				CUR0_ROM_EN, cur_rom_en);
 
 	if (color_format == CURSOR_MODE_MONO) {
 		/* todo: clarify what to program these to */
-		REG_UPDATE(CURSOR0_COLOR0,
-				CUR0_COLOR0, 0x00000000);
-		REG_UPDATE(CURSOR0_COLOR1,
-				CUR0_COLOR1, 0xFFFFFFFF);
+
+		if (!dpp_base->cursor_offload) {
+			REG_UPDATE(CURSOR0_COLOR0,
+					CUR0_COLOR0, 0x00000000);
+			REG_UPDATE(CURSOR0_COLOR1,
+					CUR0_COLOR1, 0xFFFFFFFF);
+		}
 	}
 
 	dpp_base->att.cur0_ctl.bits.expansion_mode = 0;
@@ -424,11 +444,6 @@ bool dpp3_get_optimal_number_of_taps(
 	int max_taps_y, max_taps_c;
 	int min_taps_y, min_taps_c;
 	enum lb_memory_config lb_config;
-
-	if (scl_data->viewport.width > scl_data->h_active &&
-		dpp->ctx->dc->debug.max_downscale_src_width != 0 &&
-		scl_data->viewport.width > dpp->ctx->dc->debug.max_downscale_src_width)
-		return false;
 
 	/*
 	 * Set default taps if none are provided
@@ -467,6 +482,12 @@ bool dpp3_get_optimal_number_of_taps(
 	else
 		scl_data->taps.h_taps_c = in_taps->h_taps_c;
 
+	// Avoid null data in the scl data with this early return, proceed non-adaptive calcualtion first
+	if (scl_data->viewport.width > scl_data->h_active &&
+		dpp->ctx->dc->debug.max_downscale_src_width != 0 &&
+		scl_data->viewport.width > dpp->ctx->dc->debug.max_downscale_src_width)
+		return false;
+
 	/*Ensure we can support the requested number of vtaps*/
 	min_taps_y = dc_fixpt_ceil(scl_data->ratios.vert);
 	min_taps_c = dc_fixpt_ceil(scl_data->ratios.vert_c);
@@ -496,17 +517,26 @@ bool dpp3_get_optimal_number_of_taps(
 	else if (max_taps_c < min_taps_c)
 		return false;
 
-	if (scl_data->taps.v_taps > max_taps_y)
-		scl_data->taps.v_taps = max_taps_y;
+	{
+		uint32_t max_supported_taps_y = (uint32_t)max_taps_y;
+		uint32_t max_supported_taps_c = (uint32_t)max_taps_c;
 
-	if (scl_data->taps.v_taps_c > max_taps_c)
-		scl_data->taps.v_taps_c = max_taps_c;
+		if (scl_data->taps.v_taps > max_supported_taps_y)
+			scl_data->taps.v_taps = max_supported_taps_y;
+
+		if (scl_data->taps.v_taps_c > max_supported_taps_c)
+			scl_data->taps.v_taps_c = max_supported_taps_c;
+	}
 
 	if (!dpp->ctx->dc->debug.always_scale) {
-		if (IDENTITY_RATIO(scl_data->ratios.horz))
+		if (IDENTITY_RATIO(scl_data->ratios.horz)) {
 			scl_data->taps.h_taps = 1;
-		if (IDENTITY_RATIO(scl_data->ratios.vert))
+			scl_data->taps.h_taps_c = 1;
+		}
+		if (IDENTITY_RATIO(scl_data->ratios.vert)) {
 			scl_data->taps.v_taps = 1;
+			scl_data->taps.v_taps_c = 1;
+		}
 		if (IDENTITY_RATIO(scl_data->ratios.horz_c))
 			scl_data->taps.h_taps_c = 1;
 		if (IDENTITY_RATIO(scl_data->ratios.vert_c))
@@ -518,7 +548,7 @@ bool dpp3_get_optimal_number_of_taps(
 
 static void dpp3_deferred_update(struct dpp *dpp_base)
 {
-	int bypass_state;
+	uint32_t bypass_state;
 	struct dcn3_dpp *dpp = TO_DCN30_DPP(dpp_base);
 
 	if (dpp_base->deferred_reg_writes.bits.disable_dscl) {
@@ -573,13 +603,11 @@ static void dpp3_power_on_blnd_lut(
 		if (power_on) {
 			REG_UPDATE(CM_MEM_PWR_CTRL, BLNDGAM_MEM_PWR_FORCE, 0);
 			REG_WAIT(CM_MEM_PWR_STATUS, BLNDGAM_MEM_PWR_STATE, 0, 1, 5);
+			dpp_base->deferred_reg_writes.bits.disable_blnd_lut = false;
 		} else {
 			dpp_base->ctx->dc->optimized_required = true;
 			dpp_base->deferred_reg_writes.bits.disable_blnd_lut = true;
 		}
-	} else {
-		REG_SET(CM_MEM_PWR_CTRL, 0,
-				BLNDGAM_MEM_PWR_FORCE, power_on == true ? 0 : 1);
 	}
 }
 
@@ -593,6 +621,7 @@ static void dpp3_power_on_hdr3dlut(
 		if (power_on) {
 			REG_UPDATE(CM_MEM_PWR_CTRL2, HDR3DLUT_MEM_PWR_FORCE, 0);
 			REG_WAIT(CM_MEM_PWR_STATUS2, HDR3DLUT_MEM_PWR_STATE, 0, 1, 5);
+			dpp_base->deferred_reg_writes.bits.disable_3dlut = false;
 		} else {
 			dpp_base->ctx->dc->optimized_required = true;
 			dpp_base->deferred_reg_writes.bits.disable_3dlut = true;
@@ -610,6 +639,7 @@ static void dpp3_power_on_shaper(
 		if (power_on) {
 			REG_UPDATE(CM_MEM_PWR_CTRL2, SHAPER_MEM_PWR_FORCE, 0);
 			REG_WAIT(CM_MEM_PWR_STATUS2, SHAPER_MEM_PWR_STATE, 0, 1, 5);
+			dpp_base->deferred_reg_writes.bits.disable_shaper = false;
 		} else {
 			dpp_base->ctx->dc->optimized_required = true;
 			dpp_base->deferred_reg_writes.bits.disable_shaper = true;
@@ -789,8 +819,7 @@ static bool dpp3_program_blnd_lut(struct dpp *dpp_base,
 
 	if (params == NULL) {
 		REG_SET(CM_BLNDGAM_CONTROL, 0, CM_BLNDGAM_MODE, 0);
-		if (dpp_base->ctx->dc->debug.enable_mem_low_power.bits.cm)
-			dpp3_power_on_blnd_lut(dpp_base, false);
+		dpp3_power_on_blnd_lut(dpp_base, false);
 		return false;
 	}
 
@@ -1203,8 +1232,7 @@ static bool dpp3_program_shaper(struct dpp *dpp_base,
 
 	if (params == NULL) {
 		REG_SET(CM_SHAPER_CONTROL, 0, CM_SHAPER_LUT_MODE, 0);
-		if (dpp_base->ctx->dc->debug.enable_mem_low_power.bits.cm)
-			dpp3_power_on_shaper(dpp_base, false);
+		dpp3_power_on_shaper(dpp_base, false);
 		return false;
 	}
 
@@ -1287,6 +1315,7 @@ static void dpp3_set_3dlut_mode(
 		bool is_color_channel_12bits,
 		bool is_lut_size17x17x17)
 {
+	(void)is_color_channel_12bits;
 	uint32_t lut_mode;
 	struct dcn3_dpp *dpp = TO_DCN30_DPP(dpp_base);
 
@@ -1398,8 +1427,7 @@ static bool dpp3_program_3dlut(struct dpp *dpp_base,
 
 	if (params == NULL) {
 		dpp3_set_3dlut_mode(dpp_base, LUT_BYPASS, false, false);
-		if (dpp_base->ctx->dc->debug.enable_mem_low_power.bits.cm)
-			dpp3_power_on_hdr3dlut(dpp_base, false);
+		dpp3_power_on_hdr3dlut(dpp_base, false);
 		return false;
 	}
 
@@ -1496,6 +1524,7 @@ static struct dpp_funcs dcn30_dpp_funcs = {
 	.dpp_dppclk_control		= dpp1_dppclk_control,
 	.dpp_set_hdr_multiplier		= dpp3_set_hdr_multiplier,
 	.dpp_get_gamut_remap		= dpp3_cm_get_gamut_remap,
+	.dpp_force_disable_cursor 	= dpp_force_disable_cursor,
 };
 
 
@@ -1525,3 +1554,18 @@ bool dpp3_construct(
 	return true;
 }
 
+bool dpp3_should_bypass_post_csc_for_colorspace(enum dc_color_space dc_color_space)
+{
+	switch (dc_color_space) {
+	case COLOR_SPACE_UNKNOWN:
+	case COLOR_SPACE_SRGB:
+	case COLOR_SPACE_XR_RGB:
+	case COLOR_SPACE_SRGB_LIMITED:
+	case COLOR_SPACE_MSREF_SCRGB:
+	case COLOR_SPACE_2020_RGB_FULLRANGE:
+	case COLOR_SPACE_2020_RGB_LIMITEDRANGE:
+		return true;
+	default:
+		return false;
+	}
+}

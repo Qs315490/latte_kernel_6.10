@@ -29,6 +29,7 @@
 #include "hw_sequencer_private.h"
 
 struct dc;
+struct dc_underflow_debug_data;
 
 void dcn30_init_hw(struct dc *dc);
 void dcn30_program_all_writeback_pipes_in_tree(
@@ -71,6 +72,19 @@ void dcn30_set_avmute(struct pipe_ctx *pipe_ctx, bool enable);
 void dcn30_update_info_frame(struct pipe_ctx *pipe_ctx);
 void dcn30_program_dmdata_engine(struct pipe_ctx *pipe_ctx);
 
+enum dc_status dcn30_setup_hdmi_frl_link(
+		struct dc_link *link,
+		int hpo_inst,
+		enum clock_source_id frl_phy_clock_source_id);
+void dcn30_hw_set_fva_vrr_adj(struct dc *dc, struct pipe_ctx **pipe_ctx, int num_pipes,
+		struct fva_adj *fva_adj,
+		struct dc_crtc_timing_adjust *vrr_adj);
+
+int dcn30_hw_get_max_fva_factor(struct dc *dc,
+		struct pipe_ctx *pipe_ctx,
+		struct dc_crtc_timing *timing,
+		unsigned int max_pixel_clock);
+
 bool dcn30_does_plane_fit_in_mall(struct dc *dc,
 		unsigned int pitch,
 		unsigned int height,
@@ -97,5 +111,9 @@ void dcn30_prepare_bandwidth(struct dc *dc,
 	struct dc_state *context);
 
 void dcn30_wait_for_all_pending_updates(const struct pipe_ctx *pipe_ctx);
+
+void dcn30_get_underflow_debug_data(const struct dc *dc,
+	struct timing_generator *tg,
+	struct dc_underflow_debug_data *out_data);
 
 #endif /* __DC_HWSS_DCN30_H__ */

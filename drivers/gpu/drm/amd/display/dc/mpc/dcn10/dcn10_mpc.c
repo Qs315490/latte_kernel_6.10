@@ -118,9 +118,7 @@ void mpc1_assert_idle_mpcc(struct mpc *mpc, int id)
 
 struct mpcc *mpc1_get_mpcc(struct mpc *mpc, int mpcc_id)
 {
-	struct dcn10_mpc *mpc10 = TO_DCN10_MPC(mpc);
-
-	ASSERT(mpcc_id < mpc10->num_mpcc);
+	ASSERT(mpcc_id < TO_DCN10_MPC(mpc)->num_mpcc);
 	return &(mpc->mpcc_array[mpcc_id]);
 }
 
@@ -140,22 +138,6 @@ struct mpcc *mpc1_get_mpcc_for_dpp(struct mpc_tree *tree, int dpp_id)
 		tmp_mpcc = tmp_mpcc->mpcc_bot;
 	}
 	return NULL;
-}
-
-bool mpc1_is_mpcc_idle(struct mpc *mpc, int mpcc_id)
-{
-	struct dcn10_mpc *mpc10 = TO_DCN10_MPC(mpc);
-	unsigned int top_sel;
-	unsigned int opp_id;
-	unsigned int idle;
-
-	REG_GET(MPCC_TOP_SEL[mpcc_id], MPCC_TOP_SEL, &top_sel);
-	REG_GET(MPCC_OPP_ID[mpcc_id],  MPCC_OPP_ID, &opp_id);
-	REG_GET(MPCC_STATUS[mpcc_id],  MPCC_IDLE,   &idle);
-	if (top_sel == 0xf && opp_id == 0xf && idle)
-		return true;
-	else
-		return false;
 }
 
 void mpc1_assert_mpcc_idle_before_connect(struct mpc *mpc, int mpcc_id)
@@ -393,7 +375,7 @@ void mpc1_mpc_init(struct mpc *mpc)
 void mpc1_mpc_init_single_inst(struct mpc *mpc, unsigned int mpcc_id)
 {
 	struct dcn10_mpc *mpc10 = TO_DCN10_MPC(mpc);
-	int opp_id;
+	uint32_t opp_id;
 
 	REG_GET(MPCC_OPP_ID[mpcc_id], MPCC_OPP_ID, &opp_id);
 
@@ -440,7 +422,7 @@ void mpc1_init_mpcc_list_from_hw(
 
 				if (out_mux == mpcc_id)
 					tree->opp_list = mpcc;
-				if (bot_sel != 0xf && bot_sel < mpc10->num_mpcc) {
+				if (bot_sel != 0xf && bot_sel < (unsigned int)mpc10->num_mpcc) {
 					bot_mpcc_id = bot_sel;
 					REG_GET(MPCC_OPP_ID[bot_mpcc_id],  MPCC_OPP_ID,  &opp_id);
 					REG_GET(MPCC_TOP_SEL[bot_mpcc_id], MPCC_TOP_SEL, &top_sel);

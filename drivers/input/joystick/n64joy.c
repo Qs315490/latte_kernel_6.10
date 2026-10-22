@@ -216,7 +216,7 @@ static void n64joy_close(struct input_dev *dev)
 	guard(mutex)(&priv->n64joy_mutex);
 
 	if (!--priv->n64joy_opened)
-		del_timer_sync(&priv->timer);
+		timer_delete_sync(&priv->timer);
 }
 
 static const u64 __initconst scandata[] ____cacheline_aligned = {
@@ -243,7 +243,7 @@ static int __init n64joy_probe(struct platform_device *pdev)
 	int err = 0;
 	u32 i, j, found = 0;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 	mutex_init(&priv->n64joy_mutex);

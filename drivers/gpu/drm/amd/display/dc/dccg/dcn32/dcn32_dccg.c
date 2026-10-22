@@ -26,6 +26,7 @@
 #include "reg_helper.h"
 #include "core_types.h"
 #include "dcn32_dccg.h"
+#include "dcn20/dcn20_dccg.h"
 
 #define TO_DCN_DCCG(dccg)\
 	container_of(dccg, struct dcn_dccg, base)
@@ -264,6 +265,7 @@ static void dccg32_get_dccg_ref_freq(struct dccg *dccg,
 		unsigned int xtalin_freq_inKhz,
 		unsigned int *dccg_ref_freq_inKhz)
 {
+	(void)dccg;
 	/*
 	 * Assume refclk is sourced from xtalin
 	 * expect 100MHz
@@ -327,7 +329,75 @@ static void dccg32_otg_drop_pixel(struct dccg *dccg,
 			OTG_DROP_PIXEL[otg_inst], 1);
 }
 
+static void dccg32_set_hdmistreamclk(struct dccg *dccg,
+				     enum streamclk_source src,
+				     uint32_t otg_inst)
+{
+	struct dcn_dccg *dccg_dcn = TO_DCN_DCCG(dccg);
+
+	/* set the dtbclk_p source */
+	/* always program refclk as DTBCLK. No use-case expected to require DPREFCLK as refclk */
+	dccg32_set_dtbclk_p_src(dccg, DTBCLK0, otg_inst);
+
+	if (src == REFCLK) {
+		REG_UPDATE_2(HDMISTREAMCLK_CNTL,
+				HDMISTREAMCLK0_EN, 0,             /* SEL_REFCLK */
+				HDMISTREAMCLK0_DTO_FORCE_DIS, 1); /* DTO_FORCE_BYPASS */
+	} else {
+		REG_UPDATE_3(HDMISTREAMCLK_CNTL,
+				HDMISTREAMCLK0_EN, 1,             /* selects one of the dtbclk_p as per HDMISTREAMCLK0_SRC_SEL */
+				HDMISTREAMCLK0_SRC_SEL, otg_inst, /* Selects dtbclk_p as source for hdmistreamclk */
+				HDMISTREAMCLK0_DTO_FORCE_DIS, 1); /* DTO_FORCE_BYPASS */
+	}
+}
+
+static void dccg32_enable_hdmicharclk(struct dccg *dccg, int hpo_inst,
+				      int phypll_inst)
+{
+	struct dcn_dccg *dccg_dcn = TO_DCN_DCCG(dccg);
+
+	ASSERT(hpo_inst >= 0 && phypll_inst >= 0);
+	REG_UPDATE_2(HDMICHARCLK_CLOCK_CNTL[hpo_inst],
+			HDMICHARCLK0_EN, 1,
+			HDMICHARCLK0_SRC_SEL, phypll_inst);
+
+	/* Enable FORCE_EN for SYMCLK */
+	switch (phypll_inst) {
+	case 0:
+		REG_UPDATE_2(PHYASYMCLK_CLOCK_CNTL,
+				PHYASYMCLK_FORCE_EN, 1,
+				PHYASYMCLK_FORCE_SRC_SEL, 1);
+		break;
+	case 1:
+		REG_UPDATE_2(PHYBSYMCLK_CLOCK_CNTL,
+				PHYBSYMCLK_FORCE_EN, 1,
+				PHYBSYMCLK_FORCE_SRC_SEL, 1);
+		break;
+	case 2:
+		REG_UPDATE_2(PHYCSYMCLK_CLOCK_CNTL,
+				PHYCSYMCLK_FORCE_EN, 1,
+				PHYCSYMCLK_FORCE_SRC_SEL, 1);
+		break;
+	case 3:
+		REG_UPDATE_2(PHYDSYMCLK_CLOCK_CNTL,
+				PHYDSYMCLK_FORCE_EN, 1,
+				PHYDSYMCLK_FORCE_SRC_SEL, 1);
+		break;
+	case 4:
+		REG_UPDATE_2(PHYESYMCLK_CLOCK_CNTL,
+				PHYESYMCLK_FORCE_EN, 1,
+				PHYESYMCLK_FORCE_SRC_SEL, 1);
+		break;
+	default:
+		BREAK_TO_DEBUGGER();
+		return;
+	}
+}
+
 static const struct dccg_funcs dccg32_funcs = {
+	.enable_hdmicharclk = dccg32_enable_hdmicharclk,
+	.disable_hdmicharclk = dccg3_disable_hdmicharclk,
+	.set_hdmistreamclk = dccg32_set_hdmistreamclk,
 	.update_dpp_dto = dccg2_update_dpp_dto,
 	.get_dccg_ref_freq = dccg32_get_dccg_ref_freq,
 	.dccg_init = dccg31_init,
@@ -347,6 +417,10 @@ static const struct dccg_funcs dccg32_funcs = {
 	.get_pixel_rate_div = dccg32_get_pixel_rate_div,
 	.trigger_dio_fifo_resync = dccg32_trigger_dio_fifo_resync,
 	.set_dtbclk_p_src = dccg32_set_dtbclk_p_src,
+	.refclk_setup = dccg2_refclk_setup, /* Deprecated - for backward compatibility only */
+	.allow_clock_gating = dccg2_allow_clock_gating,
+	.enable_memory_low_power = dccg2_enable_memory_low_power,
+	.is_s0i3_golden_init_wa_done = dccg2_is_s0i3_golden_init_wa_done /* Deprecated - for backward compatibility only */
 };
 
 struct dccg *dccg32_create(
@@ -355,7 +429,7 @@ struct dccg *dccg32_create(
 	const struct dccg_shift *dccg_shift,
 	const struct dccg_mask *dccg_mask)
 {
-	struct dcn_dccg *dccg_dcn = kzalloc(sizeof(*dccg_dcn), GFP_KERNEL);
+	struct dcn_dccg *dccg_dcn = kzalloc_obj(*dccg_dcn);
 	struct dccg *base;
 
 	if (dccg_dcn == NULL) {

@@ -365,11 +365,6 @@ unsigned sizeof_namespace_label(struct nvdimm_drvdata *ndd);
 	for (res = (ndd)->dpa.child, next = res ? res->sibling : NULL; \
 			res; res = next, next = next ? next->sibling : NULL)
 
-struct nd_percpu_lane {
-	int count;
-	spinlock_t lock;
-};
-
 enum nd_label_flags {
 	ND_LABEL_REAP,
 };
@@ -400,6 +395,10 @@ struct nd_mapping {
 	struct nvdimm_drvdata *ndd;
 };
 
+struct nd_lane {
+	struct mutex lock; /* serialize lane access */
+} ____cacheline_aligned_in_smp;
+
 struct nd_region {
 	struct device dev;
 	struct ida ns_ida;
@@ -420,7 +419,7 @@ struct nd_region {
 	struct kernfs_node *bb_state;
 	struct badblocks bb;
 	struct nd_interleave_set *nd_set;
-	struct nd_percpu_lane __percpu *lane;
+	struct nd_lane *lane;
 	int (*flush)(struct nd_region *nd_region, struct bio *bio);
 	struct nd_mapping mapping[] __counted_by(ndr_mappings);
 };
@@ -632,6 +631,12 @@ u64 nd_region_interleave_set_cookie(struct nd_region *nd_region,
 u64 nd_region_interleave_set_altcookie(struct nd_region *nd_region);
 void nvdimm_bus_lock(struct device *dev);
 void nvdimm_bus_unlock(struct device *dev);
+DEFINE_CLASS(nvdimm_bus, struct device *,
+	     if (_T) nvdimm_bus_unlock(_T),
+	     ({ if (_T) nvdimm_bus_lock(_T); _T; }),
+	     struct device *_T);
+DEFINE_CLASS_IS_GUARD(nvdimm_bus);
+
 bool is_nvdimm_bus_locked(struct device *dev);
 void nvdimm_check_and_set_ro(struct gendisk *disk);
 void nvdimm_drvdata_release(struct kref *kref);
@@ -673,7 +678,7 @@ static inline bool is_bad_pmem(struct badblocks *bb, sector_t sector,
 {
 	if (bb->count) {
 		sector_t first_bad;
-		int num_bad;
+		sector_t num_bad;
 
 		return !!badblocks_check(bb, sector, len / 512, &first_bad,
 				&num_bad);

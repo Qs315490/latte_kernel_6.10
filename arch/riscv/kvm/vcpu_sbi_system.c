@@ -13,7 +13,6 @@ static int kvm_sbi_ext_susp_handler(struct kvm_vcpu *vcpu, struct kvm_run *run,
 				    struct kvm_vcpu_sbi_return *retdata)
 {
 	struct kvm_cpu_context *cp = &vcpu->arch.guest_context;
-	struct kvm_cpu_context *reset_cntx;
 	unsigned long funcid = cp->a6;
 	unsigned long hva, i;
 	struct kvm_vcpu *tmp;
@@ -36,6 +35,20 @@ static int kvm_sbi_ext_susp_handler(struct kvm_vcpu *vcpu, struct kvm_run *run,
 			return 0;
 		}
 
+		/*
+		 * Check that all other vCPUs are stopped before entering
+		 * system suspend.
+		 *
+		 * There is a known TOCTOU race here: a concurrent HSM
+		 * HART_START on another vCPU can start a vCPU after it
+		 * has already passed this check, violating the invariant.
+		 *
+		 * We do not fix this because:
+		 * 1. Triggering the race requires a pathological guest.
+		 * 2. Only guest state is at risk, not host integrity.
+		 * 3. Userspace can double-check vCPU states before
+		 *    proceeding with suspend.
+		 */
 		kvm_for_each_vcpu(i, tmp, vcpu->kvm) {
 			if (tmp == vcpu)
 				continue;
@@ -45,19 +58,10 @@ static int kvm_sbi_ext_susp_handler(struct kvm_vcpu *vcpu, struct kvm_run *run,
 			}
 		}
 
-		spin_lock(&vcpu->arch.reset_cntx_lock);
-		reset_cntx = &vcpu->arch.guest_reset_context;
-		reset_cntx->sepc = cp->a1;
-		reset_cntx->a0 = vcpu->vcpu_id;
-		reset_cntx->a1 = cp->a2;
-		spin_unlock(&vcpu->arch.reset_cntx_lock);
-
-		kvm_make_request(KVM_REQ_VCPU_RESET, vcpu);
+		kvm_riscv_vcpu_sbi_request_reset(vcpu, cp->a1, cp->a2);
 
 		/* userspace provides the suspend implementation */
-		kvm_riscv_vcpu_sbi_forward(vcpu, run);
-		retdata->uexit = true;
-		break;
+		return kvm_riscv_vcpu_sbi_forward_handler(vcpu, run, retdata);
 	default:
 		retdata->err_val = SBI_ERR_NOT_SUPPORTED;
 		break;

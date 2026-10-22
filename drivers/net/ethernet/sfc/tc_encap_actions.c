@@ -11,6 +11,8 @@
 #include "tc_encap_actions.h"
 #include "tc.h"
 #include "mae.h"
+#include <net/flow.h>
+#include <net/inet_dscp.h>
 #include <net/vxlan.h>
 #include <net/geneve.h>
 #include <net/netevent.h>
@@ -99,7 +101,7 @@ static int efx_bind_neigh(struct efx_nic *efx,
 	case EFX_ENCAP_TYPE_GENEVE:
 		flow4.flowi4_proto = IPPROTO_UDP;
 		flow4.fl4_dport = encap->key.tp_dst;
-		flow4.flowi4_tos = encap->key.tos;
+		flow4.flowi4_dscp = inet_dsfield_to_dscp(encap->key.tos);
 		flow4.daddr = encap->key.u.ipv4.dst;
 		flow4.saddr = encap->key.u.ipv4.src;
 		break;
@@ -118,7 +120,7 @@ static int efx_bind_neigh(struct efx_nic *efx,
 		return -EOPNOTSUPP;
 	}
 
-	neigh = kzalloc(sizeof(*neigh), GFP_KERNEL_ACCOUNT);
+	neigh = kzalloc_obj(*neigh, GFP_KERNEL_ACCOUNT);
 	if (!neigh)
 		return -ENOMEM;
 	neigh->net = get_net_track(net, &neigh->ns_tracker, GFP_KERNEL_ACCOUNT);
@@ -147,8 +149,7 @@ static int efx_bind_neigh(struct efx_nic *efx,
 #if IS_ENABLED(CONFIG_IPV6)
 			struct dst_entry *dst;
 
-			dst = ipv6_stub->ipv6_dst_lookup_flow(net, NULL, &flow6,
-							      NULL);
+			dst = ip6_dst_lookup_flow(net, NULL, &flow6, NULL);
 			rc = PTR_ERR_OR_ZERO(dst);
 			if (rc) {
 				NL_SET_ERR_MSG_MOD(extack, "Failed to lookup route for IPv6 encap");
@@ -442,7 +443,7 @@ static void efx_tc_update_encap(struct efx_nic *efx,
 			rule = container_of(acts, struct efx_tc_flow_rule, acts);
 			if (rule->fallback)
 				fallback = rule->fallback;
-			else /* fallback fallback: deliver to PF */
+			else /* fallback of the fallback: deliver to PF */
 				fallback = &efx->tc->facts.pf;
 			rc = efx_mae_update_rule(efx, fallback->fw_id,
 						 rule->fw_id);
@@ -529,7 +530,7 @@ static int efx_neigh_event(struct efx_nic *efx, struct neighbour *n)
 	if (n->tbl == &arp_tbl) {
 		keysize = sizeof(keys.dst_ip);
 #if IS_ENABLED(CONFIG_IPV6)
-	} else if (n->tbl == ipv6_stub->nd_tbl) {
+	} else if (n->tbl == &nd_tbl) {
 		ipv6 = true;
 		keysize = sizeof(keys.dst_ip6);
 #endif
@@ -630,7 +631,7 @@ struct efx_tc_encap_action *efx_tc_flower_create_encap_md(
 				       info->mode);
 		return ERR_PTR(-EOPNOTSUPP);
 	}
-	encap = kzalloc(sizeof(*encap), GFP_KERNEL_ACCOUNT);
+	encap = kzalloc_obj(*encap, GFP_KERNEL_ACCOUNT);
 	if (!encap)
 		return ERR_PTR(-ENOMEM);
 	encap->type = type;

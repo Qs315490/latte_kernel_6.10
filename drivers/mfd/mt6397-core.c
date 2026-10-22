@@ -84,6 +84,12 @@ static const struct resource mt6359_keys_resources[] = {
 	DEFINE_RES_IRQ_NAMED(MT6359_IRQ_HOMEKEY_R, "homekey_r"),
 };
 
+static const struct resource mt6359_accdet_resources[] = {
+	DEFINE_RES_IRQ_NAMED(MT6359_IRQ_ACCDET, "accdet_irq"),
+	DEFINE_RES_IRQ_NAMED(MT6359_IRQ_ACCDET_EINT0, "accdet_eint0"),
+	DEFINE_RES_IRQ_NAMED(MT6359_IRQ_ACCDET_EINT1, "accdet_eint1"),
+};
+
 static const struct resource mt6323_keys_resources[] = {
 	DEFINE_RES_IRQ_NAMED(MT6323_IRQ_STATUS_PWRKEY, "powerkey"),
 	DEFINE_RES_IRQ_NAMED(MT6323_IRQ_STATUS_FCHRKEY, "homekey"),
@@ -130,7 +136,7 @@ static const struct mfd_cell mt6323_devs[] = {
 		.name = "mt6323-led",
 		.of_compatible = "mediatek,mt6323-led"
 	}, {
-		.name = "mtk-pmic-keys",
+		.name = "mt6323-keys",
 		.num_resources = ARRAY_SIZE(mt6323_keys_resources),
 		.resources = mt6323_keys_resources,
 		.of_compatible = "mediatek,mt6323-keys"
@@ -147,7 +153,7 @@ static const struct mfd_cell mt6328_devs[] = {
 		.name = "mt6328-regulator",
 		.of_compatible = "mediatek,mt6328-regulator"
 	}, {
-		.name = "mtk-pmic-keys",
+		.name = "mt6328-keys",
 		.num_resources = ARRAY_SIZE(mt6328_keys_resources),
 		.resources = mt6328_keys_resources,
 		.of_compatible = "mediatek,mt6328-keys"
@@ -169,7 +175,7 @@ static const struct mfd_cell mt6357_devs[] = {
 		.name = "mt6357-sound",
 		.of_compatible = "mediatek,mt6357-sound"
 	}, {
-		.name = "mtk-pmic-keys",
+		.name = "mt6357-keys",
 		.num_resources = ARRAY_SIZE(mt6357_keys_resources),
 		.resources = mt6357_keys_resources,
 		.of_compatible = "mediatek,mt6357-keys"
@@ -190,7 +196,7 @@ static const struct mfd_cell mt6331_mt6332_devs[] = {
 		.name = "mt6332-regulator",
 		.of_compatible = "mediatek,mt6332-regulator"
 	}, {
-		.name = "mtk-pmic-keys",
+		.name = "mt6331-keys",
 		.num_resources = ARRAY_SIZE(mt6331_keys_resources),
 		.resources = mt6331_keys_resources,
 		.of_compatible = "mediatek,mt6331-keys"
@@ -234,10 +240,16 @@ static const struct mfd_cell mt6359_devs[] = {
 	},
 	{ .name = "mt6359-sound", },
 	{
-		.name = "mtk-pmic-keys",
+		.name = "mt6359-keys",
 		.num_resources = ARRAY_SIZE(mt6359_keys_resources),
 		.resources = mt6359_keys_resources,
 		.of_compatible = "mediatek,mt6359-keys"
+	},
+	{
+		.name = "mt6359-accdet",
+		.of_compatible = "mediatek,mt6359-accdet",
+		.num_resources = ARRAY_SIZE(mt6359_accdet_resources),
+		.resources = mt6359_accdet_resources,
 	},
 };
 
@@ -260,7 +272,7 @@ static const struct mfd_cell mt6397_devs[] = {
 		.name = "mt6397-pinctrl",
 		.of_compatible = "mediatek,mt6397-pinctrl",
 	}, {
-		.name = "mtk-pmic-keys",
+		.name = "mt6397-keys",
 		.num_resources = ARRAY_SIZE(mt6397_keys_resources),
 		.resources = mt6397_keys_resources,
 		.of_compatible = "mediatek,mt6397-keys"
@@ -285,7 +297,7 @@ static const struct chip_data mt6323_core = {
 
 static const struct chip_data mt6328_core = {
 	.cid_addr = MT6328_HWCID,
-	.cid_shift = 0,
+	.cid_shift = 8,
 	.cells = mt6328_devs,
 	.cell_size = ARRAY_SIZE(mt6328_devs),
 	.irq_init = mt6397_irq_init,
@@ -301,7 +313,7 @@ static const struct chip_data mt6357_core = {
 
 static const struct chip_data mt6331_mt6332_core = {
 	.cid_addr = MT6331_HWCID,
-	.cid_shift = 0,
+	.cid_shift = 8,
 	.cells = mt6331_mt6332_devs,
 	.cell_size = ARRAY_SIZE(mt6331_mt6332_devs),
 	.irq_init = mt6397_irq_init,

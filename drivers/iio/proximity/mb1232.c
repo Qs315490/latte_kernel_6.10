@@ -14,7 +14,6 @@
 #include <linux/err.h>
 #include <linux/i2c.h>
 #include <linux/delay.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 
@@ -42,11 +41,6 @@ struct mb1232_data {
 	 */
 	struct completion	ranging;
 	int			irqnr;
-	/* Ensure correct alignment of data to push to IIO buffer */
-	struct {
-		s16 distance;
-		aligned_s64 ts;
-	} scan;
 };
 
 static irqreturn_t mb1232_handle_irq(int irq, void *dev_id)
@@ -120,13 +114,17 @@ static irqreturn_t mb1232_trigger_handler(int irq, void *p)
 	struct iio_poll_func *pf = p;
 	struct iio_dev *indio_dev = pf->indio_dev;
 	struct mb1232_data *data = iio_priv(indio_dev);
+	struct {
+		s16 distance;
+		aligned_s64 ts;
+	} scan = { };
 
-	data->scan.distance = mb1232_read_distance(data);
-	if (data->scan.distance < 0)
+	scan.distance = mb1232_read_distance(data);
+	if (scan.distance < 0)
 		goto err;
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan,
-					   pf->timestamp);
+	iio_push_to_buffers_with_ts(indio_dev, &scan, sizeof(scan),
+				    pf->timestamp);
 
 err:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -239,19 +237,19 @@ static const struct of_device_id of_mb1232_match[] = {
 	{ .compatible = "maxbotix,mb1242", },
 	{ .compatible = "maxbotix,mb7040", },
 	{ .compatible = "maxbotix,mb7137", },
-	{},
+	{ }
 };
 
 MODULE_DEVICE_TABLE(of, of_mb1232_match);
 
 static const struct i2c_device_id mb1232_id[] = {
-	{ "maxbotix-mb1202", },
-	{ "maxbotix-mb1212", },
-	{ "maxbotix-mb1222", },
-	{ "maxbotix-mb1232", },
-	{ "maxbotix-mb1242", },
-	{ "maxbotix-mb7040", },
-	{ "maxbotix-mb7137", },
+	{ .name = "maxbotix-mb1202" },
+	{ .name = "maxbotix-mb1212" },
+	{ .name = "maxbotix-mb1222" },
+	{ .name = "maxbotix-mb1232" },
+	{ .name = "maxbotix-mb1242" },
+	{ .name = "maxbotix-mb7040" },
+	{ .name = "maxbotix-mb7137" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mb1232_id);

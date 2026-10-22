@@ -47,6 +47,9 @@ static enum dc_irq_source to_dal_irq_source_dcn315(
 		uint32_t src_id,
 		uint32_t ext_id)
 {
+	(void)irq_service;
+	(void)src_id;
+	(void)ext_id;
 	switch (src_id) {
 	case DCN_1_0__SRCID__DC_D1_OTG_VSTARTUP:
 		return DC_IRQ_SOURCE_VBLANK1;
@@ -135,36 +138,9 @@ static enum dc_irq_source to_dal_irq_source_dcn315(
 	}
 }
 
-static bool hpd_ack(
-	struct irq_service *irq_service,
-	const struct irq_source_info *info)
-{
-	uint32_t addr = info->status_reg;
-	uint32_t value = dm_read_reg(irq_service->ctx, addr);
-	uint32_t current_status =
-		get_reg_field_value(
-			value,
-			HPD0_DC_HPD_INT_STATUS,
-			DC_HPD_SENSE_DELAYED);
-
-	dal_irq_service_ack_generic(irq_service, info);
-
-	value = dm_read_reg(irq_service->ctx, info->enable_reg);
-
-	set_reg_field_value(
-		value,
-		current_status ? 0 : 1,
-		HPD0_DC_HPD_INT_CONTROL,
-		DC_HPD_INT_POLARITY);
-
-	dm_write_reg(irq_service->ctx, info->enable_reg, value);
-
-	return true;
-}
-
 static struct irq_source_info_funcs hpd_irq_info_funcs  = {
 	.set = NULL,
-	.ack = hpd_ack
+	.ack = hpd0_ack
 };
 
 static struct irq_source_info_funcs hpd_rx_irq_info_funcs = {
@@ -218,7 +194,7 @@ static struct irq_source_info_funcs vline0_irq_info_funcs = {
 		block ## reg_num ## _ ## reg1 ## __ ## mask1 ## _MASK,\
 	.enable_value = {\
 		block ## reg_num ## _ ## reg1 ## __ ## mask1 ## _MASK,\
-		~block ## reg_num ## _ ## reg1 ## __ ## mask1 ## _MASK \
+		(uint32_t)~block ## reg_num ## _ ## reg1 ## __ ## mask1 ## _MASK \
 	},\
 	.ack_reg = SRI(reg2, block, reg_num),\
 	.ack_mask = \
@@ -232,7 +208,7 @@ static struct irq_source_info_funcs vline0_irq_info_funcs = {
 		reg1 ## __ ## mask1 ## _MASK,\
 	.enable_value = {\
 		reg1 ## __ ## mask1 ## _MASK,\
-		~reg1 ## __ ## mask1 ## _MASK \
+		(uint32_t)~reg1 ## __ ## mask1 ## _MASK \
 	},\
 	.ack_reg = SRI_DMUB(reg2),\
 	.ack_mask = \
@@ -427,8 +403,7 @@ static void dcn315_irq_construct(
 struct irq_service *dal_irq_service_dcn315_create(
 	struct irq_service_init_data *init_data)
 {
-	struct irq_service *irq_service = kzalloc(sizeof(*irq_service),
-						  GFP_KERNEL);
+	struct irq_service *irq_service = kzalloc_obj(*irq_service);
 
 	if (!irq_service)
 		return NULL;

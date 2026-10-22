@@ -41,6 +41,7 @@ struct dsc_config {
 	enum dc_color_depth color_depth;  /* Bits per component */
 	bool is_odm;
 	struct dc_dsc_config dc_dsc_cfg;
+	uint32_t dsc_padding;
 };
 
 
@@ -63,8 +64,17 @@ struct dcn_dsc_state {
 	uint32_t dsc_chunk_size;
 	uint32_t dsc_fw_en;
 	uint32_t dsc_opp_source;
+	uint32_t dsc_block_pred_enable;
+	uint32_t dsc_line_buf_depth;
+	uint32_t dsc_version_minor;
+	uint32_t dsc_rc_buffer_size;
+	uint32_t dsc_simple_422;
 };
 
+struct dcn_dsc_reg_state {
+	uint32_t dsc_top_control;
+	uint32_t dscc_interrupt_control_status;
+};
 
 /* DSC encoder capabilities
  * They differ from the DPCD DSC caps because they are based on AMD DSC encoder caps.
@@ -92,6 +102,11 @@ struct dsc_enc_caps {
 	int32_t max_total_throughput_mps; /* Maximum total throughput with all the slices combined */
 	int32_t max_slice_width;
 	uint32_t bpp_increment_div; /* bpp increment divisor, e.g. if 16, it's 1/16th of a bit */
+	bool is_frl;
+	bool is_vic_all_bpp;
+	uint32_t total_chunk_kbytes;
+	uint32_t num_lanes;
+	uint32_t frl_rate;
 	uint32_t edp_sink_max_bits_per_pixel;
 	bool is_dp;
 };
@@ -99,6 +114,7 @@ struct dsc_enc_caps {
 struct dsc_funcs {
 	void (*dsc_get_enc_caps)(struct dsc_enc_caps *dsc_enc_caps, int pixel_clock_100Hz);
 	void (*dsc_read_state)(struct display_stream_compressor *dsc, struct dcn_dsc_state *s);
+	void (*dsc_read_reg_state)(struct display_stream_compressor *dsc, struct dcn_dsc_reg_state *dccg_reg_state);
 	bool (*dsc_validate_stream)(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg);
 	void (*dsc_set_config)(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg,
 			struct dsc_optc_config *dsc_optc_cfg);
@@ -108,6 +124,8 @@ struct dsc_funcs {
 	void (*dsc_disable)(struct display_stream_compressor *dsc);
 	void (*dsc_disconnect)(struct display_stream_compressor *dsc);
 	void (*dsc_wait_disconnect_pending_clear)(struct display_stream_compressor *dsc);
+	void (*dsc_get_single_enc_caps)(struct dsc_enc_caps *dsc_enc_caps, unsigned int max_dscclk_khz);
+	void (*set_fgcg)(struct display_stream_compressor *dsc, bool enable);
 };
 
 #endif

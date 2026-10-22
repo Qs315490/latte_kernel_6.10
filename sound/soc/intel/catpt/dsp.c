@@ -5,6 +5,7 @@
 // Author: Cezary Rojewski <cezary.rojewski@intel.com>
 //
 
+#include <linux/cleanup.h>
 #include <linux/devcoredump.h>
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
@@ -43,7 +44,6 @@ struct dma_chan *catpt_dma_request_config_chan(struct catpt_dev *cdev)
 	}
 
 	memset(&config, 0, sizeof(config));
-	config.direction = DMA_MEM_TO_DEV;
 	config.src_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
 	config.dst_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
 	config.src_maxburst = 16;
@@ -121,13 +121,10 @@ int catpt_dmac_probe(struct catpt_dev *cdev)
 	if (!dmac)
 		return -ENOMEM;
 
-	dmac->regs = cdev->lpe_ba + cdev->spec->host_dma_offset[CATPT_DMA_DEVID];
+	dmac->regs = catpt_dma_addr(cdev, CATPT_DMA_DEVID);
 	dmac->dev = cdev->dev;
 	dmac->irq = cdev->irq;
 
-	ret = dma_coerce_mask_and_coherent(cdev->dev, DMA_BIT_MASK(31));
-	if (ret)
-		return ret;
 	/*
 	 * Caller is responsible for putting device in D0 to allow
 	 * for I/O and memory access before probing DW.
@@ -156,7 +153,7 @@ static void catpt_dsp_set_srampge(struct catpt_dev *cdev, struct resource *sram,
 {
 	unsigned long old;
 	u32 off = sram->start;
-	u32 b = __ffs(mask);
+	unsigned long b = __ffs(mask);
 
 	old = catpt_readl_pci(cdev, VDRTCTL0) & mask;
 	dev_dbg(cdev->dev, "SRAMPGE [0x%08lx] 0x%08lx -> 0x%08lx",
@@ -259,17 +256,15 @@ static int catpt_dsp_select_lpclock(struct catpt_dev *cdev, bool lp, bool waiti)
 	u32 mask, reg, val;
 	int ret;
 
-	mutex_lock(&cdev->clk_mutex);
+	guard(mutex)(&cdev->clk_mutex);
 
 	val = lp ? CATPT_CS_LPCS : 0;
 	reg = catpt_readl_shim(cdev, CS1) & CATPT_CS_LPCS;
 	dev_dbg(cdev->dev, "LPCS [0x%08lx] 0x%08x -> 0x%08x",
 		CATPT_CS_LPCS, reg, val);
 
-	if (reg == val) {
-		mutex_unlock(&cdev->clk_mutex);
+	if (reg == val)
 		return 0;
-	}
 
 	if (waiti) {
 		/* wait for DSP to signal WAIT state */
@@ -279,10 +274,8 @@ static int catpt_dsp_select_lpclock(struct catpt_dev *cdev, bool lp, bool waiti)
 		if (ret) {
 			dev_warn(cdev->dev, "await WAITI timeout\n");
 			/* no signal - only high clock selection allowed */
-			if (lp) {
-				mutex_unlock(&cdev->clk_mutex);
+			if (lp)
 				return 0;
-			}
 		}
 	}
 
@@ -306,7 +299,6 @@ static int catpt_dsp_select_lpclock(struct catpt_dev *cdev, bool lp, bool waiti)
 	/* update PLL accordingly */
 	cdev->spec->pll_shutdown(cdev, lp);
 
-	mutex_unlock(&cdev->clk_mutex);
 	return 0;
 }
 
@@ -505,7 +497,7 @@ int catpt_coredump(struct catpt_dev *cdev)
 	hdr->size = resource_size(&cdev->iram);
 	pos += sizeof(*hdr);
 
-	memcpy_fromio(pos, cdev->lpe_ba + cdev->iram.start, hdr->size);
+	memcpy_fromio(pos, catpt_iram_addr(cdev), hdr->size);
 	pos += hdr->size;
 
 	hdr = (struct catpt_dump_section_hdr *)pos;
@@ -515,7 +507,7 @@ int catpt_coredump(struct catpt_dev *cdev)
 	hdr->size = resource_size(&cdev->dram);
 	pos += sizeof(*hdr);
 
-	memcpy_fromio(pos, cdev->lpe_ba + cdev->dram.start, hdr->size);
+	memcpy_fromio(pos, catpt_dram_addr(cdev), hdr->size);
 	pos += hdr->size;
 
 	hdr = (struct catpt_dump_section_hdr *)pos;

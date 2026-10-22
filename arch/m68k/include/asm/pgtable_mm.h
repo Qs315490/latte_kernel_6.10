@@ -11,7 +11,7 @@
 
 #include <asm/setup.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <asm/processor.h>
 #include <linux/sched.h>
 #include <linux/threads.h>
@@ -110,25 +110,6 @@ extern unsigned long m68k_vmalloc_end;
 #define VMALLOC_END KMAP_START
 #endif
 
-/* zero page used for uninitialized stuff */
-extern void *empty_zero_page;
-
-/*
- * ZERO_PAGE is a global shared page that is always zero: used
- * for zero-mapped memory areas etc..
- */
-#define ZERO_PAGE(vaddr)	(virt_to_page(empty_zero_page))
-
-/* number of bits that fit into a memory pointer */
-#define BITS_PER_PTR			(8*sizeof(unsigned long))
-
-/* to align the pointer to a pointer address */
-#define PTR_MASK			(~(sizeof(void*)-1))
-
-/* sizeof(void*)==1<<SIZEOF_PTR_LOG2 */
-/* 64-bit machines, beware!  SRB. */
-#define SIZEOF_PTR_LOG2			       2
-
 extern void kernel_set_cachemode(void *addr, unsigned long size, int cmode);
 
 /*
@@ -145,7 +126,7 @@ static inline void update_mmu_cache_range(struct vm_fault *vmf,
 #define update_mmu_cache(vma, addr, ptep) \
 	update_mmu_cache_range(NULL, vma, addr, ptep, 1)
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 /* MMU-specific headers */
 
@@ -157,7 +138,7 @@ static inline void update_mmu_cache_range(struct vm_fault *vmf,
 #include <asm/motorola_pgtable.h>
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 /*
  * Macro to mark a page protection value as "uncacheable".
  */
@@ -182,6 +163,6 @@ pgprot_t pgprot_dmacoherent(pgprot_t prot);
 #define pgprot_dmacoherent(prot)	pgprot_dmacoherent(prot)
 
 #endif /* CONFIG_COLDFIRE */
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* _M68K_PGTABLE_H */

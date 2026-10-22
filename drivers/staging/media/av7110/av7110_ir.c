@@ -71,8 +71,8 @@ int av7110_set_ir_config(struct av7110 *av7110)
 {
 	dprintk(4, "ir config = %08x\n", av7110->ir.ir_config);
 
-	return av7110_fw_cmd(av7110, COMTYPE_PIDFILTER, SetIR, 1,
-			     av7110->ir.ir_config);
+	return av7110_fw_cmd(av7110, COMTYPE_PIDFILTER,
+			     AV7110_SET_IR, 1, av7110->ir.ir_config);
 }
 
 static int change_protocol(struct rc_dev *rcdev, u64 *rc_type)
@@ -151,6 +151,7 @@ int av7110_ir_init(struct av7110 *av7110)
 void av7110_ir_exit(struct av7110 *av7110)
 {
 	rc_unregister_device(av7110->ir.rcdev);
+	rc_free_device(av7110->ir.rcdev);
 }
 
 //MODULE_AUTHOR("Holger Waechtler <holger@convergence.de>, Oliver Endriss <o.endriss@gmx.de>");

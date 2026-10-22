@@ -33,7 +33,7 @@ static int adis_update_scan_mode_burst(struct iio_dev *indio_dev,
 	else
 		burst_max_length = burst_length;
 
-	adis->xfer = kcalloc(2, sizeof(*adis->xfer), GFP_KERNEL);
+	adis->xfer = kzalloc_objs(*adis->xfer, 2);
 	if (!adis->xfer)
 		return -ENOMEM;
 
@@ -49,12 +49,10 @@ static int adis_update_scan_mode_burst(struct iio_dev *indio_dev,
 	tx[1] = 0;
 
 	adis->xfer[0].tx_buf = tx;
-	adis->xfer[0].bits_per_word = 8;
 	adis->xfer[0].len = 2;
 	if (adis->data->burst_max_speed_hz)
 		adis->xfer[0].speed_hz = adis->data->burst_max_speed_hz;
 	adis->xfer[1].rx_buf = adis->buffer;
-	adis->xfer[1].bits_per_word = 8;
 	adis->xfer[1].len = burst_length;
 	if (adis->data->burst_max_speed_hz)
 		adis->xfer[1].speed_hz = adis->data->burst_max_speed_hz;
@@ -83,7 +81,7 @@ int adis_update_scan_mode(struct iio_dev *indio_dev,
 
 	scan_count = indio_dev->scan_bytes / 2;
 
-	adis->xfer = kcalloc(scan_count + 1, sizeof(*adis->xfer), GFP_KERNEL);
+	adis->xfer = kzalloc_objs(*adis->xfer, scan_count + 1);
 	if (!adis->xfer)
 		return -ENOMEM;
 
@@ -100,7 +98,6 @@ int adis_update_scan_mode(struct iio_dev *indio_dev,
 	spi_message_init(&adis->msg);
 
 	for (j = 0; j <= scan_count; j++) {
-		adis->xfer[j].bits_per_word = 8;
 		if (j != scan_count)
 			adis->xfer[j].cs_change = 1;
 		adis->xfer[j].len = 2;

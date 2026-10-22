@@ -14,8 +14,6 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
-#include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
@@ -145,7 +143,7 @@ static int spcp8x5_port_probe(struct usb_serial_port *port)
 	const struct usb_device_id *id = usb_get_serial_data(port->serial);
 	struct spcp8x5_private *priv;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 

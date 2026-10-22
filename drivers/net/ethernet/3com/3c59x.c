@@ -376,54 +376,54 @@ static struct vortex_chip_info {
 
 
 static const struct pci_device_id vortex_pci_tbl[] = {
-	{ 0x10B7, 0x5900, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C590 },
-	{ 0x10B7, 0x5920, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C592 },
-	{ 0x10B7, 0x5970, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C597 },
-	{ 0x10B7, 0x5950, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C595_1 },
-	{ 0x10B7, 0x5951, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C595_2 },
+	{ PCI_DEVICE(0x10B7, 0x5900), .driver_data = CH_3C590 },
+	{ PCI_DEVICE(0x10B7, 0x5920), .driver_data = CH_3C592 },
+	{ PCI_DEVICE(0x10B7, 0x5970), .driver_data = CH_3C597 },
+	{ PCI_DEVICE(0x10B7, 0x5950), .driver_data = CH_3C595_1 },
+	{ PCI_DEVICE(0x10B7, 0x5951), .driver_data = CH_3C595_2 },
 
-	{ 0x10B7, 0x5952, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C595_3 },
-	{ 0x10B7, 0x9000, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C900_1 },
-	{ 0x10B7, 0x9001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C900_2 },
-	{ 0x10B7, 0x9004, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C900_3 },
-	{ 0x10B7, 0x9005, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C900_4 },
+	{ PCI_DEVICE(0x10B7, 0x5952), .driver_data = CH_3C595_3 },
+	{ PCI_DEVICE(0x10B7, 0x9000), .driver_data = CH_3C900_1 },
+	{ PCI_DEVICE(0x10B7, 0x9001), .driver_data = CH_3C900_2 },
+	{ PCI_DEVICE(0x10B7, 0x9004), .driver_data = CH_3C900_3 },
+	{ PCI_DEVICE(0x10B7, 0x9005), .driver_data = CH_3C900_4 },
 
-	{ 0x10B7, 0x9006, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C900_5 },
-	{ 0x10B7, 0x900A, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C900B_FL },
-	{ 0x10B7, 0x9050, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C905_1 },
-	{ 0x10B7, 0x9051, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C905_2 },
-	{ 0x10B7, 0x9054, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C905B_TX },
-	{ 0x10B7, 0x9055, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C905B_1 },
+	{ PCI_DEVICE(0x10B7, 0x9006), .driver_data = CH_3C900_5 },
+	{ PCI_DEVICE(0x10B7, 0x900A), .driver_data = CH_3C900B_FL },
+	{ PCI_DEVICE(0x10B7, 0x9050), .driver_data = CH_3C905_1 },
+	{ PCI_DEVICE(0x10B7, 0x9051), .driver_data = CH_3C905_2 },
+	{ PCI_DEVICE(0x10B7, 0x9054), .driver_data = CH_3C905B_TX },
+	{ PCI_DEVICE(0x10B7, 0x9055), .driver_data = CH_3C905B_1 },
 
-	{ 0x10B7, 0x9058, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C905B_2 },
-	{ 0x10B7, 0x905A, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C905B_FX },
-	{ 0x10B7, 0x9200, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C905C },
-	{ 0x10B7, 0x9202, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C9202 },
-	{ 0x10B7, 0x9800, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C980 },
-	{ 0x10B7, 0x9805, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C9805 },
+	{ PCI_DEVICE(0x10B7, 0x9058), .driver_data = CH_3C905B_2 },
+	{ PCI_DEVICE(0x10B7, 0x905A), .driver_data = CH_3C905B_FX },
+	{ PCI_DEVICE(0x10B7, 0x9200), .driver_data = CH_3C905C },
+	{ PCI_DEVICE(0x10B7, 0x9202), .driver_data = CH_3C9202 },
+	{ PCI_DEVICE(0x10B7, 0x9800), .driver_data = CH_3C980 },
+	{ PCI_DEVICE(0x10B7, 0x9805), .driver_data = CH_3C9805 },
 
-	{ 0x10B7, 0x7646, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3CSOHO100_TX },
-	{ 0x10B7, 0x5055, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C555 },
-	{ 0x10B7, 0x6055, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C556 },
-	{ 0x10B7, 0x6056, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C556B },
-	{ 0x10B7, 0x5b57, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C575 },
+	{ PCI_DEVICE(0x10B7, 0x7646), .driver_data = CH_3CSOHO100_TX },
+	{ PCI_DEVICE(0x10B7, 0x5055), .driver_data = CH_3C555 },
+	{ PCI_DEVICE(0x10B7, 0x6055), .driver_data = CH_3C556 },
+	{ PCI_DEVICE(0x10B7, 0x6056), .driver_data = CH_3C556B },
+	{ PCI_DEVICE(0x10B7, 0x5b57), .driver_data = CH_3C575 },
 
-	{ 0x10B7, 0x5057, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C575_1 },
-	{ 0x10B7, 0x5157, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3CCFE575 },
-	{ 0x10B7, 0x5257, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3CCFE575CT },
-	{ 0x10B7, 0x6560, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3CCFE656 },
-	{ 0x10B7, 0x6562, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3CCFEM656 },
+	{ PCI_DEVICE(0x10B7, 0x5057), .driver_data = CH_3C575_1 },
+	{ PCI_DEVICE(0x10B7, 0x5157), .driver_data = CH_3CCFE575 },
+	{ PCI_DEVICE(0x10B7, 0x5257), .driver_data = CH_3CCFE575CT },
+	{ PCI_DEVICE(0x10B7, 0x6560), .driver_data = CH_3CCFE656 },
+	{ PCI_DEVICE(0x10B7, 0x6562), .driver_data = CH_3CCFEM656 },
 
-	{ 0x10B7, 0x6564, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3CCFEM656_1 },
-	{ 0x10B7, 0x4500, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C450 },
-	{ 0x10B7, 0x9201, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C920 },
-	{ 0x10B7, 0x1201, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C982A },
-	{ 0x10B7, 0x1202, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_3C982B },
+	{ PCI_DEVICE(0x10B7, 0x6564), .driver_data = CH_3CCFEM656_1 },
+	{ PCI_DEVICE(0x10B7, 0x4500), .driver_data = CH_3C450 },
+	{ PCI_DEVICE(0x10B7, 0x9201), .driver_data = CH_3C920 },
+	{ PCI_DEVICE(0x10B7, 0x1201), .driver_data = CH_3C982A },
+	{ PCI_DEVICE(0x10B7, 0x1202), .driver_data = CH_3C982B },
 
-	{ 0x10B7, 0x9056, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_905BT4 },
-	{ 0x10B7, 0x9210, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_920B_EMB_WNM },
+	{ PCI_DEVICE(0x10B7, 0x9056), .driver_data = CH_905BT4 },
+	{ PCI_DEVICE(0x10B7, 0x9210), .driver_data = CH_920B_EMB_WNM },
 
-	{0,}						/* 0 terminated list. */
+	{ }						/* 0 terminated list. */
 };
 MODULE_DEVICE_TABLE(pci, vortex_pci_tbl);
 
@@ -1473,7 +1473,7 @@ static int vortex_probe1(struct device *gendev, void __iomem *ioaddr, int irq,
 		return 0;
 
 free_ring:
-	dma_free_coherent(&pdev->dev,
+	dma_free_coherent(gendev,
 		sizeof(struct boom_rx_desc) * RX_RING_SIZE +
 		sizeof(struct boom_tx_desc) * TX_RING_SIZE,
 		vp->rx_ring, vp->rx_ring_dma);
@@ -1783,7 +1783,7 @@ out:
 static void
 vortex_timer(struct timer_list *t)
 {
-	struct vortex_private *vp = from_timer(vp, t, timer);
+	struct vortex_private *vp = timer_container_of(vp, t, timer);
 	struct net_device *dev = vp->mii.dev;
 	void __iomem *ioaddr = vp->ioaddr;
 	int next_tick = 60*HZ;
@@ -2691,7 +2691,7 @@ vortex_down(struct net_device *dev, int final_down)
 	netdev_reset_queue(dev);
 	netif_stop_queue(dev);
 
-	del_timer_sync(&vp->timer);
+	timer_delete_sync(&vp->timer);
 
 	/* Turn off statistics ASAP.  We update dev->stats below. */
 	iowrite16(StatsDisable, ioaddr + EL3_CMD);

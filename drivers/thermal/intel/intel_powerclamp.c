@@ -200,8 +200,7 @@ static int cpumask_get(char *buf, const struct kernel_param *kp)
 	if (!cpumask_available(idle_injection_cpu_mask))
 		return -ENODEV;
 
-	return bitmap_print_to_pagebuf(false, buf, cpumask_bits(idle_injection_cpu_mask),
-				       nr_cpumask_bits);
+	return sysfs_emit(buf, "%*pb\n", cpumask_pr_args(idle_injection_cpu_mask));
 }
 
 static const struct kernel_param_ops cpumask_ops = {
@@ -340,7 +339,7 @@ static bool has_pkg_state_counter(void)
 
 	/* check if any one of the counter msrs exists */
 	while (info->msr_index) {
-		if (!rdmsrl_safe(info->msr_index, &val))
+		if (!rdmsrq_safe(info->msr_index, &val))
 			return true;
 		info++;
 	}
@@ -356,7 +355,7 @@ static u64 pkg_state_counter(void)
 
 	while (info->msr_index) {
 		if (!info->skip) {
-			if (!rdmsrl_safe(info->msr_index, &val))
+			if (!rdmsrq_safe(info->msr_index, &val))
 				count += val;
 			else
 				info->skip = true;

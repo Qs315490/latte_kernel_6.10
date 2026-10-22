@@ -8,6 +8,7 @@
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
+#include <linux/sysfs.h>
 #include <linux/of.h>
 #include <linux/device.h>
 #include <linux/cpu.h>
@@ -171,7 +172,7 @@ static u8 fastsleep_workaround_applyonce;
 static ssize_t show_fastsleep_workaround_applyonce(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u\n", fastsleep_workaround_applyonce);
+	return sysfs_emit(buf, "%u\n", fastsleep_workaround_applyonce);
 }
 
 static ssize_t store_fastsleep_workaround_applyonce(struct device *dev,
@@ -1171,8 +1172,9 @@ static void __init pnv_arch300_idle_init(void)
 	u64 max_residency_ns = 0;
 	int i;
 
-	/* stop is not really architected, we only have p9,p10 drivers */
-	if (!pvr_version_is(PVR_POWER10) && !pvr_version_is(PVR_POWER9))
+	/* stop is not really architected, we only have p9,p10 and p11 drivers */
+	if (!pvr_version_is(PVR_POWER9) && !pvr_version_is(PVR_POWER10) &&
+		!pvr_version_is(PVR_POWER11))
 		return;
 
 	/*
@@ -1189,8 +1191,8 @@ static void __init pnv_arch300_idle_init(void)
 		struct pnv_idle_states_t *state = &pnv_idle_states[i];
 		u64 psscr_rl = state->psscr_val & PSSCR_RL_MASK;
 
-		/* No deep loss driver implemented for POWER10 yet */
-		if (pvr_version_is(PVR_POWER10) &&
+		/* No deep loss driver implemented for POWER10 and POWER11 yet */
+		if ((pvr_version_is(PVR_POWER10) || pvr_version_is(PVR_POWER11)) &&
 				state->flags & (OPAL_PM_TIMEBASE_STOP|OPAL_PM_LOSE_FULL_CONTEXT))
 			continue;
 
@@ -1335,8 +1337,7 @@ static int __init pnv_parse_cpuidle_dt(void)
 	nr_idle_states = of_property_count_u32_elems(np,
 						"ibm,cpu-idle-state-flags");
 
-	pnv_idle_states = kcalloc(nr_idle_states, sizeof(*pnv_idle_states),
-				  GFP_KERNEL);
+	pnv_idle_states = kzalloc_objs(*pnv_idle_states, nr_idle_states);
 	temp_u32 = kcalloc(nr_idle_states, sizeof(u32),  GFP_KERNEL);
 	temp_u64 = kcalloc(nr_idle_states, sizeof(u64),  GFP_KERNEL);
 	temp_string = kcalloc(nr_idle_states, sizeof(char *),  GFP_KERNEL);

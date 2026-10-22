@@ -5,7 +5,6 @@
 #include <objtool/check.h>
 #include <objtool/orc.h>
 #include <objtool/warn.h>
-#include <objtool/endianness.h>
 
 int init_orc_entry(struct orc_entry *orc, struct cfi_state *cfi, struct instruction *insn)
 {
@@ -41,7 +40,7 @@ int init_orc_entry(struct orc_entry *orc, struct cfi_state *cfi, struct instruct
 		orc->type = ORC_TYPE_REGS_PARTIAL;
 		break;
 	default:
-		WARN_INSN(insn, "unknown unwind hint type %d", cfi->type);
+		ERROR_INSN(insn, "unknown unwind hint type %d", cfi->type);
 		return -1;
 	}
 
@@ -55,7 +54,7 @@ int init_orc_entry(struct orc_entry *orc, struct cfi_state *cfi, struct instruct
 		orc->sp_reg = ORC_REG_FP;
 		break;
 	default:
-		WARN_INSN(insn, "unknown CFA base reg %d", cfi->cfa.base);
+		ERROR_INSN(insn, "unknown CFA base reg %d", cfi->cfa.base);
 		return -1;
 	}
 
@@ -72,7 +71,7 @@ int init_orc_entry(struct orc_entry *orc, struct cfi_state *cfi, struct instruct
 		orc->fp_reg = ORC_REG_FP;
 		break;
 	default:
-		WARN_INSN(insn, "unknown FP base reg %d", fp->base);
+		ERROR_INSN(insn, "unknown FP base reg %d", fp->base);
 		return -1;
 	}
 
@@ -89,7 +88,7 @@ int init_orc_entry(struct orc_entry *orc, struct cfi_state *cfi, struct instruct
 		orc->ra_reg = ORC_REG_FP;
 		break;
 	default:
-		WARN_INSN(insn, "unknown RA base reg %d", ra->base);
+		ERROR_INSN(insn, "unknown RA base reg %d", ra->base);
 		return -1;
 	}
 

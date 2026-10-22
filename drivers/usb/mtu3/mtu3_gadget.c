@@ -235,7 +235,7 @@ struct usb_request *mtu3_alloc_request(struct usb_ep *ep, gfp_t gfp_flags)
 	struct mtu3_ep *mep = to_mtu3_ep(ep);
 	struct mtu3_request *mreq;
 
-	mreq = kzalloc(sizeof(*mreq), gfp_flags);
+	mreq = kzalloc_obj(*mreq, gfp_flags);
 	if (!mreq)
 		return NULL;
 
@@ -305,6 +305,7 @@ static int mtu3_gadget_queue(struct usb_ep *ep,
 
 	if (mtu3_prepare_transfer(mep)) {
 		ret = -EAGAIN;
+		usb_gadget_unmap_request(&mtu->g, req, mep->is_in);
 		goto error;
 	}
 

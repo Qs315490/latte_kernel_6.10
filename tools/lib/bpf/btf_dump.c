@@ -21,7 +21,6 @@
 #include "hashmap.h"
 #include "libbpf.h"
 #include "libbpf_internal.h"
-#include "str_error.h"
 
 static const char PREFIXES[] = "\t\t\t\t\t\t\t\t\t\t\t\t\t";
 static const size_t PREFIX_CNT = sizeof(PREFIXES) - 1;
@@ -68,6 +67,7 @@ struct btf_dump_data {
 	bool compact;
 	bool skip_names;
 	bool emit_zeroes;
+	bool emit_strings;
 	__u8 indent_lvl;	/* base indent level */
 	char indent_str[BTF_DATA_INDENT_STR_LEN];
 	/* below are used during iteration */
@@ -226,6 +226,9 @@ static void btf_dump_free_names(struct hashmap *map)
 	size_t bkt;
 	struct hashmap_entry *cur;
 
+	if (!map)
+		return;
+
 	hashmap__for_each_entry(map, cur, bkt)
 		free((void *)cur->pkey);
 
@@ -313,7 +316,7 @@ static int btf_dump_mark_referenced(struct btf_dump *d)
 {
 	int i, j, n = btf__type_cnt(d->btf);
 	const struct btf_type *t;
-	__u16 vlen;
+	__u32 vlen;
 
 	for (i = d->last_id + 1; i < n; i++) {
 		t = btf__type_by_id(d->btf, i);
@@ -482,7 +485,7 @@ static int btf_dump_order_type(struct btf_dump *d, __u32 id, bool through_ptr)
 	 */
 	struct btf_dump_type_aux_state *tstate = &d->type_states[id];
 	const struct btf_type *t;
-	__u16 vlen;
+	__u32 vlen;
 	int err, i;
 
 	/* return true, letting typedefs know that it's ok to be emitted */
@@ -795,7 +798,7 @@ static void btf_dump_emit_type(struct btf_dump *d, __u32 id, __u32 cont_id)
 		 */
 		if (top_level_def || t->name_off == 0) {
 			const struct btf_member *m = btf_members(t);
-			__u16 vlen = btf_vlen(t);
+			__u32 vlen = btf_vlen(t);
 			int i, new_cont_id;
 
 			new_cont_id = t->name_off == 0 ? cont_id : id;
@@ -817,7 +820,7 @@ static void btf_dump_emit_type(struct btf_dump *d, __u32 id, __u32 cont_id)
 		break;
 	case BTF_KIND_FUNC_PROTO: {
 		const struct btf_param *p = btf_params(t);
-		__u16 n = btf_vlen(t);
+		__u32 n = btf_vlen(t);
 		int i;
 
 		btf_dump_emit_type(d, t->type, cont_id);
@@ -836,7 +839,7 @@ static bool btf_is_struct_packed(const struct btf *btf, __u32 id,
 {
 	const struct btf_member *m;
 	int max_align = 1, align, i, bit_sz;
-	__u16 vlen;
+	__u32 vlen;
 
 	m = btf_members(t);
 	vlen = btf_vlen(t);
@@ -970,7 +973,7 @@ static void btf_dump_emit_struct_def(struct btf_dump *d,
 	bool is_struct = btf_is_struct(t);
 	bool packed, prev_bitfield = false;
 	int align, i, off = 0;
-	__u16 vlen = btf_vlen(t);
+	__u32 vlen = btf_vlen(t);
 
 	align = btf__align_of(d->btf, id);
 	packed = is_struct ? btf_is_struct_packed(d->btf, id, t) : 0;
@@ -1061,7 +1064,7 @@ static void btf_dump_emit_enum_fwd(struct btf_dump *d, __u32 id,
 
 static void btf_dump_emit_enum32_val(struct btf_dump *d,
 				     const struct btf_type *t,
-				     int lvl, __u16 vlen)
+				     int lvl, __u32 vlen)
 {
 	const struct btf_enum *v = btf_enum(t);
 	bool is_signed = btf_kflag(t);
@@ -1086,7 +1089,7 @@ static void btf_dump_emit_enum32_val(struct btf_dump *d,
 
 static void btf_dump_emit_enum64_val(struct btf_dump *d,
 				     const struct btf_type *t,
-				     int lvl, __u16 vlen)
+				     int lvl, __u32 vlen)
 {
 	const struct btf_enum64 *v = btf_enum64(t);
 	bool is_signed = btf_kflag(t);
@@ -1119,7 +1122,7 @@ static void btf_dump_emit_enum_def(struct btf_dump *d, __u32 id,
 				   const struct btf_type *t,
 				   int lvl)
 {
-	__u16 vlen = btf_vlen(t);
+	__u32 vlen = btf_vlen(t);
 
 	btf_dump_printf(d, "enum%s%s",
 			t->name_off ? " " : "",
@@ -1494,7 +1497,10 @@ static void btf_dump_emit_type_chain(struct btf_dump *d,
 		case BTF_KIND_TYPE_TAG:
 			btf_dump_emit_mods(d, decls);
 			name = btf_name_of(d, t->name_off);
-			btf_dump_printf(d, " __attribute__((btf_type_tag(\"%s\")))", name);
+			if (btf_kflag(t))
+				btf_dump_printf(d, " __attribute__((%s))", name);
+			else
+				btf_dump_printf(d, " __attribute__((btf_type_tag(\"%s\")))", name);
 			break;
 		case BTF_KIND_ARRAY: {
 			const struct btf_array *a = btf_array(t);
@@ -1536,7 +1542,7 @@ static void btf_dump_emit_type_chain(struct btf_dump *d,
 		}
 		case BTF_KIND_FUNC_PROTO: {
 			const struct btf_param *p = btf_params(t);
-			__u16 vlen = btf_vlen(t);
+			__u32 vlen = btf_vlen(t);
 			int i;
 
 			/*
@@ -1756,8 +1762,17 @@ static int btf_dump_get_bitfield_value(struct btf_dump *d,
 	__u16 left_shift_bits, right_shift_bits;
 	const __u8 *bytes = data;
 	__u8 nr_copy_bits;
+	__u8 start_bit, nr_bytes;
 	__u64 num = 0;
 	int i;
+
+	/* Calculate how many bytes cover the bitfield */
+	start_bit = bits_offset % 8;
+	nr_bytes = (start_bit + bit_sz + 7) / 8;
+
+	/* Bound check */
+	if (data + nr_bytes > d->typed_dump->data_end)
+		return -E2BIG;
 
 	/* Maximum supported bitfield size is 64 bits */
 	if (t->size > 8) {
@@ -2025,6 +2040,52 @@ static int btf_dump_var_data(struct btf_dump *d,
 	return btf_dump_dump_type_data(d, NULL, t, type_id, data, 0, 0);
 }
 
+static int btf_dump_string_data(struct btf_dump *d,
+				const struct btf_type *t,
+				__u32 id,
+				const void *data)
+{
+	const struct btf_array *array = btf_array(t);
+	const char *chars = data;
+	__u32 i;
+
+	/* Make sure it is a NUL-terminated string. */
+	for (i = 0; i < array->nelems; i++) {
+		if ((void *)(chars + i) >= d->typed_dump->data_end)
+			return -E2BIG;
+		if (chars[i] == '\0')
+			break;
+	}
+	if (i == array->nelems) {
+		/* The caller will print this as a regular array. */
+		return -EINVAL;
+	}
+
+	btf_dump_data_pfx(d);
+	btf_dump_printf(d, "\"");
+
+	for (i = 0; i < array->nelems; i++) {
+		char c = chars[i];
+
+		if (c == '\0') {
+			/*
+			 * When printing character arrays as strings, NUL bytes
+			 * are always treated as string terminators; they are
+			 * never printed.
+			 */
+			break;
+		}
+		if (isprint(c))
+			btf_dump_printf(d, "%c", c);
+		else
+			btf_dump_printf(d, "\\x%02x", (__u8)c);
+	}
+
+	btf_dump_printf(d, "\"");
+
+	return 0;
+}
+
 static int btf_dump_array_data(struct btf_dump *d,
 			       const struct btf_type *t,
 			       __u32 id,
@@ -2052,8 +2113,13 @@ static int btf_dump_array_data(struct btf_dump *d,
 		 * char arrays, so if size is 1 and element is
 		 * printable as a char, we'll do that.
 		 */
-		if (elem_size == 1)
+		if (elem_size == 1) {
+			if (d->typed_dump->emit_strings &&
+			    btf_dump_string_data(d, t, id, data) == 0) {
+				return 0;
+			}
 			d->typed_dump->is_array_char = true;
+		}
 	}
 
 	/* note that we increment depth before calling btf_dump_print() below;
@@ -2093,7 +2159,7 @@ static int btf_dump_struct_data(struct btf_dump *d,
 				const void *data)
 {
 	const struct btf_member *m = btf_members(t);
-	__u16 n = btf_vlen(t);
+	__u32 n = btf_vlen(t);
 	int i, err = 0;
 
 	/* note that we increment depth before calling btf_dump_print() below;
@@ -2383,7 +2449,7 @@ static int btf_dump_type_data_check_zero(struct btf_dump *d,
 	case BTF_KIND_STRUCT:
 	case BTF_KIND_UNION: {
 		const struct btf_member *m = btf_members(t);
-		__u16 n = btf_vlen(t);
+		__u32 n = btf_vlen(t);
 
 		/* if any struct/union member is non-zero, the struct/union
 		 * is considered non-zero and dumped.
@@ -2541,6 +2607,7 @@ int btf_dump__dump_type_data(struct btf_dump *d, __u32 id,
 	d->typed_dump->compact = OPTS_GET(opts, compact, false);
 	d->typed_dump->skip_names = OPTS_GET(opts, skip_names, false);
 	d->typed_dump->emit_zeroes = OPTS_GET(opts, emit_zeroes, false);
+	d->typed_dump->emit_strings = OPTS_GET(opts, emit_strings, false);
 
 	ret = btf_dump_dump_type_data(d, NULL, t, id, data, 0, 0);
 

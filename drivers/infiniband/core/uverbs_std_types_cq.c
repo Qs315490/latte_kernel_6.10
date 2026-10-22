@@ -64,25 +64,29 @@ static int UVERBS_HANDLER(UVERBS_METHOD_CQ_CREATE)(
 	struct ib_ucq_object *obj = container_of(
 		uverbs_attr_get_uobject(attrs, UVERBS_ATTR_CREATE_CQ_HANDLE),
 		typeof(*obj), uevent.uobject);
+	struct ib_uverbs_completion_event_file *ev_file = NULL;
 	struct ib_device *ib_dev = attrs->context->device;
-	int ret;
-	u64 user_handle;
 	struct ib_cq_init_attr attr = {};
-	struct ib_cq                   *cq;
-	struct ib_uverbs_completion_event_file    *ev_file = NULL;
 	struct ib_uobject *ev_file_uobj;
+	struct ib_cq *cq;
+	u64 user_handle;
+	int ret;
 
-	if (!ib_dev->ops.create_cq || !ib_dev->ops.destroy_cq)
+	if ((!ib_dev->ops.create_cq && !ib_dev->ops.create_user_cq) ||
+	    !ib_dev->ops.destroy_cq)
 		return -EOPNOTSUPP;
 
 	ret = uverbs_copy_from(&attr.comp_vector, attrs,
 			       UVERBS_ATTR_CREATE_CQ_COMP_VECTOR);
-	if (!ret)
-		ret = uverbs_copy_from(&attr.cqe, attrs,
-				       UVERBS_ATTR_CREATE_CQ_CQE);
-	if (!ret)
-		ret = uverbs_copy_from(&user_handle, attrs,
-				       UVERBS_ATTR_CREATE_CQ_USER_HANDLE);
+	if (ret)
+		return ret;
+
+	ret = uverbs_copy_from(&attr.cqe, attrs, UVERBS_ATTR_CREATE_CQ_CQE);
+	if (ret || !attr.cqe)
+		return ret ? : -EINVAL;
+
+	ret = uverbs_copy_from(&user_handle, attrs,
+			       UVERBS_ATTR_CREATE_CQ_USER_HANDLE);
 	if (ret)
 		return ret;
 
@@ -128,7 +132,10 @@ static int UVERBS_HANDLER(UVERBS_METHOD_CQ_CREATE)(
 	rdma_restrack_new(&cq->res, RDMA_RESTRACK_CQ);
 	rdma_restrack_set_name(&cq->res, NULL);
 
-	ret = ib_dev->ops.create_cq(cq, &attr, attrs);
+	if (ib_dev->ops.create_user_cq)
+		ret = ib_dev->ops.create_user_cq(cq, &attr, attrs);
+	else
+		ret = ib_dev->ops.create_cq(cq, &attr, attrs);
 	if (ret)
 		goto err_free;
 
@@ -180,6 +187,19 @@ DECLARE_UVERBS_NAMED_METHOD(
 		       UVERBS_OBJECT_ASYNC_EVENT,
 		       UVERBS_ACCESS_READ,
 		       UA_OPTIONAL),
+	UVERBS_ATTR_PTR_IN(UVERBS_ATTR_CREATE_CQ_BUFFER_VA,
+			   UVERBS_ATTR_TYPE(u64),
+			   UA_OPTIONAL),
+	UVERBS_ATTR_PTR_IN(UVERBS_ATTR_CREATE_CQ_BUFFER_LENGTH,
+			   UVERBS_ATTR_TYPE(u64),
+			   UA_OPTIONAL),
+	UVERBS_ATTR_RAW_FD(UVERBS_ATTR_CREATE_CQ_BUFFER_FD,
+			   UA_OPTIONAL),
+	UVERBS_ATTR_PTR_IN(UVERBS_ATTR_CREATE_CQ_BUFFER_OFFSET,
+			   UVERBS_ATTR_TYPE(u64),
+			   UA_OPTIONAL),
+	UVERBS_ATTR_UMEM(UVERBS_ATTR_CREATE_CQ_BUF_UMEM,
+			 UA_OPTIONAL),
 	UVERBS_ATTR_UHW());
 
 static int UVERBS_HANDLER(UVERBS_METHOD_CQ_DESTROY)(

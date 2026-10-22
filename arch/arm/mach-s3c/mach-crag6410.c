@@ -252,14 +252,17 @@ static struct resource crag6410_mmgpio_resource[] = {
 	[0] = DEFINE_RES_MEM_NAMED(S3C64XX_PA_XM0CSN4, 1, "dat"),
 };
 
-static struct platform_device crag6410_mmgpio = {
+static const struct property_entry crag6410_mmgpio_props[] = {
+	PROPERTY_ENTRY_U32("gpio-mmio,base", MMGPIO_GPIO_BASE),
+	{ }
+};
+
+static struct platform_device_info crag6410_mmgpio_devinfo = {
 	.name		= "basic-mmio-gpio",
 	.id		= -1,
-	.resource	= crag6410_mmgpio_resource,
-	.num_resources	= ARRAY_SIZE(crag6410_mmgpio_resource),
-	.dev.platform_data = &(struct bgpio_pdata) {
-		.base	= MMGPIO_GPIO_BASE,
-	},
+	.res		= crag6410_mmgpio_resource,
+	.num_res	= ARRAY_SIZE(crag6410_mmgpio_resource),
+	.properties	= crag6410_mmgpio_props,
 };
 
 static struct platform_device speyside_device = {
@@ -373,7 +376,6 @@ static struct platform_device *crag6410_devices[] __initdata = {
 	&crag6410_gpio_keydev,
 	&crag6410_dm9k_device,
 	&s3c64xx_device_spi0,
-	&crag6410_mmgpio,
 	&crag6410_lcd_powerdev,
 	&crag6410_backlight_device,
 	&speyside_device,
@@ -777,43 +779,50 @@ static struct s3c_sdhci_platdata crag6410_hsmmc0_pdata = {
 static const struct gpio_led gpio_leds[] = {
 	{
 		.name = "d13:green:",
-		.gpio = MMGPIO_GPIO_BASE + 0,
 		.default_state = LEDS_GPIO_DEFSTATE_ON,
 	},
 	{
 		.name = "d14:green:",
-		.gpio = MMGPIO_GPIO_BASE + 1,
 		.default_state = LEDS_GPIO_DEFSTATE_ON,
 	},
 	{
 		.name = "d15:green:",
-		.gpio = MMGPIO_GPIO_BASE + 2,
 		.default_state = LEDS_GPIO_DEFSTATE_ON,
 	},
 	{
 		.name = "d16:green:",
-		.gpio = MMGPIO_GPIO_BASE + 3,
 		.default_state = LEDS_GPIO_DEFSTATE_ON,
 	},
 	{
 		.name = "d17:green:",
-		.gpio = MMGPIO_GPIO_BASE + 4,
 		.default_state = LEDS_GPIO_DEFSTATE_ON,
 	},
 	{
 		.name = "d18:green:",
-		.gpio = MMGPIO_GPIO_BASE + 5,
 		.default_state = LEDS_GPIO_DEFSTATE_ON,
 	},
 	{
 		.name = "d19:green:",
-		.gpio = MMGPIO_GPIO_BASE + 6,
 		.default_state = LEDS_GPIO_DEFSTATE_ON,
 	},
 	{
 		.name = "d20:green:",
-		.gpio = MMGPIO_GPIO_BASE + 7,
 		.default_state = LEDS_GPIO_DEFSTATE_ON,
+	},
+};
+
+static struct gpiod_lookup_table crag_leds_table = {
+	.dev_id = "leds-gpio",
+	.table = {
+		GPIO_LOOKUP_IDX("basic-mmio-gpio", 0, "cs", 0, GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP_IDX("basic-mmio-gpio", 1, "cs", 1, GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP_IDX("basic-mmio-gpio", 2, "cs", 2, GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP_IDX("basic-mmio-gpio", 3, "cs", 3, GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP_IDX("basic-mmio-gpio", 4, "cs", 4, GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP_IDX("basic-mmio-gpio", 5, "cs", 5, GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP_IDX("basic-mmio-gpio", 6, "cs", 6, GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP_IDX("basic-mmio-gpio", 7, "cs", 7, GPIO_ACTIVE_LOW),
+		{ },
 	},
 };
 
@@ -871,7 +880,9 @@ static void __init crag6410_machine_init(void)
 
 	pwm_add_table(crag6410_pwm_lookup, ARRAY_SIZE(crag6410_pwm_lookup));
 	platform_add_devices(crag6410_devices, ARRAY_SIZE(crag6410_devices));
+	platform_device_register_full(&crag6410_mmgpio_devinfo);
 
+	gpiod_add_lookup_table(&crag_leds_table);
 	gpio_led_register_device(-1, &gpio_leds_pdata);
 
 	regulator_has_full_constraints();

@@ -3,7 +3,7 @@
  * Copyright (c) 2020-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -217,7 +217,7 @@ xrep_setup_parent(
 
 	xchk_fsgates_enable(sc, XCHK_FSGATES_DIRENTS);
 
-	rp = kvzalloc(sizeof(struct xrep_parent), XCHK_GFP_FLAGS);
+	rp = kvzalloc_obj(struct xrep_parent, XCHK_GFP_FLAGS);
 	if (!rp)
 		return -ENOMEM;
 	rp->sc = sc;
@@ -302,14 +302,14 @@ xrep_parent_replay_update(
 		trace_xrep_parent_replay_parentadd(sc->tempip, xname,
 				&pptr->pptr_rec);
 
-		return xfs_parent_set(sc->tempip, sc->ip->i_ino, xname,
+		return xfs_parent_set(sc->tempip, I_INO(sc->ip), xname,
 				&pptr->pptr_rec, &rp->pptr_args);
 	case XREP_PPTR_REMOVE:
 		/* Remove parent pointer. */
 		trace_xrep_parent_replay_parentremove(sc->tempip, xname,
 				&pptr->pptr_rec);
 
-		return xfs_parent_unset(sc->tempip, sc->ip->i_ino, xname,
+		return xfs_parent_unset(sc->tempip, I_INO(sc->ip), xname,
 				&pptr->pptr_rec, &rp->pptr_args);
 	}
 
@@ -434,7 +434,7 @@ xrep_parent_scan_dirent(
 	int			error;
 
 	/* Dirent doesn't point to this directory. */
-	if (ino != rp->sc->ip->i_ino)
+	if (ino != I_INO(rp->sc->ip))
 		return 0;
 
 	/* No weird looking names. */
@@ -569,9 +569,7 @@ xrep_parent_scan_dirtree(
 	if (sc->ilock_flags & (XFS_ILOCK_SHARED | XFS_ILOCK_EXCL))
 		xchk_iunlock(sc, sc->ilock_flags & (XFS_ILOCK_SHARED |
 						    XFS_ILOCK_EXCL));
-	error = xchk_trans_alloc_empty(sc);
-	if (error)
-		return error;
+	xchk_trans_alloc_empty(sc);
 
 	while ((error = xchk_iscan_iter(&rp->pscan.iscan, &ip)) == 1) {
 		bool		flush;
@@ -597,9 +595,7 @@ xrep_parent_scan_dirtree(
 			if (error)
 				break;
 
-			error = xchk_trans_alloc_empty(sc);
-			if (error)
-				break;
+			xchk_trans_alloc_empty(sc);
 		}
 
 		if (xchk_should_terminate(sc, &error))
@@ -649,8 +645,8 @@ xrep_parent_live_update(
 	 * repairing, so stash the update for replay against the temporary
 	 * file.
 	 */
-	if (p->ip->i_ino == sc->ip->i_ino &&
-	    xchk_iscan_want_live_update(&rp->pscan.iscan, p->dp->i_ino)) {
+	if (I_INO(p->ip) == I_INO(sc->ip) &&
+	    xchk_iscan_want_live_update(&rp->pscan.iscan, I_INO(p->dp))) {
 		mutex_lock(&rp->pscan.lock);
 		if (p->delta > 0)
 			error = xrep_parent_stash_parentadd(rp, p->name, p->dp);
@@ -910,7 +906,7 @@ xrep_parent_fetch_xattr_remote(
 		.namelen	= namelen,
 		.trans		= sc->tp,
 		.valuelen	= valuelen,
-		.owner		= ip->i_ino,
+		.owner		= I_INO(ip),
 	};
 	int			error;
 
@@ -988,7 +984,7 @@ xrep_parent_insert_xattr(
 		.attr_filter		= key->flags,
 		.namelen		= key->namelen,
 		.valuelen		= key->valuelen,
-		.owner			= rp->sc->ip->i_ino,
+		.owner			= I_INO(rp->sc->ip),
 		.geo			= rp->sc->mp->m_attr_geo,
 		.whichfork		= XFS_ATTR_FORK,
 		.op_flags		= XFS_DA_OP_OKNOENT,
@@ -1099,9 +1095,7 @@ xrep_parent_flush_xattrs(
 	xrep_tempfile_iounlock(rp->sc);
 
 	/* Recreate the empty transaction and relock the inode. */
-	error = xchk_trans_alloc_empty(rp->sc);
-	if (error)
-		return error;
+	xchk_trans_alloc_empty(rp->sc);
 	xchk_ilock(rp->sc, XFS_ILOCK_EXCL);
 	return 0;
 }
@@ -1335,7 +1329,7 @@ xrep_parent_rebuild_pptrs(
 	 * For this purpose, root directories are their own parents.
 	 */
 	if (xchk_inode_is_dirtree_root(sc->ip)) {
-		xrep_findparent_scan_found(&rp->pscan, sc->ip->i_ino);
+		xrep_findparent_scan_found(&rp->pscan, I_INO(sc->ip));
 	} else {
 		error = xrep_parent_lookup_pptrs(sc, &parent_ino);
 		if (error)
@@ -1457,7 +1451,7 @@ xrep_parent_set_nondir_nlink(
 		 * The file is on the unlinked list but we found parents.
 		 * Remove the file from the unlinked list.
 		 */
-		pag = xfs_perag_get(sc->mp, XFS_INO_TO_AGNO(sc->mp, ip->i_ino));
+		pag = xfs_perag_get(sc->mp, XFS_INODE_TO_AGNO(ip));
 		if (!pag) {
 			ASSERT(0);
 			return -EFSCORRUPTED;
@@ -1503,7 +1497,6 @@ xrep_parent_setup_scan(
 	struct xrep_parent	*rp)
 {
 	struct xfs_scrub	*sc = rp->sc;
-	char			*descr;
 	struct xfs_da_geometry	*geo = sc->mp->m_attr_geo;
 	int			max_len;
 	int			error;
@@ -1531,32 +1524,22 @@ xrep_parent_setup_scan(
 		goto out_xattr_name;
 
 	/* Set up some staging memory for logging parent pointer updates. */
-	descr = xchk_xfile_ino_descr(sc, "parent pointer entries");
-	error = xfarray_create(descr, 0, sizeof(struct xrep_pptr),
-			&rp->pptr_recs);
-	kfree(descr);
+	error = xfarray_create("parent pointer entries", 0,
+			sizeof(struct xrep_pptr), &rp->pptr_recs);
 	if (error)
 		goto out_xattr_value;
 
-	descr = xchk_xfile_ino_descr(sc, "parent pointer names");
-	error = xfblob_create(descr, &rp->pptr_names);
-	kfree(descr);
+	error = xfblob_create("parent pointer names", &rp->pptr_names);
 	if (error)
 		goto out_recs;
 
 	/* Set up some storage for copying attrs before the mapping exchange */
-	descr = xchk_xfile_ino_descr(sc,
-				"parent pointer retained xattr entries");
-	error = xfarray_create(descr, 0, sizeof(struct xrep_parent_xattr),
-			&rp->xattr_records);
-	kfree(descr);
+	error = xfarray_create("parent pointer xattr entries", 0,
+			sizeof(struct xrep_parent_xattr), &rp->xattr_records);
 	if (error)
 		goto out_names;
 
-	descr = xchk_xfile_ino_descr(sc,
-				"parent pointer retained xattr values");
-	error = xfblob_create(descr, &rp->xattr_blobs);
-	kfree(descr);
+	error = xfblob_create("parent pointer xattr values", &rp->xattr_blobs);
 	if (error)
 		goto out_attr_keys;
 

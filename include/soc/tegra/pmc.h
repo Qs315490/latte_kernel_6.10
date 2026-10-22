@@ -16,10 +16,7 @@
 
 struct clk;
 struct reset_control;
-
-bool tegra_pmc_cpu_is_powered(unsigned int cpuid);
-int tegra_pmc_cpu_power_on(unsigned int cpuid);
-int tegra_pmc_cpu_remove_clamping(unsigned int cpuid);
+struct tegra_pmc;
 
 /*
  * powergate and I/O rail APIs
@@ -149,58 +146,79 @@ enum tegra_io_pad {
 };
 
 #ifdef CONFIG_SOC_TEGRA_PMC
-int tegra_powergate_power_on(unsigned int id);
-int tegra_powergate_power_off(unsigned int id);
-int tegra_powergate_remove_clamping(unsigned int id);
+struct tegra_pmc *devm_tegra_pmc_get(struct device *dev);
+
+int tegra_pmc_powergate_power_on(struct tegra_pmc *pmc, unsigned int id);
+int tegra_pmc_powergate_power_off(struct tegra_pmc *pmc, unsigned int id);
+int tegra_pmc_powergate_remove_clamping(struct tegra_pmc *pmc, unsigned int id);
 
 /* Must be called with clk disabled, and returns with clk enabled */
-int tegra_powergate_sequence_power_up(unsigned int id, struct clk *clk,
-				      struct reset_control *rst);
-
-int tegra_io_pad_power_enable(enum tegra_io_pad id);
-int tegra_io_pad_power_disable(enum tegra_io_pad id);
-
-void tegra_pmc_set_suspend_mode(enum tegra_suspend_mode mode);
-void tegra_pmc_enter_suspend_mode(enum tegra_suspend_mode mode);
-
-bool tegra_pmc_core_domain_state_synced(void);
+int tegra_pmc_powergate_sequence_power_up(struct tegra_pmc *pmc,
+					  unsigned int id, struct clk *clk,
+					  struct reset_control *rst);
+int tegra_pmc_io_pad_power_enable(struct tegra_pmc *pmc, enum tegra_io_pad id);
+int tegra_pmc_io_pad_power_disable(struct tegra_pmc *pmc, enum tegra_io_pad id);
 
 #else
-static inline int tegra_powergate_power_on(unsigned int id)
+static inline struct tegra_pmc *devm_tegra_pmc_get(struct device *dev)
+{
+	return ERR_PTR(-ENOSYS);
+}
+
+static inline int
+tegra_pmc_powergate_power_on(struct tegra_pmc *pmc, unsigned int id)
 {
 	return -ENOSYS;
 }
 
-static inline int tegra_powergate_power_off(unsigned int id)
+static inline int
+tegra_pmc_powergate_power_off(struct tegra_pmc *pmc, unsigned int id)
 {
 	return -ENOSYS;
 }
 
-static inline int tegra_powergate_remove_clamping(unsigned int id)
+static inline int
+tegra_pmc_powergate_remove_clamping(struct tegra_pmc *pmc, unsigned int id)
 {
 	return -ENOSYS;
 }
 
-static inline int tegra_powergate_sequence_power_up(unsigned int id,
-						    struct clk *clk,
-						    struct reset_control *rst)
+/* Must be called with clk disabled, and returns with clk enabled */
+static inline int
+tegra_pmc_powergate_sequence_power_up(struct tegra_pmc *pmc, unsigned int id,
+				      struct clk *clk,
+				      struct reset_control *rst)
 {
 	return -ENOSYS;
 }
 
-static inline int tegra_io_pad_power_enable(enum tegra_io_pad id)
+static inline int
+tegra_pmc_io_pad_power_enable(struct tegra_pmc *pmc, enum tegra_io_pad id)
 {
 	return -ENOSYS;
 }
 
-static inline int tegra_io_pad_power_disable(enum tegra_io_pad id)
+static inline int
+tegra_pmc_io_pad_power_disable(struct tegra_pmc *pmc, enum tegra_io_pad id)
 {
 	return -ENOSYS;
 }
+#endif /* CONFIG_SOC_TEGRA_PMC */
 
-static inline int tegra_io_pad_get_voltage(enum tegra_io_pad id)
+/* 32-bit ARM platforms only */
+#if defined(CONFIG_ARM)
+bool tegra_pmc_cpu_is_powered(unsigned int cpuid);
+int tegra_pmc_cpu_power_on(unsigned int cpuid);
+int tegra_pmc_cpu_remove_clamping(unsigned int cpuid);
+
+#if defined(CONFIG_SOC_TEGRA_PMC) && defined(CONFIG_PM_SLEEP)
+enum tegra_suspend_mode tegra_pmc_get_suspend_mode(void);
+void tegra_pmc_set_suspend_mode(enum tegra_suspend_mode mode);
+void tegra_pmc_enter_suspend_mode(enum tegra_suspend_mode mode);
+#else
+static inline enum tegra_suspend_mode tegra_pmc_get_suspend_mode(void)
 {
-	return -ENOSYS;
+	return TEGRA_SUSPEND_NONE;
 }
 
 static inline void tegra_pmc_set_suspend_mode(enum tegra_suspend_mode mode)
@@ -210,20 +228,16 @@ static inline void tegra_pmc_set_suspend_mode(enum tegra_suspend_mode mode)
 static inline void tegra_pmc_enter_suspend_mode(enum tegra_suspend_mode mode)
 {
 }
+#endif
+#endif
 
+#if defined(CONFIG_ARM) && defined(CONFIG_SOC_TEGRA_PMC)
+bool tegra_pmc_core_domain_state_synced(void);
+#else
+/* needed for COMPILE_TEST */
 static inline bool tegra_pmc_core_domain_state_synced(void)
 {
 	return false;
-}
-
-#endif /* CONFIG_SOC_TEGRA_PMC */
-
-#if defined(CONFIG_SOC_TEGRA_PMC) && defined(CONFIG_PM_SLEEP)
-enum tegra_suspend_mode tegra_pmc_get_suspend_mode(void);
-#else
-static inline enum tegra_suspend_mode tegra_pmc_get_suspend_mode(void)
-{
-	return TEGRA_SUSPEND_NONE;
 }
 #endif
 

@@ -2,7 +2,6 @@
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/spi/spi.h>
 
 struct rtspi {
@@ -169,7 +168,6 @@ static int realtek_rtl_spi_probe(struct platform_device *pdev)
 
 	init_hw(rtspi);
 
-	ctrl->dev.of_node = pdev->dev.of_node;
 	ctrl->flags = SPI_CONTROLLER_HALF_DUPLEX;
 	ctrl->set_cs = rt_set_cs;
 	ctrl->transfer_one = transfer_one;

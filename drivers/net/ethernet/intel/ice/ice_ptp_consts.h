@@ -10,70 +10,25 @@
 /* Constants defined for the PTP 1588 clock hardware. */
 
 const struct ice_phy_reg_info_eth56g eth56g_phy_res[NUM_ETH56G_PHY_RES] = {
-	/* ETH56G_PHY_REG_PTP */
-	{
-		/* base_addr */
-		{
-			0x092000,
-			0x126000,
-			0x1BA000,
-			0x24E000,
-			0x2E2000,
-		},
-		/* step */
-		0x98,
+	[ETH56G_PHY_REG_PTP] = {
+		.base_addr = 0x092000,
+		.step = 0x98,
 	},
-	/* ETH56G_PHY_MEM_PTP */
-	{
-		/* base_addr */
-		{
-			0x093000,
-			0x127000,
-			0x1BB000,
-			0x24F000,
-			0x2E3000,
-		},
-		/* step */
-		0x200,
+	[ETH56G_PHY_MEM_PTP] = {
+		.base_addr = 0x093000,
+		.step = 0x200,
 	},
-	/* ETH56G_PHY_REG_XPCS */
-	{
-		/* base_addr */
-		{
-			0x000000,
-			0x009400,
-			0x128000,
-			0x1BC000,
-			0x250000,
-		},
-		/* step */
-		0x21000,
+	[ETH56G_PHY_REG_XPCS] = {
+		.base_addr = 0x000000,
+		.step = 0x21000,
 	},
-	/* ETH56G_PHY_REG_MAC */
-	{
-		/* base_addr */
-		{
-			0x085000,
-			0x119000,
-			0x1AD000,
-			0x241000,
-			0x2D5000,
-		},
-		/* step */
-		0x1000,
+	[ETH56G_PHY_REG_MAC] = {
+		.base_addr = 0x085000,
+		.step = 0x1000,
 	},
-	/* ETH56G_PHY_REG_GPCS */
-	{
-		/* base_addr */
-		{
-			0x084000,
-			0x118000,
-			0x1AC000,
-			0x240000,
-			0x2D4000,
-		},
-		/* step */
-		0x400,
+	[ETH56G_PHY_REG_GPCS] = {
+		.base_addr = 0x084000,
+		.step = 0x400,
 	},
 };
 
@@ -123,14 +78,14 @@ struct ice_eth56g_mac_reg_cfg eth56g_mac_cfg[NUM_ICE_ETH56G_LNK_SPD] = {
 		.blktime = 0x666, /* 3.2 */
 		.tx_offset = {
 			.serdes = 0x234c, /* 17.6484848 */
-			.no_fec = 0x8e80, /* 71.25 */
+			.no_fec = 0x93d9, /* 73 */
 			.fc = 0xb4a4, /* 90.32 */
 			.sfd = 0x4a4, /* 2.32 */
 			.onestep = 0x4ccd /* 38.4 */
 		},
 		.rx_offset = {
 			.serdes = 0xffffeb27, /* -10.42424 */
-			.no_fec = 0xffffcccd, /* -25.6 */
+			.no_fec = 0xffffc7b6, /* -28 */
 			.fc = 0xfffc557b, /* -469.26 */
 			.sfd = 0x4a4, /* 2.32 */
 			.bs_ds = 0x32 /* 0.0969697 */
@@ -163,17 +118,17 @@ struct ice_eth56g_mac_reg_cfg eth56g_mac_cfg[NUM_ICE_ETH56G_LNK_SPD] = {
 		.mktime = 0x147b, /* 10.24, only if RS-FEC enabled */
 		.tx_offset = {
 			.serdes = 0xe1e, /* 7.0593939 */
-			.no_fec = 0x3857, /* 28.17 */
+			.no_fec = 0x4266, /* 33 */
 			.fc = 0x48c3, /* 36.38 */
-			.rs = 0x8100, /* 64.5 */
+			.rs = 0x8a00, /* 69 */
 			.sfd = 0x1dc, /* 0.93 */
 			.onestep = 0x1eb8 /* 15.36 */
 		},
 		.rx_offset = {
 			.serdes = 0xfffff7a9, /* -4.1697 */
-			.no_fec = 0xffffe71a, /* -12.45 */
+			.no_fec = 0xffffe700, /* -12 */
 			.fc = 0xfffe894d, /* -187.35 */
-			.rs = 0xfffff8cd, /* -3.6 */
+			.rs = 0xfffff8cc, /* -3 */
 			.sfd = 0x1dc, /* 0.93 */
 			.bs_ds = 0x14 /* 0.0387879, RS-FEC 0 */
 		}
@@ -326,7 +281,7 @@ struct ice_eth56g_mac_reg_cfg eth56g_mac_cfg[NUM_ICE_ETH56G_LNK_SPD] = {
 
 /* struct ice_time_ref_info_e82x
  *
- * E822 hardware can use different sources as the reference for the PTP
+ * E82X hardware can use different sources as the reference for the PTP
  * hardware clock. Each clock has different characteristics such as a slightly
  * different frequency, etc.
  *
@@ -334,8 +289,8 @@ struct ice_eth56g_mac_reg_cfg eth56g_mac_cfg[NUM_ICE_ETH56G_LNK_SPD] = {
  * reference. See the struct ice_time_ref_info_e82x for information about the
  * meaning of each constant.
  */
-const struct ice_time_ref_info_e82x e82x_time_ref[NUM_ICE_TIME_REF_FREQ] = {
-	/* ICE_TIME_REF_FREQ_25_000 -> 25 MHz */
+const struct ice_time_ref_info_e82x e82x_time_ref[NUM_ICE_TSPLL_FREQ] = {
+	/* ICE_TSPLL_FREQ_25_000 -> 25 MHz */
 	{
 		/* pll_freq */
 		823437500, /* 823.4375 MHz PLL */
@@ -343,7 +298,7 @@ const struct ice_time_ref_info_e82x e82x_time_ref[NUM_ICE_TIME_REF_FREQ] = {
 		0x136e44fabULL,
 	},
 
-	/* ICE_TIME_REF_FREQ_122_880 -> 122.88 MHz */
+	/* ICE_TSPLL_FREQ_122_880 -> 122.88 MHz */
 	{
 		/* pll_freq */
 		783360000, /* 783.36 MHz */
@@ -351,7 +306,7 @@ const struct ice_time_ref_info_e82x e82x_time_ref[NUM_ICE_TIME_REF_FREQ] = {
 		0x146cc2177ULL,
 	},
 
-	/* ICE_TIME_REF_FREQ_125_000 -> 125 MHz */
+	/* ICE_TSPLL_FREQ_125_000 -> 125 MHz */
 	{
 		/* pll_freq */
 		796875000, /* 796.875 MHz */
@@ -359,7 +314,7 @@ const struct ice_time_ref_info_e82x e82x_time_ref[NUM_ICE_TIME_REF_FREQ] = {
 		0x141414141ULL,
 	},
 
-	/* ICE_TIME_REF_FREQ_153_600 -> 153.6 MHz */
+	/* ICE_TSPLL_FREQ_153_600 -> 153.6 MHz */
 	{
 		/* pll_freq */
 		816000000, /* 816 MHz */
@@ -367,7 +322,7 @@ const struct ice_time_ref_info_e82x e82x_time_ref[NUM_ICE_TIME_REF_FREQ] = {
 		0x139b9b9baULL,
 	},
 
-	/* ICE_TIME_REF_FREQ_156_250 -> 156.25 MHz */
+	/* ICE_TSPLL_FREQ_156_250 -> 156.25 MHz */
 	{
 		/* pll_freq */
 		830078125, /* 830.78125 MHz */
@@ -375,173 +330,12 @@ const struct ice_time_ref_info_e82x e82x_time_ref[NUM_ICE_TIME_REF_FREQ] = {
 		0x134679aceULL,
 	},
 
-	/* ICE_TIME_REF_FREQ_245_760 -> 245.76 MHz */
+	/* ICE_TSPLL_FREQ_245_760 -> 245.76 MHz */
 	{
 		/* pll_freq */
 		783360000, /* 783.36 MHz */
 		/* nominal_incval */
 		0x146cc2177ULL,
-	},
-};
-
-const struct ice_cgu_pll_params_e82x e822_cgu_params[NUM_ICE_TIME_REF_FREQ] = {
-	/* ICE_TIME_REF_FREQ_25_000 -> 25 MHz */
-	{
-		/* refclk_pre_div */
-		1,
-		/* feedback_div */
-		197,
-		/* frac_n_div */
-		2621440,
-		/* post_pll_div */
-		6,
-	},
-
-	/* ICE_TIME_REF_FREQ_122_880 -> 122.88 MHz */
-	{
-		/* refclk_pre_div */
-		5,
-		/* feedback_div */
-		223,
-		/* frac_n_div */
-		524288,
-		/* post_pll_div */
-		7,
-	},
-
-	/* ICE_TIME_REF_FREQ_125_000 -> 125 MHz */
-	{
-		/* refclk_pre_div */
-		5,
-		/* feedback_div */
-		223,
-		/* frac_n_div */
-		524288,
-		/* post_pll_div */
-		7,
-	},
-
-	/* ICE_TIME_REF_FREQ_153_600 -> 153.6 MHz */
-	{
-		/* refclk_pre_div */
-		5,
-		/* feedback_div */
-		159,
-		/* frac_n_div */
-		1572864,
-		/* post_pll_div */
-		6,
-	},
-
-	/* ICE_TIME_REF_FREQ_156_250 -> 156.25 MHz */
-	{
-		/* refclk_pre_div */
-		5,
-		/* feedback_div */
-		159,
-		/* frac_n_div */
-		1572864,
-		/* post_pll_div */
-		6,
-	},
-
-	/* ICE_TIME_REF_FREQ_245_760 -> 245.76 MHz */
-	{
-		/* refclk_pre_div */
-		10,
-		/* feedback_div */
-		223,
-		/* frac_n_div */
-		524288,
-		/* post_pll_div */
-		7,
-	},
-};
-
-const
-struct ice_cgu_pll_params_e825c e825c_cgu_params[NUM_ICE_TIME_REF_FREQ] = {
-	/* ICE_TIME_REF_FREQ_25_000 -> 25 MHz */
-	{
-		/* tspll_ck_refclkfreq */
-		0x19,
-		/* tspll_ndivratio */
-		1,
-		/* tspll_fbdiv_intgr */
-		320,
-		/* tspll_fbdiv_frac */
-		0,
-		/* ref1588_ck_div */
-		0,
-	},
-
-	/* ICE_TIME_REF_FREQ_122_880 -> 122.88 MHz */
-	{
-		/* tspll_ck_refclkfreq */
-		0x29,
-		/* tspll_ndivratio */
-		3,
-		/* tspll_fbdiv_intgr */
-		195,
-		/* tspll_fbdiv_frac */
-		1342177280UL,
-		/* ref1588_ck_div */
-		0,
-	},
-
-	/* ICE_TIME_REF_FREQ_125_000 -> 125 MHz */
-	{
-		/* tspll_ck_refclkfreq */
-		0x3E,
-		/* tspll_ndivratio */
-		2,
-		/* tspll_fbdiv_intgr */
-		128,
-		/* tspll_fbdiv_frac */
-		0,
-		/* ref1588_ck_div */
-		0,
-	},
-
-	/* ICE_TIME_REF_FREQ_153_600 -> 153.6 MHz */
-	{
-		/* tspll_ck_refclkfreq */
-		0x33,
-		/* tspll_ndivratio */
-		3,
-		/* tspll_fbdiv_intgr */
-		156,
-		/* tspll_fbdiv_frac */
-		1073741824UL,
-		/* ref1588_ck_div */
-		0,
-	},
-
-	/* ICE_TIME_REF_FREQ_156_250 -> 156.25 MHz */
-	{
-		/* tspll_ck_refclkfreq */
-		0x1F,
-		/* tspll_ndivratio */
-		5,
-		/* tspll_fbdiv_intgr */
-		256,
-		/* tspll_fbdiv_frac */
-		0,
-		/* ref1588_ck_div */
-		0,
-	},
-
-	/* ICE_TIME_REF_FREQ_245_760 -> 245.76 MHz */
-	{
-		/* tspll_ck_refclkfreq */
-		0x52,
-		/* tspll_ndivratio */
-		3,
-		/* tspll_fbdiv_intgr */
-		97,
-		/* tspll_fbdiv_frac */
-		2818572288UL,
-		/* ref1588_ck_div */
-		0,
 	},
 };
 

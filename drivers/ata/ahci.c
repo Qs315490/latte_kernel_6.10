@@ -63,10 +63,12 @@ enum board_ids {
 	board_ahci_pcs_quirk_no_devslp,
 	board_ahci_pcs_quirk_no_sntf,
 	board_ahci_yes_fbs,
+	board_ahci_yes_fbs_atapi_dma,
 
 	/* board IDs for specific chipsets in alphabetical order */
 	board_ahci_al,
 	board_ahci_avn,
+	board_ahci_jmb585,
 	board_ahci_mcp65,
 	board_ahci_mcp77,
 	board_ahci_mcp89,
@@ -109,17 +111,17 @@ static const struct scsi_host_template ahci_sht = {
 
 static struct ata_port_operations ahci_vt8251_ops = {
 	.inherits		= &ahci_ops,
-	.hardreset		= ahci_vt8251_hardreset,
+	.reset.hardreset	= ahci_vt8251_hardreset,
 };
 
 static struct ata_port_operations ahci_p5wdh_ops = {
 	.inherits		= &ahci_ops,
-	.hardreset		= ahci_p5wdh_hardreset,
+	.reset.hardreset	= ahci_p5wdh_hardreset,
 };
 
 static struct ata_port_operations ahci_avn_ops = {
 	.inherits		= &ahci_ops,
-	.hardreset		= ahci_avn_hardreset,
+	.reset.hardreset	= ahci_avn_hardreset,
 };
 
 static const struct ata_port_info ahci_port_info[] = {
@@ -188,6 +190,14 @@ static const struct ata_port_info ahci_port_info[] = {
 		.udma_mask	= ATA_UDMA6,
 		.port_ops	= &ahci_ops,
 	},
+	[board_ahci_yes_fbs_atapi_dma] = {
+		AHCI_HFLAGS	(AHCI_HFLAG_YES_FBS |
+				 AHCI_HFLAG_ATAPI_DMA_QUIRK),
+		.flags		= AHCI_FLAG_COMMON,
+		.pio_mask	= ATA_PIO4,
+		.udma_mask	= ATA_UDMA6,
+		.port_ops	= &ahci_ops,
+	},
 	/* by chipsets */
 	[board_ahci_al] = {
 		AHCI_HFLAGS	(AHCI_HFLAG_NO_PMP | AHCI_HFLAG_NO_MSI),
@@ -202,6 +212,15 @@ static const struct ata_port_info ahci_port_info[] = {
 		.pio_mask	= ATA_PIO4,
 		.udma_mask	= ATA_UDMA6,
 		.port_ops	= &ahci_avn_ops,
+	},
+	/* JMicron JMB582/585: 64-bit DMA is broken, force 32-bit */
+	[board_ahci_jmb585] = {
+		AHCI_HFLAGS	(AHCI_HFLAG_IGN_IRQ_IF_ERR |
+				 AHCI_HFLAG_32BIT_ONLY),
+		.flags		= AHCI_FLAG_COMMON,
+		.pio_mask	= ATA_PIO4,
+		.udma_mask	= ATA_UDMA6,
+		.port_ops	= &ahci_ops,
 	},
 	[board_ahci_mcp65] = {
 		AHCI_HFLAGS	(AHCI_HFLAG_NO_FPDMA_AA | AHCI_HFLAG_NO_PMP |
@@ -260,378 +279,1312 @@ static const struct ata_port_info ahci_port_info[] = {
 
 static const struct pci_device_id ahci_pci_tbl[] = {
 	/* Intel */
-	{ PCI_VDEVICE(INTEL, 0x06d6), board_ahci_pcs_quirk }, /* Comet Lake PCH-H RAID */
-	{ PCI_VDEVICE(INTEL, 0x2652), board_ahci_pcs_quirk }, /* ICH6 */
-	{ PCI_VDEVICE(INTEL, 0x2653), board_ahci_pcs_quirk }, /* ICH6M */
-	{ PCI_VDEVICE(INTEL, 0x27c1), board_ahci_pcs_quirk }, /* ICH7 */
-	{ PCI_VDEVICE(INTEL, 0x27c5), board_ahci_pcs_quirk }, /* ICH7M */
-	{ PCI_VDEVICE(INTEL, 0x27c3), board_ahci_pcs_quirk }, /* ICH7R */
-	{ PCI_VDEVICE(AL, 0x5288), board_ahci_ign_iferr }, /* ULi M5288 */
-	{ PCI_VDEVICE(INTEL, 0x2681), board_ahci_pcs_quirk }, /* ESB2 */
-	{ PCI_VDEVICE(INTEL, 0x2682), board_ahci_pcs_quirk }, /* ESB2 */
-	{ PCI_VDEVICE(INTEL, 0x2683), board_ahci_pcs_quirk }, /* ESB2 */
-	{ PCI_VDEVICE(INTEL, 0x27c6), board_ahci_pcs_quirk }, /* ICH7-M DH */
-	{ PCI_VDEVICE(INTEL, 0x2821), board_ahci_pcs_quirk }, /* ICH8 */
-	{ PCI_VDEVICE(INTEL, 0x2822), board_ahci_pcs_quirk_no_sntf }, /* ICH8/Lewisburg RAID*/
-	{ PCI_VDEVICE(INTEL, 0x2824), board_ahci_pcs_quirk }, /* ICH8 */
-	{ PCI_VDEVICE(INTEL, 0x2829), board_ahci_pcs_quirk }, /* ICH8M */
-	{ PCI_VDEVICE(INTEL, 0x282a), board_ahci_pcs_quirk }, /* ICH8M */
-	{ PCI_VDEVICE(INTEL, 0x2922), board_ahci_pcs_quirk }, /* ICH9 */
-	{ PCI_VDEVICE(INTEL, 0x2923), board_ahci_pcs_quirk }, /* ICH9 */
-	{ PCI_VDEVICE(INTEL, 0x2924), board_ahci_pcs_quirk }, /* ICH9 */
-	{ PCI_VDEVICE(INTEL, 0x2925), board_ahci_pcs_quirk }, /* ICH9 */
-	{ PCI_VDEVICE(INTEL, 0x2927), board_ahci_pcs_quirk }, /* ICH9 */
-	{ PCI_VDEVICE(INTEL, 0x2929), board_ahci_pcs_quirk }, /* ICH9M */
-	{ PCI_VDEVICE(INTEL, 0x292a), board_ahci_pcs_quirk }, /* ICH9M */
-	{ PCI_VDEVICE(INTEL, 0x292b), board_ahci_pcs_quirk }, /* ICH9M */
-	{ PCI_VDEVICE(INTEL, 0x292c), board_ahci_pcs_quirk }, /* ICH9M */
-	{ PCI_VDEVICE(INTEL, 0x292f), board_ahci_pcs_quirk }, /* ICH9M */
-	{ PCI_VDEVICE(INTEL, 0x294d), board_ahci_pcs_quirk }, /* ICH9 */
-	{ PCI_VDEVICE(INTEL, 0x294e), board_ahci_pcs_quirk }, /* ICH9M */
-	{ PCI_VDEVICE(INTEL, 0x502a), board_ahci_pcs_quirk }, /* Tolapai */
-	{ PCI_VDEVICE(INTEL, 0x502b), board_ahci_pcs_quirk }, /* Tolapai */
-	{ PCI_VDEVICE(INTEL, 0x3a05), board_ahci_pcs_quirk }, /* ICH10 */
-	{ PCI_VDEVICE(INTEL, 0x3a22), board_ahci_pcs_quirk }, /* ICH10 */
-	{ PCI_VDEVICE(INTEL, 0x3a25), board_ahci_pcs_quirk }, /* ICH10 */
-	{ PCI_VDEVICE(INTEL, 0x3b22), board_ahci_pcs_quirk }, /* PCH AHCI */
-	{ PCI_VDEVICE(INTEL, 0x3b23), board_ahci_pcs_quirk }, /* PCH AHCI */
-	{ PCI_VDEVICE(INTEL, 0x3b24), board_ahci_pcs_quirk }, /* PCH RAID */
-	{ PCI_VDEVICE(INTEL, 0x3b25), board_ahci_pcs_quirk }, /* PCH RAID */
-	{ PCI_VDEVICE(INTEL, 0x3b29), board_ahci_pcs_quirk }, /* PCH M AHCI */
-	{ PCI_VDEVICE(INTEL, 0x3b2b), board_ahci_pcs_quirk }, /* PCH RAID */
-	{ PCI_VDEVICE(INTEL, 0x3b2c), board_ahci_pcs_quirk }, /* PCH M RAID */
-	{ PCI_VDEVICE(INTEL, 0x3b2f), board_ahci_pcs_quirk }, /* PCH AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19b0), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19b1), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19b2), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19b3), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19b4), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19b5), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19b6), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19b7), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19bE), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19bF), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19c0), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19c1), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19c2), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19c3), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19c4), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19c5), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19c6), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19c7), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19cE), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x19cF), board_ahci }, /* DNV AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1c02), board_ahci_pcs_quirk }, /* CPT AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1c03), board_ahci_pcs_quirk }, /* CPT M AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1c04), board_ahci_pcs_quirk }, /* CPT RAID */
-	{ PCI_VDEVICE(INTEL, 0x1c05), board_ahci_pcs_quirk }, /* CPT M RAID */
-	{ PCI_VDEVICE(INTEL, 0x1c06), board_ahci_pcs_quirk }, /* CPT RAID */
-	{ PCI_VDEVICE(INTEL, 0x1c07), board_ahci_pcs_quirk }, /* CPT RAID */
-	{ PCI_VDEVICE(INTEL, 0x1d02), board_ahci_pcs_quirk }, /* PBG AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1d04), board_ahci_pcs_quirk }, /* PBG RAID */
-	{ PCI_VDEVICE(INTEL, 0x1d06), board_ahci_pcs_quirk }, /* PBG RAID */
-	{ PCI_VDEVICE(INTEL, 0x2323), board_ahci_pcs_quirk }, /* DH89xxCC AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1e02), board_ahci_pcs_quirk }, /* Panther Point AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1e03), board_ahci_pcs_quirk }, /* Panther M AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1e04), board_ahci_pcs_quirk }, /* Panther Point RAID */
-	{ PCI_VDEVICE(INTEL, 0x1e05), board_ahci_pcs_quirk }, /* Panther Point RAID */
-	{ PCI_VDEVICE(INTEL, 0x1e06), board_ahci_pcs_quirk }, /* Panther Point RAID */
-	{ PCI_VDEVICE(INTEL, 0x1e07), board_ahci_pcs_quirk }, /* Panther M RAID */
-	{ PCI_VDEVICE(INTEL, 0x1e0e), board_ahci_pcs_quirk }, /* Panther Point RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c02), board_ahci_pcs_quirk }, /* Lynx Point AHCI */
-	{ PCI_VDEVICE(INTEL, 0x8c03), board_ahci_pcs_quirk }, /* Lynx M AHCI */
-	{ PCI_VDEVICE(INTEL, 0x8c04), board_ahci_pcs_quirk }, /* Lynx Point RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c05), board_ahci_pcs_quirk }, /* Lynx M RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c06), board_ahci_pcs_quirk }, /* Lynx Point RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c07), board_ahci_pcs_quirk }, /* Lynx M RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c0e), board_ahci_pcs_quirk }, /* Lynx Point RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c0f), board_ahci_pcs_quirk }, /* Lynx M RAID */
-	{ PCI_VDEVICE(INTEL, 0x9c02), board_ahci_pcs_quirk }, /* Lynx LP AHCI */
-	{ PCI_VDEVICE(INTEL, 0x9c03), board_ahci_pcs_quirk }, /* Lynx LP AHCI */
-	{ PCI_VDEVICE(INTEL, 0x9c04), board_ahci_pcs_quirk }, /* Lynx LP RAID */
-	{ PCI_VDEVICE(INTEL, 0x9c05), board_ahci_pcs_quirk }, /* Lynx LP RAID */
-	{ PCI_VDEVICE(INTEL, 0x9c06), board_ahci_pcs_quirk }, /* Lynx LP RAID */
-	{ PCI_VDEVICE(INTEL, 0x9c07), board_ahci_pcs_quirk }, /* Lynx LP RAID */
-	{ PCI_VDEVICE(INTEL, 0x9c0e), board_ahci_pcs_quirk }, /* Lynx LP RAID */
-	{ PCI_VDEVICE(INTEL, 0x9c0f), board_ahci_pcs_quirk }, /* Lynx LP RAID */
-	{ PCI_VDEVICE(INTEL, 0x9dd3), board_ahci_pcs_quirk }, /* Cannon Lake PCH-LP AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1f22), board_ahci_pcs_quirk }, /* Avoton AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1f23), board_ahci_pcs_quirk }, /* Avoton AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1f24), board_ahci_pcs_quirk }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f25), board_ahci_pcs_quirk }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f26), board_ahci_pcs_quirk }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f27), board_ahci_pcs_quirk }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f2e), board_ahci_pcs_quirk }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f2f), board_ahci_pcs_quirk }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f32), board_ahci_avn }, /* Avoton AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1f33), board_ahci_avn }, /* Avoton AHCI */
-	{ PCI_VDEVICE(INTEL, 0x1f34), board_ahci_avn }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f35), board_ahci_avn }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f36), board_ahci_avn }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f37), board_ahci_avn }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f3e), board_ahci_avn }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x1f3f), board_ahci_avn }, /* Avoton RAID */
-	{ PCI_VDEVICE(INTEL, 0x2823), board_ahci_pcs_quirk }, /* Wellsburg/Lewisburg AHCI*/
-	{ PCI_VDEVICE(INTEL, 0x2826), board_ahci_pcs_quirk }, /* *burg SATA0 'RAID' */
-	{ PCI_VDEVICE(INTEL, 0x2827), board_ahci_pcs_quirk }, /* *burg SATA1 'RAID' */
-	{ PCI_VDEVICE(INTEL, 0x282f), board_ahci_pcs_quirk }, /* *burg SATA2 'RAID' */
-	{ PCI_VDEVICE(INTEL, 0x43d4), board_ahci_pcs_quirk }, /* Rocket Lake PCH-H RAID */
-	{ PCI_VDEVICE(INTEL, 0x43d5), board_ahci_pcs_quirk }, /* Rocket Lake PCH-H RAID */
-	{ PCI_VDEVICE(INTEL, 0x43d6), board_ahci_pcs_quirk }, /* Rocket Lake PCH-H RAID */
-	{ PCI_VDEVICE(INTEL, 0x43d7), board_ahci_pcs_quirk }, /* Rocket Lake PCH-H RAID */
-	{ PCI_VDEVICE(INTEL, 0x8d02), board_ahci_pcs_quirk }, /* Wellsburg AHCI */
-	{ PCI_VDEVICE(INTEL, 0x8d04), board_ahci_pcs_quirk }, /* Wellsburg RAID */
-	{ PCI_VDEVICE(INTEL, 0x8d06), board_ahci_pcs_quirk }, /* Wellsburg RAID */
-	{ PCI_VDEVICE(INTEL, 0x8d0e), board_ahci_pcs_quirk }, /* Wellsburg RAID */
-	{ PCI_VDEVICE(INTEL, 0x8d62), board_ahci_pcs_quirk }, /* Wellsburg AHCI */
-	{ PCI_VDEVICE(INTEL, 0x8d64), board_ahci_pcs_quirk }, /* Wellsburg RAID */
-	{ PCI_VDEVICE(INTEL, 0x8d66), board_ahci_pcs_quirk }, /* Wellsburg RAID */
-	{ PCI_VDEVICE(INTEL, 0x8d6e), board_ahci_pcs_quirk }, /* Wellsburg RAID */
-	{ PCI_VDEVICE(INTEL, 0x23a3), board_ahci_pcs_quirk }, /* Coleto Creek AHCI */
-	{ PCI_VDEVICE(INTEL, 0x9c83), board_ahci_pcs_quirk }, /* Wildcat LP AHCI */
-	{ PCI_VDEVICE(INTEL, 0x9c85), board_ahci_pcs_quirk }, /* Wildcat LP RAID */
-	{ PCI_VDEVICE(INTEL, 0x9c87), board_ahci_pcs_quirk }, /* Wildcat LP RAID */
-	{ PCI_VDEVICE(INTEL, 0x9c8f), board_ahci_pcs_quirk }, /* Wildcat LP RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c82), board_ahci_pcs_quirk }, /* 9 Series AHCI */
-	{ PCI_VDEVICE(INTEL, 0x8c83), board_ahci_pcs_quirk }, /* 9 Series M AHCI */
-	{ PCI_VDEVICE(INTEL, 0x8c84), board_ahci_pcs_quirk }, /* 9 Series RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c85), board_ahci_pcs_quirk }, /* 9 Series M RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c86), board_ahci_pcs_quirk }, /* 9 Series RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c87), board_ahci_pcs_quirk }, /* 9 Series M RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c8e), board_ahci_pcs_quirk }, /* 9 Series RAID */
-	{ PCI_VDEVICE(INTEL, 0x8c8f), board_ahci_pcs_quirk }, /* 9 Series M RAID */
-	{ PCI_VDEVICE(INTEL, 0x9d03), board_ahci_pcs_quirk }, /* Sunrise LP AHCI */
-	{ PCI_VDEVICE(INTEL, 0x9d05), board_ahci_pcs_quirk }, /* Sunrise LP RAID */
-	{ PCI_VDEVICE(INTEL, 0x9d07), board_ahci_pcs_quirk }, /* Sunrise LP RAID */
-	{ PCI_VDEVICE(INTEL, 0xa102), board_ahci_pcs_quirk }, /* Sunrise Point-H AHCI */
-	{ PCI_VDEVICE(INTEL, 0xa103), board_ahci_pcs_quirk }, /* Sunrise M AHCI */
-	{ PCI_VDEVICE(INTEL, 0xa105), board_ahci_pcs_quirk }, /* Sunrise Point-H RAID */
-	{ PCI_VDEVICE(INTEL, 0xa106), board_ahci_pcs_quirk }, /* Sunrise Point-H RAID */
-	{ PCI_VDEVICE(INTEL, 0xa107), board_ahci_pcs_quirk }, /* Sunrise M RAID */
-	{ PCI_VDEVICE(INTEL, 0xa10f), board_ahci_pcs_quirk }, /* Sunrise Point-H RAID */
-	{ PCI_VDEVICE(INTEL, 0xa182), board_ahci_pcs_quirk }, /* Lewisburg AHCI*/
-	{ PCI_VDEVICE(INTEL, 0xa186), board_ahci_pcs_quirk }, /* Lewisburg RAID*/
-	{ PCI_VDEVICE(INTEL, 0xa1d2), board_ahci_pcs_quirk }, /* Lewisburg RAID*/
-	{ PCI_VDEVICE(INTEL, 0xa1d6), board_ahci_pcs_quirk }, /* Lewisburg RAID*/
-	{ PCI_VDEVICE(INTEL, 0xa202), board_ahci_pcs_quirk }, /* Lewisburg AHCI*/
-	{ PCI_VDEVICE(INTEL, 0xa206), board_ahci_pcs_quirk }, /* Lewisburg RAID*/
-	{ PCI_VDEVICE(INTEL, 0xa252), board_ahci_pcs_quirk }, /* Lewisburg RAID*/
-	{ PCI_VDEVICE(INTEL, 0xa256), board_ahci_pcs_quirk }, /* Lewisburg RAID*/
-	{ PCI_VDEVICE(INTEL, 0xa356), board_ahci_pcs_quirk }, /* Cannon Lake PCH-H RAID */
-	{ PCI_VDEVICE(INTEL, 0x06d7), board_ahci_pcs_quirk }, /* Comet Lake-H RAID */
-	{ PCI_VDEVICE(INTEL, 0xa386), board_ahci_pcs_quirk }, /* Comet Lake PCH-V RAID */
-	{ PCI_VDEVICE(INTEL, 0x0f22), board_ahci_pcs_quirk }, /* Bay Trail AHCI */
-	{ PCI_VDEVICE(INTEL, 0x0f23), board_ahci_pcs_quirk_no_devslp }, /* Bay Trail AHCI */
-	{ PCI_VDEVICE(INTEL, 0x22a3), board_ahci_pcs_quirk }, /* Cherry Tr. AHCI */
-	{ PCI_VDEVICE(INTEL, 0x5ae3), board_ahci_pcs_quirk }, /* ApolloLake AHCI */
-	{ PCI_VDEVICE(INTEL, 0x34d3), board_ahci_pcs_quirk }, /* Ice Lake LP AHCI */
-	{ PCI_VDEVICE(INTEL, 0x02d3), board_ahci_pcs_quirk }, /* Comet Lake PCH-U AHCI */
-	{ PCI_VDEVICE(INTEL, 0x02d7), board_ahci_pcs_quirk }, /* Comet Lake PCH RAID */
-	/* Elkhart Lake IDs 0x4b60 & 0x4b62 https://sata-io.org/product/8803 not tested yet */
-	{ PCI_VDEVICE(INTEL, 0x4b63), board_ahci_pcs_quirk }, /* Elkhart Lake AHCI */
+	{
+		/* Comet Lake PCH-H RAID */
+		PCI_VDEVICE(INTEL, 0x06d6),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH6 */
+		PCI_VDEVICE(INTEL, 0x2652),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH6M */
+		PCI_VDEVICE(INTEL, 0x2653),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH7 */
+		PCI_VDEVICE(INTEL, 0x27c1),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH7M */
+		PCI_VDEVICE(INTEL, 0x27c5),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH7R */
+		PCI_VDEVICE(INTEL, 0x27c3),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ULi M5288 */
+		PCI_VDEVICE(AL, 0x5288),
+		.driver_data = board_ahci_ign_iferr,
+	}, {
+		/* ESB2 */
+		PCI_VDEVICE(INTEL, 0x2681),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ESB2 */
+		PCI_VDEVICE(INTEL, 0x2682),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ESB2 */
+		PCI_VDEVICE(INTEL, 0x2683),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH7-M DH */
+		PCI_VDEVICE(INTEL, 0x27c6),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH8 */
+		PCI_VDEVICE(INTEL, 0x2821),
+			.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH8/Lewisburg RAID*/
+		PCI_VDEVICE(INTEL, 0x2822),
+			.driver_data = board_ahci_pcs_quirk_no_sntf,
+	}, {
+		/* ICH8 */
+		PCI_VDEVICE(INTEL, 0x2824),
+			.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH8M */
+		PCI_VDEVICE(INTEL, 0x2829),
+			.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH8M */
+		PCI_VDEVICE(INTEL, 0x282a),
+			.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9 */
+		PCI_VDEVICE(INTEL, 0x2922),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9 */
+		PCI_VDEVICE(INTEL, 0x2923),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9 */
+		PCI_VDEVICE(INTEL, 0x2924),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9 */
+		PCI_VDEVICE(INTEL, 0x2925),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9 */
+		PCI_VDEVICE(INTEL, 0x2927),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9M */
+		PCI_VDEVICE(INTEL, 0x2929),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9M */
+		PCI_VDEVICE(INTEL, 0x292a),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9M */
+		PCI_VDEVICE(INTEL, 0x292b),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9M */
+		PCI_VDEVICE(INTEL, 0x292c),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9M */
+		PCI_VDEVICE(INTEL, 0x292f),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9 */
+		PCI_VDEVICE(INTEL, 0x294d),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH9M */
+		PCI_VDEVICE(INTEL, 0x294e),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Tolapai */
+		PCI_VDEVICE(INTEL, 0x502a),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Tolapai */
+		PCI_VDEVICE(INTEL, 0x502b),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH10 */
+		PCI_VDEVICE(INTEL, 0x3a05),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH10 */
+		PCI_VDEVICE(INTEL, 0x3a22),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ICH10 */
+		PCI_VDEVICE(INTEL, 0x3a25),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PCH AHCI */
+		PCI_VDEVICE(INTEL, 0x3b22),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PCH AHCI */
+		PCI_VDEVICE(INTEL, 0x3b23),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PCH RAID */
+		PCI_VDEVICE(INTEL, 0x3b24),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PCH RAID */
+		PCI_VDEVICE(INTEL, 0x3b25),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PCH M AHCI */
+		PCI_VDEVICE(INTEL, 0x3b29),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PCH RAID */
+		PCI_VDEVICE(INTEL, 0x3b2b),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PCH M RAID */
+		PCI_VDEVICE(INTEL, 0x3b2c),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PCH AHCI */
+		PCI_VDEVICE(INTEL, 0x3b2f),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19b0),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19b1),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19b2),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19b3),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19b4),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19b5),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19b6),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19b7),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19bE),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19bF),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19c0),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19c1),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19c2),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19c3),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19c4),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19c5),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19c6),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19c7),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19cE),
+		.driver_data = board_ahci,
+	}, {
+		/* DNV AHCI */
+		PCI_VDEVICE(INTEL, 0x19cF),
+		.driver_data = board_ahci,
+	}, {
+		/* CPT AHCI */
+		PCI_VDEVICE(INTEL, 0x1c02),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* CPT M AHCI */
+		PCI_VDEVICE(INTEL, 0x1c03),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* CPT RAID */
+		PCI_VDEVICE(INTEL, 0x1c04),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* CPT M RAID */
+		PCI_VDEVICE(INTEL, 0x1c05),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* CPT RAID */
+		PCI_VDEVICE(INTEL, 0x1c06),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* CPT RAID */
+		PCI_VDEVICE(INTEL, 0x1c07),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PBG AHCI */
+		PCI_VDEVICE(INTEL, 0x1d02),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PBG RAID */
+		PCI_VDEVICE(INTEL, 0x1d04),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* PBG RAID */
+		PCI_VDEVICE(INTEL, 0x1d06),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* DH89xxCC AHCI */
+		PCI_VDEVICE(INTEL, 0x2323),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Panther Point AHCI */
+		PCI_VDEVICE(INTEL, 0x1e02),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Panther M AHCI */
+		PCI_VDEVICE(INTEL, 0x1e03),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Panther Point RAID */
+		PCI_VDEVICE(INTEL, 0x1e04),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Panther Point RAID */
+		PCI_VDEVICE(INTEL, 0x1e05),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Panther Point RAID */
+		PCI_VDEVICE(INTEL, 0x1e06),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Panther M RAID */
+		PCI_VDEVICE(INTEL, 0x1e07),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Panther Point RAID */
+		PCI_VDEVICE(INTEL, 0x1e0e),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx Point AHCI */
+		PCI_VDEVICE(INTEL, 0x8c02),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx M AHCI */
+		PCI_VDEVICE(INTEL, 0x8c03),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx Point RAID */
+		PCI_VDEVICE(INTEL, 0x8c04),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx M RAID */
+		PCI_VDEVICE(INTEL, 0x8c05),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx Point RAID */
+		PCI_VDEVICE(INTEL, 0x8c06),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx M RAID */
+		PCI_VDEVICE(INTEL, 0x8c07),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx Point RAID */
+		PCI_VDEVICE(INTEL, 0x8c0e),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx M RAID */
+		PCI_VDEVICE(INTEL, 0x8c0f),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx LP AHCI */
+		PCI_VDEVICE(INTEL, 0x9c02),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx LP AHCI */
+		PCI_VDEVICE(INTEL, 0x9c03),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx LP RAID */
+		PCI_VDEVICE(INTEL, 0x9c04),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx LP RAID */
+		PCI_VDEVICE(INTEL, 0x9c05),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx LP RAID */
+		PCI_VDEVICE(INTEL, 0x9c06),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx LP RAID */
+		PCI_VDEVICE(INTEL, 0x9c07),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx LP RAID */
+		PCI_VDEVICE(INTEL, 0x9c0e),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lynx LP RAID */
+		PCI_VDEVICE(INTEL, 0x9c0f),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Cannon Lake PCH-LP AHCI */
+		PCI_VDEVICE(INTEL, 0x9dd3),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Avoton AHCI */
+		PCI_VDEVICE(INTEL, 0x1f22),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Avoton AHCI */
+		PCI_VDEVICE(INTEL, 0x1f23),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f24),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f25),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f26),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f27),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f2e),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f2f),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Avoton AHCI */
+		PCI_VDEVICE(INTEL, 0x1f32),
+		.driver_data = board_ahci_avn,
+	}, {
+		/* Avoton AHCI */
+		PCI_VDEVICE(INTEL, 0x1f33),
+		.driver_data = board_ahci_avn,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f34),
+		.driver_data = board_ahci_avn,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f35),
+		.driver_data = board_ahci_avn,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f36),
+		.driver_data = board_ahci_avn,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f37),
+		.driver_data = board_ahci_avn,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f3e),
+		.driver_data = board_ahci_avn,
+	}, {
+		/* Avoton RAID */
+		PCI_VDEVICE(INTEL, 0x1f3f),
+		.driver_data = board_ahci_avn,
+	}, {
+		/* Wellsburg/Lewisburg AHCI*/
+		PCI_VDEVICE(INTEL, 0x2823),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* *burg SATA0 'RAID' */
+		PCI_VDEVICE(INTEL, 0x2826),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* *burg SATA1 'RAID' */
+		PCI_VDEVICE(INTEL, 0x2827),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* *burg SATA2 'RAID' */
+		PCI_VDEVICE(INTEL, 0x282f),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Rocket Lake PCH-H RAID */
+		PCI_VDEVICE(INTEL, 0x43d4),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Rocket Lake PCH-H RAID */
+		PCI_VDEVICE(INTEL, 0x43d5),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Rocket Lake PCH-H RAID */
+		PCI_VDEVICE(INTEL, 0x43d6),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Rocket Lake PCH-H RAID */
+		PCI_VDEVICE(INTEL, 0x43d7),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wellsburg AHCI */
+		PCI_VDEVICE(INTEL, 0x8d02),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wellsburg RAID */
+		PCI_VDEVICE(INTEL, 0x8d04),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wellsburg RAID */
+		PCI_VDEVICE(INTEL, 0x8d06),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wellsburg RAID */
+		PCI_VDEVICE(INTEL, 0x8d0e),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wellsburg AHCI */
+		PCI_VDEVICE(INTEL, 0x8d62),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wellsburg RAID */
+		PCI_VDEVICE(INTEL, 0x8d64),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wellsburg RAID */
+		PCI_VDEVICE(INTEL, 0x8d66),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wellsburg RAID */
+		PCI_VDEVICE(INTEL, 0x8d6e),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Coleto Creek AHCI */
+		PCI_VDEVICE(INTEL, 0x23a3),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wildcat LP AHCI */
+		PCI_VDEVICE(INTEL, 0x9c83),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wildcat LP RAID */
+		PCI_VDEVICE(INTEL, 0x9c85),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wildcat LP RAID */
+		PCI_VDEVICE(INTEL, 0x9c87),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Wildcat LP RAID */
+		PCI_VDEVICE(INTEL, 0x9c8f),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* 9 Series AHCI */
+		PCI_VDEVICE(INTEL, 0x8c82),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* 9 Series M AHCI */
+		PCI_VDEVICE(INTEL, 0x8c83),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* 9 Series RAID */
+		PCI_VDEVICE(INTEL, 0x8c84),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* 9 Series M RAID */
+		PCI_VDEVICE(INTEL, 0x8c85),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* 9 Series RAID */
+		PCI_VDEVICE(INTEL, 0x8c86),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* 9 Series M RAID */
+		PCI_VDEVICE(INTEL, 0x8c87),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* 9 Series RAID */
+		PCI_VDEVICE(INTEL, 0x8c8e),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* 9 Series M RAID */
+		PCI_VDEVICE(INTEL, 0x8c8f),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Sunrise LP AHCI */
+		PCI_VDEVICE(INTEL, 0x9d03),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Sunrise LP RAID */
+		PCI_VDEVICE(INTEL, 0x9d05),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Sunrise LP RAID */
+		PCI_VDEVICE(INTEL, 0x9d07),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Sunrise Point-H AHCI */
+		PCI_VDEVICE(INTEL, 0xa102),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Sunrise M AHCI */
+		PCI_VDEVICE(INTEL, 0xa103),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Sunrise Point-H RAID */
+		PCI_VDEVICE(INTEL, 0xa105),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Sunrise Point-H RAID */
+		PCI_VDEVICE(INTEL, 0xa106),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Sunrise M RAID */
+		PCI_VDEVICE(INTEL, 0xa107),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Sunrise Point-H RAID */
+		PCI_VDEVICE(INTEL, 0xa10f),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lewisburg AHCI*/
+		PCI_VDEVICE(INTEL, 0xa182),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lewisburg RAID*/
+		PCI_VDEVICE(INTEL, 0xa186),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lewisburg RAID*/
+		PCI_VDEVICE(INTEL, 0xa1d2),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lewisburg RAID*/
+		PCI_VDEVICE(INTEL, 0xa1d6),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lewisburg AHCI*/
+		PCI_VDEVICE(INTEL, 0xa202),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lewisburg RAID*/
+		PCI_VDEVICE(INTEL, 0xa206),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lewisburg RAID*/
+		PCI_VDEVICE(INTEL, 0xa252),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Lewisburg RAID*/
+		PCI_VDEVICE(INTEL, 0xa256),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Cannon Lake PCH-H RAID */
+		PCI_VDEVICE(INTEL, 0xa356),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Comet Lake-H RAID */
+		PCI_VDEVICE(INTEL, 0x06d7),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Comet Lake PCH-V RAID */
+		PCI_VDEVICE(INTEL, 0xa386),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Bay Trail AHCI */
+		PCI_VDEVICE(INTEL, 0x0f22),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Bay Trail AHCI */
+		PCI_VDEVICE(INTEL, 0x0f23),
+		.driver_data = board_ahci_pcs_quirk_no_devslp,
+	}, {
+		/* Cherry Tr. AHCI */
+		PCI_VDEVICE(INTEL, 0x22a3),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* ApolloLake AHCI */
+		PCI_VDEVICE(INTEL, 0x5ae3),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Ice Lake LP AHCI */
+		PCI_VDEVICE(INTEL, 0x34d3),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Comet Lake PCH-U AHCI */
+		PCI_VDEVICE(INTEL, 0x02d3),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* Comet Lake PCH RAID */
+		PCI_VDEVICE(INTEL, 0x02d7),
+		.driver_data = board_ahci_pcs_quirk,
+	},
 
-	/* JMicron 360/1/3/5/6, match class to avoid IDE function */
-	{ PCI_VENDOR_ID_JMICRON, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
-	  PCI_CLASS_STORAGE_SATA_AHCI, 0xffffff, board_ahci_ign_iferr },
+	/* Elkhart Lake IDs 0x4b60 & 0x4b62 https://sata-io.org/product/8803 not tested yet */
+	{
+		/* Elkhart Lake AHCI */
+		PCI_VDEVICE(INTEL, 0x4b63),
+		.driver_data = board_ahci_pcs_quirk,
+	}, {
+		/* JMicron JMB582/585: force 32-bit DMA (broken 64-bit implementation) */
+		PCI_VDEVICE(JMICRON, 0x0582),
+		.driver_data = board_ahci_jmb585,
+
+	}, {
+		PCI_VDEVICE(JMICRON, 0x0585),
+		.driver_data = board_ahci_jmb585,
+	}, {
+		/* JMicron 360/1/3/5/6, match class to avoid IDE function */
+		PCI_DEVICE(PCI_VENDOR_ID_JMICRON, PCI_ANY_ID),
+		.class = PCI_CLASS_STORAGE_SATA_AHCI,
+		.class_mask = 0xffffff,
+		.driver_data = board_ahci_ign_iferr,
+
+	},
 	/* JMicron 362B and 362C have an AHCI function with IDE class code */
-	{ PCI_VDEVICE(JMICRON, 0x2362), board_ahci_ign_iferr },
-	{ PCI_VDEVICE(JMICRON, 0x236f), board_ahci_ign_iferr },
+	{
+		PCI_VDEVICE(JMICRON, 0x2362),
+		.driver_data = board_ahci_ign_iferr,
+
+	}, {
+		PCI_VDEVICE(JMICRON, 0x236f),
+		.driver_data = board_ahci_ign_iferr,
+
+	},
 	/* May need to update quirk_jmicron_async_suspend() for additions */
 
 	/* ATI */
-	{ PCI_VDEVICE(ATI, 0x4380), board_ahci_sb600 }, /* ATI SB600 */
-	{ PCI_VDEVICE(ATI, 0x4390), board_ahci_sb700 }, /* ATI SB700/800 */
-	{ PCI_VDEVICE(ATI, 0x4391), board_ahci_sb700 }, /* ATI SB700/800 */
-	{ PCI_VDEVICE(ATI, 0x4392), board_ahci_sb700 }, /* ATI SB700/800 */
-	{ PCI_VDEVICE(ATI, 0x4393), board_ahci_sb700 }, /* ATI SB700/800 */
-	{ PCI_VDEVICE(ATI, 0x4394), board_ahci_sb700 }, /* ATI SB700/800 */
-	{ PCI_VDEVICE(ATI, 0x4395), board_ahci_sb700 }, /* ATI SB700/800 */
+	{
+		/* ATI SB600 */
+		PCI_VDEVICE(ATI, 0x4380),
+		.driver_data = board_ahci_sb600,
+	}, {
+		/* ATI SB700/800 */
+		PCI_VDEVICE(ATI, 0x4390),
+		.driver_data = board_ahci_sb700,
+	}, {
+		/* ATI SB700/800 */
+		PCI_VDEVICE(ATI, 0x4391),
+		.driver_data = board_ahci_sb700,
+	}, {
+		/* ATI SB700/800 */
+		PCI_VDEVICE(ATI, 0x4392),
+		.driver_data = board_ahci_sb700,
+	}, {
+		/* ATI SB700/800 */
+		PCI_VDEVICE(ATI, 0x4393),
+		.driver_data = board_ahci_sb700,
+	}, {
+		/* ATI SB700/800 */
+		PCI_VDEVICE(ATI, 0x4394),
+		.driver_data = board_ahci_sb700,
+	}, {
+		/* ATI SB700/800 */
+		PCI_VDEVICE(ATI, 0x4395),
+		.driver_data = board_ahci_sb700,
+	},
 
 	/* Amazon's Annapurna Labs support */
-	{ PCI_DEVICE(PCI_VENDOR_ID_AMAZON_ANNAPURNA_LABS, 0x0031),
-		.class = PCI_CLASS_STORAGE_SATA_AHCI,
-		.class_mask = 0xffffff,
-		board_ahci_al },
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_AMAZON_ANNAPURNA_LABS, 0x0031),
+			.class = PCI_CLASS_STORAGE_SATA_AHCI,
+			.class_mask = 0xffffff,
+		.driver_data = board_ahci_al,
+
+	},
 	/* AMD */
-	{ PCI_VDEVICE(AMD, 0x7800), board_ahci }, /* AMD Hudson-2 */
-	{ PCI_VDEVICE(AMD, 0x7801), board_ahci_no_debounce_delay }, /* AMD Hudson-2 (AHCI mode) */
-	{ PCI_VDEVICE(AMD, 0x7900), board_ahci }, /* AMD CZ */
-	{ PCI_VDEVICE(AMD, 0x7901), board_ahci }, /* AMD Green Sardine */
+	{
+		/* AMD Hudson-2 */
+		PCI_VDEVICE(AMD, 0x7800),
+		.driver_data = board_ahci,
+	}, {
+		/* AMD Hudson-2 (AHCI mode) */
+		PCI_VDEVICE(AMD, 0x7801),
+		.driver_data = board_ahci_no_debounce_delay,
+	}, {
+		/* AMD CZ */
+		PCI_VDEVICE(AMD, 0x7900),
+		.driver_data = board_ahci,
+	}, {
+		/* AMD Green Sardine */
+		PCI_VDEVICE(AMD, 0x7901),
+		.driver_data = board_ahci,
+	},
 	/* AMD is using RAID class only for ahci controllers */
-	{ PCI_VENDOR_ID_AMD, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
-	  PCI_CLASS_STORAGE_RAID << 8, 0xffffff, board_ahci },
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_ANY_ID),
+		.class = PCI_CLASS_STORAGE_RAID << 8,
+		.class_mask = 0xffffff,
+		.driver_data = board_ahci,
+	},
 
 	/* Dell S140/S150 */
-	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID, PCI_SUBVENDOR_ID_DELL, PCI_ANY_ID,
-	  PCI_CLASS_STORAGE_RAID << 8, 0xffffff, board_ahci_pcs_quirk },
+	{
+		PCI_DEVICE_SUB(PCI_VENDOR_ID_INTEL, PCI_ANY_ID,
+			       PCI_SUBVENDOR_ID_DELL, PCI_ANY_ID),
+		.class = PCI_CLASS_STORAGE_RAID << 8,
+		.class_mask = 0xffffff,
+		.driver_data = board_ahci_pcs_quirk,
+
+	},
 
 	/* VIA */
-	{ PCI_VDEVICE(VIA, 0x3349), board_ahci_vt8251 }, /* VIA VT8251 */
-	{ PCI_VDEVICE(VIA, 0x6287), board_ahci_vt8251 }, /* VIA VT8251 */
+	{
+		/* VIA VT8251 */
+		PCI_VDEVICE(VIA, 0x3349),
+		.driver_data = board_ahci_vt8251,
+	}, {
+		/* VIA VT8251 */
+		PCI_VDEVICE(VIA, 0x6287),
+		.driver_data = board_ahci_vt8251,
+	},
 
 	/* NVIDIA */
-	{ PCI_VDEVICE(NVIDIA, 0x044c), board_ahci_mcp65 },	/* MCP65 */
-	{ PCI_VDEVICE(NVIDIA, 0x044d), board_ahci_mcp65 },	/* MCP65 */
-	{ PCI_VDEVICE(NVIDIA, 0x044e), board_ahci_mcp65 },	/* MCP65 */
-	{ PCI_VDEVICE(NVIDIA, 0x044f), board_ahci_mcp65 },	/* MCP65 */
-	{ PCI_VDEVICE(NVIDIA, 0x045c), board_ahci_mcp65 },	/* MCP65 */
-	{ PCI_VDEVICE(NVIDIA, 0x045d), board_ahci_mcp65 },	/* MCP65 */
-	{ PCI_VDEVICE(NVIDIA, 0x045e), board_ahci_mcp65 },	/* MCP65 */
-	{ PCI_VDEVICE(NVIDIA, 0x045f), board_ahci_mcp65 },	/* MCP65 */
-	{ PCI_VDEVICE(NVIDIA, 0x0550), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x0551), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x0552), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x0553), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x0554), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x0555), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x0556), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x0557), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x0558), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x0559), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x055a), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x055b), board_ahci_mcp67 },	/* MCP67 */
-	{ PCI_VDEVICE(NVIDIA, 0x0580), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x0581), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x0582), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x0583), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x0584), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x0585), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x0586), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x0587), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x0588), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x0589), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x058a), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x058b), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x058c), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x058d), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x058e), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x058f), board_ahci_mcp_linux },	/* Linux ID */
-	{ PCI_VDEVICE(NVIDIA, 0x07f0), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07f1), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07f2), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07f3), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07f4), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07f5), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07f6), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07f7), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07f8), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07f9), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07fa), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x07fb), board_ahci_mcp73 },	/* MCP73 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ad0), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ad1), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ad2), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ad3), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ad4), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ad5), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ad6), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ad7), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ad8), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ad9), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ada), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0adb), board_ahci_mcp77 },	/* MCP77 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ab4), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ab5), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ab6), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ab7), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ab8), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0ab9), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0aba), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0abb), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0abc), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0abd), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0abe), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0abf), board_ahci_mcp79 },	/* MCP79 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d84), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d85), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d86), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d87), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d88), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d89), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d8a), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d8b), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d8c), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d8d), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d8e), board_ahci_mcp89 },	/* MCP89 */
-	{ PCI_VDEVICE(NVIDIA, 0x0d8f), board_ahci_mcp89 },	/* MCP89 */
+	{
+		/* MCP65 */
+		PCI_VDEVICE(NVIDIA, 0x044c),
+		.driver_data = board_ahci_mcp65,
+	}, {
+		/* MCP65 */
+		PCI_VDEVICE(NVIDIA, 0x044d),
+		.driver_data = board_ahci_mcp65,
+	}, {
+		/* MCP65 */
+		PCI_VDEVICE(NVIDIA, 0x044e),
+		.driver_data = board_ahci_mcp65,
+	}, {
+		/* MCP65 */
+		PCI_VDEVICE(NVIDIA, 0x044f),
+		.driver_data = board_ahci_mcp65,
+	}, {
+		/* MCP65 */
+		PCI_VDEVICE(NVIDIA, 0x045c),
+		.driver_data = board_ahci_mcp65,
+	}, {
+		/* MCP65 */
+		PCI_VDEVICE(NVIDIA, 0x045d),
+		.driver_data = board_ahci_mcp65,
+	}, {
+		/* MCP65 */
+		PCI_VDEVICE(NVIDIA, 0x045e),
+		.driver_data = board_ahci_mcp65,
+	}, {
+		/* MCP65 */
+		PCI_VDEVICE(NVIDIA, 0x045f),
+		.driver_data = board_ahci_mcp65,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x0550),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x0551),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x0552),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x0553),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x0554),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x0555),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x0556),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x0557),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x0558),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x0559),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x055a),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* MCP67 */
+		PCI_VDEVICE(NVIDIA, 0x055b),
+		.driver_data = board_ahci_mcp67,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x0580),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x0581),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x0582),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x0583),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x0584),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x0585),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x0586),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x0587),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x0588),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x0589),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x058a),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x058b),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x058c),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x058d),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x058e),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* Linux ID */
+		PCI_VDEVICE(NVIDIA, 0x058f),
+		.driver_data = board_ahci_mcp_linux,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07f0),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07f1),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07f2),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07f3),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07f4),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07f5),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07f6),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07f7),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07f8),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07f9),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07fa),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP73 */
+		PCI_VDEVICE(NVIDIA, 0x07fb),
+		.driver_data = board_ahci_mcp73,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ad0),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ad1),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ad2),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ad3),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ad4),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ad5),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ad6),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ad7),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ad8),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ad9),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0ada),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP77 */
+		PCI_VDEVICE(NVIDIA, 0x0adb),
+		.driver_data = board_ahci_mcp77,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0ab4),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0ab5),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0ab6),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0ab7),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0ab8),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0ab9),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0aba),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0abb),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0abc),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0abd),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0abe),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP79 */
+		PCI_VDEVICE(NVIDIA, 0x0abf),
+		.driver_data = board_ahci_mcp79,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d84),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d85),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d86),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d87),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d88),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d89),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d8a),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d8b),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d8c),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d8d),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d8e),
+		.driver_data = board_ahci_mcp89,
+	}, {
+		/* MCP89 */
+		PCI_VDEVICE(NVIDIA, 0x0d8f),
+		.driver_data = board_ahci_mcp89,
+	},
 
 	/* SiS */
-	{ PCI_VDEVICE(SI, 0x1184), board_ahci },		/* SiS 966 */
-	{ PCI_VDEVICE(SI, 0x1185), board_ahci },		/* SiS 968 */
-	{ PCI_VDEVICE(SI, 0x0186), board_ahci },		/* SiS 968 */
+	{
+		/* SiS 966 */
+		PCI_VDEVICE(SI, 0x1184),
+		.driver_data = board_ahci,
+	}, {
+		/* SiS 968 */
+		PCI_VDEVICE(SI, 0x1185),
+		.driver_data = board_ahci,
+	}, {
+		/* SiS 968 */
+		PCI_VDEVICE(SI, 0x0186),
+		.driver_data = board_ahci,
+	},
 
 	/* ST Microelectronics */
-	{ PCI_VDEVICE(STMICRO, 0xCC06), board_ahci },		/* ST ConneXt */
+	{
+		/* ST ConneXt */
+		PCI_VDEVICE(STMICRO, 0xCC06),
+		.driver_data = board_ahci,
+	},
 
 	/* Marvell */
-	{ PCI_VDEVICE(MARVELL, 0x6145), board_ahci_mv },	/* 6145 */
-	{ PCI_VDEVICE(MARVELL, 0x6121), board_ahci_mv },	/* 6121 */
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9123),
-	  .class = PCI_CLASS_STORAGE_SATA_AHCI,
-	  .class_mask = 0xffffff,
-	  .driver_data = board_ahci_yes_fbs },			/* 88se9128 */
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9125),
-	  .driver_data = board_ahci_yes_fbs },			/* 88se9125 */
-	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_MARVELL_EXT, 0x9178,
-			 PCI_VENDOR_ID_MARVELL_EXT, 0x9170),
-	  .driver_data = board_ahci_yes_fbs },			/* 88se9170 */
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x917a),
-	  .driver_data = board_ahci_yes_fbs },			/* 88se9172 */
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9172),
-	  .driver_data = board_ahci_yes_fbs },			/* 88se9182 */
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9182),
-	  .driver_data = board_ahci_yes_fbs },			/* 88se9172 */
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9192),
-	  .driver_data = board_ahci_yes_fbs },			/* 88se9172 on some Gigabyte */
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x91a0),
-	  .driver_data = board_ahci_yes_fbs },
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x91a2), 	/* 88se91a2 */
-	  .driver_data = board_ahci_yes_fbs },
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x91a3),
-	  .driver_data = board_ahci_yes_fbs },
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9230),
-	  .driver_data = board_ahci_yes_fbs },
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9235),
-	  .driver_data = board_ahci_no_debounce_delay },
-	{ PCI_DEVICE(PCI_VENDOR_ID_TTI, 0x0642), /* highpoint rocketraid 642L */
-	  .driver_data = board_ahci_yes_fbs },
-	{ PCI_DEVICE(PCI_VENDOR_ID_TTI, 0x0645), /* highpoint rocketraid 644L */
-	  .driver_data = board_ahci_yes_fbs },
+	{
+		/* 6145 */
+		PCI_VDEVICE(MARVELL, 0x6145),
+		.driver_data = board_ahci_mv,
+	}, {
+		/* 6121 */
+		PCI_VDEVICE(MARVELL, 0x6121),
+		.driver_data = board_ahci_mv,
+	}, {
+		/* 88se9128 */
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9123),
+			.class = PCI_CLASS_STORAGE_SATA_AHCI,
+			.class_mask = 0xffffff,
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		/* 88se9125 */
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9125),
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		/* 88se9170 */
+		PCI_DEVICE_SUB(PCI_VENDOR_ID_MARVELL_EXT, 0x9178,
+			       PCI_VENDOR_ID_MARVELL_EXT, 0x9170),
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		/* 88se9172 */
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x917a),
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		/* 88se9182 */
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9172),
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		/* 88se9172 */
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9182),
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		/* 88se9172 on some Gigabyte */
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9192),
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x91a0),
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x91a2), 	/* 88se91a2 */
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x91a3),
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9215),
+		.driver_data = board_ahci_yes_fbs_atapi_dma,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9230),
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_MARVELL_EXT, 0x9235),
+		.driver_data = board_ahci_no_debounce_delay,
+	},
+
+	/* TTI */
+	{
+		/* highpoint rocketraid 642L */
+		PCI_DEVICE(PCI_VENDOR_ID_TTI, 0x0642),
+		.driver_data = board_ahci_yes_fbs,
+	}, {
+		/* highpoint rocketraid 644L */
+		PCI_DEVICE(PCI_VENDOR_ID_TTI, 0x0645),
+		.driver_data = board_ahci_yes_fbs,
+	},
 
 	/* Promise */
-	{ PCI_VDEVICE(PROMISE, 0x3f20), board_ahci },	/* PDC42819 */
-	{ PCI_VDEVICE(PROMISE, 0x3781), board_ahci },   /* FastTrak TX8660 ahci-mode */
+	{
+		/* PDC42819 */
+		PCI_VDEVICE(PROMISE, 0x3f20),
+		.driver_data = board_ahci,
+	}, {
+		/* FastTrak TX8660 ahci-mode */
+		PCI_VDEVICE(PROMISE, 0x3781),
+		.driver_data = board_ahci,
+	},
 
 	/* ASMedia */
-	{ PCI_VDEVICE(ASMEDIA, 0x0601), board_ahci_43bit_dma },	/* ASM1060 */
-	{ PCI_VDEVICE(ASMEDIA, 0x0602), board_ahci_43bit_dma },	/* ASM1060 */
-	{ PCI_VDEVICE(ASMEDIA, 0x0611), board_ahci_43bit_dma },	/* ASM1061 */
-	{ PCI_VDEVICE(ASMEDIA, 0x0612), board_ahci_43bit_dma },	/* ASM1061/1062 */
-	{ PCI_VDEVICE(ASMEDIA, 0x0621), board_ahci_43bit_dma },	/* ASM1061R */
-	{ PCI_VDEVICE(ASMEDIA, 0x0622), board_ahci_43bit_dma },	/* ASM1062R */
-	{ PCI_VDEVICE(ASMEDIA, 0x0624), board_ahci_43bit_dma },	/* ASM1062+JMB575 */
-	{ PCI_VDEVICE(ASMEDIA, 0x1062), board_ahci },	/* ASM1062A */
-	{ PCI_VDEVICE(ASMEDIA, 0x1064), board_ahci },	/* ASM1064 */
-	{ PCI_VDEVICE(ASMEDIA, 0x1164), board_ahci },   /* ASM1164 */
-	{ PCI_VDEVICE(ASMEDIA, 0x1165), board_ahci },   /* ASM1165 */
-	{ PCI_VDEVICE(ASMEDIA, 0x1166), board_ahci },   /* ASM1166 */
+	{
+		/* ASM1060 */
+		PCI_VDEVICE(ASMEDIA, 0x0601),
+		.driver_data = board_ahci_43bit_dma,
+	}, {
+		/* ASM1060 */
+		PCI_VDEVICE(ASMEDIA, 0x0602),
+		.driver_data = board_ahci_43bit_dma,
+	}, {
+		/* ASM1061 */
+		PCI_VDEVICE(ASMEDIA, 0x0611),
+		.driver_data = board_ahci_43bit_dma,
+	}, {
+		/* ASM1061/1062 */
+		PCI_VDEVICE(ASMEDIA, 0x0612),
+		.driver_data = board_ahci_43bit_dma,
+	}, {
+		/* ASM1061R */
+		PCI_VDEVICE(ASMEDIA, 0x0621),
+		.driver_data = board_ahci_43bit_dma,
+	}, {
+		/* ASM1062R */
+		PCI_VDEVICE(ASMEDIA, 0x0622),
+		.driver_data = board_ahci_43bit_dma,
+	}, {
+		/* ASM1062+JMB575 */
+		PCI_VDEVICE(ASMEDIA, 0x0624),
+		.driver_data = board_ahci_43bit_dma,
+	}, {
+		/* ASM1062A */
+		PCI_VDEVICE(ASMEDIA, 0x1062),
+		.driver_data = board_ahci,
+	}, {
+		/* ASM1064 */
+		PCI_VDEVICE(ASMEDIA, 0x1064),
+		.driver_data = board_ahci,
+	}, {
+		/* ASM1164 */
+		PCI_VDEVICE(ASMEDIA, 0x1164),
+		.driver_data = board_ahci,
+	}, {
+		/* ASM1165 */
+		PCI_VDEVICE(ASMEDIA, 0x1165),
+		.driver_data = board_ahci,
+	}, {
+		/* ASM1166 */
+		PCI_VDEVICE(ASMEDIA, 0x1166),
+		.driver_data = board_ahci,
+	}, {
+		/*
+		 * Samsung SSDs found on some macbooks.  NCQ times out if MSI is
+		 * enabled.  https://bugzilla.kernel.org/show_bug.cgi?id=60731
+		 */
+		PCI_VDEVICE(SAMSUNG, 0x1600),
+		.driver_data = board_ahci_no_msi,
 
-	/*
-	 * Samsung SSDs found on some macbooks.  NCQ times out if MSI is
-	 * enabled.  https://bugzilla.kernel.org/show_bug.cgi?id=60731
-	 */
-	{ PCI_VDEVICE(SAMSUNG, 0x1600), board_ahci_no_msi },
-	{ PCI_VDEVICE(SAMSUNG, 0xa800), board_ahci_no_msi },
+	}, {
+		PCI_VDEVICE(SAMSUNG, 0xa800),
+		.driver_data = board_ahci_no_msi,
+	}, {
+		/* Enmotus */
+		PCI_DEVICE(0x1c44, 0x8000),
+		.driver_data = board_ahci,
+	}, {
+		/* Loongson */
+		PCI_VDEVICE(LOONGSON, 0x7a08),
+		.driver_data = board_ahci,
 
-	/* Enmotus */
-	{ PCI_DEVICE(0x1c44, 0x8000), board_ahci },
-
-	/* Loongson */
-	{ PCI_VDEVICE(LOONGSON, 0x7a08), board_ahci },
-
-	/* Generic, PCI class code for AHCI */
-	{ PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
-	  PCI_CLASS_STORAGE_SATA_AHCI, 0xffffff, board_ahci },
+	}, {
+		/* Generic, PCI class code for AHCI */
+		PCI_DEVICE_CLASS(PCI_CLASS_STORAGE_SATA_AHCI, 0xffffff),
+		.driver_data = board_ahci,
+	},
 
 	{ }	/* terminate list */
 };
@@ -663,7 +1616,9 @@ MODULE_PARM_DESC(marvell_enable, "Marvell SATA via AHCI (1 = enabled)");
 
 static int mobile_lpm_policy = -1;
 module_param(mobile_lpm_policy, int, 0644);
-MODULE_PARM_DESC(mobile_lpm_policy, "Default LPM policy for mobile chipsets");
+MODULE_PARM_DESC(mobile_lpm_policy,
+		 "Default LPM policy. Despite its name, this parameter applies "
+		 "to all chipsets, including desktop and server chipsets");
 
 static char *ahci_mask_port_map;
 module_param_named(mask_port_map, ahci_mask_port_map, charp, 0444);
@@ -676,40 +1631,50 @@ MODULE_PARM_DESC(mask_port_map,
 		 "where <pci_dev> is the PCI ID of an AHCI controller in the "
 		 "form \"domain:bus:dev.func\"");
 
-static void ahci_apply_port_map_mask(struct device *dev,
-				     struct ahci_host_priv *hpriv, char *mask_s)
+static char *ahci_mask_port_ext;
+module_param_named(mask_port_ext, ahci_mask_port_ext, charp, 0444);
+MODULE_PARM_DESC(mask_port_ext,
+		 "32-bits mask to ignore the external/hotplug capability of ports. "
+		 "Valid values are: "
+		 "\"<mask>\" to apply the same mask to all AHCI controller "
+		 "devices, and \"<pci_dev>=<mask>,<pci_dev>=<mask>,...\" to "
+		 "specify different masks for the controllers specified, "
+		 "where <pci_dev> is the PCI ID of an AHCI controller in the "
+		 "form \"domain:bus:dev.func\"");
+
+static u32 ahci_port_mask(struct device *dev, char *mask_s)
 {
 	unsigned int mask;
 
 	if (kstrtouint(mask_s, 0, &mask)) {
 		dev_err(dev, "Invalid port map mask\n");
-		return;
+		return 0;
 	}
 
-	hpriv->mask_port_map = mask;
+	return mask;
 }
 
-static void ahci_get_port_map_mask(struct device *dev,
-				   struct ahci_host_priv *hpriv)
+static u32 ahci_get_port_mask(struct device *dev, char *mask_p)
 {
 	char *param, *end, *str, *mask_s;
 	char *name;
+	u32 mask = 0;
 
-	if (!strlen(ahci_mask_port_map))
-		return;
+	if (!mask_p || !strlen(mask_p))
+		return 0;
 
-	str = kstrdup(ahci_mask_port_map, GFP_KERNEL);
+	str = kstrdup(mask_p, GFP_KERNEL);
 	if (!str)
-		return;
+		return 0;
 
 	/* Handle single mask case */
 	if (!strchr(str, '=')) {
-		ahci_apply_port_map_mask(dev, hpriv, str);
+		mask = ahci_port_mask(dev, str);
 		goto free;
 	}
 
 	/*
-	 * Mask list case: parse the parameter to apply the mask only if
+	 * Mask list case: parse the parameter to get the mask only if
 	 * the device name matches.
 	 */
 	param = str;
@@ -739,11 +1704,13 @@ static void ahci_get_port_map_mask(struct device *dev,
 			param++;
 		}
 
-		ahci_apply_port_map_mask(dev, hpriv, mask_s);
+		mask = ahci_port_mask(dev, mask_s);
 	}
 
 free:
 	kfree(str);
+
+	return mask;
 }
 
 static void ahci_pci_save_initial_config(struct pci_dev *pdev,
@@ -769,8 +1736,10 @@ static void ahci_pci_save_initial_config(struct pci_dev *pdev,
 	}
 
 	/* Handle port map masks passed as module parameter. */
-	if (ahci_mask_port_map)
-		ahci_get_port_map_mask(&pdev->dev, hpriv);
+	hpriv->mask_port_map =
+		ahci_get_port_mask(&pdev->dev, ahci_mask_port_map);
+	hpriv->mask_port_ext =
+		ahci_get_port_mask(&pdev->dev, ahci_mask_port_ext);
 
 	ahci_save_initial_config(&pdev->dev, hpriv);
 }
@@ -1399,8 +2368,15 @@ static bool ahci_broken_suspend(struct pci_dev *pdev)
 
 static bool ahci_broken_lpm(struct pci_dev *pdev)
 {
+	/*
+	 * Platforms with LPM problems.
+	 * If driver_data is NULL, there is no existing BIOS version with
+	 * functioning LPM.
+	 * If driver_data is non-NULL, then driver_data contains the DMI BIOS
+	 * build date of the first BIOS version with functioning LPM (i.e. older
+	 * BIOS versions have broken LPM).
+	 */
 	static const struct dmi_system_id sysids[] = {
-		/* Various Lenovo 50 series have LPM issues with older BIOSen */
 		{
 			.matches = {
 				DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
@@ -1427,13 +2403,30 @@ static bool ahci_broken_lpm(struct pci_dev *pdev)
 				DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
 				DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad W541"),
 			},
+			.driver_data = "20180409", /* 2.35 */
+		},
+		{
+			.matches = {
+				DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
+				DMI_MATCH(DMI_PRODUCT_NAME, "ASUSPRO D840MB_M840SA"),
+			},
+			/* 320 is broken, there is no known good version. */
+		},
+		{
 			/*
-			 * Note date based on release notes, 2.35 has been
-			 * reported to be good, but I've been unable to get
-			 * a hold of the reporter to get the DMI BIOS date.
-			 * TODO: fix this.
+			 * AMD 500 Series Chipset SATA Controller [1022:43eb]
+			 * on this motherboard timeouts on ports 5 and 6 when
+			 * LPM is enabled, at least with WDC WD20EFAX-68FB5N0
+			 * hard drives. LPM with the same drive works fine on
+			 * all other ports on the same controller.
 			 */
-			.driver_data = "20180310", /* 2.35 */
+			.matches = {
+				DMI_MATCH(DMI_BOARD_VENDOR,
+					  "ASUSTeK COMPUTER INC."),
+				DMI_MATCH(DMI_BOARD_NAME,
+					  "ROG STRIX B550-F GAMING (WI-FI)"),
+			},
+			/* 3621 is broken, there is no known good version. */
 		},
 		{ }	/* terminate list */
 	};
@@ -1443,6 +2436,9 @@ static bool ahci_broken_lpm(struct pci_dev *pdev)
 
 	if (!dmi)
 		return false;
+
+	if (!dmi->driver_data)
+		return true;
 
 	dmi_get_date(DMI_BIOS_DATE, &year, &month, &date);
 	snprintf(buf, sizeof(buf), "%04d%02d%02d", year, month, date);
@@ -1665,13 +2661,15 @@ static int ahci_get_irq_vector(struct ata_host *host, int port)
 	return pci_irq_vector(to_pci_dev(host->dev), port);
 }
 
-static int ahci_init_msi(struct pci_dev *pdev, unsigned int n_ports,
+static void ahci_init_irq(struct pci_dev *pdev, unsigned int n_ports,
 			struct ahci_host_priv *hpriv)
 {
 	int nvec;
 
-	if (hpriv->flags & AHCI_HFLAG_NO_MSI)
-		return -ENODEV;
+	if (hpriv->flags & AHCI_HFLAG_NO_MSI) {
+		pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_INTX);
+		return;
+	}
 
 	/*
 	 * If number of MSIs is less than number of ports then Sharing Last
@@ -1685,7 +2683,7 @@ static int ahci_init_msi(struct pci_dev *pdev, unsigned int n_ports,
 			if (!(readl(hpriv->mmio + HOST_CTL) & HOST_MRSM)) {
 				hpriv->get_irq_vector = ahci_get_irq_vector;
 				hpriv->flags |= AHCI_HFLAG_MULTI_MSI;
-				return nvec;
+				return;
 			}
 
 			/*
@@ -1700,12 +2698,13 @@ static int ahci_init_msi(struct pci_dev *pdev, unsigned int n_ports,
 
 	/*
 	 * If the host is not capable of supporting per-port vectors, fall
-	 * back to single MSI before finally attempting single MSI-X.
+	 * back to single MSI before finally attempting single MSI-X or
+	 * a legacy INTx.
 	 */
 	nvec = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
 	if (nvec == 1)
-		return nvec;
-	return pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSIX);
+		return;
+	pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSIX | PCI_IRQ_INTX);
 }
 
 static void ahci_mark_external_port(struct ata_port *ap)
@@ -1714,11 +2713,20 @@ static void ahci_mark_external_port(struct ata_port *ap)
 	void __iomem *port_mmio = ahci_port_base(ap);
 	u32 tmp;
 
-	/* mark external ports (hotplug-capable, eSATA) */
+	/*
+	 * Mark external ports (hotplug-capable, eSATA), unless we were asked to
+	 * ignore this feature.
+	 */
 	tmp = readl(port_mmio + PORT_CMD);
 	if (((tmp & PORT_CMD_ESP) && (hpriv->cap & HOST_CAP_SXS)) ||
-	    (tmp & PORT_CMD_HPCP))
+	    (tmp & PORT_CMD_HPCP)) {
+		if (hpriv->mask_port_ext & (1U << ap->port_no)) {
+			ata_port_info(ap,
+				"Ignoring external/hotplug capability\n");
+			return;
+		}
 		ap->pflags |= ATA_PFLAG_EXTERNAL;
+	}
 }
 
 static void ahci_update_initial_lpm_policy(struct ata_port *ap)
@@ -1733,15 +2741,26 @@ static void ahci_update_initial_lpm_policy(struct ata_port *ap)
 	 * LPM if the port advertises itself as an external port.
 	 */
 	if (ap->pflags & ATA_PFLAG_EXTERNAL) {
-		ata_port_dbg(ap, "external port, not enabling LPM\n");
+		ap->flags |= ATA_FLAG_NO_LPM;
+		ap->target_lpm_policy = ATA_LPM_MAX_POWER;
 		return;
+	}
+
+	/* If no Partial or no Slumber, we cannot support DIPM. */
+	if ((ap->host->flags & ATA_HOST_NO_PART) ||
+	    (ap->host->flags & ATA_HOST_NO_SSC)) {
+		ata_port_dbg(ap, "Host does not support DIPM\n");
+		ap->flags |= ATA_FLAG_NO_DIPM;
 	}
 
 	/* If no LPM states are supported by the HBA, do not bother with LPM */
 	if ((ap->host->flags & ATA_HOST_NO_PART) &&
 	    (ap->host->flags & ATA_HOST_NO_SSC) &&
 	    (ap->host->flags & ATA_HOST_NO_DEVSLP)) {
-		ata_port_dbg(ap, "no LPM states supported, not enabling LPM\n");
+		ata_port_dbg(ap,
+			"No LPM states supported, forcing LPM max_power\n");
+		ap->flags |= ATA_FLAG_NO_LPM;
+		ap->target_lpm_policy = ATA_LPM_MAX_POWER;
 		return;
 	}
 
@@ -1796,6 +2815,24 @@ static ssize_t remapped_nvme_show(struct device *dev,
 }
 
 static DEVICE_ATTR_RO(remapped_nvme);
+
+static int ahci_validate_bar_size(struct pci_dev *pdev, int bar,
+				  struct ahci_host_priv *hpriv)
+{
+	u32 cap = readl(hpriv->mmio + HOST_CAP);
+	unsigned int max_ports = ahci_nr_ports(cap);
+	u32 last_port_end = 0x100 + (max_ports * 0x80);
+	resource_size_t bar_size = pci_resource_len(pdev, bar);
+
+	if (last_port_end > bar_size) {
+		dev_warn(&pdev->dev,
+			 "BAR%d too small for %u ports (last port ends at %#x, BAR %pa)\n",
+			 bar, max_ports, last_port_end, &bar_size);
+		return -ENODEV;
+	}
+
+	return 0;
+}
 
 static int ahci_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
@@ -1897,6 +2934,10 @@ static int ahci_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (!hpriv->mmio)
 		return -ENOMEM;
 
+	rc = ahci_validate_bar_size(pdev, ahci_pci_bar, hpriv);
+	if (rc)
+		return rc;
+
 	/* detect remapped nvme devices */
 	ahci_remap_check(pdev, ahci_pci_bar, hpriv);
 
@@ -1985,10 +3026,8 @@ static int ahci_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 	host->private_data = hpriv;
 
-	if (ahci_init_msi(pdev, n_ports, hpriv) < 0) {
-		/* legacy intx interrupts */
-		pcim_intx(pdev, 1);
-	}
+	ahci_init_irq(pdev, n_ports, hpriv);
+
 	hpriv->irq = pci_irq_vector(pdev, 0);
 
 	if (!(hpriv->cap & HOST_CAP_SSS) || ahci_ignore_sss)
@@ -2019,13 +3058,13 @@ static int ahci_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		if (ap->flags & ATA_FLAG_EM)
 			ap->em_message_type = hpriv->em_msg_type;
 
-		ahci_mark_external_port(ap);
-
-		ahci_update_initial_lpm_policy(ap);
-
 		/* disabled/not-implemented port */
-		if (!(hpriv->port_map & (1 << i)))
+		if (!(hpriv->port_map & (1 << i))) {
 			ap->ops = &ata_dummy_port_ops;
+		} else {
+			ahci_mark_external_port(ap);
+			ahci_update_initial_lpm_policy(ap);
+		}
 	}
 
 	/* apply workaround for ASUS P5W DH Deluxe mainboard */

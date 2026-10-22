@@ -223,13 +223,13 @@ Userspace components
 Compiler
 --------
 
-Peano is an LLVM based open-source compiler for AMD XDNA Array compute tile
-available at:
+Peano is an LLVM based open-source single core compiler for AMD XDNA Array
+compute tile. Peano is available at:
 https://github.com/Xilinx/llvm-aie
 
-The open-source IREE compiler supports graph compilation of ML models for AMD
-NPU and uses Peano underneath. It is available at:
-https://github.com/nod-ai/iree-amd-aie
+IRON is an open-source array compiler for AMD XDNA Array based NPU which uses
+Peano underneath. IRON is available at:
+https://github.com/Xilinx/mlir-aie
 
 Usermode Driver (UMD)
 ---------------------
@@ -269,6 +269,31 @@ MERT can report various kinds of telemetry information like the following:
 * DMA counter
 * Deep Sleep counter
 * etc.
+
+.. _amdxdna-usage-stats:
+
+Amdxdna DRM client usage stats implementation
+=============================================
+
+The amdxdna driver implements the DRM client usage stats specification as
+documented in :ref:`drm-client-usage-stats`.
+
+Example of the output showing the implemented key value pairs:
+
+::
+
+        pos:	0
+        flags:	0100002
+        mnt_id:	29
+        ino:	939
+        drm-driver:	amdxdna_accel_driver
+        drm-client-id:	3219
+        drm-pdev:	0000:c5:00.1
+        amdxdna_accel_driver-heap-alloc:	60 KiB
+        amdxdna_accel_driver-internal-alloc:	67588 KiB
+        amdxdna_accel_driver-external-alloc:	0
+        drm-total-memory:	67632 KiB
+        drm-shared-memory:	0
 
 
 References

@@ -102,6 +102,7 @@
 #define CX23885_BOARD_HAUPPAUGE_QUADHD_DVB_885 60
 #define CX23885_BOARD_HAUPPAUGE_QUADHD_ATSC_885 61
 #define CX23885_BOARD_AVERMEDIA_CE310B         62
+#define CX23885_BOARD_AVERMEDIA_H789C          63
 
 #define GPIO_0 0x00000001
 #define GPIO_1 0x00000002
@@ -403,6 +404,7 @@ struct cx23885_dev {
 	unsigned char              radio_addr;
 	struct v4l2_subdev	   *sd_cx25840;
 	struct work_struct	   cx25840_work;
+	unsigned int		   disable_analog;
 
 	/* Infrared */
 	struct v4l2_subdev         *sd_ir;

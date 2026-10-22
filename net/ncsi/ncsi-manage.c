@@ -88,7 +88,7 @@ report:
 
 static void ncsi_channel_monitor(struct timer_list *t)
 {
-	struct ncsi_channel *nc = from_timer(nc, t, monitor.timer);
+	struct ncsi_channel *nc = timer_container_of(nc, t, monitor.timer);
 	struct ncsi_package *np = nc->package;
 	struct ncsi_dev_priv *ndp = np->ndp;
 	struct ncsi_channel_mode *ncm;
@@ -189,7 +189,7 @@ void ncsi_stop_channel_monitor(struct ncsi_channel *nc)
 	nc->monitor.enabled = false;
 	spin_unlock_irqrestore(&nc->lock, flags);
 
-	del_timer_sync(&nc->monitor.timer);
+	timer_delete_sync(&nc->monitor.timer);
 }
 
 struct ncsi_channel *ncsi_find_channel(struct ncsi_package *np,
@@ -211,7 +211,7 @@ struct ncsi_channel *ncsi_add_channel(struct ncsi_package *np, unsigned char id)
 	int index;
 	unsigned long flags;
 
-	nc = kzalloc(sizeof(*nc), GFP_ATOMIC);
+	nc = kzalloc_obj(*nc, GFP_ATOMIC);
 	if (!nc)
 		return NULL;
 
@@ -285,7 +285,7 @@ struct ncsi_package *ncsi_add_package(struct ncsi_dev_priv *ndp,
 	struct ncsi_package *np, *tmp;
 	unsigned long flags;
 
-	np = kzalloc(sizeof(*np), GFP_ATOMIC);
+	np = kzalloc_obj(*np, GFP_ATOMIC);
 	if (!np)
 		return NULL;
 
@@ -396,7 +396,7 @@ void ncsi_free_request(struct ncsi_request *nr)
 
 	if (nr->enabled) {
 		nr->enabled = false;
-		del_timer_sync(&nr->timer);
+		timer_delete_sync(&nr->timer);
 	}
 
 	spin_lock_irqsave(&ndp->lock, flags);
@@ -430,7 +430,7 @@ struct ncsi_dev *ncsi_find_dev(struct net_device *dev)
 
 static void ncsi_request_timeout(struct timer_list *t)
 {
-	struct ncsi_request *nr = from_timer(nr, t, timer);
+	struct ncsi_request *nr = timer_container_of(nr, t, timer);
 	struct ncsi_dev_priv *ndp = nr->ndp;
 	struct ncsi_cmd_pkt *cmd;
 	struct ncsi_package *np;
@@ -1697,7 +1697,7 @@ int ncsi_vlan_rx_add_vid(struct net_device *dev, __be16 proto, u16 vid)
 		return -ENOSPC;
 	}
 
-	vlan = kzalloc(sizeof(*vlan), GFP_KERNEL);
+	vlan = kzalloc_obj(*vlan);
 	if (!vlan)
 		return -ENOMEM;
 
@@ -1767,7 +1767,7 @@ struct ncsi_dev *ncsi_register_dev(struct net_device *dev,
 		return nd;
 
 	/* Create NCSI device */
-	ndp = kzalloc(sizeof(*ndp), GFP_ATOMIC);
+	ndp = kzalloc_obj(*ndp, GFP_ATOMIC);
 	if (!ndp)
 		return NULL;
 

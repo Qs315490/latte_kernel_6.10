@@ -70,12 +70,22 @@ static const struct hda_dai_widget_dma_ops *
 hda_dai_get_ops(struct snd_pcm_substream *substream, struct snd_soc_dai *cpu_dai)
 {
 	struct snd_soc_dapm_widget *w = snd_soc_dai_get_widget(cpu_dai, substream->stream);
-	struct snd_sof_widget *swidget = w->dobj.private;
+	struct snd_sof_widget *swidget;
 	struct snd_sof_dev *sdev;
 	struct snd_sof_dai *sdai;
 
-	sdev = widget_to_sdev(w);
+	/*
+	 * this is unlikely if the topology and the machine driver DAI links match.
+	 * But if there's a missing DAI link in topology, this will prevent a NULL pointer
+	 * dereference later on.
+	 */
+	if (!w) {
+		dev_err(cpu_dai->dev, "%s: widget is NULL\n", __func__);
+		return NULL;
+	}
 
+	sdev = widget_to_sdev(w);
+	swidget = w->dobj.private;
 	if (!swidget) {
 		dev_err(sdev->dev, "%s: swidget is NULL\n", __func__);
 		return NULL;
@@ -318,7 +328,7 @@ static int __maybe_unused hda_dai_trigger(struct snd_pcm_substream *substream, i
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 		ret = hda_link_dma_cleanup(substream, hext_stream, dai,
-					   cmd == SNDRV_PCM_TRIGGER_STOP ? false : true);
+					   cmd != SNDRV_PCM_TRIGGER_STOP);
 		if (ret < 0) {
 			dev_err(sdev->dev, "%s: failed to clean up link DMA\n", __func__);
 			return ret;
@@ -854,6 +864,14 @@ struct snd_soc_dai_driver skl_dai[] = {
 	.capture = {
 		.channels_min = 1,
 		.channels_max = 4,
+	},
+},
+{
+	/* Virtual CPU DAI for Echo reference */
+	.name = "Loopback Virtual Pin",
+	.capture = {
+		.channels_min = 1,
+		.channels_max = 2,
 	},
 },
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA_AUDIO_CODEC)

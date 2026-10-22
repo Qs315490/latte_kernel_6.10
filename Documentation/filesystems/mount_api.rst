@@ -299,8 +299,6 @@ manage the filesystem context.  They are as follows:
      On success it should return 0.  In the case of an error, it should return
      a negative error code.
 
-     .. Note:: reconfigure is intended as a replacement for remount_fs.
-
 
 Filesystem context Security
 ===========================
@@ -506,8 +504,16 @@ returned.
 
    * ::
 
+       int vfs_parse_fs_qstr(struct fs_context *fc, const char *key,
+			       const struct qstr *value);
+
+     A wrapper around vfs_parse_fs_param() that copies the value string it is
+     passed.
+
+   * ::
+
        int vfs_parse_fs_string(struct fs_context *fc, const char *key,
-			       const char *value, size_t v_size);
+			       const char *value);
 
      A wrapper around vfs_parse_fs_param() that copies the value string it is
      passed.
@@ -641,9 +647,7 @@ The members are as follows:
 	fs_param_is_u64		64-bit unsigned int	result->uint_64
 	fs_param_is_enum	Enum value name 	result->uint_32
 	fs_param_is_string	Arbitrary string	param->string
-	fs_param_is_blob	Binary blob		param->blob
 	fs_param_is_blockdev	Blockdev path		* Needs lookup
-	fs_param_is_path	Path			* Needs lookup
 	fs_param_is_fd		File descriptor		result->int_32
 	fs_param_is_uid		User ID (u32)           result->uid
 	fs_param_is_gid		Group ID (u32)          result->gid
@@ -671,14 +675,11 @@ The members are as follows:
 	fsparam_bool()		fs_param_is_bool
 	fsparam_u32()		fs_param_is_u32
 	fsparam_u32oct()	fs_param_is_u32_octal
-	fsparam_u32hex()	fs_param_is_u32_hex
 	fsparam_s32()		fs_param_is_s32
 	fsparam_u64()		fs_param_is_u64
 	fsparam_enum()		fs_param_is_enum
 	fsparam_string()	fs_param_is_string
-	fsparam_blob()		fs_param_is_blob
 	fsparam_bdev()		fs_param_is_blockdev
-	fsparam_path()		fs_param_is_path
 	fsparam_fd()		fs_param_is_fd
 	fsparam_uid()		fs_param_is_uid
 	fsparam_gid()		fs_param_is_gid
@@ -752,21 +753,6 @@ process the parameters it is given.
 
      If a match is found, the corresponding value is returned.  If a match
      isn't found, the not_found value is returned instead.
-
-   * ::
-
-       bool validate_constant_table(const struct constant_table *tbl,
-				    size_t tbl_size,
-				    int low, int high, int special);
-
-     Validate a constant table.  Checks that all the elements are appropriately
-     ordered, that there are no duplicates and that the values are between low
-     and high inclusive, though provision is made for one allowable special
-     value outside of that range.  If no special value is required, special
-     should just be set to lie inside the low-to-high range.
-
-     If all is good, true is returned.  If the table is invalid, errors are
-     logged to the kernel log buffer and false is returned.
 
    * ::
 

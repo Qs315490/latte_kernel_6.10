@@ -24,8 +24,6 @@
 
 #define IRQ_IN_COMBINER		8
 
-static DEFINE_SPINLOCK(irq_controller_lock);
-
 struct combiner_chip_data {
 	unsigned int hwirq_offset;
 	unsigned int irq_mask;
@@ -72,9 +70,7 @@ static void combiner_handle_cascade_irq(struct irq_desc *desc)
 
 	chained_irq_enter(chip, desc);
 
-	spin_lock(&irq_controller_lock);
 	status = readl_relaxed(chip_data->base + COMBINER_INT_STATUS);
-	spin_unlock(&irq_controller_lock);
 	status &= chip_data->irq_mask;
 
 	if (status == 0)
@@ -176,11 +172,11 @@ static void __init combiner_init(void __iomem *combiner_base,
 
 	nr_irq = max_nr * IRQ_IN_COMBINER;
 
-	combiner_data = kcalloc(max_nr, sizeof (*combiner_data), GFP_KERNEL);
+	combiner_data = kzalloc_objs(*combiner_data, max_nr);
 	if (!combiner_data)
 		return;
 
-	combiner_irq_domain = irq_domain_add_linear(np, nr_irq,
+	combiner_irq_domain = irq_domain_create_linear(of_fwnode_handle(np), nr_irq,
 				&combiner_irq_domain_ops, combiner_data);
 	if (WARN_ON(!combiner_irq_domain)) {
 		pr_warn("%s: irq domain init failed\n", __func__);
@@ -200,12 +196,13 @@ static void __init combiner_init(void __iomem *combiner_base,
 
 /**
  * combiner_suspend - save interrupt combiner state before suspend
+ * @data: syscore context
  *
  * Save the interrupt enable set register for all combiner groups since
  * the state is lost when the system enters into a sleep state.
  *
  */
-static int combiner_suspend(void)
+static int combiner_suspend(void *data)
 {
 	int i;
 
@@ -218,12 +215,13 @@ static int combiner_suspend(void)
 
 /**
  * combiner_resume - restore interrupt combiner state after resume
+ * @data: syscore context
  *
  * Restore the interrupt enable set register for all combiner groups since
  * the state is lost when the system enters into a sleep state on suspend.
  *
  */
-static void combiner_resume(void)
+static void combiner_resume(void *data)
 {
 	int i;
 
@@ -240,9 +238,13 @@ static void combiner_resume(void)
 #define combiner_resume		NULL
 #endif
 
-static struct syscore_ops combiner_syscore_ops = {
+static const struct syscore_ops combiner_syscore_ops = {
 	.suspend	= combiner_suspend,
 	.resume		= combiner_resume,
+};
+
+static struct syscore combiner_syscore = {
+	.ops = &combiner_syscore_ops,
 };
 
 static int __init combiner_of_init(struct device_node *np,
@@ -264,7 +266,7 @@ static int __init combiner_of_init(struct device_node *np,
 
 	combiner_init(combiner_base, np);
 
-	register_syscore_ops(&combiner_syscore_ops);
+	register_syscore(&combiner_syscore);
 
 	return 0;
 }

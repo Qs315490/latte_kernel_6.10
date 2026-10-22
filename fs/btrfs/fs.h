@@ -3,6 +3,8 @@
 #ifndef BTRFS_FS_H
 #define BTRFS_FS_H
 
+#include <crypto/blake2b.h>
+#include <crypto/sha2.h>
 #include <linux/blkdev.h>
 #include <linux/sizes.h>
 #include <linux/time64.h>
@@ -24,30 +26,57 @@
 #include <linux/wait_bit.h>
 #include <linux/sched.h>
 #include <linux/rbtree.h>
+#include <linux/xxhash.h>
+#include <linux/fserror.h>
 #include <uapi/linux/btrfs.h>
 #include <uapi/linux/btrfs_tree.h>
 #include "extent-io-tree.h"
 #include "async-thread.h"
 #include "block-rsv.h"
+#include "messages.h"
 
 struct inode;
 struct super_block;
 struct kobject;
 struct reloc_control;
-struct crypto_shash;
 struct ulist;
 struct btrfs_device;
 struct btrfs_block_group;
 struct btrfs_root;
 struct btrfs_fs_devices;
 struct btrfs_transaction;
-struct btrfs_delayed_root;
 struct btrfs_balance_control;
 struct btrfs_subpage_info;
 struct btrfs_stripe_hash_table;
 struct btrfs_space_info;
 
+/* Minimum data and metadata block size. */
+#define BTRFS_MIN_BLOCKSIZE	(SZ_4K)
+#define BTRFS_MAX_BLOCKSIZE	(SZ_64K)
+
+/* The maximum folio size btrfs supports. */
+#define BTRFS_MAX_FOLIO_SIZE	(SZ_2M)
+static_assert(BTRFS_MAX_FOLIO_SIZE > PAGE_SIZE);
+
+/*
+ * The maximum number of blocks a huge folio can support.
+ *
+ * Depending on the filesystem block size, the real maximum blocks per folio
+ * may also be limited by the above BTRFS_MAX_FOLIO_SIZE.
+ */
+#ifdef CONFIG_BTRFS_EXPERIMENTAL
+#define BTRFS_MAX_BLOCKS_PER_FOLIO		(512)
+#else
+#define BTRFS_MAX_BLOCKS_PER_FOLIO		(BITS_PER_LONG)
+#endif
+
 #define BTRFS_MAX_EXTENT_SIZE SZ_128M
+
+/*
+ * Maximum length to trim in a single iteration to avoid holding device list
+ * mutex for too long.
+ */
+#define BTRFS_MAX_TRIM_LENGTH			SZ_2G
 
 #define BTRFS_OLDEST_GENERATION	0ULL
 
@@ -58,6 +87,17 @@ struct btrfs_space_info;
 #define BTRFS_SUPER_INFO_OFFSET			SZ_64K
 #define BTRFS_SUPER_INFO_SIZE			4096
 static_assert(sizeof(struct btrfs_super_block) == BTRFS_SUPER_INFO_SIZE);
+
+/* Array of bytes with variable length, hexadecimal format 0x1234 */
+#define BTRFS_CSUM_FMT				"0x%*phN"
+#define BTRFS_CSUM_FMT_VALUE(size, bytes)	size, bytes
+
+#define BTRFS_KEY_FMT			"(%llu %u %llu)"
+#define BTRFS_KEY_FMT_VALUE(key)	(key)->objectid, (key)->type, (key)->offset
+
+#define BTRFS_QGROUP_FMT		"%hu/%llu"
+#define BTRFS_QGROUP_FMT_VALUE(qgroup)	btrfs_qgroup_level((qgroup)->qgroupid), \
+					btrfs_qgroup_subvolid((qgroup)->qgroupid)
 
 /*
  * Number of metadata items necessary for an unlink operation:
@@ -90,6 +130,8 @@ enum {
 	BTRFS_FS_STATE_RO,
 	/* Track if a transaction abort has been reported on this filesystem */
 	BTRFS_FS_STATE_TRANS_ABORTED,
+	/* Track if log replay has failed. */
+	BTRFS_FS_STATE_LOG_REPLAY_ABORTED,
 	/*
 	 * Bio operations should be blocked on this filesystem because a source
 	 * or target device is being destroyed as part of a device replace
@@ -105,6 +147,15 @@ enum {
 	/* Indicates there was an error cleaning up a log tree. */
 	BTRFS_FS_STATE_LOG_CLEANUP_ERROR,
 
+	/* No more delayed iput can be queued. */
+	BTRFS_FS_STATE_NO_DELAYED_IPUT,
+
+	/*
+	 * Emergency shutdown, a step further than transaction aborted by
+	 * rejecting all operations.
+	 */
+	BTRFS_FS_STATE_EMERGENCY_SHUTDOWN,
+
 	BTRFS_FS_STATE_COUNT
 };
 
@@ -114,6 +165,7 @@ enum {
 	BTRFS_FS_LOG_RECOVERING,
 	BTRFS_FS_OPEN,
 	BTRFS_FS_QUOTA_ENABLED,
+	BTRFS_FS_SQUOTA_ENABLING,
 	BTRFS_FS_UPDATE_UUID_TREE_GEN,
 	BTRFS_FS_CREATING_FREE_SPACE_TREE,
 	BTRFS_FS_BTREE_ERR,
@@ -228,7 +280,16 @@ enum {
 	BTRFS_MOUNT_NOSPACECACHE		= (1ULL << 30),
 	BTRFS_MOUNT_IGNOREMETACSUMS		= (1ULL << 31),
 	BTRFS_MOUNT_IGNORESUPERFLAGS		= (1ULL << 32),
+	BTRFS_MOUNT_REF_TRACKER			= (1ULL << 33),
 };
+
+/* These mount options require a full read-only fs, no new transaction is allowed. */
+#define BTRFS_MOUNT_FULL_RO_MASK		\
+	(BTRFS_MOUNT_NOLOGREPLAY |		\
+	 BTRFS_MOUNT_IGNOREBADROOTS |		\
+	 BTRFS_MOUNT_IGNOREDATACSUMS |		\
+	 BTRFS_MOUNT_IGNOREMETACSUMS |		\
+	 BTRFS_MOUNT_IGNORESUPERFLAGS)
 
 /*
  * Compat flags that we support.  If any incompat flags are set other than the
@@ -265,13 +326,14 @@ enum {
 
 #ifdef CONFIG_BTRFS_EXPERIMENTAL
 	/*
-	 * Features under developmen like Extent tree v2 support is enabled
+	 * Features under development like Extent tree v2 support is enabled
 	 * only under CONFIG_BTRFS_EXPERIMENTAL
 	 */
 #define BTRFS_FEATURE_INCOMPAT_SUPP		\
 	(BTRFS_FEATURE_INCOMPAT_SUPP_STABLE |	\
 	 BTRFS_FEATURE_INCOMPAT_RAID_STRIPE_TREE | \
-	 BTRFS_FEATURE_INCOMPAT_EXTENT_TREE_V2)
+	 BTRFS_FEATURE_INCOMPAT_EXTENT_TREE_V2 | \
+	 BTRFS_FEATURE_INCOMPAT_REMAP_TREE)
 
 #else
 
@@ -285,7 +347,18 @@ enum {
 #define BTRFS_FEATURE_INCOMPAT_SAFE_CLEAR		0ULL
 
 #define BTRFS_DEFAULT_COMMIT_INTERVAL	(30)
+#define BTRFS_WARNING_COMMIT_INTERVAL	(300)
 #define BTRFS_DEFAULT_MAX_INLINE	(2048)
+
+enum btrfs_compression_type {
+	BTRFS_COMPRESS_NONE  = 0,
+	BTRFS_COMPRESS_ZLIB  = 1,
+	BTRFS_COMPRESS_LZO   = 2,
+	BTRFS_COMPRESS_ZSTD  = 3,
+	BTRFS_NR_COMPRESS_TYPES = 4,
+
+	BTRFS_DEFRAG_DONT_COMPRESS,
+};
 
 struct btrfs_dev_replace {
 	/* See #define above */
@@ -404,7 +477,27 @@ struct btrfs_commit_stats {
 	u64 last_commit_dur;
 	/* The total commit duration in ns */
 	u64 total_commit_dur;
+	/* Start of the last critical section in ns. */
+	u64 critical_section_start_time;
 };
+
+struct btrfs_delayed_root {
+	spinlock_t lock;
+	int nodes;		/* for delayed nodes */
+	struct list_head node_list;
+	/*
+	 * Used for delayed nodes which is waiting to be dealt with by the
+	 * worker. If the delayed node is inserted into the work queue, we
+	 * drop it from this list.
+	 */
+	struct list_head prepare_list;
+	atomic_t items;		/* for delayed items */
+	atomic_t items_seq;	/* for delayed items */
+	wait_queue_head_t wait;
+};
+
+struct btrfs_free_space_ctl;
+struct btrfs_free_space;
 
 struct btrfs_fs_info {
 	u8 chunk_tree_uuid[BTRFS_UUID_SIZE];
@@ -418,6 +511,7 @@ struct btrfs_fs_info {
 	struct btrfs_root *data_reloc_root;
 	struct btrfs_root *block_group_root;
 	struct btrfs_root *stripe_root;
+	struct btrfs_root *remap_root;
 
 	/* The log root tree is a directory of all the other log roots */
 	struct btrfs_root *log_root_tree;
@@ -452,10 +546,14 @@ struct btrfs_fs_info {
 	struct btrfs_block_rsv trans_block_rsv;
 	/* Block reservation for chunk tree */
 	struct btrfs_block_rsv chunk_block_rsv;
+	/* Block reservation for remap tree. */
+	struct btrfs_block_rsv remap_block_rsv;
 	/* Block reservation for delayed operations */
 	struct btrfs_block_rsv delayed_block_rsv;
 	/* Block reservation for delayed refs */
 	struct btrfs_block_rsv delayed_refs_rsv;
+	/* Block reservation for treelog tree */
+	struct btrfs_block_rsv treelog_rsv;
 
 	struct btrfs_block_rsv empty_block_rsv;
 
@@ -485,8 +583,11 @@ struct btrfs_fs_info {
 	u64 last_trans_log_full_commit;
 	unsigned long long mount_opt;
 
-	unsigned long compress_type:4;
-	unsigned int compress_level;
+	/* Compress related structures. */
+	void *compr_wsm[BTRFS_NR_COMPRESS_TYPES];
+
+	int compress_type;
+	int compress_level;
 	u32 commit_interval;
 	/*
 	 * It is a suggestive number, the read side is safe even it gets a
@@ -521,6 +622,7 @@ struct btrfs_fs_info {
 	struct mutex transaction_kthread_mutex;
 	struct mutex cleaner_mutex;
 	struct mutex chunk_mutex;
+	struct mutex remap_mutex;
 
 	/*
 	 * This is taken to make sure we don't set block groups ro after the
@@ -555,6 +657,8 @@ struct btrfs_fs_info {
 	 * to protect us from the relocation code.
 	 */
 	struct mutex reloc_mutex;
+	/* Protects setting, clearing and getting fs_info->reloc_ctl. */
+	spinlock_t reloc_ctl_lock;
 
 	struct list_head trans_list;
 	struct list_head dead_roots;
@@ -606,17 +710,11 @@ struct btrfs_fs_info {
 	struct workqueue_struct *endio_workers;
 	struct workqueue_struct *endio_meta_workers;
 	struct workqueue_struct *rmw_workers;
-	struct workqueue_struct *compressed_write_workers;
 	struct btrfs_workqueue *endio_write_workers;
 	struct btrfs_workqueue *endio_freespace_worker;
 	struct btrfs_workqueue *caching_workers;
 
-	/*
-	 * Fixup workers take dirty pages that didn't properly go through the
-	 * cow mechanism and make them safe to write.  It happens for the
-	 * sys_munmap function call path.
-	 */
-	struct btrfs_workqueue *fixup_workers;
+	struct workqueue_struct *fixup_workers;
 	struct btrfs_workqueue *delayed_workers;
 
 	struct task_struct *transaction_kthread;
@@ -695,8 +793,6 @@ struct btrfs_fs_info {
 	u32 data_chunk_allocations;
 	u32 metadata_ratio;
 
-	void *bdev_holder;
-
 	/* Private scrub information */
 	struct mutex scrub_lock;
 	atomic_t scrubs_running;
@@ -709,7 +805,6 @@ struct btrfs_fs_info {
 	 * running.
 	 */
 	refcount_t scrub_workers_refcnt;
-	u32 sectors_per_page;
 	struct workqueue_struct *scrub_workers;
 
 	struct btrfs_discard_ctl discard_ctl;
@@ -720,12 +815,6 @@ struct btrfs_fs_info {
 	/* Holds configuration and tracking. Protected by qgroup_lock. */
 	struct rb_root qgroup_tree;
 	spinlock_t qgroup_lock;
-
-	/*
-	 * Used to avoid frequently calling ulist_alloc()/ulist_free()
-	 * when doing qgroup accounting, it must be protected by qgroup_lock.
-	 */
-	struct ulist *qgroup_ulist;
 
 	/*
 	 * Protect user change for quota operations. If a transaction is needed,
@@ -760,12 +849,10 @@ struct btrfs_fs_info {
 	/* Filesystem state */
 	unsigned long fs_state;
 
-	struct btrfs_delayed_root *delayed_root;
+	struct btrfs_delayed_root delayed_root;
 
-	/* Extent buffer radix tree */
-	spinlock_t buffer_lock;
-	/* Entries are eb->start / sectorsize */
-	struct radix_tree_root buffer_radix;
+	/* Entries are eb->start >> nodesize_bits */
+	struct xarray buffer_tree;
 
 	/* Next backup root to be overwritten */
 	int backup_root_index;
@@ -786,22 +873,28 @@ struct btrfs_fs_info {
 	struct list_head reclaim_bgs;
 	int bg_reclaim_threshold;
 
-	/* Protects the lists unused_bgs and reclaim_bgs. */
+	/* Protects the lists unused_bgs, reclaim_bgs, and fully_remapped_bgs. */
 	spinlock_t unused_bgs_lock;
 	/* Protected by unused_bgs_lock. */
 	struct list_head unused_bgs;
+	struct list_head fully_remapped_bgs;
 	struct mutex unused_bg_unpin_mutex;
 	/* Protect block groups that are going to be deleted */
 	struct mutex reclaim_bgs_lock;
 
 	/* Cached block sizes */
 	u32 nodesize;
+	u32 nodesize_bits;
 	u32 sectorsize;
 	/* ilog2 of sectorsize, use to avoid 64bit division */
 	u32 sectorsize_bits;
+	u32 block_min_order;
+	u32 block_max_order;
+	u32 stripesize;
+	u32 writeback_bio_size;
 	u32 csum_size;
 	u32 csums_per_leaf;
-	u32 stripesize;
+	u32 csum_type;
 
 	/*
 	 * Maximum size of an extent. BTRFS_MAX_EXTENT_SIZE on regular
@@ -812,8 +905,6 @@ struct btrfs_fs_info {
 	/* Block groups and devices containing active swapfiles. */
 	spinlock_t swapfile_pins_lock;
 	struct rb_root swapfile_pins;
-
-	struct crypto_shash *csum_shash;
 
 	/* Type of exclusive operation running, protected by super_lock */
 	enum btrfs_exclusive_operation exclusive_operation;
@@ -868,18 +959,20 @@ struct btrfs_fs_info {
 	struct lockdep_map btrfs_trans_pending_ordered_map;
 	struct lockdep_map btrfs_ordered_extent_map;
 
-#ifdef CONFIG_BTRFS_FS_REF_VERIFY
+#ifdef CONFIG_BTRFS_DEBUG
 	spinlock_t ref_verify_lock;
 	struct rb_root block_tree;
-#endif
 
-#ifdef CONFIG_BTRFS_DEBUG
 	struct kobject *debug_kobj;
 	struct list_head allocated_roots;
 
 	spinlock_t eb_leak_lock;
 	struct list_head allocated_ebs;
 #endif
+
+	/* Used by self tests only. */
+	bool (*use_bitmap)(struct btrfs_free_space_ctl *ctl,
+			   struct btrfs_free_space *info);
 };
 
 #define folio_to_inode(_folio)	(BTRFS_I(_Generic((_folio),			\
@@ -890,9 +983,15 @@ struct btrfs_fs_info {
 #define inode_to_fs_info(_inode) (BTRFS_I(_Generic((_inode),			\
 					   struct inode *: (_inode)))->root->fs_info)
 
-static inline gfp_t btrfs_alloc_write_mask(struct address_space *mapping)
+static inline gfp_t btrfs_alloc_write_mask(const struct address_space *mapping)
 {
 	return mapping_gfp_constraint(mapping, ~__GFP_FS);
+}
+
+/* Return the minimal folio size of the fs. */
+static inline unsigned int btrfs_min_folio_size(const struct btrfs_fs_info *fs_info)
+{
+	return 1U << (PAGE_SHIFT + fs_info->block_min_order);
 }
 
 static inline u64 btrfs_get_fs_generation(const struct btrfs_fs_info *fs_info)
@@ -981,6 +1080,13 @@ static inline u32 count_max_extents(const struct btrfs_fs_info *fs_info, u64 siz
 	return div_u64(size + fs_info->max_extent_size - 1, fs_info->max_extent_size);
 }
 
+static inline unsigned int btrfs_blocks_per_folio(const struct btrfs_fs_info *fs_info,
+						  const struct folio *folio)
+{
+	return folio_size(folio) >> fs_info->sectorsize_bits;
+}
+
+bool __attribute_const__ btrfs_supported_blocksize(u32 blocksize);
 bool btrfs_exclop_start(struct btrfs_fs_info *fs_info,
 			enum btrfs_exclusive_operation type);
 bool btrfs_exclop_start_try_lock(struct btrfs_fs_info *fs_info,
@@ -995,8 +1101,20 @@ int btrfs_check_ioctl_vol_args_path(const struct btrfs_ioctl_vol_args *vol_args)
 u16 btrfs_csum_type_size(u16 type);
 int btrfs_super_csum_size(const struct btrfs_super_block *s);
 const char *btrfs_super_csum_name(u16 csum_type);
-const char *btrfs_super_csum_driver(u16 csum_type);
 size_t __attribute_const__ btrfs_get_num_csums(void);
+struct btrfs_csum_ctx {
+	u16 csum_type;
+	union {
+		u32 crc32;
+		struct xxh64_state xxh64;
+		struct sha256_ctx sha256;
+		struct blake2b_ctx blake2b;
+	};
+};
+void btrfs_csum(u16 csum_type, const u8 *data, size_t len, u8 *out);
+void btrfs_csum_init(struct btrfs_csum_ctx *ctx, u16 csum_type);
+void btrfs_csum_update(struct btrfs_csum_ctx *ctx, const u8 *data, size_t len);
+void btrfs_csum_final(struct btrfs_csum_ctx *ctx, u8 *out);
 
 static inline bool btrfs_is_empty_uuid(const u8 *uuid)
 {
@@ -1043,15 +1161,26 @@ void __btrfs_clear_fs_compat_ro(struct btrfs_fs_info *fs_info, u64 flag,
 #define btrfs_test_opt(fs_info, opt)	((fs_info)->mount_opt & \
 					 BTRFS_MOUNT_##opt)
 
-static inline int btrfs_fs_closing(const struct btrfs_fs_info *fs_info)
+static inline bool btrfs_is_full_ro(const struct btrfs_fs_info *fs_info)
 {
-	/* Do it this way so we only ever do one test_bit in the normal case. */
-	if (test_bit(BTRFS_FS_CLOSING_START, &fs_info->flags)) {
-		if (test_bit(BTRFS_FS_CLOSING_DONE, &fs_info->flags))
-			return 2;
-		return 1;
-	}
-	return 0;
+	if (!sb_rdonly(fs_info->sb))
+		return false;
+	if (unlikely(fs_info->mount_opt & BTRFS_MOUNT_FULL_RO_MASK))
+		return true;
+	return false;
+}
+
+static inline bool btrfs_fs_closing(const struct btrfs_fs_info *fs_info)
+{
+	return unlikely(test_bit(BTRFS_FS_CLOSING_START, &fs_info->flags));
+}
+
+static inline bool btrfs_fs_closing_done(const struct btrfs_fs_info *fs_info)
+{
+	if (btrfs_fs_closing(fs_info) && test_bit(BTRFS_FS_CLOSING_DONE, &fs_info->flags))
+		return true;
+
+	return false;
 }
 
 /*
@@ -1073,27 +1202,52 @@ static inline void btrfs_wake_unfinished_drop(struct btrfs_fs_info *fs_info)
 	clear_and_wake_up_bit(BTRFS_FS_UNFINISHED_DROPS, &fs_info->flags);
 }
 
+/*
+ * We use the folio owner_2 flag to indicate the folio has blocks that were
+ * dirtied without a space reservation and need the writepage fixup before
+ * writeback. For bs < folio_size the fixup bitmap tracks the affected
+ * blocks.
+ */
+#define folio_test_fixup_pending(folio) folio_test_owner_2(folio)
+#define folio_set_fixup_pending(folio) folio_set_owner_2(folio)
+#define folio_clear_fixup_pending(folio) folio_clear_owner_2(folio)
+
 #define BTRFS_FS_ERROR(fs_info)	(READ_ONCE((fs_info)->fs_error))
 
 #define BTRFS_FS_LOG_CLEANUP_ERROR(fs_info)				\
 	(unlikely(test_bit(BTRFS_FS_STATE_LOG_CLEANUP_ERROR,		\
 			   &(fs_info)->fs_state)))
 
-/*
- * We use folio flag owner_2 to indicate there is an ordered extent with
- * unfinished IO.
- */
-#define folio_test_ordered(folio)	folio_test_owner_2(folio)
-#define folio_set_ordered(folio)	folio_set_owner_2(folio)
-#define folio_clear_ordered(folio)	folio_clear_owner_2(folio)
+static inline bool btrfs_is_shutdown(const struct btrfs_fs_info *fs_info)
+{
+	return unlikely(test_bit(BTRFS_FS_STATE_EMERGENCY_SHUTDOWN, &fs_info->fs_state));
+}
+
+static inline void btrfs_force_shutdown(struct btrfs_fs_info *fs_info)
+{
+	/*
+	 * Here we do not want to use handle_fs_error(), which will mark the fs
+	 * read-only.
+	 * Some call sites like shutdown ioctl will mark the fs shutdown when
+	 * the fs is frozen. But thaw path will handle RO and RW fs
+	 * differently.
+	 *
+	 * So here we only mark the fs error without flipping it RO.
+	 */
+	WRITE_ONCE(fs_info->fs_error, -EIO);
+	if (!test_and_set_bit(BTRFS_FS_STATE_EMERGENCY_SHUTDOWN, &fs_info->fs_state)) {
+		btrfs_crit(fs_info, "emergency shutdown");
+		fserror_report_shutdown(fs_info->sb, GFP_KERNEL);
+	}
+}
 
 #ifdef CONFIG_BTRFS_FS_RUN_SANITY_TESTS
 
 #define EXPORT_FOR_TESTS
 
-static inline int btrfs_is_testing(const struct btrfs_fs_info *fs_info)
+static inline bool btrfs_is_testing(const struct btrfs_fs_info *fs_info)
 {
-	return test_bit(BTRFS_FS_STATE_DUMMY_FS_INFO, &fs_info->fs_state);
+	return unlikely(test_bit(BTRFS_FS_STATE_DUMMY_FS_INFO, &fs_info->fs_state));
 }
 
 void btrfs_test_destroy_inode(struct inode *inode);
@@ -1102,9 +1256,9 @@ void btrfs_test_destroy_inode(struct inode *inode);
 
 #define EXPORT_FOR_TESTS static
 
-static inline int btrfs_is_testing(const struct btrfs_fs_info *fs_info)
+static inline bool btrfs_is_testing(const struct btrfs_fs_info *fs_info)
 {
-	return 0;
+	return false;
 }
 #endif
 

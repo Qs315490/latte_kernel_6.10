@@ -93,7 +93,7 @@ int torture_hrtimeout_ns(ktime_t baset_ns, u32 fuzzt_ns, const enum hrtimer_mode
 {
 	ktime_t hto = baset_ns;
 
-	if (trsp)
+	if (trsp && fuzzt_ns)
 		hto += torture_random(trsp) % fuzzt_ns;
 	set_current_state(TASK_IDLE);
 	return schedule_hrtimeout(&hto, mode);
@@ -359,6 +359,8 @@ torture_onoff(void *arg)
 		torture_hrtimeout_jiffies(onoff_holdoff, &rand);
 		VERBOSE_TOROUT_STRING("torture_onoff end holdoff");
 	}
+	while (!rcu_inkernel_boot_has_ended())
+		schedule_timeout_interruptible(HZ / 10);
 	while (!torture_must_stop()) {
 		if (disable_onoff_at_boot && !rcu_inkernel_boot_has_ended()) {
 			torture_hrtimeout_jiffies(HZ / 10, &rand);
@@ -492,7 +494,7 @@ void torture_shuffle_task_register(struct task_struct *tp)
 
 	if (WARN_ON_ONCE(tp == NULL))
 		return;
-	stp = kmalloc(sizeof(*stp), GFP_KERNEL);
+	stp = kmalloc_obj(*stp);
 	if (WARN_ON_ONCE(stp == NULL))
 		return;
 	stp->st_t = tp;
@@ -792,11 +794,14 @@ static void torture_stutter_cleanup(void)
 	stutter_task = NULL;
 }
 
+static unsigned long torture_init_jiffies;
+
 static void
 torture_print_module_parms(void)
 {
-	pr_alert("torture module --- %s:  disable_onoff_at_boot=%d ftrace_dump_at_shutdown=%d verbose_sleep_frequency=%d verbose_sleep_duration=%d random_shuffle=%d\n",
-		 torture_type, disable_onoff_at_boot, ftrace_dump_at_shutdown, verbose_sleep_frequency, verbose_sleep_duration, random_shuffle);
+	pr_alert("torture module --- %s:  disable_onoff_at_boot=%d ftrace_dump_at_shutdown=%d verbose_sleep_frequency=%d verbose_sleep_duration=%d random_shuffle=%d%s\n",
+		 torture_type, disable_onoff_at_boot, ftrace_dump_at_shutdown, verbose_sleep_frequency, verbose_sleep_duration, random_shuffle,
+		 rcu_inkernel_boot_has_ended() ? "" : " still booting");
 }
 
 /*
@@ -821,6 +826,7 @@ bool torture_init_begin(char *ttype, int v)
 	torture_type = ttype;
 	verbose = v;
 	fullstop = FULLSTOP_DONTSTOP;
+	WRITE_ONCE(torture_init_jiffies, jiffies); // Lockless reads.
 	torture_print_module_parms();
 	return true;
 }
@@ -835,6 +841,15 @@ void torture_init_end(void)
 	register_reboot_notifier(&torture_shutdown_nb);
 }
 EXPORT_SYMBOL_GPL(torture_init_end);
+
+/*
+ * Get the torture_init_begin()-time value of the jiffies counter.
+ */
+unsigned long get_torture_init_jiffies(void)
+{
+	return READ_ONCE(torture_init_jiffies);
+}
+EXPORT_SYMBOL_GPL(get_torture_init_jiffies);
 
 /*
  * Clean up torture module.  Please note that this is -not- invoked via
@@ -957,3 +972,19 @@ void _torture_stop_kthread(char *m, struct task_struct **tp)
 	*tp = NULL;
 }
 EXPORT_SYMBOL_GPL(_torture_stop_kthread);
+
+/*
+ * Set the specified task's niceness value, saturating at limits.
+ * Saturating noisily, but saturating.
+ */
+void torture_sched_set_normal(struct task_struct *t, int nice)
+{
+	int realnice = nice;
+
+	if (WARN_ON_ONCE(realnice > MAX_NICE))
+		realnice = MAX_NICE;
+	if (WARN_ON_ONCE(realnice < MIN_NICE))
+		realnice = MIN_NICE;
+	sched_set_normal(t, realnice);
+}
+EXPORT_SYMBOL_GPL(torture_sched_set_normal);

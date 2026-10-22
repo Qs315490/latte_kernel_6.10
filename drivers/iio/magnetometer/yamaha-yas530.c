@@ -29,7 +29,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
@@ -168,6 +167,7 @@ struct yas5xx;
 /**
  * struct yas5xx_chip_info - device-specific data and function pointers
  * @devid: device ID number
+ * @product_label: product label used in Linux
  * @product_name: product name of the YAS variant
  * @version_names: version letters or namings
  * @volatile_reg: device-specific volatile registers
@@ -189,6 +189,7 @@ struct yas5xx;
  */
 struct yas5xx_chip_info {
 	unsigned int devid;
+	const char *product_label;
 	const char *product_name;
 	const char *version_names[2];
 	const int *volatile_reg;
@@ -623,7 +624,6 @@ static int yas5xx_read_raw(struct iio_dev *indio_dev,
 	case IIO_CHAN_INFO_RAW:
 		pm_runtime_get_sync(yas5xx->dev);
 		ret = ci->get_measure(yas5xx, &t, &x, &y, &z);
-		pm_runtime_mark_last_busy(yas5xx->dev);
 		pm_runtime_put_autosuspend(yas5xx->dev);
 		if (ret)
 			return ret;
@@ -664,7 +664,6 @@ static void yas5xx_fill_buffer(struct iio_dev *indio_dev)
 
 	pm_runtime_get_sync(yas5xx->dev);
 	ret = ci->get_measure(yas5xx, &t, &x, &y, &z);
-	pm_runtime_mark_last_busy(yas5xx->dev);
 	pm_runtime_put_autosuspend(yas5xx->dev);
 	if (ret) {
 		dev_err(yas5xx->dev, "error refilling buffer\n");
@@ -674,8 +673,8 @@ static void yas5xx_fill_buffer(struct iio_dev *indio_dev)
 	yas5xx->scan.channels[1] = x;
 	yas5xx->scan.channels[2] = y;
 	yas5xx->scan.channels[3] = z;
-	iio_push_to_buffers_with_timestamp(indio_dev, &yas5xx->scan,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &yas5xx->scan, sizeof(yas5xx->scan),
+				    iio_get_time_ns(indio_dev));
 }
 
 static irqreturn_t yas5xx_handle_trigger(int irq, void *p)
@@ -861,9 +860,9 @@ static int yas530_get_calibration_data(struct yas5xx *yas5xx)
 	c->f[0] = FIELD_GET(GENMASK(22, 21), val);
 	c->f[1] = FIELD_GET(GENMASK(14, 13), val);
 	c->f[2] = FIELD_GET(GENMASK(6, 5), val);
-	c->r[0] = sign_extend32(FIELD_GET(GENMASK(28, 23), val), 5);
-	c->r[1] = sign_extend32(FIELD_GET(GENMASK(20, 15), val), 5);
-	c->r[2] = sign_extend32(FIELD_GET(GENMASK(12, 7), val), 5);
+	c->r[0] = FIELD_GET_SIGNED(GENMASK(28, 23), val);
+	c->r[1] = FIELD_GET_SIGNED(GENMASK(20, 15), val);
+	c->r[2] = FIELD_GET_SIGNED(GENMASK(12, 7), val);
 
 	return 0;
 }
@@ -916,9 +915,9 @@ static int yas532_get_calibration_data(struct yas5xx *yas5xx)
 	c->f[0] = FIELD_GET(GENMASK(24, 23), val);
 	c->f[1] = FIELD_GET(GENMASK(16, 15), val);
 	c->f[2] = FIELD_GET(GENMASK(8, 7), val);
-	c->r[0] = sign_extend32(FIELD_GET(GENMASK(30, 25), val), 5);
-	c->r[1] = sign_extend32(FIELD_GET(GENMASK(22, 17), val), 5);
-	c->r[2] = sign_extend32(FIELD_GET(GENMASK(14, 7), val), 5);
+	c->r[0] = FIELD_GET_SIGNED(GENMASK(30, 25), val);
+	c->r[1] = FIELD_GET_SIGNED(GENMASK(22, 17), val);
+	c->r[2] = FIELD_GET_SIGNED(GENMASK(14, 7), val);
 
 	return 0;
 }
@@ -1225,7 +1224,7 @@ static int yas530_measure_offsets(struct yas5xx *yas5xx)
 	 * as the values for [x, y1, y2]. The value is +/-31
 	 * but the effect on the raw values is much larger.
 	 * The effect of the offset is to bring the measure
-	 * rougly to the center.
+	 * roughly to the center.
 	 */
 	ox = 0;
 	oy1 = 0;
@@ -1317,7 +1316,7 @@ static int yas537_power_on(struct yas5xx *yas5xx)
 		return ret;
 
 	/* Wait until the coil has ramped up */
-	usleep_range(YAS537_MAG_RCOIL_TIME_US, YAS537_MAG_RCOIL_TIME_US + 100);
+	fsleep(YAS537_MAG_RCOIL_TIME_US);
 
 	return 0;
 }
@@ -1325,6 +1324,7 @@ static int yas537_power_on(struct yas5xx *yas5xx)
 static const struct yas5xx_chip_info yas5xx_chip_info_tbl[] = {
 	[yas530] = {
 		.devid = YAS530_DEVICE_ID,
+		.product_label = "yas530",
 		.product_name = "YAS530 MS-3E",
 		.version_names = { "A", "B" },
 		.volatile_reg = yas530_volatile_reg,
@@ -1340,6 +1340,7 @@ static const struct yas5xx_chip_info yas5xx_chip_info_tbl[] = {
 	},
 	[yas532] = {
 		.devid = YAS532_DEVICE_ID,
+		.product_label = "yas532",
 		.product_name = "YAS532 MS-3R",
 		.version_names = { "AB", "AC" },
 		.volatile_reg = yas530_volatile_reg,
@@ -1355,6 +1356,7 @@ static const struct yas5xx_chip_info yas5xx_chip_info_tbl[] = {
 	},
 	[yas533] = {
 		.devid = YAS532_DEVICE_ID,
+		.product_label = "yas533",
 		.product_name = "YAS533 MS-3F",
 		.version_names = { "AB", "AC" },
 		.volatile_reg = yas530_volatile_reg,
@@ -1370,6 +1372,7 @@ static const struct yas5xx_chip_info yas5xx_chip_info_tbl[] = {
 	},
 	[yas537] = {
 		.devid = YAS537_DEVICE_ID,
+		.product_label = "yas537",
 		.product_name = "YAS537 MS-3T",
 		.version_names = { "v0", "v1" }, /* version naming unknown */
 		.volatile_reg = yas537_volatile_reg,
@@ -1387,7 +1390,6 @@ static const struct yas5xx_chip_info yas5xx_chip_info_tbl[] = {
 
 static int yas5xx_probe(struct i2c_client *i2c)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(i2c);
 	struct iio_dev *indio_dev;
 	struct device *dev = &i2c->dev;
 	struct yas5xx *yas5xx;
@@ -1402,7 +1404,10 @@ static int yas5xx_probe(struct i2c_client *i2c)
 	yas5xx = iio_priv(indio_dev);
 	i2c_set_clientdata(i2c, indio_dev);
 	yas5xx->dev = dev;
-	mutex_init(&yas5xx->lock);
+
+	ret = devm_mutex_init(dev, &yas5xx->lock);
+	if (ret)
+		return ret;
 
 	ret = iio_read_mount_matrix(dev, &yas5xx->orientation);
 	if (ret)
@@ -1420,7 +1425,7 @@ static int yas5xx_probe(struct i2c_client *i2c)
 		return dev_err_probe(dev, ret, "cannot enable regulators\n");
 
 	/* See comment in runtime resume callback */
-	usleep_range(31000, 40000);
+	fsleep(31 * USEC_PER_MSEC);
 
 	/* This will take the device out of reset if need be */
 	yas5xx->reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
@@ -1445,7 +1450,7 @@ static int yas5xx_probe(struct i2c_client *i2c)
 	if (id_check != ci->devid) {
 		ret = dev_err_probe(dev, -ENODEV,
 				    "device ID %02x doesn't match %s\n",
-				    id_check, id->name);
+				    id_check, ci->product_label);
 		goto assert_reset;
 	}
 
@@ -1471,7 +1476,7 @@ static int yas5xx_probe(struct i2c_client *i2c)
 	indio_dev->info = &yas5xx_info;
 	indio_dev->available_scan_masks = yas5xx_scan_masks;
 	indio_dev->modes = INDIO_DIRECT_MODE;
-	indio_dev->name = id->name;
+	indio_dev->name = ci->product_label;
 	indio_dev->channels = yas5xx_channels;
 	indio_dev->num_channels = ARRAY_SIZE(yas5xx_channels);
 
@@ -1559,7 +1564,7 @@ static int yas5xx_runtime_resume(struct device *dev)
 	 * for all voltages to settle. The YAS532 is 10ms then 4ms for the
 	 * I2C to come online. Let's keep it safe and put this at 31ms.
 	 */
-	usleep_range(31000, 40000);
+	fsleep(31 * USEC_PER_MSEC);
 	gpiod_set_value_cansleep(yas5xx->reset, 0);
 
 	ret = ci->power_on(yas5xx);
@@ -1581,11 +1586,11 @@ static DEFINE_RUNTIME_DEV_PM_OPS(yas5xx_dev_pm_ops, yas5xx_runtime_suspend,
 				 yas5xx_runtime_resume, NULL);
 
 static const struct i2c_device_id yas5xx_id[] = {
-	{"yas530", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas530] },
-	{"yas532", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas532] },
-	{"yas533", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas533] },
-	{"yas537", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas537] },
-	{}
+	{ .name = "yas530", .driver_data = (kernel_ulong_t)&yas5xx_chip_info_tbl[yas530] },
+	{ .name = "yas532", .driver_data = (kernel_ulong_t)&yas5xx_chip_info_tbl[yas532] },
+	{ .name = "yas533", .driver_data = (kernel_ulong_t)&yas5xx_chip_info_tbl[yas533] },
+	{ .name = "yas537", .driver_data = (kernel_ulong_t)&yas5xx_chip_info_tbl[yas537] },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, yas5xx_id);
 
@@ -1594,7 +1599,7 @@ static const struct of_device_id yas5xx_of_match[] = {
 	{ .compatible = "yamaha,yas532", &yas5xx_chip_info_tbl[yas532] },
 	{ .compatible = "yamaha,yas533", &yas5xx_chip_info_tbl[yas533] },
 	{ .compatible = "yamaha,yas537", &yas5xx_chip_info_tbl[yas537] },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, yas5xx_of_match);
 

@@ -7,6 +7,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/iommu.h>
+#include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/types.h>
 
@@ -25,6 +26,8 @@
 
 /* SMEM host id representing the modem. */
 #define QCOM_SMEM_HOST_MODEM	1
+
+#define SMEM_IPA_FILTER_TABLE	497
 
 const struct ipa_mem *ipa_mem_find(struct ipa *ipa, enum ipa_mem_id mem_id)
 {
@@ -509,7 +512,6 @@ static void ipa_imem_exit(struct ipa *ipa)
 /**
  * ipa_smem_init() - Initialize SMEM memory used by the IPA
  * @ipa:	IPA pointer
- * @item:	Item ID of SMEM memory
  * @size:	Size (bytes) of SMEM memory region
  *
  * SMEM is a managed block of shared DRAM, from which numbered "items"
@@ -523,7 +525,7 @@ static void ipa_imem_exit(struct ipa *ipa)
  *
  * Note: @size and the item address are is not guaranteed to be page-aligned.
  */
-static int ipa_smem_init(struct ipa *ipa, u32 item, size_t size)
+static int ipa_smem_init(struct ipa *ipa, size_t size)
 {
 	struct device *dev = ipa->dev;
 	struct iommu_domain *domain;
@@ -545,25 +547,25 @@ static int ipa_smem_init(struct ipa *ipa, u32 item, size_t size)
 	 * The item might have already been allocated, in which case we
 	 * use it unless the size isn't what we expect.
 	 */
-	ret = qcom_smem_alloc(QCOM_SMEM_HOST_MODEM, item, size);
+	ret = qcom_smem_alloc(QCOM_SMEM_HOST_MODEM, SMEM_IPA_FILTER_TABLE, size);
 	if (ret && ret != -EEXIST) {
-		dev_err(dev, "error %d allocating size %zu SMEM item %u\n",
-			ret, size, item);
+		dev_err(dev, "error %d allocating size %zu SMEM item\n",
+			ret, size);
 		return ret;
 	}
 
 	/* Now get the address of the SMEM memory region */
-	virt = qcom_smem_get(QCOM_SMEM_HOST_MODEM, item, &actual);
+	virt = qcom_smem_get(QCOM_SMEM_HOST_MODEM, SMEM_IPA_FILTER_TABLE, &actual);
 	if (IS_ERR(virt)) {
 		ret = PTR_ERR(virt);
-		dev_err(dev, "error %d getting SMEM item %u\n", ret, item);
+		dev_err(dev, "error %d getting SMEM item\n", ret);
 		return ret;
 	}
 
 	/* In case the region was already allocated, verify the size */
 	if (ret && actual != size) {
-		dev_err(dev, "SMEM item %u has size %zu, expected %zu\n",
-			item, actual, size);
+		dev_err(dev, "SMEM item has size %zu, expected %zu\n",
+			actual, size);
 		return -EINVAL;
 	}
 
@@ -616,7 +618,9 @@ static void ipa_smem_exit(struct ipa *ipa)
 int ipa_mem_init(struct ipa *ipa, struct platform_device *pdev,
 		 const struct ipa_mem_data *mem_data)
 {
+	struct device_node *ipa_slice_np;
 	struct device *dev = &pdev->dev;
+	u32 imem_base, imem_size;
 	struct resource *res;
 	int ret;
 
@@ -655,11 +659,30 @@ int ipa_mem_init(struct ipa *ipa, struct platform_device *pdev,
 	ipa->mem_addr = res->start;
 	ipa->mem_size = resource_size(res);
 
-	ret = ipa_imem_init(ipa, mem_data->imem_addr, mem_data->imem_size);
+	ipa_slice_np = of_parse_phandle(dev->of_node, "sram", 0);
+	if (ipa_slice_np) {
+		struct resource sram_res;
+
+		ret = of_address_to_resource(ipa_slice_np, 0, &sram_res);
+		of_node_put(ipa_slice_np);
+		if (ret)
+			goto err_unmap;
+
+		imem_base = sram_res.start;
+		imem_size = resource_size(&sram_res);
+	} else {
+		/* Backwards compatibility for DTs lacking
+		 * an explicit reference
+		 */
+		imem_base = mem_data->imem_addr;
+		imem_size = mem_data->imem_size;
+	}
+
+	ret = ipa_imem_init(ipa, imem_base, imem_size);
 	if (ret)
 		goto err_unmap;
 
-	ret = ipa_smem_init(ipa, mem_data->smem_id, mem_data->smem_size);
+	ret = ipa_smem_init(ipa, mem_data->smem_size);
 	if (ret)
 		goto err_imem_exit;
 

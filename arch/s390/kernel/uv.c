@@ -4,9 +4,9 @@
  *
  * Copyright IBM Corp. 2019, 2024
  */
-#define KMSG_COMPONENT "prot_virt"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "prot_virt: " fmt
 
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/sizes.h>
@@ -15,6 +15,7 @@
 #include <linux/pagemap.h>
 #include <linux/swap.h>
 #include <linux/pagewalk.h>
+#include <linux/backing-dev.h>
 #include <asm/facility.h>
 #include <asm/sections.h>
 #include <asm/uv.h>
@@ -133,16 +134,17 @@ static int uv_destroy(unsigned long paddr)
  */
 int uv_destroy_folio(struct folio *folio)
 {
+	unsigned long i;
 	int rc;
 
-	/* See gmap_make_secure(): large folios cannot be secure */
-	if (unlikely(folio_test_large(folio)))
-		return 0;
-
 	folio_get(folio);
-	rc = uv_destroy(folio_to_phys(folio));
+	for (i = 0; i < (1 << folio_order(folio)); i++) {
+		rc = uv_destroy(folio_to_phys(folio) + i * PAGE_SIZE);
+		if (rc)
+			break;
+	}
 	if (!rc)
-		clear_bit(PG_arch_1, &folio->flags);
+		clear_bit(PG_arch_1, &folio->flags.f);
 	folio_put(folio);
 	return rc;
 }
@@ -182,16 +184,17 @@ EXPORT_SYMBOL_GPL(uv_convert_from_secure);
  */
 int uv_convert_from_secure_folio(struct folio *folio)
 {
+	unsigned long i;
 	int rc;
 
-	/* See gmap_make_secure(): large folios cannot be secure */
-	if (unlikely(folio_test_large(folio)))
-		return 0;
-
 	folio_get(folio);
-	rc = uv_convert_from_secure(folio_to_phys(folio));
+	for (i = 0; i < (1 << folio_order(folio)); i++) {
+		rc = uv_convert_from_secure(folio_to_phys(folio) + i * PAGE_SIZE);
+		if (rc)
+			break;
+	}
 	if (!rc)
-		clear_bit(PG_arch_1, &folio->flags);
+		clear_bit(PG_arch_1, &folio->flags.f);
 	folio_put(folio);
 	return rc;
 }
@@ -204,39 +207,6 @@ int uv_convert_from_secure_pte(pte_t pte)
 {
 	VM_WARN_ON(!pte_present(pte));
 	return uv_convert_from_secure_folio(pfn_folio(pte_pfn(pte)));
-}
-
-/**
- * should_export_before_import - Determine whether an export is needed
- * before an import-like operation
- * @uvcb: the Ultravisor control block of the UVC to be performed
- * @mm: the mm of the process
- *
- * Returns whether an export is needed before every import-like operation.
- * This is needed for shared pages, which don't trigger a secure storage
- * exception when accessed from a different guest.
- *
- * Although considered as one, the Unpin Page UVC is not an actual import,
- * so it is not affected.
- *
- * No export is needed also when there is only one protected VM, because the
- * page cannot belong to the wrong VM in that case (there is no "other VM"
- * it can belong to).
- *
- * Return: true if an export is needed before every import, otherwise false.
- */
-static bool should_export_before_import(struct uv_cb_header *uvcb, struct mm_struct *mm)
-{
-	/*
-	 * The misc feature indicates, among other things, that importing a
-	 * shared page from a different protected VM will automatically also
-	 * transfer its ownership.
-	 */
-	if (uv_has_feature(BIT_UV_FEAT_MISC))
-		return false;
-	if (uvcb->cmd == UVC_CMD_UNPIN_PAGE_SHARED)
-		return false;
-	return atomic_read(&mm->context.protected_count) > 1;
 }
 
 /*
@@ -278,7 +248,7 @@ static int expected_folio_refs(struct folio *folio)
  *          (it's the same logic as split_folio()), and the folio must be
  *          locked.
  */
-static int __make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb)
+int __make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb)
 {
 	int expected, cc = 0;
 
@@ -287,7 +257,7 @@ static int __make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb)
 	expected = expected_folio_refs(folio) + 1;
 	if (!folio_ref_freeze(folio, expected))
 		return -EBUSY;
-	set_bit(PG_arch_1, &folio->flags);
+	set_bit(PG_arch_1, &folio->flags.f);
 	/*
 	 * If the UVC does not succeed or fail immediately, we don't want to
 	 * loop for long, or we might get stall notifications.
@@ -308,133 +278,126 @@ static int __make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb)
 		return -EAGAIN;
 	return uvcb->rc == 0x10a ? -ENXIO : -EINVAL;
 }
-
-static int make_folio_secure(struct mm_struct *mm, struct folio *folio, struct uv_cb_header *uvcb)
-{
-	int rc;
-
-	if (!folio_trylock(folio))
-		return -EAGAIN;
-	if (should_export_before_import(uvcb, mm))
-		uv_convert_from_secure(folio_to_phys(folio));
-	rc = __make_folio_secure(folio, uvcb);
-	folio_unlock(folio);
-
-	return rc;
-}
+EXPORT_SYMBOL(__make_folio_secure);
 
 /**
- * s390_wiggle_split_folio() - try to drain extra references to a folio and optionally split.
+ * s390_wiggle_split_folio() - try to drain extra references to a folio and
+ *			       split the folio if it is large.
  * @mm:    the mm containing the folio to work on
  * @folio: the folio
- * @split: whether to split a large folio
  *
  * Context: Must be called while holding an extra reference to the folio;
  *          the mm lock should not be held.
- * Return: 0 if the folio was split successfully;
- *         -EAGAIN if the folio was not split successfully but another attempt
- *                 can be made, or if @split was set to false;
- *         -EINVAL in case of other errors. See split_folio().
+ * Return: 0 if the operation was successful;
+ *	   -EAGAIN if splitting the large folio was not successful,
+ *		   but another attempt can be made;
+ *	   -EINVAL in case of other folio splitting errors. See split_folio().
  */
-static int s390_wiggle_split_folio(struct mm_struct *mm, struct folio *folio, bool split)
+int s390_wiggle_split_folio(struct mm_struct *mm, struct folio *folio)
 {
-	int rc;
+	int rc, tried_splits;
 
 	lockdep_assert_not_held(&mm->mmap_lock);
 	folio_wait_writeback(folio);
 	lru_add_drain_all();
-	if (split) {
+
+	if (!folio_test_large(folio))
+		return 0;
+
+	for (tried_splits = 0; tried_splits < 2; tried_splits++) {
+		struct address_space *mapping;
+		loff_t lstart, lend;
+		struct inode *inode;
+
 		folio_lock(folio);
 		rc = split_folio(folio);
+		if (rc != -EBUSY) {
+			folio_unlock(folio);
+			return rc;
+		}
+
+		/*
+		 * Splitting with -EBUSY can fail for various reasons, but we
+		 * have to handle one case explicitly for now: some mappings
+		 * don't allow for splitting dirty folios; writeback will
+		 * mark them clean again, including marking all page table
+		 * entries mapping the folio read-only, to catch future write
+		 * attempts.
+		 *
+		 * While the system should be writing back dirty folios in the
+		 * background, we obtained this folio by looking up a writable
+		 * page table entry. On these problematic mappings, writable
+		 * page table entries imply dirty folios, preventing the
+		 * split in the first place.
+		 *
+		 * To prevent a livelock when trigger writeback manually and
+		 * letting the caller look up the folio again in the page
+		 * table (turning it dirty), immediately try to split again.
+		 *
+		 * This is only a problem for some mappings (e.g., XFS);
+		 * mappings that do not support writeback (e.g., shmem) do not
+		 * apply.
+		 */
+		if (!folio_test_dirty(folio) || folio_test_anon(folio) ||
+		    !folio->mapping || !mapping_can_writeback(folio->mapping)) {
+			folio_unlock(folio);
+			break;
+		}
+
+		/*
+		 * Ideally, we'd only trigger writeback on this exact folio. But
+		 * there is no easy way to do that, so we'll stabilize the
+		 * mapping while we still hold the folio lock, so we can drop
+		 * the folio lock to trigger writeback on the range currently
+		 * covered by the folio instead.
+		 */
+		mapping = folio->mapping;
+		lstart = folio_pos(folio);
+		lend = lstart + folio_size(folio) - 1;
+		inode = igrab(mapping->host);
 		folio_unlock(folio);
 
-		if (rc != -EBUSY)
-			return rc;
+		if (unlikely(!inode))
+			break;
+
+		filemap_write_and_wait_range(mapping, lstart, lend);
+		iput(mapping->host);
 	}
 	return -EAGAIN;
 }
-
-int make_hva_secure(struct mm_struct *mm, unsigned long hva, struct uv_cb_header *uvcb)
-{
-	struct vm_area_struct *vma;
-	struct folio_walk fw;
-	struct folio *folio;
-	int rc;
-
-	mmap_read_lock(mm);
-	vma = vma_lookup(mm, hva);
-	if (!vma) {
-		mmap_read_unlock(mm);
-		return -EFAULT;
-	}
-	folio = folio_walk_start(&fw, vma, hva, 0);
-	if (!folio) {
-		mmap_read_unlock(mm);
-		return -ENXIO;
-	}
-
-	folio_get(folio);
-	/*
-	 * Secure pages cannot be huge and userspace should not combine both.
-	 * In case userspace does it anyway this will result in an -EFAULT for
-	 * the unpack. The guest is thus never reaching secure mode.
-	 * If userspace plays dirty tricks and decides to map huge pages at a
-	 * later point in time, it will receive a segmentation fault or
-	 * KVM_RUN will return -EFAULT.
-	 */
-	if (folio_test_hugetlb(folio))
-		rc = -EFAULT;
-	else if (folio_test_large(folio))
-		rc = -E2BIG;
-	else if (!pte_write(fw.pte) || (pte_val(fw.pte) & _PAGE_INVALID))
-		rc = -ENXIO;
-	else
-		rc = make_folio_secure(mm, folio, uvcb);
-	folio_walk_end(&fw, vma);
-	mmap_read_unlock(mm);
-
-	if (rc == -E2BIG || rc == -EBUSY)
-		rc = s390_wiggle_split_folio(mm, folio, rc == -E2BIG);
-	folio_put(folio);
-
-	return rc;
-}
-EXPORT_SYMBOL_GPL(make_hva_secure);
+EXPORT_SYMBOL_GPL(s390_wiggle_split_folio);
 
 /*
  * To be called with the folio locked or with an extra reference! This will
- * prevent gmap_make_secure from touching the folio concurrently. Having 2
- * parallel arch_make_folio_accessible is fine, as the UV calls will become a
- * no-op if the folio is already exported.
+ * prevent kvm_s390_pv_make_secure() from touching the folio concurrently.
+ * Having 2 parallel arch_make_folio_accessible is fine, as the UV calls will
+ * become a no-op if the folio is already exported.
  */
 int arch_make_folio_accessible(struct folio *folio)
 {
 	int rc = 0;
 
-	/* See gmap_make_secure(): large folios cannot be secure */
-	if (unlikely(folio_test_large(folio)))
+	/*
+	 * PG_arch_1 is used as an indication that this small folio might be
+	 * secure. This can overindicate, e.g. we set the bit before calling
+	 * convert_to_secure.
+	 */
+	if (!test_bit(PG_arch_1, &folio->flags.f))
 		return 0;
 
-	/*
-	 * PG_arch_1 is used in 2 places:
-	 * 1. for storage keys of hugetlb folios and KVM
-	 * 2. As an indication that this small folio might be secure. This can
-	 *    overindicate, e.g. we set the bit before calling
-	 *    convert_to_secure.
-	 * As secure pages are never large folios, both variants can co-exists.
-	 */
-	if (!test_bit(PG_arch_1, &folio->flags))
-		return 0;
+	/* Large folios cannot be secure. */
+	if (WARN_ON_ONCE(folio_test_large(folio)))
+		return -EFAULT;
 
 	rc = uv_pin_shared(folio_to_phys(folio));
 	if (!rc) {
-		clear_bit(PG_arch_1, &folio->flags);
+		clear_bit(PG_arch_1, &folio->flags.f);
 		return 0;
 	}
 
 	rc = uv_convert_from_secure(folio_to_phys(folio));
 	if (!rc) {
-		clear_bit(PG_arch_1, &folio->flags);
+		clear_bit(PG_arch_1, &folio->flags.f);
 		return 0;
 	}
 
@@ -782,7 +745,12 @@ out_kobj:
 device_initcall(uv_sysfs_init);
 
 /*
- * Find the secret with the secret_id in the provided list.
+ * Locate a secret in the list by its id.
+ * @secret_id: search pattern.
+ * @list: ephemeral buffer space
+ * @secret: output data, containing the secret's metadata.
+ *
+ * Search for a secret with the given secret_id in the Ultravisor secret store.
  *
  * Context: might sleep.
  */
@@ -801,14 +769,17 @@ static int find_secret_in_page(const u8 secret_id[UV_SECRET_ID_LEN],
 	return -ENOENT;
 }
 
-/*
- * Do the actual search for `uv_get_secret_metadata`.
+/**
+ * uv_find_secret() - search secret metadata for a given secret id.
+ * @secret_id: search pattern.
+ * @list: ephemeral buffer space
+ * @secret: output data, containing the secret's metadata.
  *
  * Context: might sleep.
  */
-static int find_secret(const u8 secret_id[UV_SECRET_ID_LEN],
-		       struct uv_secret_list *list,
-		       struct uv_secret_list_item_hdr *secret)
+int uv_find_secret(const u8 secret_id[UV_SECRET_ID_LEN],
+		   struct uv_secret_list *list,
+		   struct uv_secret_list_item_hdr *secret)
 {
 	u16 start_idx = 0;
 	u16 list_rc;
@@ -830,36 +801,7 @@ static int find_secret(const u8 secret_id[UV_SECRET_ID_LEN],
 
 	return -ENOENT;
 }
-
-/**
- * uv_get_secret_metadata() - get secret metadata for a given secret id.
- * @secret_id: search pattern.
- * @secret: output data, containing the secret's metadata.
- *
- * Search for a secret with the given secret_id in the Ultravisor secret store.
- *
- * Context: might sleep.
- *
- * Return:
- * * %0:	- Found entry; secret->idx and secret->type are valid.
- * * %ENOENT	- No entry found.
- * * %ENODEV:	- Not supported: UV not available or command not available.
- * * %EIO:	- Other unexpected UV error.
- */
-int uv_get_secret_metadata(const u8 secret_id[UV_SECRET_ID_LEN],
-			   struct uv_secret_list_item_hdr *secret)
-{
-	struct uv_secret_list *buf;
-	int rc;
-
-	buf = kzalloc(sizeof(*buf), GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-	rc = find_secret(secret_id, buf, secret);
-	kfree(buf);
-	return rc;
-}
-EXPORT_SYMBOL_GPL(uv_get_secret_metadata);
+EXPORT_SYMBOL_GPL(uv_find_secret);
 
 /**
  * uv_retrieve_secret() - get the secret value for the secret index.

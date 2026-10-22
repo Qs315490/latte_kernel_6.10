@@ -27,6 +27,7 @@
 #include "amdgpu_ih.h"
 #include "sid.h"
 #include "si_ih.h"
+
 #include "oss/oss_1_0_d.h"
 #include "oss/oss_1_0_sh_mask.h"
 
@@ -95,6 +96,9 @@ static int si_ih_irq_init(struct amdgpu_device *adev)
 	pci_set_master(adev->pdev);
 	si_ih_enable_interrupts(adev);
 
+	if (adev->irq.ih_soft.ring_size)
+		adev->irq.ih_soft.enabled = true;
+
 	return 0;
 }
 
@@ -111,6 +115,9 @@ static u32 si_ih_get_wptr(struct amdgpu_device *adev,
 
 	wptr = le32_to_cpu(*ih->wptr_cpu);
 
+	if (ih == &adev->irq.ih_soft)
+		goto out;
+
 	if (wptr & IH_RB_WPTR__RB_OVERFLOW_MASK) {
 		wptr &= ~IH_RB_WPTR__RB_OVERFLOW_MASK;
 		dev_warn(adev->dev, "IH ring buffer overflow (0x%08X, 0x%08X, 0x%08X)\n",
@@ -126,6 +133,8 @@ static u32 si_ih_get_wptr(struct amdgpu_device *adev,
 		tmp &= ~IH_RB_CNTL__WPTR_OVERFLOW_CLEAR_MASK;
 		WREG32(IH_RB_CNTL, tmp);
 	}
+
+out:
 	return (wptr & ih->ptr_mask);
 }
 
@@ -174,6 +183,10 @@ static int si_ih_sw_init(struct amdgpu_ip_block *ip_block)
 	if (r)
 		return r;
 
+	r = amdgpu_ih_ring_init(adev, &adev->irq.ih_soft, IH_SW_RING_SIZE, true);
+	if (r)
+		return r;
+
 	return amdgpu_irq_init(adev);
 }
 
@@ -210,10 +223,10 @@ static int si_ih_resume(struct amdgpu_ip_block *ip_block)
 	return si_ih_hw_init(ip_block);
 }
 
-static bool si_ih_is_idle(void *handle)
+static bool si_ih_is_idle(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
-	u32 tmp = RREG32(SRBM_STATUS);
+	struct amdgpu_device *adev = ip_block->adev;
+	u32 tmp = RREG32(mmSRBM_STATUS);
 
 	if (tmp & SRBM_STATUS__IH_BUSY_MASK)
 		return false;
@@ -227,7 +240,7 @@ static int si_ih_wait_for_idle(struct amdgpu_ip_block *ip_block)
 	struct amdgpu_device *adev = ip_block->adev;
 
 	for (i = 0; i < adev->usec_timeout; i++) {
-		if (si_ih_is_idle(adev))
+		if (si_ih_is_idle(ip_block))
 			return 0;
 		udelay(1);
 	}
@@ -239,23 +252,23 @@ static int si_ih_soft_reset(struct amdgpu_ip_block *ip_block)
 	struct amdgpu_device *adev = ip_block->adev;
 
 	u32 srbm_soft_reset = 0;
-	u32 tmp = RREG32(SRBM_STATUS);
+	u32 tmp = RREG32(mmSRBM_STATUS);
 
 	if (tmp & SRBM_STATUS__IH_BUSY_MASK)
 		srbm_soft_reset |= SRBM_SOFT_RESET__SOFT_RESET_IH_MASK;
 
 	if (srbm_soft_reset) {
-		tmp = RREG32(SRBM_SOFT_RESET);
+		tmp = RREG32(mmSRBM_SOFT_RESET);
 		tmp |= srbm_soft_reset;
-		dev_info(adev->dev, "SRBM_SOFT_RESET=0x%08X\n", tmp);
-		WREG32(SRBM_SOFT_RESET, tmp);
-		tmp = RREG32(SRBM_SOFT_RESET);
+		dev_info(adev->dev, "mmSRBM_SOFT_RESET=0x%08X\n", tmp);
+		WREG32(mmSRBM_SOFT_RESET, tmp);
+		tmp = RREG32(mmSRBM_SOFT_RESET);
 
 		udelay(50);
 
 		tmp &= ~srbm_soft_reset;
-		WREG32(SRBM_SOFT_RESET, tmp);
-		tmp = RREG32(SRBM_SOFT_RESET);
+		WREG32(mmSRBM_SOFT_RESET, tmp);
+		tmp = RREG32(mmSRBM_SOFT_RESET);
 
 		udelay(50);
 	}

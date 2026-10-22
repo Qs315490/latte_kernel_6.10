@@ -30,6 +30,7 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/export.h>
+#include <linux/kvm_types.h>
 #include <linux/ptrace.h>
 #include <linux/notifier.h>
 #include <linux/kprobes.h>
@@ -57,6 +58,7 @@
 #include <asm/unistd.h>
 #include <asm/fsgsbase.h>
 #include <asm/fred.h>
+#include <asm/msr.h>
 #ifdef CONFIG_IA32_EMULATION
 /* Not included via unistd.h */
 #include <asm/unistd_32_ia32.h>
@@ -95,21 +97,21 @@ void __show_regs(struct pt_regs *regs, enum show_regs_mode mode,
 		return;
 
 	if (mode == SHOW_REGS_USER) {
-		rdmsrl(MSR_FS_BASE, fs);
-		rdmsrl(MSR_KERNEL_GS_BASE, shadowgs);
+		rdmsrq(MSR_FS_BASE, fs);
+		rdmsrq(MSR_KERNEL_GS_BASE, shadowgs);
 		printk("%sFS:  %016lx GS:  %016lx\n",
 		       log_lvl, fs, shadowgs);
 		return;
 	}
 
-	asm("movl %%ds,%0" : "=r" (ds));
-	asm("movl %%es,%0" : "=r" (es));
-	asm("movl %%fs,%0" : "=r" (fsindex));
-	asm("movl %%gs,%0" : "=r" (gsindex));
+	savesegment(ds, ds);
+	savesegment(es, es);
+	savesegment(fs, fsindex);
+	savesegment(gs, gsindex);
 
-	rdmsrl(MSR_FS_BASE, fs);
-	rdmsrl(MSR_GS_BASE, gs);
-	rdmsrl(MSR_KERNEL_GS_BASE, shadowgs);
+	rdmsrq(MSR_FS_BASE, fs);
+	rdmsrq(MSR_GS_BASE, gs);
+	rdmsrq(MSR_KERNEL_GS_BASE, shadowgs);
 
 	cr0 = read_cr0();
 	cr2 = read_cr2();
@@ -132,7 +134,7 @@ void __show_regs(struct pt_regs *regs, enum show_regs_mode mode,
 
 	/* Only print out debug registers if they are in their non-default state. */
 	if (!((d0 == 0) && (d1 == 0) && (d2 == 0) && (d3 == 0) &&
-	    (d6 == DR6_RESERVED) && (d7 == 0x400))) {
+	    (d6 == DR6_RESERVED) && (d7 == DR7_FIXED_1))) {
 		printk("%sDR0: %016lx DR1: %016lx DR2: %016lx\n",
 		       log_lvl, d0, d1, d2);
 		printk("%sDR3: %016lx DR6: %016lx DR7: %016lx\n",
@@ -195,7 +197,7 @@ static noinstr unsigned long __rdgsbase_inactive(void)
 		native_swapgs();
 	} else {
 		instrumentation_begin();
-		rdmsrl(MSR_KERNEL_GS_BASE, gsbase);
+		rdmsrq(MSR_KERNEL_GS_BASE, gsbase);
 		instrumentation_end();
 	}
 
@@ -221,7 +223,7 @@ static noinstr void __wrgsbase_inactive(unsigned long gsbase)
 		native_swapgs();
 	} else {
 		instrumentation_begin();
-		wrmsrl(MSR_KERNEL_GS_BASE, gsbase);
+		wrmsrq(MSR_KERNEL_GS_BASE, gsbase);
 		instrumentation_end();
 	}
 }
@@ -302,9 +304,7 @@ void current_save_fsgs(void)
 	save_fsgs(current);
 	local_irq_restore(flags);
 }
-#if IS_ENABLED(CONFIG_KVM)
-EXPORT_SYMBOL_GPL(current_save_fsgs);
-#endif
+EXPORT_SYMBOL_FOR_KVM(current_save_fsgs);
 
 static __always_inline void loadseg(enum which_selector which,
 				    unsigned short sel)
@@ -353,7 +353,7 @@ static __always_inline void load_seg_legacy(unsigned short prev_index,
 		} else {
 			if (prev_index != next_index)
 				loadseg(which, next_index);
-			wrmsrl(which == FS ? MSR_FS_BASE : MSR_KERNEL_GS_BASE,
+			wrmsrq(which == FS ? MSR_FS_BASE : MSR_KERNEL_GS_BASE,
 			       next_base);
 		}
 	} else {
@@ -463,7 +463,7 @@ unsigned long x86_gsbase_read_cpu_inactive(void)
 		gsbase = __rdgsbase_inactive();
 		local_irq_restore(flags);
 	} else {
-		rdmsrl(MSR_KERNEL_GS_BASE, gsbase);
+		rdmsrq(MSR_KERNEL_GS_BASE, gsbase);
 	}
 
 	return gsbase;
@@ -478,7 +478,7 @@ void x86_gsbase_write_cpu_inactive(unsigned long gsbase)
 		__wrgsbase_inactive(gsbase);
 		local_irq_restore(flags);
 	} else {
-		wrmsrl(MSR_KERNEL_GS_BASE, gsbase);
+		wrmsrq(MSR_KERNEL_GS_BASE, gsbase);
 	}
 }
 
@@ -614,10 +614,9 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	int cpu = smp_processor_id();
 
 	WARN_ON_ONCE(IS_ENABLED(CONFIG_DEBUG_ENTRY) &&
-		     this_cpu_read(pcpu_hot.hardirq_stack_inuse));
+		     this_cpu_read(hardirq_stack_inuse));
 
-	if (!test_tsk_thread_flag(prev_p, TIF_NEED_FPU_LOAD))
-		switch_fpu_prepare(prev_p, cpu);
+	switch_fpu(prev_p, cpu);
 
 	/* We must save %fs and %gs before load_TLS() because
 	 * %fs and %gs may be cleared by load_TLS().
@@ -668,10 +667,8 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	/*
 	 * Switch the PDA and FPU contexts.
 	 */
-	raw_cpu_write(pcpu_hot.current_task, next_p);
-	raw_cpu_write(pcpu_hot.top_of_stack, task_top_of_stack(next_p));
-
-	switch_fpu_finish(next_p);
+	raw_cpu_write(current_task, next_p);
+	raw_cpu_write(cpu_current_top_of_stack, task_top_of_stack(next_p));
 
 	/* Reload sp0. */
 	update_task_stack(next_p);
@@ -707,7 +704,11 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	}
 
 	/* Load the Intel cache allocation PQR MSR. */
-	resctrl_sched_in(next_p);
+	resctrl_arch_sched_in(next_p);
+
+	/* Reset hw history on AMD CPUs */
+	if (cpu_feature_enabled(X86_FEATURE_AMD_WORKLOAD_CLASS))
+		wrmsrq(MSR_AMD_WORKLOAD_HRST, 0x1);
 
 	return prev_p;
 }
@@ -940,14 +941,14 @@ long do_arch_prctl_64(struct task_struct *task, int option, unsigned long arg2)
 #ifdef CONFIG_CHECKPOINT_RESTORE
 # ifdef CONFIG_X86_X32_ABI
 	case ARCH_MAP_VDSO_X32:
-		return prctl_map_vdso(&vdso_image_x32, arg2);
+		return prctl_map_vdso(&vdsox32_image, arg2);
 # endif
-# if defined CONFIG_X86_32 || defined CONFIG_IA32_EMULATION
+# ifdef CONFIG_IA32_EMULATION
 	case ARCH_MAP_VDSO_32:
-		return prctl_map_vdso(&vdso_image_32, arg2);
+		return prctl_map_vdso(&vdso32_image, arg2);
 # endif
 	case ARCH_MAP_VDSO_64:
-		return prctl_map_vdso(&vdso_image_64, arg2);
+		return prctl_map_vdso(&vdso64_image, arg2);
 #endif
 #ifdef CONFIG_ADDRESS_MASKING
 	case ARCH_GET_UNTAG_MASK:
@@ -978,27 +979,4 @@ long do_arch_prctl_64(struct task_struct *task, int option, unsigned long arg2)
 	}
 
 	return ret;
-}
-
-SYSCALL_DEFINE2(arch_prctl, int, option, unsigned long, arg2)
-{
-	long ret;
-
-	ret = do_arch_prctl_64(current, option, arg2);
-	if (ret == -EINVAL)
-		ret = do_arch_prctl_common(option, arg2);
-
-	return ret;
-}
-
-#ifdef CONFIG_IA32_EMULATION
-COMPAT_SYSCALL_DEFINE2(arch_prctl, int, option, unsigned long, arg2)
-{
-	return do_arch_prctl_common(option, arg2);
-}
-#endif
-
-unsigned long KSTK_ESP(struct task_struct *task)
-{
-	return task_pt_regs(task)->sp;
 }

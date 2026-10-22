@@ -259,7 +259,7 @@ sci_mpc_agent_validate_phy_configuration(struct isci_host *ihost,
 		if (!phy_mask)
 			continue;
 		/*
-		 * Make sure that one or more of the phys were not already assinged to
+		 * Make sure that one or more of the phys were not already assigned to
 		 * a different port. */
 		if ((phy_mask & ~assigned_phy_mask) == 0) {
 			return SCI_FAILURE_UNSUPPORTED_PORT_CONFIGURATION;
@@ -321,7 +321,7 @@ sci_mpc_agent_validate_phy_configuration(struct isci_host *ihost,
 static void mpc_agent_timeout(struct timer_list *t)
 {
 	u8 index;
-	struct sci_timer *tmr = from_timer(tmr, t, timer);
+	struct sci_timer *tmr = timer_container_of(tmr, t, timer);
 	struct sci_port_configuration_agent *port_agent;
 	struct isci_host *ihost;
 	unsigned long flags;
@@ -659,7 +659,7 @@ static void sci_apc_agent_link_down(
 static void apc_agent_timeout(struct timer_list *t)
 {
 	u32 index;
-	struct sci_timer *tmr = from_timer(tmr, t, timer);
+	struct sci_timer *tmr = timer_container_of(tmr, t, timer);
 	struct sci_port_configuration_agent *port_agent;
 	struct isci_host *ihost;
 	unsigned long flags;

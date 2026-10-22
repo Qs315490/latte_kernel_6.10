@@ -82,7 +82,7 @@ static void ipu6_bus_release(struct device *dev)
 
 struct ipu6_bus_device *
 ipu6_bus_initialize_device(struct pci_dev *pdev, struct device *parent,
-			   void *pdata, struct ipu6_buttress_ctrl *ctrl,
+			   void *pdata, const struct ipu6_buttress_ctrl *ctrl,
 			   char *name)
 {
 	struct auxiliary_device *auxdev;
@@ -90,7 +90,7 @@ ipu6_bus_initialize_device(struct pci_dev *pdev, struct device *parent,
 	struct ipu6_device *isp = pci_get_drvdata(pdev);
 	int ret;
 
-	adev = kzalloc(sizeof(*adev), GFP_KERNEL);
+	adev = kzalloc_obj(*adev);
 	if (!adev)
 		return ERR_PTR(-ENOMEM);
 

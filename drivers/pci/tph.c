@@ -139,8 +139,7 @@ static void set_ctrl_reg_req_en(struct pci_dev *pdev, u8 req_type)
 
 	pci_read_config_dword(pdev, pdev->tph_cap + PCI_TPH_CTRL, &reg);
 
-	reg &= ~PCI_TPH_CTRL_REQ_EN_MASK;
-	reg |= FIELD_PREP(PCI_TPH_CTRL_REQ_EN_MASK, req_type);
+	FIELD_MODIFY(PCI_TPH_CTRL_REQ_EN_MASK, &reg, req_type);
 
 	pci_write_config_dword(pdev, pdev->tph_cap + PCI_TPH_CTRL, reg);
 }
@@ -155,7 +154,16 @@ static u8 get_st_modes(struct pci_dev *pdev)
 	return reg;
 }
 
-static u32 get_st_table_loc(struct pci_dev *pdev)
+/**
+ * pcie_tph_get_st_table_loc - Return the device's ST table location
+ * @pdev: PCI device to query
+ *
+ * Return:
+ *  PCI_TPH_LOC_NONE - Not present
+ *  PCI_TPH_LOC_CAP  - Located in the TPH Requester Extended Capability
+ *  PCI_TPH_LOC_MSIX - Located in the MSI-X Table
+ */
+u32 pcie_tph_get_st_table_loc(struct pci_dev *pdev)
 {
 	u32 reg;
 
@@ -163,18 +171,19 @@ static u32 get_st_table_loc(struct pci_dev *pdev)
 
 	return FIELD_GET(PCI_TPH_CAP_LOC_MASK, reg);
 }
+EXPORT_SYMBOL(pcie_tph_get_st_table_loc);
 
 /*
  * Return the size of ST table. If ST table is not in TPH Requester Extended
  * Capability space, return 0. Otherwise return the ST Table Size + 1.
  */
-static u16 get_st_table_size(struct pci_dev *pdev)
+u16 pcie_tph_get_st_table_size(struct pci_dev *pdev)
 {
 	u32 reg;
 	u32 loc;
 
 	/* Check ST table location first */
-	loc = get_st_table_loc(pdev);
+	loc = pcie_tph_get_st_table_loc(pdev);
 
 	/* Convert loc to match with PCI_TPH_LOC_* defined in pci_regs.h */
 	loc = FIELD_PREP(PCI_TPH_CAP_LOC_MASK, loc);
@@ -185,6 +194,7 @@ static u16 get_st_table_size(struct pci_dev *pdev)
 
 	return FIELD_GET(PCI_TPH_CAP_ST_MASK, reg) + 1;
 }
+EXPORT_SYMBOL(pcie_tph_get_st_table_size);
 
 /* Return device's Root Port completer capability */
 static u8 get_rp_completer_type(struct pci_dev *pdev)
@@ -204,48 +214,6 @@ static u8 get_rp_completer_type(struct pci_dev *pdev)
 	return FIELD_GET(PCI_EXP_DEVCAP2_TPH_COMP_MASK, reg);
 }
 
-/* Write ST to MSI-X vector control reg - Return 0 if OK, otherwise -errno */
-static int write_tag_to_msix(struct pci_dev *pdev, int msix_idx, u16 tag)
-{
-#ifdef CONFIG_PCI_MSI
-	struct msi_desc *msi_desc = NULL;
-	void __iomem *vec_ctrl;
-	u32 val;
-	int err = 0;
-
-	msi_lock_descs(&pdev->dev);
-
-	/* Find the msi_desc entry with matching msix_idx */
-	msi_for_each_desc(msi_desc, &pdev->dev, MSI_DESC_ASSOCIATED) {
-		if (msi_desc->msi_index == msix_idx)
-			break;
-	}
-
-	if (!msi_desc) {
-		err = -ENXIO;
-		goto err_out;
-	}
-
-	/* Get the vector control register (offset 0xc) pointed by msix_idx */
-	vec_ctrl = pdev->msix_base + msix_idx * PCI_MSIX_ENTRY_SIZE;
-	vec_ctrl += PCI_MSIX_ENTRY_VECTOR_CTRL;
-
-	val = readl(vec_ctrl);
-	val &= ~PCI_MSIX_ENTRY_CTRL_ST;
-	val |= FIELD_PREP(PCI_MSIX_ENTRY_CTRL_ST, tag);
-	writel(val, vec_ctrl);
-
-	/* Read back to flush the update */
-	val = readl(vec_ctrl);
-
-err_out:
-	msi_unlock_descs(&pdev->dev);
-	return err;
-#else
-	return -ENODEV;
-#endif
-}
-
 /* Write tag to ST table - Return 0 if OK, otherwise -errno */
 static int write_tag_to_st_table(struct pci_dev *pdev, int index, u16 tag)
 {
@@ -253,7 +221,7 @@ static int write_tag_to_st_table(struct pci_dev *pdev, int index, u16 tag)
 	int offset;
 
 	/* Check if index is out of bound */
-	st_table_size = get_st_table_size(pdev);
+	st_table_size = pcie_tph_get_st_table_size(pdev);
 	if (index >= st_table_size)
 		return -ENXIO;
 
@@ -267,21 +235,27 @@ static int write_tag_to_st_table(struct pci_dev *pdev, int index, u16 tag)
  * with a specific CPU
  * @pdev: PCI device
  * @mem_type: target memory type (volatile or persistent RAM)
- * @cpu_uid: associated CPU id
+ * @cpu: associated CPU id
  * @tag: Steering Tag to be returned
  *
  * Return the Steering Tag for a target memory that is associated with a
- * specific CPU as indicated by cpu_uid.
+ * specific CPU as indicated by cpu.
  *
  * Return: 0 if success, otherwise negative value (-errno)
  */
 int pcie_tph_get_cpu_st(struct pci_dev *pdev, enum tph_mem_type mem_type,
-			unsigned int cpu_uid, u16 *tag)
+			unsigned int cpu, u16 *tag)
 {
 #ifdef CONFIG_ACPI
 	struct pci_dev *rp;
 	acpi_handle rp_acpi_handle;
 	union st_info info;
+	u32 cpu_uid;
+	int ret;
+
+	ret = acpi_get_cpu_uid(cpu, &cpu_uid);
+	if (ret != 0)
+		return ret;
 
 	rp = pcie_find_root_port(pdev);
 	if (!rp || !rp->bus || !rp->bus->bridge)
@@ -296,9 +270,9 @@ int pcie_tph_get_cpu_st(struct pci_dev *pdev, enum tph_mem_type mem_type,
 
 	*tag = tph_extract_tag(mem_type, pdev->tph_req_type, &info);
 
-	pci_dbg(pdev, "get steering tag: mem_type=%s, cpu_uid=%d, tag=%#04x\n",
+	pci_dbg(pdev, "get steering tag: mem_type=%s, cpu=%d, tag=%#04x\n",
 		(mem_type == TPH_MEM_TYPE_VM) ? "volatile" : "persistent",
-		cpu_uid, *tag);
+		cpu, *tag);
 
 	return 0;
 #else
@@ -340,13 +314,13 @@ int pcie_tph_set_st_entry(struct pci_dev *pdev, unsigned int index, u16 tag)
 	 */
 	set_ctrl_reg_req_en(pdev, PCI_TPH_REQ_DISABLE);
 
-	loc = get_st_table_loc(pdev);
+	loc = pcie_tph_get_st_table_loc(pdev);
 	/* Convert loc to match with PCI_TPH_LOC_* */
 	loc = FIELD_PREP(PCI_TPH_CAP_LOC_MASK, loc);
 
 	switch (loc) {
 	case PCI_TPH_LOC_MSIX:
-		err = write_tag_to_msix(pdev, index, tag);
+		err = pci_msix_write_tph_tag(pdev, index, tag);
 		break;
 	case PCI_TPH_LOC_CAP:
 		err = write_tag_to_st_table(pdev, index, tag);
@@ -438,10 +412,13 @@ int pcie_enable_tph(struct pci_dev *pdev, int mode)
 	else
 		pdev->tph_req_type = PCI_TPH_REQ_TPH_ONLY;
 
-	rp_req_type = get_rp_completer_type(pdev);
+	/* Check if the device is behind a Root Port */
+	if (pci_pcie_type(pdev) != PCI_EXP_TYPE_RC_END) {
+		rp_req_type = get_rp_completer_type(pdev);
 
-	/* Final req_type is the smallest value of two */
-	pdev->tph_req_type = min(pdev->tph_req_type, rp_req_type);
+		/* Final req_type is the smallest value of two */
+		pdev->tph_req_type = min(pdev->tph_req_type, rp_req_type);
+	}
 
 	if (pdev->tph_req_type == PCI_TPH_REQ_DISABLE)
 		return -EINVAL;
@@ -449,11 +426,8 @@ int pcie_enable_tph(struct pci_dev *pdev, int mode)
 	/* Write them into TPH control register */
 	pci_read_config_dword(pdev, pdev->tph_cap + PCI_TPH_CTRL, &reg);
 
-	reg &= ~PCI_TPH_CTRL_MODE_SEL_MASK;
-	reg |= FIELD_PREP(PCI_TPH_CTRL_MODE_SEL_MASK, pdev->tph_mode);
-
-	reg &= ~PCI_TPH_CTRL_REQ_EN_MASK;
-	reg |= FIELD_PREP(PCI_TPH_CTRL_REQ_EN_MASK, pdev->tph_req_type);
+	FIELD_MODIFY(PCI_TPH_CTRL_MODE_SEL_MASK, &reg, pdev->tph_mode);
+	FIELD_MODIFY(PCI_TPH_CTRL_REQ_EN_MASK, &reg, pdev->tph_req_type);
 
 	pci_write_config_dword(pdev, pdev->tph_cap + PCI_TPH_CTRL, reg);
 
@@ -485,7 +459,7 @@ void pci_restore_tph_state(struct pci_dev *pdev)
 	pci_write_config_dword(pdev, pdev->tph_cap + PCI_TPH_CTRL, *cap++);
 	st_entry = (u16 *)cap;
 	offset = PCI_TPH_BASE_SIZEOF;
-	num_entries = get_st_table_size(pdev);
+	num_entries = pcie_tph_get_st_table_size(pdev);
 	for (i = 0; i < num_entries; i++) {
 		pci_write_config_word(pdev, pdev->tph_cap + offset,
 				      *st_entry++);
@@ -517,7 +491,7 @@ void pci_save_tph_state(struct pci_dev *pdev)
 	/* Save all ST entries in extended capability structure */
 	st_entry = (u16 *)cap;
 	offset = PCI_TPH_BASE_SIZEOF;
-	num_entries = get_st_table_size(pdev);
+	num_entries = pcie_tph_get_st_table_size(pdev);
 	for (i = 0; i < num_entries; i++) {
 		pci_read_config_word(pdev, pdev->tph_cap + offset,
 				     st_entry++);
@@ -541,7 +515,7 @@ void pci_tph_init(struct pci_dev *pdev)
 	if (!pdev->tph_cap)
 		return;
 
-	num_entries = get_st_table_size(pdev);
+	num_entries = pcie_tph_get_st_table_size(pdev);
 	save_size = sizeof(u32) + num_entries * sizeof(u16);
 	pci_add_ext_cap_save_buffer(pdev, PCI_EXT_CAP_ID_TPH, save_size);
 }

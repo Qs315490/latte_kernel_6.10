@@ -164,7 +164,7 @@ static int uvd_v5_0_hw_init(struct amdgpu_ip_block *ip_block)
 
 	r = amdgpu_ring_alloc(ring, 10);
 	if (r) {
-		DRM_ERROR("amdgpu: ring failed to lock UVD ring (%d).\n", r);
+		drm_err(adev_to_drm(adev), "ring alloc failed (%d).\n", r);
 		goto done;
 	}
 
@@ -191,7 +191,7 @@ static int uvd_v5_0_hw_init(struct amdgpu_ip_block *ip_block)
 
 done:
 	if (!r)
-		DRM_INFO("UVD initialized successfully.\n");
+		drm_info(adev_to_drm(adev), "UVD initialized successfully.\n");
 
 	return r;
 
@@ -580,9 +580,9 @@ static void uvd_v5_0_ring_insert_nop(struct amdgpu_ring *ring, uint32_t count)
 	}
 }
 
-static bool uvd_v5_0_is_idle(void *handle)
+static bool uvd_v5_0_is_idle(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 
 	return !(RREG32(mmSRBM_STATUS) & SRBM_STATUS__UVD_BUSY_MASK);
 }
@@ -837,16 +837,16 @@ out:
 	return ret;
 }
 
-static void uvd_v5_0_get_clockgating_state(void *handle, u64 *flags)
+static void uvd_v5_0_get_clockgating_state(struct amdgpu_ip_block *ip_block, u64 *flags)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 	int data;
 
 	mutex_lock(&adev->pm.mutex);
 
 	if (RREG32_SMC(ixCURRENT_PG_STATUS) &
 				CURRENT_PG_STATUS__UVD_PG_STATUS_MASK) {
-		DRM_INFO("Cannot get clockgating state when UVD is powergated.\n");
+		drm_info(adev_to_drm(adev), "Cannot get clockgating state when UVD is powergated.\n");
 		goto out;
 	}
 

@@ -319,12 +319,11 @@ static int bm1390_read_raw(struct iio_dev *idev,
 
 		return -EINVAL;
 	case IIO_CHAN_INFO_RAW:
-		ret = iio_device_claim_direct_mode(idev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(idev))
+			return -EBUSY;
 
 		ret = bm1390_read_data(data, chan, val, val2);
-		iio_device_release_direct_mode(idev);
+		iio_device_release_direct(idev);
 		if (ret)
 			return ret;
 
@@ -441,7 +440,7 @@ static int bm1390_fifo_flush(struct iio_dev *idev, unsigned int samples)
 	 * the timestamps. If we are ran from IRQ, then the
 	 * IRQF_ONESHOT has us covered - but if we are ran by the
 	 * user-space read we need to disable the IRQ to be on a safe
-	 * side. We do this usng synchronous disable so that if the
+	 * side. We do this using synchronous disable so that if the
 	 * IRQ thread is being ran on other CPU we wait for it to be
 	 * finished.
 	 */
@@ -653,7 +652,8 @@ static irqreturn_t bm1390_trigger_handler(int irq, void *p)
 		}
 	}
 
-	iio_push_to_buffers_with_timestamp(idev, &data->buf, data->timestamp);
+	iio_push_to_buffers_with_ts(idev, &data->buf, sizeof(data->buf),
+				    data->timestamp);
 	iio_trigger_notify_done(idev->trig);
 
 	return IRQ_HANDLED;
@@ -883,13 +883,13 @@ static int bm1390_probe(struct i2c_client *i2c)
 
 static const struct of_device_id bm1390_of_match[] = {
 	{ .compatible = "rohm,bm1390glv-z" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, bm1390_of_match);
 
 static const struct i2c_device_id bm1390_id[] = {
-	{ "bm1390glv-z", },
-	{}
+	{ .name = "bm1390glv-z" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bm1390_id);
 

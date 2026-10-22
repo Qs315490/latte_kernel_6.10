@@ -3,6 +3,7 @@
  */
 
 #include "main.h"
+#include "mac.h"
 #include "rx.h"
 #include "ps.h"
 #include "debug.h"
@@ -72,6 +73,12 @@ static void rtw_rx_phy_stat(struct rtw_dev *rtwdev,
 		rate_ss = 2;
 		rate_ss_evm = 2;
 		evm_id = RTW_EVM_2SS_A;
+		break;
+	case DESC_RATEMCS16...DESC_RATEMCS23:
+	case DESC_RATEVHT3SS_MCS0...DESC_RATEVHT3SS_MCS9:
+		rate_ss = 3;
+		rate_ss_evm = 3;
+		evm_id = RTW_EVM_3SS_A;
 		break;
 	default:
 		rtw_warn(rtwdev, "unknown pkt rate = %d\n", pkt_stat->rate);
@@ -255,9 +262,9 @@ static void rtw_rx_fill_rx_status(struct rtw_dev *rtwdev,
 	}
 }
 
-void rtw_rx_query_rx_desc(struct rtw_dev *rtwdev, void *rx_desc8,
-			  struct rtw_rx_pkt_stat *pkt_stat,
-			  struct ieee80211_rx_status *rx_status)
+int rtw_rx_query_rx_desc(struct rtw_dev *rtwdev, void *rx_desc8,
+			 struct rtw_rx_pkt_stat *pkt_stat,
+			 struct ieee80211_rx_status *rx_status)
 {
 	u32 desc_sz = rtwdev->chip->rx_pkt_desc_sz;
 	struct rtw_rx_desc *rx_desc = rx_desc8;
@@ -289,12 +296,28 @@ void rtw_rx_query_rx_desc(struct rtw_dev *rtwdev, void *rx_desc8,
 
 	pkt_stat->tsf_low = le32_get_bits(rx_desc->w5, RTW_RX_DESC_W5_TSFL);
 
+	if (unlikely(pkt_stat->rate >= DESC_RATE_MAX))
+		return -EINVAL;
+
+	if (unlikely(pkt_stat->drv_info_sz &&
+		     pkt_stat->drv_info_sz != PHY_STATUS_SIZE))
+		return -EINVAL;
+
+	if (unlikely(pkt_stat->phy_status && !pkt_stat->drv_info_sz))
+		return -EINVAL;
+
+	if (unlikely(pkt_stat->pkt_len > IEEE80211_MAX_MPDU_LEN_VHT_11454))
+		return -EINVAL;
+
 	/* drv_info_sz is in unit of 8-bytes */
 	pkt_stat->drv_info_sz *= 8;
 
 	/* c2h cmd pkt's rx/phy status is not interested */
 	if (pkt_stat->is_c2h)
-		return;
+		return 0;
+
+	if (unlikely(pkt_stat->pkt_len <= FCS_LEN))
+		return -EINVAL;
 
 	phy_status = rx_desc8 + desc_sz + pkt_stat->shift;
 	hdr = phy_status + pkt_stat->drv_info_sz;
@@ -304,5 +327,7 @@ void rtw_rx_query_rx_desc(struct rtw_dev *rtwdev, void *rx_desc8,
 		rtwdev->chip->ops->query_phy_status(rtwdev, phy_status, pkt_stat);
 
 	rtw_rx_fill_rx_status(rtwdev, pkt_stat, hdr, rx_status);
+
+	return 0;
 }
 EXPORT_SYMBOL(rtw_rx_query_rx_desc);

@@ -10,14 +10,12 @@
 
 #include <linux/kernel.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/slab.h>
 #include <linux/tty_flip.h>
 #include <linux/serial.h>
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
-#include <linux/uaccess.h>
 
 #define CONTROL_RTS			0x02
 #define RESEND_CTS_STATE	0x03
@@ -220,7 +218,7 @@ static int opticon_write(struct tty_struct *tty, struct usb_serial_port *port,
 
 	/* The connected devices do not have a bulk write endpoint,
 	 * to transmit data to de barcode device the control endpoint is used */
-	dr = kmalloc(sizeof(struct usb_ctrlrequest), GFP_ATOMIC);
+	dr = kmalloc_obj(struct usb_ctrlrequest, GFP_ATOMIC);
 	if (!dr)
 		goto error_no_dr;
 
@@ -354,7 +352,7 @@ static int opticon_port_probe(struct usb_serial_port *port)
 {
 	struct opticon_private *priv;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 

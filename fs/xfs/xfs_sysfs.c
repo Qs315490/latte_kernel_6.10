@@ -4,7 +4,7 @@
  * All Rights Reserved.
  */
 
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
 #include "xfs_log_format.h"
@@ -13,6 +13,9 @@
 #include "xfs_log.h"
 #include "xfs_log_priv.h"
 #include "xfs_mount.h"
+#include "xfs_zone_priv.h"
+#include "xfs_zones.h"
+#include "xfs_zone_alloc.h"
 
 struct xfs_sysfs_attr {
 	struct attribute attr;
@@ -69,7 +72,7 @@ static struct attribute *xfs_mp_attrs[] = {
 };
 ATTRIBUTE_GROUPS(xfs_mp);
 
-const struct kobj_type xfs_mp_ktype = {
+static const struct kobj_type xfs_mp_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
 	.default_groups = xfs_mp_groups,
@@ -568,8 +571,8 @@ retry_timeout_seconds_store(
 	if (val == -1)
 		cfg->retry_timeout = XFS_ERR_RETRY_FOREVER;
 	else {
-		cfg->retry_timeout = msecs_to_jiffies(val * MSEC_PER_SEC);
-		ASSERT(msecs_to_jiffies(val * MSEC_PER_SEC) < LONG_MAX);
+		cfg->retry_timeout = secs_to_jiffies(val);
+		ASSERT(secs_to_jiffies(val) < LONG_MAX);
 	}
 	return count;
 }
@@ -686,8 +689,8 @@ xfs_error_sysfs_init_class(
 		if (init[i].retry_timeout == XFS_ERR_RETRY_FOREVER)
 			cfg->retry_timeout = XFS_ERR_RETRY_FOREVER;
 		else
-			cfg->retry_timeout = msecs_to_jiffies(
-					init[i].retry_timeout * MSEC_PER_SEC);
+			cfg->retry_timeout =
+					secs_to_jiffies(init[i].retry_timeout);
 	}
 	return 0;
 
@@ -701,40 +704,152 @@ out_error:
 	return error;
 }
 
+static inline struct xfs_mount *zoned_to_mp(struct kobject *kobj)
+{
+	return container_of(to_kobj(kobj), struct xfs_mount, m_zoned_kobj);
+}
+
+static ssize_t
+max_open_zones_show(
+	struct kobject		*kobj,
+	char			*buf)
+{
+	/* only report the open zones available for user data */
+	return sysfs_emit(buf, "%u\n",
+		zoned_to_mp(kobj)->m_max_open_zones - XFS_OPEN_GC_ZONES);
+}
+XFS_SYSFS_ATTR_RO(max_open_zones);
+
+static ssize_t
+nr_open_zones_show(
+	struct kobject		*kobj,
+	char			*buf)
+{
+	struct xfs_zone_info	*zi = zoned_to_mp(kobj)->m_zone_info;
+
+	return sysfs_emit(buf, "%u\n", READ_ONCE(zi->zi_nr_open_zones));
+}
+XFS_SYSFS_ATTR_RO(nr_open_zones);
+
+static ssize_t
+zonegc_low_space_store(
+	struct kobject		*kobj,
+	const char		*buf,
+	size_t			count)
+{
+	struct xfs_mount	*mp = zoned_to_mp(kobj);
+	int			ret;
+	unsigned int		val;
+
+	ret = kstrtouint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val > 100)
+		return -EINVAL;
+
+	if (mp->m_zonegc_low_space != val) {
+		mp->m_zonegc_low_space = val;
+		xfs_zone_gc_wakeup(mp);
+	}
+
+	return count;
+}
+
+static ssize_t
+zonegc_low_space_show(
+	struct kobject		*kobj,
+	char			*buf)
+{
+	return sysfs_emit(buf, "%u\n",
+			zoned_to_mp(kobj)->m_zonegc_low_space);
+}
+XFS_SYSFS_ATTR_RW(zonegc_low_space);
+
+static struct attribute *xfs_zoned_attrs[] = {
+	ATTR_LIST(max_open_zones),
+	ATTR_LIST(nr_open_zones),
+	ATTR_LIST(zonegc_low_space),
+	NULL,
+};
+ATTRIBUTE_GROUPS(xfs_zoned);
+
+static const struct kobj_type xfs_zoned_ktype = {
+	.release = xfs_sysfs_release,
+	.sysfs_ops = &xfs_sysfs_ops,
+	.default_groups = xfs_zoned_groups,
+};
+
 int
-xfs_error_sysfs_init(
+xfs_zoned_sysfs_init(struct xfs_mount *mp)
+{
+	if (!IS_ENABLED(CONFIG_XFS_RT) || !xfs_has_zoned(mp))
+		return 0;
+
+	return xfs_sysfs_init(&mp->m_zoned_kobj, &xfs_zoned_ktype,
+			&mp->m_kobj, "zoned");
+}
+
+void
+xfs_zoned_sysfs_del(struct xfs_mount *mp)
+{
+	if (IS_ENABLED(CONFIG_XFS_RT) && xfs_has_zoned(mp))
+		xfs_sysfs_del(&mp->m_zoned_kobj);
+}
+
+int
+xfs_mount_sysfs_init(
 	struct xfs_mount	*mp)
 {
 	int			error;
+
+	super_set_sysfs_name_id(mp->m_super);
+
+	/* .../xfs/<dev>/ */
+	error = xfs_sysfs_init(&mp->m_kobj, &xfs_mp_ktype,
+			       NULL, mp->m_super->s_id);
+	if (error)
+		return error;
+
+	/* .../xfs/<dev>/stats/ */
+	error = xfs_sysfs_init(&mp->m_stats.xs_kobj, &xfs_stats_ktype,
+			       &mp->m_kobj, "stats");
+	if (error)
+		goto out_remove_fsdir;
 
 	/* .../xfs/<dev>/error/ */
 	error = xfs_sysfs_init(&mp->m_error_kobj, &xfs_error_ktype,
 				&mp->m_kobj, "error");
 	if (error)
-		return error;
+		goto out_remove_stats_dir;
 
+	/* .../xfs/<dev>/error/fail_at_unmount */
 	error = sysfs_create_file(&mp->m_error_kobj.kobject,
 				  ATTR_LIST(fail_at_unmount));
 
 	if (error)
-		goto out_error;
+		goto out_remove_error_dir;
 
 	/* .../xfs/<dev>/error/metadata/ */
 	error = xfs_error_sysfs_init_class(mp, XFS_ERR_METADATA,
 				"metadata", &mp->m_error_meta_kobj,
 				xfs_error_meta_init);
 	if (error)
-		goto out_error;
+		goto out_remove_error_dir;
 
 	return 0;
 
-out_error:
+out_remove_error_dir:
 	xfs_sysfs_del(&mp->m_error_kobj);
+out_remove_stats_dir:
+	xfs_sysfs_del(&mp->m_stats.xs_kobj);
+out_remove_fsdir:
+	xfs_sysfs_del(&mp->m_kobj);
 	return error;
 }
 
 void
-xfs_error_sysfs_del(
+xfs_mount_sysfs_del(
 	struct xfs_mount	*mp)
 {
 	struct xfs_error_cfg	*cfg;
@@ -749,6 +864,8 @@ xfs_error_sysfs_del(
 	}
 	xfs_sysfs_del(&mp->m_error_meta_kobj);
 	xfs_sysfs_del(&mp->m_error_kobj);
+	xfs_sysfs_del(&mp->m_stats.xs_kobj);
+	xfs_sysfs_del(&mp->m_kobj);
 }
 
 struct xfs_error_cfg *

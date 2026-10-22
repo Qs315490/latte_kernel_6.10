@@ -12,7 +12,6 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/regmap.h>
 #include <sound/pcm.h>
@@ -590,7 +589,7 @@ static struct snd_soc_dai_driver es8316_dai = {
 static void es8316_enable_micbias_for_mic_gnd_short_detect(
 	struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	snd_soc_dapm_mutex_lock(dapm);
 	snd_soc_dapm_force_enable_pin_unlocked(dapm, "Bias");
@@ -605,7 +604,7 @@ static void es8316_enable_micbias_for_mic_gnd_short_detect(
 static void es8316_disable_micbias_for_mic_gnd_short_detect(
 	struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	snd_soc_dapm_mutex_lock(dapm);
 	snd_soc_dapm_disable_pin_unlocked(dapm, "Mic Bias");
@@ -895,8 +894,8 @@ static int es8316_i2c_probe(struct i2c_client *i2c_client)
 }
 
 static const struct i2c_device_id es8316_i2c_id[] = {
-	{"es8316" },
-	{}
+	{ .name = "es8316" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, es8316_i2c_id);
 

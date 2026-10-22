@@ -48,15 +48,7 @@
 
 static int fib_map_alloc(struct aac_dev *dev)
 {
-	if (dev->max_fib_size > AAC_MAX_NATIVE_SIZE)
-		dev->max_cmd_size = AAC_MAX_NATIVE_SIZE;
-	else
-		dev->max_cmd_size = dev->max_fib_size;
-	if (dev->max_fib_size < AAC_MAX_NATIVE_SIZE) {
-		dev->max_cmd_size = AAC_MAX_NATIVE_SIZE;
-	} else {
-		dev->max_cmd_size = dev->max_fib_size;
-	}
+	dev->max_cmd_size = AAC_MAX_NATIVE_SIZE;
 
 	dprintk((KERN_INFO
 	  "allocate hardware fibs dma_alloc_coherent(%p, %d * (%d + %d), %p)\n",
@@ -1915,13 +1907,13 @@ static int fillup_pools(struct aac_dev *dev, struct hw_fib **hw_fib_pool,
 	hw_fib_p = hw_fib_pool;
 	fib_p = fib_pool;
 	while (hw_fib_p < &hw_fib_pool[num]) {
-		*(hw_fib_p) = kmalloc(sizeof(struct hw_fib), GFP_KERNEL);
+		*(hw_fib_p) = kmalloc_obj(struct hw_fib);
 		if (!(*(hw_fib_p++))) {
 			--hw_fib_p;
 			break;
 		}
 
-		*(fib_p) = kmalloc(sizeof(struct fib), GFP_KERNEL);
+		*(fib_p) = kmalloc_obj(struct fib);
 		if (!(*(fib_p++))) {
 			kfree(*(--hw_fib_p));
 			break;
@@ -2109,12 +2101,11 @@ static void aac_process_events(struct aac_dev *dev)
 		if (!num)
 			goto free_fib;
 
-		hw_fib_pool = kmalloc_array(num, sizeof(struct hw_fib *),
-						GFP_KERNEL);
+		hw_fib_pool = kmalloc_objs(struct hw_fib *, num);
 		if (!hw_fib_pool)
 			goto free_fib;
 
-		fib_pool = kmalloc_array(num, sizeof(struct fib *), GFP_KERNEL);
+		fib_pool = kmalloc_objs(struct fib *, num);
 		if (!fib_pool)
 			goto free_hw_fib_pool;
 

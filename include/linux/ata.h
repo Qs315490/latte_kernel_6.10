@@ -26,9 +26,7 @@ enum {
 	ATA_MAX_DEVICES		= 2,	/* per bus/port */
 	ATA_MAX_PRD		= 256,	/* we could make these 256/256 */
 	ATA_SECT_SIZE		= 512,
-	ATA_MAX_SECTORS_128	= 128,
 	ATA_MAX_SECTORS		= 256,
-	ATA_MAX_SECTORS_1024    = 1024,
 	ATA_MAX_SECTORS_LBA48	= 65535,/* avoid count to be 0000h */
 	ATA_MAX_SECTORS_TAPE	= 65535,
 	ATA_MAX_TRIM_RNUM	= 64,	/* 512-byte payload / (6-byte LBA + 2-byte range per entry) */
@@ -566,6 +564,7 @@ struct ata_bmdma_prd {
 #define ata_id_has_ncq(id)	((id)[ATA_ID_SATA_CAPABILITY] & (1 << 8))
 #define ata_id_queue_depth(id)	(((id)[ATA_ID_QUEUE_DEPTH] & 0x1f) + 1)
 #define ata_id_removable(id)	((id)[ATA_ID_CONFIG] & (1 << 7))
+#define ata_id_is_locked(id)	(((id)[ATA_ID_DLF] & 0x7) == 0x7)
 #define ata_id_has_atapi_AN(id)	\
 	((((id)[ATA_ID_SATA_CAPABILITY] != 0x0000) && \
 	  ((id)[ATA_ID_SATA_CAPABILITY] != 0xffff)) && \
@@ -763,8 +762,7 @@ static inline bool ata_id_sense_reporting_enabled(const u16 *id)
 	return id[ATA_ID_COMMAND_SET_4] & BIT(6);
 }
 
-/**
- *
+/*
  * Word: 206 - SCT Command Transport
  *    15:12 - Vendor Specific
  *     11:6 - Reserved
@@ -811,8 +809,9 @@ static inline bool ata_id_sct_supported(const u16 *id)
  *
  *	The practical impact of this is that ata_id_major_version cannot
  *	reliably report on drives below ATA3.
+ *
+ *	Returns: major version of ATA drive level or %0 if unknown
  */
-
 static inline unsigned int ata_id_major_version(const u16 *id)
 {
 	unsigned int mver;

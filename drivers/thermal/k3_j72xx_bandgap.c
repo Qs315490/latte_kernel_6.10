@@ -20,6 +20,8 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 
+#include "thermal_hwmon.h"
+
 #define K3_VTM_DEVINFO_PWR0_OFFSET		0x4
 #define K3_VTM_DEVINFO_PWR0_TEMPSENS_CT_MASK	0xf0
 #define K3_VTM_TMPSENS0_CTRL_OFFSET		0x300
@@ -460,13 +462,13 @@ static int k3_j72xx_bandgap_probe(struct platform_device *pdev)
 		goto err_alloc;
 	}
 
-	ref_table = kzalloc(sizeof(*ref_table) * TABLE_SIZE, GFP_KERNEL);
+	ref_table = kzalloc_objs(*ref_table, TABLE_SIZE);
 	if (!ref_table) {
 		ret = -ENOMEM;
 		goto err_alloc;
 	}
 
-	derived_table = devm_kzalloc(bgp->dev, sizeof(*derived_table) * TABLE_SIZE,
+	derived_table = devm_kcalloc(bgp->dev, TABLE_SIZE, sizeof(*derived_table),
 				     GFP_KERNEL);
 	if (!derived_table) {
 		ret = -ENOMEM;
@@ -513,6 +515,8 @@ static int k3_j72xx_bandgap_probe(struct platform_device *pdev)
 			ret = PTR_ERR(ti_thermal);
 			goto err_free_ref_table;
 		}
+
+		devm_thermal_add_hwmon_sysfs(bgp->dev, ti_thermal);
 	}
 
 	platform_set_drvdata(pdev, bgp);

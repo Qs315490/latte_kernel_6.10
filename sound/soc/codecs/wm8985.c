@@ -564,7 +564,7 @@ static const struct snd_soc_dapm_route wm8985_aux_dapm_routes[] = {
 static int wm8985_add_widgets(struct snd_soc_component *component)
 {
 	struct wm8985_priv *wm8985 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	switch (wm8985->dev_type) {
 	case WM8758:
@@ -589,7 +589,7 @@ static int wm8985_add_widgets(struct snd_soc_component *component)
 static int eqmode_get(struct snd_kcontrol *kcontrol,
 		      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	unsigned int reg;
 
 	reg = snd_soc_component_read(component, WM8985_EQ1_LOW_SHELF);
@@ -604,7 +604,7 @@ static int eqmode_get(struct snd_kcontrol *kcontrol,
 static int eqmode_put(struct snd_kcontrol *kcontrol,
 		      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	unsigned int regpwr2, regpwr3;
 	unsigned int reg_eq;
 
@@ -688,10 +688,10 @@ static int wm8985_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 			    WM8985_FMT_MASK, format << WM8985_FMT_SHIFT);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		master = 1;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		master = 0;
 		break;
 	default:
@@ -948,6 +948,7 @@ static int wm8985_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	int ret;
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct wm8985_priv *wm8985;
 
 	wm8985 = snd_soc_component_get_drvdata(component);
@@ -960,7 +961,7 @@ static int wm8985_set_bias_level(struct snd_soc_component *component,
 				    1 << WM8985_VMIDSEL_SHIFT);
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			ret = regulator_bulk_enable(ARRAY_SIZE(wm8985->supplies),
 						    wm8985->supplies);
 			if (ret) {
@@ -1194,8 +1195,8 @@ static int wm8985_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8985_i2c_id[] = {
-	{ "wm8985", WM8985 },
-	{ "wm8758", WM8758 },
+	{ .name = "wm8985", .driver_data = WM8985 },
+	{ .name = "wm8758", .driver_data = WM8758 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8985_i2c_id);

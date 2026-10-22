@@ -12,8 +12,8 @@ static char early_cmdline[COMMAND_LINE_SIZE];
 
 static char *get_early_cmdline(uintptr_t dtb_pa)
 {
-	const char *fdt_cmdline = NULL;
-	unsigned int fdt_cmdline_size = 0;
+	const char *fdt_cmdline;
+	ssize_t fdt_cmdline_size = 0;
 	int chosen_node;
 
 	if (!IS_ENABLED(CONFIG_CMDLINE_FORCE)) {
@@ -22,18 +22,18 @@ static char *get_early_cmdline(uintptr_t dtb_pa)
 			fdt_cmdline = fdt_getprop((void *)dtb_pa, chosen_node,
 						  "bootargs", NULL);
 			if (fdt_cmdline) {
-				fdt_cmdline_size = strlen(fdt_cmdline);
-				strscpy(early_cmdline, fdt_cmdline,
-					COMMAND_LINE_SIZE);
+				fdt_cmdline_size = strscpy(early_cmdline, fdt_cmdline);
+				if (fdt_cmdline_size < 0)
+					return early_cmdline;
 			}
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_CMDLINE_EXTEND) ||
 	    IS_ENABLED(CONFIG_CMDLINE_FORCE) ||
-	    fdt_cmdline_size == 0 /* CONFIG_CMDLINE_FALLBACK */) {
-		strlcat(early_cmdline, CONFIG_CMDLINE, COMMAND_LINE_SIZE);
-	}
+	    fdt_cmdline_size == 0 /* CONFIG_CMDLINE_FALLBACK */)
+		strscpy(early_cmdline + fdt_cmdline_size, CONFIG_CMDLINE,
+			COMMAND_LINE_SIZE - fdt_cmdline_size);
 
 	return early_cmdline;
 }
@@ -41,9 +41,9 @@ static char *get_early_cmdline(uintptr_t dtb_pa)
 static u64 match_noXlvl(char *cmdline)
 {
 	if (strstr(cmdline, "no4lvl"))
-		return SATP_MODE_48;
+		return SATP_MODE_39;
 	else if (strstr(cmdline, "no5lvl"))
-		return SATP_MODE_57;
+		return SATP_MODE_48;
 
 	return 0;
 }

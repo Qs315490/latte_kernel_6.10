@@ -120,7 +120,6 @@ void dcn35_link_encoder_setup(
 void dcn35_link_encoder_init(struct link_encoder *enc)
 {
 	enc31_hw_init(enc);
-	dcn35_link_encoder_set_fgcg(enc, enc->ctx->dc->debug.enable_fine_grain_clock_gating.bits.dio);
 }
 
 void dcn35_link_encoder_set_fgcg(struct link_encoder *enc, bool enable)
@@ -137,9 +136,9 @@ static const struct link_encoder_funcs dcn35_link_enc_funcs = {
 	.hw_init = dcn35_link_encoder_init,
 	.setup = dcn35_link_encoder_setup,
 	.enable_tmds_output = dcn10_link_encoder_enable_tmds_output,
-	.enable_dp_output = dcn31_link_encoder_enable_dp_output,
-	.enable_dp_mst_output = dcn31_link_encoder_enable_dp_mst_output,
-	.disable_output = dcn31_link_encoder_disable_output,
+	.enable_dp_output = dcn35_link_encoder_enable_dp_output,
+	.enable_dp_mst_output = dcn35_link_encoder_enable_dp_mst_output,
+	.disable_output = dcn35_link_encoder_disable_output,
 	.dp_set_lane_settings = dcn10_link_encoder_dp_set_lane_settings,
 	.dp_set_phy_pattern = dcn10_link_encoder_dp_set_phy_pattern,
 	.update_mst_stream_allocation_table =
@@ -159,9 +158,20 @@ static const struct link_encoder_funcs dcn35_link_enc_funcs = {
 	.get_dig_mode = dcn35_get_dig_mode,
 	.is_in_alt_mode = dcn31_link_encoder_is_in_alt_mode,
 	.get_max_link_cap = dcn31_link_encoder_get_max_link_cap,
+	.dpcstx_set_order_invert_18_bit = NULL,
+	.set_phy_source = NULL,
+	.dpcs_initialize_phy = NULL,
+	.dpcs_configure_phypll = NULL,
+	.dpcs_configure_dpcs = NULL,
+	.dpcs_enable_dpcs = NULL,
+	.prog_eq_setting = dpcs32_program_eq_setting,
+	.get_txffe = dpcs32_get_txffe,
+	.set_txffe = dpcs32_set_txffe,
 	.set_dio_phy_mux = dcn31_link_encoder_set_dio_phy_mux,
 	.enable_dpia_output = dcn35_link_encoder_enable_dpia_output,
 	.disable_dpia_output = dcn35_link_encoder_disable_dpia_output,
+	.get_hpd_state = dcn10_get_hpd_state,
+	.program_hpd_filter = dcn10_program_hpd_filter,
 };
 
 void dcn35_link_encoder_construct(
@@ -183,6 +193,7 @@ void dcn35_link_encoder_construct(
 	enc10->base.ctx = init_data->ctx;
 	enc10->base.id = init_data->encoder;
 
+	enc10->base.hpd_gpio = init_data->hpd_gpio;
 	enc10->base.hpd_source = init_data->hpd_source;
 	enc10->base.connector = init_data->connector;
 
@@ -259,6 +270,12 @@ void dcn35_link_encoder_construct(
 		enc10->base.features.flags.bits.IS_UHBR13_5_CAPABLE = bp_cap_info.DP_UHBR13_5_EN;
 		enc10->base.features.flags.bits.IS_UHBR20_CAPABLE = bp_cap_info.DP_UHBR20_EN;
 
+		enc10->base.features.flags.bits.IS_HDMI_FRL_CAPABLE =
+				bp_cap_info.FRL_8G_EN || bp_cap_info.FRL_10G_EN || bp_cap_info.FRL_12G_EN;
+		enc10->base.features.flags.bits.IS_FRL_8G_CAPABLE = bp_cap_info.FRL_8G_EN;
+		enc10->base.features.flags.bits.IS_FRL_10G_CAPABLE = bp_cap_info.FRL_10G_EN;
+		enc10->base.features.flags.bits.IS_FRL_12G_CAPABLE = bp_cap_info.FRL_12G_EN;
+		enc10->base.txffe_state = 0;
 	} else {
 		DC_LOG_WARNING("%s: Failed to get encoder_cap_info from VBIOS with error code %d!\n",
 				__func__,
@@ -266,6 +283,12 @@ void dcn35_link_encoder_construct(
 	}
 	if (enc10->base.ctx->dc->debug.hdmi20_disable)
 		enc10->base.features.flags.bits.HDMI_6GB_EN = 0;
+	if (enc10->base.ctx->dc->config.force_hdmi21_frl_enc_enable) {
+		enc10->base.features.flags.bits.IS_HDMI_FRL_CAPABLE = 1;
+		enc10->base.features.flags.bits.IS_FRL_8G_CAPABLE = 1;
+		enc10->base.features.flags.bits.IS_FRL_10G_CAPABLE = 1;
+		enc10->base.features.flags.bits.IS_FRL_12G_CAPABLE = 1;
+	}
 
 }
 
@@ -295,6 +318,50 @@ static void link_encoder_disable(struct dcn10_link_encoder *enc10)
 {
 	/* reset training complete */
 	REG_UPDATE(DP_LINK_CNTL, DP_LINK_TRAINING_COMPLETE, 0);
+}
+
+void dcn35_link_encoder_enable_dp_output(
+	struct link_encoder *enc,
+	const struct dc_link_settings *link_settings,
+	enum clock_source_id clock_source)
+{
+	struct dcn10_link_encoder *enc10 = TO_DCN10_LINK_ENC(enc);
+
+	if (!enc->ctx->dc->config.unify_link_enc_assignment)
+		dcn31_link_encoder_enable_dp_output(enc, link_settings, clock_source);
+	else {
+		DC_LOG_DEBUG("%s: enc_id(%d)\n", __func__, enc->preferred_engine);
+		dcn20_link_encoder_enable_dp_output(enc, link_settings, clock_source);
+	}
+}
+
+void dcn35_link_encoder_enable_dp_mst_output(
+	struct link_encoder *enc,
+	const struct dc_link_settings *link_settings,
+	enum clock_source_id clock_source)
+{
+	struct dcn10_link_encoder *enc10 = TO_DCN10_LINK_ENC(enc);
+
+	if (!enc->ctx->dc->config.unify_link_enc_assignment)
+		dcn31_link_encoder_enable_dp_mst_output(enc, link_settings, clock_source);
+	else {
+		DC_LOG_DEBUG("%s: enc_id(%d)\n", __func__, enc->preferred_engine);
+		dcn10_link_encoder_enable_dp_mst_output(enc, link_settings, clock_source);
+	}
+}
+
+void dcn35_link_encoder_disable_output(
+	struct link_encoder *enc,
+	enum signal_type signal)
+{
+	struct dcn10_link_encoder *enc10 = TO_DCN10_LINK_ENC(enc);
+
+	if (!enc->ctx->dc->config.unify_link_enc_assignment)
+		dcn31_link_encoder_disable_output(enc, signal);
+	else {
+		DC_LOG_DEBUG("%s: enc_id(%d)\n", __func__, enc->preferred_engine);
+		dcn10_link_encoder_disable_output(enc, signal);
+	}
 }
 
 void dcn35_link_encoder_enable_dpia_output(

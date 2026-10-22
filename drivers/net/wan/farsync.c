@@ -524,27 +524,21 @@ do {								\
 /*      PCI ID lookup table
  */
 static const struct pci_device_id fst_pci_dev_id[] = {
-	{PCI_VENDOR_ID_FARSITE, PCI_DEVICE_ID_FARSITE_T2P, PCI_ANY_ID,
-	 PCI_ANY_ID, 0, 0, FST_TYPE_T2P},
+	{ PCI_VDEVICE(FARSITE, PCI_DEVICE_ID_FARSITE_T2P), .driver_data = FST_TYPE_T2P },
 
-	{PCI_VENDOR_ID_FARSITE, PCI_DEVICE_ID_FARSITE_T4P, PCI_ANY_ID,
-	 PCI_ANY_ID, 0, 0, FST_TYPE_T4P},
+	{ PCI_VDEVICE(FARSITE, PCI_DEVICE_ID_FARSITE_T4P), .driver_data = FST_TYPE_T4P },
 
-	{PCI_VENDOR_ID_FARSITE, PCI_DEVICE_ID_FARSITE_T1U, PCI_ANY_ID,
-	 PCI_ANY_ID, 0, 0, FST_TYPE_T1U},
+	{ PCI_VDEVICE(FARSITE, PCI_DEVICE_ID_FARSITE_T1U), .driver_data = FST_TYPE_T1U },
 
-	{PCI_VENDOR_ID_FARSITE, PCI_DEVICE_ID_FARSITE_T2U, PCI_ANY_ID,
-	 PCI_ANY_ID, 0, 0, FST_TYPE_T2U},
+	{ PCI_VDEVICE(FARSITE, PCI_DEVICE_ID_FARSITE_T2U), .driver_data = FST_TYPE_T2U },
 
-	{PCI_VENDOR_ID_FARSITE, PCI_DEVICE_ID_FARSITE_T4U, PCI_ANY_ID,
-	 PCI_ANY_ID, 0, 0, FST_TYPE_T4U},
+	{ PCI_VDEVICE(FARSITE, PCI_DEVICE_ID_FARSITE_T4U), .driver_data = FST_TYPE_T4U },
 
-	{PCI_VENDOR_ID_FARSITE, PCI_DEVICE_ID_FARSITE_TE1, PCI_ANY_ID,
-	 PCI_ANY_ID, 0, 0, FST_TYPE_TE1},
+	{ PCI_VDEVICE(FARSITE, PCI_DEVICE_ID_FARSITE_TE1), .driver_data = FST_TYPE_TE1 },
 
-	{PCI_VENDOR_ID_FARSITE, PCI_DEVICE_ID_FARSITE_TE1C, PCI_ANY_ID,
-	 PCI_ANY_ID, 0, 0, FST_TYPE_TE1},
-	{0,}			/* End */
+	{ PCI_VDEVICE(FARSITE, PCI_DEVICE_ID_FARSITE_TE1C), .driver_data = FST_TYPE_TE1 },
+
+	{ }			/* End */
 };
 
 MODULE_DEVICE_TABLE(pci, fst_pci_dev_id);
@@ -2359,7 +2353,7 @@ fst_add_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	/* Allocate driver private data */
-	card = kzalloc(sizeof(struct fst_card_info), GFP_KERNEL);
+	card = kzalloc_obj(struct fst_card_info);
 	if (!card)
 		return -ENOMEM;
 
@@ -2550,6 +2544,8 @@ fst_remove_one(struct pci_dev *pdev)
 
 	fst_disable_intr(card);
 	free_irq(card->irq, card);
+	tasklet_kill(&fst_tx_task);
+	tasklet_kill(&fst_int_task);
 
 	iounmap(card->ctlmem);
 	iounmap(card->mem);

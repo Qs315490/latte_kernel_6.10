@@ -182,7 +182,7 @@ static int mxs_spi_txrx_dma(struct mxs_spi *spi,
 	if (!len)
 		return -EINVAL;
 
-	dma_xfer = kcalloc(sgs, sizeof(*dma_xfer), GFP_KERNEL);
+	dma_xfer = kzalloc_objs(*dma_xfer, sgs);
 	if (!dma_xfer)
 		return -ENOMEM;
 
@@ -388,7 +388,7 @@ static int mxs_spi_transfer_one(struct spi_controller *host,
 		       TXRX_DEASSERT_CS : 0;
 
 		/*
-		 * Small blocks can be transfered via PIO.
+		 * Small blocks can be transferred via PIO.
 		 * Measured by empiric means:
 		 *
 		 * dd if=/dev/mtdblock0 of=/dev/null bs=1024k count=1
@@ -563,7 +563,7 @@ static int mxs_spi_probe(struct platform_device *pdev)
 	if (ret)
 		clk_freq = clk_freq_default;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*spi));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*spi));
 	if (!host)
 		return -ENOMEM;
 
@@ -589,13 +589,12 @@ static int mxs_spi_probe(struct platform_device *pdev)
 	ret = devm_request_irq(&pdev->dev, irq_err, mxs_ssp_irq_handler, 0,
 			       dev_name(&pdev->dev), ssp);
 	if (ret)
-		goto out_host_free;
+		return ret;
 
 	ssp->dmach = dma_request_chan(&pdev->dev, "rx-tx");
 	if (IS_ERR(ssp->dmach)) {
 		dev_err(ssp->dev, "Failed to request DMA\n");
-		ret = PTR_ERR(ssp->dmach);
-		goto out_host_free;
+		return PTR_ERR(ssp->dmach);
 	}
 
 	pm_runtime_enable(ssp->dev);
@@ -619,7 +618,7 @@ static int mxs_spi_probe(struct platform_device *pdev)
 	if (ret)
 		goto out_pm_runtime_put;
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret) {
 		dev_err(&pdev->dev, "Cannot register SPI host, %d\n", ret);
 		goto out_pm_runtime_put;
@@ -635,8 +634,7 @@ out_pm_runtime_disable:
 	pm_runtime_disable(ssp->dev);
 out_dma_release:
 	dma_release_channel(ssp->dmach);
-out_host_free:
-	spi_controller_put(host);
+
 	return ret;
 }
 
@@ -649,6 +647,8 @@ static void mxs_spi_remove(struct platform_device *pdev)
 	host = platform_get_drvdata(pdev);
 	spi = spi_controller_get_devdata(host);
 	ssp = &spi->ssp;
+
+	spi_unregister_controller(host);
 
 	pm_runtime_disable(&pdev->dev);
 	if (!pm_runtime_status_suspended(&pdev->dev))

@@ -107,19 +107,15 @@ void __init setup_dma_zone(const struct machine_desc *mdesc)
 #endif
 }
 
-static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
-	unsigned long max_high)
+void __init arch_zone_limits_init(unsigned long *max_zone_pfn)
 {
-	unsigned long max_zone_pfn[MAX_NR_ZONES] = { 0 };
-
 #ifdef CONFIG_ZONE_DMA
-	max_zone_pfn[ZONE_DMA] = min(arm_dma_pfn_limit, max_low);
+	max_zone_pfn[ZONE_DMA] = min(arm_dma_pfn_limit, max_low_pfn);
 #endif
-	max_zone_pfn[ZONE_NORMAL] = max_low;
+	max_zone_pfn[ZONE_NORMAL] = max_low_pfn;
 #ifdef CONFIG_HIGHMEM
-	max_zone_pfn[ZONE_HIGHMEM] = max_high;
+	max_zone_pfn[ZONE_HIGHMEM] = max_pfn;
 #endif
-	free_area_init(max_zone_pfn);
 }
 
 #ifdef CONFIG_HAVE_ARCH_PFN_VALID
@@ -211,19 +207,6 @@ void __init bootmem_init(void)
 
 	early_memtest((phys_addr_t)min_low_pfn << PAGE_SHIFT,
 		      (phys_addr_t)max_low_pfn << PAGE_SHIFT);
-
-	/*
-	 * sparse_init() tries to allocate memory from memblock, so must be
-	 * done after the fixed reservations
-	 */
-	sparse_init();
-
-	/*
-	 * Now free the memory - free_area_init needs
-	 * the sparse mem_map arrays initialized by sparse_init()
-	 * for memmap_init_zone(), otherwise all PFNs are invalid.
-	 */
-	zone_sizes_init(min_low_pfn, max_low_pfn, max_pfn);
 }
 
 /*
@@ -237,55 +220,16 @@ static inline void poison_init_mem(void *s, size_t count)
 		*p++ = 0xe7fddef0;
 }
 
-static void __init free_highpages(void)
-{
-#ifdef CONFIG_HIGHMEM
-	unsigned long max_low = max_low_pfn;
-	phys_addr_t range_start, range_end;
-	u64 i;
-
-	/* set highmem page free */
-	for_each_free_mem_range(i, NUMA_NO_NODE, MEMBLOCK_NONE,
-				&range_start, &range_end, NULL) {
-		unsigned long start = PFN_UP(range_start);
-		unsigned long end = PFN_DOWN(range_end);
-
-		/* Ignore complete lowmem entries */
-		if (end <= max_low)
-			continue;
-
-		/* Truncate partial highmem entries */
-		if (start < max_low)
-			start = max_low;
-
-		for (; start < end; start++)
-			free_highmem_page(pfn_to_page(start));
-	}
-#endif
-}
-
-/*
- * mem_init() marks the free areas in the mem_map and tells us how much
- * memory is free.  This is done after various parts of the system have
- * claimed their memory after the kernel image.
- */
-void __init mem_init(void)
+void __init arch_mm_preinit(void)
 {
 #ifdef CONFIG_ARM_LPAE
 	swiotlb_init(max_pfn > arm_dma_pfn_limit, SWIOTLB_VERBOSE);
 #endif
 
-	set_max_mapnr(pfn_to_page(max_pfn) - mem_map);
-
-	/* this will put all unused low memory onto the freelists */
-	memblock_free_all();
-
 #ifdef CONFIG_SA1111
 	/* now that our DMA memory is actually so designated, we can free it */
-	free_reserved_area(__va(PHYS_OFFSET), swapper_pg_dir, -1, NULL);
+	memblock_phys_free(PHYS_OFFSET, __pa(swapper_pg_dir) - PHYS_OFFSET);
 #endif
-
-	free_highpages();
 
 	/*
 	 * Check boundaries twice: Some fundamental inconsistencies can

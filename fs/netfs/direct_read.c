@@ -45,12 +45,11 @@ static void netfs_prepare_dio_read_iterator(struct netfs_io_subrequest *subreq)
  * Perform a read to a buffer from the server, slicing up the region to be read
  * according to the network rsize.
  */
-static int netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
+static void netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 {
-	struct netfs_io_stream *stream = &rreq->io_streams[0];
 	unsigned long long start = rreq->start;
 	ssize_t size = rreq->len;
-	int ret = 0;
+	int ret;
 
 	do {
 		struct netfs_io_subrequest *subreq;
@@ -58,7 +57,10 @@ static int netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 
 		subreq = netfs_alloc_subrequest(rreq);
 		if (!subreq) {
-			ret = -ENOMEM;
+			/* Stash the error in the request if there's not
+			 * already an error set.
+			 */
+			cmpxchg(&rreq->error, 0, -ENOMEM);
 			break;
 		}
 
@@ -66,26 +68,13 @@ static int netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 		subreq->start	= start;
 		subreq->len	= size;
 
-		__set_bit(NETFS_SREQ_IN_PROGRESS, &subreq->flags);
-
-		spin_lock(&rreq->lock);
-		list_add_tail(&subreq->rreq_link, &stream->subrequests);
-		if (list_is_first(&subreq->rreq_link, &stream->subrequests)) {
-			stream->front = subreq;
-			if (!stream->active) {
-				stream->collected_to = stream->front->start;
-				/* Store list pointers before active flag */
-				smp_store_release(&stream->active, true);
-			}
-		}
-		trace_netfs_sreq(subreq, netfs_sreq_trace_added);
-		spin_unlock(&rreq->lock);
+		netfs_queue_read(rreq, subreq);
 
 		netfs_stat(&netfs_n_rh_download);
 		if (rreq->netfs_ops->prepare_read) {
 			ret = rreq->netfs_ops->prepare_read(subreq);
 			if (ret < 0) {
-				netfs_put_subrequest(subreq, false, netfs_sreq_trace_put_cancel);
+				netfs_cancel_read(subreq, ret);
 				break;
 			}
 		}
@@ -103,11 +92,8 @@ static int netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 		rreq->netfs_ops->issue_read(subreq);
 
 		if (test_bit(NETFS_RREQ_PAUSE, &rreq->flags))
-			netfs_wait_for_pause(rreq);
+			netfs_wait_for_paused_read(rreq);
 		if (test_bit(NETFS_RREQ_FAILED, &rreq->flags))
-			break;
-		if (test_bit(NETFS_RREQ_BLOCKED, &rreq->flags) &&
-		    test_bit(NETFS_RREQ_NONBLOCK, &rreq->flags))
 			break;
 		cond_resched();
 	} while (size > 0);
@@ -115,10 +101,8 @@ static int netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 	if (unlikely(size > 0)) {
 		smp_wmb(); /* Write lists before ALL_QUEUED. */
 		set_bit(NETFS_RREQ_ALL_QUEUED, &rreq->flags);
-		netfs_wake_read_collector(rreq);
+		netfs_wake_collector(rreq);
 	}
-
-	return ret;
 }
 
 /*
@@ -134,27 +118,24 @@ static ssize_t netfs_unbuffered_read(struct netfs_io_request *rreq, bool sync)
 
 	if (rreq->len == 0) {
 		pr_err("Zero-sized read [R=%x]\n", rreq->debug_id);
+		netfs_put_request(rreq, netfs_rreq_trace_put_discard);
 		return -EIO;
 	}
 
 	// TODO: Use bounce buffer if requested
 
 	inode_dio_begin(rreq->inode);
+	netfs_dispatch_unbuffered_reads(rreq);
 
-	ret = netfs_dispatch_unbuffered_reads(rreq);
-
-	if (!rreq->submitted) {
-		netfs_put_request(rreq, false, netfs_rreq_trace_put_no_submit);
-		inode_dio_end(rreq->inode);
-		ret = 0;
-		goto out;
-	}
+	/* The collector will get run, even if we don't manage to submit any
+	 * subreqs, so we shouldn't call inode_dio_end() here.
+	 */
 
 	if (sync)
 		ret = netfs_wait_for_read(rreq);
 	else
 		ret = -EIOCBQUEUED;
-out:
+
 	_leave(" = %zd", ret);
 	return ret;
 }
@@ -188,7 +169,8 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 
 	rreq = netfs_alloc_request(iocb->ki_filp->f_mapping, iocb->ki_filp,
 				   iocb->ki_pos, orig_count,
-				   NETFS_DIO_READ);
+				   iocb->ki_flags & IOCB_DIRECT ?
+				   NETFS_DIO_READ : NETFS_UNBUFFERED_READ);
 	if (IS_ERR(rreq))
 		return PTR_ERR(rreq);
 
@@ -207,7 +189,7 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 	if (user_backed_iter(iter)) {
 		ret = netfs_extract_user_iter(iter, rreq->len, &rreq->buffer.iter, 0);
 		if (ret < 0)
-			goto out;
+			goto error_put;
 		rreq->direct_bv = (struct bio_vec *)rreq->buffer.iter.bvec;
 		rreq->direct_bv_count = ret;
 		rreq->direct_bv_unpin = iov_iter_extract_will_pin(iter);
@@ -236,9 +218,13 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 	}
 
 out:
-	netfs_put_request(rreq, false, netfs_rreq_trace_put_return);
+	netfs_put_request(rreq, netfs_rreq_trace_put_return);
 	if (ret > 0)
 		orig_count -= ret;
+	return ret;
+
+error_put:
+	netfs_put_failed_request(rreq);
 	return ret;
 }
 EXPORT_SYMBOL(netfs_unbuffered_read_iter_locked);

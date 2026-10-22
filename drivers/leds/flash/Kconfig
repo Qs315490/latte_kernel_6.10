@@ -76,7 +76,7 @@ config LEDS_MT6370_FLASH
 	  will be called "leds-mt6370-flash".
 
 config LEDS_QCOM_FLASH
-	tristate "LED support for flash module inside Qualcomm Technologies, Inc. PMIC"
+	tristate "LED support for flash module inside Qualcomm PMIC"
 	depends on MFD_SPMI_PMIC || COMPILE_TEST
 	depends on LEDS_CLASS && OF
 	depends on V4L2_FLASH_LED_CLASS || !V4L2_FLASH_LED_CLASS
@@ -114,6 +114,17 @@ config LEDS_RT8515
 	  To compile this driver as a module, choose M here: the module
 	  will be called leds-rt8515.
 
+config LEDS_S2M_FLASH
+	tristate "Samsung S2M series PMICs flash/torch LED support"
+	depends on LEDS_CLASS
+	depends on MFD_SEC_CORE
+	depends on V4L2_FLASH_LED_CLASS || !V4L2_FLASH_LED_CLASS
+	help
+	  This option enables support for the flash/torch LEDs found in certain
+	  Samsung S2M series PMICs, such as the S2MU005. It has a LED channel
+	  dedicated for every physical LED. The LEDs can be controlled in flash
+	  and torch modes.
+
 config LEDS_SGM3140
 	tristate "LED support for the SGM3140"
 	depends on V4L2_FLASH_LED_CLASS || !V4L2_FLASH_LED_CLASS
@@ -131,5 +142,17 @@ config LEDS_SY7802
 	  SY7802 includes torch and flash functions with programmable current.
 
 	  This driver can be built as a module, it will be called "leds-sy7802".
+
+config LEDS_TPS6131X
+	tristate "LED support for TI TPS6131x flash LED driver"
+	depends on I2C && OF
+	depends on GPIOLIB
+	depends on V4L2_FLASH_LED_CLASS || !V4L2_FLASH_LED_CLASS
+	select REGMAP_I2C
+	help
+	  This option enables support for Texas Instruments TPS61310/TPS61311
+	  flash LED driver.
+
+	  This driver can be built as a module, it will be called "leds-tps6131x".
 
 endif # LEDS_CLASS_FLASH

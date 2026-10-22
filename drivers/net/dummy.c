@@ -38,6 +38,7 @@
 #include <linux/moduleparam.h>
 #include <linux/rtnetlink.h>
 #include <linux/net_tstamp.h>
+#include <net/netdev_lock.h>
 #include <net/rtnetlink.h>
 #include <linux/u64_stats_sync.h>
 
@@ -46,8 +47,11 @@
 static int numdummies = 1;
 
 /* fake multicast ability */
-static void set_multicast_list(struct net_device *dev)
+static int set_multicast_list(struct net_device *dev,
+			      struct netdev_hw_addr_list *uc,
+			      struct netdev_hw_addr_list *mc)
 {
+	return 0;
 }
 
 static void dummy_get_stats64(struct net_device *dev,
@@ -86,7 +90,7 @@ static const struct net_device_ops dummy_netdev_ops = {
 	.ndo_init		= dummy_dev_init,
 	.ndo_start_xmit		= dummy_xmit,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_set_rx_mode	= set_multicast_list,
+	.ndo_set_rx_mode_async	= set_multicast_list,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_get_stats64	= dummy_get_stats64,
 	.ndo_change_carrier	= dummy_change_carrier,
@@ -104,6 +108,7 @@ static void dummy_setup(struct net_device *dev)
 	dev->netdev_ops = &dummy_netdev_ops;
 	dev->ethtool_ops = &dummy_ethtool_ops;
 	dev->needs_free_netdev = true;
+	dev->request_ops_lock = true;
 
 	/* Fill in device structure with ethernet-generic values. */
 	dev->flags |= IFF_NOARP;
@@ -154,7 +159,7 @@ static int __init dummy_init_one(void)
 		return -ENOMEM;
 
 	dev_dummy->rtnl_link_ops = &dummy_link_ops;
-	err = register_netdevice(dev_dummy);
+	err = register_netdev(dev_dummy);
 	if (err < 0)
 		goto err;
 	return 0;
@@ -172,14 +177,10 @@ static int __init dummy_init_module(void)
 	if (err < 0)
 		return err;
 
-	rtnl_net_lock(&init_net);
-
 	for (i = 0; i < numdummies && !err; i++) {
 		err = dummy_init_one();
 		cond_resched();
 	}
-
-	rtnl_net_unlock(&init_net);
 
 	if (err < 0)
 		rtnl_link_unregister(&dummy_link_ops);

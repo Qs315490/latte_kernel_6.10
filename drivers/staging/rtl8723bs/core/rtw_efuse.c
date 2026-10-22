@@ -8,83 +8,12 @@
 #include <hal_data.h>
 #include <linux/jiffies.h>
 
-
-/* Define global variables */
-u8 fakeEfuseBank;
-u32 fakeEfuseUsedBytes;
-u8 fakeEfuseContent[EFUSE_MAX_HW_SIZE] = {0};
-u8 fakeEfuseInitMap[EFUSE_MAX_MAP_LEN] = {0};
-u8 fakeEfuseModifiedMap[EFUSE_MAX_MAP_LEN] = {0};
-
-u32 BTEfuseUsedBytes;
-u8 BTEfuseContent[EFUSE_MAX_BT_BANK][EFUSE_MAX_HW_SIZE];
-u8 BTEfuseInitMap[EFUSE_BT_MAX_MAP_LEN] = {0};
-u8 BTEfuseModifiedMap[EFUSE_BT_MAX_MAP_LEN] = {0};
-
-u32 fakeBTEfuseUsedBytes;
-u8 fakeBTEfuseContent[EFUSE_MAX_BT_BANK][EFUSE_MAX_HW_SIZE];
-u8 fakeBTEfuseInitMap[EFUSE_BT_MAX_MAP_LEN] = {0};
-u8 fakeBTEfuseModifiedMap[EFUSE_BT_MAX_MAP_LEN] = {0};
-
-#define REG_EFUSE_CTRL		0x0030
-#define EFUSE_CTRL			REG_EFUSE_CTRL		/*  E-Fuse Control. */
-
-static bool
-Efuse_Read1ByteFromFakeContent(u16 Offset, u8 *Value)
-{
-	if (Offset >= EFUSE_MAX_HW_SIZE)
-		return false;
-	if (fakeEfuseBank == 0)
-		*Value = fakeEfuseContent[Offset];
-	else
-		*Value = fakeBTEfuseContent[fakeEfuseBank - 1][Offset];
-	return true;
-}
-
-static bool
-Efuse_Write1ByteToFakeContent(u16 Offset, u8 Value)
-{
-	if (Offset >= EFUSE_MAX_HW_SIZE)
-		return false;
-	if (fakeEfuseBank == 0)
-		fakeEfuseContent[Offset] = Value;
-	else
-		fakeBTEfuseContent[fakeEfuseBank - 1][Offset] = Value;
-	return true;
-}
-
-/*-----------------------------------------------------------------------------
- * Function:	Efuse_PowerSwitch
- *
- * Overview:	When we want to enable write operation, we should change to
- *			pwr on state. When we stop write, we should switch to 500k mode
- *			and disable LDO 2.5V.
- *
- * Input:       NONE
- *
- * Output:      NONE
- *
- * Return:      NONE
- *
- * Revised History:
- * When			Who		Remark
- * 11/17/2008	MHC		Create Version 0.
- *
- *---------------------------------------------------------------------------*/
-void
-Efuse_PowerSwitch(
-struct adapter *padapter,
-u8 bWrite,
-u8 PwrState)
-{
-	Hal_EfusePowerSwitch(padapter, bWrite, PwrState);
-}
-
 /*  11/16/2008 MH Add description. Get current efuse area enabled word!!. */
 u8
-Efuse_CalculateWordCnts(u8 word_en)
+rtw_efuse_calculate_word_counts(u8 word_en)
 {
 	u8 word_cnts = 0;
+
 	if (!(word_en & BIT(0)))
 		word_cnts++; /*  0 : write enable */
 	if (!(word_en & BIT(1)))
@@ -96,60 +25,8 @@ Efuse_CalculateWordCnts(u8 word_en)
 	return word_cnts;
 }
 
-/*  */
-/* Description: */
-/*		1. Execute E-Fuse read byte operation according as map offset and */
-/*			save to E-Fuse table. */
-/*		2. Referred from SD1 Richard. */
-/*  */
-/* Assumption: */
-/*		1. Boot from E-Fuse and successfully auto-load. */
-/*		2. PASSIVE_LEVEL (USB interface) */
-/*  */
-/* Created by Roger, 2008.10.21. */
-/*  */
-/* 2008/12/12 MH	1. Reorganize code flow and reserve bytes. and add description. */
-/*					2. Add efuse utilization collect. */
-/* 2008/12/22 MH	Read Efuse must check if we write section 1 data again!!! Sec1 */
-/*					write addr must be after sec5. */
-/*  */
-
-void
-efuse_ReadEFuse(
-	struct adapter *Adapter,
-	u8 efuseType,
-	u16		_offset,
-	u16		_size_byte,
-	u8 *pbuf,
-bool	bPseudoTest
-	);
-void
-efuse_ReadEFuse(
-	struct adapter *Adapter,
-	u8 efuseType,
-	u16		_offset,
-	u16		_size_byte,
-	u8 *pbuf,
-bool	bPseudoTest
-	)
-{
-	Hal_ReadEFuse(Adapter, efuseType, _offset, _size_byte, pbuf, bPseudoTest);
-}
-
-void
-EFUSE_GetEfuseDefinition(
-	struct adapter *padapter,
-	u8 efuseType,
-	u8 type,
-	void	*pOut,
-	bool		bPseudoTest
-	)
-{
-	Hal_GetEfuseDefinition(padapter, efuseType, type, pOut, bPseudoTest);
-}
-
 /*-----------------------------------------------------------------------------
- * Function:	EFUSE_Read1Byte
+ * Function:	rtw_efuse_read_1_byte
  *
  * Overview:	Copy from WMAC fot EFUSE read 1 byte.
  *
@@ -163,9 +40,9 @@ EFUSE_GetEfuseDefinition(
  * When			Who		Remark
  * 09/23/2008	MHC		Copy from WMAC.
  *
- *---------------------------------------------------------------------------*/
+ */
 u8
-EFUSE_Read1Byte(
+rtw_efuse_read_1_byte(
 struct adapter *Adapter,
 u16		Address)
 {
@@ -174,7 +51,7 @@ u16		Address)
 	u32 k = 0;
 	u16 contentLen = 0;
 
-	EFUSE_GetEfuseDefinition(Adapter, EFUSE_WIFI, TYPE_EFUSE_REAL_CONTENT_LEN, (void *)&contentLen, false);
+	Hal_GetEfuseDefinition(Adapter, EFUSE_WIFI, TYPE_EFUSE_REAL_CONTENT_LEN, &contentLen);
 
 	if (Address < contentLen) {/* E-fuse 512Byte */
 		/* Write E-fuse Register address bit0~7 */
@@ -199,30 +76,26 @@ u16		Address)
 				break;
 		}
 		return rtw_read8(Adapter, EFUSE_CTRL);
-	} else
+	} else {
 		return 0xFF;
-
-} /* EFUSE_Read1Byte */
+	}
+} /* rtw_efuse_read_1_byte */
 
 /*  11/16/2008 MH Read one byte from real Efuse. */
 u8
-efuse_OneByteRead(
+rtw_efuse_one_byte_read(
 struct adapter *padapter,
 u16	addr,
-u8	*data,
-bool		bPseudoTest)
+u8	*data)
 {
 	u32 tmpidx = 0;
 	u8 bResult;
 	u8 readbyte;
 
-	if (bPseudoTest)
-		return Efuse_Read1ByteFromFakeContent(addr, data);
-
 	/*  <20130121, Kordan> For SMIC EFUSE specificatoin. */
 	/* 0x34[11]: SW force PGMEN input of efuse to high. (for the bank selected by 0x34[9:8]) */
 	/* PHY_SetMacReg(padapter, 0x34, BIT11, 0); */
-	rtw_write16(padapter, 0x34, rtw_read16(padapter, 0x34) & (~BIT11));
+	rtw_write16(padapter, 0x34, rtw_read16(padapter, 0x34) & (~BIT(11)));
 
 	/*  -----------------e-fuse reg ctrl --------------------------------- */
 	/* address */
@@ -250,54 +123,6 @@ bool		bPseudoTest)
 	return bResult;
 }
 
-/*  11/16/2008 MH Write one byte to reald Efuse. */
-u8 efuse_OneByteWrite(struct adapter *padapter, u16 addr, u8 data, bool bPseudoTest)
-{
-	u8 tmpidx = 0;
-	u8 bResult = false;
-
-	if (bPseudoTest)
-		return Efuse_Write1ByteToFakeContent(addr, data);
-
-	/*  -----------------e-fuse reg ctrl --------------------------------- */
-	/* address */
-
-	/*  <20130227, Kordan> 8192E MP chip A-cut had better not set 0x34[11] until B-Cut. */
-
-	/*  <20130121, Kordan> For SMIC EFUSE specificatoin. */
-	/* 0x34[11]: SW force PGMEN input of efuse to high. (for the bank selected by 0x34[9:8]) */
-	/* PHY_SetMacReg(padapter, 0x34, BIT11, 1); */
-	rtw_write16(padapter, 0x34, rtw_read16(padapter, 0x34) | (BIT11));
-	rtw_write32(padapter, EFUSE_CTRL, 0x90600000 | ((addr << 8 | data)));
-
-	while ((0x80 &  rtw_read8(padapter, EFUSE_CTRL + 3)) && (tmpidx < 100)) {
-		mdelay(1);
-		tmpidx++;
-	}
-
-	if (tmpidx < 100)
-		bResult = true;
-	else
-		bResult = false;
-
-	/*  disable Efuse program enable */
-	PHY_SetMacReg(padapter, EFUSE_TEST, BIT(11), 0);
-
-	return bResult;
-}
-
-u8
-Efuse_WordEnableDataWrite(struct adapter *padapter,
-						u16		efuse_addr,
-						u8 word_en,
-						u8 *data,
-						bool		bPseudoTest)
-{
-	return padapter->HalFunc.Efuse_WordEnableDataWrite(padapter, efuse_addr,
-							   word_en, data,
-							   bPseudoTest);
-}
-
 /*-----------------------------------------------------------------------------
  * Function:	Efuse_ReadAllMap
  *
@@ -313,24 +138,18 @@ Efuse_WordEnableDataWrite(struct adapter *padapter,
  * When			Who		Remark
  * 11/11/2008	MHC		Create Version 0.
  *
- *---------------------------------------------------------------------------*/
-void
-Efuse_ReadAllMap(
-	struct adapter *padapter,
-	u8 efuseType,
-	u8 *Efuse,
-	bool		bPseudoTest);
-void Efuse_ReadAllMap(struct adapter *padapter, u8 efuseType, u8 *Efuse, bool bPseudoTest)
+ */
+static void Efuse_ReadAllMap(struct adapter *padapter, u8 efuseType, u8 *Efuse)
 {
 	u16 mapLen = 0;
 
-	Efuse_PowerSwitch(padapter, false, true);
+	Hal_EfusePowerSwitch(padapter, true);
 
-	EFUSE_GetEfuseDefinition(padapter, efuseType, TYPE_EFUSE_MAP_LEN, (void *)&mapLen, bPseudoTest);
+	Hal_GetEfuseDefinition(padapter, efuseType, TYPE_EFUSE_MAP_LEN, &mapLen);
 
-	efuse_ReadEFuse(padapter, efuseType, 0, mapLen, Efuse, bPseudoTest);
+	Hal_ReadEFuse(padapter, efuseType, 0, mapLen, Efuse);
 
-	Efuse_PowerSwitch(padapter, false, false);
+	Hal_EfusePowerSwitch(padapter, false);
 }
 
 /*-----------------------------------------------------------------------------
@@ -350,7 +169,7 @@ void Efuse_ReadAllMap(struct adapter *padapter, u8 efuseType, u8 *Efuse, bool bP
  * When			Who		Remark
  * 11/12/2008	MHC		Create Version 0.
  *
- *---------------------------------------------------------------------------*/
+ */
 static void efuse_ShadowRead1Byte(struct adapter *padapter, u16 Offset, u8 *Value)
 {
 	struct eeprom_priv *pEEPROM = GET_EEPROM_EFUSE_PRIV(padapter);
@@ -382,7 +201,7 @@ static void efuse_ShadowRead4Byte(struct adapter *padapter, u16 Offset, u32 *Val
 }	/*  efuse_ShadowRead4Byte */
 
 /*-----------------------------------------------------------------------------
- * Function:	EFUSE_ShadowMapUpdate
+ * Function:	rtw_efuse_shadow_map_update
  *
  * Overview:	Transfer current EFUSE content to shadow init and modify map.
  *
@@ -396,26 +215,25 @@ static void efuse_ShadowRead4Byte(struct adapter *padapter, u16 Offset, u32 *Val
  * When			Who		Remark
  * 11/13/2008	MHC		Create Version 0.
  *
- *---------------------------------------------------------------------------*/
-void EFUSE_ShadowMapUpdate(struct adapter *padapter, u8 efuseType, bool bPseudoTest)
+ */
+void rtw_efuse_shadow_map_update(struct adapter *padapter, u8 efuseType)
 {
 	struct eeprom_priv *pEEPROM = GET_EEPROM_EFUSE_PRIV(padapter);
 	u16 mapLen = 0;
 
-	EFUSE_GetEfuseDefinition(padapter, efuseType, TYPE_EFUSE_MAP_LEN, (void *)&mapLen, bPseudoTest);
+	Hal_GetEfuseDefinition(padapter, efuseType, TYPE_EFUSE_MAP_LEN, &mapLen);
 
 	if (pEEPROM->bautoload_fail_flag)
 		memset(pEEPROM->efuse_eeprom_data, 0xFF, mapLen);
 	else
-		Efuse_ReadAllMap(padapter, efuseType, pEEPROM->efuse_eeprom_data, bPseudoTest);
+		Efuse_ReadAllMap(padapter, efuseType, pEEPROM->efuse_eeprom_data);
 
 	/* PlatformMoveMemory((void *)&pHalData->EfuseMap[EFUSE_MODIFY_MAP][0], */
 	/* void *)&pHalData->EfuseMap[EFUSE_INIT_MAP][0], mapLen); */
-} /*  EFUSE_ShadowMapUpdate */
-
+} /*  rtw_efuse_shadow_map_update */
 
 /*-----------------------------------------------------------------------------
- * Function:	EFUSE_ShadowRead
+ * Function:	rtw_efuse_shadow_read
  *
  * Overview:	Read from efuse init map !!!!!
  *
@@ -429,8 +247,8 @@ void EFUSE_ShadowMapUpdate(struct adapter *padapter, u8 efuseType, bool bPseudoT
  * When			Who		Remark
  * 11/12/2008	MHC		Create Version 0.
  *
- *---------------------------------------------------------------------------*/
-void EFUSE_ShadowRead(struct adapter *padapter, u8 Type, u16 Offset, u32 *Value)
+ */
+void rtw_efuse_shadow_read(struct adapter *padapter, u8 Type, u16 Offset, u32 *Value)
 {
 	if (Type == 1)
 		efuse_ShadowRead1Byte(padapter, Offset, (u8 *)Value);
@@ -439,4 +257,4 @@ void EFUSE_ShadowRead(struct adapter *padapter, u8 Type, u16 Offset, u32 *Value)
 	else if (Type == 4)
 		efuse_ShadowRead4Byte(padapter, Offset, (u32 *)Value);
 
-}	/* EFUSE_ShadowRead*/
+} /* rtw_efuse_shadow_read*/

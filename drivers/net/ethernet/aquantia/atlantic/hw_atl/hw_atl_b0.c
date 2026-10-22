@@ -736,6 +736,15 @@ int hw_atl_b0_hw_ring_tx_xmit(struct aq_hw_s *self, struct aq_ring_s *ring,
 				txd->ctl |= HW_ATL_B0_TXD_CTL_CMD_WB;
 				is_gso = false;
 				is_vlan = false;
+
+				if (ATL_HW_IS_CHIP_FEATURE(self, ANTIGUA) &&
+				    unlikely(buff->request_ts)) {
+					txd->ctl |= AQ_HW_TXD_CTL_TS_EN;
+					if (buff->clk_sel != ATL_TSG_CLOCK_SEL_1)
+						txd->ctl |= AQ_HW_TXD_CTL_TS_TSG0;
+					/* The only DD+TS is required */
+					txd->ctl &= ~HW_ATL_B0_TXD_CTL_CMD_WB;
+				}
 			}
 		}
 		ring->sw_tail = aq_ring_next_dx(ring, ring->sw_tail);
@@ -1198,26 +1207,9 @@ static int hw_atl_b0_hw_interrupt_moderation_set(struct aq_hw_s *self)
 
 static int hw_atl_b0_hw_stop(struct aq_hw_s *self)
 {
-	int err;
-	u32 val;
-
 	hw_atl_b0_hw_irq_disable(self, HW_ATL_B0_INT_MASK);
 
-	/* Invalidate Descriptor Cache to prevent writing to the cached
-	 * descriptors and to the data pointer of those descriptors
-	 */
-	hw_atl_rdm_rx_dma_desc_cache_init_tgl(self);
-
-	err = aq_hw_err_from_flags(self);
-
-	if (err)
-		goto err_exit;
-
-	readx_poll_timeout_atomic(hw_atl_rdm_rx_dma_desc_cache_init_done_get,
-				  self, val, val == 1, 1000U, 10000U);
-
-err_exit:
-	return err;
+	return aq_hw_invalidate_descriptor_cache(self);
 }
 
 int hw_atl_b0_hw_ring_tx_stop(struct aq_hw_s *self, struct aq_ring_s *ring)
@@ -1340,8 +1332,8 @@ static int hw_atl_b0_adj_clock_freq(struct aq_hw_s *self, s32 ppb)
 	return self->aq_fw_ops->send_fw_request(self, &fwreq, size);
 }
 
-static int hw_atl_b0_gpio_pulse(struct aq_hw_s *self, u32 index,
-				u64 start, u32 period)
+static int hw_atl_b0_gpio_pulse(struct aq_hw_s *self, u32 index, u32 clk_sel,
+				u64 start, u32 period, u32 hightime)
 {
 	struct hw_fw_request_iface fwreq;
 	size_t size;
@@ -1359,7 +1351,7 @@ static int hw_atl_b0_gpio_pulse(struct aq_hw_s *self, u32 index,
 }
 
 static int hw_atl_b0_extts_gpio_enable(struct aq_hw_s *self, u32 index,
-				       u32 enable)
+				       u32 channel, int enable)
 {
 	/* Enable/disable Sync1588 GPIO Timestamping */
 	aq_phy_write_reg(self, MDIO_MMD_PCS, 0xc611, enable ? 0x71 : 0);

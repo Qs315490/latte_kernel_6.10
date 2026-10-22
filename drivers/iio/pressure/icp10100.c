@@ -10,7 +10,6 @@
 
 #include <linux/device.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/i2c.h>
 #include <linux/pm_runtime.h>
 #include <linux/crc8.h>
@@ -265,7 +264,6 @@ static int icp10100_get_measures(struct icp10100_state *st,
 			(be16_to_cpu(measures[1]) >> 8);
 	*temperature = be16_to_cpu(measures[2]);
 
-	pm_runtime_mark_last_busy(&st->client->dev);
 error_measure:
 	pm_runtime_put_autosuspend(&st->client->dev);
 	return ret;
@@ -343,9 +341,8 @@ static int icp10100_read_raw_measures(struct iio_dev *indio_dev,
 	uint32_t pressure_mPa;
 	int ret;
 
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret)
-		return ret;
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
 
 	ret = icp10100_get_measures(st, &raw_pressure, &raw_temp);
 	if (ret)
@@ -370,7 +367,7 @@ static int icp10100_read_raw_measures(struct iio_dev *indio_dev,
 	}
 
 error_release:
-	iio_device_release_direct_mode(indio_dev);
+	iio_device_release_direct(indio_dev);
 	return ret;
 }
 
@@ -439,7 +436,6 @@ static int icp10100_write_raw(struct iio_dev *indio_dev,
 {
 	struct icp10100_state *st = iio_priv(indio_dev);
 	unsigned int mode;
-	int ret;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
@@ -449,13 +445,12 @@ static int icp10100_write_raw(struct iio_dev *indio_dev,
 		mode = ilog2(val);
 		if (mode >= ICP10100_MODE_NB)
 			return -EINVAL;
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 		mutex_lock(&st->lock);
 		st->mode = mode;
 		mutex_unlock(&st->lock);
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 		return 0;
 	default:
 		return -EINVAL;
@@ -637,7 +632,7 @@ static const struct of_device_id icp10100_of_match[] = {
 MODULE_DEVICE_TABLE(of, icp10100_of_match);
 
 static const struct i2c_device_id icp10100_id[] = {
-	{ "icp10100" },
+	{ .name = "icp10100" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, icp10100_id);

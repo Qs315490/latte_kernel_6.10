@@ -27,14 +27,17 @@
  * Daniel Vetter <daniel.vetter@ffwll.ch>
  */
 
-#include <drm/drm_atomic_uapi.h>
 #include <drm/drm_atomic.h>
+#include <drm/drm_atomic_helper.h>
+#include <drm/drm_atomic_uapi.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_print.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_writeback.h>
 #include <drm/drm_vblank.h>
+#include <drm/drm_colorop.h>
 
+#include <linux/export.h>
 #include <linux/dma-fence.h>
 #include <linux/uaccess.h>
 #include <linux/sync_file.h>
@@ -256,6 +259,42 @@ drm_atomic_set_fb_for_plane(struct drm_plane_state *plane_state,
 EXPORT_SYMBOL(drm_atomic_set_fb_for_plane);
 
 /**
+ * drm_atomic_set_colorop_for_plane - set colorop for plane
+ * @plane_state: atomic state object for the plane
+ * @colorop: colorop to use for the plane
+ *
+ * Helper function to select the color pipeline on a plane by setting
+ * it to the first drm_colorop element of the pipeline.
+ *
+ * Return: true if plane color pipeline value changed, false otherwise.
+ */
+bool
+drm_atomic_set_colorop_for_plane(struct drm_plane_state *plane_state,
+				 struct drm_colorop *colorop)
+{
+	struct drm_plane *plane = plane_state->plane;
+
+	/* Color pipeline didn't change */
+	if (plane_state->color_pipeline == colorop)
+		return false;
+
+	if (colorop)
+		drm_dbg_atomic(plane->dev,
+			       "Set [COLOROP:%d] for [PLANE:%d:%s] state %p\n",
+			       colorop->base.id, plane->base.id, plane->name,
+			       plane_state);
+	else
+		drm_dbg_atomic(plane->dev,
+			       "Set [NOCOLOROP] for [PLANE:%d:%s] state %p\n",
+			       plane->base.id, plane->name, plane_state);
+
+	plane_state->color_pipeline = colorop;
+
+	return true;
+}
+EXPORT_SYMBOL(drm_atomic_set_colorop_for_plane);
+
+/**
  * drm_atomic_set_crtc_for_connector - set CRTC for connector
  * @conn_state: atomic state object for the connector
  * @crtc: CRTC to use for the connector
@@ -316,13 +355,13 @@ drm_atomic_set_crtc_for_connector(struct drm_connector_state *conn_state,
 }
 EXPORT_SYMBOL(drm_atomic_set_crtc_for_connector);
 
-static void set_out_fence_for_crtc(struct drm_atomic_state *state,
+static void set_out_fence_for_crtc(struct drm_atomic_commit *state,
 				   struct drm_crtc *crtc, s32 __user *fence_ptr)
 {
 	state->crtcs[drm_crtc_index(crtc)].out_fence_ptr = fence_ptr;
 }
 
-static s32 __user *get_out_fence_for_crtc(struct drm_atomic_state *state,
+static s32 __user *get_out_fence_for_crtc(struct drm_atomic_commit *state,
 					  struct drm_crtc *crtc)
 {
 	s32 __user *fence_ptr;
@@ -333,7 +372,7 @@ static s32 __user *get_out_fence_for_crtc(struct drm_atomic_state *state,
 	return fence_ptr;
 }
 
-static int set_out_fence_for_connector(struct drm_atomic_state *state,
+static int set_out_fence_for_connector(struct drm_atomic_commit *state,
 					struct drm_connector *connector,
 					s32 __user *fence_ptr)
 {
@@ -350,7 +389,7 @@ static int set_out_fence_for_connector(struct drm_atomic_state *state,
 	return 0;
 }
 
-static s32 __user *get_out_fence_for_connector(struct drm_atomic_state *state,
+static s32 __user *get_out_fence_for_connector(struct drm_atomic_commit *state,
 					       struct drm_connector *connector)
 {
 	unsigned int index = drm_connector_index(connector);
@@ -382,10 +421,19 @@ static int drm_atomic_crtc_set_property(struct drm_crtc *crtc,
 	} else if (property == config->prop_vrr_enabled) {
 		state->vrr_enabled = val;
 	} else if (property == config->degamma_lut_property) {
+		const size_t elem_size = sizeof(struct drm_color_lut);
+		u64 lut_size;
+
+		ret = drm_object_immutable_property_get_value(&crtc->base,
+							      config->degamma_lut_size_property,
+							      &lut_size);
+		if (ret)
+			return ret;
+
 		ret = drm_property_replace_blob_from_id(dev,
 					&state->degamma_lut,
 					val,
-					-1, sizeof(struct drm_color_lut),
+					elem_size * lut_size, -1, elem_size,
 					&replaced);
 		state->color_mgmt_changed |= replaced;
 		return ret;
@@ -393,18 +441,29 @@ static int drm_atomic_crtc_set_property(struct drm_crtc *crtc,
 		ret = drm_property_replace_blob_from_id(dev,
 					&state->ctm,
 					val,
-					sizeof(struct drm_color_ctm), -1,
+					-1, sizeof(struct drm_color_ctm), -1,
 					&replaced);
 		state->color_mgmt_changed |= replaced;
 		return ret;
 	} else if (property == config->gamma_lut_property) {
+		const size_t elem_size = sizeof(struct drm_color_lut);
+		u64 lut_size;
+
+		ret = drm_object_immutable_property_get_value(&crtc->base,
+							      config->gamma_lut_size_property,
+							      &lut_size);
+		if (ret)
+			return ret;
+
 		ret = drm_property_replace_blob_from_id(dev,
 					&state->gamma_lut,
 					val,
-					-1, sizeof(struct drm_color_lut),
+					elem_size * lut_size, -1, elem_size,
 					&replaced);
 		state->color_mgmt_changed |= replaced;
 		return ret;
+	} else if (property == config->background_color_property) {
+		state->background_color = val;
 	} else if (property == config->prop_out_fence_ptr) {
 		s32 __user *fence_ptr = u64_to_user_ptr(val);
 
@@ -417,6 +476,8 @@ static int drm_atomic_crtc_set_property(struct drm_crtc *crtc,
 		set_out_fence_for_crtc(state->state, crtc, fence_ptr);
 	} else if (property == crtc->scaling_filter_property) {
 		state->scaling_filter = val;
+	} else if (property == crtc->sharpness_strength_property) {
+		state->sharpness_strength = val;
 	} else if (crtc->funcs->atomic_set_property) {
 		return crtc->funcs->atomic_set_property(crtc, state, property, val);
 	} else {
@@ -450,10 +511,14 @@ drm_atomic_crtc_get_property(struct drm_crtc *crtc,
 		*val = (state->ctm) ? state->ctm->base.id : 0;
 	else if (property == config->gamma_lut_property)
 		*val = (state->gamma_lut) ? state->gamma_lut->base.id : 0;
+	else if (property == config->background_color_property)
+		*val = state->background_color;
 	else if (property == config->prop_out_fence_ptr)
 		*val = 0;
 	else if (property == crtc->scaling_filter_property)
 		*val = state->scaling_filter;
+	else if (property == crtc->sharpness_strength_property)
+		*val = state->sharpness_strength;
 	else if (crtc->funcs->atomic_get_property)
 		return crtc->funcs->atomic_get_property(crtc, state, property, val);
 	else {
@@ -538,12 +603,21 @@ static int drm_atomic_plane_set_property(struct drm_plane *plane,
 		state->color_encoding = val;
 	} else if (property == plane->color_range_property) {
 		state->color_range = val;
+	} else if (property == plane->color_pipeline_property) {
+		/* find DRM colorop object */
+		struct drm_colorop *colorop = NULL;
+
+		colorop = drm_colorop_find(dev, file_priv, val);
+
+		if (val && !colorop)
+			return -EACCES;
+
+		state->color_mgmt_changed |= drm_atomic_set_colorop_for_plane(state, colorop);
 	} else if (property == config->prop_fb_damage_clips) {
 		ret = drm_property_replace_blob_from_id(dev,
 					&state->fb_damage_clips,
 					val,
-					-1,
-					sizeof(struct drm_mode_rect),
+					-1, -1, sizeof(struct drm_mode_rect),
 					&replaced);
 		return ret;
 	} else if (property == plane->scaling_filter_property) {
@@ -620,6 +694,8 @@ drm_atomic_plane_get_property(struct drm_plane *plane,
 		*val = state->color_encoding;
 	} else if (property == plane->color_range_property) {
 		*val = state->color_range;
+	} else if (property == plane->color_pipeline_property) {
+		*val = (state->color_pipeline) ? state->color_pipeline->base.id : 0;
 	} else if (property == config->prop_fb_damage_clips) {
 		*val = (state->fb_damage_clips) ?
 			state->fb_damage_clips->base.id : 0;
@@ -638,6 +714,112 @@ drm_atomic_plane_get_property(struct drm_plane *plane,
 			       property->base.id, property->name);
 		return -EINVAL;
 	}
+
+	return 0;
+}
+
+static int drm_atomic_color_set_data_property(struct drm_colorop *colorop,
+					      struct drm_colorop_state *state,
+					      struct drm_property *property,
+					      uint64_t val,
+					      bool *replaced)
+{
+	ssize_t elem_size = -1;
+	ssize_t size = -1;
+
+	switch (colorop->type) {
+	case DRM_COLOROP_1D_LUT:
+		size = colorop->size * sizeof(struct drm_color_lut32);
+		break;
+	case DRM_COLOROP_CTM_3X4:
+		size = sizeof(struct drm_color_ctm_3x4);
+		break;
+	case DRM_COLOROP_3D_LUT:
+		size = colorop->size * colorop->size * colorop->size *
+		       sizeof(struct drm_color_lut32);
+		break;
+	default:
+		/* should never get here */
+		return -EINVAL;
+	}
+
+	return drm_property_replace_blob_from_id(colorop->dev,
+						 &state->data,
+						 val,
+						 -1, size, elem_size,
+						 replaced);
+}
+
+static int drm_atomic_colorop_set_property(struct drm_colorop *colorop,
+					   struct drm_colorop_state *state,
+					   struct drm_file *file_priv,
+					   struct drm_property *property,
+					   uint64_t val,
+					   bool *replaced)
+{
+	if (property == colorop->bypass_property) {
+		if (state->bypass != val) {
+			state->bypass = val;
+			*replaced = true;
+		}
+	} else if (property == colorop->lut1d_interpolation_property) {
+		if (state->lut1d_interpolation != val) {
+			state->lut1d_interpolation = val;
+			*replaced = true;
+		}
+	} else if (property == colorop->curve_1d_type_property) {
+		if (state->curve_1d_type != val) {
+			state->curve_1d_type = val;
+			*replaced = true;
+		}
+	} else if (property == colorop->multiplier_property) {
+		if (state->multiplier != val) {
+			state->multiplier = val;
+			*replaced = true;
+		}
+	} else if (property == colorop->lut3d_interpolation_property) {
+		if (state->lut3d_interpolation != val) {
+			state->lut3d_interpolation = val;
+			*replaced = true;
+		}
+	} else if (property == colorop->data_property) {
+		return drm_atomic_color_set_data_property(colorop, state,
+							  property, val,
+							  replaced);
+	} else {
+		drm_dbg_atomic(colorop->dev,
+			       "[COLOROP:%d:%d] unknown property [PROP:%d:%s]\n",
+			       colorop->base.id, colorop->type,
+			       property->base.id, property->name);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int
+drm_atomic_colorop_get_property(struct drm_colorop *colorop,
+				const struct drm_colorop_state *state,
+				struct drm_property *property, uint64_t *val)
+{
+	if (property == colorop->type_property)
+		*val = colorop->type;
+	else if (property == colorop->bypass_property)
+		*val = state->bypass;
+	else if (property == colorop->lut1d_interpolation_property)
+		*val = state->lut1d_interpolation;
+	else if (property == colorop->curve_1d_type_property)
+		*val = state->curve_1d_type;
+	else if (property == colorop->multiplier_property)
+		*val = state->multiplier;
+	else if (property == colorop->size_property)
+		*val = colorop->size;
+	else if (property == colorop->lut3d_interpolation_property)
+		*val = state->lut3d_interpolation;
+	else if (property == colorop->data_property)
+		*val = (state->data) ? state->data->base.id : 0;
+	else
+		return -EINVAL;
 
 	return 0;
 }
@@ -739,7 +921,7 @@ static int drm_atomic_connector_set_property(struct drm_connector *connector,
 		ret = drm_property_replace_blob_from_id(dev,
 				&state->hdr_output_metadata,
 				val,
-				sizeof(struct hdr_output_metadata), -1,
+				-1, sizeof(struct hdr_output_metadata), -1,
 				&replaced);
 		return ret;
 	} else if (property == config->aspect_ratio_property) {
@@ -908,6 +1090,15 @@ int drm_atomic_get_property(struct drm_mode_object *obj,
 				plane->state, property, val);
 		break;
 	}
+	case DRM_MODE_OBJECT_COLOROP: {
+		struct drm_colorop *colorop = obj_to_colorop(obj);
+
+		if (colorop->plane)
+			WARN_ON(!drm_modeset_is_locked(&colorop->plane->mutex));
+
+		ret = drm_atomic_colorop_get_property(colorop, colorop->state, property, val);
+		break;
+	}
 	default:
 		drm_dbg_atomic(dev, "[OBJECT:%d] has no properties\n", obj->id);
 		ret = -EINVAL;
@@ -926,7 +1117,7 @@ static struct drm_pending_vblank_event *create_vblank_event(
 {
 	struct drm_pending_vblank_event *e = NULL;
 
-	e = kzalloc(sizeof *e, GFP_KERNEL);
+	e = kzalloc_obj(*e);
 	if (!e)
 		return NULL;
 
@@ -938,7 +1129,7 @@ static struct drm_pending_vblank_event *create_vblank_event(
 	return e;
 }
 
-int drm_atomic_connector_commit_dpms(struct drm_atomic_state *state,
+int drm_atomic_connector_commit_dpms(struct drm_atomic_commit *state,
 				     struct drm_connector *connector,
 				     int mode)
 {
@@ -1005,7 +1196,7 @@ static int drm_atomic_check_prop_changes(int ret, uint64_t old_val, uint64_t pro
 	return 0;
 }
 
-int drm_atomic_set_property(struct drm_atomic_state *state,
+int drm_atomic_set_property(struct drm_atomic_commit *state,
 			    struct drm_file *file_priv,
 			    struct drm_mode_object *obj,
 			    struct drm_property *prop,
@@ -1067,6 +1258,7 @@ int drm_atomic_set_property(struct drm_atomic_state *state,
 		struct drm_plane *plane = obj_to_plane(obj);
 		struct drm_plane_state *plane_state;
 		struct drm_mode_config *config = &plane->dev->mode_config;
+		const struct drm_plane_helper_funcs *plane_funcs = plane->helper_private;
 
 		plane_state = drm_atomic_get_plane_state(state, plane);
 		if (IS_ERR(plane_state)) {
@@ -1074,20 +1266,64 @@ int drm_atomic_set_property(struct drm_atomic_state *state,
 			break;
 		}
 
-		if (async_flip &&
-		    (plane_state->plane->type != DRM_PLANE_TYPE_PRIMARY ||
-		     (prop != config->prop_fb_id &&
-		      prop != config->prop_in_fence_fd &&
-		      prop != config->prop_fb_damage_clips))) {
+		if (async_flip) {
+			/* no-op changes are always allowed */
 			ret = drm_atomic_plane_get_property(plane, plane_state,
 							    prop, &old_val);
 			ret = drm_atomic_check_prop_changes(ret, old_val, prop_value, prop);
-			break;
+
+			/* fail everything that isn't no-op or a pure flip */
+			if (ret && prop != config->prop_fb_id &&
+			    prop != config->prop_in_fence_fd &&
+			    prop != config->prop_fb_damage_clips) {
+				break;
+			}
+
+			if (ret && plane->type != DRM_PLANE_TYPE_PRIMARY) {
+				/* ask the driver if this non-primary plane is supported */
+				if (plane_funcs && plane_funcs->atomic_async_check)
+					ret = plane_funcs->atomic_async_check(plane, state, true);
+
+				if (ret) {
+					drm_dbg_atomic(prop->dev,
+						       "[PLANE:%d:%s] does not support async flips\n",
+						       obj->id, plane->name);
+					break;
+				}
+			}
 		}
 
 		ret = drm_atomic_plane_set_property(plane,
 				plane_state, file_priv,
 				prop, prop_value);
+
+		break;
+	}
+	case DRM_MODE_OBJECT_COLOROP: {
+		struct drm_plane_state *plane_state;
+		struct drm_colorop *colorop = obj_to_colorop(obj);
+		struct drm_colorop_state *colorop_state;
+		bool replaced = false;
+
+		colorop_state = drm_atomic_get_colorop_state(state, colorop);
+		if (IS_ERR(colorop_state)) {
+			ret = PTR_ERR(colorop_state);
+			break;
+		}
+
+		ret = drm_atomic_colorop_set_property(colorop, colorop_state,
+						      file_priv, prop, prop_value,
+						      &replaced);
+		if (ret || !replaced)
+			break;
+
+		plane_state = drm_atomic_get_plane_state(state, colorop->plane);
+		if (IS_ERR(plane_state)) {
+			ret = PTR_ERR(plane_state);
+			break;
+		}
+		plane_state->color_mgmt_changed |= replaced;
+
 		break;
 	}
 	default:
@@ -1176,7 +1412,7 @@ static int setup_out_fence(struct drm_out_fence_state *fence_state,
 }
 
 static int prepare_signaling(struct drm_device *dev,
-				  struct drm_atomic_state *state,
+				  struct drm_atomic_commit *state,
 				  struct drm_mode_atomic *arg,
 				  struct drm_file *file_priv,
 				  struct drm_out_fence_state **fence_state,
@@ -1301,7 +1537,7 @@ static int prepare_signaling(struct drm_device *dev,
 }
 
 static void complete_signaling(struct drm_device *dev,
-			       struct drm_atomic_state *state,
+			       struct drm_atomic_commit *state,
 			       struct drm_out_fence_state *fence_state,
 			       unsigned int num_fences,
 			       bool install_fds)
@@ -1324,7 +1560,7 @@ static void complete_signaling(struct drm_device *dev,
 		/*
 		 * Free the allocated event. drm_atomic_helper_setup_commit
 		 * can allocate an event too, so only free it if it's ours
-		 * to prevent a double free in drm_atomic_state_clear.
+		 * to prevent a double free in drm_atomic_commit_clear.
 		 */
 		if (event && (event->base.fence || event->base.file_priv)) {
 			drm_event_cancel_free(dev, &event->base);
@@ -1351,7 +1587,7 @@ static void complete_signaling(struct drm_device *dev,
 }
 
 static void
-set_async_flip(struct drm_atomic_state *state)
+set_async_flip(struct drm_atomic_commit *state)
 {
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *crtc_state;
@@ -1371,7 +1607,7 @@ int drm_mode_atomic_ioctl(struct drm_device *dev,
 	uint32_t __user *props_ptr = (uint32_t __user *)(unsigned long)(arg->props_ptr);
 	uint64_t __user *prop_values_ptr = (uint64_t __user *)(unsigned long)(arg->prop_values_ptr);
 	unsigned int copied_objs, copied_props;
-	struct drm_atomic_state *state;
+	struct drm_atomic_commit *state;
 	struct drm_modeset_acquire_ctx ctx;
 	struct drm_out_fence_state *fence_state;
 	int ret = 0;
@@ -1420,13 +1656,14 @@ int drm_mode_atomic_ioctl(struct drm_device *dev,
 		return -EINVAL;
 	}
 
-	state = drm_atomic_state_alloc(dev);
+	state = drm_atomic_commit_alloc(dev);
 	if (!state)
 		return -ENOMEM;
 
 	drm_modeset_acquire_init(&ctx, DRM_MODESET_ACQUIRE_INTERRUPTIBLE);
 	state->acquire_ctx = &ctx;
 	state->allow_modeset = !!(arg->flags & DRM_MODE_ATOMIC_ALLOW_MODESET);
+	state->plane_color_pipeline = file_priv->plane_color_pipeline;
 
 retry:
 	copied_objs = 0;
@@ -1527,13 +1764,13 @@ out:
 	complete_signaling(dev, state, fence_state, num_fences, !ret);
 
 	if (ret == -EDEADLK) {
-		drm_atomic_state_clear(state);
+		drm_atomic_commit_clear(state);
 		ret = drm_modeset_backoff(&ctx);
 		if (!ret)
 			goto retry;
 	}
 
-	drm_atomic_state_put(state);
+	drm_atomic_commit_put(state);
 
 	drm_modeset_drop_locks(&ctx);
 	drm_modeset_acquire_fini(&ctx);

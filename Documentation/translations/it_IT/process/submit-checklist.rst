@@ -58,9 +58,10 @@ Fornite documentazione
 4) Tutti i nuovi parametri dei moduli sono documentati con ``MODULE_PARM_DESC()``.
 
 5) Tutte le nuove interfacce verso lo spazio utente sono documentate in
-    ``Documentation/ABI/``.  Leggete ``Documentation/ABI/README`` per maggiori
-    informazioni.  Le patch che modificano le interfacce utente dovrebbero
-    essere inviate in copia anche a linux-api@vger.kernel.org.
+    ``Documentation/ABI/``.  Leggete Documentation/admin-guide/abi.rst
+    (o ``Documentation/ABI/README``) per maggiori informazioni.
+    Le patch che modificano le interfacce utente dovrebbero essere inviate
+    in copia anche a linux-api@vger.kernel.org.
 
 6) Se la patch aggiunge nuove chiamate ioctl, allora aggiornate
     ``Documentation/userspace-api/ioctl/ioctl-number.rst``.
@@ -121,7 +122,7 @@ Verificate il vostro codice
 
 1) La patch è stata verificata con le seguenti opzioni abilitate
    contemporaneamente: ``CONFIG_PREEMPT``, ``CONFIG_DEBUG_PREEMPT``,
-   ``CONFIG_DEBUG_SLAB``, ``CONFIG_DEBUG_PAGEALLOC``, ``CONFIG_DEBUG_MUTEXES``,
+   ``CONFIG_SLUB_DEBUG``, ``CONFIG_DEBUG_PAGEALLOC``, ``CONFIG_DEBUG_MUTEXES``,
    ``CONFIG_DEBUG_SPINLOCK``, ``CONFIG_DEBUG_ATOMIC_SLEEP``,
    ``CONFIG_PROVE_RCU`` e ``CONFIG_DEBUG_OBJECTS_RCU_HEAD``.
 

@@ -337,7 +337,7 @@ static int make_r8a66597_device(struct r8a66597 *r8a66597,
 	struct r8a66597_device *dev;
 	int usb_address = urb->setup_packet[2];	/* urb->pipe is address 0 */
 
-	dev = kzalloc(sizeof(struct r8a66597_device), GFP_ATOMIC);
+	dev = kzalloc_obj(struct r8a66597_device, GFP_ATOMIC);
 	if (dev == NULL)
 		return -ENOMEM;
 
@@ -1720,7 +1720,8 @@ static void r8a66597_root_hub_control(struct r8a66597 *r8a66597, int port)
 
 static void r8a66597_interval_timer(struct timer_list *t)
 {
-	struct r8a66597_timers *timers = from_timer(timers, t, interval);
+	struct r8a66597_timers *timers = timer_container_of(timers, t,
+							    interval);
 	struct r8a66597 *r8a66597 = timers->r8a66597;
 	unsigned long flags;
 	u16 pipenum;
@@ -1744,7 +1745,7 @@ static void r8a66597_interval_timer(struct timer_list *t)
 
 static void r8a66597_td_timer(struct timer_list *t)
 {
-	struct r8a66597_timers *timers = from_timer(timers, t, td);
+	struct r8a66597_timers *timers = timer_container_of(timers, t, td);
 	struct r8a66597 *r8a66597 = timers->r8a66597;
 	unsigned long flags;
 	u16 pipenum;
@@ -1798,7 +1799,7 @@ static void r8a66597_td_timer(struct timer_list *t)
 
 static void r8a66597_timer(struct timer_list *t)
 {
-	struct r8a66597 *r8a66597 = from_timer(r8a66597, t, rh_timer);
+	struct r8a66597 *r8a66597 = timer_container_of(r8a66597, t, rh_timer);
 	unsigned long flags;
 	int port;
 
@@ -1858,7 +1859,7 @@ static struct r8a66597_td *r8a66597_make_td(struct r8a66597 *r8a66597,
 	struct r8a66597_td *td;
 	u16 pipenum;
 
-	td = kzalloc(sizeof(struct r8a66597_td), GFP_ATOMIC);
+	td = kzalloc_obj(struct r8a66597_td, GFP_ATOMIC);
 	if (td == NULL)
 		return NULL;
 
@@ -1900,8 +1901,7 @@ static int r8a66597_urb_enqueue(struct usb_hcd *hcd,
 		goto error_not_linked;
 
 	if (!hep->hcpriv) {
-		hep->hcpriv = kzalloc(sizeof(struct r8a66597_pipe),
-				GFP_ATOMIC);
+		hep->hcpriv = kzalloc_obj(struct r8a66597_pipe, GFP_ATOMIC);
 		if (!hep->hcpriv) {
 			ret = -ENOMEM;
 			goto error;
@@ -2384,7 +2384,7 @@ static void r8a66597_remove(struct platform_device *pdev)
 	struct r8a66597		*r8a66597 = platform_get_drvdata(pdev);
 	struct usb_hcd		*hcd = r8a66597_to_hcd(r8a66597);
 
-	del_timer_sync(&r8a66597->rh_timer);
+	timer_delete_sync(&r8a66597->rh_timer);
 	usb_remove_hcd(hcd);
 	iounmap(r8a66597->reg);
 	if (r8a66597->pdata->on_chip)

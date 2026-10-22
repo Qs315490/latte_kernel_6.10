@@ -7,35 +7,39 @@
 
 #include <linux/console.h>
 #include <linux/fb.h>
-#include <linux/fbcon.h>
 #include <linux/major.h>
 
 #include "fb_internal.h"
+#include "fbcon.h"
 
-#define FB_SYSFS_FLAG_ATTR 1
+static int activate_locked(struct fb_info *fb_info,
+			    struct fb_var_screeninfo *var)
+{
+	var->activate |= FB_ACTIVATE_FORCE;
+	return fb_set_var_from_user(fb_info, var);
+}
 
 static int activate(struct fb_info *fb_info, struct fb_var_screeninfo *var)
 {
 	int err;
 
-	var->activate |= FB_ACTIVATE_FORCE;
 	console_lock();
 	lock_fb_info(fb_info);
-	err = fb_set_var(fb_info, var);
-	if (!err)
-		fbcon_update_vcs(fb_info, var->activate & FB_ACTIVATE_ALL);
+	err = activate_locked(fb_info, var);
 	unlock_fb_info(fb_info);
 	console_unlock();
-	if (err)
-		return err;
-	return 0;
+
+	return err;
 }
 
-static int mode_string(char *buf, unsigned int offset,
+static int mode_string(char *buf, size_t size, unsigned int offset,
 		       const struct fb_videomode *mode)
 {
 	char m = 'U';
 	char v = 'p';
+
+	if (offset >= size)
+		return 0;
 
 	if (mode->flag & FB_MODE_IS_DETAILED)
 		m = 'D';
@@ -49,7 +53,7 @@ static int mode_string(char *buf, unsigned int offset,
 	if (mode->vmode & FB_VMODE_DOUBLE)
 		v = 'd';
 
-	return snprintf(&buf[offset], PAGE_SIZE - offset, "%c:%dx%d%c-%d\n",
+	return scnprintf(&buf[offset], size - offset, "%c:%dx%d%c-%d\n",
 	                m, mode->xres, mode->yres, v, mode->refresh);
 }
 
@@ -66,19 +70,32 @@ static ssize_t store_mode(struct device *device, struct device_attribute *attr,
 
 	memset(&var, 0, sizeof(var));
 
+	console_lock();
+	lock_fb_info(fb_info);
+
 	list_for_each_entry(modelist, &fb_info->modelist, list) {
 		mode = &modelist->mode;
-		i = mode_string(mstr, 0, mode);
+		i = mode_string(mstr, sizeof(mstr), 0, mode);
 		if (strncmp(mstr, buf, max(count, i)) == 0) {
 
 			var = fb_info->var;
 			fb_videomode_to_var(&var, mode);
-			if ((err = activate(fb_info, &var)))
+			err = activate_locked(fb_info, &var);
+			if (err) {
+				unlock_fb_info(fb_info);
+				console_unlock();
 				return err;
+			}
 			fb_info->mode = mode;
+			unlock_fb_info(fb_info);
+			console_unlock();
 			return count;
 		}
 	}
+
+	unlock_fb_info(fb_info);
+	console_unlock();
+
 	return -EINVAL;
 }
 
@@ -86,11 +103,20 @@ static ssize_t show_mode(struct device *device, struct device_attribute *attr,
 			 char *buf)
 {
 	struct fb_info *fb_info = dev_get_drvdata(device);
+	struct fb_videomode mode;
+	bool have_mode = false;
 
-	if (!fb_info->mode)
+	lock_fb_info(fb_info);
+	if (fb_info->mode) {
+		mode = *fb_info->mode;
+		have_mode = true;
+	}
+	unlock_fb_info(fb_info);
+
+	if (!have_mode)
 		return 0;
 
-	return mode_string(buf, 0, fb_info->mode);
+	return mode_string(buf, PAGE_SIZE, 0, &mode);
 }
 
 static ssize_t store_modes(struct device *device,
@@ -113,8 +139,15 @@ static ssize_t store_modes(struct device *device,
 	if (fb_new_modelist(fb_info)) {
 		fb_destroy_modelist(&fb_info->modelist);
 		list_splice(&old_list, &fb_info->modelist);
-	} else
+	} else {
+		/*
+		 * fb_display[i].mode and fb_info->mode both point into the old
+		 * list. Clear them before it is freed.
+		 */
+		fbcon_delete_modelist(&old_list);
+		fb_info->mode = NULL;
 		fb_destroy_modelist(&old_list);
+	}
 
 	unlock_fb_info(fb_info);
 	console_unlock();
@@ -131,10 +164,15 @@ static ssize_t show_modes(struct device *device, struct device_attribute *attr,
 	const struct fb_videomode *mode;
 
 	i = 0;
+	lock_fb_info(fb_info);
 	list_for_each_entry(modelist, &fb_info->modelist, list) {
 		mode = &modelist->mode;
-		i += mode_string(buf, i, mode);
+		i += mode_string(buf, PAGE_SIZE, i, mode);
+		if (i >= PAGE_SIZE - 1)
+			break;
 	}
+	unlock_fb_info(fb_info);
+
 	return i;
 }
 
@@ -233,20 +271,18 @@ static ssize_t store_blank(struct device *device,
 
 	arg = simple_strtoul(buf, &last, 0);
 	console_lock();
-	err = fb_blank(fb_info, arg);
-	/* might again call into fb_blank */
-	fbcon_fb_blanked(fb_info, arg);
+	err = fb_blank_from_user(fb_info, arg);
 	console_unlock();
 	if (err < 0)
 		return err;
 	return count;
 }
 
-static ssize_t show_blank(struct device *device,
-			  struct device_attribute *attr, char *buf)
+static ssize_t show_blank(struct device *device, struct device_attribute *attr, char *buf)
 {
-//	struct fb_info *fb_info = dev_get_drvdata(device);
-	return 0;
+	struct fb_info *fb_info = dev_get_drvdata(device);
+
+	return sysfs_emit(buf, "%d\n", fb_info->blank);
 }
 
 static ssize_t store_console(struct device *device,
@@ -416,59 +452,42 @@ static ssize_t show_bl_curve(struct device *device,
 /* When cmap is added back in it should be a binary attribute
  * not a text one. Consideration should also be given to converting
  * fbdev to use configfs instead of sysfs */
-static struct device_attribute device_attrs[] = {
-	__ATTR(bits_per_pixel, S_IRUGO|S_IWUSR, show_bpp, store_bpp),
-	__ATTR(blank, S_IRUGO|S_IWUSR, show_blank, store_blank),
-	__ATTR(console, S_IRUGO|S_IWUSR, show_console, store_console),
-	__ATTR(cursor, S_IRUGO|S_IWUSR, show_cursor, store_cursor),
-	__ATTR(mode, S_IRUGO|S_IWUSR, show_mode, store_mode),
-	__ATTR(modes, S_IRUGO|S_IWUSR, show_modes, store_modes),
-	__ATTR(pan, S_IRUGO|S_IWUSR, show_pan, store_pan),
-	__ATTR(virtual_size, S_IRUGO|S_IWUSR, show_virtual, store_virtual),
-	__ATTR(name, S_IRUGO, show_name, NULL),
-	__ATTR(stride, S_IRUGO, show_stride, NULL),
-	__ATTR(rotate, S_IRUGO|S_IWUSR, show_rotate, store_rotate),
-	__ATTR(state, S_IRUGO|S_IWUSR, show_fbstate, store_fbstate),
+static DEVICE_ATTR(bits_per_pixel, 0644, show_bpp, store_bpp);
+static DEVICE_ATTR(blank, 0644, show_blank, store_blank);
+static DEVICE_ATTR(console, 0644, show_console, store_console);
+static DEVICE_ATTR(cursor, 0644, show_cursor, store_cursor);
+static DEVICE_ATTR(mode, 0644, show_mode, store_mode);
+static DEVICE_ATTR(modes, 0644, show_modes, store_modes);
+static DEVICE_ATTR(pan, 0644, show_pan, store_pan);
+static DEVICE_ATTR(virtual_size, 0644, show_virtual, store_virtual);
+static DEVICE_ATTR(name, 0444, show_name, NULL);
+static DEVICE_ATTR(stride, 0444, show_stride, NULL);
+static DEVICE_ATTR(rotate, 0644, show_rotate, store_rotate);
+static DEVICE_ATTR(state, 0644, show_fbstate, store_fbstate);
 #if IS_ENABLED(CONFIG_FB_BACKLIGHT)
-	__ATTR(bl_curve, S_IRUGO|S_IWUSR, show_bl_curve, store_bl_curve),
+static DEVICE_ATTR(bl_curve, 0644, show_bl_curve, store_bl_curve);
 #endif
+
+static struct attribute *fb_device_attrs[] = {
+	&dev_attr_bits_per_pixel.attr,
+	&dev_attr_blank.attr,
+	&dev_attr_console.attr,
+	&dev_attr_cursor.attr,
+	&dev_attr_mode.attr,
+	&dev_attr_modes.attr,
+	&dev_attr_pan.attr,
+	&dev_attr_virtual_size.attr,
+	&dev_attr_name.attr,
+	&dev_attr_stride.attr,
+	&dev_attr_rotate.attr,
+	&dev_attr_state.attr,
+#if IS_ENABLED(CONFIG_FB_BACKLIGHT)
+	&dev_attr_bl_curve.attr,
+#endif
+	NULL,
 };
 
-static int fb_init_device(struct fb_info *fb_info)
-{
-	int i, error = 0;
-
-	dev_set_drvdata(fb_info->dev, fb_info);
-
-	fb_info->class_flag |= FB_SYSFS_FLAG_ATTR;
-
-	for (i = 0; i < ARRAY_SIZE(device_attrs); i++) {
-		error = device_create_file(fb_info->dev, &device_attrs[i]);
-
-		if (error)
-			break;
-	}
-
-	if (error) {
-		while (--i >= 0)
-			device_remove_file(fb_info->dev, &device_attrs[i]);
-		fb_info->class_flag &= ~FB_SYSFS_FLAG_ATTR;
-	}
-
-	return 0;
-}
-
-static void fb_cleanup_device(struct fb_info *fb_info)
-{
-	unsigned int i;
-
-	if (fb_info->class_flag & FB_SYSFS_FLAG_ATTR) {
-		for (i = 0; i < ARRAY_SIZE(device_attrs); i++)
-			device_remove_file(fb_info->dev, &device_attrs[i]);
-
-		fb_info->class_flag &= ~FB_SYSFS_FLAG_ATTR;
-	}
-}
+ATTRIBUTE_GROUPS(fb_device);
 
 int fb_device_create(struct fb_info *fb_info)
 {
@@ -476,14 +495,13 @@ int fb_device_create(struct fb_info *fb_info)
 	dev_t devt = MKDEV(FB_MAJOR, node);
 	int ret;
 
-	fb_info->dev = device_create(fb_class, fb_info->device, devt, NULL, "fb%d", node);
+	fb_info->dev = device_create_with_groups(fb_class, fb_info->device, devt, fb_info,
+						 fb_device_groups, "fb%d", node);
 	if (IS_ERR(fb_info->dev)) {
 		/* Not fatal */
 		ret = PTR_ERR(fb_info->dev);
 		pr_warn("Unable to create device for framebuffer %d; error %d\n", node, ret);
 		fb_info->dev = NULL;
-	} else {
-		fb_init_device(fb_info);
 	}
 
 	return 0;
@@ -496,7 +514,6 @@ void fb_device_destroy(struct fb_info *fb_info)
 	if (!fb_info->dev)
 		return;
 
-	fb_cleanup_device(fb_info);
 	device_destroy(fb_class, devt);
 	fb_info->dev = NULL;
 }

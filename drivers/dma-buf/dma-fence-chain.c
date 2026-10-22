@@ -218,7 +218,6 @@ static void dma_fence_chain_set_deadline(struct dma_fence *fence,
 }
 
 const struct dma_fence_ops dma_fence_chain_ops = {
-	.use_64bit_seqno = true,
 	.get_driver_name = dma_fence_chain_get_driver_name,
 	.get_timeline_name = dma_fence_chain_get_timeline_name,
 	.enable_signaling = dma_fence_chain_enable_signaling,
@@ -243,16 +242,16 @@ void dma_fence_chain_init(struct dma_fence_chain *chain,
 			  struct dma_fence *fence,
 			  uint64_t seqno)
 {
+	static struct lock_class_key dma_fence_chain_lock_key;
 	struct dma_fence_chain *prev_chain = to_dma_fence_chain(prev);
 	uint64_t context;
 
-	spin_lock_init(&chain->lock);
 	rcu_assign_pointer(chain->prev, prev);
 	chain->fence = fence;
 	chain->prev_seqno = 0;
 
 	/* Try to reuse the context of the previous chain node. */
-	if (prev_chain && __dma_fence_is_later(seqno, prev->seqno, prev->ops)) {
+	if (prev_chain && __dma_fence_is_later(prev, seqno, prev->seqno)) {
 		context = prev->context;
 		chain->prev_seqno = prev->seqno;
 	} else {
@@ -262,8 +261,20 @@ void dma_fence_chain_init(struct dma_fence_chain *chain,
 			seqno = max(prev->seqno, seqno);
 	}
 
-	dma_fence_init(&chain->base, &dma_fence_chain_ops,
-		       &chain->lock, context, seqno);
+	dma_fence_init64(&chain->base, &dma_fence_chain_ops, NULL,
+			 context, seqno);
+
+	/*
+	 * dma_fence_chain_enable_signaling() is invoked while holding
+	 * chain->base.inline_lock and may call dma_fence_add_callback()
+	 * on the underlying fences, which takes their inline_lock.
+	 *
+	 * Since both locks share the same lockdep class, this legitimate
+	 * nesting confuses lockdep and triggers a recursive locking
+	 * warning. Assign a separate lockdep class to the chain lock
+	 * to model this hierarchy correctly.
+	 */
+	lockdep_set_class(&chain->base.inline_lock, &dma_fence_chain_lock_key);
 
 	/*
 	 * Chaining dma_fence_chain container together is only allowed through

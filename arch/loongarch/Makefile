@@ -5,7 +5,12 @@
 
 boot	:= arch/loongarch/boot
 
-KBUILD_DEFCONFIG := loongson3_defconfig
+ifeq ($(shell uname -m),loongarch32)
+KBUILD_DEFCONFIG := loongson32_defconfig
+else
+KBUILD_DEFCONFIG := loongson64_defconfig
+endif
+
 KBUILD_DTBS      := dtbs
 
 image-name-y			:= vmlinux
@@ -20,6 +25,7 @@ endif
 #
 # Select the object file format to substitute into the linker script.
 #
+32bit-tool-archpref	= loongarch32
 64bit-tool-archpref	= loongarch64
 32bit-bfd		= elf32-loongarch
 64bit-bfd		= elf64-loongarch
@@ -46,9 +52,14 @@ KBUILD_CPPFLAGS += -DCC_USING_PATCHABLE_FUNCTION_ENTRY
 CC_FLAGS_FTRACE := -fpatchable-function-entry=2
 endif
 
-ifdef CONFIG_64BIT
+ifdef CONFIG_32BIT
+tool-archpref		= $(32bit-tool-archpref)
+UTS_MACHINE		:= loongarch32
+cflags-y		+= $(call cc-option,-m32)
+else
 tool-archpref		= $(64bit-tool-archpref)
 UTS_MACHINE		:= loongarch64
+cflags-y		+= $(call cc-option,-m64)
 endif
 
 ifneq ($(SUBARCH),$(ARCH))
@@ -57,9 +68,19 @@ ifneq ($(SUBARCH),$(ARCH))
   endif
 endif
 
+ifdef CONFIG_32BIT
+ifdef CONFIG_32BIT_STANDARD
+ld-emul			= $(32bit-emul)
+cflags-y		+= -march=la32v1.0 -mabi=ilp32s -mcmodel=normal
+else  # CONFIG_32BIT_REDUCED
+ld-emul			= $(32bit-emul)
+cflags-y		+= -march=la32rv1.0 -mabi=ilp32s -mcmodel=normal
+endif
+endif
+
 ifdef CONFIG_64BIT
 ld-emul			= $(64bit-emul)
-cflags-y		+= -mabi=lp64s -mcmodel=normal
+cflags-y		+= -march=loongarch64 -mabi=lp64s -mcmodel=normal
 endif
 
 cflags-y			+= -pipe $(CC_FLAGS_NO_FPU)
@@ -101,7 +122,22 @@ KBUILD_AFLAGS			+= $(call cc-option,-mthin-add-sub) $(call cc-option,-Wa$(comma)
 KBUILD_CFLAGS			+= $(call cc-option,-mthin-add-sub) $(call cc-option,-Wa$(comma)-mthin-add-sub)
 
 ifdef CONFIG_OBJTOOL
-KBUILD_CFLAGS			+= -fno-jump-tables
+ifdef CONFIG_CC_HAS_ANNOTATE_TABLEJUMP
+KBUILD_CFLAGS			+= -mannotate-tablejump
+else
+KBUILD_CFLAGS			+= -fno-jump-tables # keep compatibility with older compilers
+endif
+ifdef CONFIG_RUSTC_HAS_ANNOTATE_TABLEJUMP
+KBUILD_RUSTFLAGS		+= -Cllvm-args=--loongarch-annotate-tablejump
+else
+KBUILD_RUSTFLAGS		+= $(if $(call rustc-min-version,109300),-Cjump-tables=n,-Zno-jump-tables) # keep compatibility with older compilers
+endif
+ifdef CONFIG_LTO_CLANG
+# The annotate-tablejump option can not be passed to LLVM backend when LTO is enabled.
+# Ensure it is aware of linker with LTO, '--loongarch-annotate-tablejump' also needs to
+# be passed via '-mllvm' to ld.lld.
+KBUILD_LDFLAGS			+= $(call ld-option,-mllvm --loongarch-annotate-tablejump)
+endif
 endif
 
 KBUILD_RUSTFLAGS		+= --target=loongarch64-unknown-none-softfloat -Ccode-model=small
@@ -114,13 +150,18 @@ KBUILD_RUSTFLAGS_KERNEL		+= -Crelocation-model=pie
 LDFLAGS_vmlinux			+= -static -pie --no-dynamic-linker -z notext $(call ld-option, --apply-dynamic-relocs)
 endif
 
-cflags-y += $(call cc-option, -mno-check-zero-division)
+cflags-y += $(call cc-option, -mno-check-zero-division -fno-isolate-erroneous-paths-dereference)
 
 ifndef CONFIG_KASAN
 cflags-y += -fno-builtin-memcpy -fno-builtin-memmove -fno-builtin-memset
 endif
 
+ifdef CONFIG_32BIT
+load-y		= 0xa0200000
+else
 load-y		= 0x9000000000200000
+endif
+
 bootvars-y	= VMLINUX_LOAD_ADDRESS=$(load-y)
 
 drivers-$(CONFIG_PCI)		+= arch/loongarch/pci/
@@ -156,8 +197,6 @@ endif
 libs-y += arch/loongarch/lib/
 libs-$(CONFIG_EFI_STUB) += $(objtree)/drivers/firmware/efi/libstub/lib.a
 
-drivers-y		+= arch/loongarch/crypto/
-
 # suspend and hibernation support
 drivers-$(CONFIG_PM)	+= arch/loongarch/power/
 
@@ -177,11 +216,14 @@ vmlinux.elf vmlinux.efi vmlinuz.efi: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(bootvars-y) $(boot)/$@
 
 install:
-	$(Q)install -D -m 755 $(KBUILD_IMAGE) $(INSTALL_PATH)/$(image-name-y)-$(KERNELRELEASE)
-	$(Q)install -D -m 644 .config $(INSTALL_PATH)/config-$(KERNELRELEASE)
-	$(Q)install -D -m 644 System.map $(INSTALL_PATH)/System.map-$(KERNELRELEASE)
+	$(call cmd,install)
 
 define archhelp
-	echo '  install              - install kernel into $(INSTALL_PATH)'
+	echo '  vmlinux.elf    - Uncompressed ELF kernel image (arch/loongarch/boot/vmlinux.elf)'
+	echo '  vmlinux.efi    - Uncompressed EFI kernel image (arch/loongarch/boot/vmlinux.efi)'
+	echo '  vmlinuz.efi    - GZIP/ZSTD-compressed EFI kernel image (arch/loongarch/boot/vmlinuz.efi)'
+	echo '                   Default when CONFIG_EFI_ZBOOT=y'
+	echo '  install        - Install kernel using (your) ~/bin/$(INSTALLKERNEL) or'
+	echo '                   (distribution) /sbin/$(INSTALLKERNEL) or install.sh to $$(INSTALL_PATH)'
 	echo
 endef

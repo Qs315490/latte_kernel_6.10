@@ -8,7 +8,6 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/wait.h>
@@ -55,7 +54,6 @@ struct nau7802_state {
 	struct mutex		data_lock;
 	u32			vref_mv;
 	u32			conversion_count;
-	u32			min_conversions;
 	u8			sample_rate;
 	u32			scale_avail[8];
 	struct completion	value_ok;
@@ -257,7 +255,7 @@ static int nau7802_read_poll(struct iio_dev *indio_dev,
 	/*
 	 * Because there is actually only one ADC for both channels, we have to
 	 * wait for enough conversions to happen before getting a significant
-	 * value when changing channels and the values are far appart.
+	 * value when changing channels and the values are far apart.
 	 */
 	do {
 		ret = i2c_smbus_read_byte_data(st->client, NAU7802_REG_PUCTRL);
@@ -532,7 +530,7 @@ static int nau7802_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id nau7802_i2c_id[] = {
-	{ "nau7802" },
+	{ .name = "nau7802" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, nau7802_i2c_id);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright (C) 2015-2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2024 Intel Corporation
+ * Copyright (C) 2018-2024, 2026 Intel Corporation
  */
 #include <net/cfg80211.h>
 #include <linux/etherdevice.h>
@@ -54,27 +54,37 @@ static int iwl_mvm_ftm_responder_set_bw_v2(struct cfg80211_chan_def *chandef,
 {
 	switch (chandef->width) {
 	case NL80211_CHAN_WIDTH_20_NOHT:
-		*format_bw = IWL_LOCATION_FRAME_FORMAT_LEGACY;
-		*format_bw |= IWL_LOCATION_BW_20MHZ << LOCATION_BW_POS;
+		*format_bw = u8_encode_bits(IWL_LOCATION_FRAME_FORMAT_LEGACY,
+					    IWL_LOCATION_FMT_BW_FORMAT);
+		*format_bw |= u8_encode_bits(IWL_LOCATION_BW_20MHZ,
+					     IWL_LOCATION_FMT_BW_BANDWIDTH);
 		break;
 	case NL80211_CHAN_WIDTH_20:
-		*format_bw = IWL_LOCATION_FRAME_FORMAT_HT;
-		*format_bw |= IWL_LOCATION_BW_20MHZ << LOCATION_BW_POS;
+		*format_bw = u8_encode_bits(IWL_LOCATION_FRAME_FORMAT_HT,
+					    IWL_LOCATION_FMT_BW_FORMAT);
+		*format_bw |= u8_encode_bits(IWL_LOCATION_BW_20MHZ,
+					     IWL_LOCATION_FMT_BW_BANDWIDTH);
 		break;
 	case NL80211_CHAN_WIDTH_40:
-		*format_bw = IWL_LOCATION_FRAME_FORMAT_HT;
-		*format_bw |= IWL_LOCATION_BW_40MHZ << LOCATION_BW_POS;
+		*format_bw = u8_encode_bits(IWL_LOCATION_FRAME_FORMAT_HT,
+					    IWL_LOCATION_FMT_BW_FORMAT);
+		*format_bw |= u8_encode_bits(IWL_LOCATION_BW_40MHZ,
+					     IWL_LOCATION_FMT_BW_BANDWIDTH);
 		*ctrl_ch_position = iwl_mvm_get_ctrl_pos(chandef);
 		break;
 	case NL80211_CHAN_WIDTH_80:
-		*format_bw = IWL_LOCATION_FRAME_FORMAT_VHT;
-		*format_bw |= IWL_LOCATION_BW_80MHZ << LOCATION_BW_POS;
+		*format_bw = u8_encode_bits(IWL_LOCATION_FRAME_FORMAT_VHT,
+					    IWL_LOCATION_FMT_BW_FORMAT);
+		*format_bw |= u8_encode_bits(IWL_LOCATION_BW_80MHZ,
+					     IWL_LOCATION_FMT_BW_BANDWIDTH);
 		*ctrl_ch_position = iwl_mvm_get_ctrl_pos(chandef);
 		break;
 	case NL80211_CHAN_WIDTH_160:
 		if (cmd_ver >= 9) {
-			*format_bw = IWL_LOCATION_FRAME_FORMAT_HE;
-			*format_bw |= IWL_LOCATION_BW_160MHZ << LOCATION_BW_POS;
+			*format_bw = u8_encode_bits(IWL_LOCATION_FRAME_FORMAT_HE,
+						    IWL_LOCATION_FMT_BW_FORMAT);
+			*format_bw |= u8_encode_bits(IWL_LOCATION_BW_160MHZ,
+						     IWL_LOCATION_FMT_BW_BANDWIDTH);
 			*ctrl_ch_position = iwl_mvm_get_ctrl_pos(chandef);
 			break;
 		}
@@ -322,92 +332,6 @@ static void iwl_mvm_resp_del_pasn_sta(struct iwl_mvm *mvm,
 
 	iwl_mvm_dealloc_int_sta(mvm, &sta->int_sta);
 	kfree(sta);
-}
-
-int iwl_mvm_ftm_respoder_add_pasn_sta(struct iwl_mvm *mvm,
-				      struct ieee80211_vif *vif,
-				      u8 *addr, u32 cipher, u8 *tk, u32 tk_len,
-				      u8 *hltk, u32 hltk_len)
-{
-	int ret;
-	struct iwl_mvm_pasn_sta *sta = NULL;
-	struct iwl_mvm_pasn_hltk_data hltk_data = {
-		.addr = addr,
-		.hltk = hltk,
-	};
-	struct iwl_mvm_pasn_hltk_data *hltk_data_ptr = NULL;
-
-	u8 cmd_ver = iwl_fw_lookup_cmd_ver(mvm->fw,
-					   WIDE_ID(LOCATION_GROUP, TOF_RESPONDER_DYN_CONFIG_CMD),
-					   2);
-
-	lockdep_assert_held(&mvm->mutex);
-
-	if (cmd_ver < 3) {
-		IWL_ERR(mvm, "Adding PASN station not supported by FW\n");
-		return -EOPNOTSUPP;
-	}
-
-	if ((!hltk || !hltk_len) && (!tk || !tk_len)) {
-		IWL_ERR(mvm, "TK and HLTK not set\n");
-		return -EINVAL;
-	}
-
-	if (hltk && hltk_len) {
-		if (!fw_has_capa(&mvm->fw->ucode_capa,
-				 IWL_UCODE_TLV_CAPA_SECURE_LTF_SUPPORT)) {
-			IWL_ERR(mvm, "No support for secure LTF measurement\n");
-			return -EINVAL;
-		}
-
-		hltk_data.cipher = iwl_mvm_cipher_to_location_cipher(cipher);
-		if (hltk_data.cipher == IWL_LOCATION_CIPHER_INVALID) {
-			IWL_ERR(mvm, "invalid cipher: %u\n", cipher);
-			return -EINVAL;
-		}
-
-		hltk_data_ptr = &hltk_data;
-	}
-
-	if (tk && tk_len) {
-		sta = kzalloc(sizeof(*sta) + tk_len, GFP_KERNEL);
-		if (!sta)
-			return -ENOBUFS;
-
-		ret = iwl_mvm_add_pasn_sta(mvm, vif, &sta->int_sta, addr,
-					   cipher, tk, tk_len, &sta->keyconf);
-		if (ret) {
-			kfree(sta);
-			return ret;
-		}
-
-		memcpy(sta->addr, addr, ETH_ALEN);
-		list_add_tail(&sta->list, &mvm->resp_pasn_list);
-	}
-
-	ret = iwl_mvm_ftm_responder_dyn_cfg_v3(mvm, vif, NULL, hltk_data_ptr);
-	if (ret && sta)
-		iwl_mvm_resp_del_pasn_sta(mvm, vif, sta);
-
-	return ret;
-}
-
-int iwl_mvm_ftm_resp_remove_pasn_sta(struct iwl_mvm *mvm,
-				     struct ieee80211_vif *vif, u8 *addr)
-{
-	struct iwl_mvm_pasn_sta *sta, *prev;
-
-	lockdep_assert_held(&mvm->mutex);
-
-	list_for_each_entry_safe(sta, prev, &mvm->resp_pasn_list, list) {
-		if (!memcmp(sta->addr, addr, ETH_ALEN)) {
-			iwl_mvm_resp_del_pasn_sta(mvm, vif, sta);
-			return 0;
-		}
-	}
-
-	IWL_ERR(mvm, "FTM: PASN station %pM not found\n", addr);
-	return -EINVAL;
 }
 
 int iwl_mvm_ftm_start_responder(struct iwl_mvm *mvm, struct ieee80211_vif *vif,

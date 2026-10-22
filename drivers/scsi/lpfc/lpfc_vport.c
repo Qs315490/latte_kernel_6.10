@@ -246,7 +246,7 @@ static void lpfc_discovery_wait(struct lpfc_vport *vport)
 	 * fabric RA_TOV value and dev_loss tmo.  The driver's
 	 * devloss_tmo is 10 giving this loop a 3x multiplier minimally.
 	 */
-	wait_time_max = msecs_to_jiffies(((phba->fc_ratov * 3) + 3) * 1000);
+	wait_time_max = secs_to_jiffies((phba->fc_ratov * 3) + 3);
 	wait_time_max += jiffies;
 	start_time = jiffies;
 	while (time_before(jiffies, wait_time_max)) {
@@ -505,7 +505,7 @@ lpfc_send_npiv_logo(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp)
 		wait_event_timeout(waitq,
 				   !test_bit(NLP_WAIT_FOR_LOGO,
 					     &ndlp->save_flags),
-				   msecs_to_jiffies(phba->fc_ratov * 2000));
+				   secs_to_jiffies(phba->fc_ratov * 2));
 
 		if (!test_bit(NLP_WAIT_FOR_LOGO, &ndlp->save_flags))
 			goto logo_cmpl;
@@ -666,7 +666,7 @@ lpfc_vport_delete(struct fc_vport *fc_vport)
 	 * Take early refcount for outstanding I/O requests we schedule during
 	 * delete processing for unreg_vpi.  Always keep this before
 	 * scsi_remove_host() as we can no longer obtain a reference through
-	 * scsi_host_get() after scsi_host_remove as shost is set to SHOST_DEL.
+	 * scsi_host_get() after scsi_remove_host as shost is set to SHOST_DEL.
 	 */
 	if (!scsi_host_get(shost))
 		return VPORT_INVAL;
@@ -703,7 +703,7 @@ lpfc_vport_delete(struct fc_vport *fc_vport)
 				wait_event_timeout(waitq,
 				   !test_bit(NLP_WAIT_FOR_DA_ID,
 					     &ndlp->save_flags),
-				   msecs_to_jiffies(phba->fc_ratov * 2000));
+				   secs_to_jiffies(phba->fc_ratov * 2));
 			}
 
 			lpfc_printf_vlog(vport, KERN_INFO, LOG_VPORT | LOG_ELS,
@@ -787,8 +787,7 @@ lpfc_create_vport_work_array(struct lpfc_hba *phba)
 	struct lpfc_vport *port_iterator;
 	struct lpfc_vport **vports;
 	int index = 0;
-	vports = kcalloc(phba->max_vports + 1, sizeof(struct lpfc_vport *),
-			 GFP_KERNEL);
+	vports = kzalloc_objs(struct lpfc_vport *, phba->max_vports + 1);
 	if (vports == NULL)
 		return NULL;
 	spin_lock_irq(&phba->port_list_lock);

@@ -90,6 +90,7 @@ Brief summary of control files.
                                      used.
  memory.swappiness		     set/show swappiness parameter of vmscan
 				     (See sysctl's vm.swappiness)
+				     Per memcg knob does not exist in cgroup v2.
  memory.move_charge_at_immigrate     This knob is deprecated.
  memory.oom_control		     set/show oom controls.
                                      This knob is deprecated and shouldn't be
@@ -310,9 +311,8 @@ Lock order is as follows::
 
   folio_lock
     mm->page_table_lock or split pte_lock
-      folio_memcg_lock (memcg->move_lock)
-        mapping->i_pages lock
-          lruvec->lru_lock.
+      mapping->i_pages lock
+        lruvec->lru_lock.
 
 Per-node-per-memcgroup LRU (cgroup's private LRU) is guarded by
 lruvec->lru_lock; the folio LRU flag is cleared before
@@ -608,6 +608,10 @@ memory.stat file includes following statistics:
 	amount of physical memory used by the cgroup.
 
 	'rss + mapped_file" will give you resident set size of cgroup.
+
+	Note that some kernel configurations might account complete larger
+	allocations (e.g., THP) towards 'rss' and 'mapped_file', even if
+	only some, but not all that memory is mapped.
 
 	(Note: file and shmem may be shared among other cgroups. In that case,
 	mapped_file is accounted only when the memory cgroup is owner of page

@@ -656,7 +656,7 @@ static int uli526x_stop(struct net_device *dev)
 	netif_stop_queue(dev);
 
 	/* deleted timer */
-	del_timer_sync(&db->timer);
+	timer_delete_sync(&db->timer);
 
 	/* Reset & stop ULI526X board */
 	uw32(DCR0, ULI526X_RESET);
@@ -1014,7 +1014,7 @@ static const struct ethtool_ops netdev_ethtool_ops = {
 
 static void uli526x_timer(struct timer_list *t)
 {
-	struct uli526x_board_info *db = from_timer(db, t, timer);
+	struct uli526x_board_info *db = timer_container_of(db, t, timer);
 	struct net_device *dev = pci_get_drvdata(db->pdev);
 	struct uli_phy_ops *phy = &db->phy;
 	void __iomem *ioaddr = db->ioaddr;
@@ -1728,9 +1728,9 @@ static u16 phy_read_1bit(struct uli526x_board_info *db)
 
 
 static const struct pci_device_id uli526x_pci_tbl[] = {
-	{ 0x10B9, 0x5261, PCI_ANY_ID, PCI_ANY_ID, 0, 0, PCI_ULI5261_ID },
-	{ 0x10B9, 0x5263, PCI_ANY_ID, PCI_ANY_ID, 0, 0, PCI_ULI5263_ID },
-	{ 0, }
+	{ PCI_DEVICE(0x10B9, 0x5261), .driver_data = PCI_ULI5261_ID },
+	{ PCI_DEVICE(0x10B9, 0x5263), .driver_data = PCI_ULI5263_ID },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, uli526x_pci_tbl);
 

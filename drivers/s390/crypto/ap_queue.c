@@ -6,15 +6,21 @@
  * Adjunct processor bus, queue related code.
  */
 
-#define KMSG_COMPONENT "ap"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "ap: " fmt
 
+#include <linux/export.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <asm/facility.h>
 
+#define CREATE_TRACE_POINTS
+#include <asm/trace/ap.h>
+
 #include "ap_bus.h"
 #include "ap_debug.h"
+
+EXPORT_TRACEPOINT_SYMBOL(s390_ap_nqap);
+EXPORT_TRACEPOINT_SYMBOL(s390_ap_dqap);
 
 static void __ap_flush_queue(struct ap_queue *aq);
 
@@ -97,9 +103,17 @@ static inline struct ap_queue_status
 __ap_send(ap_qid_t qid, unsigned long psmid, void *msg, size_t msglen,
 	  int special)
 {
+	struct ap_queue_status status;
+
 	if (special)
 		qid |= 0x400000UL;
-	return ap_nqap(qid, psmid, msg, msglen);
+
+	status = ap_nqap(qid, psmid, msg, msglen);
+
+	trace_s390_ap_nqap(AP_QID_CARD(qid), AP_QID_QUEUE(qid),
+			   status.value, psmid);
+
+	return status;
 }
 
 /* State machine definitions and helpers */
@@ -138,6 +152,9 @@ static struct ap_queue_status ap_sm_recv(struct ap_queue *aq)
 				 &aq->reply->len, &reslen, &resgr0);
 		parts++;
 	} while (status.response_code == 0xFF && resgr0 != 0);
+
+	trace_s390_ap_dqap(AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid),
+			   status.value, aq->reply->psmid);
 
 	switch (status.response_code) {
 	case AP_RESPONSE_NORMAL:
@@ -268,7 +285,7 @@ static enum ap_sm_wait ap_sm_write(struct ap_queue *aq)
 		list_move_tail(&ap_msg->list, &aq->pendingq);
 		aq->requestq_count--;
 		aq->pendingq_count++;
-		if (aq->queue_count < aq->card->hwinfo.qd) {
+		if (aq->queue_count < aq->card->hwinfo.qd + 1) {
 			aq->sm_state = AP_SM_STATE_WORKING;
 			return AP_SM_WAIT_AGAIN;
 		}
@@ -461,6 +478,7 @@ static enum ap_sm_wait ap_sm_assoc_wait(struct ap_queue *aq)
 		pr_debug("queue 0x%02x.%04x associated with %u\n",
 			 AP_QID_CARD(aq->qid),
 			 AP_QID_QUEUE(aq->qid), aq->assoc_idx);
+		ap_send_se_assoc_uevent(&aq->ap_dev, aq->assoc_idx);
 		return AP_SM_WAIT_NONE;
 	case AP_BS_Q_USABLE_NO_SECURE_KEY:
 		/* association still pending */
@@ -713,6 +731,46 @@ static ssize_t ap_functions_show(struct device *dev,
 
 static DEVICE_ATTR_RO(ap_functions);
 
+static ssize_t driver_override_show(struct device *dev,
+				    struct device_attribute *attr,
+				    char *buf)
+{
+	guard(spinlock)(&dev->driver_override.lock);
+	return sysfs_emit(buf, "%s\n", dev->driver_override.name ?: "");
+}
+
+static ssize_t driver_override_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	int rc = -EINVAL;
+	bool old_value;
+
+	if (mutex_lock_interruptible(&ap_attr_mutex))
+		return -ERESTARTSYS;
+
+	/* Do not allow driver override if apmask/aqmask is in use */
+	if (ap_apmask_aqmask_in_use)
+		goto out;
+
+	old_value = device_has_driver_override(dev);
+	rc = __device_set_driver_override(dev, buf, count);
+	if (rc)
+		goto out;
+	if (old_value && !device_has_driver_override(dev))
+		--ap_driver_override_ctr;
+	else if (!old_value && device_has_driver_override(dev))
+		++ap_driver_override_ctr;
+
+	rc = count;
+
+out:
+	mutex_unlock(&ap_attr_mutex);
+	return rc;
+}
+
+static DEVICE_ATTR_RW(driver_override);
+
 #ifdef CONFIG_AP_DEBUG
 static ssize_t states_show(struct device *dev,
 			   struct device_attribute *attr, char *buf)
@@ -825,6 +883,7 @@ static struct attribute *ap_queue_dev_attrs[] = {
 	&dev_attr_config.attr,
 	&dev_attr_chkstop.attr,
 	&dev_attr_ap_functions.attr,
+	&dev_attr_driver_override.attr,
 #ifdef CONFIG_AP_DEBUG
 	&dev_attr_states.attr,
 	&dev_attr_last_err_rc.attr,
@@ -902,9 +961,12 @@ static ssize_t se_bind_store(struct device *dev,
 		__ap_flush_queue(aq);
 		aq->rapq_fbit = 1;
 		_ap_queue_init_state(aq);
-		rc = count;
-		goto out;
+		spin_unlock_bh(&aq->lock);
+		return count;
 	}
+
+	/* lock this ap to have fetch and update in an atomic way */
+	spin_lock_bh(&aq->lock);
 
 	/* Bind. Check current SE bind state */
 	status = ap_test_queue(aq->qid, 1, &hwinfo);
@@ -912,24 +974,24 @@ static ssize_t se_bind_store(struct device *dev,
 		AP_DBF_WARN("%s RC 0x%02x on tapq(0x%02x.%04x)\n",
 			    __func__, status.response_code,
 			    AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
-		return -EIO;
+		rc = -EIO;
+		goto error;
 	}
 
 	/* Update BS state */
-	spin_lock_bh(&aq->lock);
 	aq->se_bstate = hwinfo.bs;
 	if (hwinfo.bs != AP_BS_Q_AVAIL_FOR_BINDING) {
 		AP_DBF_WARN("%s bind attempt with bs %d on queue 0x%02x.%04x\n",
 			    __func__, hwinfo.bs,
 			    AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
 		rc = -EINVAL;
-		goto out;
+		goto error;
 	}
 
 	/* Check SM state */
 	if (aq->sm_state < AP_SM_STATE_IDLE) {
 		rc = -EBUSY;
-		goto out;
+		goto error;
 	}
 
 	/* invoke BAPQ */
@@ -939,7 +1001,7 @@ static ssize_t se_bind_store(struct device *dev,
 			    __func__, status.response_code,
 			    AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
 		rc = -EIO;
-		goto out;
+		goto error;
 	}
 	aq->assoc_idx = ASSOC_IDX_INVALID;
 
@@ -950,7 +1012,7 @@ static ssize_t se_bind_store(struct device *dev,
 			    __func__, status.response_code,
 			    AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
 		rc = -EIO;
-		goto out;
+		goto error;
 	}
 	aq->se_bstate = hwinfo.bs;
 	if (!(hwinfo.bs == AP_BS_Q_USABLE ||
@@ -959,15 +1021,19 @@ static ssize_t se_bind_store(struct device *dev,
 			    __func__, hwinfo.bs,
 			    AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
 		rc = -EIO;
-		goto out;
+		goto error;
 	}
 
 	/* SE bind was successful */
+	spin_unlock_bh(&aq->lock);
+
 	AP_DBF_INFO("%s bapq(0x%02x.%04x) success\n", __func__,
 		    AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
-	rc = count;
+	ap_send_se_bind_uevent(&aq->ap_dev);
 
-out:
+	return count;
+
+error:
 	spin_unlock_bh(&aq->lock);
 	return rc;
 }
@@ -1033,15 +1099,18 @@ static ssize_t se_associate_store(struct device *dev,
 	if (value >= ASSOC_IDX_INVALID)
 		return -EINVAL;
 
+	/* lock this ap to have fetch and update in an atomic way */
+	spin_lock_bh(&aq->lock);
+
 	/* check current SE bind state */
 	status = ap_test_queue(aq->qid, 1, &hwinfo);
 	if (status.response_code) {
 		AP_DBF_WARN("%s RC 0x%02x on tapq(0x%02x.%04x)\n",
 			    __func__, status.response_code,
 			    AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
-		return -EIO;
+		rc = -EIO;
+		goto out;
 	}
-	spin_lock_bh(&aq->lock);
 	aq->se_bstate = hwinfo.bs;
 	if (hwinfo.bs != AP_BS_Q_USABLE_NO_SECURE_KEY) {
 		AP_DBF_WARN("%s association attempt with bs %d on queue 0x%02x.%04x\n",
@@ -1065,16 +1134,15 @@ static ssize_t se_associate_store(struct device *dev,
 		aq->sm_state = AP_SM_STATE_ASSOC_WAIT;
 		aq->assoc_idx = value;
 		ap_wait(ap_sm_event(aq, AP_SM_EVENT_POLL));
+		rc = count;
 		break;
 	default:
 		AP_DBF_WARN("%s RC 0x%02x on aapq(0x%02x.%04x)\n",
 			    __func__, status.response_code,
 			    AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
 		rc = -EIO;
-		goto out;
+		break;
 	}
-
-	rc = count;
 
 out:
 	spin_unlock_bh(&aq->lock);
@@ -1113,7 +1181,7 @@ struct ap_queue *ap_queue_create(ap_qid_t qid, struct ap_card *ac)
 {
 	struct ap_queue *aq;
 
-	aq = kzalloc(sizeof(*aq), GFP_KERNEL);
+	aq = kzalloc_obj(*aq);
 	if (!aq)
 		return NULL;
 	aq->card = ac;
@@ -1289,7 +1357,7 @@ void ap_queue_prepare_remove(struct ap_queue *aq)
 	/* move queue device state to SHUTDOWN in progress */
 	aq->dev_state = AP_DEV_STATE_SHUTDOWN;
 	spin_unlock_bh(&aq->lock);
-	del_timer_sync(&aq->timeout);
+	timer_delete_sync(&aq->timeout);
 }
 
 void ap_queue_remove(struct ap_queue *aq)

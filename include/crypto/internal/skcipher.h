@@ -56,15 +56,30 @@ struct crypto_lskcipher_spawn {
 
 struct skcipher_walk {
 	union {
+		/* Virtual address of the source. */
 		struct {
-			void *addr;
-		} virt;
-	} src, dst;
+			struct {
+				const void *const addr;
+			} virt;
+		} src;
 
-	struct scatter_walk in;
+		/* Private field for the API, do not use. */
+		struct scatter_walk in;
+	};
+
+	union {
+		/* Virtual address of the destination. */
+		struct {
+			struct {
+				void *const addr;
+			} virt;
+		} dst;
+
+		/* Private field for the API, do not use. */
+		struct scatter_walk out;
+	};
+
 	unsigned int nbytes;
-
-	struct scatter_walk out;
 	unsigned int total;
 
 	u8 *page;
@@ -197,13 +212,15 @@ int lskcipher_register_instance(struct crypto_template *tmpl,
 				struct lskcipher_instance *inst);
 
 int skcipher_walk_done(struct skcipher_walk *walk, int res);
-int skcipher_walk_virt(struct skcipher_walk *walk,
-		       struct skcipher_request *req,
+int skcipher_walk_virt(struct skcipher_walk *__restrict walk,
+		       struct skcipher_request *__restrict req,
 		       bool atomic);
-int skcipher_walk_aead_encrypt(struct skcipher_walk *walk,
-			       struct aead_request *req, bool atomic);
-int skcipher_walk_aead_decrypt(struct skcipher_walk *walk,
-			       struct aead_request *req, bool atomic);
+int skcipher_walk_aead_encrypt(struct skcipher_walk *__restrict walk,
+			       struct aead_request *__restrict req,
+			       bool atomic);
+int skcipher_walk_aead_decrypt(struct skcipher_walk *__restrict walk,
+			       struct aead_request *__restrict req,
+			       bool atomic);
 
 static inline void skcipher_walk_abort(struct skcipher_walk *walk)
 {
@@ -223,6 +240,13 @@ static inline void *crypto_lskcipher_ctx(struct crypto_lskcipher *tfm)
 static inline void *crypto_skcipher_ctx_dma(struct crypto_skcipher *tfm)
 {
 	return crypto_tfm_ctx_dma(&tfm->base);
+}
+
+static inline bool crypto_skcipher_tested(struct crypto_skcipher *tfm)
+{
+	struct crypto_tfm *tfm_base = crypto_skcipher_tfm(tfm);
+
+	return tfm_base->__crt_alg->cra_flags & CRYPTO_ALG_TESTED;
 }
 
 static inline void *skcipher_request_ctx(struct skcipher_request *req)

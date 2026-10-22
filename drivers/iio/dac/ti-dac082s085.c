@@ -14,7 +14,6 @@
 
 #include <linux/iio/iio.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
 
@@ -161,7 +160,7 @@ static const struct iio_chan_spec_ext_info ti_dac_ext_info[] = {
 	},
 	IIO_ENUM("powerdown_mode", IIO_SHARED_BY_TYPE, &ti_dac_powerdown_mode),
 	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE, &ti_dac_powerdown_mode),
-	{ },
+	{ }
 };
 
 #define TI_DAC_CHANNEL(chan) {					\

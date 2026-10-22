@@ -308,7 +308,6 @@ static void ad7949_disable_reg(void *reg)
 
 static int ad7949_spi_probe(struct spi_device *spi)
 {
-	u32 spi_ctrl_mask = spi->controller->bits_per_word_mask;
 	struct device *dev = &spi->dev;
 	const struct ad7949_adc_spec *spec;
 	struct ad7949_adc_chip *ad7949_adc;
@@ -317,10 +316,8 @@ static int ad7949_spi_probe(struct spi_device *spi)
 	int ret;
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(*ad7949_adc));
-	if (!indio_dev) {
-		dev_err(dev, "can not allocate iio device\n");
+	if (!indio_dev)
 		return -ENOMEM;
-	}
 
 	indio_dev->info = &ad7949_spi_info;
 	indio_dev->name = spi_get_device_id(spi)->name;
@@ -337,15 +334,15 @@ static int ad7949_spi_probe(struct spi_device *spi)
 	ad7949_adc->resolution = spec->resolution;
 
 	/* Set SPI bits per word */
-	if (spi_ctrl_mask & SPI_BPW_MASK(ad7949_adc->resolution)) {
+	if (spi_is_bpw_supported(spi, ad7949_adc->resolution)) {
 		spi->bits_per_word = ad7949_adc->resolution;
-	} else if (spi_ctrl_mask == SPI_BPW_MASK(16)) {
+	} else if (spi_is_bpw_supported(spi, 16)) {
 		spi->bits_per_word = 16;
-	} else if (spi_ctrl_mask == SPI_BPW_MASK(8)) {
+	} else if (spi_is_bpw_supported(spi, 8)) {
 		spi->bits_per_word = 8;
 	} else {
-		dev_err(dev, "unable to find common BPW with spi controller\n");
-		return -EINVAL;
+		return dev_err_probe(dev, -EINVAL,
+				     "unable to find common BPW with spi controller\n");
 	}
 
 	/* Setup internal voltage reference */
@@ -360,8 +357,8 @@ static int ad7949_spi_probe(struct spi_device *spi)
 		ad7949_adc->refsel = AD7949_CFG_VAL_REF_INT_4096;
 		break;
 	default:
-		dev_err(dev, "unsupported internal voltage reference\n");
-		return -EINVAL;
+		return dev_err_probe(dev, -EINVAL,
+				     "unsupported internal voltage reference\n");
 	}
 
 	/* Setup external voltage reference, buffered? */
@@ -385,10 +382,9 @@ static int ad7949_spi_probe(struct spi_device *spi)
 
 	if (ad7949_adc->refsel & AD7949_CFG_VAL_REF_EXTERNAL) {
 		ret = regulator_enable(ad7949_adc->vref);
-		if (ret < 0) {
-			dev_err(dev, "fail to enable regulator\n");
-			return ret;
-		}
+		if (ret < 0)
+			return dev_err_probe(dev, ret,
+					     "fail to enable regulator\n");
 
 		ret = devm_add_action_or_reset(dev, ad7949_disable_reg,
 					       ad7949_adc->vref);
@@ -399,16 +395,10 @@ static int ad7949_spi_probe(struct spi_device *spi)
 	mutex_init(&ad7949_adc->lock);
 
 	ret = ad7949_spi_init(ad7949_adc);
-	if (ret) {
-		dev_err(dev, "fail to init this device: %d\n", ret);
-		return ret;
-	}
-
-	ret = devm_iio_device_register(dev, indio_dev);
 	if (ret)
-		dev_err(dev, "fail to register iio device: %d\n", ret);
+		return dev_err_probe(dev, ret, "fail to init this device\n");
 
-	return ret;
+	return devm_iio_device_register(dev, indio_dev);
 }
 
 static const struct of_device_id ad7949_spi_of_id[] = {

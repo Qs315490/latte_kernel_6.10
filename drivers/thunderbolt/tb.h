@@ -308,7 +308,7 @@ struct tb_port {
  * struct usb4_port - USB4 port device
  * @dev: Device for the port
  * @port: Pointer to the lane 0 adapter
- * @can_offline: Does the port have necessary platform support to moved
+ * @can_offline: Does the port have necessary platform support to move
  *		 it into offline mode and back
  * @offline: The port is currently in offline mode
  * @margining: Pointer to margining structure if enabled
@@ -324,7 +324,7 @@ struct usb4_port {
 };
 
 /**
- * tb_retimer: Thunderbolt retimer
+ * struct tb_retimer - Thunderbolt retimer
  * @dev: Device for the retimer
  * @tb: Pointer to the domain the retimer belongs to
  * @index: Retimer index facing the router USB4 port
@@ -355,7 +355,7 @@ struct tb_retimer {
  * struct tb_path_hop - routing information for a tb_path
  * @in_port: Ingress port of a switch
  * @out_port: Egress port of a switch where the packet is routed out
- *	      (must be on the same switch than @in_port)
+ *	      (must be on the same switch as @in_port)
  * @in_hop_index: HopID where the path configuration entry is placed in
  *		  the path config space of @in_port.
  * @in_counter_index: Used counter index (not used in the driver
@@ -419,9 +419,9 @@ enum tb_path_port {
  * @activated: Is the path active
  * @clear_fc: Clear all flow control from the path config space entries
  *	      when deactivating this path
- * @hops: Path hops
  * @path_length: How many hops the path uses
  * @alloc_hopid: Does this path consume port HopID
+ * @hops: Path hops
  *
  * A path consists of a number of hops (see &struct tb_path_hop). To
  * establish a PCIe tunnel two paths have to be created between the two
@@ -440,9 +440,10 @@ struct tb_path {
 	bool drop_packages;
 	bool activated;
 	bool clear_fc;
-	struct tb_path_hop *hops;
 	int path_length;
 	bool alloc_hopid;
+
+	struct tb_path_hop hops[] __counted_by(path_length);
 };
 
 /* HopIDs 0-7 are reserved by the Thunderbolt protocol */
@@ -499,9 +500,9 @@ struct tb_path {
  *		    performed. If this returns %-EOPNOTSUPP then the
  *		    native USB4 router operation is called.
  * @usb4_switch_nvm_authenticate_status: Optional callback that the CM
- *					 implementation can be used to
- *					 return status of USB4 NVM_AUTH
- *					 router operation.
+ *					 implementation can use to return
+ *					 status of USB4 NVM_AUTH router
+ *					 operation.
  */
 struct tb_cm_ops {
 	int (*driver_ready)(struct tb *tb);
@@ -552,13 +553,14 @@ static inline void *tb_priv(struct tb *tb)
 
 /**
  * tb_upstream_port() - return the upstream port of a switch
+ * @sw: Router
  *
  * Every switch has an upstream port (for the root switch it is the NHI).
  *
  * During switch alloc/init tb_upstream_port()->remote may be NULL, even for
  * non root switches (on the NHI port remote is always NULL).
  *
- * Return: Returns the upstream port of the switch.
+ * Return: Pointer to &struct tb_port.
  */
 static inline struct tb_port *tb_upstream_port(struct tb_switch *sw)
 {
@@ -569,8 +571,8 @@ static inline struct tb_port *tb_upstream_port(struct tb_switch *sw)
  * tb_is_upstream_port() - Is the port upstream facing
  * @port: Port to check
  *
- * Returns true if @port is upstream facing port. In case of dual link
- * ports both return true.
+ * Return: %true if @port is upstream facing port. In case of dual link
+ * ports, both return %true.
  */
 static inline bool tb_is_upstream_port(const struct tb_port *port)
 {
@@ -613,7 +615,7 @@ static inline const char *tb_width_name(enum tb_link_width width)
  * tb_port_has_remote() - Does the port have switch connected downstream
  * @port: Port to check
  *
- * Returns true only when the port is primary port and has remote set.
+ * Return: %true only when the port is primary port and has remote set.
  */
 static inline bool tb_port_has_remote(const struct tb_port *port)
 {
@@ -723,11 +725,11 @@ static inline int tb_port_write(struct tb_port *port, const void *buffer,
 			    length);
 }
 
-#define tb_err(tb, fmt, arg...) dev_err(&(tb)->nhi->pdev->dev, fmt, ## arg)
-#define tb_WARN(tb, fmt, arg...) dev_WARN(&(tb)->nhi->pdev->dev, fmt, ## arg)
-#define tb_warn(tb, fmt, arg...) dev_warn(&(tb)->nhi->pdev->dev, fmt, ## arg)
-#define tb_info(tb, fmt, arg...) dev_info(&(tb)->nhi->pdev->dev, fmt, ## arg)
-#define tb_dbg(tb, fmt, arg...) dev_dbg(&(tb)->nhi->pdev->dev, fmt, ## arg)
+#define tb_err(tb, fmt, arg...) dev_err((tb)->nhi->dev, fmt, ## arg)
+#define tb_WARN(tb, fmt, arg...) dev_WARN((tb)->nhi->dev, fmt, ## arg)
+#define tb_warn(tb, fmt, arg...) dev_warn((tb)->nhi->dev, fmt, ## arg)
+#define tb_info(tb, fmt, arg...) dev_info((tb)->nhi->dev, fmt, ## arg)
+#define tb_dbg(tb, fmt, arg...) dev_dbg((tb)->nhi->dev, fmt, ## arg)
 
 #define __TB_SW_PRINT(level, sw, fmt, arg...)           \
 	do {                                            \
@@ -791,6 +793,7 @@ int tb_domain_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 				       int transmit_path, int transmit_ring,
 				       int receive_path, int receive_ring);
 int tb_domain_disconnect_all_paths(struct tb *tb);
+int tb_domain_unregister_unplugged_xdomains(struct tb *tb);
 
 static inline struct tb *tb_domain_get(struct tb *tb)
 {
@@ -802,6 +805,19 @@ static inline struct tb *tb_domain_get(struct tb *tb)
 static inline void tb_domain_put(struct tb *tb)
 {
 	put_device(&tb->dev);
+}
+
+/**
+ * tb_domain_event() - Notify userspace about an event in domain
+ * @tb: Domain where event occurred
+ * @envp: Array of uevent environment strings (can be %NULL)
+ *
+ * This function provides a way to notify userspace about any events
+ * that take place in the domain.
+ */
+static inline void tb_domain_event(struct tb *tb, char *envp[])
+{
+	kobject_uevent_env(&tb->dev.kobj, KOBJ_CHANGE, envp);
 }
 
 struct tb_nvm *tb_nvm_alloc(struct device *dev);
@@ -892,8 +908,9 @@ static inline struct tb_switch *tb_switch_parent(struct tb_switch *sw)
  * tb_switch_downstream_port() - Return downstream facing port of parent router
  * @sw: Device router pointer
  *
- * Only call for device routers. Returns the downstream facing port of
- * the parent router.
+ * Call only for device routers.
+ *
+ * Return: Pointer to &struct tb_port or %NULL in case of failure.
  */
 static inline struct tb_port *tb_switch_downstream_port(struct tb_switch *sw)
 {
@@ -905,6 +922,8 @@ static inline struct tb_port *tb_switch_downstream_port(struct tb_switch *sw)
 /**
  * tb_switch_depth() - Returns depth of the connected router
  * @sw: Router
+ *
+ * Return: Router depth level as a number.
  */
 static inline int tb_switch_depth(const struct tb_switch *sw)
 {
@@ -997,6 +1016,9 @@ static inline bool tb_switch_is_tiger_lake(const struct tb_switch *sw)
  * is handling @sw this function can be called. It is valid to call this
  * after tb_switch_alloc() and tb_switch_configure() has been called
  * (latter only for SW CM case).
+ *
+ * Return: %true if switch is handled by ICM, %false if handled by
+ * software CM.
  */
 static inline bool tb_switch_is_icm(const struct tb_switch *sw)
 {
@@ -1024,6 +1046,8 @@ int tb_switch_tmu_configure(struct tb_switch *sw, enum tb_switch_tmu_mode mode);
  *
  * Checks if given router TMU mode is configured to @mode. Note the
  * router TMU might not be enabled to this mode.
+ *
+ * Return: %true if TMU mode is equal to @mode, %false otherwise.
  */
 static inline bool tb_switch_tmu_is_configured(const struct tb_switch *sw,
 					       enum tb_switch_tmu_mode mode)
@@ -1035,8 +1059,8 @@ static inline bool tb_switch_tmu_is_configured(const struct tb_switch *sw,
  * tb_switch_tmu_is_enabled() - Checks if the specified TMU mode is enabled
  * @sw: Router whose TMU mode to check
  *
- * Return true if hardware TMU configuration matches the requested
- * configuration (and is not %TB_SWITCH_TMU_MODE_OFF).
+ * Return: %true if hardware TMU configuration matches the requested
+ * configuration (and is not %TB_SWITCH_TMU_MODE_OFF), %false otherwise.
  */
 static inline bool tb_switch_tmu_is_enabled(const struct tb_switch *sw)
 {
@@ -1056,9 +1080,10 @@ int tb_switch_clx_disable(struct tb_switch *sw);
  * @clx: The CLx states to check for
  *
  * Checks if the specified CLx is enabled on the router upstream link.
- * Returns true if any of the given states is enabled.
  *
  * Not applicable for a host router.
+ *
+ * Return: %true if any of the given states is enabled, %false otherwise.
  */
 static inline bool tb_switch_clx_is_enabled(const struct tb_switch *sw,
 					    unsigned int clx)
@@ -1086,11 +1111,11 @@ struct tb_port *tb_next_port_on_path(struct tb_port *start, struct tb_port *end,
 				     struct tb_port *prev);
 
 /**
- * tb_port_path_direction_downstream() - Checks if path directed downstream
+ * tb_port_path_direction_downstream() - Checks if path is directed downstream
  * @src: Source adapter
  * @dst: Destination adapter
  *
- * Returns %true only if the specified path from source adapter (@src)
+ * Return: %true only if the specified path from source adapter (@src)
  * to destination adapter (@dst) is directed downstream.
  */
 static inline bool
@@ -1118,7 +1143,7 @@ static inline bool tb_port_use_credit_allocation(const struct tb_port *port)
 	     (p) = tb_next_port_on_path((src), (dst), (p)))
 
 /**
- * tb_for_each_upstream_port_on_path() - Iterate over each upstreamm port on path
+ * tb_for_each_upstream_port_on_path() - Iterate over each upstream port on path
  * @src: Source port
  * @dst: Destination port
  * @p: Port used as iterator
@@ -1219,10 +1244,11 @@ static inline int tb_route_length(u64 route)
 
 /**
  * tb_downstream_route() - get route to downstream switch
+ * @port: Port to check
  *
  * Port must not be the upstream port (otherwise a loop is created).
  *
- * Return: Returns a route to the switch behind @port.
+ * Return: Route to the switch behind @port.
  */
 static inline u64 tb_downstream_route(struct tb_port *port)
 {
@@ -1238,6 +1264,7 @@ struct tb_xdomain *tb_xdomain_alloc(struct tb *tb, struct device *parent,
 				    const uuid_t *remote_uuid);
 void tb_xdomain_add(struct tb_xdomain *xd);
 void tb_xdomain_remove(struct tb_xdomain *xd);
+void tb_xdomain_unregister(struct tb_xdomain *xd);
 struct tb_xdomain *tb_xdomain_find_by_link_depth(struct tb *tb, u8 link,
 						 u8 depth);
 
@@ -1250,7 +1277,7 @@ static inline struct tb_switch *tb_xdomain_parent(struct tb_xdomain *xd)
  * tb_xdomain_downstream_port() - Return downstream facing port of parent router
  * @xd: Xdomain pointer
  *
- * Returns the downstream port the XDomain is connected to.
+ * Return: Pointer to &struct tb_port or %NULL in case of failure.
  */
 static inline struct tb_port *tb_xdomain_downstream_port(struct tb_xdomain *xd)
 {
@@ -1278,7 +1305,7 @@ static inline struct tb_retimer *tb_to_retimer(struct device *dev)
  * usb4_switch_version() - Returns USB4 version of the router
  * @sw: Router to check
  *
- * Returns major version of USB4 router (%1 for v1, %2 for v2 and so
+ * Return: Major version of USB4 router (%1 for v1, %2 for v2 and so
  * on). Can be called to pre-USB4 router too and in that case returns %0.
  */
 static inline unsigned int usb4_switch_version(const struct tb_switch *sw)
@@ -1290,7 +1317,7 @@ static inline unsigned int usb4_switch_version(const struct tb_switch *sw)
  * tb_switch_is_usb4() - Is the switch USB4 compliant
  * @sw: Switch to check
  *
- * Returns true if the @sw is USB4 compliant router, false otherwise.
+ * Return: %true if the @sw is USB4 compliant router, %false otherwise.
  */
 static inline bool tb_switch_is_usb4(const struct tb_switch *sw)
 {
@@ -1304,7 +1331,7 @@ int usb4_switch_read_uid(struct tb_switch *sw, u64 *uid);
 int usb4_switch_drom_read(struct tb_switch *sw, unsigned int address, void *buf,
 			  size_t size);
 bool usb4_switch_lane_bonding_possible(struct tb_switch *sw);
-int usb4_switch_set_wake(struct tb_switch *sw, unsigned int flags);
+int usb4_switch_set_wake(struct tb_switch *sw, unsigned int flags, bool runtime);
 int usb4_switch_set_sleep(struct tb_switch *sw);
 int usb4_switch_nvm_sector_size(struct tb_switch *sw);
 int usb4_switch_nvm_read(struct tb_switch *sw, unsigned int address, void *buf,
@@ -1342,7 +1369,7 @@ int usb4_port_asym_set_link_width(struct tb_port *port, enum tb_link_width width
 int usb4_port_asym_start(struct tb_port *port);
 
 /**
- * enum tb_sb_target - Sideband transaction target
+ * enum usb4_sb_target - Sideband transaction target
  * @USB4_SB_TARGET_ROUTER: Target is the router itself
  * @USB4_SB_TARGET_PARTNER: Target is partner
  * @USB4_SB_TARGET_RETIMER: Target is retimer
@@ -1387,6 +1414,8 @@ enum usb4_margining_lane {
  * @voltage_time_offset: Offset for voltage / time for software margining
  * @optional_voltage_offset_range: Enable optional extended voltage range
  * @right_high: %false if left/low margin test is performed, %true if right/high
+ * @upper_eye: %true if margin test is done on upper eye, %false if done on
+ *	       lower eye
  * @time: %true if time margining is used instead of voltage
  */
 struct usb4_port_margining_params {
@@ -1452,6 +1481,7 @@ int usb4_dp_port_allocate_bandwidth(struct tb_port *port, int bw);
 int usb4_dp_port_requested_bandwidth(struct tb_port *port);
 
 int usb4_pci_port_set_ext_encapsulation(struct tb_port *port, bool enable);
+int usb4_pci_port_ltssm_state(struct tb_port *port);
 
 static inline bool tb_is_usb4_port_device(const struct device *dev)
 {
@@ -1468,6 +1498,7 @@ static inline struct usb4_port *tb_to_usb4_port_device(struct device *dev)
 struct usb4_port *usb4_port_device_add(struct tb_port *port);
 void usb4_port_device_remove(struct usb4_port *usb4);
 int usb4_port_device_resume(struct usb4_port *usb4);
+int usb4_port_index(const struct tb_switch *sw, const struct tb_port *port);
 
 static inline bool usb4_port_device_is_offline(const struct usb4_port *usb4)
 {
@@ -1526,6 +1557,14 @@ static inline void tb_service_debugfs_init(struct tb_service *svc) { }
 static inline void tb_service_debugfs_remove(struct tb_service *svc) { }
 static inline void tb_retimer_debugfs_init(struct tb_retimer *rt) { }
 static inline void tb_retimer_debugfs_remove(struct tb_retimer *rt) { }
+#endif
+
+#if IS_REACHABLE(CONFIG_CONFIGFS_FS)
+int tb_configfs_init(void);
+void tb_configfs_exit(void);
+#else
+static inline int tb_configfs_init(void) { return 0; }
+static inline void tb_configfs_exit(void) { }
 #endif
 
 #endif

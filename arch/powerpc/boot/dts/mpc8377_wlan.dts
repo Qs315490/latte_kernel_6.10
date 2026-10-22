@@ -10,6 +10,7 @@
 
 / {
 	compatible = "fsl,mpc8377wlan";
+	model = "fsl,mpc8377wlan";
 	#address-cells = <1>;
 	#size-cells = <1>;
 
@@ -40,7 +41,7 @@
 		};
 	};
 
-	memory {
+	memory@0 {
 		device_type = "memory";
 		reg = <0x00000000 0x20000000>;	// 512MB at 0
 	};
@@ -89,7 +90,7 @@
 		reg = <0xe0000000 0x00000200>;
 		bus-frequency = <0>;
 
-		wdt@200 {
+		watchdog@200 {
 			device_type = "watchdog";
 			compatible = "mpc83xx_wdt";
 			reg = <0x200 0x100>;

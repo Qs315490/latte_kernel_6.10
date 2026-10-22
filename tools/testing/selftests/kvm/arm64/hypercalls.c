@@ -21,22 +21,31 @@
 #define KVM_REG_ARM_STD_BMAP_BIT_MAX		0
 #define KVM_REG_ARM_STD_HYP_BMAP_BIT_MAX	0
 #define KVM_REG_ARM_VENDOR_HYP_BMAP_BIT_MAX	1
+#define KVM_REG_ARM_VENDOR_HYP_BMAP_2_BIT_MAX   1
+
+#define KVM_REG_ARM_STD_BMAP_RESET_VAL		FW_REG_ULIMIT_VAL(KVM_REG_ARM_STD_BMAP_BIT_MAX)
+#define KVM_REG_ARM_STD_HYP_BMAP_RESET_VAL	FW_REG_ULIMIT_VAL(KVM_REG_ARM_STD_HYP_BMAP_BIT_MAX)
+#define KVM_REG_ARM_VENDOR_HYP_BMAP_RESET_VAL	FW_REG_ULIMIT_VAL(KVM_REG_ARM_VENDOR_HYP_BMAP_BIT_MAX)
+#define KVM_REG_ARM_VENDOR_HYP_BMAP_2_RESET_VAL 0
 
 struct kvm_fw_reg_info {
-	uint64_t reg;		/* Register definition */
-	uint64_t max_feat_bit;	/* Bit that represents the upper limit of the feature-map */
+	u64 reg;		/* Register definition */
+	u64 max_feat_bit;	/* Bit that represents the upper limit of the feature-map */
+	u64 reset_val;	/* Reset value for the register */
 };
 
 #define FW_REG_INFO(r)			\
 	{					\
 		.reg = r,			\
 		.max_feat_bit = r##_BIT_MAX,	\
+		.reset_val = r##_RESET_VAL	\
 	}
 
 static const struct kvm_fw_reg_info fw_reg_info[] = {
 	FW_REG_INFO(KVM_REG_ARM_STD_BMAP),
 	FW_REG_INFO(KVM_REG_ARM_STD_HYP_BMAP),
 	FW_REG_INFO(KVM_REG_ARM_VENDOR_HYP_BMAP),
+	FW_REG_INFO(KVM_REG_ARM_VENDOR_HYP_BMAP_2),
 };
 
 enum test_stage {
@@ -50,8 +59,8 @@ enum test_stage {
 static int stage = TEST_STAGE_REG_IFACE;
 
 struct test_hvc_info {
-	uint32_t func_id;
-	uint64_t arg1;
+	u32 func_id;
+	u64 arg1;
 };
 
 #define TEST_HVC_INFO(f, a1)	\
@@ -99,7 +108,7 @@ static void guest_test_hvc(const struct test_hvc_info *hc_info)
 
 	for (i = 0; i < hvc_info_arr_sz; i++, hc_info++) {
 		memset(&res, 0, sizeof(res));
-		smccc_hvc(hc_info->func_id, hc_info->arg1, 0, 0, 0, 0, 0, 0, &res);
+		do_smccc(hc_info->func_id, hc_info->arg1, 0, 0, 0, 0, 0, 0, &res);
 
 		switch (stage) {
 		case TEST_STAGE_HVC_IFACE_FEAT_DISABLED:
@@ -143,9 +152,9 @@ static void guest_code(void)
 }
 
 struct st_time {
-	uint32_t rev;
-	uint32_t attr;
-	uint64_t st_time;
+	u32 rev;
+	u32 attr;
+	u64 st_time;
 };
 
 #define STEAL_TIME_SIZE		((sizeof(struct st_time) + 63) & ~63)
@@ -153,7 +162,7 @@ struct st_time {
 
 static void steal_time_init(struct kvm_vcpu *vcpu)
 {
-	uint64_t st_ipa = (ulong)ST_GPA_BASE;
+	u64 st_ipa = (ulong)ST_GPA_BASE;
 	unsigned int gpages;
 
 	gpages = vm_calc_num_guest_pages(VM_MODE_DEFAULT, STEAL_TIME_SIZE);
@@ -165,28 +174,45 @@ static void steal_time_init(struct kvm_vcpu *vcpu)
 
 static void test_fw_regs_before_vm_start(struct kvm_vcpu *vcpu)
 {
-	uint64_t val;
+	u64 val;
 	unsigned int i;
 	int ret;
 
 	for (i = 0; i < ARRAY_SIZE(fw_reg_info); i++) {
 		const struct kvm_fw_reg_info *reg_info = &fw_reg_info[i];
+		u64 set_val;
 
-		/* First 'read' should be an upper limit of the features supported */
+		/* First 'read' should be the reset value for the reg  */
 		val = vcpu_get_reg(vcpu, reg_info->reg);
-		TEST_ASSERT(val == FW_REG_ULIMIT_VAL(reg_info->max_feat_bit),
-			"Expected all the features to be set for reg: 0x%lx; expected: 0x%lx; read: 0x%lx",
-			reg_info->reg, FW_REG_ULIMIT_VAL(reg_info->max_feat_bit), val);
+		TEST_ASSERT(val == reg_info->reset_val,
+			"Unexpected reset value for reg: 0x%lx; expected: 0x%lx; read: 0x%lx",
+			reg_info->reg, reg_info->reset_val, val);
 
-		/* Test a 'write' by disabling all the features of the register map */
-		ret = __vcpu_set_reg(vcpu, reg_info->reg, 0);
+		if (reg_info->reset_val)
+			set_val = 0;
+		else
+			set_val = FW_REG_ULIMIT_VAL(reg_info->max_feat_bit);
+
+		ret = __vcpu_set_reg(vcpu, reg_info->reg, set_val);
 		TEST_ASSERT(ret == 0,
+			"Failed to %s all the features of reg: 0x%lx; ret: %d",
+			(set_val ? "set" : "clear"), reg_info->reg, errno);
+
+		val = vcpu_get_reg(vcpu, reg_info->reg);
+		TEST_ASSERT(val == set_val,
+			"Expected all the features to be %s for reg: 0x%lx",
+			(set_val ? "set" : "cleared"), reg_info->reg);
+
+		/*
+		 * If the reg has been set, clear it as test_fw_regs_after_vm_start()
+		 * expects it to be cleared.
+		 */
+		if (set_val) {
+			ret = __vcpu_set_reg(vcpu, reg_info->reg, 0);
+			TEST_ASSERT(ret == 0,
 			"Failed to clear all the features of reg: 0x%lx; ret: %d",
 			reg_info->reg, errno);
-
-		val = vcpu_get_reg(vcpu, reg_info->reg);
-		TEST_ASSERT(val == 0,
-			"Expected all the features to be cleared for reg: 0x%lx", reg_info->reg);
+		}
 
 		/*
 		 * Test enabling a feature that's not supported.
@@ -203,7 +229,7 @@ static void test_fw_regs_before_vm_start(struct kvm_vcpu *vcpu)
 
 static void test_fw_regs_after_vm_start(struct kvm_vcpu *vcpu)
 {
-	uint64_t val;
+	u64 val;
 	unsigned int i;
 	int ret;
 

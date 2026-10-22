@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2022, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022,2025, Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2023, Linaro Limited
  */
 
@@ -34,7 +34,6 @@
 		.io_reg = REG_BASE + 0x4 + REG_SIZE * id,		\
 		.intr_cfg_reg = REG_BASE + 0x8 + REG_SIZE * id,		\
 		.intr_status_reg = REG_BASE + 0xc + REG_SIZE * id,	\
-		.intr_target_reg = REG_BASE + 0x8 + REG_SIZE * id,	\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
@@ -63,7 +62,6 @@
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -88,7 +86,6 @@
 		.io_reg = offset + 0x4,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
 		.drv_bit = 0,				\
@@ -102,12 +99,6 @@
 		.intr_polarity_bit = -1,		\
 		.intr_detection_bit = -1,		\
 		.intr_detection_width = -1,		\
-	}
-
-#define QUP_I3C(qup_mode, qup_offset)			\
-	{						\
-		.mode = qup_mode,			\
-		.offset = qup_offset,			\
 	}
 
 #define QUP_I3C_6_MODE_OFFSET	0xAF000
@@ -467,6 +458,7 @@ enum sa8775p_functions {
 	msm_mux_edp2_lcd,
 	msm_mux_edp3_hot,
 	msm_mux_edp3_lcd,
+	msm_mux_egpio,
 	msm_mux_emac0_mcg0,
 	msm_mux_emac0_mcg1,
 	msm_mux_emac0_mcg2,
@@ -742,6 +734,13 @@ static const char * const edp3_hot_groups[] = {
 
 static const char * const edp3_lcd_groups[] = {
 	"gpio49",
+};
+
+static const char *const egpio_groups[] = {
+	"gpio126", "gpio127", "gpio128", "gpio129", "gpio130", "gpio131",
+	"gpio132", "gpio133", "gpio134", "gpio135", "gpio136", "gpio137",
+	"gpio138", "gpio139", "gpio140", "gpio141", "gpio142", "gpio143",
+	"gpio144", "gpio145", "gpio146", "gpio147", "gpio148",
 };
 
 static const char * const emac0_mcg0_groups[] = {
@@ -1173,7 +1172,7 @@ static const char * const vsense_trigger_groups[] = {
 };
 
 static const struct pinfunction sa8775p_functions[] = {
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(atest_char),
 	MSM_PIN_FUNCTION(atest_usb2),
 	MSM_PIN_FUNCTION(audio_ref),
@@ -1209,6 +1208,7 @@ static const struct pinfunction sa8775p_functions[] = {
 	MSM_PIN_FUNCTION(edp2_lcd),
 	MSM_PIN_FUNCTION(edp3_hot),
 	MSM_PIN_FUNCTION(edp3_lcd),
+	MSM_GPIO_PIN_FUNCTION(egpio),
 	MSM_PIN_FUNCTION(emac0_mcg0),
 	MSM_PIN_FUNCTION(emac0_mcg1),
 	MSM_PIN_FUNCTION(emac0_mcg2),
@@ -1454,29 +1454,29 @@ static const struct msm_pingroup sa8775p_groups[] = {
 	[123] = PINGROUP(123, hs2_mi2s, phase_flag, _, _, _, _, _, _, _),
 	[124] = PINGROUP(124, hs2_mi2s, phase_flag, _, _, _, _, _, _, _),
 	[125] = PINGROUP(125, hs2_mi2s, phase_flag, _, _, _, _, _, _, _),
-	[126] = PINGROUP(126, _, _, _, _, _, _, _, _, _),
-	[127] = PINGROUP(127, _, _, _, _, _, _, _, _, _),
-	[128] = PINGROUP(128, _, _, _, _, _, _, _, _, _),
-	[129] = PINGROUP(129, _, _, _, _, _, _, _, _, _),
-	[130] = PINGROUP(130, _, _, _, _, _, _, _, _, _),
-	[131] = PINGROUP(131, _, _, _, _, _, _, _, _, _),
-	[132] = PINGROUP(132, _, _, _, _, _, _, _, _, _),
-	[133] = PINGROUP(133, _, _, _, _, _, _, _, _, _),
-	[134] = PINGROUP(134, _, _, _, _, _, _, _, _, _),
-	[135] = PINGROUP(135, _, _, _, _, _, _, _, _, _),
-	[136] = PINGROUP(136, _, _, _, _, _, _, _, _, _),
-	[137] = PINGROUP(137, _, _, _, _, _, _, _, _, _),
-	[138] = PINGROUP(138, _, _, _, _, _, _, _, _, _),
-	[139] = PINGROUP(139, _, _, _, _, _, _, _, _, _),
-	[140] = PINGROUP(140, _, _, _, _, _, _, _, _, _),
-	[141] = PINGROUP(141, _, _, _, _, _, _, _, _, _),
-	[142] = PINGROUP(142, _, _, _, _, _, _, _, _, _),
-	[143] = PINGROUP(143, _, _, _, _, _, _, _, _, _),
-	[144] = PINGROUP(144, dbg_out, _, _, _, _, _, _, _, _),
-	[145] = PINGROUP(145, _, _, _, _, _, _, _, _, _),
-	[146] = PINGROUP(146, _, _, _, _, _, _, _, _, _),
-	[147] = PINGROUP(147, _, _, _, _, _, _, _, _, _),
-	[148] = PINGROUP(148, _, _, _, _, _, _, _, _, _),
+	[126] = PINGROUP(126, _, _, _, _, _, _, _, _, egpio),
+	[127] = PINGROUP(127, _, _, _, _, _, _, _, _, egpio),
+	[128] = PINGROUP(128, _, _, _, _, _, _, _, _, egpio),
+	[129] = PINGROUP(129, _, _, _, _, _, _, _, _, egpio),
+	[130] = PINGROUP(130, _, _, _, _, _, _, _, _, egpio),
+	[131] = PINGROUP(131, _, _, _, _, _, _, _, _, egpio),
+	[132] = PINGROUP(132, _, _, _, _, _, _, _, _, egpio),
+	[133] = PINGROUP(133, _, _, _, _, _, _, _, _, egpio),
+	[134] = PINGROUP(134, _, _, _, _, _, _, _, _, egpio),
+	[135] = PINGROUP(135, _, _, _, _, _, _, _, _, egpio),
+	[136] = PINGROUP(136, _, _, _, _, _, _, _, _, egpio),
+	[137] = PINGROUP(137, _, _, _, _, _, _, _, _, egpio),
+	[138] = PINGROUP(138, _, _, _, _, _, _, _, _, egpio),
+	[139] = PINGROUP(139, _, _, _, _, _, _, _, _, egpio),
+	[140] = PINGROUP(140, _, _, _, _, _, _, _, _, egpio),
+	[141] = PINGROUP(141, _, _, _, _, _, _, _, _, egpio),
+	[142] = PINGROUP(142, _, _, _, _, _, _, _, _, egpio),
+	[143] = PINGROUP(143, _, _, _, _, _, _, _, _, egpio),
+	[144] = PINGROUP(144, dbg_out, _, _, _, _, _, _, _, egpio),
+	[145] = PINGROUP(145, _, _, _, _, _, _, _, _, egpio),
+	[146] = PINGROUP(146, _, _, _, _, _, _, _, _, egpio),
+	[147] = PINGROUP(147, _, _, _, _, _, _, _, _, egpio),
+	[148] = PINGROUP(148, _, _, _, _, _, _, _, _, egpio),
 	[149] = UFS_RESET(ufs_reset, 0x1a2000),
 	[150] = SDC_QDSD_PINGROUP(sdc1_rclk, 0x199000, 15, 0),
 	[151] = SDC_QDSD_PINGROUP(sdc1_clk, 0x199000, 13, 6),
@@ -1511,6 +1511,7 @@ static const struct msm_pinctrl_soc_data sa8775p_pinctrl = {
 	.ngpios = 150,
 	.wakeirq_map = sa8775p_pdc_map,
 	.nwakeirq_map = ARRAY_SIZE(sa8775p_pdc_map),
+	.egpio_func = 9,
 };
 
 static int sa8775p_pinctrl_probe(struct platform_device *pdev)
@@ -1530,7 +1531,6 @@ static struct platform_driver sa8775p_pinctrl_driver = {
 		.of_match_table = sa8775p_pinctrl_of_match,
 	},
 	.probe = sa8775p_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init sa8775p_pinctrl_init(void)

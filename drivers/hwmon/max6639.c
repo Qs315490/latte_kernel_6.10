@@ -16,9 +16,7 @@
 #include <linux/jiffies.h>
 #include <linux/i2c.h>
 #include <linux/hwmon.h>
-#include <linux/hwmon-sysfs.h>
 #include <linux/err.h>
-#include <linux/mutex.h>
 #include <linux/regmap.h>
 #include <linux/util_macros.h>
 
@@ -75,11 +73,11 @@ static const unsigned int freq_table[] = { 20, 33, 50, 100, 5000, 8333, 12500,
  */
 struct max6639_data {
 	struct regmap *regmap;
-	struct mutex update_lock;
 
 	/* Register values initialized only once */
 	u8 ppr[MAX6639_NUM_CHANNELS];	/* Pulses per rotation 0..3 for 1..4 ppr */
 	u8 rpm_range[MAX6639_NUM_CHANNELS]; /* Index in above rpm_ranges table */
+	u32 target_rpm[MAX6639_NUM_CHANNELS];
 
 	/* Optional regulator for FAN supply */
 	struct regulator *reg;
@@ -234,7 +232,7 @@ static int max6639_read_fan(struct device *dev, u32 attr, int channel,
 static int max6639_set_ppr(struct max6639_data *data, int channel, u8 ppr)
 {
 	/* Decrement the PPR value and shift left by 6 to match the register format */
-	return regmap_write(data->regmap, MAX6639_REG_FAN_PPR(channel), ppr-- << 6);
+	return regmap_write(data->regmap, MAX6639_REG_FAN_PPR(channel), --ppr << 6);
 }
 
 static int max6639_write_fan(struct device *dev, u32 attr, int channel,
@@ -248,16 +246,11 @@ static int max6639_write_fan(struct device *dev, u32 attr, int channel,
 		if (val <= 0 || val > 4)
 			return -EINVAL;
 
-		mutex_lock(&data->update_lock);
 		/* Set Fan pulse per revolution */
 		err = max6639_set_ppr(data, channel, val);
-		if (err < 0) {
-			mutex_unlock(&data->update_lock);
+		if (err < 0)
 			return err;
-		}
 		data->ppr[channel] = val;
-
-		mutex_unlock(&data->update_lock);
 		return 0;
 	default:
 		return -EOPNOTSUPP;
@@ -319,21 +312,17 @@ static int max6639_write_pwm(struct device *dev, u32 attr, int channel,
 	case hwmon_pwm_input:
 		if (val < 0 || val > 255)
 			return -EINVAL;
-		err = regmap_write(data->regmap, MAX6639_REG_TARGTDUTY(channel),
-				   val * 120 / 255);
-		return err;
+		return regmap_write(data->regmap, MAX6639_REG_TARGTDUTY(channel),
+				    val * 120 / 255);
 	case hwmon_pwm_freq:
 		val = clamp_val(val, 0, 25000);
 
 		i = find_closest(val, freq_table, ARRAY_SIZE(freq_table));
 
-		mutex_lock(&data->update_lock);
 		err = regmap_update_bits(data->regmap, MAX6639_REG_FAN_CONFIG3(channel),
 					 MAX6639_FAN_CONFIG3_FREQ_MASK, i);
-		if (err < 0) {
-			mutex_unlock(&data->update_lock);
+		if (err < 0)
 			return err;
-		}
 
 		if (i >> 2)
 			err = regmap_set_bits(data->regmap, MAX6639_REG_GCONFIG,
@@ -342,7 +331,6 @@ static int max6639_write_pwm(struct device *dev, u32 attr, int channel,
 			err = regmap_clear_bits(data->regmap, MAX6639_REG_GCONFIG,
 						MAX6639_GCONFIG_PWM_FREQ_HI);
 
-		mutex_unlock(&data->update_lock);
 		return err;
 	default:
 		return -EOPNOTSUPP;
@@ -536,8 +524,8 @@ static int max6639_probe_child_from_dt(struct i2c_client *client,
 
 {
 	struct device *dev = &client->dev;
-	u32 i;
-	int err, val;
+	u32 i, val;
+	int err;
 
 	err = of_property_read_u32(child, "reg", &i);
 	if (err) {
@@ -552,8 +540,8 @@ static int max6639_probe_child_from_dt(struct i2c_client *client,
 
 	err = of_property_read_u32(child, "pulses-per-revolution", &val);
 	if (!err) {
-		if (val < 1 || val > 5) {
-			dev_err(dev, "invalid pulses-per-revolution %d of %pOFn\n", val, child);
+		if (val < 1 || val > 4) {
+			dev_err(dev, "invalid pulses-per-revolution %u of %pOFn\n", val, child);
 			return -EINVAL;
 		}
 		data->ppr[i] = val;
@@ -563,6 +551,10 @@ static int max6639_probe_child_from_dt(struct i2c_client *client,
 	if (!err)
 		data->rpm_range[i] = rpm_range_to_reg(val);
 
+	err = of_property_read_u32(child, "target-rpm", &val);
+	if (!err)
+		data->target_rpm[i] = val;
+
 	return 0;
 }
 
@@ -571,8 +563,8 @@ static int max6639_init_client(struct i2c_client *client,
 {
 	struct device *dev = &client->dev;
 	const struct device_node *np = dev->of_node;
-	struct device_node *child;
 	int i, err;
+	u8 target_duty;
 
 	/* Reset chip to default values, see below for GCONFIG setup */
 	err = regmap_write(data->regmap, MAX6639_REG_GCONFIG, MAX6639_GCONFIG_POR);
@@ -586,16 +578,16 @@ static int max6639_init_client(struct i2c_client *client,
 	/* default: 4000 RPM */
 	data->rpm_range[0] = 1;
 	data->rpm_range[1] = 1;
+	data->target_rpm[0] = 4000;
+	data->target_rpm[1] = 4000;
 
-	for_each_child_of_node(np, child) {
+	for_each_child_of_node_scoped(np, child) {
 		if (strcmp(child->name, "fan"))
 			continue;
 
 		err = max6639_probe_child_from_dt(client, child, data);
-		if (err) {
-			of_node_put(child);
+		if (err)
 			return err;
-		}
 	}
 
 	for (i = 0; i < MAX6639_NUM_CHANNELS; i++) {
@@ -615,7 +607,7 @@ static int max6639_init_client(struct i2c_client *client,
 			return err;
 
 		/* Fans PWM polarity high by default */
-		err = regmap_write(data->regmap, MAX6639_REG_FAN_CONFIG2a(i), 0x00);
+		err = regmap_write(data->regmap, MAX6639_REG_FAN_CONFIG2a(i), 0x02);
 		if (err)
 			return err;
 
@@ -639,8 +631,12 @@ static int max6639_init_client(struct i2c_client *client,
 		if (err)
 			return err;
 
-		/* PWM 120/120 (i.e. 100%) */
-		err = regmap_write(data->regmap, MAX6639_REG_TARGTDUTY(i), 120);
+		/* Set PWM based on target RPM if specified */
+		if (data->target_rpm[i] >  rpm_ranges[data->rpm_range[i]])
+			data->target_rpm[i] = rpm_ranges[data->rpm_range[i]];
+
+		target_duty = 120 * data->target_rpm[i] / rpm_ranges[data->rpm_range[i]];
+		err = regmap_write(data->regmap, MAX6639_REG_TARGTDUTY(i), target_duty);
 		if (err)
 			return err;
 	}
@@ -741,8 +737,6 @@ static int max6639_probe(struct i2c_client *client)
 		}
 	}
 
-	mutex_init(&data->update_lock);
-
 	/* Initialize the max6639 chip */
 	err = max6639_init_client(client, data);
 	if (err < 0)
@@ -784,7 +778,7 @@ static int max6639_resume(struct device *dev)
 }
 
 static const struct i2c_device_id max6639_id[] = {
-	{"max6639"},
+	{ .name = "max6639" },
 	{ }
 };
 

@@ -59,7 +59,8 @@ static int memcpy_fw(struct xe_gsc *gsc)
 
 	xe_map_memcpy_from(xe, storage, &gsc->fw.bo->vmap, 0, fw_size);
 	xe_map_memcpy_to(xe, &gsc->private->vmap, 0, storage, fw_size);
-	xe_map_memset(xe, &gsc->private->vmap, fw_size, 0, gsc->private->size - fw_size);
+	xe_map_memset(xe, &gsc->private->vmap, fw_size, 0,
+		      xe_bo_size(gsc->private) - fw_size);
 
 	kfree(storage);
 
@@ -82,7 +83,8 @@ static int emit_gsc_upload(struct xe_gsc *gsc)
 	bb->cs[bb->len++] = GSC_FW_LOAD;
 	bb->cs[bb->len++] = lower_32_bits(offset);
 	bb->cs[bb->len++] = upper_32_bits(offset);
-	bb->cs[bb->len++] = (gsc->private->size / SZ_4K) | GSC_FW_LOAD_LIMIT_VALID;
+	bb->cs[bb->len++] = (xe_bo_size(gsc->private) / SZ_4K) |
+		GSC_FW_LOAD_LIMIT_VALID;
 
 	job = xe_bb_create_job(gsc->q, bb);
 	if (IS_ERR(job)) {
@@ -134,10 +136,10 @@ static int query_compatibility_version(struct xe_gsc *gsc)
 	u64 ggtt_offset;
 	int err;
 
-	bo = xe_bo_create_pin_map(xe, tile, NULL, GSC_VER_PKT_SZ * 2,
-				  ttm_bo_type_kernel,
-				  XE_BO_FLAG_SYSTEM |
-				  XE_BO_FLAG_GGTT);
+	bo = xe_bo_create_pin_map_novm(xe, tile, GSC_VER_PKT_SZ * 2,
+				       ttm_bo_type_kernel,
+				       XE_BO_FLAG_SYSTEM |
+				       XE_BO_FLAG_GGTT, false);
 	if (IS_ERR(bo)) {
 		xe_gt_err(gt, "failed to allocate bo for GSC version query\n");
 		return PTR_ERR(bo);
@@ -164,7 +166,7 @@ static int query_compatibility_version(struct xe_gsc *gsc)
 				     &rd_offset);
 	if (err) {
 		xe_gt_err(gt, "HuC: invalid GSC reply for version query (err=%d)\n", err);
-		return err;
+		goto out_bo;
 	}
 
 	compat->major = version_query_rd(xe, &bo->vmap, rd_offset, proj_major);
@@ -264,7 +266,7 @@ static int gsc_upload_and_init(struct xe_gsc *gsc)
 	unsigned int fw_ref;
 	int ret;
 
-	if (XE_WA(tile->primary_gt, 14018094691)) {
+	if (tile->primary_gt && XE_GT_WA(tile->primary_gt, 14018094691)) {
 		fw_ref = xe_force_wake_get(gt_to_fw(tile->primary_gt), XE_FORCEWAKE_ALL);
 
 		/*
@@ -279,7 +281,7 @@ static int gsc_upload_and_init(struct xe_gsc *gsc)
 
 	ret = gsc_upload(gsc);
 
-	if (XE_WA(tile->primary_gt, 14018094691))
+	if (tile->primary_gt && XE_GT_WA(tile->primary_gt, 14018094691))
 		xe_force_wake_put(gt_to_fw(tile->primary_gt), fw_ref);
 
 	if (ret)
@@ -350,7 +352,6 @@ static void gsc_work(struct work_struct *work)
 	struct xe_gsc *gsc = container_of(work, typeof(*gsc), work);
 	struct xe_gt *gt = gsc_to_gt(gsc);
 	struct xe_device *xe = gt_to_xe(gt);
-	unsigned int fw_ref;
 	u32 actions;
 	int ret;
 
@@ -359,13 +360,12 @@ static void gsc_work(struct work_struct *work)
 	gsc->work_actions = 0;
 	spin_unlock_irq(&gsc->lock);
 
-	xe_pm_runtime_get(xe);
-	fw_ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GSC);
+	guard(xe_pm_runtime)(xe);
+	CLASS(xe_force_wake, fw_ref)(gt_to_fw(gt), XE_FW_GSC);
 
 	if (actions & GSC_ACTION_ER_COMPLETE) {
-		ret = gsc_er_complete(gt);
-		if (ret)
-			goto out;
+		if (gsc_er_complete(gt))
+			return;
 	}
 
 	if (actions & GSC_ACTION_FW_LOAD) {
@@ -378,10 +378,6 @@ static void gsc_work(struct work_struct *work)
 
 	if (actions & GSC_ACTION_SW_PROXY)
 		xe_gsc_proxy_request_handler(gsc);
-
-out:
-	xe_force_wake_put(gt_to_fw(gt), fw_ref);
-	xe_pm_runtime_put(xe);
 }
 
 void xe_gsc_hwe_irq_handler(struct xe_hw_engine *hwe, u16 intr_vec)
@@ -418,14 +414,15 @@ int xe_gsc_init(struct xe_gsc *gsc)
 	}
 
 	/*
-	 * Some platforms can have GuC but not GSC. That would cause
-	 * xe_uc_fw_init(gsc) to return a "not supported" failure code and abort
-	 * all firmware loading. So check for GSC being enabled before
-	 * propagating the failure back up. That way the higher level will keep
-	 * going and load GuC as appropriate.
+	 * Starting from BMG the GSC is no longer needed for MC6 entry, so the
+	 * only missing features if the FW is lacking would be the content
+	 * protection ones. This is acceptable, so we allow the driver load to
+	 * continue if the GSC FW is missing.
 	 */
 	ret = xe_uc_fw_init(&gsc->fw);
 	if (!xe_uc_fw_is_enabled(&gsc->fw))
+		return 0;
+	else if (gt_to_xe(gt)->info.platform >= XE_BATTLEMAGE && !xe_uc_fw_is_available(&gsc->fw))
 		return 0;
 	else if (ret)
 		goto out;
@@ -485,8 +482,7 @@ int xe_gsc_init_post_hwconfig(struct xe_gsc *gsc)
 				 EXEC_QUEUE_FLAG_PERMANENT, 0);
 	if (IS_ERR(q)) {
 		xe_gt_err(gt, "Failed to create queue for GSC submission\n");
-		err = PTR_ERR(q);
-		goto out_bo;
+		return PTR_ERR(q);
 	}
 
 	wq = alloc_ordered_workqueue("gsc-ordered-wq", 0);
@@ -509,8 +505,6 @@ int xe_gsc_init_post_hwconfig(struct xe_gsc *gsc)
 
 out_q:
 	xe_exec_queue_put(q);
-out_bo:
-	xe_bo_unpin_map_no_vm(bo);
 	return err;
 }
 
@@ -555,13 +549,26 @@ void xe_gsc_wait_for_worker_completion(struct xe_gsc *gsc)
 		flush_work(&gsc->work);
 }
 
-/**
- * xe_gsc_remove() - Clean up the GSC structures before driver removal
- * @gsc: the GSC uC
- */
-void xe_gsc_remove(struct xe_gsc *gsc)
+void xe_gsc_stop_prepare(struct xe_gsc *gsc)
 {
-	xe_gsc_proxy_remove(gsc);
+	struct xe_gt *gt = gsc_to_gt(gsc);
+	int ret;
+
+	if (!xe_uc_fw_is_loadable(&gsc->fw) || xe_uc_fw_is_in_error_state(&gsc->fw))
+		return;
+
+	xe_force_wake_assert_held(gt_to_fw(gt), XE_FW_GSC);
+
+	/*
+	 * If the GSC FW load or the proxy init are interrupted, the only way
+	 * to recover it is to do an FLR and reload the GSC from scratch.
+	 * Therefore, let's wait for the init to complete before stopping
+	 * operations. The proxy init is the last step, so we can just wait on
+	 * that
+	 */
+	ret = xe_gsc_wait_for_proxy_init_done(gsc);
+	if (ret)
+		xe_gt_err(gt, "failed to wait for GSC init completion before uc stop\n");
 }
 
 /*
@@ -578,7 +585,7 @@ void xe_gsc_wa_14015076503(struct xe_gt *gt, bool prep)
 	u32 gs1_clr = prep ? 0 : HECI_H_GS1_ER_PREP;
 
 	/* WA only applies if the GSC is loaded */
-	if (!XE_WA(gt, 14015076503) || !gsc_fw_is_loaded(gt))
+	if (!XE_GT_WA(gt, 14015076503) || !gsc_fw_is_loaded(gt))
 		return;
 
 	xe_mmio_rmw32(&gt->mmio, HECI_H_GS1(MTL_GSC_HECI2_BASE), gs1_clr, gs1_set);
@@ -600,17 +607,16 @@ void xe_gsc_print_info(struct xe_gsc *gsc, struct drm_printer *p)
 {
 	struct xe_gt *gt = gsc_to_gt(gsc);
 	struct xe_mmio *mmio = &gt->mmio;
-	unsigned int fw_ref;
 
 	xe_uc_fw_print(&gsc->fw, p);
 
 	drm_printf(p, "\tfound security version %u\n", gsc->security_version);
 
-	if (!xe_uc_fw_is_enabled(&gsc->fw))
+	if (!xe_uc_fw_is_available(&gsc->fw))
 		return;
 
-	fw_ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GSC);
-	if (!fw_ref)
+	CLASS(xe_force_wake, fw_ref)(gt_to_fw(gt), XE_FW_GSC);
+	if (!fw_ref.domains)
 		return;
 
 	drm_printf(p, "\nHECI1 FWSTS: 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
@@ -620,6 +626,4 @@ void xe_gsc_print_info(struct xe_gsc *gsc, struct drm_printer *p)
 			xe_mmio_read32(mmio, HECI_FWSTS4(MTL_GSC_HECI1_BASE)),
 			xe_mmio_read32(mmio, HECI_FWSTS5(MTL_GSC_HECI1_BASE)),
 			xe_mmio_read32(mmio, HECI_FWSTS6(MTL_GSC_HECI1_BASE)));
-
-	xe_force_wake_put(gt_to_fw(gt), fw_ref);
 }

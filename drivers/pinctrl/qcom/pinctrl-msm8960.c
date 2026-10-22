@@ -974,7 +974,7 @@ static const struct pinfunction msm8960_functions[] = {
 	MSM_PIN_FUNCTION(gp_pdm_1b),
 	MSM_PIN_FUNCTION(gp_pdm_2a),
 	MSM_PIN_FUNCTION(gp_pdm_2b),
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(gsbi1),
 	MSM_PIN_FUNCTION(gsbi1_spi_cs1_n),
 	MSM_PIN_FUNCTION(gsbi1_spi_cs2a_n),
@@ -1239,6 +1239,7 @@ static const struct of_device_id msm8960_pinctrl_of_match[] = {
 	{ .compatible = "qcom,msm8960-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, msm8960_pinctrl_of_match);
 
 static struct platform_driver msm8960_pinctrl_driver = {
 	.driver = {
@@ -1246,7 +1247,6 @@ static struct platform_driver msm8960_pinctrl_driver = {
 		.of_match_table = msm8960_pinctrl_of_match,
 	},
 	.probe = msm8960_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init msm8960_pinctrl_init(void)
@@ -1264,4 +1264,3 @@ module_exit(msm8960_pinctrl_exit);
 MODULE_AUTHOR("Bjorn Andersson <bjorn.andersson@sonymobile.com>");
 MODULE_DESCRIPTION("Qualcomm MSM8960 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, msm8960_pinctrl_of_match);

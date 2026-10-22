@@ -548,7 +548,7 @@ static int igt_reset_fail_engine(void *arg)
 	struct intel_engine_cs *engine;
 	enum intel_engine_id id;
 
-	/* Check that we can recover from engine-reset failues */
+	/* Check that we can recover from engine-reset failures */
 
 	if (!intel_has_reset_engine(gt))
 		return 0;
@@ -904,7 +904,7 @@ static void active_engine(struct kthread_work *work)
 			arg->result = PTR_ERR(ce[count]);
 			pr_err("[%s] Create context #%ld failed: %d!\n",
 			       engine->name, count, arg->result);
-			while (--count)
+			while (count--)
 				intel_context_put(ce[count]);
 			return;
 		}
@@ -986,7 +986,7 @@ static int __igt_reset_engines(struct intel_gt *gt,
 			h.ctx->sched.priority = 1024;
 	}
 
-	threads = kmalloc_array(I915_NUM_ENGINES, sizeof(*threads), GFP_KERNEL);
+	threads = kmalloc_objs(*threads, I915_NUM_ENGINES);
 	if (!threads)
 		return -ENOMEM;
 

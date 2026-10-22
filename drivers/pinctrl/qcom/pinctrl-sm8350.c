@@ -34,7 +34,6 @@
 		.io_reg = REG_SIZE * id + 0x4,		\
 		.intr_cfg_reg = REG_SIZE * id + 0x8,	\
 		.intr_status_reg = REG_SIZE * id + 0xc,	\
-		.intr_target_reg = REG_SIZE * id + 0x8,	\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
@@ -60,7 +59,6 @@
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -85,7 +83,6 @@
 		.io_reg = offset + 0x4,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
 		.drv_bit = 0,				\
@@ -1267,7 +1264,7 @@ static const struct pinfunction sm8350_functions[] = {
 	MSM_PIN_FUNCTION(gcc_gp1),
 	MSM_PIN_FUNCTION(gcc_gp2),
 	MSM_PIN_FUNCTION(gcc_gp3),
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(ibi_i3c),
 	MSM_PIN_FUNCTION(jitter_bist),
 	MSM_PIN_FUNCTION(lpass_slimbus),
@@ -1635,6 +1632,7 @@ static const struct of_device_id sm8350_tlmm_of_match[] = {
 	{ .compatible = "qcom,sm8350-tlmm", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, sm8350_tlmm_of_match);
 
 static struct platform_driver sm8350_tlmm_driver = {
 	.driver = {
@@ -1642,7 +1640,6 @@ static struct platform_driver sm8350_tlmm_driver = {
 		.of_match_table = sm8350_tlmm_of_match,
 	},
 	.probe = sm8350_tlmm_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init sm8350_tlmm_init(void)
@@ -1659,4 +1656,3 @@ module_exit(sm8350_tlmm_exit);
 
 MODULE_DESCRIPTION("QTI SM8350 TLMM driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, sm8350_tlmm_of_match);

@@ -32,6 +32,7 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/ctype.h>
+#include <linux/hex.h>
 #include <linux/jiffies.h>
 #include <linux/slab.h>
 #include <linux/timer.h>
@@ -562,7 +563,8 @@ jr3_pci_poll_subdevice(struct comedi_subdevice *s)
 
 static void jr3_pci_poll_dev(struct timer_list *t)
 {
-	struct jr3_pci_dev_private *devpriv = from_timer(devpriv, t, timer);
+	struct jr3_pci_dev_private *devpriv = timer_container_of(devpriv, t,
+								 timer);
 	struct comedi_device *dev = devpriv->dev;
 	struct jr3_pci_subdev_private *spriv;
 	struct comedi_subdevice *s;
@@ -758,7 +760,7 @@ static void jr3_pci_detach(struct comedi_device *dev)
 	struct jr3_pci_dev_private *devpriv = dev->private;
 
 	if (devpriv)
-		del_timer_sync(&devpriv->timer);
+		timer_shutdown_sync(&devpriv->timer);
 
 	comedi_pci_detach(dev);
 }
@@ -777,12 +779,12 @@ static int jr3_pci_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id jr3_pci_pci_table[] = {
-	{ PCI_VDEVICE(JR3, 0x1111), BOARD_JR3_1 },
-	{ PCI_VDEVICE(JR3, 0x3111), BOARD_JR3_1 },
-	{ PCI_VDEVICE(JR3, 0x3112), BOARD_JR3_2 },
-	{ PCI_VDEVICE(JR3, 0x3113), BOARD_JR3_3 },
-	{ PCI_VDEVICE(JR3, 0x3114), BOARD_JR3_4 },
-	{ 0 }
+	{ PCI_VDEVICE(JR3, 0x1111), .driver_data = BOARD_JR3_1 },
+	{ PCI_VDEVICE(JR3, 0x3111), .driver_data = BOARD_JR3_1 },
+	{ PCI_VDEVICE(JR3, 0x3112), .driver_data = BOARD_JR3_2 },
+	{ PCI_VDEVICE(JR3, 0x3113), .driver_data = BOARD_JR3_3 },
+	{ PCI_VDEVICE(JR3, 0x3114), .driver_data = BOARD_JR3_4 },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, jr3_pci_pci_table);
 

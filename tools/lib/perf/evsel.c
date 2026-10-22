@@ -40,8 +40,19 @@ struct perf_evsel *perf_evsel__new(struct perf_event_attr *attr)
 	return evsel;
 }
 
+void perf_evsel__exit(struct perf_evsel *evsel)
+{
+	assert(evsel->fd == NULL);  /* If not fds were not closed. */
+	assert(evsel->mmap == NULL); /* If not munmap wasn't called. */
+	assert(evsel->sample_id == NULL); /* If not free_id wasn't called. */
+	perf_cpu_map__put(evsel->cpus);
+	perf_cpu_map__put(evsel->pmu_cpus);
+	perf_thread_map__put(evsel->threads);
+}
+
 void perf_evsel__delete(struct perf_evsel *evsel)
 {
+	perf_evsel__exit(evsel);
 	free(evsel);
 }
 
@@ -116,7 +127,8 @@ int perf_evsel__open(struct perf_evsel *evsel, struct perf_cpu_map *cpus,
 		     struct perf_thread_map *threads)
 {
 	struct perf_cpu cpu;
-	int idx, thread, err = 0;
+	unsigned int idx;
+	int thread, err = 0;
 
 	if (cpus == NULL) {
 		static struct perf_cpu_map *empty_cpu_map;
@@ -449,7 +461,7 @@ int perf_evsel__enable_cpu(struct perf_evsel *evsel, int cpu_map_idx)
 int perf_evsel__enable_thread(struct perf_evsel *evsel, int thread)
 {
 	struct perf_cpu cpu __maybe_unused;
-	int idx;
+	unsigned int idx;
 	int err;
 
 	perf_cpu_map__for_each_cpu(cpu, idx, evsel->cpus) {
@@ -488,12 +500,13 @@ int perf_evsel__disable(struct perf_evsel *evsel)
 
 int perf_evsel__apply_filter(struct perf_evsel *evsel, const char *filter)
 {
-	int err = 0, i;
+	int err = 0;
 
-	for (i = 0; i < perf_cpu_map__nr(evsel->cpus) && !err; i++)
+	for (unsigned int i = 0; i < perf_cpu_map__nr(evsel->cpus) && !err; i++) {
 		err = perf_evsel__run_ioctl(evsel,
 				     PERF_EVENT_IOC_SET_FILTER,
 				     (void *)filter, i);
+	}
 	return err;
 }
 

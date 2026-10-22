@@ -9,7 +9,7 @@
 #include <linux/pci.h>
 #include <linux/suspend.h>
 #include <linux/vgaarb.h>
-#include <asm/amd_node.h>
+#include <asm/amd/node.h>
 #include <asm/hpet.h>
 #include <asm/pci_x86.h>
 
@@ -293,6 +293,46 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_MCH_PB,	pcie_ro
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_MCH_PB1,	pcie_rootport_aspm_quirk);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_MCH_PC,	pcie_rootport_aspm_quirk);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_MCH_PC1,	pcie_rootport_aspm_quirk);
+
+/*
+ * PCIe devices underneath Xeon 6 PCIe Root Port bifurcated to x2 have lower
+ * performance with Extended Tags and MRRS > 128B. Work around the performance
+ * problems by disabling Extended Tags and limiting MRRS to 128B.
+ *
+ * https://cdrdv2.intel.com/v1/dl/getContent/837176
+ */
+static int limit_mrrs_to_128(struct pci_host_bridge *b, struct pci_dev *pdev)
+{
+	int readrq = pcie_get_readrq(pdev);
+
+	if (readrq > 128)
+		pcie_set_readrq(pdev, 128);
+
+	return 0;
+}
+
+static void pci_xeon_x2_bifurc_quirk(struct pci_dev *pdev)
+{
+	struct pci_host_bridge *bridge = pci_find_host_bridge(pdev->bus);
+	u32 linkcap;
+
+	pcie_capability_read_dword(pdev, PCI_EXP_LNKCAP, &linkcap);
+	if (FIELD_GET(PCI_EXP_LNKCAP_MLW, linkcap) != 0x2)
+		return;
+
+	bridge->no_ext_tags = 1;
+	bridge->enable_device = limit_mrrs_to_128;
+	pci_info(pdev, "Disabling Extended Tags and limiting MRRS to 128B (performance reasons due to x2 PCIe link)\n");
+}
+
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x0db0, pci_xeon_x2_bifurc_quirk);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x0db1, pci_xeon_x2_bifurc_quirk);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x0db2, pci_xeon_x2_bifurc_quirk);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x0db3, pci_xeon_x2_bifurc_quirk);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x0db6, pci_xeon_x2_bifurc_quirk);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x0db7, pci_xeon_x2_bifurc_quirk);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x0db8, pci_xeon_x2_bifurc_quirk);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x0db9, pci_xeon_x2_bifurc_quirk);
 
 /*
  * Fixup to mark boot BIOS video selected by BIOS before it changes
@@ -731,7 +771,7 @@ static void pci_amd_enable_64bit_bar(struct pci_dev *dev)
 	if (i == 8)
 		return;
 
-	res = kzalloc(sizeof(*res), GFP_KERNEL);
+	res = kzalloc_obj(*res);
 	if (!res)
 		return;
 
@@ -970,13 +1010,13 @@ static void amd_rp_pme_suspend(struct pci_dev *dev)
 	struct pci_dev *rp;
 
 	/*
-	 * PM_SUSPEND_ON means we're doing runtime suspend, which means
+	 * If system suspend is not in progress, we're doing runtime suspend, so
 	 * amd-pmc will not be involved so PMEs during D3 work as advertised.
 	 *
 	 * The PMEs *do* work if amd-pmc doesn't put the SoC in the hardware
 	 * sleep state, but we assume amd-pmc is always present.
 	 */
-	if (pm_suspend_target_state == PM_SUSPEND_ON)
+	if (!pm_suspend_in_progress())
 		return;
 
 	rp = pcie_find_root_port(dev);

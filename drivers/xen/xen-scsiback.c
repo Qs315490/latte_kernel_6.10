@@ -543,8 +543,7 @@ static int scsiback_gnttab_data_map(struct vscsiif_request *ring_req,
 	}
 
 	/* free of (sgl) in fast_flush_area() */
-	pending_req->sgl = kmalloc_array(nr_segments,
-					sizeof(struct scatterlist), GFP_KERNEL);
+	pending_req->sgl = kmalloc_objs(struct scatterlist, nr_segments);
 	if (!pending_req->sgl)
 		return -ENOMEM;
 
@@ -612,6 +611,25 @@ static void scsiback_disconnect(struct vscsibk_info *info)
 	xenbus_unmap_ring_vfree(info->dev, info->ring.sring);
 }
 
+/*
+ * Send the error response for a request that did not reach the target core
+ * and return its tag.  Free the tag before the response drops the v2p
+ * reference that keeps the session alive, and snapshot what the response
+ * needs since returning the tag can let the slot be reused.
+ */
+static void scsiback_resp_and_free(struct vscsibk_pend *pending_req,
+				   int32_t result)
+{
+	struct vscsibk_info *info = pending_req->info;
+	struct v2p_entry *v2p = pending_req->v2p;
+	struct se_session *se_sess = v2p->tpg->tpg_nexus->tvn_se_sess;
+	u16 rqid = pending_req->rqid;
+
+	target_free_tag(se_sess, &pending_req->se_cmd);
+	scsiback_send_response(info, NULL, result, 0, rqid);
+	kref_put(&v2p->kref, scsiback_free_translation_entry);
+}
+
 static void scsiback_device_action(struct vscsibk_pend *pending_req,
 	enum tcm_tmreq_table act, int tag)
 {
@@ -640,7 +658,7 @@ static void scsiback_device_action(struct vscsibk_pend *pending_req,
 	return;
 
 err:
-	scsiback_do_resp_with_sense(NULL, err, 0, pending_req);
+	scsiback_resp_and_free(pending_req, err);
 }
 
 /*
@@ -793,9 +811,8 @@ static int scsiback_do_cmd_fn(struct vscsibk_info *info,
 		case VSCSIIF_ACT_SCSI_CDB:
 			if (scsiback_gnttab_data_map(&ring_req, pending_req)) {
 				scsiback_fast_flush_area(pending_req);
-				scsiback_do_resp_with_sense(NULL,
-						DID_ERROR << 16, 0, pending_req);
-				transport_generic_free_cmd(&pending_req->se_cmd, 0);
+				scsiback_resp_and_free(pending_req,
+						       DID_ERROR << 16);
 			} else {
 				scsiback_cmd_exec(pending_req);
 			}
@@ -809,9 +826,7 @@ static int scsiback_do_cmd_fn(struct vscsibk_info *info,
 			break;
 		default:
 			pr_err_ratelimited("invalid request\n");
-			scsiback_do_resp_with_sense(NULL, DID_ERROR << 16, 0,
-						    pending_req);
-			transport_generic_free_cmd(&pending_req->se_cmd, 0);
+			scsiback_resp_and_free(pending_req, DID_ERROR << 16);
 			break;
 		}
 
@@ -974,7 +989,7 @@ static int scsiback_add_translation_entry(struct vscsibk_info *info,
 		return -ENODEV;
 	}
 
-	new = kmalloc(sizeof(struct v2p_entry), GFP_KERNEL);
+	new = kmalloc_obj(struct v2p_entry);
 	if (new == NULL) {
 		err = -ENOMEM;
 		goto out_free;
@@ -1262,6 +1277,7 @@ static void scsiback_remove(struct xenbus_device *dev)
 	gnttab_page_cache_shrink(&info->free_pages, 0);
 
 	dev_set_drvdata(&dev->dev, NULL);
+	kfree(info);
 }
 
 static int scsiback_probe(struct xenbus_device *dev,
@@ -1269,8 +1285,7 @@ static int scsiback_probe(struct xenbus_device *dev,
 {
 	int err;
 
-	struct vscsibk_info *info = kzalloc(sizeof(struct vscsibk_info),
-					    GFP_KERNEL);
+	struct vscsibk_info *info = kzalloc_obj(struct vscsibk_info);
 
 	pr_debug("%s %p %d\n", __func__, dev, dev->otherend_id);
 
@@ -1351,7 +1366,7 @@ scsiback_make_tport(struct target_fabric_configfs *tf,
 	u64 wwpn = 0;
 	int off = 0;
 
-	tport = kzalloc(sizeof(struct scsiback_tport), GFP_KERNEL);
+	tport = kzalloc_obj(struct scsiback_tport);
 	if (!tport)
 		return ERR_PTR(-ENOMEM);
 
@@ -1531,7 +1546,7 @@ static int scsiback_make_nexus(struct scsiback_tpg *tpg,
 		goto out_unlock;
 	}
 
-	tv_nexus = kzalloc(sizeof(struct scsiback_nexus), GFP_KERNEL);
+	tv_nexus = kzalloc_obj(struct scsiback_nexus);
 	if (!tv_nexus) {
 		ret = -ENOMEM;
 		goto out_unlock;
@@ -1758,7 +1773,7 @@ scsiback_make_tpg(struct se_wwn *wwn, const char *name)
 	if (ret)
 		return ERR_PTR(ret);
 
-	tpg = kzalloc(sizeof(struct scsiback_tpg), GFP_KERNEL);
+	tpg = kzalloc_obj(struct scsiback_tpg);
 	if (!tpg)
 		return ERR_PTR(-ENOMEM);
 
@@ -1833,6 +1848,7 @@ static const struct target_core_fabric_ops scsiback_ops = {
 	.tfc_tpg_base_attrs		= scsiback_tpg_attrs,
 	.tfc_tpg_param_attrs		= scsiback_param_attrs,
 
+	.default_compl_type		= TARGET_QUEUE_COMPL,
 	.default_submit_type		= TARGET_DIRECT_SUBMIT,
 	.direct_submit_supp		= 1,
 };

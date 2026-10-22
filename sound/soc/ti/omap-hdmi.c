@@ -49,7 +49,7 @@ static void hdmi_dai_abort(struct device *dev)
 {
 	struct hdmi_audio_data *ad = dev_get_drvdata(dev);
 
-	mutex_lock(&ad->current_stream_lock);
+	guard(mutex)(&ad->current_stream_lock);
 	if (ad->current_stream && ad->current_stream->runtime &&
 	    snd_pcm_running(ad->current_stream)) {
 		dev_err(dev, "HDMI display disabled, aborting playback\n");
@@ -57,7 +57,6 @@ static void hdmi_dai_abort(struct device *dev)
 		snd_pcm_stop(ad->current_stream, SNDRV_PCM_STATE_DISCONNECTED);
 		snd_pcm_stream_unlock_irq(ad->current_stream);
 	}
-	mutex_unlock(&ad->current_stream_lock);
 }
 
 static int hdmi_dai_startup(struct snd_pcm_substream *substream,
@@ -86,16 +85,14 @@ static int hdmi_dai_startup(struct snd_pcm_substream *substream,
 
 	snd_soc_dai_set_dma_data(dai, substream, &ad->dma_data);
 
-	mutex_lock(&ad->current_stream_lock);
-	ad->current_stream = substream;
-	mutex_unlock(&ad->current_stream_lock);
+	scoped_guard(mutex, &ad->current_stream_lock)
+		ad->current_stream = substream;
 
 	ret = ad->ops->audio_startup(ad->dssdev, hdmi_dai_abort);
 
 	if (ret) {
-		mutex_lock(&ad->current_stream_lock);
-		ad->current_stream = NULL;
-		mutex_unlock(&ad->current_stream_lock);
+		scoped_guard(mutex, &ad->current_stream_lock)
+			ad->current_stream = NULL;
 	}
 
 	return ret;
@@ -261,9 +258,8 @@ static void hdmi_dai_shutdown(struct snd_pcm_substream *substream,
 
 	ad->ops->audio_shutdown(ad->dssdev);
 
-	mutex_lock(&ad->current_stream_lock);
-	ad->current_stream = NULL;
-	mutex_unlock(&ad->current_stream_lock);
+	scoped_guard(mutex, &ad->current_stream_lock)
+		ad->current_stream = NULL;
 }
 
 static const struct snd_soc_dai_ops hdmi_dai_ops = {
@@ -361,17 +357,20 @@ static int omap_hdmi_audio_probe(struct platform_device *pdev)
 	if (!card->dai_link)
 		return -ENOMEM;
 
-	compnent = devm_kzalloc(dev, sizeof(*compnent), GFP_KERNEL);
+	compnent = devm_kzalloc(dev, 2 * sizeof(*compnent), GFP_KERNEL);
 	if (!compnent)
 		return -ENOMEM;
-	card->dai_link->cpus		= compnent;
+	card->dai_link->cpus		= &compnent[0];
 	card->dai_link->num_cpus	= 1;
 	card->dai_link->codecs		= &snd_soc_dummy_dlc;
 	card->dai_link->num_codecs	= 1;
+	card->dai_link->platforms	= &compnent[1];
+	card->dai_link->num_platforms	= 1;
 
 	card->dai_link->name = card->name;
 	card->dai_link->stream_name = card->name;
 	card->dai_link->cpus->dai_name = dev_name(ad->dssdev);
+	card->dai_link->platforms->name = dev_name(ad->dssdev);
 	card->num_links = 1;
 	card->dev = dev;
 

@@ -53,7 +53,7 @@ static ssize_t features_show(struct device *_d,
 
 	/* We actually represent this as a bitstring, as it could be
 	 * arbitrary length in future. */
-	for (i = 0; i < sizeof(dev->features)*8; i++)
+	for (i = 0; i < VIRTIO_FEATURES_BITS; i++)
 		len += sysfs_emit_at(buf, len, "%c",
 			       __virtio_test_bit(dev, i) ? '1' : '0');
 	len += sysfs_emit_at(buf, len, "\n");
@@ -147,7 +147,7 @@ EXPORT_SYMBOL_GPL(virtio_config_changed);
 
 /**
  * virtio_config_driver_disable - disable config change reporting by drivers
- * @dev: the device to reset
+ * @dev: the device to disable
  *
  * This is only allowed to be called by a driver and disabling can't
  * be nested.
@@ -162,7 +162,7 @@ EXPORT_SYMBOL_GPL(virtio_config_driver_disable);
 
 /**
  * virtio_config_driver_enable - enable config change reporting by drivers
- * @dev: the device to reset
+ * @dev: the device to enable
  *
  * This is only allowed to be called by a driver and enabling can't
  * be nested.
@@ -272,22 +272,22 @@ static int virtio_dev_probe(struct device *_d)
 	int err, i;
 	struct virtio_device *dev = dev_to_virtio(_d);
 	struct virtio_driver *drv = drv_to_virtio(dev->dev.driver);
-	u64 device_features;
-	u64 driver_features;
+	u64 device_features[VIRTIO_FEATURES_U64S];
+	u64 driver_features[VIRTIO_FEATURES_U64S];
 	u64 driver_features_legacy;
 
 	/* We have a driver! */
 	virtio_add_status(dev, VIRTIO_CONFIG_S_DRIVER);
 
 	/* Figure out what features the device supports. */
-	device_features = dev->config->get_features(dev);
+	virtio_get_features(dev, device_features);
 
 	/* Figure out what features the driver supports. */
-	driver_features = 0;
+	virtio_features_zero(driver_features);
 	for (i = 0; i < drv->feature_table_size; i++) {
 		unsigned int f = drv->feature_table[i];
-		BUG_ON(f >= 64);
-		driver_features |= (1ULL << f);
+		if (!WARN_ON_ONCE(f >= VIRTIO_FEATURES_BITS))
+			virtio_features_set_bit(driver_features, f);
 	}
 
 	/* Some drivers have a separate feature table for virtio v1.0 */
@@ -295,24 +295,29 @@ static int virtio_dev_probe(struct device *_d)
 		driver_features_legacy = 0;
 		for (i = 0; i < drv->feature_table_size_legacy; i++) {
 			unsigned int f = drv->feature_table_legacy[i];
-			BUG_ON(f >= 64);
-			driver_features_legacy |= (1ULL << f);
+			if (!WARN_ON_ONCE(f >= 64))
+				driver_features_legacy |= (1ULL << f);
 		}
 	} else {
-		driver_features_legacy = driver_features;
+		driver_features_legacy = driver_features[0];
 	}
 
-	if (device_features & (1ULL << VIRTIO_F_VERSION_1))
-		dev->features = driver_features & device_features;
-	else
-		dev->features = driver_features_legacy & device_features;
+	if (virtio_features_test_bit(device_features, VIRTIO_F_VERSION_1)) {
+		for (i = 0; i < VIRTIO_FEATURES_U64S; ++i)
+			dev->features_array[i] = driver_features[i] &
+						 device_features[i];
+	} else {
+		virtio_features_from_u64(dev->features_array,
+					 driver_features_legacy &
+					 device_features[0]);
+	}
 
 	/* When debugging, user may filter some features by hand. */
 	virtio_debug_device_filter_features(dev);
 
 	/* Transport features always preserved to pass to finalize_features. */
 	for (i = VIRTIO_TRANSPORT_F_START; i < VIRTIO_TRANSPORT_F_END; i++)
-		if (device_features & (1ULL << i))
+		if (virtio_features_test_bit(device_features, i))
 			__virtio_set_bit(dev, i);
 
 	err = dev->config->finalize_features(dev);
@@ -320,14 +325,15 @@ static int virtio_dev_probe(struct device *_d)
 		goto err;
 
 	if (drv->validate) {
-		u64 features = dev->features;
+		u64 features[VIRTIO_FEATURES_U64S];
 
+		virtio_features_copy(features, dev->features_array);
 		err = drv->validate(dev);
 		if (err)
 			goto err;
 
 		/* Did validation change any features? Then write them again. */
-		if (features != dev->features) {
+		if (!virtio_features_equal(features, dev->features_array)) {
 			err = dev->config->finalize_features(dev);
 			if (err)
 				goto err;
@@ -395,6 +401,48 @@ static const struct cpumask *virtio_irq_get_affinity(struct device *_d,
 	return dev->config->get_vq_affinity(dev, irq_vec);
 }
 
+static void virtio_dev_shutdown(struct device *_d)
+{
+	struct virtio_device *dev = dev_to_virtio(_d);
+	struct virtio_driver *drv = drv_to_virtio(dev->dev.driver);
+
+	/*
+	 * Stop accesses to or from the device.
+	 * We only need to do it if there's a driver - no accesses otherwise.
+	 */
+	if (!drv)
+		return;
+
+	/* If the driver has its own shutdown method, use that. */
+	if (drv->shutdown) {
+		drv->shutdown(dev);
+		return;
+	}
+
+	/*
+	 * Some devices get wedged if you kick them after they are
+	 * reset. Mark all vqs as broken to make sure we don't.
+	 */
+	virtio_break_device(dev);
+	/*
+	 * Guarantee that any callback will see vq->broken as true.
+	 */
+	virtio_synchronize_cbs(dev);
+	/*
+	 * As IOMMUs are reset on shutdown, this will block device access to memory.
+	 * Some devices get wedged if this happens, so reset to make sure it does not.
+	 */
+	dev->config->reset(dev);
+}
+
+static int virtio_dev_num_vf(struct device *dev)
+{
+	struct virtio_device *vdev = dev_to_virtio(dev);
+
+	return dev_num_vf(vdev->dev.parent);
+}
+
+
 static const struct bus_type virtio_bus = {
 	.name  = "virtio",
 	.match = virtio_dev_match,
@@ -403,6 +451,8 @@ static const struct bus_type virtio_bus = {
 	.probe = virtio_dev_probe,
 	.remove = virtio_dev_remove,
 	.irq_get_affinity = virtio_irq_get_affinity,
+	.shutdown = virtio_dev_shutdown,
+	.num_vf = virtio_dev_num_vf,
 };
 
 int __register_virtio_driver(struct virtio_driver *driver, struct module *owner)
@@ -471,7 +521,7 @@ out:
  * On error, the caller must call put_device on &@dev->dev (and not kfree),
  * as another code path may have obtained a reference to @dev.
  *
- * Returns: 0 on suceess, -error on failure
+ * Returns: 0 on success, -error on failure
  */
 int register_virtio_device(struct virtio_device *dev)
 {
@@ -495,6 +545,7 @@ int register_virtio_device(struct virtio_device *dev)
 		goto out_ida_remove;
 
 	spin_lock_init(&dev->config_lock);
+	dev->config_driver_disabled = false;
 	dev->config_core_enabled = false;
 	dev->config_change_pending = false;
 
@@ -666,6 +717,9 @@ EXPORT_SYMBOL_GPL(virtio_device_reset_done);
 
 static int virtio_init(void)
 {
+	BUILD_BUG_ON(offsetof(struct virtio_device, features) !=
+		     offsetof(struct virtio_device, features_array[0]));
+
 	if (bus_register(&virtio_bus) != 0)
 		panic("virtio bus registration failed");
 	virtio_debug_init();

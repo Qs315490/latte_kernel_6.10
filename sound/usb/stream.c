@@ -79,7 +79,7 @@ static void snd_usb_audio_pcm_free(struct snd_pcm *pcm)
 static void snd_usb_init_substream(struct snd_usb_stream *as,
 				   int stream,
 				   struct audioformat *fp,
-				   struct snd_usb_power_domain *pd)
+				   struct snd_usb_power_domain **pdptr)
 {
 	struct snd_usb_substream *subs = &as->substream[stream];
 
@@ -105,10 +105,11 @@ static void snd_usb_init_substream(struct snd_usb_stream *as,
 	if (fp->channels > subs->channels_max)
 		subs->channels_max = fp->channels;
 
-	if (pd) {
-		subs->str_pd = pd;
+	if (pdptr && *pdptr) {
+		subs->str_pd = *pdptr;
+		*pdptr = NULL; /* assigned */
 		/* Initialize Power Domain to idle status D1 */
-		snd_usb_power_domain_set(subs->stream->chip, pd,
+		snd_usb_power_domain_set(subs->stream->chip, subs->str_pd,
 					 UAC3_PD_STATE_D1);
 	}
 
@@ -291,7 +292,7 @@ static struct snd_pcm_chmap_elem *convert_chmap(int channels, unsigned int bits,
 	if (channels > ARRAY_SIZE(chmap->map))
 		return NULL;
 
-	chmap = kzalloc(sizeof(*chmap), GFP_KERNEL);
+	chmap = kzalloc_obj(*chmap);
 	if (!chmap)
 		return NULL;
 
@@ -335,29 +336,41 @@ snd_pcm_chmap_elem *convert_chmap_v3(struct uac3_cluster_header_descriptor
 	if (channels > ARRAY_SIZE(chmap->map))
 		return NULL;
 
-	chmap = kzalloc(sizeof(*chmap), GFP_KERNEL);
+	chmap = kzalloc_obj(*chmap);
 	if (!chmap)
 		return NULL;
 
 	len = le16_to_cpu(cluster->wLength);
 	c = 0;
-	p += sizeof(struct uac3_cluster_header_descriptor);
+	p += sizeof(*cluster);
+	len -= sizeof(*cluster);
 
-	while (((p - (void *)cluster) < len) && (c < channels)) {
+	while (len > 0 && (c < channels)) {
 		struct uac3_cluster_segment_descriptor *cs_desc = p;
 		u16 cs_len;
 		u8 cs_type;
 
+		if (len < sizeof(*cs_desc))
+			break;
 		cs_len = le16_to_cpu(cs_desc->wLength);
+		if (cs_len < sizeof(*cs_desc))
+			break;
+		if (len < cs_len)
+			break;
 		cs_type = cs_desc->bSegmentType;
 
 		if (cs_type == UAC3_CHANNEL_INFORMATION) {
 			struct uac3_cluster_information_segment_descriptor *is = p;
 			unsigned char map;
 
+			if (cs_len < sizeof(*is))
+				break;
+
 			/*
 			 * TODO: this conversion is not complete, update it
 			 * after adding UAC3 values to asound.h
+			 * NOTE: not all UAC3 channel relationship have a
+			 * direct ALSA chmap equivalent.
 			 */
 			switch (is->bChRelationship) {
 			case UAC3_CH_MONO:
@@ -381,6 +394,12 @@ snd_pcm_chmap_elem *convert_chmap_v3(struct uac3_cluster_header_descriptor
 				break;
 			case UAC3_CH_FRONT_RIGHT_OF_CENTER:
 				map = SNDRV_CHMAP_FRC;
+				break;
+			case UAC3_CH_FRONT_WIDE_LEFT:
+				map = SNDRV_CHMAP_FLW;
+				break;
+			case UAC3_CH_FRONT_WIDE_RIGHT:
+				map = SNDRV_CHMAP_FRW;
 				break;
 			case UAC3_CH_SIDE_LEFT:
 				map = SNDRV_CHMAP_SL;
@@ -456,6 +475,7 @@ snd_pcm_chmap_elem *convert_chmap_v3(struct uac3_cluster_header_descriptor
 			chmap->map[c++] = map;
 		}
 		p += cs_len;
+		len -= cs_len;
 	}
 
 	if (channels < c)
@@ -475,11 +495,14 @@ snd_pcm_chmap_elem *convert_chmap_v3(struct uac3_cluster_header_descriptor
  * if not, create a new pcm stream. note, fp is added to the substream
  * fmt_list and will be freed on the chip instance release. do not free
  * fp or do remove it from the substream fmt_list to avoid double-free.
+ *
+ * pdptr is optional and can be NULL.  When it's non-NULL and the PD gets
+ * assigned to the stream, *pdptr is cleared to NULL upon return.
  */
-static int __snd_usb_add_audio_stream(struct snd_usb_audio *chip,
-				      int stream,
-				      struct audioformat *fp,
-				      struct snd_usb_power_domain *pd)
+int snd_usb_add_audio_stream(struct snd_usb_audio *chip,
+			     int stream,
+			     struct audioformat *fp,
+			     struct snd_usb_power_domain **pdptr)
 
 {
 	struct snd_usb_stream *as;
@@ -512,12 +535,12 @@ static int __snd_usb_add_audio_stream(struct snd_usb_audio *chip,
 		err = snd_pcm_new_stream(as->pcm, stream, 1);
 		if (err < 0)
 			return err;
-		snd_usb_init_substream(as, stream, fp, pd);
+		snd_usb_init_substream(as, stream, fp, pdptr);
 		return add_chmap(as->pcm, stream, subs);
 	}
 
 	/* create a new pcm */
-	as = kzalloc(sizeof(*as), GFP_KERNEL);
+	as = kzalloc_obj(*as);
 	if (!as)
 		return -ENOMEM;
 	as->pcm_index = chip->pcm_devs;
@@ -536,11 +559,12 @@ static int __snd_usb_add_audio_stream(struct snd_usb_audio *chip,
 	pcm->private_free = snd_usb_audio_pcm_free;
 	pcm->info_flags = 0;
 	if (chip->pcm_devs > 0)
-		sprintf(pcm->name, "USB Audio #%d", chip->pcm_devs);
+		scnprintf(pcm->name, sizeof(pcm->name), "USB Audio #%d",
+			  chip->pcm_devs);
 	else
-		strcpy(pcm->name, "USB Audio");
+		strscpy(pcm->name, "USB Audio");
 
-	snd_usb_init_substream(as, stream, fp, pd);
+	snd_usb_init_substream(as, stream, fp, pdptr);
 
 	/*
 	 * Keep using head insertion for M-Audio Audiophile USB (tm) which has a
@@ -556,21 +580,6 @@ static int __snd_usb_add_audio_stream(struct snd_usb_audio *chip,
 	snd_usb_proc_pcm_format_add(as);
 
 	return add_chmap(pcm, stream, &as->substream[stream]);
-}
-
-int snd_usb_add_audio_stream(struct snd_usb_audio *chip,
-			     int stream,
-			     struct audioformat *fp)
-{
-	return __snd_usb_add_audio_stream(chip, stream, fp, NULL);
-}
-
-static int snd_usb_add_audio_stream_v3(struct snd_usb_audio *chip,
-				       int stream,
-				       struct audioformat *fp,
-				       struct snd_usb_power_domain *pd)
-{
-	return __snd_usb_add_audio_stream(chip, stream, fp, pd);
 }
 
 static int parse_uac_endpoint_attributes(struct snd_usb_audio *chip,
@@ -680,9 +689,10 @@ audio_format_alloc_init(struct snd_usb_audio *chip,
 		       int protocol, int iface_no, int altset_idx,
 		       int altno, int num_channels, int clock)
 {
+	struct usb_host_endpoint *ep = &alts->endpoint[0];
 	struct audioformat *fp;
 
-	fp = kzalloc(sizeof(*fp), GFP_KERNEL);
+	fp = kzalloc_obj(*fp);
 	if (!fp)
 		return NULL;
 
@@ -693,11 +703,8 @@ audio_format_alloc_init(struct snd_usb_audio *chip,
 	fp->ep_attr = get_endpoint(alts, 0)->bmAttributes;
 	fp->datainterval = snd_usb_parse_datainterval(chip, alts);
 	fp->protocol = protocol;
-	fp->maxpacksize = le16_to_cpu(get_endpoint(alts, 0)->wMaxPacketSize);
+	fp->maxpacksize = usb_endpoint_max_periodic_payload(chip->dev, ep);
 	fp->channels = num_channels;
-	if (snd_usb_get_speed(chip->dev) == USB_SPEED_HIGH)
-		fp->maxpacksize = (((fp->maxpacksize >> 11) & 3) + 1)
-				* (fp->maxpacksize & 0x7ff);
 	fp->clock = clock;
 	INIT_LIST_HEAD(&fp->list);
 
@@ -880,7 +887,7 @@ snd_usb_get_audioformat_uac3(struct snd_usb_audio *chip,
 	u64 badd_formats = 0;
 	unsigned int num_channels;
 	struct audioformat *fp;
-	u16 cluster_id, wLength;
+	u16 cluster_id, wLength, cluster_wLength;
 	int clock = 0;
 	int err;
 
@@ -919,7 +926,7 @@ snd_usb_get_audioformat_uac3(struct snd_usb_audio *chip,
 			break;
 		}
 
-		chmap = kzalloc(sizeof(*chmap), GFP_KERNEL);
+		chmap = kzalloc_obj(*chmap);
 		if (!chmap)
 			return ERR_PTR(-ENOMEM);
 
@@ -987,6 +994,8 @@ snd_usb_get_audioformat_uac3(struct snd_usb_audio *chip,
 	 * and request Cluster Descriptor
 	 */
 	wLength = le16_to_cpu(hc_header.wLength);
+	if (wLength < sizeof(*cluster))
+		return NULL;
 	cluster = kzalloc(wLength, GFP_KERNEL);
 	if (!cluster)
 		return ERR_PTR(-ENOMEM);
@@ -1003,6 +1012,16 @@ snd_usb_get_audioformat_uac3(struct snd_usb_audio *chip,
 	} else if (err != wLength) {
 		dev_err(&dev->dev,
 			"%u:%d : can't get Cluster Descriptor\n",
+			iface_no, altno);
+		kfree(cluster);
+		return ERR_PTR(-EIO);
+	}
+
+	cluster_wLength = le16_to_cpu(cluster->wLength);
+	if (cluster_wLength < sizeof(*cluster) ||
+	    cluster_wLength > wLength) {
+		dev_err(&dev->dev,
+			"%u:%d : invalid Cluster Descriptor size\n",
 			iface_no, altno);
 		kfree(cluster);
 		return ERR_PTR(-EIO);
@@ -1058,7 +1077,7 @@ found_clock:
 		fp->rate_max = UAC3_BADD_SAMPLING_RATE;
 		fp->rates = SNDRV_PCM_RATE_CONTINUOUS;
 
-		pd = kzalloc(sizeof(*pd), GFP_KERNEL);
+		pd = kzalloc_obj(*pd);
 		if (!pd) {
 			audioformat_free(fp);
 			return NULL;
@@ -1085,8 +1104,7 @@ found_clock:
 		}
 	}
 
-	if (pd)
-		*pd_out = pd;
+	*pd_out = pd;
 
 	return fp;
 }
@@ -1101,7 +1119,6 @@ static int __snd_usb_parse_audio_interface(struct snd_usb_audio *chip,
 	struct usb_interface_descriptor *altsd;
 	int i, altno, err, stream;
 	struct audioformat *fp = NULL;
-	struct snd_usb_power_domain *pd = NULL;
 	bool set_iface_first;
 	int num, protocol;
 
@@ -1142,6 +1159,12 @@ static int __snd_usb_parse_audio_interface(struct snd_usb_audio *chip,
 
 		if (snd_usb_apply_interface_quirk(chip, iface_no, altno))
 			continue;
+
+		/* pd may be allocated at snd_usb_get_audioformat_uac3() and
+		 * assigned at snd_usb_add_audio_stream(); otherwise it'll be
+		 * freed automatically by cleanup at each loop.
+		 */
+		struct snd_usb_power_domain *pd __free(kfree) = NULL;
 
 		/*
 		 * Roland audio streaming interfaces are marked with protocols
@@ -1198,23 +1221,16 @@ static int __snd_usb_parse_audio_interface(struct snd_usb_audio *chip,
 			*has_non_pcm = true;
 		if ((fp->fmt_type == UAC_FORMAT_TYPE_I) == non_pcm) {
 			audioformat_free(fp);
-			kfree(pd);
 			fp = NULL;
-			pd = NULL;
 			continue;
 		}
 
 		snd_usb_audioformat_set_sync_ep(chip, fp);
 
 		dev_dbg(&dev->dev, "%u:%d: add audio endpoint %#x\n", iface_no, altno, fp->endpoint);
-		if (protocol == UAC_VERSION_3)
-			err = snd_usb_add_audio_stream_v3(chip, stream, fp, pd);
-		else
-			err = snd_usb_add_audio_stream(chip, stream, fp);
-
+		err = snd_usb_add_audio_stream(chip, stream, fp, &pd);
 		if (err < 0) {
 			audioformat_free(fp);
-			kfree(pd);
 			return err;
 		}
 
@@ -1239,6 +1255,9 @@ static int __snd_usb_parse_audio_interface(struct snd_usb_audio *chip,
 			set_iface_first = true;
 
 		/* try to set the interface... */
+		if (chip->quirk_flags & QUIRK_FLAG_SKIP_IFACE_SETUP)
+			continue;
+
 		usb_set_interface(chip->dev, iface_no, 0);
 		if (set_iface_first)
 			usb_set_interface(chip->dev, iface_no, altno);

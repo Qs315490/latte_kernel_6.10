@@ -9,24 +9,33 @@
  */
 
 #include <linux/component.h>
+#include <linux/debugfs.h>
 #include <linux/i2c.h>
+#include <linux/iopoll.h>
 #include <linux/random.h>
 
 #include <drm/display/drm_hdcp_helper.h>
+#include <drm/drm_print.h>
 #include <drm/intel/i915_component.h>
+#include <drm/intel/intel_pcode_regs.h>
+#include <drm/intel/step.h>
 
-#include "i915_drv.h"
-#include "i915_reg.h"
 #include "intel_connector.h"
 #include "intel_de.h"
+#include "intel_display_jiffies.h"
 #include "intel_display_power.h"
 #include "intel_display_power_well.h"
+#include "intel_display_regs.h"
+#include "intel_display_rpm.h"
 #include "intel_display_types.h"
+#include "intel_dp_mst.h"
 #include "intel_hdcp.h"
-#include "intel_hdcp_gsc.h"
+#include "intel_hdcp_gsc_message.h"
 #include "intel_hdcp_regs.h"
 #include "intel_hdcp_shim.h"
-#include "intel_pcode.h"
+#include "intel_parent.h"
+
+#define USE_HDCP_GSC(__display)		(DISPLAY_VER(__display) >= 14)
 
 #define KEY_LOAD_TRIES	5
 #define HDCP2_LC_RETRY_CNT			3
@@ -37,7 +46,7 @@ intel_hdcp_adjust_hdcp_line_rekeying(struct intel_encoder *encoder,
 				     bool enable)
 {
 	struct intel_display *display = to_intel_display(encoder);
-	i915_reg_t rekey_reg;
+	intel_reg_t rekey_reg;
 	u32 rekey_bit = 0;
 
 	/* Here we assume HDMI is in TMDS mode of operation */
@@ -63,29 +72,29 @@ intel_hdcp_adjust_hdcp_line_rekeying(struct intel_encoder *encoder,
 static int intel_conn_to_vcpi(struct intel_atomic_state *state,
 			      struct intel_connector *connector)
 {
+	struct intel_display *display = to_intel_display(state);
 	struct drm_dp_mst_topology_mgr *mgr;
 	struct drm_dp_mst_atomic_payload *payload;
 	struct drm_dp_mst_topology_state *mst_state;
-	int vcpi = 0;
 
 	/* For HDMI this is forced to be 0x0. For DP SST also this is 0x0. */
-	if (!connector->port)
+	if (!connector->mst.port)
 		return 0;
-	mgr = connector->port->mgr;
 
-	drm_modeset_lock(&mgr->base.lock, state->base.acquire_ctx);
-	mst_state = to_drm_dp_mst_topology_state(mgr->base.state);
-	payload = drm_atomic_get_mst_payload_state(mst_state, connector->port);
-	if (drm_WARN_ON(mgr->dev, !payload))
-		goto out;
-
-	vcpi = payload->vcpi;
-	if (drm_WARN_ON(mgr->dev, vcpi < 0)) {
-		vcpi = 0;
-		goto out;
+	mgr = connector->mst.port->mgr;
+	mst_state = drm_atomic_get_new_mst_topology_state(&state->base, mgr);
+	if (!mst_state) {
+		drm_dbg_kms(display->drm, "MST topology still not created\n");
+		return 0;
 	}
-out:
-	return vcpi;
+
+	payload = drm_atomic_get_mst_payload_state(mst_state, connector->mst.port);
+	if (!payload) {
+		drm_dbg_kms(display->drm, "MST Payload not present\n");
+		return 0;
+	}
+
+	return payload->vcpi;
 }
 
 /*
@@ -104,18 +113,19 @@ intel_hdcp_required_content_stream(struct intel_atomic_state *state,
 {
 	struct intel_display *display = to_intel_display(state);
 	struct drm_connector_list_iter conn_iter;
+	struct drm_connector_state *new_conn_state;
 	struct intel_digital_port *conn_dig_port;
 	struct intel_connector *connector;
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	bool enforce_type0 = false;
 	int k;
 
-	if (dig_port->hdcp_auth_status)
+	if (dig_port->hdcp.auth_status)
 		return 0;
 
 	data->k = 0;
 
-	if (!dig_port->hdcp_mst_type1_capable)
+	if (!dig_port->hdcp.mst_type1_capable)
 		enforce_type0 = true;
 
 	drm_connector_list_iter_begin(display->drm, &conn_iter);
@@ -130,17 +140,25 @@ intel_hdcp_required_content_stream(struct intel_atomic_state *state,
 		if (conn_dig_port != dig_port)
 			continue;
 
+		new_conn_state = drm_atomic_get_new_connector_state(&state->base,
+								    &connector->base);
+		if (!new_conn_state || !new_conn_state->crtc)
+			continue;
+
+		if (drm_WARN_ON(display->drm, data->k >= INTEL_NUM_PIPES(display)))
+			return -EINVAL;
+
 		data->streams[data->k].stream_id =
 			intel_conn_to_vcpi(state, connector);
 		data->k++;
 
 		/* if there is only one active stream */
-		if (dig_port->dp.active_mst_links <= 1)
+		if (intel_dp_mst_active_streams(&dig_port->dp) <= 1)
 			break;
 	}
 	drm_connector_list_iter_end(&conn_iter);
 
-	if (drm_WARN_ON(display->drm, data->k > INTEL_NUM_PIPES(display) || data->k == 0))
+	if (drm_WARN_ON(display->drm, !data->k))
 		return -EINVAL;
 
 	/*
@@ -158,7 +176,7 @@ static int intel_hdcp_prepare_streams(struct intel_atomic_state *state,
 				      struct intel_connector *connector)
 {
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct intel_hdcp *hdcp = &connector->hdcp;
 
 	if (intel_encoder_is_mst(intel_attached_encoder(connector)))
@@ -208,7 +226,7 @@ int intel_hdcp_read_valid_bksv(struct intel_digital_port *dig_port,
 }
 
 /* Is HDCP1.4 capable on Platform and Sink */
-bool intel_hdcp_get_capability(struct intel_connector *connector)
+static bool intel_hdcp_get_capability(struct intel_connector *connector)
 {
 	struct intel_digital_port *dig_port;
 	const struct intel_hdcp_shim *shim = connector->hdcp.shim;
@@ -247,8 +265,8 @@ static bool intel_hdcp2_prerequisite(struct intel_connector *connector)
 		return false;
 
 	/* If MTL+ make sure gsc is loaded and proxy is setup */
-	if (intel_hdcp_gsc_cs_required(display)) {
-		if (!intel_hdcp_gsc_check_status(display))
+	if (USE_HDCP_GSC(display)) {
+		if (!intel_parent_hdcp_gsc_check_status(display))
 			return false;
 	}
 
@@ -264,7 +282,7 @@ static bool intel_hdcp2_prerequisite(struct intel_connector *connector)
 }
 
 /* Is HDCP2.2 capable on Platform and Sink */
-bool intel_hdcp2_get_capability(struct intel_connector *connector)
+static bool intel_hdcp2_get_capability(struct intel_connector *connector)
 {
 	struct intel_hdcp *hdcp = &connector->hdcp;
 	bool capable = false;
@@ -278,9 +296,9 @@ bool intel_hdcp2_get_capability(struct intel_connector *connector)
 	return capable;
 }
 
-void intel_hdcp_get_remote_capability(struct intel_connector *connector,
-				      bool *hdcp_capable,
-				      bool *hdcp2_capable)
+static void intel_hdcp_get_remote_capability(struct intel_connector *connector,
+					     bool *hdcp_capable,
+					     bool *hdcp2_capable)
 {
 	struct intel_hdcp *hdcp = &connector->hdcp;
 
@@ -317,43 +335,38 @@ static int intel_hdcp_poll_ksv_fifo(struct intel_digital_port *dig_port,
 	bool ksv_ready;
 
 	/* Poll for ksv list ready (spec says max time allowed is 5s) */
-	ret = __wait_for(read_ret = shim->read_ksv_ready(dig_port,
-							 &ksv_ready),
-			 read_ret || ksv_ready, 5 * 1000 * 1000, 1000,
-			 100 * 1000);
+	ret = poll_timeout_us(read_ret = shim->read_ksv_ready(dig_port, &ksv_ready),
+			      read_ret || ksv_ready,
+			      100 * 1000, 5 * 1000 * 1000, false);
 	if (ret)
 		return ret;
 	if (read_ret)
 		return read_ret;
-	if (!ksv_ready)
-		return -ETIMEDOUT;
 
 	return 0;
 }
 
 static bool hdcp_key_loadable(struct intel_display *display)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
 	enum i915_power_well_id id;
-	intel_wakeref_t wakeref;
 	bool enabled = false;
 
 	/*
 	 * On HSW and BDW, Display HW loads the Key as soon as Display resumes.
 	 * On all BXT+, SW can load the keys only when the PW#1 is turned on.
 	 */
-	if (IS_HASWELL(i915) || IS_BROADWELL(i915))
+	if (display->platform.haswell || display->platform.broadwell)
 		id = HSW_DISP_PW_GLOBAL;
 	else
 		id = SKL_DISP_PW_1;
 
 	/* PG1 (power well #1) needs to be enabled */
-	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+	with_intel_display_rpm(display)
 		enabled = intel_display_power_well_is_enabled(display, id);
 
 	/*
 	 * Another req for hdcp key loadability is enabled state of pll for
-	 * cdclk. Without active crtc we wont land here. So we are assuming that
+	 * cdclk. Without active crtc we won't land here. So we are assuming that
 	 * cdclk is already on.
 	 */
 
@@ -369,7 +382,6 @@ static void intel_hdcp_clear_keys(struct intel_display *display)
 
 static int intel_hdcp_load_keys(struct intel_display *display)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
 	int ret;
 	u32 val;
 
@@ -381,7 +393,7 @@ static int intel_hdcp_load_keys(struct intel_display *display)
 	 * On HSW and BDW HW loads the HDCP1.4 Key when Display comes
 	 * out of reset. So if Key is not already loaded, its an error state.
 	 */
-	if (IS_HASWELL(i915) || IS_BROADWELL(i915))
+	if (display->platform.haswell || display->platform.broadwell)
 		if (!(intel_de_read(display, HDCP_KEY_STATUS) & HDCP_KEY_LOAD_DONE))
 			return -ENXIO;
 
@@ -393,8 +405,8 @@ static int intel_hdcp_load_keys(struct intel_display *display)
 	 * process from other platforms. These platforms use the GT Driver
 	 * Mailbox interface.
 	 */
-	if (DISPLAY_VER(display) == 9 && !IS_BROXTON(i915)) {
-		ret = snb_pcode_write(&i915->uncore, SKL_PCODE_LOAD_HDCP_KEYS, 1);
+	if (DISPLAY_VER(display) == 9 && !display->platform.broxton) {
+		ret = intel_parent_pcode_write(display, SKL_PCODE_LOAD_HDCP_KEYS, 1);
 		if (ret) {
 			drm_err(display->drm,
 				"Failed to initiate HDCP key load (%d)\n",
@@ -406,9 +418,8 @@ static int intel_hdcp_load_keys(struct intel_display *display)
 	}
 
 	/* Wait for the keys to load (500us) */
-	ret = intel_de_wait_custom(display, HDCP_KEY_STATUS,
-				   HDCP_KEY_LOAD_DONE, HDCP_KEY_LOAD_DONE,
-				   10, 1, &val);
+	ret = intel_de_wait_ms(display, HDCP_KEY_STATUS, HDCP_KEY_LOAD_DONE,
+			       HDCP_KEY_LOAD_DONE, 1, &val);
 	if (ret)
 		return ret;
 	else if (!(val & HDCP_KEY_LOAD_STATUS))
@@ -424,7 +435,7 @@ static int intel_hdcp_load_keys(struct intel_display *display)
 static int intel_write_sha_text(struct intel_display *display, u32 sha_text)
 {
 	intel_de_write(display, HDCP_SHA_TEXT, sha_text);
-	if (intel_de_wait_for_set(display, HDCP_REP_CTL, HDCP_SHA1_READY, 1)) {
+	if (intel_de_wait_for_set_ms(display, HDCP_REP_CTL, HDCP_SHA1_READY, 1)) {
 		drm_err(display->drm, "Timed out waiting for SHA1 ready\n");
 		return -ETIMEDOUT;
 	}
@@ -703,8 +714,8 @@ int intel_hdcp_validate_v_prime(struct intel_connector *connector,
 	/* Tell the HW we're done with the hash and wait for it to ACK */
 	intel_de_write(display, HDCP_REP_CTL,
 		       rep_ctl | HDCP_SHA1_COMPLETE_HASH);
-	if (intel_de_wait_for_set(display, HDCP_REP_CTL,
-				  HDCP_SHA1_COMPLETE, 1)) {
+	if (intel_de_wait_for_set_ms(display, HDCP_REP_CTL,
+				     HDCP_SHA1_COMPLETE, 1)) {
 		drm_err(display->drm, "Timed out waiting for SHA1 complete\n");
 		return -ETIMEDOUT;
 	}
@@ -811,6 +822,7 @@ static int intel_hdcp_auth(struct intel_connector *connector)
 	enum port port = dig_port->base.port;
 	unsigned long r0_prime_gen_start;
 	int ret, i, tries = 2;
+	u32 val;
 	union {
 		u32 reg[2];
 		u8 shim[DRM_HDCP_AN_LEN];
@@ -851,9 +863,9 @@ static int intel_hdcp_auth(struct intel_connector *connector)
 		       HDCP_CONF_CAPTURE_AN);
 
 	/* Wait for An to be acquired */
-	if (intel_de_wait_for_set(display,
-				  HDCP_STATUS(display, cpu_transcoder, port),
-				  HDCP_STATUS_AN_READY, 1)) {
+	if (intel_de_wait_for_set_ms(display,
+				     HDCP_STATUS(display, cpu_transcoder, port),
+				     HDCP_STATUS_AN_READY, 1)) {
 		drm_err(display->drm, "Timed out waiting for An\n");
 		return -ETIMEDOUT;
 	}
@@ -899,8 +911,10 @@ static int intel_hdcp_auth(struct intel_connector *connector)
 		       HDCP_CONF_AUTH_AND_ENC);
 
 	/* Wait for R0 ready */
-	if (wait_for(intel_de_read(display, HDCP_STATUS(display, cpu_transcoder, port)) &
-		     (HDCP_STATUS_R0_READY | HDCP_STATUS_ENC), 1)) {
+	ret = poll_timeout_us(val = intel_de_read(display, HDCP_STATUS(display, cpu_transcoder, port)),
+			      val & (HDCP_STATUS_R0_READY | HDCP_STATUS_ENC),
+			      100, 1000, false);
+	if (ret) {
 		drm_err(display->drm, "Timed out waiting for R0 ready\n");
 		return -ETIMEDOUT;
 	}
@@ -932,24 +946,24 @@ static int intel_hdcp_auth(struct intel_connector *connector)
 			       ri.reg);
 
 		/* Wait for Ri prime match */
-		if (!wait_for(intel_de_read(display, HDCP_STATUS(display, cpu_transcoder, port)) &
-			      (HDCP_STATUS_RI_MATCH | HDCP_STATUS_ENC), 1))
+		ret = poll_timeout_us(val = intel_de_read(display, HDCP_STATUS(display, cpu_transcoder, port)),
+				      val & (HDCP_STATUS_RI_MATCH | HDCP_STATUS_ENC),
+				      100, 1000, false);
+		if (!ret)
 			break;
 	}
 
 	if (i == tries) {
 		drm_dbg_kms(display->drm,
-			    "Timed out waiting for Ri prime match (%x)\n",
-			    intel_de_read(display,
-					  HDCP_STATUS(display, cpu_transcoder, port)));
+			    "Timed out waiting for Ri prime match (%x)\n", val);
 		return -ETIMEDOUT;
 	}
 
 	/* Wait for encryption confirmation */
-	if (intel_de_wait_for_set(display,
-				  HDCP_STATUS(display, cpu_transcoder, port),
-				  HDCP_STATUS_ENC,
-				  HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS)) {
+	if (intel_de_wait_for_set_ms(display,
+				     HDCP_STATUS(display, cpu_transcoder, port),
+				     HDCP_STATUS_ENC,
+				     HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS)) {
 		drm_err(display->drm, "Timed out waiting for encryption\n");
 		return -ETIMEDOUT;
 	}
@@ -1000,15 +1014,15 @@ static int _intel_hdcp_disable(struct intel_connector *connector)
 		 * don't disable it until it disabled HDCP encryption for
 		 * all connectors in MST topology.
 		 */
-		if (dig_port->num_hdcp_streams > 0)
+		if (dig_port->hdcp.num_streams > 0)
 			return 0;
 	}
 
 	hdcp->hdcp_encrypted = false;
 	intel_de_write(display, HDCP_CONF(display, cpu_transcoder, port), 0);
-	if (intel_de_wait_for_clear(display,
-				    HDCP_STATUS(display, cpu_transcoder, port),
-				    ~0, HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS)) {
+	if (intel_de_wait_for_clear_ms(display,
+				       HDCP_STATUS(display, cpu_transcoder, port),
+				       ~0, HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS)) {
 		drm_err(display->drm,
 			"Failed to disable HDCP, timeout clearing status\n");
 		return -ETIMEDOUT;
@@ -1084,7 +1098,6 @@ static void intel_hdcp_update_value(struct intel_connector *connector,
 				    u64 value, bool update_property)
 {
 	struct intel_display *display = to_intel_display(connector);
-	struct drm_i915_private *i915 = to_i915(display->drm);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
 	struct intel_hdcp *hdcp = &connector->hdcp;
 
@@ -1093,19 +1106,19 @@ static void intel_hdcp_update_value(struct intel_connector *connector,
 	if (hdcp->value == value)
 		return;
 
-	drm_WARN_ON(display->drm, !mutex_is_locked(&dig_port->hdcp_mutex));
+	drm_WARN_ON(display->drm, !mutex_is_locked(&dig_port->hdcp.mutex));
 
 	if (hdcp->value == DRM_MODE_CONTENT_PROTECTION_ENABLED) {
-		if (!drm_WARN_ON(display->drm, dig_port->num_hdcp_streams == 0))
-			dig_port->num_hdcp_streams--;
+		if (!drm_WARN_ON(display->drm, dig_port->hdcp.num_streams == 0))
+			dig_port->hdcp.num_streams--;
 	} else if (value == DRM_MODE_CONTENT_PROTECTION_ENABLED) {
-		dig_port->num_hdcp_streams++;
+		dig_port->hdcp.num_streams++;
 	}
 
 	hdcp->value = value;
 	if (update_property) {
 		drm_connector_get(&connector->base);
-		if (!queue_work(i915->unordered_wq, &hdcp->prop_work))
+		if (!queue_work(display->wq.unordered, &hdcp->prop_work))
 			drm_connector_put(&connector->base);
 	}
 }
@@ -1121,7 +1134,7 @@ static int intel_hdcp_check_link(struct intel_connector *connector)
 	int ret = 0;
 
 	mutex_lock(&hdcp->mutex);
-	mutex_lock(&dig_port->hdcp_mutex);
+	mutex_lock(&dig_port->hdcp.mutex);
 
 	cpu_transcoder = hdcp->cpu_transcoder;
 
@@ -1176,7 +1189,7 @@ static int intel_hdcp_check_link(struct intel_connector *connector)
 	}
 
 out:
-	mutex_unlock(&dig_port->hdcp_mutex);
+	mutex_unlock(&dig_port->hdcp.mutex);
 	mutex_unlock(&hdcp->mutex);
 	return ret;
 }
@@ -1218,7 +1231,7 @@ hdcp2_prepare_ake_init(struct intel_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct i915_hdcp_arbiter *arbiter;
 	int ret;
 
@@ -1248,7 +1261,7 @@ hdcp2_verify_rx_cert_prepare_km(struct intel_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct i915_hdcp_arbiter *arbiter;
 	int ret;
 
@@ -1276,7 +1289,7 @@ static int hdcp2_verify_hprime(struct intel_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct i915_hdcp_arbiter *arbiter;
 	int ret;
 
@@ -1302,7 +1315,7 @@ hdcp2_store_pairing_info(struct intel_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct i915_hdcp_arbiter *arbiter;
 	int ret;
 
@@ -1329,7 +1342,7 @@ hdcp2_prepare_lc_init(struct intel_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct i915_hdcp_arbiter *arbiter;
 	int ret;
 
@@ -1356,7 +1369,7 @@ hdcp2_verify_lprime(struct intel_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct i915_hdcp_arbiter *arbiter;
 	int ret;
 
@@ -1382,7 +1395,7 @@ static int hdcp2_prepare_skey(struct intel_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct i915_hdcp_arbiter *arbiter;
 	int ret;
 
@@ -1411,7 +1424,7 @@ hdcp2_verify_rep_topology_prepare_ack(struct intel_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct i915_hdcp_arbiter *arbiter;
 	int ret;
 
@@ -1441,7 +1454,7 @@ hdcp2_verify_mprime(struct intel_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct i915_hdcp_arbiter *arbiter;
 	int ret;
 
@@ -1465,7 +1478,7 @@ static int hdcp2_authenticate_port(struct intel_connector *connector)
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct i915_hdcp_arbiter *arbiter;
 	int ret;
 
@@ -1502,7 +1515,7 @@ static int hdcp2_close_session(struct intel_connector *connector)
 	}
 
 	ret = arbiter->ops->close_hdcp_session(arbiter->hdcp_dev,
-					     &dig_port->hdcp_port_data);
+					     &dig_port->hdcp.port_data);
 	mutex_unlock(&display->hdcp.hdcp_mutex);
 
 	return ret;
@@ -1550,9 +1563,9 @@ static int hdcp2_authentication_key_exchange(struct intel_connector *connector)
 	 * with a 50ms delay if not hdcp2 capable for DP/DPMST encoders
 	 * (dock decides to stop advertising hdcp2 capability for some reason).
 	 * The reason being that during suspend resume dock usually keeps the
-	 * HDCP2 registers inaccesible causing AUX error. This wouldn't be a
+	 * HDCP2 registers inaccessible causing AUX error. This wouldn't be a
 	 * big problem if the userspace just kept retrying with some delay while
-	 * it continues to play low value content but most userpace applications
+	 * it continues to play low value content but most userspace applications
 	 * end up throwing an error when it receives one from KMD. This makes
 	 * sure we give the dock and the sink devices to complete its power cycle
 	 * and then try HDCP authentication. The values of 10 and delay of 50ms
@@ -1690,7 +1703,7 @@ static
 int _hdcp2_propagate_stream_management_info(struct intel_connector *connector)
 {
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct intel_hdcp *hdcp = &connector->hdcp;
 	union {
 		struct hdcp2_rep_stream_manage stream_manage;
@@ -1768,11 +1781,11 @@ int hdcp2_authenticate_repeater_topology(struct intel_connector *connector)
 	 * MST topology is not Type 1 capable if it contains a downstream
 	 * device that is only HDCP 1.x or Legacy HDCP 2.0/2.1 compliant.
 	 */
-	dig_port->hdcp_mst_type1_capable =
+	dig_port->hdcp.mst_type1_capable =
 		!HDCP_2_2_HDCP1_DEVICE_CONNECTED(rx_info[1]) &&
 		!HDCP_2_2_HDCP_2_0_REP_CONNECTED(rx_info[1]);
 
-	if (!dig_port->hdcp_mst_type1_capable && hdcp->content_type) {
+	if (!dig_port->hdcp.mst_type1_capable && hdcp->content_type) {
 		drm_dbg_kms(display->drm,
 			    "HDCP1.x or 2.0 Legacy Device Downstream\n");
 		return -EINVAL;
@@ -1788,9 +1801,10 @@ int hdcp2_authenticate_repeater_topology(struct intel_connector *connector)
 		return -EINVAL;
 	}
 
-	if (seq_num_v < hdcp->seq_num_v) {
-		/* Roll over of the seq_num_v from repeater. Reauthenticate. */
-		drm_dbg_kms(display->drm, "Seq_num_v roll over.\n");
+	if (hdcp->hdcp2_encrypted && seq_num_v <= hdcp->seq_num_v) {
+		/* Reauthenticate on Seq_num_v repeat or rollover */
+		drm_dbg_kms(display->drm, "Seq_num_v %s\n",
+			    seq_num_v == hdcp->seq_num_v ? "repeat" : "rollover");
 		return -EINVAL;
 	}
 
@@ -1868,7 +1882,7 @@ static int hdcp2_enable_stream_encryption(struct intel_connector *connector)
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct intel_hdcp *hdcp = &connector->hdcp;
 	enum transcoder cpu_transcoder = hdcp->cpu_transcoder;
 	enum port port = dig_port->base.port;
@@ -1899,7 +1913,7 @@ link_recover:
 	if (hdcp2_deauthenticate_port(connector) < 0)
 		drm_dbg_kms(display->drm, "Port deauth failed.\n");
 
-	dig_port->hdcp_auth_status = false;
+	dig_port->hdcp.auth_status = false;
 	data->k = 0;
 
 	return ret;
@@ -1934,12 +1948,11 @@ static int hdcp2_enable_encryption(struct intel_connector *connector)
 		intel_de_rmw(display, HDCP2_CTL(display, cpu_transcoder, port),
 			     0, CTL_LINK_ENCRYPTION_REQ);
 
-	ret = intel_de_wait_for_set(display,
-				    HDCP2_STATUS(display, cpu_transcoder,
-						 port),
-				    LINK_ENCRYPTION_STATUS,
-				    HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS);
-	dig_port->hdcp_auth_status = true;
+	ret = intel_de_wait_for_set_ms(display,
+				       HDCP2_STATUS(display, cpu_transcoder, port),
+				       LINK_ENCRYPTION_STATUS,
+				       HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS);
+	dig_port->hdcp.auth_status = true;
 
 	return ret;
 }
@@ -1960,11 +1973,10 @@ static int hdcp2_disable_encryption(struct intel_connector *connector)
 	intel_de_rmw(display, HDCP2_CTL(display, cpu_transcoder, port),
 		     CTL_LINK_ENCRYPTION_REQ, 0);
 
-	ret = intel_de_wait_for_clear(display,
-				      HDCP2_STATUS(display, cpu_transcoder,
-						   port),
-				      LINK_ENCRYPTION_STATUS,
-				      HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS);
+	ret = intel_de_wait_for_clear_ms(display,
+					 HDCP2_STATUS(display, cpu_transcoder, port),
+					 LINK_ENCRYPTION_STATUS,
+					 HDCP_ENCRYPT_STATUS_CHANGE_TIMEOUT_MS);
 	if (ret == -ETIMEDOUT)
 		drm_dbg_kms(display->drm, "Disable Encryption Timedout");
 
@@ -2018,7 +2030,7 @@ static int hdcp2_authenticate_and_encrypt(struct intel_atomic_state *state,
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
 	int ret = 0, i, tries = 3;
 
-	for (i = 0; i < tries && !dig_port->hdcp_auth_status; i++) {
+	for (i = 0; i < tries && !dig_port->hdcp.auth_status; i++) {
 		ret = hdcp2_authenticate_sink(connector);
 		if (!ret) {
 			ret = intel_hdcp_prepare_streams(state, connector);
@@ -2051,7 +2063,7 @@ static int hdcp2_authenticate_and_encrypt(struct intel_atomic_state *state,
 			drm_dbg_kms(display->drm, "Port deauth failed.\n");
 	}
 
-	if (!ret && !dig_port->hdcp_auth_status) {
+	if (!ret && !dig_port->hdcp.auth_status) {
 		/*
 		 * Ensuring the required 200mSec min time interval between
 		 * Session Key Exchange and encryption.
@@ -2105,7 +2117,7 @@ _intel_hdcp2_disable(struct intel_connector *connector, bool hdcp2_link_recovery
 {
 	struct intel_display *display = to_intel_display(connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	struct intel_hdcp *hdcp = &connector->hdcp;
 	int ret;
 
@@ -2122,7 +2134,7 @@ _intel_hdcp2_disable(struct intel_connector *connector, bool hdcp2_link_recovery
 		drm_dbg_kms(display->drm, "HDCP 2.2 transcoder: %s stream encryption disabled\n",
 			    transcoder_name(hdcp->stream_transcoder));
 
-		if (dig_port->num_hdcp_streams > 0 && !hdcp2_link_recovery)
+		if (dig_port->hdcp.num_streams > 0 && !hdcp2_link_recovery)
 			return 0;
 	}
 
@@ -2132,7 +2144,7 @@ _intel_hdcp2_disable(struct intel_connector *connector, bool hdcp2_link_recovery
 		drm_dbg_kms(display->drm, "Port deauth failed.\n");
 
 	connector->hdcp.hdcp2_encrypted = false;
-	dig_port->hdcp_auth_status = false;
+	dig_port->hdcp.auth_status = false;
 	data->k = 0;
 
 	return ret;
@@ -2149,7 +2161,7 @@ static int intel_hdcp2_check_link(struct intel_connector *connector)
 	int ret = 0;
 
 	mutex_lock(&hdcp->mutex);
-	mutex_lock(&dig_port->hdcp_mutex);
+	mutex_lock(&dig_port->hdcp.mutex);
 	cpu_transcoder = hdcp->cpu_transcoder;
 
 	/* hdcp2_check_link is expected only when HDCP2.2 is Enabled */
@@ -2220,7 +2232,7 @@ static int intel_hdcp2_check_link(struct intel_connector *connector)
 	intel_hdcp_update_value(connector,
 				DRM_MODE_CONTENT_PROTECTION_DESIRED, true);
 out:
-	mutex_unlock(&dig_port->hdcp_mutex);
+	mutex_unlock(&dig_port->hdcp.mutex);
 	mutex_unlock(&hdcp->mutex);
 	return ret;
 }
@@ -2232,16 +2244,15 @@ static void intel_hdcp_check_work(struct work_struct *work)
 					       check_work);
 	struct intel_connector *connector = intel_hdcp_to_connector(hdcp);
 	struct intel_display *display = to_intel_display(connector);
-	struct drm_i915_private *i915 = to_i915(display->drm);
 
 	if (drm_connector_is_unregistered(&connector->base))
 		return;
 
-	if (!intel_hdcp2_check_link(connector))
-		queue_delayed_work(i915->unordered_wq, &hdcp->check_work,
+	if (!hdcp->force_hdcp14 && !intel_hdcp2_check_link(connector))
+		queue_delayed_work(display->wq.unordered, &hdcp->check_work,
 				   DRM_HDCP2_CHECK_PERIOD_MS);
 	else if (!intel_hdcp_check_link(connector))
-		queue_delayed_work(i915->unordered_wq, &hdcp->check_work,
+		queue_delayed_work(display->wq.unordered, &hdcp->check_work,
 				   DRM_HDCP_CHECK_PERIOD_MS);
 }
 
@@ -2302,7 +2313,7 @@ static int initialize_hdcp_port_data(struct intel_connector *connector,
 				     const struct intel_hdcp_shim *shim)
 {
 	struct intel_display *display = to_intel_display(connector);
-	struct hdcp_port_data *data = &dig_port->hdcp_port_data;
+	struct hdcp_port_data *data = &dig_port->hdcp.port_data;
 	enum port port = dig_port->base.port;
 
 	if (DISPLAY_VER(display) < 12)
@@ -2325,9 +2336,8 @@ static int initialize_hdcp_port_data(struct intel_connector *connector,
 	data->protocol = (u8)shim->protocol;
 
 	if (!data->streams)
-		data->streams = kcalloc(INTEL_NUM_PIPES(display),
-					sizeof(struct hdcp2_streamid_type),
-					GFP_KERNEL);
+		data->streams = kzalloc_objs(struct hdcp2_streamid_type,
+					     INTEL_NUM_PIPES(display));
 	if (!data->streams) {
 		drm_err(display->drm, "Out of Memory\n");
 		return -ENOMEM;
@@ -2338,18 +2348,16 @@ static int initialize_hdcp_port_data(struct intel_connector *connector,
 
 static bool is_hdcp2_supported(struct intel_display *display)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
-
-	if (intel_hdcp_gsc_cs_required(display))
+	if (USE_HDCP_GSC(display))
 		return true;
 
 	if (!IS_ENABLED(CONFIG_INTEL_MEI_HDCP))
 		return false;
 
-	return (DISPLAY_VER(display) >= 10 ||
-		IS_KABYLAKE(i915) ||
-		IS_COFFEELAKE(i915) ||
-		IS_COMETLAKE(i915));
+	return DISPLAY_VER(display) >= 10 ||
+		display->platform.kabylake ||
+		display->platform.coffeelake ||
+		display->platform.cometlake;
 }
 
 void intel_hdcp_component_init(struct intel_display *display)
@@ -2364,7 +2372,7 @@ void intel_hdcp_component_init(struct intel_display *display)
 
 	display->hdcp.comp_added = true;
 	mutex_unlock(&display->hdcp.hdcp_mutex);
-	if (intel_hdcp_gsc_cs_required(display))
+	if (USE_HDCP_GSC(display))
 		ret = intel_hdcp_gsc_init(display);
 	else
 		ret = component_add_typed(display->drm->dev, &i915_hdcp_ops,
@@ -2415,7 +2423,7 @@ int intel_hdcp_init(struct intel_connector *connector,
 							       hdcp->hdcp2_supported);
 	if (ret) {
 		hdcp->hdcp2_supported = false;
-		kfree(dig_port->hdcp_port_data.streams);
+		kfree(dig_port->hdcp.port_data.streams);
 		return ret;
 	}
 
@@ -2434,7 +2442,6 @@ static int _intel_hdcp_enable(struct intel_atomic_state *state,
 			      const struct drm_connector_state *conn_state)
 {
 	struct intel_display *display = to_intel_display(encoder);
-	struct drm_i915_private *i915 = to_i915(display->drm);
 	struct intel_connector *connector =
 		to_intel_connector(conn_state->connector);
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
@@ -2445,14 +2452,8 @@ static int _intel_hdcp_enable(struct intel_atomic_state *state,
 	if (!hdcp->shim)
 		return -ENOENT;
 
-	if (!connector->encoder) {
-		drm_err(display->drm, "[CONNECTOR:%d:%s] encoder is not initialized\n",
-			connector->base.base.id, connector->base.name);
-		return -ENODEV;
-	}
-
 	mutex_lock(&hdcp->mutex);
-	mutex_lock(&dig_port->hdcp_mutex);
+	mutex_lock(&dig_port->hdcp.mutex);
 	drm_WARN_ON(display->drm,
 		    hdcp->value == DRM_MODE_CONTENT_PROTECTION_ENABLED);
 	hdcp->content_type = (u8)conn_state->hdcp_content_type;
@@ -2466,19 +2467,22 @@ static int _intel_hdcp_enable(struct intel_atomic_state *state,
 	}
 
 	if (DISPLAY_VER(display) >= 12)
-		dig_port->hdcp_port_data.hdcp_transcoder =
+		dig_port->hdcp.port_data.hdcp_transcoder =
 			intel_get_hdcp_transcoder(hdcp->cpu_transcoder);
 
 	/*
 	 * Considering that HDCP2.2 is more secure than HDCP1.4, If the setup
 	 * is capable of HDCP2.2, it is preferred to use HDCP2.2.
 	 */
-	if (intel_hdcp2_get_capability(connector)) {
+	if (!hdcp->force_hdcp14 && intel_hdcp2_get_capability(connector)) {
 		ret = _intel_hdcp2_enable(state, connector);
 		if (!ret)
 			check_link_interval =
 				DRM_HDCP2_CHECK_PERIOD_MS;
 	}
+
+	if (hdcp->force_hdcp14)
+		drm_dbg_kms(display->drm, "Forcing HDCP 1.4\n");
 
 	/*
 	 * When HDCP2.2 fails and Content Type is not Type1, HDCP1.4 will
@@ -2490,14 +2494,14 @@ static int _intel_hdcp_enable(struct intel_atomic_state *state,
 	}
 
 	if (!ret) {
-		queue_delayed_work(i915->unordered_wq, &hdcp->check_work,
+		queue_delayed_work(display->wq.unordered, &hdcp->check_work,
 				   check_link_interval);
 		intel_hdcp_update_value(connector,
 					DRM_MODE_CONTENT_PROTECTION_ENABLED,
 					true);
 	}
 
-	mutex_unlock(&dig_port->hdcp_mutex);
+	mutex_unlock(&dig_port->hdcp.mutex);
 	mutex_unlock(&hdcp->mutex);
 	return ret;
 }
@@ -2533,7 +2537,7 @@ int intel_hdcp_disable(struct intel_connector *connector)
 		return -ENOENT;
 
 	mutex_lock(&hdcp->mutex);
-	mutex_lock(&dig_port->hdcp_mutex);
+	mutex_lock(&dig_port->hdcp.mutex);
 
 	if (hdcp->value == DRM_MODE_CONTENT_PROTECTION_UNDESIRED)
 		goto out;
@@ -2546,7 +2550,7 @@ int intel_hdcp_disable(struct intel_connector *connector)
 		ret = _intel_hdcp_disable(connector);
 
 out:
-	mutex_unlock(&dig_port->hdcp_mutex);
+	mutex_unlock(&dig_port->hdcp.mutex);
 	mutex_unlock(&hdcp->mutex);
 	cancel_delayed_work_sync(&hdcp->check_work);
 	return ret;
@@ -2561,7 +2565,7 @@ void intel_hdcp_update_pipe(struct intel_atomic_state *state,
 				to_intel_connector(conn_state->connector);
 	struct intel_hdcp *hdcp = &connector->hdcp;
 	bool content_protection_type_changed, desired_and_not_enabled = false;
-	struct drm_i915_private *i915 = to_i915(connector->base.dev);
+	struct intel_display *display = to_intel_display(connector);
 
 	if (!connector->hdcp.shim)
 		return;
@@ -2573,7 +2577,7 @@ void intel_hdcp_update_pipe(struct intel_atomic_state *state,
 
 	/*
 	 * During the HDCP encryption session if Type change is requested,
-	 * disable the HDCP and reenable it with new TYPE value.
+	 * disable the HDCP and re-enable it with new TYPE value.
 	 */
 	if (conn_state->content_protection ==
 	    DRM_MODE_CONTENT_PROTECTION_UNDESIRED ||
@@ -2588,7 +2592,7 @@ void intel_hdcp_update_pipe(struct intel_atomic_state *state,
 		mutex_lock(&hdcp->mutex);
 		hdcp->value = DRM_MODE_CONTENT_PROTECTION_DESIRED;
 		drm_connector_get(&connector->base);
-		if (!queue_work(i915->unordered_wq, &hdcp->prop_work))
+		if (!queue_work(display->wq.unordered, &hdcp->prop_work))
 			drm_connector_put(&connector->base);
 		mutex_unlock(&hdcp->mutex);
 	}
@@ -2606,7 +2610,7 @@ void intel_hdcp_update_pipe(struct intel_atomic_state *state,
 		 */
 		if (!desired_and_not_enabled && !content_protection_type_changed) {
 			drm_connector_get(&connector->base);
-			if (!queue_work(i915->unordered_wq, &hdcp->prop_work))
+			if (!queue_work(display->wq.unordered, &hdcp->prop_work))
 				drm_connector_put(&connector->base);
 
 		}
@@ -2614,6 +2618,15 @@ void intel_hdcp_update_pipe(struct intel_atomic_state *state,
 
 	if (desired_and_not_enabled || content_protection_type_changed)
 		_intel_hdcp_enable(state, encoder, crtc_state, conn_state);
+}
+
+void intel_hdcp_cancel_works(struct intel_connector *connector)
+{
+	if (!connector->hdcp.shim)
+		return;
+
+	cancel_delayed_work_sync(&connector->hdcp.check_work);
+	cancel_work_sync(&connector->hdcp.prop_work);
 }
 
 void intel_hdcp_component_fini(struct intel_display *display)
@@ -2627,7 +2640,7 @@ void intel_hdcp_component_fini(struct intel_display *display)
 	display->hdcp.comp_added = false;
 	mutex_unlock(&display->hdcp.hdcp_mutex);
 
-	if (intel_hdcp_gsc_cs_required(display))
+	if (USE_HDCP_GSC(display))
 		intel_hdcp_gsc_fini(display);
 	else
 		component_del(display->drm->dev, &i915_hdcp_ops);
@@ -2721,7 +2734,6 @@ void intel_hdcp_handle_cp_irq(struct intel_connector *connector)
 {
 	struct intel_hdcp *hdcp = &connector->hdcp;
 	struct intel_display *display = to_intel_display(connector);
-	struct drm_i915_private *i915 = to_i915(display->drm);
 
 	if (!hdcp->shim)
 		return;
@@ -2729,5 +2741,155 @@ void intel_hdcp_handle_cp_irq(struct intel_connector *connector)
 	atomic_inc(&connector->hdcp.cp_irq_count);
 	wake_up_all(&connector->hdcp.cp_irq_queue);
 
-	queue_delayed_work(i915->unordered_wq, &hdcp->check_work, 0);
+	queue_delayed_work(display->wq.unordered, &hdcp->check_work, 0);
+}
+
+static void __intel_hdcp_info(struct seq_file *m, struct intel_connector *connector,
+			      bool remote_req)
+{
+	bool hdcp_cap = false, hdcp2_cap = false;
+
+	if (!connector->hdcp.shim) {
+		seq_puts(m, "No Connector Support");
+		goto out;
+	}
+
+	if (remote_req) {
+		intel_hdcp_get_remote_capability(connector, &hdcp_cap, &hdcp2_cap);
+	} else {
+		hdcp_cap = intel_hdcp_get_capability(connector);
+		hdcp2_cap = intel_hdcp2_get_capability(connector);
+	}
+
+	if (hdcp_cap)
+		seq_puts(m, "HDCP1.4 ");
+	if (hdcp2_cap)
+		seq_puts(m, "HDCP2.2 ");
+
+	if (!hdcp_cap && !hdcp2_cap)
+		seq_puts(m, "None");
+
+out:
+	seq_puts(m, "\n");
+}
+
+void intel_hdcp_info(struct seq_file *m, struct intel_connector *connector)
+{
+	seq_puts(m, "\tHDCP version: ");
+	if (connector->mst.dp) {
+		__intel_hdcp_info(m, connector, true);
+		seq_puts(m, "\tMST Hub HDCP version: ");
+	}
+	__intel_hdcp_info(m, connector, false);
+}
+
+static int intel_hdcp_sink_capability_show(struct seq_file *m, void *data)
+{
+	struct intel_connector *connector = m->private;
+	struct intel_display *display = to_intel_display(connector);
+	int ret;
+
+	ret = drm_modeset_lock_single_interruptible(&display->drm->mode_config.connection_mutex);
+	if (ret)
+		return ret;
+
+	if (!connector->base.encoder ||
+	    connector->base.status != connector_status_connected) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	seq_printf(m, "%s:%d HDCP version: ", connector->base.name,
+		   connector->base.base.id);
+	__intel_hdcp_info(m, connector, false);
+
+out:
+	drm_modeset_unlock(&display->drm->mode_config.connection_mutex);
+
+	return ret;
+}
+DEFINE_SHOW_ATTRIBUTE(intel_hdcp_sink_capability);
+
+static ssize_t intel_hdcp_force_14_write(struct file *file,
+					 const char __user *ubuf,
+					 size_t len, loff_t *offp)
+{
+	struct seq_file *m = file->private_data;
+	struct intel_connector *connector = m->private;
+	struct intel_hdcp *hdcp = &connector->hdcp;
+	bool force_hdcp14 = false;
+	int ret;
+
+	if (len == 0)
+		return 0;
+
+	ret = kstrtobool_from_user(ubuf, len, &force_hdcp14);
+	if (ret < 0)
+		return ret;
+
+	hdcp->force_hdcp14 = force_hdcp14;
+	*offp += len;
+
+	return len;
+}
+
+static int intel_hdcp_force_14_show(struct seq_file *m, void *data)
+{
+	struct intel_connector *connector = m->private;
+	struct intel_display *display = to_intel_display(connector);
+	struct intel_encoder *encoder = intel_attached_encoder(connector);
+	struct intel_hdcp *hdcp = &connector->hdcp;
+	struct drm_crtc *crtc;
+	int ret;
+
+	if (!encoder)
+		return -ENODEV;
+
+	ret = drm_modeset_lock_single_interruptible(&display->drm->mode_config.connection_mutex);
+	if (ret)
+		return ret;
+
+	crtc = connector->base.state->crtc;
+	if (connector->base.status != connector_status_connected || !crtc) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	seq_printf(m, "%s\n",
+		   str_yes_no(hdcp->force_hdcp14));
+out:
+	drm_modeset_unlock(&display->drm->mode_config.connection_mutex);
+
+	return ret;
+}
+
+static int intel_hdcp_force_14_open(struct inode *inode,
+				    struct file *file)
+{
+	return single_open(file, intel_hdcp_force_14_show,
+			   inode->i_private);
+}
+
+static const struct file_operations intel_hdcp_force_14_fops = {
+	.owner = THIS_MODULE,
+	.open = intel_hdcp_force_14_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+	.write = intel_hdcp_force_14_write
+};
+
+void intel_hdcp_connector_debugfs_add(struct intel_connector *connector)
+{
+	struct dentry *root = connector->base.debugfs_entry;
+	int connector_type = connector->base.connector_type;
+
+	if (connector_type == DRM_MODE_CONNECTOR_DisplayPort ||
+	    connector_type == DRM_MODE_CONNECTOR_HDMIA ||
+	    connector_type == DRM_MODE_CONNECTOR_HDMIB) {
+		debugfs_create_file("i915_hdcp_sink_capability", 0444, root,
+				    connector, &intel_hdcp_sink_capability_fops);
+		debugfs_create_file("i915_force_hdcp14", 0644, root,
+				    connector, &intel_hdcp_force_14_fops);
+	}
 }

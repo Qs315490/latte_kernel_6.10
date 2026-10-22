@@ -112,7 +112,7 @@ static struct rxrpc_local *rxrpc_alloc_local(struct net *net,
 	struct rxrpc_local *local;
 	u32 tmp;
 
-	local = kzalloc(sizeof(struct rxrpc_local), GFP_KERNEL);
+	local = kzalloc_obj(struct rxrpc_local);
 	if (local) {
 		refcount_set(&local->ref, 1);
 		atomic_set(&local->active_users, 1);
@@ -194,7 +194,7 @@ static int rxrpc_open_socket(struct rxrpc_local *local, struct net *net)
 	tuncfg.encap_rcv = rxrpc_encap_rcv;
 	tuncfg.encap_err_rcv = rxrpc_encap_err_rcv;
 	tuncfg.sk_user_data = local;
-	setup_udp_tunnel_sock(net, local->socket, &tuncfg);
+	setup_udp_tunnel_sock(net, local->socket->sk, &tuncfg);
 
 	/* set the socket up */
 	usk = local->socket->sk;

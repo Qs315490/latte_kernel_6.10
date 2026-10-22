@@ -164,6 +164,7 @@ void optc1_program_timing(
 	const enum signal_type signal,
 	bool use_vbios)
 {
+	(void)use_vbios;
 	struct dc_crtc_timing patched_crtc_timing;
 	uint32_t asic_blank_end;
 	uint32_t asic_blank_start;
@@ -374,7 +375,7 @@ void optc1_set_vtg_params(struct timing_generator *optc,
 	if (REG(OTG_INTERLACE_CONTROL)) {
 		if (patched_crtc_timing.flags.INTERLACE == 1) {
 			v_init = v_init / 2;
-			if ((optc1->vstartup_start/2)*2 > asic_blank_end)
+			if ((uint32_t)((optc1->vstartup_start/2)*2) > asic_blank_end)
 				v_fp2 = v_fp2 / 2;
 		}
 	}
@@ -855,6 +856,8 @@ void optc1_set_early_control(
 	struct timing_generator *optc,
 	uint32_t early_cntl)
 {
+	(void)optc;
+	(void)early_cntl;
 	/* asic design change, do not need this control
 	 * empty for share caller logic
 	 */
@@ -1249,6 +1252,7 @@ void optc1_get_crtc_scanoutpos(
 static void optc1_enable_stereo(struct timing_generator *optc,
 	const struct dc_crtc_timing *timing, struct crtc_stereo_flags *flags)
 {
+	(void)timing;
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 
 	if (flags) {
@@ -1312,7 +1316,7 @@ bool optc1_get_hw_timing(struct timing_generator *tg,
 	if (tg == NULL || hw_crtc_timing == NULL)
 		return false;
 
-	optc1_read_otg_state(DCN10TG_FROM_TG(tg), &s);
+	optc1_read_otg_state(tg, &s);
 
 	hw_crtc_timing->h_total = s.h_total + 1;
 	hw_crtc_timing->h_addressable = s.h_total - ((s.h_total - s.h_blank_start) + s.h_blank_end);
@@ -1328,9 +1332,11 @@ bool optc1_get_hw_timing(struct timing_generator *tg,
 }
 
 
-void optc1_read_otg_state(struct optc *optc1,
+void optc1_read_otg_state(struct timing_generator *optc,
 		struct dcn_otg_state *s)
 {
+	struct optc *optc1 = DCN10TG_FROM_TG(optc);
+
 	REG_GET(OTG_CONTROL,
 			OTG_MASTER_EN, &s->otg_enabled);
 
@@ -1663,6 +1669,7 @@ static const struct timing_generator_funcs dcn10_tg_funcs = {
 		.setup_manual_trigger = optc1_setup_manual_trigger,
 		.get_hw_timing = optc1_get_hw_timing,
 		.is_two_pixels_per_container = optc1_is_two_pixels_per_container,
+		.read_otg_state = optc1_read_otg_state,
 };
 
 void dcn10_timing_generator_init(struct optc *optc1)

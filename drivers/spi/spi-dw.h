@@ -142,14 +142,14 @@ struct dw_spi_dma_ops {
 	int (*dma_init)(struct device *dev, struct dw_spi *dws);
 	void (*dma_exit)(struct dw_spi *dws);
 	int (*dma_setup)(struct dw_spi *dws, struct spi_transfer *xfer);
-	bool (*can_dma)(struct spi_controller *host, struct spi_device *spi,
+	bool (*can_dma)(struct spi_controller *ctlr, struct spi_device *spi,
 			struct spi_transfer *xfer);
 	int (*dma_transfer)(struct dw_spi *dws, struct spi_transfer *xfer);
 	void (*dma_stop)(struct dw_spi *dws);
 };
 
 struct dw_spi {
-	struct spi_controller	*host;
+	struct spi_controller	*ctlr;
 
 	u32			ip;		/* Synopsys DW SSI IP-core ID */
 	u32			ver;		/* Synopsys component version */
@@ -282,16 +282,18 @@ static inline void dw_spi_shutdown_chip(struct dw_spi *dws)
 {
 	dw_spi_enable_chip(dws, 0);
 	dw_spi_set_clk(dws, 0);
+	dws->current_freq = 0;
+	dws->cur_rx_sample_dly = 0;
 }
 
 extern void dw_spi_set_cs(struct spi_device *spi, bool enable);
 extern void dw_spi_update_config(struct dw_spi *dws, struct spi_device *spi,
 				 struct dw_spi_cfg *cfg);
 extern int dw_spi_check_status(struct dw_spi *dws, bool raw);
-extern int dw_spi_add_host(struct device *dev, struct dw_spi *dws);
-extern void dw_spi_remove_host(struct dw_spi *dws);
-extern int dw_spi_suspend_host(struct dw_spi *dws);
-extern int dw_spi_resume_host(struct dw_spi *dws);
+extern int dw_spi_add_controller(struct device *dev, struct dw_spi *dws);
+extern void dw_spi_remove_controller(struct dw_spi *dws);
+extern int dw_spi_suspend_controller(struct dw_spi *dws);
+extern int dw_spi_resume_controller(struct dw_spi *dws);
 
 #ifdef CONFIG_SPI_DW_DMA
 

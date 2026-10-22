@@ -13,6 +13,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/compiler_attributes.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -79,6 +80,12 @@ static const struct dmi_system_id dell_wmi_smbios_list[] __initconst = {
  */
 static const struct key_entry dell_wmi_keymap_type_0000[] = {
 	{ KE_IGNORE, 0x003a, { KEY_CAPSLOCK } },
+
+	/* Audio mute toggle */
+	{ KE_KEY,    0x0109, { KEY_MUTE } },
+
+	/* Mic mute toggle */
+	{ KE_KEY,    0x0150, { KEY_MICMUTE } },
 
 	/* Meta key lock */
 	{ KE_IGNORE, 0xe000, { KEY_RIGHTMETA } },
@@ -365,6 +372,13 @@ static const struct key_entry dell_wmi_keymap_type_0012[] = {
 	/* Backlight brightness change event */
 	{ KE_IGNORE, 0x0003, { KEY_RESERVED } },
 
+	/*
+	 * Electronic privacy screen toggled, extended data gives state,
+	 * separate entries for on/off see handling in dell_wmi_process_key().
+	 */
+	{ KE_KEY, 0x000c, { KEY_EPRIVACY_SCREEN_OFF } },
+	{ KE_KEY, 0x000c, { KEY_EPRIVACY_SCREEN_ON } },
+
 	/* Ultra-performance mode switch request */
 	{ KE_IGNORE, 0x000d, { KEY_RESERVED } },
 
@@ -401,7 +415,8 @@ static void dell_wmi_switch_event(struct input_dev **subdev,
 	input_sync(*subdev);
 }
 
-static int dell_wmi_process_key(struct wmi_device *wdev, int type, int code, u16 *buffer, int remaining)
+static int dell_wmi_process_key(struct wmi_device *wdev, int type, int code, __le16 *buffer,
+				int remaining)
 {
 	struct dell_wmi_priv *priv = dev_get_drvdata(&wdev->dev);
 	const struct key_entry *key;
@@ -433,10 +448,15 @@ static int dell_wmi_process_key(struct wmi_device *wdev, int type, int code, u16
 	} else if (type == 0x0011 && code == 0xe070 && remaining > 0) {
 		dell_wmi_switch_event(&priv->tabletswitch_dev,
 				      "Dell tablet mode switch",
-				      SW_TABLET_MODE, !buffer[0]);
+				      SW_TABLET_MODE, !le16_to_cpu(buffer[0]));
 		return 1;
+	} else if (type == 0x0012 && code == 0x000c && remaining > 0) {
+		/* Eprivacy toggle, switch to "on" key entry for on events */
+		if (le16_to_cpu(buffer[0]) == 2)
+			key++;
+		used = 1;
 	} else if (type == 0x0012 && code == 0x000d && remaining > 0) {
-		value = (buffer[2] == 2);
+		value = (le16_to_cpu(buffer[2]) == 2);
 		used = 1;
 	}
 
@@ -445,24 +465,17 @@ static int dell_wmi_process_key(struct wmi_device *wdev, int type, int code, u16
 	return used;
 }
 
-static void dell_wmi_notify(struct wmi_device *wdev,
-			    union acpi_object *obj)
+static void dell_wmi_notify(struct wmi_device *wdev, const struct wmi_buffer *buffer)
 {
 	struct dell_wmi_priv *priv = dev_get_drvdata(&wdev->dev);
-	u16 *buffer_entry, *buffer_end;
-	acpi_size buffer_size;
+	__le16 *buffer_entry, *buffer_end;
+	size_t buffer_size;
 	int len, i;
 
-	if (obj->type != ACPI_TYPE_BUFFER) {
-		pr_warn("bad response type %x\n", obj->type);
-		return;
-	}
+	pr_debug("Received WMI event (%*ph)\n", (int)buffer->length, buffer->data);
 
-	pr_debug("Received WMI event (%*ph)\n",
-		obj->buffer.length, obj->buffer.pointer);
-
-	buffer_entry = (u16 *)obj->buffer.pointer;
-	buffer_size = obj->buffer.length/2;
+	buffer_entry = buffer->data;
+	buffer_size = buffer->length / 2;
 	buffer_end = buffer_entry + buffer_size;
 
 	/*
@@ -478,12 +491,12 @@ static void dell_wmi_notify(struct wmi_device *wdev,
 	 * one event on devices with WMI interface version 0.
 	 */
 	if (priv->interface_version == 0 && buffer_entry < buffer_end)
-		if (buffer_end > buffer_entry + buffer_entry[0] + 1)
-			buffer_end = buffer_entry + buffer_entry[0] + 1;
+		if (buffer_end > buffer_entry + le16_to_cpu(buffer_entry[0]) + 1)
+			buffer_end = buffer_entry + le16_to_cpu(buffer_entry[0]) + 1;
 
 	while (buffer_entry < buffer_end) {
 
-		len = buffer_entry[0];
+		len = le16_to_cpu(buffer_entry[0]);
 		if (len == 0)
 			break;
 
@@ -496,11 +509,11 @@ static void dell_wmi_notify(struct wmi_device *wdev,
 
 		pr_debug("Process buffer (%*ph)\n", len*2, buffer_entry);
 
-		switch (buffer_entry[1]) {
+		switch (le16_to_cpu(buffer_entry[1])) {
 		case 0x0000: /* One key pressed or event occurred */
 			if (len > 2)
-				dell_wmi_process_key(wdev, buffer_entry[1],
-						     buffer_entry[2],
+				dell_wmi_process_key(wdev, le16_to_cpu(buffer_entry[1]),
+						     le16_to_cpu(buffer_entry[2]),
 						     buffer_entry + 3,
 						     len - 3);
 			/* Extended data is currently ignored */
@@ -508,22 +521,23 @@ static void dell_wmi_notify(struct wmi_device *wdev,
 		case 0x0010: /* Sequence of keys pressed */
 		case 0x0011: /* Sequence of events occurred */
 			for (i = 2; i < len; ++i)
-				i += dell_wmi_process_key(wdev, buffer_entry[1],
-							  buffer_entry[i],
+				i += dell_wmi_process_key(wdev, le16_to_cpu(buffer_entry[1]),
+							  le16_to_cpu(buffer_entry[i]),
 							  buffer_entry + i,
 							  len - i - 1);
 			break;
 		case 0x0012:
-			if ((len > 4) && dell_privacy_process_event(buffer_entry[1], buffer_entry[3],
-								    buffer_entry[4]))
+			if ((len > 4) && dell_privacy_process_event(le16_to_cpu(buffer_entry[1]),
+								    le16_to_cpu(buffer_entry[3]),
+								    le16_to_cpu(buffer_entry[4])))
 				/* dell_privacy_process_event has handled the event */;
 			else if (len > 2)
-				dell_wmi_process_key(wdev, buffer_entry[1], buffer_entry[2],
+				dell_wmi_process_key(wdev, le16_to_cpu(buffer_entry[1]),
+						     le16_to_cpu(buffer_entry[2]),
 						     buffer_entry + 3, len - 3);
 			break;
 		default: /* Unknown event */
-			pr_info("Unknown WMI event type 0x%x\n",
-				(int)buffer_entry[1]);
+			pr_info("Unknown WMI event type 0x%x\n", le16_to_cpu(buffer_entry[1]));
 			break;
 		}
 
@@ -574,7 +588,7 @@ static void handle_dmi_entry(const struct dmi_header *dm, void *opaque)
 		return;
 	}
 
-	keymap = kcalloc(hotkey_num, sizeof(struct key_entry), GFP_KERNEL);
+	keymap = kzalloc_objs(struct key_entry, hotkey_num);
 	if (!keymap) {
 		results->err = -ENOMEM;
 		return;
@@ -644,13 +658,8 @@ static int dell_wmi_input_setup(struct wmi_device *wdev)
 		goto err_free_dev;
 	}
 
-	keymap = kcalloc(dmi_results.keymap_size +
-			 ARRAY_SIZE(dell_wmi_keymap_type_0000) +
-			 ARRAY_SIZE(dell_wmi_keymap_type_0010) +
-			 ARRAY_SIZE(dell_wmi_keymap_type_0011) +
-			 ARRAY_SIZE(dell_wmi_keymap_type_0012) +
-			 1,
-			 sizeof(struct key_entry), GFP_KERNEL);
+	keymap = kzalloc_objs(struct key_entry,
+			      dmi_results.keymap_size + ARRAY_SIZE(dell_wmi_keymap_type_0000) + ARRAY_SIZE(dell_wmi_keymap_type_0010) + ARRAY_SIZE(dell_wmi_keymap_type_0011) + ARRAY_SIZE(dell_wmi_keymap_type_0012) + 1);
 	if (!keymap) {
 		kfree(dmi_results.keymap);
 		err = -ENOMEM;
@@ -761,7 +770,7 @@ static int dell_wmi_events_set_enabled(bool enable)
 	struct calling_interface_buffer *buffer;
 	int ret;
 
-	buffer = kzalloc(sizeof(struct calling_interface_buffer), GFP_KERNEL);
+	buffer = kzalloc_obj(struct calling_interface_buffer);
 	if (!buffer)
 		return -ENOMEM;
 	buffer->cmd_class = CLASS_INFO;
@@ -812,9 +821,10 @@ static struct wmi_driver dell_wmi_driver = {
 		.name = "dell-wmi",
 	},
 	.id_table = dell_wmi_id_table,
+	.min_event_size = sizeof(__le16),
 	.probe = dell_wmi_probe,
 	.remove = dell_wmi_remove,
-	.notify = dell_wmi_notify,
+	.notify_new = dell_wmi_notify,
 };
 
 static int __init dell_wmi_init(void)

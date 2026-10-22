@@ -8,6 +8,7 @@
  */
 #include "builtin.h"
 
+#include "util/aslr.h"
 #include "util/color.h"
 #include "util/dso.h"
 #include "util/vdso.h"
@@ -24,8 +25,10 @@
 #include "util/string2.h"
 #include "util/symbol.h"
 #include "util/synthetic-events.h"
+#include "util/pmus.h"
 #include "util/thread.h"
 #include "util/namespaces.h"
+#include "util/unwind.h"
 #include "util/util.h"
 #include "util/tsc.h"
 
@@ -122,6 +125,8 @@ struct perf_inject {
 	bool			in_place_update;
 	bool			in_place_update_dry_run;
 	bool			copy_kcore_dir;
+	bool			convert_callchain;
+	bool			aslr;
 	const char		*input_name;
 	struct perf_data	output;
 	u64			bytes_written;
@@ -132,7 +137,8 @@ struct perf_inject {
 	struct perf_file_section secs[HEADER_FEAT_BITS];
 	struct guest_session	guest_session;
 	struct strlist		*known_build_ids;
-	const struct evsel	*mmap_evsel;
+	struct evsel		*mmap_evsel;
+	struct ip_callchain	*raw_callchain;
 };
 
 struct event_entry {
@@ -144,14 +150,12 @@ struct event_entry {
 static int tool__inject_build_id(const struct perf_tool *tool,
 				 struct perf_sample *sample,
 				 struct machine *machine,
-				 const struct evsel *evsel,
 				 __u16 misc,
 				 const char *filename,
 				 struct dso *dso, u32 flags);
 static int tool__inject_mmap2_build_id(const struct perf_tool *tool,
 				      struct perf_sample *sample,
 				      struct machine *machine,
-				      const struct evsel *evsel,
 				      __u16 misc,
 				      __u32 pid, __u32 tid,
 				      __u64 start, __u64 len, __u64 pgoff,
@@ -197,18 +201,28 @@ static int perf_event__drop_oe(const struct perf_tool *tool __maybe_unused,
 }
 #endif
 
-static int perf_event__repipe_op2_synth(struct perf_session *session,
+static int perf_event__repipe_op2_synth(const struct perf_tool *tool,
+					struct perf_session *session __maybe_unused,
 					union perf_event *event)
 {
-	return perf_event__repipe_synth(session->tool, event);
+	return perf_event__repipe_synth(tool, event);
 }
 
-static int perf_event__repipe_op4_synth(struct perf_session *session,
+static int perf_event__repipe_op4_synth(const struct perf_tool *tool,
+					struct perf_session *session __maybe_unused,
 					union perf_event *event,
 					u64 data __maybe_unused,
 					const char *str __maybe_unused)
 {
-	return perf_event__repipe_synth(session->tool, event);
+	return perf_event__repipe_synth(tool, event);
+}
+
+static int perf_event__repipe_synth_cb(const struct perf_tool *tool,
+				       union perf_event *event,
+				       struct perf_sample *sample __maybe_unused,
+				       struct machine *machine __maybe_unused)
+{
+	return perf_event__repipe_synth(tool, event);
 }
 
 static int perf_event__repipe_attr(const struct perf_tool *tool,
@@ -217,17 +231,82 @@ static int perf_event__repipe_attr(const struct perf_tool *tool,
 {
 	struct perf_inject *inject = container_of(tool, struct perf_inject,
 						  tool);
+	struct perf_event_attr attr;
+	u32 raw_attr_size, attr_size;
+	size_t n_ids;
+	u64 *ids;
 	int ret;
+
+	union perf_event *aslr_event = NULL;
 
 	ret = perf_event__process_attr(tool, event, pevlist);
 	if (ret)
 		return ret;
 
-	/* If the output isn't a pipe then the attributes will be written as part of the header. */
-	if (!inject->output.is_pipe)
-		return 0;
+	if (inject->aslr) {
+		aslr_event = malloc(event->header.size);
+		if (!aslr_event)
+			return -ENOMEM;
+		memcpy(aslr_event, event, event->header.size);
+		aslr_tool__strip_attr_event(aslr_event, *pevlist);
+		event = aslr_event;
+	}
 
-	return perf_event__repipe_synth(tool, event);
+	/* If the output isn't a pipe then the attributes will be written as part of the header. */
+	if (!inject->output.is_pipe) {
+		ret = 0;
+		goto out;
+	}
+
+	if (!inject->itrace_synth_opts.set) {
+		ret = perf_event__repipe_synth(tool, event);
+		goto out;
+	}
+
+	if (event->header.size < sizeof(struct perf_event_header) + PERF_ATTR_SIZE_VER0) {
+		pr_err("Attribute event size %u is too small\n", event->header.size);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/*
+	 * ABI0 pipe/inject events have attr.size == 0; default to
+	 * PERF_ATTR_SIZE_VER0 (the ABI0 footprint) for the bounded
+	 * copy and ID array position.  Same pattern as
+	 * perf_event__process_attr() in header.c.
+	 */
+	raw_attr_size = event->attr.attr.size;
+	attr_size = raw_attr_size ?: PERF_ATTR_SIZE_VER0;
+
+	if (raw_attr_size && (raw_attr_size < PERF_ATTR_SIZE_VER0 ||
+			      raw_attr_size > event->header.size - sizeof(event->header))) {
+		pr_err("Attribute event size %u is too small for attr.size %u\n",
+		       event->header.size, raw_attr_size);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	memset(&attr, 0, sizeof(attr));
+	memcpy(&attr, &event->attr.attr,
+	       min_t(size_t, sizeof(attr), attr_size));
+
+	n_ids = event->header.size - sizeof(event->header) - attr_size;
+	n_ids /= sizeof(u64);
+	ids = (void *)&event->attr.attr + attr_size;
+
+	attr.size = sizeof(struct perf_event_attr);
+	attr.sample_type &= ~PERF_SAMPLE_AUX;
+
+
+	if (inject->itrace_synth_opts.add_last_branch) {
+		attr.sample_type |= PERF_SAMPLE_BRANCH_STACK;
+		attr.branch_sample_type |= PERF_SAMPLE_BRANCH_HW_INDEX;
+	}
+	ret = perf_event__synthesize_attr(tool, &attr, (u32)n_ids, ids,
+					   perf_event__repipe_synth_cb);
+out:
+	free(aslr_event);
+	return ret;
 }
 
 static int perf_event__repipe_event_update(const struct perf_tool *tool,
@@ -236,8 +315,6 @@ static int perf_event__repipe_event_update(const struct perf_tool *tool,
 {
 	return perf_event__repipe_synth(tool, event);
 }
-
-#ifdef HAVE_AUXTRACE_SUPPORT
 
 static int copy_bytes(struct perf_inject *inject, struct perf_data *data, off_t size)
 {
@@ -258,20 +335,18 @@ static int copy_bytes(struct perf_inject *inject, struct perf_data *data, off_t 
 	return 0;
 }
 
-static s64 perf_event__repipe_auxtrace(struct perf_session *session,
+static s64 perf_event__repipe_auxtrace(const struct perf_tool *tool,
+				       struct perf_session *session,
 				       union perf_event *event)
 {
-	const struct perf_tool *tool = session->tool;
-	struct perf_inject *inject = container_of(tool, struct perf_inject,
-						  tool);
+	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
 	int ret;
 
 	inject->have_auxtrace = true;
 
 	if (!inject->output.is_pipe) {
-		off_t offset;
+		off_t offset = perf_data__seek(&inject->output, 0, SEEK_CUR);
 
-		offset = lseek(inject->output.file.fd, 0, SEEK_CUR);
 		if (offset == -1)
 			return -errno;
 		ret = auxtrace_index__auxtrace_event(&session->auxtrace_index,
@@ -295,18 +370,6 @@ static s64 perf_event__repipe_auxtrace(struct perf_session *session,
 
 	return event->auxtrace.size;
 }
-
-#else
-
-static s64
-perf_event__repipe_auxtrace(struct perf_session *session __maybe_unused,
-			    union perf_event *event __maybe_unused)
-{
-	pr_err("AUX area tracing not supported\n");
-	return -EINVAL;
-}
-
-#endif
 
 static int perf_event__repipe(const struct perf_tool *tool,
 			      union perf_event *event,
@@ -342,8 +405,8 @@ perf_inject__cut_auxtrace_sample(struct perf_inject *inject,
 				 union perf_event *event,
 				 struct perf_sample *sample)
 {
-	size_t sz1 = sample->aux_sample.data - (void *)event;
-	size_t sz2 = event->header.size - sample->aux_sample.size - sz1;
+	size_t sz1 = sample->aux_sample.data - (void *)event - sizeof(u64);
+	size_t sz2 = event->header.size - sample->aux_sample.size - (sz1 + sizeof(u64));
 	union perf_event *ev;
 
 	if (inject->event_copy == NULL) {
@@ -354,13 +417,12 @@ perf_inject__cut_auxtrace_sample(struct perf_inject *inject,
 	ev = (union perf_event *)inject->event_copy;
 	if (sz1 > event->header.size || sz2 > event->header.size ||
 	    sz1 + sz2 > event->header.size ||
-	    sz1 < sizeof(struct perf_event_header) + sizeof(u64))
+	    sz1 < sizeof(struct perf_event_header))
 		return event;
 
 	memcpy(ev, event, sz1);
 	memcpy((void *)ev + sz1, (void *)event + event->header.size - sz2, sz2);
 	ev->header.size = sz1 + sz2;
-	((u64 *)((void *)ev + sz1))[-1] = 0;
 
 	return ev;
 }
@@ -368,32 +430,184 @@ perf_inject__cut_auxtrace_sample(struct perf_inject *inject,
 typedef int (*inject_handler)(const struct perf_tool *tool,
 			      union perf_event *event,
 			      struct perf_sample *sample,
-			      struct evsel *evsel,
 			      struct machine *machine);
 
 static int perf_event__repipe_sample(const struct perf_tool *tool,
 				     union perf_event *event,
 				     struct perf_sample *sample,
-				     struct evsel *evsel,
 				     struct machine *machine)
 {
-	struct perf_inject *inject = container_of(tool, struct perf_inject,
-						  tool);
+	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
+	struct evsel *evsel = sample->evsel;
 
-	if (evsel && evsel->handler) {
+	if (evsel == NULL)
+		return perf_event__repipe_synth(tool, event);
+
+	if (evsel->handler) {
 		inject_handler f = evsel->handler;
-		return f(tool, event, sample, evsel, machine);
+		return f(tool, event, sample, machine);
 	}
 
-	build_id__mark_dso_hit(tool, event, sample, evsel, machine);
+	build_id__mark_dso_hit(tool, event, sample, machine);
 
-	if (inject->itrace_synth_opts.set && sample->aux_sample.size) {
+	if (inject->itrace_synth_opts.set &&
+	    (inject->itrace_synth_opts.last_branch ||
+	     inject->itrace_synth_opts.add_last_branch)) {
+		union perf_event *event_copy = (void *)inject->event_copy;
+		struct branch_stack dummy_bs = { .nr = 0, .hw_idx = 0 };
+		int err;
+		size_t sz;
+		u64 orig_type = evsel->core.attr.sample_type;
+		u64 orig_branch_type = evsel->core.attr.branch_sample_type;
+
+		struct branch_stack *orig_bs = sample->branch_stack;
+
+		if (event_copy == NULL) {
+			inject->event_copy = malloc(PERF_SAMPLE_MAX_SIZE);
+			if (!inject->event_copy)
+				return -ENOMEM;
+
+			event_copy = (void *)inject->event_copy;
+		}
+
+		if (!sample->branch_stack)
+			sample->branch_stack = &dummy_bs;
+
+		if (inject->itrace_synth_opts.add_last_branch) {
+			/* Temporarily add in type bits for synthesis. */
+			evsel->core.attr.sample_type |= PERF_SAMPLE_BRANCH_STACK;
+			evsel->core.attr.branch_sample_type |= PERF_SAMPLE_BRANCH_HW_INDEX;
+		}
+		evsel->core.attr.sample_type &= ~PERF_SAMPLE_AUX;
+
+		sz = perf_event__sample_event_size(sample, evsel->core.attr.sample_type,
+						   evsel->core.attr.read_format,
+						   evsel->core.attr.branch_sample_type);
+
+		if (sz >= PERF_SAMPLE_MAX_SIZE) {
+			pr_err("Sample size %zu exceeds max size %d\n", sz, PERF_SAMPLE_MAX_SIZE);
+			evsel->core.attr.sample_type = orig_type;
+			evsel->core.attr.branch_sample_type = orig_branch_type;
+			sample->branch_stack = orig_bs;
+			return -EFAULT;
+		}
+
+		event_copy->header.type = PERF_RECORD_SAMPLE;
+		event_copy->header.misc = event->header.misc;
+		event_copy->header.size = sz;
+
+		err = perf_event__synthesize_sample(event_copy, evsel->core.attr.sample_type,
+						    evsel->core.attr.read_format,
+						    evsel->core.attr.branch_sample_type, sample);
+
+		evsel->core.attr.sample_type = orig_type;
+		evsel->core.attr.branch_sample_type = orig_branch_type;
+		sample->branch_stack = orig_bs;
+
+		if (err) {
+			pr_err("Failed to synthesize sample\n");
+			return err;
+		}
+		event = event_copy;
+	} else if (inject->itrace_synth_opts.set &&
+		   (evsel->core.attr.sample_type & PERF_SAMPLE_AUX)) {
 		event = perf_inject__cut_auxtrace_sample(inject, event, sample);
 		if (IS_ERR(event))
 			return PTR_ERR(event);
 	}
 
 	return perf_event__repipe_synth(tool, event);
+}
+
+static int perf_event__convert_sample_callchain(const struct perf_tool *tool,
+						union perf_event *event,
+						struct perf_sample *sample,
+						struct machine *machine)
+{
+	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
+	struct evsel *evsel = sample->evsel;
+	struct callchain_cursor *cursor = get_tls_callchain_cursor();
+	union perf_event *event_copy = (void *)inject->event_copy;
+	struct callchain_cursor_node *node;
+	struct thread *thread;
+	u64 sample_type = evsel->core.attr.sample_type;
+	size_t sz;
+	u64 i, k;
+	int ret;
+
+	if (event_copy == NULL) {
+		inject->event_copy = malloc(PERF_SAMPLE_MAX_SIZE);
+		if (!inject->event_copy)
+			return -ENOMEM;
+
+		event_copy = (void *)inject->event_copy;
+	}
+
+	if (cursor == NULL)
+		return -ENOMEM;
+
+	callchain_cursor_reset(cursor);
+
+	thread = machine__find_thread(machine, sample->tid, sample->pid);
+	if (thread == NULL)
+		goto out;
+
+	/* this will parse DWARF using stack and register data */
+	ret = thread__resolve_callchain(thread, cursor, sample,
+					/*parent=*/NULL, /*root_al=*/NULL,
+					PERF_MAX_STACK_DEPTH);
+	thread__put(thread);
+	if (ret != 0)
+		goto out;
+
+	/* copy kernel callchain and context entries */
+	for (i = 0; i < sample->callchain->nr; i++) {
+		inject->raw_callchain->ips[i] = sample->callchain->ips[i];
+		if (sample->callchain->ips[i] == PERF_CONTEXT_USER) {
+			i++;
+			break;
+		}
+	}
+	if (i == 0 || inject->raw_callchain->ips[i - 1] != PERF_CONTEXT_USER)
+		inject->raw_callchain->ips[i++] = PERF_CONTEXT_USER;
+
+	node = cursor->first;
+	for (k = 0; k < cursor->nr && i < PERF_MAX_STACK_DEPTH; k++) {
+		if (!(machine->single_address_space &&
+		      machine__kernel_ip(machine, node->ip)) &&
+		    !(node->ms.sym && symbol__inlined(node->ms.sym))) {
+			inject->raw_callchain->ips[i++] = node->ip;
+		}
+
+		node = node->next;
+	}
+
+	inject->raw_callchain->nr = i;
+	sample->callchain = inject->raw_callchain;
+
+out:
+	memcpy(event_copy, event, sizeof(event->header));
+
+	/* remove sample_type {STACK,REGS}_USER for synthesize */
+	sample_type &= ~(PERF_SAMPLE_STACK_USER | PERF_SAMPLE_REGS_USER);
+
+	sz = perf_event__sample_event_size(sample, sample_type,
+					   evsel->core.attr.read_format,
+					   evsel->core.attr.branch_sample_type);
+	if (sz >= PERF_SAMPLE_MAX_SIZE) {
+		pr_err("Sample size %zu exceeds max size %d\n", sz, PERF_SAMPLE_MAX_SIZE);
+		return -EFAULT;
+	}
+	event_copy->header.size = sz;
+
+	ret = perf_event__synthesize_sample(event_copy, sample_type,
+					    evsel->core.attr.read_format,
+					    evsel->core.attr.branch_sample_type, sample);
+	if (ret) {
+		pr_err("Failed to synthesize sample\n");
+		return ret;
+	}
+	return perf_event__repipe_synth(tool, event_copy);
 }
 
 static struct dso *findnew_dso(int pid, int tid, const char *filename,
@@ -446,7 +660,7 @@ static struct dso *findnew_dso(int pid, int tid, const char *filename,
  * processing mmap events. If not stashed, search the evlist for the first mmap
  * gathering event.
  */
-static const struct evsel *inject__mmap_evsel(struct perf_inject *inject)
+static struct evsel *inject__mmap_evsel(struct perf_inject *inject)
 {
 	struct evsel *pos;
 
@@ -512,11 +726,12 @@ static int perf_event__repipe_common_mmap(const struct perf_tool *tool,
 		}
 
 		if (dso && !dso__hit(dso)) {
-			struct evsel *evsel = evlist__event2evsel(inject->session->evlist, event);
+			if (!sample->evsel)
+				sample->evsel = evlist__event2evsel(inject->session->evlist, event);
 
-			if (evsel) {
+			if (sample->evsel) {
 				dso__set_hit(dso);
-				tool__inject_build_id(tool, sample, machine, evsel,
+				tool__inject_build_id(tool, sample, machine,
 						      /*misc=*/sample->cpumode,
 						      filename, dso, flags);
 			}
@@ -543,23 +758,26 @@ static int perf_event__repipe_common_mmap(const struct perf_tool *tool,
 	}
 	if ((inject->build_id_style == BID_RWS__MMAP2_BUILDID_ALL) &&
 	    !(event->header.misc & PERF_RECORD_MISC_MMAP_BUILD_ID)) {
-		struct evsel *evsel = evlist__event2evsel(inject->session->evlist, event);
+		struct evsel *saved_evsel = sample->evsel;
 
-		if (evsel && !dso_sought) {
+		sample->evsel = evlist__event2evsel(inject->session->evlist, event);
+		if (sample->evsel && !dso_sought) {
 			dso = findnew_dso(pid, tid, filename, dso_id, machine);
 			dso_sought = true;
 		}
-		if (evsel && dso &&
-		    !tool__inject_mmap2_build_id(tool, sample, machine, evsel,
+		if (sample->evsel && dso &&
+		    !tool__inject_mmap2_build_id(tool, sample, machine,
 						 sample->cpumode | PERF_RECORD_MISC_MMAP_BUILD_ID,
 						 pid, tid, start, len, pgoff,
 						 dso,
 						 prot, flags,
 						 filename)) {
 			/* Injected mmap2 so no need to repipe. */
+			sample->evsel = saved_evsel;
 			dso__put(dso);
 			return 0;
 		}
+		sample->evsel = saved_evsel;
 	}
 	dso__put(dso);
 	if (inject->build_id_style == BID_RWS__MMAP2_BUILDID_LAZY)
@@ -587,15 +805,17 @@ static int perf_event__repipe_mmap2(const struct perf_tool *tool,
 				struct perf_sample *sample,
 				struct machine *machine)
 {
-	struct dso_id id;
-	struct dso_id *dso_id = NULL;
+	struct dso_id id = dso_id_empty;
 
-	if (!(event->header.misc & PERF_RECORD_MISC_MMAP_BUILD_ID)) {
+	if (event->header.misc & PERF_RECORD_MISC_MMAP_BUILD_ID) {
+		build_id__init(&id.build_id, event->mmap2.build_id, event->mmap2.build_id_size);
+	} else {
 		id.maj = event->mmap2.maj;
 		id.min = event->mmap2.min;
 		id.ino = event->mmap2.ino;
 		id.ino_generation = event->mmap2.ino_generation;
-		dso_id = &id;
+		id.mmap2_valid = true;
+		id.mmap2_ino_generation_valid = true;
 	}
 
 	return perf_event__repipe_common_mmap(
@@ -603,7 +823,7 @@ static int perf_event__repipe_mmap2(const struct perf_tool *tool,
 		event->mmap2.pid, event->mmap2.tid,
 		event->mmap2.start, event->mmap2.len, event->mmap2.pgoff,
 		event->mmap2.flags, event->mmap2.prot,
-		event->mmap2.filename, dso_id,
+		event->mmap2.filename, &id,
 		perf_event__process_mmap2);
 }
 
@@ -659,31 +879,33 @@ static int perf_event__repipe_exit(const struct perf_tool *tool,
 }
 
 #ifdef HAVE_LIBTRACEEVENT
-static int perf_event__repipe_tracing_data(struct perf_session *session,
+static int perf_event__repipe_tracing_data(const struct perf_tool *tool,
+					   struct perf_session *session,
 					   union perf_event *event)
 {
-	perf_event__repipe_synth(session->tool, event);
+	perf_event__repipe_synth(tool, event);
 
-	return perf_event__process_tracing_data(session, event);
+	return perf_event__process_tracing_data(tool, session, event);
 }
 #endif
 
 static int dso__read_build_id(struct dso *dso)
 {
 	struct nscookie nsc;
+	struct build_id bid = { .size = 0, };
 
 	if (dso__has_build_id(dso))
 		return 0;
 
 	mutex_lock(dso__lock(dso));
 	nsinfo__mountns_enter(dso__nsinfo(dso), &nsc);
-	if (filename__read_build_id(dso__long_name(dso), dso__bid(dso)) > 0)
-		dso__set_has_build_id(dso);
+	if (filename__read_build_id(dso__long_name(dso), &bid) > 0)
+		dso__set_build_id(dso, &bid);
 	else if (dso__nsinfo(dso)) {
 		char *new_name = dso__filename_with_chroot(dso, dso__long_name(dso));
 
-		if (new_name && filename__read_build_id(new_name, dso__bid(dso)) > 0)
-			dso__set_has_build_id(dso);
+		if (new_name && filename__read_build_id(new_name, &bid) > 0)
+			dso__set_build_id(dso, &bid);
 		free(new_name);
 	}
 	nsinfo__mountns_exit(&nsc);
@@ -732,23 +954,26 @@ static bool perf_inject__lookup_known_build_id(struct perf_inject *inject,
 					       struct dso *dso)
 {
 	struct str_node *pos;
-	int bid_len;
 
 	strlist__for_each_entry(pos, inject->known_build_ids) {
+		struct build_id bid;
 		const char *build_id, *dso_name;
+		size_t bid_len;
 
 		build_id = skip_spaces(pos->s);
 		dso_name = strchr(build_id, ' ');
 		bid_len = dso_name - pos->s;
+		if (bid_len > sizeof(bid.data))
+			bid_len = sizeof(bid.data);
 		dso_name = skip_spaces(dso_name);
 		if (strcmp(dso__long_name(dso), dso_name))
 			continue;
-		for (int ix = 0; 2 * ix + 1 < bid_len; ++ix) {
-			dso__bid(dso)->data[ix] = (hex(build_id[2 * ix]) << 4 |
-						  hex(build_id[2 * ix + 1]));
+		for (size_t ix = 0; 2 * ix + 1 < bid_len; ++ix) {
+			bid.data[ix] = (hex(build_id[2 * ix]) << 4 |
+					hex(build_id[2 * ix + 1]));
 		}
-		dso__bid(dso)->size = bid_len / 2;
-		dso__set_has_build_id(dso);
+		bid.size = bid_len / 2;
+		dso__set_build_id(dso, &bid);
 		return true;
 	}
 	return false;
@@ -757,7 +982,6 @@ static bool perf_inject__lookup_known_build_id(struct perf_inject *inject,
 static int tool__inject_build_id(const struct perf_tool *tool,
 				 struct perf_sample *sample,
 				 struct machine *machine,
-				 const struct evsel *evsel,
 				 __u16 misc,
 				 const char *filename,
 				 struct dso *dso, u32 flags)
@@ -781,7 +1005,7 @@ static int tool__inject_build_id(const struct perf_tool *tool,
 
 	err = perf_event__synthesize_build_id(tool, sample, machine,
 					      perf_event__repipe,
-					      evsel, misc, dso__bid(dso),
+					      misc, dso__bid(dso),
 					      filename);
 	if (err) {
 		pr_err("Can't synthesize build_id event for %s\n", filename);
@@ -794,7 +1018,6 @@ static int tool__inject_build_id(const struct perf_tool *tool,
 static int tool__inject_mmap2_build_id(const struct perf_tool *tool,
 				       struct perf_sample *sample,
 				       struct machine *machine,
-				       const struct evsel *evsel,
 				       __u16 misc,
 				       __u32 pid, __u32 tid,
 				       __u64 start, __u64 len, __u64 pgoff,
@@ -817,7 +1040,6 @@ static int tool__inject_mmap2_build_id(const struct perf_tool *tool,
 
 	err = perf_event__synthesize_mmap2_build_id(tool, sample, machine,
 						    perf_event__repipe,
-						    evsel,
 						    misc, pid, tid,
 						    start, len, pgoff,
 						    dso__bid(dso),
@@ -834,7 +1056,7 @@ static int mark_dso_hit(const struct perf_inject *inject,
 			const struct perf_tool *tool,
 			struct perf_sample *sample,
 			struct machine *machine,
-			const struct evsel *mmap_evsel,
+			struct evsel *mmap_evsel,
 			struct map *map, bool sample_in_dso)
 {
 	struct dso *dso;
@@ -862,9 +1084,13 @@ static int mark_dso_hit(const struct perf_inject *inject,
 	dso = map__dso(map);
 	if (inject->build_id_style == BID_RWS__INJECT_HEADER_LAZY) {
 		if (dso && !dso__hit(dso)) {
+			/*
+			 * The sample is just read for identifiers which we want
+			 * to match the for the event of the sample.
+			 */
 			dso__set_hit(dso);
 			tool__inject_build_id(tool, sample, machine,
-					     mmap_evsel, misc, dso__long_name(dso), dso,
+					     misc, dso__long_name(dso), dso,
 					     map__flags(map));
 		}
 	} else if (inject->build_id_style == BID_RWS__MMAP2_BUILDID_LAZY) {
@@ -872,11 +1098,13 @@ static int mark_dso_hit(const struct perf_inject *inject,
 			const struct build_id null_bid = { .size = 0 };
 			const struct build_id *bid = dso ? dso__bid(dso) : &null_bid;
 			const char *filename = dso ? dso__long_name(dso) : "";
+			struct evsel *saved_evsel = sample->evsel;
 
 			map__set_hit(map);
+			/* Creating a new mmap2 event which has an evsel for the mmap event. */
+			sample->evsel = mmap_evsel;
 			perf_event__synthesize_mmap2_build_id(tool, sample, machine,
 								perf_event__repipe,
-								mmap_evsel,
 								misc,
 								sample->pid, sample->tid,
 								map__start(map),
@@ -886,6 +1114,7 @@ static int mark_dso_hit(const struct perf_inject *inject,
 								map__prot(map),
 								map__flags(map),
 								filename);
+			sample->evsel = saved_evsel;
 		}
 	}
 	return 0;
@@ -896,7 +1125,7 @@ struct mark_dso_hit_args {
 	const struct perf_tool *tool;
 	struct perf_sample *sample;
 	struct machine *machine;
-	const struct evsel *mmap_evsel;
+	struct evsel *mmap_evsel;
 };
 
 static int mark_dso_hit_callback(struct callchain_cursor_node *node, void *data)
@@ -908,10 +1137,8 @@ static int mark_dso_hit_callback(struct callchain_cursor_node *node, void *data)
 			    args->mmap_evsel, map, /*sample_in_dso=*/false);
 }
 
-int perf_event__inject_buildid(const struct perf_tool *tool, union perf_event *event,
-			       struct perf_sample *sample,
-			       struct evsel *evsel __maybe_unused,
-			       struct machine *machine)
+static int perf_event__inject_buildid(const struct perf_tool *tool, union perf_event *event,
+				      struct perf_sample *sample, struct machine *machine)
 {
 	struct addr_location al;
 	struct thread *thread;
@@ -941,9 +1168,8 @@ int perf_event__inject_buildid(const struct perf_tool *tool, union perf_event *e
 			     /*sample_in_dso=*/true);
 	}
 
-	sample__for_each_callchain_node(thread, evsel, sample, PERF_MAX_STACK_DEPTH,
+	sample__for_each_callchain_node(thread, sample, PERF_MAX_STACK_DEPTH,
 					/*symbols=*/false, mark_dso_hit_callback, &args);
-
 	thread__put(thread);
 repipe:
 	perf_event__repipe(tool, event, sample, machine);
@@ -954,7 +1180,6 @@ repipe:
 static int perf_inject__sched_process_exit(const struct perf_tool *tool,
 					   union perf_event *event __maybe_unused,
 					   struct perf_sample *sample,
-					   struct evsel *evsel __maybe_unused,
 					   struct machine *machine __maybe_unused)
 {
 	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
@@ -974,13 +1199,12 @@ static int perf_inject__sched_process_exit(const struct perf_tool *tool,
 static int perf_inject__sched_switch(const struct perf_tool *tool,
 				     union perf_event *event,
 				     struct perf_sample *sample,
-				     struct evsel *evsel,
 				     struct machine *machine)
 {
 	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
 	struct event_entry *ent;
 
-	perf_inject__sched_process_exit(tool, event, sample, evsel, machine);
+	perf_inject__sched_process_exit(tool, event, sample, machine);
 
 	ent = malloc(event->header.size + sizeof(struct event_entry));
 	if (ent == NULL) {
@@ -999,14 +1223,15 @@ static int perf_inject__sched_switch(const struct perf_tool *tool,
 static int perf_inject__sched_stat(const struct perf_tool *tool,
 				   union perf_event *event __maybe_unused,
 				   struct perf_sample *sample,
-				   struct evsel *evsel,
 				   struct machine *machine)
 {
 	struct event_entry *ent;
 	union perf_event *event_sw;
 	struct perf_sample sample_sw;
 	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
-	u32 pid = evsel__intval(evsel, sample, "pid");
+	struct evsel *evsel = sample->evsel;
+	u32 pid = perf_sample__intval(sample, "pid");
+	int ret;
 
 	list_for_each_entry(ent, &inject->samples, node) {
 		if (pid == ent->tid)
@@ -1021,9 +1246,12 @@ found:
 	sample_sw.period = sample->period;
 	sample_sw.time	 = sample->time;
 	perf_event__synthesize_sample(event_sw, evsel->core.attr.sample_type,
-				      evsel->core.attr.read_format, &sample_sw);
-	build_id__mark_dso_hit(tool, event_sw, &sample_sw, evsel, machine);
-	return perf_event__repipe(tool, event_sw, &sample_sw, machine);
+				      evsel->core.attr.read_format,
+				      evsel->core.attr.branch_sample_type, &sample_sw);
+	build_id__mark_dso_hit(tool, event_sw, &sample_sw, machine);
+	ret = perf_event__repipe(tool, event_sw, &sample_sw, machine);
+	perf_sample__exit(&sample_sw);
+	return ret;
 }
 #endif
 
@@ -1342,13 +1570,14 @@ static int process_build_id(const struct perf_tool *tool,
 {
 	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
 
-	return perf_event__process_build_id(inject->session, event);
+	return perf_event__process_build_id(tool, inject->session, event);
 }
 
 static int synthesize_build_id(struct perf_inject *inject, struct dso *dso, pid_t machine_pid)
 {
 	struct machine *machine = perf_session__findnew_machine(inject->session, machine_pid);
 	struct perf_sample synth_sample = {
+		.evsel	   = inject__mmap_evsel(inject),
 		.pid	   = -1,
 		.tid	   = -1,
 		.time	   = -1,
@@ -1366,7 +1595,7 @@ static int synthesize_build_id(struct perf_inject *inject, struct dso *dso, pid_
 	dso__set_hit(dso);
 
 	return perf_event__synthesize_build_id(&inject->tool, &synth_sample, machine,
-					       process_build_id, inject__mmap_evsel(inject),
+					       process_build_id,
 					       /*misc=*/synth_sample.cpumode,
 					       dso__bid(dso), dso__long_name(dso));
 }
@@ -1568,6 +1797,7 @@ static int guest_session__fetch(struct guest_session *gs)
 	size_t hdr_sz = sizeof(*hdr);
 	ssize_t ret;
 
+	perf_sample__init(&gs->ev.sample, /*all=*/false);
 	buf = gs->ev.event_buf;
 	if (!buf) {
 		buf = malloc(PERF_SAMPLE_MAX_SIZE);
@@ -1665,18 +1895,24 @@ static int guest_session__inject_events(struct guest_session *gs, u64 timestamp)
 		if (!gs->fetched) {
 			ret = guest_session__fetch(gs);
 			if (ret)
-				return ret;
+				break;
 			gs->fetched = true;
 		}
 
 		ev = gs->ev.event;
 		sample = &gs->ev.sample;
 
-		if (!ev->header.size)
-			return 0; /* EOF */
-
-		if (sample->time > timestamp)
-			return 0;
+		if (!ev->header.size) {
+			/* EOF */
+			perf_sample__exit(&gs->ev.sample);
+			gs->fetched = false;
+			ret = 0;
+			break;
+		}
+		if (sample->time > timestamp) {
+			ret = 0;
+			break;
+		}
 
 		/* Change cpumode to guest */
 		cpumode = ev->header.misc & PERF_RECORD_MISC_CPUMODE_MASK;
@@ -1699,12 +1935,14 @@ static int guest_session__inject_events(struct guest_session *gs, u64 timestamp)
 
 		if (id_hdr_size & 7) {
 			pr_err("Bad id_hdr_size %u\n", id_hdr_size);
-			return -EINVAL;
+			ret = -EINVAL;
+			break;
 		}
 
 		if (ev->header.size & 7) {
 			pr_err("Bad event size %u\n", ev->header.size);
-			return -EINVAL;
+			ret = -EINVAL;
+			break;
 		}
 
 		/* Remove guest id sample */
@@ -1712,14 +1950,16 @@ static int guest_session__inject_events(struct guest_session *gs, u64 timestamp)
 
 		if (ev->header.size & 7) {
 			pr_err("Bad raw event size %u\n", ev->header.size);
-			return -EINVAL;
+			ret = -EINVAL;
+			break;
 		}
 
 		guest_id = guest_session__lookup_id(gs, id);
 		if (!guest_id) {
 			pr_err("Guest event with unknown id %llu\n",
 			       (unsigned long long)id);
-			return -EINVAL;
+			ret = -EINVAL;
+			break;
 		}
 
 		/* Change to host ID to avoid conflicting ID values */
@@ -1739,19 +1979,28 @@ static int guest_session__inject_events(struct guest_session *gs, u64 timestamp)
 		/* New id sample with new ID and CPU */
 		ret = evlist__append_id_sample(inject->session->evlist, ev, sample);
 		if (ret)
-			return ret;
+			break;
 
 		if (ev->header.size & 7) {
 			pr_err("Bad new event size %u\n", ev->header.size);
-			return -EINVAL;
+			ret = -EINVAL;
+			break;
 		}
-
-		gs->fetched = false;
 
 		ret = output_bytes(inject, ev, ev->header.size);
 		if (ret)
-			return ret;
+			break;
+
+		/* Reset for next guest session event fetch. */
+		perf_sample__exit(sample);
+		gs->fetched = false;
 	}
+	if (ret && gs->fetched) {
+		/* Clear saved sample state on error. */
+		perf_sample__exit(&gs->ev.sample);
+		gs->fetched = false;
+	}
+	return ret;
 }
 
 static int guest_session__flush_events(struct guest_session *gs)
@@ -1774,9 +2023,10 @@ static int host__repipe(const struct perf_tool *tool,
 	return perf_event__repipe(tool, event, sample, machine);
 }
 
-static int host__finished_init(struct perf_session *session, union perf_event *event)
+static int host__finished_init(const struct perf_tool *tool, struct perf_session *session,
+			       union perf_event *event)
 {
-	struct perf_inject *inject = container_of(session->tool, struct perf_inject, tool);
+	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
 	struct guest_session *gs = &inject->guest_session;
 	int ret;
 
@@ -1823,7 +2073,7 @@ static int host__finished_init(struct perf_session *session, union perf_event *e
 	if (ret)
 		return ret;
 
-	return perf_event__repipe_op2_synth(session, event);
+	return perf_event__repipe_op2_synth(tool, session, event);
 }
 
 /*
@@ -1907,7 +2157,6 @@ static int evsel__check_stype(struct evsel *evsel, u64 sample_type, const char *
 static int drop_sample(const struct perf_tool *tool __maybe_unused,
 		       union perf_event *event __maybe_unused,
 		       struct perf_sample *sample __maybe_unused,
-		       struct evsel *evsel __maybe_unused,
 		       struct machine *machine __maybe_unused)
 {
 	return 0;
@@ -2027,7 +2276,7 @@ static int save_section_info(struct perf_inject *inject)
 	return perf_header__process_sections(header, fd, inject, save_section_info_cb);
 }
 
-static bool keep_feat(int feat)
+static bool keep_feat(struct perf_inject *inject, int feat)
 {
 	switch (feat) {
 	/* Keep original information that describes the machine or software */
@@ -2052,9 +2301,12 @@ static bool keep_feat(int feat)
 	case HEADER_CLOCK_DATA:
 	case HEADER_HYBRID_TOPOLOGY:
 	case HEADER_PMU_CAPS:
+	case HEADER_CPU_DOMAIN_INFO:
+	case HEADER_CLN_SIZE:
 		return true;
 	/* Information that can be updated */
 	case HEADER_BUILD_ID:
+		return inject->build_id_style == BID_RWS__NONE;
 	case HEADER_CMDLINE:
 	case HEADER_EVENT_DESC:
 	case HEADER_BRANCH_STACK:
@@ -2113,7 +2365,7 @@ static int feat_copy_cb(struct feat_copier *fc, int feat, struct feat_writer *fw
 	int ret;
 
 	if (!inject->secs[feat].offset ||
-	    !keep_feat(feat))
+	    !keep_feat(inject, feat))
 		return 0;
 
 	ret = feat_copy(inject, feat, fw);
@@ -2274,6 +2526,15 @@ static int __cmd_inject(struct perf_inject *inject)
 		/* Allow space in the header for guest attributes */
 		output_data_offset += gs->session->header.data_offset;
 		output_data_offset = roundup(output_data_offset, 4096);
+	} else if (inject->convert_callchain) {
+		inject->tool.sample	= perf_event__convert_sample_callchain;
+		inject->tool.fork	= perf_event__repipe_fork;
+		inject->tool.comm	= perf_event__repipe_comm;
+		inject->tool.exit	= perf_event__repipe_exit;
+		inject->tool.mmap	= perf_event__repipe_mmap;
+		inject->tool.mmap2	= perf_event__repipe_mmap2;
+		inject->tool.ordered_events = true;
+		inject->tool.ordering_requires_timestamps = true;
 	}
 
 	if (!inject->itrace_synth_opts.set)
@@ -2319,13 +2580,48 @@ static int __cmd_inject(struct perf_inject *inject)
 		 * synthesized hardware events, so clear the feature flag.
 		 */
 		if (inject->itrace_synth_opts.set) {
+			struct evsel *evsel;
+
 			perf_header__clear_feat(&session->header,
 						HEADER_AUXTRACE);
-			if (inject->itrace_synth_opts.last_branch ||
-			    inject->itrace_synth_opts.add_last_branch)
+
+			evlist__for_each_entry(session->evlist, evsel) {
+				evsel->core.attr.sample_type &= ~PERF_SAMPLE_AUX;
+			}
+
+			if (inject->itrace_synth_opts.add_last_branch) {
 				perf_header__set_feat(&session->header,
 						      HEADER_BRANCH_STACK);
+
+				evlist__for_each_entry(session->evlist, evsel) {
+					evsel->core.attr.sample_type |= PERF_SAMPLE_BRANCH_STACK;
+					if (evsel->core.attr.size < PERF_ATTR_SIZE_VER2)
+						evsel->core.attr.size = PERF_ATTR_SIZE_VER2;
+					evsel->core.attr.branch_sample_type |=
+						PERF_SAMPLE_BRANCH_HW_INDEX;
+				}
+			}
 		}
+
+		/*
+		 * The converted data file won't have stack and registers.
+		 * Update the perf_event_attr to remove them before writing.
+		 */
+		if (inject->convert_callchain) {
+			struct evsel *evsel;
+
+			evlist__for_each_entry(session->evlist, evsel) {
+				evsel__reset_sample_bit(evsel, REGS_USER);
+				evsel__reset_sample_bit(evsel, STACK_USER);
+				evsel->core.attr.sample_regs_user = 0;
+				evsel->core.attr.sample_stack_user = 0;
+				evsel->core.attr.exclude_callchain_user = 0;
+			}
+		}
+
+		if (inject->aslr)
+			aslr_tool__strip_evlist(inject->session->tool, session->evlist);
+
 		session->header.data_offset = output_data_offset;
 		session->header.data_size = inject->bytes_written;
 		perf_session__inject_header(session, session->evlist, fd, &inj_fc.fc,
@@ -2350,6 +2646,18 @@ static int __cmd_inject(struct perf_inject *inject)
 	return ret;
 }
 
+static bool evsel__has_dwarf_callchain(struct evsel *evsel)
+{
+	struct perf_event_attr *attr = &evsel->core.attr;
+	const u64 dwarf_callchain_flags =
+		PERF_SAMPLE_STACK_USER | PERF_SAMPLE_REGS_USER | PERF_SAMPLE_CALLCHAIN;
+
+	if (!attr->exclude_callchain_user)
+		return false;
+
+	return (attr->sample_type & dwarf_callchain_flags) == dwarf_callchain_flags;
+}
+
 int cmd_inject(int argc, const char **argv)
 {
 	struct perf_inject inject = {
@@ -2358,12 +2666,12 @@ int cmd_inject(int argc, const char **argv)
 		.output = {
 			.path = "-",
 			.mode = PERF_DATA_MODE_WRITE,
-			.use_stdio = true,
+			.file.use_stdio = true,
 		},
 	};
 	struct perf_data data = {
 		.mode = PERF_DATA_MODE_READ,
-		.use_stdio = true,
+		.file.use_stdio = true,
 	};
 	int ret;
 	const char *known_build_ids = NULL;
@@ -2418,6 +2726,13 @@ int cmd_inject(int argc, const char **argv)
 		OPT_STRING(0, "guestmount", &symbol_conf.guestmount, "directory",
 			   "guest mount directory under which every guest os"
 			   " instance has a subdir"),
+		OPT_CALLBACK(0, "unwind-style", NULL, "unwind style",
+			     "unwind styles (libdw,libunwind)",
+			     unwind__option),
+		OPT_BOOLEAN(0, "convert-callchain", &inject.convert_callchain,
+			    "Generate callchains using DWARF and drop register/stack data"),
+		OPT_BOOLEAN(0, "aslr", &inject.aslr,
+			    "Remap virtual memory addresses similar to ASLR"),
 		OPT_END()
 	};
 	const char * const inject_usage[] = {
@@ -2425,6 +2740,7 @@ int cmd_inject(int argc, const char **argv)
 		NULL
 	};
 	bool ordered_events;
+	struct perf_tool *tool = &inject.tool;
 
 	if (!inject.itrace_synth_opts.set) {
 		/* Disable eager loading of kernel symbols that adds overhead to perf inject. */
@@ -2434,6 +2750,9 @@ int cmd_inject(int argc, const char **argv)
 #ifndef HAVE_JITDUMP
 	set_option_nobuild(options, 'j', "jit", "NO_LIBELF=1", true);
 #endif
+#ifndef HAVE_LIBDW_SUPPORT
+	set_option_nobuild(options, 0, "convert-callchain", "NO_LIBDW=1", true);
+#endif
 	argc = parse_options(argc, argv, options, inject_usage, 0);
 
 	/*
@@ -2441,6 +2760,11 @@ int cmd_inject(int argc, const char **argv)
 	 */
 	if (argc)
 		usage_with_options(inject_usage, options);
+
+	if (inject.aslr && inject.convert_callchain) {
+		pr_err("Error: --aslr and --convert-callchain are mutually exclusive features.\n");
+		return -EINVAL;
+	}
 
 	if (inject.strip && !inject.itrace_synth_opts.set) {
 		pr_err("--strip option requires --itrace option\n");
@@ -2530,17 +2854,43 @@ int cmd_inject(int argc, const char **argv)
 	inject.tool.finished_init	= perf_event__repipe_op2_synth;
 	inject.tool.compressed		= perf_event__repipe_op4_synth;
 	inject.tool.auxtrace		= perf_event__repipe_auxtrace;
+	inject.tool.bpf_metadata	= perf_event__repipe_op2_synth;
+	inject.tool.schedstat_cpu	= perf_event__repipe_op2_synth;
+	inject.tool.schedstat_domain	= perf_event__repipe_op2_synth;
 	inject.tool.dont_split_sample_group = true;
-	inject.session = __perf_session__new(&data, &inject.tool,
-					     /*trace_event_repipe=*/inject.output.is_pipe);
+	inject.tool.merge_deferred_callchains = false;
+	if (inject.aslr) {
+		tool = aslr_tool__new(&inject.tool);
+		if (!tool) {
+			ret = -ENOMEM;
+			goto out_close_output;
+		}
+	}
+	inject.session = __perf_session__new(&data, tool,
+					     /*trace_event_repipe=*/inject.output.is_pipe,
+					     /*host_env=*/NULL);
 
 	if (IS_ERR(inject.session)) {
 		ret = PTR_ERR(inject.session);
+		if (inject.aslr)
+			aslr_tool__delete(tool);
 		goto out_close_output;
 	}
 
 	if (zstd_init(&(inject.session->zstd_data), 0) < 0)
 		pr_warning("Decompression initialization failed.\n");
+
+	if (inject.aslr) {
+		struct evsel *evsel;
+
+		evlist__for_each_entry(inject.session->evlist, evsel) {
+			ret = aslr_tool__cache_orig_attrs(tool, evsel);
+			if (ret) {
+				pr_err("Failed to cache original attributes: %d\n", ret);
+				goto out_delete;
+			}
+		}
+	}
 
 	/* Save original section info before feature bits change */
 	ret = save_section_info(&inject);
@@ -2560,10 +2910,17 @@ int cmd_inject(int argc, const char **argv)
 		 * the input.
 		 */
 		if (!data.is_pipe) {
+			if (inject.aslr)
+				aslr_tool__strip_evlist(tool, inject.session->evlist);
+
 			ret = perf_event__synthesize_for_pipe(&inject.tool,
 							      inject.session,
 							      &inject.output,
 							      perf_event__repipe);
+
+			if (inject.aslr)
+				aslr_tool__restore_evlist(tool, inject.session->evlist);
+
 			if (ret < 0)
 				goto out_delete;
 		}
@@ -2589,6 +2946,28 @@ int cmd_inject(int argc, const char **argv)
 		}
 	}
 
+	if (inject.convert_callchain) {
+		struct evsel *evsel;
+
+		if (inject.output.is_pipe || inject.session->data->is_pipe) {
+			pr_err("--convert-callchain cannot work with pipe\n");
+			goto out_delete;
+		}
+
+		evlist__for_each_entry(inject.session->evlist, evsel) {
+			if (!evsel__has_dwarf_callchain(evsel) && !evsel__is_dummy_event(evsel)) {
+				pr_err("--convert-callchain requires DWARF call graph.\n");
+				goto out_delete;
+			}
+		}
+
+		inject.raw_callchain = calloc(PERF_MAX_STACK_DEPTH, sizeof(u64));
+		if (inject.raw_callchain == NULL) {
+			pr_err("callchain allocation failed\n");
+			goto out_delete;
+		}
+	}
+
 #ifdef HAVE_JITDUMP
 	if (inject.jit_mode) {
 		inject.tool.mmap2	   = perf_event__repipe_mmap2;
@@ -2601,7 +2980,7 @@ int cmd_inject(int argc, const char **argv)
 		inject.tool.finished_round = perf_event__drop_oe;
 	}
 #endif
-	ret = symbol__init(&inject.session->header.env);
+	ret = symbol__init(perf_session__env(inject.session));
 	if (ret < 0)
 		goto out_delete;
 
@@ -2613,11 +2992,14 @@ out_delete:
 	strlist__delete(inject.known_build_ids);
 	zstd_fini(&(inject.session->zstd_data));
 	perf_session__delete(inject.session);
+	if (inject.aslr)
+		aslr_tool__delete(tool);
 out_close_output:
 	if (!inject.in_place_update)
 		perf_data__close(&inject.output);
 	free(inject.itrace_synth_opts.vm_tm_corr_args);
 	free(inject.event_copy);
 	free(inject.guest_session.ev.event_buf);
+	free(inject.raw_callchain);
 	return ret;
 }

@@ -74,7 +74,7 @@ static struct i2c_dev *get_free_i2c_dev(struct i2c_adapter *adap)
 		return ERR_PTR(-ENODEV);
 	}
 
-	i2c_dev = kzalloc(sizeof(*i2c_dev), GFP_KERNEL);
+	i2c_dev = kzalloc_obj(*i2c_dev);
 	if (!i2c_dev)
 		return ERR_PTR(-ENOMEM);
 	i2c_dev->adap = adap;
@@ -487,12 +487,13 @@ static long i2cdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		client->adapter->retries = arg;
 		break;
 	case I2C_TIMEOUT:
-		if (arg > INT_MAX)
+		/*
+		 * For historical reasons, user-space sets the timeout value in
+		 * units of 10 ms.
+		 */
+		if (arg > INT_MAX / 10)
 			return -EINVAL;
 
-		/* For historical reasons, user-space sets the timeout
-		 * value in units of 10 ms.
-		 */
 		client->adapter->timeout = msecs_to_jiffies(arg * 10);
 		break;
 	default:
@@ -552,8 +553,7 @@ static long compat_i2cdev_ioctl(struct file *file, unsigned int cmd, unsigned lo
 		if (rdwr_arg.nmsgs > I2C_RDWR_IOCTL_MAX_MSGS)
 			return -EINVAL;
 
-		rdwr_pa = kmalloc_array(rdwr_arg.nmsgs, sizeof(struct i2c_msg),
-				      GFP_KERNEL);
+		rdwr_pa = kmalloc_objs(struct i2c_msg, rdwr_arg.nmsgs);
 		if (!rdwr_pa)
 			return -ENOMEM;
 
@@ -612,7 +612,7 @@ static int i2cdev_open(struct inode *inode, struct file *file)
 	 * or I2C core code!!  It just holds private copies of addressing
 	 * information and maybe a PEC flag.
 	 */
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
+	client = kzalloc_obj(*client);
 	if (!client) {
 		i2c_put_adapter(adap);
 		return -ENOMEM;

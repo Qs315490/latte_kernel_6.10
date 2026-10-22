@@ -94,12 +94,13 @@ DECLARE_STATIC_CALL(xen_hypercall, xen_hypercall_func);
 #ifdef MODULE
 #define __ADDRESSABLE_xen_hypercall
 #else
-#define __ADDRESSABLE_xen_hypercall __ADDRESSABLE_ASM_STR(__SCK__xen_hypercall)
+#define __ADDRESSABLE_xen_hypercall \
+	__stringify(.global STATIC_CALL_KEY(xen_hypercall);)
 #endif
 
 #define __HYPERCALL					\
 	__ADDRESSABLE_xen_hypercall			\
-	"call __SCT__xen_hypercall"
+	__stringify(call STATIC_CALL_TRAMP(xen_hypercall))
 
 #define __HYPERCALL_ENTRY(x)	"a" (x)
 
@@ -231,14 +232,12 @@ static __always_inline void __xen_stac(void)
 	 * Suppress objtool seeing the STAC/CLAC and getting confused about it
 	 * calling random code with AC=1.
 	 */
-	asm volatile(ANNOTATE_IGNORE_ALTERNATIVE
-		     ASM_STAC ::: "memory", "flags");
+	asm volatile(ASM_STAC_UNSAFE ::: "memory", "flags");
 }
 
 static __always_inline void __xen_clac(void)
 {
-	asm volatile(ANNOTATE_IGNORE_ALTERNATIVE
-		     ASM_CLAC ::: "memory", "flags");
+	asm volatile(ASM_CLAC_UNSAFE ::: "memory", "flags");
 }
 
 static inline long

@@ -42,6 +42,7 @@ config HIBERNATION
 	select CRC32
 	select CRYPTO
 	select CRYPTO_LZO
+	select CRYPTO_LZ4
 	help
 	  Enable the suspend to disk (STD) functionality, which is usually
 	  called "hibernation" in user interfaces.  STD checkpoints the
@@ -201,6 +202,17 @@ config PM_WAKELOCKS_GC
 	bool "Garbage collector for user space wakeup sources"
 	depends on PM_WAKELOCKS
 	default y
+
+config PM_QOS_CPU_SYSTEM_WAKEUP
+	bool "User space interface for CPU system wakeup QoS"
+	depends on CPU_IDLE
+	help
+	  Enable this to allow user space via the cpu_wakeup_latency file to
+	  specify a CPU system wakeup latency limit.
+
+	  This may be particularly useful for platforms supporting multiple low
+	  power states for CPUs during system-wide suspend and s2idle in
+	  particular.
 
 config PM
 	bool "Device power management core functionality"
@@ -380,8 +392,7 @@ config CPU_PM
 
 config ENERGY_MODEL
 	bool "Energy Model for devices with DVFS (CPUs, GPUs, etc)"
-	depends on SMP
-	depends on CPU_FREQ
+	depends on CPU_FREQ || PM_DEVFREQ
 	help
 	  Several subsystems (thermal and/or the task scheduler for example)
 	  can leverage information about the energy consumed by devices to

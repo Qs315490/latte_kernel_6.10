@@ -18,7 +18,6 @@
 #include <linux/firmware.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
@@ -26,7 +25,6 @@
 #include <linux/serial.h>
 #include <linux/kfifo.h>
 #include <linux/mutex.h>
-#include <linux/uaccess.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 
@@ -519,7 +517,7 @@ static int ti_startup(struct usb_serial *serial)
 		dev->descriptor.bNumConfigurations,
 		dev->actconfig->desc.bConfigurationValue);
 
-	tdev = kzalloc(sizeof(struct ti_device), GFP_KERNEL);
+	tdev = kzalloc_obj(struct ti_device);
 	if (!tdev)
 		return -ENOMEM;
 
@@ -598,7 +596,7 @@ static int ti_port_probe(struct usb_serial_port *port)
 {
 	struct ti_port *tport;
 
-	tport = kzalloc(sizeof(*tport), GFP_KERNEL);
+	tport = kzalloc_obj(*tport);
 	if (!tport)
 		return -ENOMEM;
 
@@ -729,11 +727,6 @@ static int ti_open(struct tty_struct *tty, struct usb_serial_port *port)
 
 	/* start read urb */
 	urb = port->read_urb;
-	if (!urb) {
-		dev_err(&port->dev, "%s - no read urb\n", __func__);
-		status = -EINVAL;
-		goto unlink_int_urb;
-	}
 	tport->tp_read_urb_state = TI_READ_URB_RUNNING;
 	urb->context = tport;
 	status = usb_submit_urb(urb, GFP_KERNEL);
@@ -902,7 +895,7 @@ static void ti_set_termios(struct tty_struct *tty,
 	u16 wbaudrate;
 	u16 wflags = 0;
 
-	config = kmalloc(sizeof(*config), GFP_KERNEL);
+	config = kmalloc_obj(*config);
 	if (!config)
 		return;
 
@@ -1605,29 +1598,29 @@ static int ti_download_firmware(struct ti_device *tdev)
 		if (le16_to_cpu(dev->descriptor.idVendor) == MTS_VENDOR_ID) {
 			switch (le16_to_cpu(dev->descriptor.idProduct)) {
 			case MTS_CDMA_PRODUCT_ID:
-				strcpy(buf, "mts_cdma.fw");
+				strscpy(buf, "mts_cdma.fw");
 				break;
 			case MTS_GSM_PRODUCT_ID:
-				strcpy(buf, "mts_gsm.fw");
+				strscpy(buf, "mts_gsm.fw");
 				break;
 			case MTS_EDGE_PRODUCT_ID:
-				strcpy(buf, "mts_edge.fw");
+				strscpy(buf, "mts_edge.fw");
 				break;
 			case MTS_MT9234MU_PRODUCT_ID:
-				strcpy(buf, "mts_mt9234mu.fw");
+				strscpy(buf, "mts_mt9234mu.fw");
 				break;
 			case MTS_MT9234ZBA_PRODUCT_ID:
-				strcpy(buf, "mts_mt9234zba.fw");
+				strscpy(buf, "mts_mt9234zba.fw");
 				break;
 			case MTS_MT9234ZBAOLD_PRODUCT_ID:
-				strcpy(buf, "mts_mt9234zba.fw");
+				strscpy(buf, "mts_mt9234zba.fw");
 				break;			}
 		}
 		if (buf[0] == '\0') {
 			if (tdev->td_is_3410)
-				strcpy(buf, "ti_3410.fw");
+				strscpy(buf, "ti_3410.fw");
 			else
-				strcpy(buf, "ti_5052.fw");
+				strscpy(buf, "ti_5052.fw");
 		}
 		status = request_firmware(&fw_p, buf, &dev->dev);
 	}

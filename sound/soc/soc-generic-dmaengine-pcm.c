@@ -332,8 +332,9 @@ static const struct snd_soc_component_driver dmaengine_pcm_component = {
 	.hw_params	= dmaengine_pcm_hw_params,
 	.trigger	= dmaengine_pcm_trigger,
 	.pointer	= dmaengine_pcm_pointer,
-	.pcm_construct	= dmaengine_pcm_new,
+	.pcm_new	= dmaengine_pcm_new,
 	.sync_stop	= dmaengine_pcm_sync_stop,
+	.debugfs_prefix	= "dma",
 };
 
 static const struct snd_soc_component_driver dmaengine_pcm_component_process = {
@@ -345,8 +346,9 @@ static const struct snd_soc_component_driver dmaengine_pcm_component_process = {
 	.trigger	= dmaengine_pcm_trigger,
 	.pointer	= dmaengine_pcm_pointer,
 	.copy		= dmaengine_copy,
-	.pcm_construct	= dmaengine_pcm_new,
+	.pcm_new	= dmaengine_pcm_new,
 	.sync_stop	= dmaengine_pcm_sync_stop,
+	.debugfs_prefix	= "dma",
 };
 
 static const char * const dmaengine_pcm_dma_channel_names[] = {
@@ -437,13 +439,10 @@ int snd_dmaengine_pcm_register(struct device *dev,
 	struct dmaengine_pcm *pcm;
 	int ret;
 
-	pcm = kzalloc(sizeof(*pcm), GFP_KERNEL);
+	pcm = kzalloc_obj(*pcm);
 	if (!pcm)
 		return -ENOMEM;
 
-#ifdef CONFIG_DEBUG_FS
-	pcm->component.debugfs_prefix = "dma";
-#endif
 	if (!config)
 		config = &snd_dmaengine_pcm_default_config;
 	pcm->config = config;

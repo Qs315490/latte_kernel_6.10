@@ -6,7 +6,7 @@
  * Copyright 2007-2008	Johannes Berg <johannes@sipsolutions.net>
  * Copyright 2013-2014  Intel Mobile Communications GmbH
  * Copyright 2015-2017	Intel Deutschland GmbH
- * Copyright 2018-2020, 2022-2024  Intel Corporation
+ * Copyright 2018-2020, 2022-2026  Intel Corporation
  */
 
 #include <crypto/utils.h>
@@ -150,11 +150,14 @@ static int ieee80211_key_enable_hw_accel(struct ieee80211_key *key)
 	sta = key->sta;
 
 	/*
-	 * If this is a per-STA GTK, check if it
-	 * is supported; if not, return.
+	 * Allow installation of a per-STA GTK if per-STA GTK is supported
+	 * by the driver or the interface is a NAN Data interface (as
+	 * per-station GTKs are required to be supported if secure NAN is
+	 * supported).
 	 */
 	if (sta && !(key->conf.flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
-	    !ieee80211_hw_check(&key->local->hw, SUPPORTS_PER_STA_GTK))
+	    !(ieee80211_hw_check(&key->local->hw, SUPPORTS_PER_STA_GTK) ||
+	      sdata->vif.type == NL80211_IFTYPE_NAN_DATA))
 		goto out_unsupported;
 
 	if (sta && !sta->uploaded)
@@ -508,10 +511,16 @@ static int ieee80211_key_replace(struct ieee80211_sub_if_data *sdata,
 				ret = ieee80211_key_enable_hw_accel(new);
 		}
 	} else {
-		if (!new->local->wowlan)
+		if (!new->local->wowlan) {
 			ret = ieee80211_key_enable_hw_accel(new);
-		else
+		} else if (link_id < 0 || !sdata->vif.active_links ||
+			 BIT(link_id) & sdata->vif.active_links) {
 			new->flags |= KEY_FLAG_UPLOADED_TO_HARDWARE;
+			if (!(new->conf.flags & (IEEE80211_KEY_FLAG_GENERATE_MMIC |
+						 IEEE80211_KEY_FLAG_PUT_MIC_SPACE |
+						 IEEE80211_KEY_FLAG_RESERVE_TAILROOM)))
+				decrease_tailroom_need_count(sdata, 1);
+		}
 	}
 
 	if (ret)
@@ -684,10 +693,9 @@ ieee80211_key_alloc(u32 cipher, int idx, size_t key_len,
 		 * Initialize AES key state here as an optimization so that
 		 * it does not need to be initialized for every packet.
 		 */
-		key->u.aes_cmac.tfm =
-			ieee80211_aes_cmac_key_setup(key_data, key_len);
-		if (IS_ERR(key->u.aes_cmac.tfm)) {
-			err = PTR_ERR(key->u.aes_cmac.tfm);
+		err = aes_cmac_preparekey(&key->u.aes_cmac.key, key_data,
+					  key_len);
+		if (err) {
 			kfree(key);
 			return ERR_PTR(err);
 		}
@@ -743,10 +751,6 @@ static void ieee80211_key_free_common(struct ieee80211_key *key)
 	case WLAN_CIPHER_SUITE_CCMP:
 	case WLAN_CIPHER_SUITE_CCMP_256:
 		ieee80211_aes_key_free(key->u.ccmp.tfm);
-		break;
-	case WLAN_CIPHER_SUITE_AES_CMAC:
-	case WLAN_CIPHER_SUITE_BIP_CMAC_256:
-		ieee80211_aes_cmac_key_free(key->u.aes_cmac.tfm);
 		break;
 	case WLAN_CIPHER_SUITE_BIP_GMAC_128:
 	case WLAN_CIPHER_SUITE_BIP_GMAC_256:
@@ -866,11 +870,16 @@ int ieee80211_key_link(struct ieee80211_key *key,
 		alt_key = wiphy_dereference(sdata->local->hw.wiphy,
 					    sta->ptk[idx ^ 1]);
 
-		/* The rekey code assumes that the old and new key are using
+		/*
+		 * The rekey code assumes that the old and new key are using
 		 * the same cipher. Enforce the assumption for pairwise keys.
+		 * NAN Data interfaces are exempt: Wi-Fi Aware v4.0 section 7.4
+		 * requires upgrading the ND-TKSA when a new NDP negotiates a
+		 * stronger cipher suite.
 		 */
-		if ((alt_key && alt_key->conf.cipher != key->conf.cipher) ||
-		    (old_key && old_key->conf.cipher != key->conf.cipher)) {
+		if (sdata->vif.type != NL80211_IFTYPE_NAN_DATA &&
+		    ((alt_key && alt_key->conf.cipher != key->conf.cipher) ||
+		     (old_key && old_key->conf.cipher != key->conf.cipher))) {
 			ret = -EOPNOTSUPP;
 			goto out;
 		}
@@ -981,7 +990,8 @@ void ieee80211_reenable_keys(struct ieee80211_sub_if_data *sdata)
 
 	if (ieee80211_sdata_running(sdata)) {
 		list_for_each_entry(key, &sdata->key_list, list) {
-			increment_tailroom_need_count(sdata);
+			if (!(key->flags & KEY_FLAG_TAINTED))
+				increment_tailroom_need_count(sdata);
 			ieee80211_key_enable_hw_accel(key);
 		}
 	}
@@ -1353,38 +1363,14 @@ void ieee80211_set_key_rx_seq(struct ieee80211_key_conf *keyconf,
 }
 EXPORT_SYMBOL_GPL(ieee80211_set_key_rx_seq);
 
-void ieee80211_remove_key(struct ieee80211_key_conf *keyconf)
-{
-	struct ieee80211_key *key;
-
-	key = container_of(keyconf, struct ieee80211_key, conf);
-
-	lockdep_assert_wiphy(key->local->hw.wiphy);
-
-	/*
-	 * if key was uploaded, we assume the driver will/has remove(d)
-	 * it, so adjust bookkeeping accordingly
-	 */
-	if (key->flags & KEY_FLAG_UPLOADED_TO_HARDWARE) {
-		key->flags &= ~KEY_FLAG_UPLOADED_TO_HARDWARE;
-
-		if (!(key->conf.flags & (IEEE80211_KEY_FLAG_GENERATE_MMIC |
-					 IEEE80211_KEY_FLAG_PUT_MIC_SPACE |
-					 IEEE80211_KEY_FLAG_RESERVE_TAILROOM)))
-			increment_tailroom_need_count(key->sdata);
-	}
-
-	ieee80211_key_free(key, false);
-}
-EXPORT_SYMBOL_GPL(ieee80211_remove_key);
-
 struct ieee80211_key_conf *
 ieee80211_gtk_rekey_add(struct ieee80211_vif *vif,
-			struct ieee80211_key_conf *keyconf,
+			u8 idx, u8 *key_data, u8 key_len,
 			int link_id)
 {
 	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
 	struct ieee80211_local *local = sdata->local;
+	struct ieee80211_key *prev_key;
 	struct ieee80211_key *key;
 	int err;
 	struct ieee80211_link_data *link_data =
@@ -1400,8 +1386,37 @@ ieee80211_gtk_rekey_add(struct ieee80211_vif *vif,
 	if (WARN_ON(vif->type != NL80211_IFTYPE_STATION))
 		return ERR_PTR(-EINVAL);
 
-	key = ieee80211_key_alloc(keyconf->cipher, keyconf->keyidx,
-				  keyconf->keylen, keyconf->key,
+	if (WARN_ON(idx >= NUM_DEFAULT_KEYS + NUM_DEFAULT_MGMT_KEYS +
+		    NUM_DEFAULT_BEACON_KEYS))
+		return ERR_PTR(-EINVAL);
+
+	prev_key = wiphy_dereference(local->hw.wiphy,
+				     link_data->gtk[idx]);
+	if (!prev_key) {
+		if (idx < NUM_DEFAULT_KEYS) {
+			for (int i = 0; i < NUM_DEFAULT_KEYS; i++) {
+				if (i == idx)
+					continue;
+				prev_key = wiphy_dereference(local->hw.wiphy,
+							     link_data->gtk[i]);
+				if (prev_key)
+					break;
+			}
+		} else {
+			/* For IGTK we have 4 and 5 and for BIGTK - 6 and 7 */
+			prev_key = wiphy_dereference(local->hw.wiphy,
+						     link_data->gtk[idx ^ 1]);
+		}
+	}
+
+	if (WARN_ON(!prev_key))
+		return ERR_PTR(-EINVAL);
+
+	if (WARN_ON(key_len < prev_key->conf.keylen))
+		return ERR_PTR(-EINVAL);
+
+	key = ieee80211_key_alloc(prev_key->conf.cipher, idx,
+				  prev_key->conf.keylen, key_data,
 				  0, NULL);
 	if (IS_ERR(key))
 		return ERR_CAST(key);

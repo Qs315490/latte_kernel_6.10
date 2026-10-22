@@ -16,6 +16,17 @@ extern int
 seq_print_ip_sym(struct trace_seq *s, unsigned long ip,
 		unsigned long sym_flags);
 
+static inline int seq_print_ip_sym_offset(struct trace_seq *s, unsigned long ip,
+					   unsigned long sym_flags)
+{
+	return seq_print_ip_sym(s, ip, sym_flags | TRACE_ITER(SYM_OFFSET));
+}
+static inline int seq_print_ip_sym_no_offset(struct trace_seq *s, unsigned long ip,
+					   unsigned long sym_flags)
+{
+	return seq_print_ip_sym(s, ip, sym_flags & ~TRACE_ITER(SYM_OFFSET));
+}
+
 extern void trace_seq_print_sym(struct trace_seq *s, unsigned long address, bool offset);
 extern int trace_print_context(struct trace_iterator *iter);
 extern int trace_print_lat_context(struct trace_iterator *iter);
@@ -41,5 +52,14 @@ extern struct rw_semaphore trace_event_sem;
 #define SEQ_PUT_HEX_FIELD(s, x)				\
 	trace_seq_putmem_hex(s, &(x), sizeof(x))
 
+#ifdef CONFIG_FUNCTION_TRACE_ARGS
+void print_function_args(struct trace_seq *s, unsigned long *args,
+			 unsigned long func);
+#else
+static inline void print_function_args(struct trace_seq *s, unsigned long *args,
+				       unsigned long func) {
+	trace_seq_puts(s, "()");
+}
+#endif
 #endif
 

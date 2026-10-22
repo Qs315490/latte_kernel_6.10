@@ -25,10 +25,7 @@
 #include "core.h"
 #include "registers.h"
 
-#define CREATE_TRACE_POINTS
-#include "trace.h"
-
-static int __maybe_unused catpt_suspend(struct device *dev)
+static int catpt_do_suspend(struct device *dev)
 {
 	struct catpt_dev *cdev = dev_get_drvdata(dev);
 	struct dma_chan *chan;
@@ -41,7 +38,7 @@ static int __maybe_unused catpt_suspend(struct device *dev)
 	memset(&cdev->dx_ctx, 0, sizeof(cdev->dx_ctx));
 	ret = catpt_ipc_enter_dxstate(cdev, CATPT_DX_STATE_D3, &cdev->dx_ctx);
 	if (ret) {
-		ret = CATPT_IPC_ERROR(ret);
+		ret = CATPT_IPC_RET(ret);
 		goto release_dma_chan;
 	}
 
@@ -72,7 +69,14 @@ release_dma_chan:
 	return catpt_dsp_power_down(cdev);
 }
 
-static int __maybe_unused catpt_resume(struct device *dev)
+/* Do not block the system from suspending, recover on resume() if needed. */
+static int catpt_suspend(struct device *dev)
+{
+	catpt_do_suspend(dev);
+	return 0;
+}
+
+static int catpt_resume(struct device *dev)
 {
 	struct catpt_dev *cdev = dev_get_drvdata(dev);
 	int ret, i;
@@ -100,13 +104,13 @@ static int __maybe_unused catpt_resume(struct device *dev)
 
 		ret = catpt_ipc_set_device_format(cdev, &cdev->devfmt[i]);
 		if (ret)
-			return CATPT_IPC_ERROR(ret);
+			return CATPT_IPC_RET(ret);
 	}
 
 	return 0;
 }
 
-static int __maybe_unused catpt_runtime_suspend(struct device *dev)
+static int catpt_runtime_suspend(struct device *dev)
 {
 	if (!try_module_get(dev->driver->owner)) {
 		dev_info(dev, "module unloading, skipping suspend\n");
@@ -114,17 +118,17 @@ static int __maybe_unused catpt_runtime_suspend(struct device *dev)
 	}
 	module_put(dev->driver->owner);
 
-	return catpt_suspend(dev);
+	return catpt_do_suspend(dev);
 }
 
-static int __maybe_unused catpt_runtime_resume(struct device *dev)
+static int catpt_runtime_resume(struct device *dev)
 {
 	return catpt_resume(dev);
 }
 
 static const struct dev_pm_ops catpt_dev_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(catpt_suspend, catpt_resume)
-	SET_RUNTIME_PM_OPS(catpt_runtime_suspend, catpt_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(catpt_suspend, catpt_resume)
+	RUNTIME_PM_OPS(catpt_runtime_suspend, catpt_runtime_resume, NULL)
 };
 
 /* machine board owned by CATPT is removed with this hook */
@@ -150,7 +154,7 @@ static int catpt_register_board(struct catpt_dev *cdev)
 					PLATFORM_DEVID_NONE,
 					(const void *)mach, sizeof(*mach));
 	if (IS_ERR(board)) {
-		dev_err(cdev->dev, "board register failed\n");
+		dev_err(cdev->dev, "register board failed: %ld\n", PTR_ERR(board));
 		return PTR_ERR(board);
 	}
 
@@ -184,22 +188,25 @@ static int catpt_probe_components(struct catpt_dev *cdev)
 		goto err_boot_fw;
 	}
 
-	ret = catpt_register_board(cdev);
-	if (ret) {
-		dev_err(cdev->dev, "register board failed: %d\n", ret);
-		goto err_reg_board;
-	}
-
 	/* reflect actual ADSP state in pm_runtime */
 	pm_runtime_set_active(cdev->dev);
 
 	pm_runtime_set_autosuspend_delay(cdev->dev, 2000);
 	pm_runtime_use_autosuspend(cdev->dev);
 	pm_runtime_mark_last_busy(cdev->dev);
+	/* Enable PM before spawning child device. See catpt_dai_pcm_new(). */
 	pm_runtime_enable(cdev->dev);
+
+	ret = catpt_register_board(cdev);
+	if (ret) {
+		dev_err(cdev->dev, "register board failed: %d\n", ret);
+		goto err_reg_board;
+	}
+
 	return 0;
 
 err_reg_board:
+	pm_runtime_disable(cdev->dev);
 	snd_soc_unregister_component(cdev->dev);
 err_boot_fw:
 	catpt_dmac_remove(cdev);
@@ -216,7 +223,7 @@ static void catpt_dev_init(struct catpt_dev *cdev, struct device *dev,
 	cdev->spec = spec;
 	init_completion(&cdev->fw_ready);
 	INIT_LIST_HEAD(&cdev->stream_list);
-	spin_lock_init(&cdev->list_lock);
+	mutex_init(&cdev->stream_mutex);
 	mutex_init(&cdev->clk_mutex);
 
 	/*
@@ -226,12 +233,9 @@ static void catpt_dev_init(struct catpt_dev *cdev, struct device *dev,
 	cdev->devfmt[CATPT_SSP_IFACE_0].iface = UINT_MAX;
 	cdev->devfmt[CATPT_SSP_IFACE_1].iface = UINT_MAX;
 
+	resource_set_range(&cdev->dram, spec->host_dram_offset, catpt_dram_size(cdev));
+	resource_set_range(&cdev->iram, spec->host_iram_offset, catpt_iram_size(cdev));
 	catpt_ipc_init(&cdev->ipc, dev);
-
-	catpt_sram_init(&cdev->dram, spec->host_dram_offset,
-			catpt_dram_size(cdev));
-	catpt_sram_init(&cdev->iram, spec->host_iram_offset,
-			catpt_iram_size(cdev));
 }
 
 static int catpt_acpi_probe(struct platform_device *pdev)
@@ -271,8 +275,16 @@ static int catpt_acpi_probe(struct platform_device *pdev)
 	if (IS_ERR(cdev->pci_ba))
 		return PTR_ERR(cdev->pci_ba);
 
-	/* alloc buffer for storing DRAM context during dx transitions */
-	cdev->dxbuf_vaddr = dmam_alloc_coherent(dev, catpt_dram_size(cdev),
+	/*
+	 * As per design HOST is responsible for preserving firmware's runtime
+	 * context during D0 -> D3 -> D0 transitions.  Addresses used for DMA
+	 * to/from HOST memory shall be outside the reserved range of 0xFFFxxxxx.
+	 */
+	ret = dma_coerce_mask_and_coherent(cdev->dev, DMA_BIT_MASK(31));
+	if (ret)
+		return ret;
+
+	cdev->dxbuf_vaddr = dmam_alloc_coherent(dev, resource_size(&cdev->dram),
 						&cdev->dxbuf_paddr, GFP_KERNEL);
 	if (!cdev->dxbuf_vaddr)
 		return -ENOMEM;
@@ -338,6 +350,7 @@ static struct snd_soc_acpi_mach wpt_machines[] = {
 static struct catpt_spec lpt_desc = {
 	.machines = lpt_machines,
 	.core_id = 0x01,
+	.fw_name = "intel/IntcSST1.bin",
 	.host_dram_offset = 0x000000,
 	.host_iram_offset = 0x080000,
 	.host_shim_offset = 0x0E7000,
@@ -353,6 +366,7 @@ static struct catpt_spec lpt_desc = {
 static struct catpt_spec wpt_desc = {
 	.machines = wpt_machines,
 	.core_id = 0x02,
+	.fw_name = "intel/IntcSST2.bin",
 	.host_dram_offset = 0x000000,
 	.host_iram_offset = 0x0A0000,
 	.host_shim_offset = 0x0FB000,
@@ -378,7 +392,7 @@ static struct platform_driver catpt_acpi_driver = {
 	.driver = {
 		.name = "intel_catpt",
 		.acpi_match_table = catpt_ids,
-		.pm = &catpt_dev_pm,
+		.pm = pm_ptr(&catpt_dev_pm),
 		.dev_groups = catpt_attr_groups,
 	},
 };

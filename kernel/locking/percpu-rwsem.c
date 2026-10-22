@@ -138,7 +138,8 @@ static int percpu_rwsem_wake_function(struct wait_queue_entry *wq_entry,
 	return !reader; /* wake (readers until) 1 writer */
 }
 
-static void percpu_rwsem_wait(struct percpu_rw_semaphore *sem, bool reader)
+static void percpu_rwsem_wait(struct percpu_rw_semaphore *sem, bool reader,
+			      bool freeze)
 {
 	DEFINE_WAIT_FUNC(wq_entry, percpu_rwsem_wake_function);
 	bool wait;
@@ -156,7 +157,8 @@ static void percpu_rwsem_wait(struct percpu_rw_semaphore *sem, bool reader)
 	spin_unlock_irq(&sem->waiters.lock);
 
 	while (wait) {
-		set_current_state(TASK_UNINTERRUPTIBLE);
+		set_current_state(TASK_UNINTERRUPTIBLE |
+				  (freeze ? TASK_FREEZABLE : 0));
 		if (!smp_load_acquire(&wq_entry.private))
 			break;
 		schedule();
@@ -164,7 +166,8 @@ static void percpu_rwsem_wait(struct percpu_rw_semaphore *sem, bool reader)
 	__set_current_state(TASK_RUNNING);
 }
 
-bool __sched __percpu_down_read(struct percpu_rw_semaphore *sem, bool try)
+bool __sched __percpu_down_read(struct percpu_rw_semaphore *sem, bool try,
+				bool freeze)
 {
 	if (__percpu_down_read_trylock(sem))
 		return true;
@@ -174,7 +177,7 @@ bool __sched __percpu_down_read(struct percpu_rw_semaphore *sem, bool try)
 
 	trace_contention_begin(sem, LCB_F_PERCPU | LCB_F_READ);
 	preempt_enable();
-	percpu_rwsem_wait(sem, /* .reader = */ true);
+	percpu_rwsem_wait(sem, /* .reader = */ true, freeze);
 	preempt_disable();
 	trace_contention_end(sem, 0);
 
@@ -184,7 +187,7 @@ EXPORT_SYMBOL_GPL(__percpu_down_read);
 
 #define per_cpu_sum(var)						\
 ({									\
-	typeof(var) __sum = 0;						\
+	TYPEOF_UNQUAL(var) __sum = 0;					\
 	int cpu;							\
 	compiletime_assert_atomic_type(__sum);				\
 	for_each_possible_cpu(cpu)					\
@@ -237,7 +240,7 @@ void __sched percpu_down_write(struct percpu_rw_semaphore *sem)
 	 */
 	if (!__percpu_down_write_trylock(sem)) {
 		trace_contention_begin(sem, LCB_F_PERCPU | LCB_F_WRITE);
-		percpu_rwsem_wait(sem, /* .reader = */ false);
+		percpu_rwsem_wait(sem, /* .reader = */ false, false);
 		contended = true;
 	}
 
@@ -259,6 +262,9 @@ EXPORT_SYMBOL_GPL(percpu_down_write);
 void percpu_up_write(struct percpu_rw_semaphore *sem)
 {
 	rwsem_release(&sem->dep_map, _RET_IP_);
+
+	if (trace_contended_release_enabled() && wq_has_sleeper(&sem->waiters))
+		trace_call__contended_release(sem);
 
 	/*
 	 * Signal the writer is done, no fast path yet.
@@ -285,3 +291,29 @@ void percpu_up_write(struct percpu_rw_semaphore *sem)
 	rcu_sync_exit(&sem->rss);
 }
 EXPORT_SYMBOL_GPL(percpu_up_write);
+
+void __percpu_up_read(struct percpu_rw_semaphore *sem)
+{
+	lockdep_assert_preemption_disabled();
+	/*
+	 * After percpu_up_write() completes, rcu_sync_is_idle() can still
+	 * return false during the grace period, forcing readers into this
+	 * slowpath. Only trace when a writer is actually waiting for
+	 * readers to drain.
+	 */
+	if (trace_contended_release_enabled() && rcuwait_active(&sem->writer))
+		trace_call__contended_release(sem);
+	/*
+	 * slowpath; reader will only ever wake a single blocked
+	 * writer.
+	 */
+	smp_mb(); /* B matches C */
+	/*
+	 * In other words, if they see our decrement (presumably to
+	 * aggregate zero, as that is the only time it matters) they
+	 * will also see our critical section.
+	 */
+	this_cpu_dec(*sem->read_count);
+	rcuwait_wake_up(&sem->writer);
+}
+EXPORT_SYMBOL_GPL(__percpu_up_read);

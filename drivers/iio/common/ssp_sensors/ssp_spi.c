@@ -6,7 +6,7 @@
 #include "ssp.h"
 
 #define SSP_DEV (&data->spi->dev)
-#define SSP_GET_MESSAGE_TYPE(data) (data & (3 << SSP_RW))
+#define SSP_GET_MESSAGE_TYPE(data) ((data) & (3 << SSP_RW))
 
 /*
  * SSP -> AP Instruction
@@ -29,7 +29,7 @@ struct ssp_msg_header {
 	__le16 length;
 	__le16 options;
 	__le32 data;
-} __attribute__((__packed__));
+} __packed;
 
 struct ssp_msg {
 	u16 length;
@@ -77,7 +77,7 @@ static struct ssp_msg *ssp_create_msg(u8 cmd, u16 len, u16 opt, u32 data)
 	struct ssp_msg_header h;
 	struct ssp_msg *msg;
 
-	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
+	msg = kzalloc_obj(*msg);
 	if (!msg)
 		return NULL;
 
@@ -104,7 +104,7 @@ static struct ssp_msg *ssp_create_msg(u8 cmd, u16 len, u16 opt, u32 data)
 /*
  * It is a bit heavy to do it this way but often the function is used to compose
  * the message from smaller chunks which are placed on the stack.  Often the
- * chunks are small so memcpy should be optimalized.
+ * chunks are small so memcpy should be optimized.
  */
 static inline void ssp_fill_buffer(struct ssp_msg *m, unsigned int offset,
 				   const void *src, unsigned int len)
@@ -119,9 +119,9 @@ static inline void ssp_get_buffer(struct ssp_msg *m, unsigned int offset,
 }
 
 #define SSP_GET_BUFFER_AT_INDEX(m, index) \
-	(m->buffer[SSP_HEADER_SIZE_ALIGNED + index])
+	((m)->buffer[SSP_HEADER_SIZE_ALIGNED + (index)])
 #define SSP_SET_BUFFER_AT_INDEX(m, index, val) \
-	(m->buffer[SSP_HEADER_SIZE_ALIGNED + index] = val)
+	((m)->buffer[SSP_HEADER_SIZE_ALIGNED + (index)] = val)
 
 static void ssp_clean_msg(struct ssp_msg *m)
 {

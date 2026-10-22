@@ -15,6 +15,11 @@ properties:
   compatible:
     oneOf:
 
+      - description: 100ASK DshanPi A1 board
+        items:
+          - const: 100ask,dshanpi-a1
+          - const: rockchip,rk3576
+
       - description: 96boards RK3399 Ficus (ROCK960 Enterprise Edition)
         items:
           - const: vamrs,ficus
@@ -24,6 +29,12 @@ properties:
         items:
           - const: vamrs,rock960
           - const: rockchip,rk3399
+
+      - description: 9Tripod X3568 series board
+        items:
+          - enum:
+              - 9tripod,x3568-v4
+          - const: rockchip,rk3568
 
       - description: Amarula Vyasa RK3288
         items:
@@ -49,6 +60,22 @@ properties:
               - anbernic,rg-arc-s
           - const: rockchip,rk3566
 
+      - description: Anbernic RK3568 Handheld Gaming Console
+        items:
+          - enum:
+              - anbernic,rg-ds
+          - const: rockchip,rk3568
+
+      - description: Ariaboard Photonicat
+        items:
+          - const: ariaboard,photonicat
+          - const: rockchip,rk3568
+
+      - description: ArmSoM Sige1 board
+        items:
+          - const: armsom,sige1
+          - const: rockchip,rk3528
+
       - description: ArmSoM Sige5 board
         items:
           - const: armsom,sige5
@@ -68,13 +95,17 @@ properties:
 
       - description: Asus Tinker board
         items:
-          - const: asus,rk3288-tinker
+          - enum:
+              - asus,rk3288-tinker
+              - asus,rk3288-tinker-s
           - const: rockchip,rk3288
 
-      - description: Asus Tinker board S
+      - description: Asus Tinker Board 3/3S
         items:
-          - const: asus,rk3288-tinker-s
-          - const: rockchip,rk3288
+          - enum:
+              - asus,rk3566-tinker-board-3
+              - asus,rk3566-tinker-board-3s
+          - const: rockchip,rk3566
 
       - description: Beelink A1
         items:
@@ -178,6 +209,13 @@ properties:
           - const: engicam,px30-core
           - const: rockchip,px30
 
+      - description: Firefly iCore-3588Q-based boards
+        items:
+          - enum:
+              - mntre,reform2-rcore
+          - const: firefly,icore-3588q
+          - const: rockchip,rk3588
+
       - description: Firefly Core-3588J-based boards
         items:
           - enum:
@@ -236,10 +274,25 @@ properties:
               - firefly,roc-rk3399-pc-plus
           - const: rockchip,rk3399
 
+      - description: Firefly ROC-RK3576-PC
+        items:
+          - const: firefly,roc-rk3576-pc
+          - const: rockchip,rk3576
+
+      - description: Firefly ROC-RK3588-RT
+        items:
+          - const: firefly,roc-rk3588-rt
+          - const: rockchip,rk3588
+
       - description: Firefly Station M2
         items:
           - const: firefly,rk3566-roc-pc
           - const: rockchip,rk3566
+
+      - description: Firefly Station M3
+        items:
+          - const: firefly,rk3588s-roc-pc
+          - const: rockchip,rk3588s
 
       - description: Firefly Station P2
         items:
@@ -278,6 +331,12 @@ properties:
               - friendlyarm,nanopi-r4s-enterprise
           - const: rockchip,rk3399
 
+      - description: FriendlyElec NanoPi M5 series boards
+        items:
+          - enum:
+              - friendlyarm,nanopi-m5
+          - const: rockchip,rk3576
+
       - description: FriendlyElec NanoPi R5 series boards
         items:
           - enum:
@@ -291,6 +350,16 @@ properties:
               - friendlyarm,nanopi-r6c
               - friendlyarm,nanopi-r6s
           - const: rockchip,rk3588s
+
+      - description: FriendlyElec NanoPi R76S
+        items:
+          - const: friendlyarm,nanopi-r76s
+          - const: rockchip,rk3576
+
+      - description: FriendlyElec NanoPi Zero2
+        items:
+          - const: friendlyarm,nanopi-zero2
+          - const: rockchip,rk3528
 
       - description: FriendlyElec NanoPC T6 series boards
         items:
@@ -655,6 +724,13 @@ properties:
           - const: hardkernel,odroid-m2
           - const: rockchip,rk3588s
 
+      - description: HINLINK H66K / H68K
+        items:
+          - enum:
+              - hinlink,h66k
+              - hinlink,h68k
+          - const: rockchip,rk3568
+
       - description: Hugsun X99 TV Box
         items:
           - const: hugsun,x99
@@ -678,6 +754,11 @@ properties:
           - const: khadas,edge2
           - const: rockchip,rk3588s
 
+      - description: Khadas Edge-2L series boards
+        items:
+          - const: khadas,edge-2l
+          - const: rockchip,rk3576
+
       - description: Kobol Helios64
         items:
           - const: kobol,helios64
@@ -697,6 +778,18 @@ properties:
         items:
           - const: lckfb,tspi-rk3566
           - const: rockchip,rk3566
+
+      - description: LinkEase EasePi R1
+        items:
+          - const: linkease,easepi-r1
+          - const: rockchip,rk3568
+
+      - description: Luckfox Core3576 Module based boards
+        items:
+          - enum:
+              - luckfox,omni3576
+          - const: luckfox,core3576
+          - const: rockchip,rk3576
 
       - description: Lunzn FastRhino R66S / R68S
         items:
@@ -720,10 +813,21 @@ properties:
           - const: netxeon,r89
           - const: rockchip,rk3288
 
+      - description: Onion Omega4 Evaluation board
+        items:
+          - const: onion,omega4-evb
+          - const: onion,omega4
+          - const: rockchip,rv1103b
+
       - description: OPEN AI LAB EAIDK-610
         items:
           - const: openailab,eaidk-610
           - const: rockchip,rk3399
+
+      - description: OneThing Edge Cube series
+        items:
+          - const: onething,edge-cube
+          - const: rockchip,rk3566
 
       - description: Xunlong Orange Pi RK3399 board
         items:
@@ -811,10 +915,16 @@ properties:
           - const: prt,mecsbc
           - const: rockchip,rk3568
 
-      - description: QNAP TS-433-4G 4-Bay NAS
-        items:
-          - const: qnap,ts433
-          - const: rockchip,rk3568
+      - description: QNAP TS-x33 NAS devices
+        oneOf:
+          - items:
+              - const: qnap,ts133
+              - const: rockchip,rk3566
+          - items:
+              - enum:
+                  - qnap,ts233
+                  - qnap,ts433
+              - const: rockchip,rk3568
 
       - description: Radxa Compute Module 3 (CM3)
         items:
@@ -823,12 +933,26 @@ properties:
           - const: radxa,cm3
           - const: rockchip,rk3566
 
-      - description: Radxa CM3 Industrial
+      - description: Radxa CM3I
         items:
           - enum:
               - radxa,e25
           - const: radxa,cm3i
           - const: rockchip,rk3568
+
+      - description: Radxa CM3J
+        items:
+          - enum:
+              - radxa,cm3j-rpi-cm4
+          - const: radxa,cm3j
+          - const: rockchip,rk3568
+
+      - description: Radxa CM5
+        items:
+          - enum:
+              - radxa,cm5-io
+          - const: radxa,cm5
+          - const: rockchip,rk3588s
 
       - description: Radxa E20C
         items:
@@ -846,6 +970,13 @@ properties:
           - const: radxa,rock
           - const: rockchip,rk3188
 
+      - description: Radxa ROCK 2A/2F
+        items:
+          - enum:
+              - radxa,rock-2a
+              - radxa,rock-2f
+          - const: rockchip,rk3528
+
       - description: Radxa ROCK Pi 4A/A+/B/B+/C
         items:
           - enum:
@@ -861,6 +992,11 @@ properties:
         items:
           - const: radxa,rock-4c-plus
           - const: rockchip,rk3399
+
+      - description: Radxa ROCK 4D
+        items:
+          - const: radxa,rock-4d
+          - const: rockchip,rk3576
 
       - description: Radxa ROCK 4SE
         items:
@@ -924,6 +1060,11 @@ properties:
           - const: radxa,rock-5b
           - const: rockchip,rk3588
 
+      - description: Radxa ROCK 5B+
+        items:
+          - const: radxa,rock-5b-plus
+          - const: rockchip,rk3588
+
       - description: Radxa ROCK 5C
         items:
           - const: radxa,rock-5c
@@ -933,6 +1074,11 @@ properties:
         items:
           - const: radxa,rock-s0
           - const: rockchip,rk3308
+
+      - description: Radxa ROCK 5T
+        items:
+          - const: radxa,rock-5t
+          - const: rockchip,rk3588
 
       - description: Radxa ZERO 3W/3E
         items:
@@ -1025,6 +1171,11 @@ properties:
           - const: rockchip,rk3399-evb
           - const: rockchip,rk3399
 
+      - description: Rockchip RK3399 Industry Evaluation board
+        items:
+          - const: rockchip,rk3399-evb-ind
+          - const: rockchip,rk3399
+
       - description: Rockchip RK3399 Sapphire standalone
         items:
           - const: rockchip,rk3399-sapphire
@@ -1034,6 +1185,11 @@ properties:
         items:
           - const: rockchip,rk3399-sapphire-excavator
           - const: rockchip,rk3399
+
+      - description: Rockchip RK3562 Evaluation board 2
+        items:
+          - const: rockchip,rk3562-evb2-v10
+          - const: rockchip,rk3562
 
       - description: Rockchip RK3566 BOX Evaluation Demo board
         items:
@@ -1047,12 +1203,16 @@ properties:
 
       - description: Rockchip RK3576 Evaluation board
         items:
-          - const: rockchip,rk3576-evb1-v10
+          - enum:
+              - rockchip,rk3576-evb1-v10
+              - rockchip,rk3576-evb2-v10
           - const: rockchip,rk3576
 
       - description: Rockchip RK3588 Evaluation board
         items:
-          - const: rockchip,rk3588-evb1-v10
+          - enum:
+              - rockchip,rk3588-evb1-v10
+              - rockchip,rk3588-evb2-v10
           - const: rockchip,rk3588
 
       - description: Rockchip RK3588S Evaluation board
@@ -1070,6 +1230,11 @@ properties:
           - const: rockchip,rk3588-toybrick-x0
           - const: rockchip,rk3588
 
+      - description: Sakura Pi RK3308B
+        items:
+          - const: sakurapi,rk3308-sakurapi-rk3308b
+          - const: rockchip,rk3308
+
       - description: Sinovoip RK3308 Banana Pi P2 Pro
         items:
           - const: sinovoip,rk3308-bpi-p2pro
@@ -1086,6 +1251,24 @@ properties:
           - enum:
               - rockchip,rv1126
               - rockchip,rv1109
+
+      - description: Theobroma Systems PX30-Cobra
+        items:
+          - enum:
+              - tsd,px30-cobra-ltk050h3146w
+              - tsd,px30-cobra-ltk050h3146w-a2
+              - tsd,px30-cobra-ltk050h3148w
+              - tsd,px30-cobra-ltk500hd1829
+          - const: tsd,px30-cobra
+          - const: rockchip,px30
+
+      - description: Theobroma Systems PX30-PP1516
+        items:
+          - enum:
+              - tsd,px30-pp1516-ltk050h3146w-a2
+              - tsd,px30-pp1516-ltk050h3148w
+          - const: tsd,px30-pp1516
+          - const: rockchip,px30
 
       - description: Theobroma Systems PX30-uQ7 with Haikou baseboard
         items:
@@ -1136,11 +1319,12 @@ properties:
           - const: xunlong,orangepi-3b
           - const: rockchip,rk3566
 
-      - description: Xunlong Orange Pi 5 Max/Plus
+      - description: Xunlong Orange Pi 5 Max/Plus/Ultra
         items:
           - enum:
               - xunlong,orangepi-5-max
               - xunlong,orangepi-5-plus
+              - xunlong,orangepi-5-ultra
           - const: rockchip,rk3588
 
       - description: Xunlong Orange Pi R1 Plus / LTS
@@ -1155,6 +1339,12 @@ properties:
           - enum:
               - xunlong,orangepi-5
               - xunlong,orangepi-5b
+          - const: rockchip,rk3588s
+
+      - description: Xunlong Orange Pi CM5
+        items:
+          - const: xunlong,orangepi-cm5-base
+          - const: xunlong,orangepi-cm5
           - const: rockchip,rk3588s
 
       - description: Zkmagic A95X Z2

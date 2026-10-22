@@ -457,6 +457,12 @@
 	type DSCRM_DSC_DOUBLE_BUFFER_REG_UPDATE_PENDING; \
 	type DSCRM_DSC_FORWARD_EN_STATUS
 
+enum dsc_bits_per_comp {
+	DSC_BPC_8 = 8,
+	DSC_BPC_10 = 10,
+	DSC_BPC_12 = 12,
+	DSC_BPC_UNKNOWN
+};
 
 struct dcn20_dsc_registers {
 	uint32_t DSC_TOP_CONTROL;
@@ -600,6 +606,7 @@ bool dsc2_get_packed_pps(struct display_stream_compressor *dsc,
 		uint8_t *dsc_packed_pps);
 
 void dsc2_read_state(struct display_stream_compressor *dsc, struct dcn_dsc_state *s);
+void dsc2_read_reg_state(struct display_stream_compressor *dsc, struct dcn_dsc_reg_state *dccg_reg_state);
 bool dsc2_validate_stream(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg);
 void dsc2_set_config(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg,
 		struct dsc_optc_config *dsc_optc_cfg);

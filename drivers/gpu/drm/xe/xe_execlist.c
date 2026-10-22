@@ -15,8 +15,7 @@
 #include "xe_bo.h"
 #include "xe_device.h"
 #include "xe_exec_queue.h"
-#include "xe_gt.h"
-#include "xe_hw_fence.h"
+#include "xe_gt_types.h"
 #include "xe_irq.h"
 #include "xe_lrc.h"
 #include "xe_macros.h"
@@ -48,7 +47,6 @@ static void __start_lrc(struct xe_hw_engine *hwe, struct xe_lrc *lrc,
 	struct xe_mmio *mmio = &gt->mmio;
 	struct xe_device *xe = gt_to_xe(gt);
 	u64 lrc_desc;
-	u32 ring_mode = _MASKED_BIT_ENABLE(GFX_DISABLE_LEGACY_MODE);
 
 	lrc_desc = xe_lrc_descriptor(lrc);
 
@@ -59,10 +57,6 @@ static void __start_lrc(struct xe_hw_engine *hwe, struct xe_lrc *lrc,
 		xe_gt_assert(hwe->gt, FIELD_FIT(SW_CTX_ID, ctx_id));
 		lrc_desc |= FIELD_PREP(SW_CTX_ID, ctx_id);
 	}
-
-	if (hwe->class == XE_ENGINE_CLASS_COMPUTE)
-		xe_mmio_write32(mmio, RCU_MODE,
-				_MASKED_BIT_ENABLE(RCU_MODE_CCS_ENABLE));
 
 	xe_lrc_write_ctx_reg(lrc, CTX_RING_TAIL, lrc->ring.tail);
 	lrc->ring.old_tail = lrc->ring.tail;
@@ -82,10 +76,6 @@ static void __start_lrc(struct xe_hw_engine *hwe, struct xe_lrc *lrc,
 	xe_mmio_write32(mmio, RING_HWS_PGA(hwe->mmio_base),
 			xe_bo_ggtt_addr(hwe->hwsp));
 	xe_mmio_read32(mmio, RING_HWS_PGA(hwe->mmio_base));
-
-	if (xe_device_has_msix(gt_to_xe(hwe->gt)))
-		ring_mode |= _MASKED_BIT_ENABLE(GFX_MSIX_INTERRUPT_ENABLE);
-	xe_mmio_write32(mmio, RING_MODE(hwe->mmio_base), ring_mode);
 
 	xe_mmio_write32(mmio, RING_EXECLIST_SQ_CONTENTS_LO(hwe->mmio_base),
 			lower_32_bits(lrc_desc));
@@ -269,7 +259,7 @@ struct xe_execlist_port *xe_execlist_port_create(struct xe_device *xe,
 
 	port->hwe = hwe;
 
-	port->lrc = xe_lrc_create(hwe, NULL, SZ_16K, XE_IRQ_DEFAULT_MSIX);
+	port->lrc = xe_lrc_create(hwe, NULL, NULL, SZ_16K, XE_IRQ_DEFAULT_MSIX, 0);
 	if (IS_ERR(port->lrc)) {
 		err = PTR_ERR(port->lrc);
 		goto err;
@@ -297,7 +287,7 @@ err:
 
 void xe_execlist_port_destroy(struct xe_execlist_port *port)
 {
-	del_timer(&port->irq_fail);
+	timer_delete(&port->irq_fail);
 
 	/* Prevent an interrupt while we're destroying */
 	spin_lock_irq(&gt_to_xe(port->hwe->gt)->irq.lock);
@@ -336,6 +326,15 @@ static const struct drm_sched_backend_ops drm_sched_ops = {
 static int execlist_exec_queue_init(struct xe_exec_queue *q)
 {
 	struct drm_gpu_scheduler *sched;
+	const struct drm_sched_init_args args = {
+		.ops = &drm_sched_ops,
+		.num_rqs = 1,
+		.credit_limit = xe_lrc_ring_size() / MAX_JOB_SIZE_BYTES,
+		.hang_limit = XE_SCHED_HANG_LIMIT,
+		.timeout = XE_SCHED_JOB_TIMEOUT,
+		.name = q->hwe->name,
+		.dev = gt_to_xe(q->gt)->drm.dev,
+	};
 	struct xe_execlist_exec_queue *exl;
 	struct xe_device *xe = gt_to_xe(q->gt);
 	int err;
@@ -344,17 +343,13 @@ static int execlist_exec_queue_init(struct xe_exec_queue *q)
 
 	drm_info(&xe->drm, "Enabling execlist submission (GuC submission disabled)\n");
 
-	exl = kzalloc(sizeof(*exl), GFP_KERNEL);
+	exl = kzalloc_obj(*exl);
 	if (!exl)
 		return -ENOMEM;
 
 	exl->q = q;
 
-	err = drm_sched_init(&exl->sched, &drm_sched_ops, NULL, 1,
-			     q->lrc[0]->ring.size / MAX_JOB_SIZE_BYTES,
-			     XE_SCHED_HANG_LIMIT, XE_SCHED_JOB_TIMEOUT,
-			     NULL, NULL, q->hwe->name,
-			     gt_to_xe(q->gt)->drm.dev);
+	err = drm_sched_init(&exl->sched, &args);
 	if (err)
 		goto err_free;
 
@@ -380,10 +375,20 @@ err_free:
 	return err;
 }
 
-static void execlist_exec_queue_fini_async(struct work_struct *w)
+static void execlist_exec_queue_fini(struct xe_exec_queue *q)
+{
+	struct xe_execlist_exec_queue *exl = q->execlist;
+
+	drm_sched_entity_fini(&exl->entity);
+	drm_sched_fini(&exl->sched);
+
+	kfree(exl);
+}
+
+static void execlist_exec_queue_destroy_async(struct work_struct *w)
 {
 	struct xe_execlist_exec_queue *ee =
-		container_of(w, struct xe_execlist_exec_queue, fini_async);
+		container_of(w, struct xe_execlist_exec_queue, destroy_async);
 	struct xe_exec_queue *q = ee->q;
 	struct xe_execlist_exec_queue *exl = q->execlist;
 	struct xe_device *xe = gt_to_xe(q->gt);
@@ -396,10 +401,6 @@ static void execlist_exec_queue_fini_async(struct work_struct *w)
 		list_del(&exl->active_link);
 	spin_unlock_irqrestore(&exl->port->lock, flags);
 
-	drm_sched_entity_fini(&exl->entity);
-	drm_sched_fini(&exl->sched);
-	kfree(exl);
-
 	xe_exec_queue_fini(q);
 }
 
@@ -408,10 +409,10 @@ static void execlist_exec_queue_kill(struct xe_exec_queue *q)
 	/* NIY */
 }
 
-static void execlist_exec_queue_fini(struct xe_exec_queue *q)
+static void execlist_exec_queue_destroy(struct xe_exec_queue *q)
 {
-	INIT_WORK(&q->execlist->fini_async, execlist_exec_queue_fini_async);
-	queue_work(system_unbound_wq, &q->execlist->fini_async);
+	INIT_WORK(&q->execlist->destroy_async, execlist_exec_queue_destroy_async);
+	queue_work(system_dfl_wq, &q->execlist->destroy_async);
 }
 
 static int execlist_exec_queue_set_priority(struct xe_exec_queue *q,
@@ -458,10 +459,17 @@ static bool execlist_exec_queue_reset_status(struct xe_exec_queue *q)
 	return false;
 }
 
+static bool execlist_exec_queue_active(struct xe_exec_queue *q)
+{
+	/* NIY */
+	return false;
+}
+
 static const struct xe_exec_queue_ops execlist_exec_queue_ops = {
 	.init = execlist_exec_queue_init,
 	.kill = execlist_exec_queue_kill,
 	.fini = execlist_exec_queue_fini,
+	.destroy = execlist_exec_queue_destroy,
 	.set_priority = execlist_exec_queue_set_priority,
 	.set_timeslice = execlist_exec_queue_set_timeslice,
 	.set_preempt_timeout = execlist_exec_queue_set_preempt_timeout,
@@ -469,6 +477,7 @@ static const struct xe_exec_queue_ops execlist_exec_queue_ops = {
 	.suspend_wait = execlist_exec_queue_suspend_wait,
 	.resume = execlist_exec_queue_resume,
 	.reset_status = execlist_exec_queue_reset_status,
+	.active = execlist_exec_queue_active,
 };
 
 int xe_execlist_init(struct xe_gt *gt)

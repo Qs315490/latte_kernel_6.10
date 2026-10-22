@@ -214,6 +214,11 @@ static s32 stub_xfer(struct i2c_adapter *adap, u16 addr, unsigned short flags,
 		 * We ignore banks here, because banked chips don't use I2C
 		 * block transfers
 		 */
+		if (data->block[0] == 0 ||
+		    data->block[0] > I2C_SMBUS_BLOCK_MAX) {
+			ret = -EINVAL;
+			break;
+		}
 		if (data->block[0] > 256 - command)	/* Avoid overrun */
 			data->block[0] = 256 - command;
 		len = data->block[0];
@@ -372,8 +377,7 @@ static int __init i2c_stub_init(void)
 
 	/* Allocate memory for all chips at once */
 	stub_chips_nr = i;
-	stub_chips = kcalloc(stub_chips_nr, sizeof(struct stub_chip),
-			     GFP_KERNEL);
+	stub_chips = kzalloc_objs(struct stub_chip, stub_chips_nr);
 	if (!stub_chips)
 		return -ENOMEM;
 

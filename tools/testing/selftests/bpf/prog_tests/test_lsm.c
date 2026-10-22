@@ -5,35 +5,13 @@
  */
 
 #include <test_progs.h>
-#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <malloc.h>
-#include <stdlib.h>
 
 #include "lsm.skel.h"
 #include "lsm_tailcall.skel.h"
 
 char *CMD_ARGS[] = {"true", NULL};
-
-#define GET_PAGE_ADDR(ADDR, PAGE_SIZE)					\
-	(char *)(((unsigned long) (ADDR + PAGE_SIZE)) & ~(PAGE_SIZE-1))
-
-int stack_mprotect(void)
-{
-	void *buf;
-	long sz;
-	int ret;
-
-	sz = sysconf(_SC_PAGESIZE);
-	if (sz < 0)
-		return sz;
-
-	buf = alloca(sz * 3);
-	ret = mprotect(GET_PAGE_ADDR(buf, sz), sz,
-		       PROT_READ | PROT_WRITE | PROT_EXEC);
-	return ret;
-}
 
 int exec_cmd(int *monitored_pid)
 {
@@ -139,7 +117,7 @@ static void test_lsm_tailcall(void)
 	if (CHECK_FAIL(!err))
 		goto close_prog;
 
-	prog_fd = bpf_program__fd(skel->progs.lsm_file_alloc_security_prog);
+	prog_fd = bpf_program__fd(skel->progs.lsm_kernfs_init_security_prog);
 	if (CHECK_FAIL(prog_fd < 0))
 		goto close_prog;
 

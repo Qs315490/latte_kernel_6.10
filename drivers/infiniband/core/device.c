@@ -42,6 +42,7 @@
 #include <linux/security.h>
 #include <linux/notifier.h>
 #include <linux/hashtable.h>
+#include <linux/cc_platform.h>
 #include <rdma/rdma_netlink.h>
 #include <rdma/ib_addr.h>
 #include <rdma/ib_cache.h>
@@ -93,6 +94,7 @@ static struct workqueue_struct *ib_unreg_wq;
 static DEFINE_XARRAY_FLAGS(devices, XA_FLAGS_ALLOC);
 static DECLARE_RWSEM(devices_rwsem);
 #define DEVICE_REGISTERED XA_MARK_1
+#define DEVICE_GID_UPDATES XA_MARK_2
 
 static u32 highest_client_id;
 #define CLIENT_REGISTERED XA_MARK_1
@@ -144,6 +146,33 @@ bool rdma_dev_access_netns(const struct ib_device *dev, const struct net *net)
 		net_eq(read_pnet(&dev->coredev.rdma_net), net));
 }
 EXPORT_SYMBOL(rdma_dev_access_netns);
+
+/**
+ * rdma_dev_has_raw_cap() - Returns whether a specified rdma device has
+ *			    CAP_NET_RAW capability or not.
+ *
+ * @dev:	Pointer to rdma device whose capability to be checked
+ *
+ * Returns true if a rdma device's owning user namespace has CAP_NET_RAW
+ * capability, otherwise false. When rdma subsystem is in legacy shared network,
+ * namespace mode, the default net namespace is considered.
+ */
+bool rdma_dev_has_raw_cap(const struct ib_device *dev)
+{
+	const struct net *net;
+
+	/* Network namespace is the resource whose user namespace
+	 * to be considered. When in shared mode, there is no reliable
+	 * network namespace resource, so consider the default net namespace.
+	 */
+	if (ib_devices_shared_netns)
+		net = &init_net;
+	else
+		net = read_pnet(&dev->coredev.rdma_net);
+
+	return ns_capable(net->user_ns, CAP_NET_RAW);
+}
+EXPORT_SYMBOL(rdma_dev_has_raw_cap);
 
 /*
  * xarray has this behavior where it won't iterate over NULL values stored in
@@ -334,34 +363,6 @@ static struct ib_device *__ib_device_get_by_name(const char *name)
 	return NULL;
 }
 
-/**
- * ib_device_get_by_name - Find an IB device by name
- * @name: The name to look for
- * @driver_id: The driver ID that must match (RDMA_DRIVER_UNKNOWN matches all)
- *
- * Find and hold an ib_device by its name. The caller must call
- * ib_device_put() on the returned pointer.
- */
-struct ib_device *ib_device_get_by_name(const char *name,
-					enum rdma_driver_id driver_id)
-{
-	struct ib_device *device;
-
-	down_read(&devices_rwsem);
-	device = __ib_device_get_by_name(name);
-	if (device && driver_id != RDMA_DRIVER_UNKNOWN &&
-	    device->ops.driver_id != driver_id)
-		device = NULL;
-
-	if (device) {
-		if (!ib_device_try_get(device))
-			device = NULL;
-	}
-	up_read(&devices_rwsem);
-	return device;
-}
-EXPORT_SYMBOL(ib_device_get_by_name);
-
 static int rename_compat_devs(struct ib_device *device)
 {
 	struct ib_core_device *cdev;
@@ -509,12 +510,13 @@ static int ib_device_uevent(const struct device *device,
 	return 0;
 }
 
-static const void *net_namespace(const struct device *d)
+static const struct ns_common *net_namespace(const struct device *d)
 {
 	const struct ib_core_device *coredev =
 			container_of(d, struct ib_core_device, dev);
+	struct net *net = read_pnet(&coredev->rdma_net);
 
-	return read_pnet(&coredev->rdma_net);
+	return net ? to_ns_common(net) : NULL;
 }
 
 static struct class ib_class = {
@@ -528,6 +530,8 @@ static struct class ib_class = {
 static void rdma_init_coredev(struct ib_core_device *coredev,
 			      struct ib_device *dev, struct net *net)
 {
+	bool is_full_dev = &dev->coredev == coredev;
+
 	/* This BUILD_BUG_ON is intended to catch layout change
 	 * of union of ib_core_device and device.
 	 * dev must be the first element as ib_core and providers
@@ -539,6 +543,13 @@ static void rdma_init_coredev(struct ib_core_device *coredev,
 
 	coredev->dev.class = &ib_class;
 	coredev->dev.groups = dev->groups;
+
+	/*
+	 * Don't expose hw counters outside of the init namespace.
+	 */
+	if (!is_full_dev && dev->hw_stats_attr_index)
+		coredev->dev.groups[dev->hw_stats_attr_index] = NULL;
+
 	device_initialize(&coredev->dev);
 	coredev->owner = dev;
 	INIT_LIST_HEAD(&coredev->port_list);
@@ -548,6 +559,8 @@ static void rdma_init_coredev(struct ib_core_device *coredev,
 /**
  * _ib_alloc_device - allocate an IB device struct
  * @size:size of structure to allocate
+ * @net: network namespace device should be located in, namespace
+ *       must stay valid until ib_register_device() is completed.
  *
  * Low-level drivers should use ib_alloc_device() to allocate &struct
  * ib_device.  @size is the size of the structure to be allocated,
@@ -555,7 +568,7 @@ static void rdma_init_coredev(struct ib_core_device *coredev,
  * ib_dealloc_device() must be used to free structures allocated with
  * ib_alloc_device().
  */
-struct ib_device *_ib_alloc_device(size_t size)
+struct ib_device *_ib_alloc_device(size_t size, struct net *net)
 {
 	struct ib_device *device;
 	unsigned int i;
@@ -572,7 +585,15 @@ struct ib_device *_ib_alloc_device(size_t size)
 		return NULL;
 	}
 
-	rdma_init_coredev(&device->coredev, device, &init_net);
+	/* ib_devices_shared_netns can't change while we have active namespaces
+	 * in the system which means either init_net is passed or the user has
+	 * no idea what they are doing.
+	 *
+	 * To avoid breaking backward compatibility, when in shared mode,
+	 * force to init the device in the init_net.
+	 */
+	net = ib_devices_shared_netns ? &init_net : net;
+	rdma_init_coredev(&device->coredev, device, net);
 
 	INIT_LIST_HEAD(&device->event_handler_list);
 	spin_lock_init(&device->qp_open_list_lock);
@@ -793,9 +814,8 @@ static int alloc_port_data(struct ib_device *device)
 	 * Therefore port_data is declared as a 1 based array with potential
 	 * empty slots at the beginning.
 	 */
-	pdata_rcu = kzalloc(struct_size(pdata_rcu, pdata,
-					size_add(rdma_end_port(device), 1)),
-			    GFP_KERNEL);
+	pdata_rcu = kzalloc_flex(*pdata_rcu, pdata,
+				 size_add(rdma_end_port(device), 1));
 	if (!pdata_rcu)
 		return -ENOMEM;
 	/*
@@ -940,7 +960,7 @@ static int add_one_compat_dev(struct ib_device *device,
 	if (ret)
 		goto done;
 
-	cdev = kzalloc(sizeof(*cdev), GFP_KERNEL);
+	cdev = kzalloc_obj(*cdev);
 	if (!cdev) {
 		ret = -ENOMEM;
 		goto cdev_err;
@@ -1226,7 +1246,6 @@ out:
  */
 static int setup_device(struct ib_device *device)
 {
-	struct ib_udata uhw = {.outlen = 0, .inlen = 0};
 	int ret;
 
 	ib_device_check_mandatory(device);
@@ -1238,7 +1257,7 @@ static int setup_device(struct ib_device *device)
 	}
 
 	memset(&device->attrs, 0, sizeof(device->attrs));
-	ret = device->ops.query_device(device, &device->attrs, &uhw);
+	ret = device->ops.query_device(device, &device->attrs, NULL);
 	if (ret) {
 		dev_warn(&device->dev,
 			 "Couldn't query the device attributes\n");
@@ -1341,9 +1360,14 @@ static void ib_device_notify_register(struct ib_device *device)
 	u32 port;
 	int ret;
 
+	down_read(&devices_rwsem);
+
+	/* Mark for userspace that device is ready */
+	kobject_uevent(&device->dev.kobj, KOBJ_ADD);
+
 	ret = rdma_nl_notify_event(device, 0, RDMA_REGISTER_EVENT);
 	if (ret)
-		return;
+		goto out;
 
 	rdma_for_each_port(device, port) {
 		netdev = ib_device_get_netdev(device, port);
@@ -1354,8 +1378,11 @@ static void ib_device_notify_register(struct ib_device *device)
 					   RDMA_NETDEV_ATTACH_EVENT);
 		dev_put(netdev);
 		if (ret)
-			return;
+			goto out;
 	}
+
+out:
+	up_read(&devices_rwsem);
 }
 
 /**
@@ -1392,6 +1419,14 @@ int ib_register_device(struct ib_device *device, const char *name,
 	 */
 	WARN_ON(dma_device && !dma_device->dma_parms);
 	device->dma_device = dma_device;
+	/*
+	 * In a CoCo guest every device is currently assumed to be untrusted
+	 * (T=0) and therefore subject to DMA bouncing. Once trusted (T=1)
+	 * device detection is wired up, narrow this check to exclude such
+	 * devices.
+	 */
+	if (dma_device && cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
+		device->cc_dma_bounce = 1;
 
 	ret = setup_device(device);
 	if (ret)
@@ -1454,10 +1489,9 @@ int ib_register_device(struct ib_device *device, const char *name,
 		return ret;
 	}
 	dev_set_uevent_suppress(&device->dev, false);
-	/* Mark for userspace that device is ready */
-	kobject_uevent(&device->dev.kobj, KOBJ_ADD);
 
 	ib_device_notify_register(device);
+
 	ib_device_put(device);
 
 	return 0;
@@ -1490,7 +1524,7 @@ static void __ib_unregister_device(struct ib_device *ib_dev)
 
 	/*
 	 * We have a registration lock so that all the calls to unregister are
-	 * fully fenced, once any unregister returns the device is truely
+	 * fully fenced, once any unregister returns the device is truly
 	 * unregistered even if multiple callers are unregistering it at the
 	 * same time. This also interacts with the registration flow and
 	 * provides sane semantics if register and unregister are racing.
@@ -2388,9 +2422,40 @@ void ib_enum_all_roce_netdevs(roce_netdev_filter filter,
 	unsigned long index;
 
 	down_read(&devices_rwsem);
-	xa_for_each_marked (&devices, index, dev, DEVICE_REGISTERED)
+	xa_for_each_marked(&devices, index, dev, DEVICE_GID_UPDATES)
 		ib_enum_roce_netdev(dev, filter, filter_cookie, cb, cookie);
 	up_read(&devices_rwsem);
+}
+
+/**
+ * ib_device_enable_gid_updates - Mark device as ready for GID cache updates
+ * @device: Device to mark
+ *
+ * Called after GID table is allocated and initialized. After this mark is set,
+ * netdevice event handlers can update the device's GID cache. This allows
+ * events that arrive during device registration to be processed, avoiding
+ * stale GID entries when netdev properties change during the device
+ * registration process.
+ */
+void ib_device_enable_gid_updates(struct ib_device *device)
+{
+	down_write(&devices_rwsem);
+	xa_set_mark(&devices, device->index, DEVICE_GID_UPDATES);
+	up_write(&devices_rwsem);
+}
+
+/**
+ * ib_device_disable_gid_updates - Clear the GID updates mark
+ * @device: Device to unmark
+ *
+ * Called before GID table cleanup to prevent event handlers from accessing
+ * the device while it's being torn down.
+ */
+void ib_device_disable_gid_updates(struct ib_device *device)
+{
+	down_write(&devices_rwsem);
+	xa_clear_mark(&devices, device->index, DEVICE_GID_UPDATES);
+	up_write(&devices_rwsem);
 }
 
 /*
@@ -2650,11 +2715,13 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 
 	dev_ops->uverbs_no_driver_id_binding |=
 		ops->uverbs_no_driver_id_binding;
+	dev_ops->uverbs_robust_udata |= ops->uverbs_robust_udata;
 
 	SET_DEVICE_OP(dev_ops, add_gid);
 	SET_DEVICE_OP(dev_ops, add_sub_dev);
 	SET_DEVICE_OP(dev_ops, advise_mr);
 	SET_DEVICE_OP(dev_ops, alloc_dm);
+	SET_DEVICE_OP(dev_ops, alloc_dmah);
 	SET_DEVICE_OP(dev_ops, alloc_hw_device_stats);
 	SET_DEVICE_OP(dev_ops, alloc_hw_port_stats);
 	SET_DEVICE_OP(dev_ops, alloc_mr);
@@ -2669,11 +2736,13 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, counter_alloc_stats);
 	SET_DEVICE_OP(dev_ops, counter_bind_qp);
 	SET_DEVICE_OP(dev_ops, counter_dealloc);
+	SET_DEVICE_OP(dev_ops, counter_init);
 	SET_DEVICE_OP(dev_ops, counter_unbind_qp);
 	SET_DEVICE_OP(dev_ops, counter_update_stats);
 	SET_DEVICE_OP(dev_ops, create_ah);
 	SET_DEVICE_OP(dev_ops, create_counters);
 	SET_DEVICE_OP(dev_ops, create_cq);
+	SET_DEVICE_OP(dev_ops, create_user_cq);
 	SET_DEVICE_OP(dev_ops, create_flow);
 	SET_DEVICE_OP(dev_ops, create_qp);
 	SET_DEVICE_OP(dev_ops, create_rwq_ind_table);
@@ -2681,6 +2750,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, create_user_ah);
 	SET_DEVICE_OP(dev_ops, create_wq);
 	SET_DEVICE_OP(dev_ops, dealloc_dm);
+	SET_DEVICE_OP(dev_ops, dealloc_dmah);
 	SET_DEVICE_OP(dev_ops, dealloc_driver);
 	SET_DEVICE_OP(dev_ops, dealloc_mw);
 	SET_DEVICE_OP(dev_ops, dealloc_pd);
@@ -2721,7 +2791,6 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, get_netdev);
 	SET_DEVICE_OP(dev_ops, get_numa_node);
 	SET_DEVICE_OP(dev_ops, get_port_immutable);
-	SET_DEVICE_OP(dev_ops, get_vector_affinity);
 	SET_DEVICE_OP(dev_ops, get_vf_config);
 	SET_DEVICE_OP(dev_ops, get_vf_guid);
 	SET_DEVICE_OP(dev_ops, get_vf_stats);
@@ -2736,6 +2805,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, map_mr_sg);
 	SET_DEVICE_OP(dev_ops, map_mr_sg_pi);
 	SET_DEVICE_OP(dev_ops, mmap);
+	SET_DEVICE_OP(dev_ops, mmap_get_pfns);
 	SET_DEVICE_OP(dev_ops, mmap_free);
 	SET_DEVICE_OP(dev_ops, modify_ah);
 	SET_DEVICE_OP(dev_ops, modify_cq);
@@ -2746,8 +2816,11 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, modify_srq);
 	SET_DEVICE_OP(dev_ops, modify_wq);
 	SET_DEVICE_OP(dev_ops, peek_cq);
+	SET_DEVICE_OP(dev_ops, pgoff_to_mmap_entry);
+	SET_DEVICE_OP(dev_ops, pre_destroy_cq);
 	SET_DEVICE_OP(dev_ops, poll_cq);
 	SET_DEVICE_OP(dev_ops, port_groups);
+	SET_DEVICE_OP(dev_ops, post_destroy_cq);
 	SET_DEVICE_OP(dev_ops, post_recv);
 	SET_DEVICE_OP(dev_ops, post_send);
 	SET_DEVICE_OP(dev_ops, post_srq_recv);
@@ -2757,6 +2830,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, query_gid);
 	SET_DEVICE_OP(dev_ops, query_pkey);
 	SET_DEVICE_OP(dev_ops, query_port);
+	SET_DEVICE_OP(dev_ops, query_port_speed);
 	SET_DEVICE_OP(dev_ops, query_qp);
 	SET_DEVICE_OP(dev_ops, query_srq);
 	SET_DEVICE_OP(dev_ops, query_ucontext);
@@ -2767,7 +2841,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, reg_user_mr_dmabuf);
 	SET_DEVICE_OP(dev_ops, req_notify_cq);
 	SET_DEVICE_OP(dev_ops, rereg_user_mr);
-	SET_DEVICE_OP(dev_ops, resize_cq);
+	SET_DEVICE_OP(dev_ops, resize_user_cq);
 	SET_DEVICE_OP(dev_ops, set_vf_guid);
 	SET_DEVICE_OP(dev_ops, set_vf_link_state);
 	SET_DEVICE_OP(dev_ops, ufile_hw_cleanup);
@@ -2776,6 +2850,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_OBJ_SIZE(dev_ops, ib_ah);
 	SET_OBJ_SIZE(dev_ops, ib_counters);
 	SET_OBJ_SIZE(dev_ops, ib_cq);
+	SET_OBJ_SIZE(dev_ops, ib_dmah);
 	SET_OBJ_SIZE(dev_ops, ib_mw);
 	SET_OBJ_SIZE(dev_ops, ib_pd);
 	SET_OBJ_SIZE(dev_ops, ib_qp);
@@ -2783,6 +2858,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_OBJ_SIZE(dev_ops, ib_srq);
 	SET_OBJ_SIZE(dev_ops, ib_ucontext);
 	SET_OBJ_SIZE(dev_ops, ib_xrcd);
+	SET_OBJ_SIZE(dev_ops, rdma_counter);
 }
 EXPORT_SYMBOL(ib_set_device_ops);
 
@@ -2814,14 +2890,15 @@ int ib_add_sub_device(struct ib_device *parent,
 
 	return ret;
 }
-EXPORT_SYMBOL(ib_add_sub_device);
 
 int ib_del_sub_device_and_put(struct ib_device *sub)
 {
 	struct ib_device *parent = sub->parent;
 
-	if (!parent)
+	if (!parent) {
+		ib_device_put(sub);
 		return -EOPNOTSUPP;
+	}
 
 	mutex_lock(&parent->subdev_lock);
 	list_del(&sub->subdev_list);
@@ -2833,7 +2910,6 @@ int ib_del_sub_device_and_put(struct ib_device *sub)
 
 	return 0;
 }
-EXPORT_SYMBOL(ib_del_sub_device_and_put);
 
 #ifdef CONFIG_INFINIBAND_VIRT_DMA
 int ib_dma_virt_map_sg(struct ib_device *dev, struct scatterlist *sg, int nents)
@@ -2960,7 +3036,7 @@ static int __init ib_core_init(void)
 {
 	int ret = -ENOMEM;
 
-	ib_wq = alloc_workqueue("infiniband", 0, 0);
+	ib_wq = alloc_workqueue("infiniband", WQ_PERCPU, 0);
 	if (!ib_wq)
 		return -ENOMEM;
 
@@ -2970,7 +3046,7 @@ static int __init ib_core_init(void)
 		goto err;
 
 	ib_comp_wq = alloc_workqueue("ib-comp-wq",
-			WQ_HIGHPRI | WQ_MEM_RECLAIM | WQ_SYSFS, 0);
+			WQ_HIGHPRI | WQ_MEM_RECLAIM | WQ_SYSFS | WQ_PERCPU, 0);
 	if (!ib_comp_wq)
 		goto err_unbound;
 

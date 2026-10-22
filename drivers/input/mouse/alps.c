@@ -12,6 +12,7 @@
  * tpconfig utility (by C. Scott Ananian and Bruce Kall).
  */
 
+#include "linux/workqueue.h"
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
@@ -1408,9 +1409,9 @@ static int alps_do_register_bare_ps2_mouse(struct alps_data *priv)
 		return -ENOMEM;
 	}
 
-	snprintf(priv->phys3, sizeof(priv->phys3), "%s/%s",
-		 psmouse->ps2dev.serio->phys,
-		 (priv->dev2 ? "input2" : "input1"));
+	scnprintf(priv->phys3, sizeof(priv->phys3), "%s/%s",
+		  psmouse->ps2dev.serio->phys,
+		  (priv->dev2 ? "input2" : "input1"));
 	dev3->phys = priv->phys3;
 
 	/*
@@ -1452,7 +1453,7 @@ err_free_input:
 static void alps_register_bare_ps2_mouse(struct work_struct *work)
 {
 	struct alps_data *priv = container_of(work, struct alps_data,
-					      dev3_register_work.work);
+					      dev3_register_work);
 	int error;
 
 	guard(mutex)(&alps_mutex);
@@ -1485,8 +1486,7 @@ static void alps_report_bare_ps2_packet(struct psmouse *psmouse,
 	} else if (unlikely(IS_ERR_OR_NULL(priv->dev3))) {
 		/* Register dev3 mouse if we received PS/2 packet first time */
 		if (!IS_ERR(priv->dev3))
-			psmouse_queue_work(psmouse, &priv->dev3_register_work,
-					   0);
+			schedule_work(&priv->dev3_register_work);
 		return;
 	} else {
 		dev = priv->dev3;
@@ -1519,7 +1519,7 @@ static psmouse_ret_t alps_handle_interleaved_ps2(struct psmouse *psmouse)
 		return PSMOUSE_GOOD_DATA;
 	}
 
-	del_timer(&priv->timer);
+	timer_delete(&priv->timer);
 
 	if (psmouse->packet[6] & 0x80) {
 
@@ -1582,7 +1582,7 @@ static psmouse_ret_t alps_handle_interleaved_ps2(struct psmouse *psmouse)
 
 static void alps_flush_packet(struct timer_list *t)
 {
-	struct alps_data *priv = from_timer(priv, t, timer);
+	struct alps_data *priv = timer_container_of(priv, t, timer);
 	struct psmouse *psmouse = priv->psmouse;
 
 	guard(serio_pause_rx)(psmouse->ps2dev.serio);
@@ -2975,6 +2975,7 @@ static void alps_disconnect(struct psmouse *psmouse)
 
 	psmouse_reset(psmouse);
 	timer_shutdown_sync(&priv->timer);
+	disable_work_sync(&priv->dev3_register_work);
 	if (priv->dev2)
 		input_unregister_device(priv->dev2);
 	if (!IS_ERR_OR_NULL(priv->dev3))
@@ -3103,8 +3104,8 @@ int alps_init(struct psmouse *psmouse)
 			goto init_fail;
 		}
 
-		snprintf(priv->phys2, sizeof(priv->phys2), "%s/input1",
-			 psmouse->ps2dev.serio->phys);
+		scnprintf(priv->phys2, sizeof(priv->phys2), "%s/input1",
+			  psmouse->ps2dev.serio->phys);
 		dev2->phys = priv->phys2;
 
 		/*
@@ -3146,8 +3147,7 @@ int alps_init(struct psmouse *psmouse)
 
 	priv->psmouse = psmouse;
 
-	INIT_DELAYED_WORK(&priv->dev3_register_work,
-			  alps_register_bare_ps2_mouse);
+	INIT_WORK(&priv->dev3_register_work, alps_register_bare_ps2_mouse);
 
 	psmouse->protocol_handler = alps_process_byte;
 	psmouse->poll = alps_poll;
@@ -3205,7 +3205,7 @@ int alps_detect(struct psmouse *psmouse, bool set_properties)
 	 */
 	psmouse_reset(psmouse);
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 

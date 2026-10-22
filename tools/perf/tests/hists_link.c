@@ -287,7 +287,7 @@ static int test__hists_link(struct test_suite *test __maybe_unused, int subtest 
 {
 	int err = -1;
 	struct hists *hists, *first_hists;
-	struct machines machines;
+	struct machines machines = { 0 };
 	struct machine *machine = NULL;
 	struct evsel *evsel, *first;
 	struct evlist *evlist = evlist__new();
@@ -303,11 +303,8 @@ static int test__hists_link(struct test_suite *test __maybe_unused, int subtest 
 		goto out;
 
 	err = TEST_FAIL;
-	/* default sort order (comm,dso,sym) will be used */
-	if (setup_sorting(NULL) < 0)
+	if (machines__init(&machines))
 		goto out;
-
-	machines__init(&machines);
 
 	/* setup threads/dso/map/symbols also */
 	machine = setup_fake_machine(&machines);
@@ -316,6 +313,10 @@ static int test__hists_link(struct test_suite *test __maybe_unused, int subtest 
 
 	if (verbose > 1)
 		machine__fprintf(machine, stderr);
+
+	/* default sort order (comm,dso,sym) will be used */
+	if (setup_sorting(evlist, machine->env) < 0)
+		goto out;
 
 	/* process sample events */
 	err = add_hist_entries(evlist, machine);

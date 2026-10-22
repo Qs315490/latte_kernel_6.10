@@ -13,7 +13,6 @@
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/nvmem-provider.h>
@@ -303,6 +302,10 @@ static int ee1004_probe(struct i2c_client *client)
 	    !i2c_check_functionality(client->adapter,
 				     I2C_FUNC_SMBUS_BYTE | I2C_FUNC_SMBUS_READ_BYTE_DATA))
 		return -EPFNOSUPPORT;
+
+	err = i2c_smbus_read_byte(client);
+	if (err < 0)
+		return -ENODEV;
 
 	mutex_lock(&ee1004_bus_lock);
 

@@ -53,9 +53,9 @@ static int clu_set_table(struct vsp1_clu *clu, struct v4l2_ctrl *ctrl)
 	for (i = 0; i < CLU_SIZE; ++i)
 		vsp1_dl_body_write(dlb, VI6_CLU_DATA, ctrl->p_new.p_u32[i]);
 
-	spin_lock_irq(&clu->lock);
-	swap(clu->clu, dlb);
-	spin_unlock_irq(&clu->lock);
+	scoped_guard(spinlock_irq, &clu->lock) {
+		swap(clu->clu, dlb);
+	}
 
 	vsp1_dl_body_put(dlb);
 	return 0;
@@ -113,7 +113,7 @@ static const struct v4l2_ctrl_config clu_mode_control = {
 };
 
 /* -----------------------------------------------------------------------------
- * V4L2 Subdevice Pad Operations
+ * V4L2 Subdevice Operations
  */
 
 static const unsigned int clu_codes[] = {
@@ -122,46 +122,15 @@ static const unsigned int clu_codes[] = {
 	MEDIA_BUS_FMT_AYUV8_1X32,
 };
 
-static int clu_enum_mbus_code(struct v4l2_subdev *subdev,
-			      struct v4l2_subdev_state *sd_state,
-			      struct v4l2_subdev_mbus_code_enum *code)
-{
-	return vsp1_subdev_enum_mbus_code(subdev, sd_state, code, clu_codes,
-					  ARRAY_SIZE(clu_codes));
-}
-
-static int clu_enum_frame_size(struct v4l2_subdev *subdev,
-			       struct v4l2_subdev_state *sd_state,
-			       struct v4l2_subdev_frame_size_enum *fse)
-{
-	return vsp1_subdev_enum_frame_size(subdev, sd_state, fse,
-					   CLU_MIN_SIZE,
-					   CLU_MIN_SIZE, CLU_MAX_SIZE,
-					   CLU_MAX_SIZE);
-}
-
-static int clu_set_format(struct v4l2_subdev *subdev,
-			  struct v4l2_subdev_state *sd_state,
-			  struct v4l2_subdev_format *fmt)
-{
-	return vsp1_subdev_set_pad_format(subdev, sd_state, fmt, clu_codes,
-					  ARRAY_SIZE(clu_codes),
-					  CLU_MIN_SIZE, CLU_MIN_SIZE,
-					  CLU_MAX_SIZE, CLU_MAX_SIZE);
-}
-
-/* -----------------------------------------------------------------------------
- * V4L2 Subdevice Operations
- */
-
 static const struct v4l2_subdev_pad_ops clu_pad_ops = {
-	.enum_mbus_code = clu_enum_mbus_code,
-	.enum_frame_size = clu_enum_frame_size,
+	.enum_mbus_code = vsp1_subdev_enum_mbus_code,
+	.enum_frame_size = vsp1_subdev_enum_frame_size,
 	.get_fmt = vsp1_subdev_get_pad_format,
-	.set_fmt = clu_set_format,
+	.set_fmt = vsp1_subdev_set_pad_format,
 };
 
 static const struct v4l2_subdev_ops clu_ops = {
+	.core	= &vsp1_entity_core_ops,
 	.pad    = &clu_pad_ops,
 };
 
@@ -193,7 +162,6 @@ static void clu_configure_frame(struct vsp1_entity *entity,
 {
 	struct vsp1_clu *clu = to_clu(&entity->subdev);
 	struct vsp1_dl_body *clu_dlb;
-	unsigned long flags;
 	u32 ctrl = VI6_CLU_CTRL_AAI | VI6_CLU_CTRL_MVS | VI6_CLU_CTRL_EN;
 
 	/* 2D mode can only be used with the YCbCr pixel encoding. */
@@ -204,10 +172,10 @@ static void clu_configure_frame(struct vsp1_entity *entity,
 
 	vsp1_clu_write(clu, dlb, VI6_CLU_CTRL, ctrl);
 
-	spin_lock_irqsave(&clu->lock, flags);
-	clu_dlb = clu->clu;
-	clu->clu = NULL;
-	spin_unlock_irqrestore(&clu->lock, flags);
+	scoped_guard(spinlock_irqsave, &clu->lock) {
+		clu_dlb = clu->clu;
+		clu->clu = NULL;
+	}
 
 	if (clu_dlb) {
 		vsp1_dl_list_add_body(dl, clu_dlb);
@@ -247,6 +215,12 @@ struct vsp1_clu *vsp1_clu_create(struct vsp1_device *vsp1)
 
 	clu->entity.ops = &clu_entity_ops;
 	clu->entity.type = VSP1_ENTITY_CLU;
+	clu->entity.codes = clu_codes;
+	clu->entity.num_codes = ARRAY_SIZE(clu_codes);
+	clu->entity.min_width = CLU_MIN_SIZE;
+	clu->entity.min_height = CLU_MIN_SIZE;
+	clu->entity.max_width = CLU_MAX_SIZE;
+	clu->entity.max_height = CLU_MAX_SIZE;
 
 	ret = vsp1_entity_init(vsp1, &clu->entity, "clu", 2, &clu_ops,
 			       MEDIA_ENT_F_PROC_VIDEO_LUT);

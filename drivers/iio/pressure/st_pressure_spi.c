@@ -9,7 +9,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/spi/spi.h>
 #include <linux/iio/iio.h>
 
@@ -55,7 +54,7 @@ static const struct of_device_id st_press_of_match[] = {
 		.compatible = "st,lps22df",
 		.data = LPS22DF_PRESS_DEV_NAME,
 	},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, st_press_of_match);
 
@@ -106,7 +105,7 @@ static const struct spi_device_id st_press_id_table[] = {
 	{ "lps25h-press", },
 	{ "lps331ap-press" },
 	{ "lps22hb-press" },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, st_press_id_table);
 

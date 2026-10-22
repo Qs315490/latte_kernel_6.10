@@ -950,9 +950,9 @@ wavefront_send_sample (snd_wavefront_t *dev,
 	if (header->size) {
 		dev->freemem = wavefront_freemem (dev);
 
-		if (dev->freemem < (int)header->size) {
+		if (dev->freemem < 0 || dev->freemem < header->size) {
 			dev_err(dev->card->dev,
-				"insufficient memory to load %d byte sample.\n",
+				"insufficient memory to load %u byte sample.\n",
 				header->size);
 			return -ENOMEM;
 		}
@@ -1381,7 +1381,7 @@ wavefront_load_patch (snd_wavefront_t *dev, const char __user *addr)
 	wavefront_patch_info *header;
 	int err;
 	
-	header = kmalloc(sizeof(*header), GFP_KERNEL);
+	header = kmalloc_obj(*header);
 	if (! header)
 		return -ENOMEM;
 
@@ -1626,6 +1626,14 @@ wavefront_synth_control (snd_wavefront_card_t *acard,
 				"support for sample aliases still being considered.\n");
 			break;
 
+		case WFC_MISYNTH_OFF:
+			dev->midi_in_to_synth = 0;
+			break;
+
+		case WFC_MISYNTH_ON:
+			dev->midi_in_to_synth = 1;
+			break;
+
 		case WFC_VMIDI_OFF:
 			snd_wavefront_midi_disable_virtual (acard);
 			break;
@@ -1635,6 +1643,83 @@ wavefront_synth_control (snd_wavefront_card_t *acard,
 			break;
 		}
 	}
+
+	return 0;
+}
+
+static int
+wavefront_restore_midi_state(snd_wavefront_card_t *acard, char isvirtual,
+			     char midi_in_to_synth)
+{
+	snd_wavefront_t *dev = &acard->wavefront;
+	unsigned char rbuf[4], wbuf[4];
+
+	if (dev->midi_in_to_synth != midi_in_to_synth) {
+		if (snd_wavefront_cmd(dev, midi_in_to_synth ?
+				      WFC_MISYNTH_ON : WFC_MISYNTH_OFF,
+				      rbuf, wbuf)) {
+			dev_err(dev->card->dev,
+				"cannot restore MIDI-IN routing after resume\n");
+			return -EIO;
+		}
+		dev->midi_in_to_synth = midi_in_to_synth;
+	}
+
+	if (dev->midi.isvirtual != isvirtual) {
+		if (snd_wavefront_cmd(dev, isvirtual ?
+				      WFC_VMIDI_ON : WFC_VMIDI_OFF,
+				      rbuf, wbuf)) {
+			dev_err(dev->card->dev,
+				"cannot restore virtual MIDI mode after resume\n");
+			return -EIO;
+		}
+		if (isvirtual)
+			snd_wavefront_midi_enable_virtual(acard);
+		else
+			snd_wavefront_midi_disable_virtual(acard);
+	}
+
+	return 0;
+}
+
+int snd_wavefront_resume_synth(snd_wavefront_card_t *acard)
+{
+	snd_wavefront_t *dev = &acard->wavefront;
+	char was_virtual = dev->midi.isvirtual;
+	char midi_in_to_synth = dev->midi_in_to_synth;
+	char rom_samples_rdonly = dev->rom_samples_rdonly;
+	int err;
+
+	err = snd_wavefront_detect(acard);
+	if (err < 0)
+		dev->israw = 1;
+
+	if (dev->israw) {
+		dev->fx_initialized = 0;
+		err = snd_wavefront_start(dev);
+		if (err < 0)
+			return err;
+	} else {
+		dev->has_fx = (snd_wavefront_fx_detect(dev) == 0);
+		wavefront_get_sample_status(dev, 0);
+		wavefront_get_program_status(dev);
+		wavefront_get_patch_status(dev);
+		outb(0x80 | 0x40 | 0x20, dev->control_port);
+	}
+
+	dev->rom_samples_rdonly = rom_samples_rdonly;
+	dev->midi.base = dev->base;
+
+	err = snd_wavefront_midi_start(acard);
+	if (err < 0)
+		return err;
+
+	err = wavefront_restore_midi_state(acard, was_virtual,
+					   midi_in_to_synth);
+	if (err < 0)
+		return err;
+
+	snd_wavefront_midi_resume(acard);
 
 	return 0;
 }
@@ -1741,10 +1826,10 @@ snd_wavefront_internal_interrupt (snd_wavefront_card_t *card)
 		return;
 	}
 
-	spin_lock(&dev->irq_lock);
-	dev->irq_ok = 1;
-	dev->irq_cnt++;
-	spin_unlock(&dev->irq_lock);
+	scoped_guard(spinlock, &dev->irq_lock) {
+		dev->irq_ok = 1;
+		dev->irq_cnt++;
+	}
 	wake_up(&dev->interrupt_sleeper);
 }
 
@@ -1796,11 +1881,11 @@ wavefront_should_cause_interrupt (snd_wavefront_t *dev,
 	wait_queue_entry_t wait;
 
 	init_waitqueue_entry(&wait, current);
-	spin_lock_irq(&dev->irq_lock);
-	add_wait_queue(&dev->interrupt_sleeper, &wait);
-	dev->irq_ok = 0;
-	outb (val,port);
-	spin_unlock_irq(&dev->irq_lock);
+	scoped_guard(spinlock_irq, &dev->irq_lock) {
+		add_wait_queue(&dev->interrupt_sleeper, &wait);
+		dev->irq_ok = 0;
+		outb(val, port);
+	}
 	while (!dev->irq_ok && time_before(jiffies, timeout)) {
 		schedule_timeout_uninterruptible(1);
 		barrier();
@@ -2030,6 +2115,17 @@ wavefront_download_firmware (snd_wavefront_t *dev, char *path)
 	release_firmware(firmware);
 	dev_err(dev->card->dev, "firmware download failed!!!\n");
 	return 1;
+}
+
+void snd_wavefront_cache_firmware(snd_wavefront_t *dev)
+{
+	int err;
+
+	err = firmware_request_cache(dev->card->dev, ospath);
+	if (err < 0)
+		dev_warn(dev->card->dev,
+			 "unable to cache firmware %s for resume: %d\n",
+			 ospath, err);
 }
 
 

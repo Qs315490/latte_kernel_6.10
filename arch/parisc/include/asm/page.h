@@ -8,7 +8,7 @@
 
 #define HAVE_ARCH_HUGETLB_UNMAPPED_AREA
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <asm/types.h>
 #include <asm/cache.h>
@@ -21,7 +21,6 @@ struct vm_area_struct;
 
 void clear_page_asm(void *page);
 void copy_page_asm(void *to, void *from);
-#define clear_user_page(vto, vaddr, page) clear_page_asm(vto)
 void copy_user_highpage(struct page *to, struct page *from, unsigned long vaddr,
 		struct vm_area_struct *vma);
 #define __HAVE_ARCH_COPY_USER_HIGHPAGE
@@ -93,7 +92,7 @@ typedef struct __physmem_range {
 extern physmem_range_t pmem_ranges[];
 extern int npmem_ranges;
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 /* WARNING: The definitions below must match exactly to sizeof(pte_t)
  * etc
@@ -139,7 +138,7 @@ extern int npmem_ranges;
 #define KERNEL_BINARY_TEXT_START	(__PAGE_OFFSET + 0x100000)
 
 /* These macros don't work for 64-bit C code -- don't allow in C at all */
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #   define PA(x)	((x)-__PAGE_OFFSET)
 #   define VA(x)	((x)+__PAGE_OFFSET)
 #endif

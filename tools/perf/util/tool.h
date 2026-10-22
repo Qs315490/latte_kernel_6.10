@@ -9,7 +9,6 @@
 struct perf_session;
 union perf_event;
 struct evlist;
-struct evsel;
 struct perf_sample;
 struct perf_tool;
 struct machine;
@@ -17,7 +16,7 @@ struct ordered_events;
 
 typedef int (*event_sample)(const struct perf_tool *tool, union perf_event *event,
 			    struct perf_sample *sample,
-			    struct evsel *evsel, struct machine *machine);
+			    struct machine *machine);
 
 typedef int (*event_op)(const struct perf_tool *tool, union perf_event *event,
 			struct perf_sample *sample, struct machine *machine);
@@ -26,10 +25,12 @@ typedef int (*event_attr_op)(const struct perf_tool *tool,
 			     union perf_event *event,
 			     struct evlist **pevlist);
 
-typedef int (*event_op2)(struct perf_session *session, union perf_event *event);
-typedef s64 (*event_op3)(struct perf_session *session, union perf_event *event);
-typedef int (*event_op4)(struct perf_session *session, union perf_event *event, u64 data,
-			 const char *str);
+typedef int (*event_op2)(const struct perf_tool *tool, struct perf_session *session,
+			 union perf_event *event);
+typedef s64 (*event_op3)(const struct perf_tool *tool, struct perf_session *session,
+			 union perf_event *event);
+typedef int (*event_op4)(const struct perf_tool *tool, struct perf_session *session,
+			 union perf_event *event, u64 data, const char *str);
 
 typedef int (*event_oe)(const struct perf_tool *tool, union perf_event *event,
 			struct ordered_events *oe);
@@ -42,7 +43,8 @@ enum show_feature_header {
 
 struct perf_tool {
 	event_sample	sample,
-			read;
+			read,
+			callchain_deferred;
 	event_op	mmap,
 			mmap2,
 			comm,
@@ -77,7 +79,10 @@ struct perf_tool {
 			stat,
 			stat_round,
 			feature,
-			finished_init;
+			finished_init,
+			bpf_metadata,
+			schedstat_cpu,
+			schedstat_domain;
 	event_op4	compressed;
 	event_op3	auxtrace;
 	bool		ordered_events;
@@ -86,6 +91,7 @@ struct perf_tool {
 	bool		cgroup_events;
 	bool		no_warn;
 	bool		dont_split_sample_group;
+	bool		merge_deferred_callchains;
 	enum show_feature_header show_feat_hdr;
 };
 
@@ -96,7 +102,15 @@ bool perf_tool__compressed_is_stub(const struct perf_tool *tool);
 int process_event_sample_stub(const struct perf_tool *tool,
 			      union perf_event *event,
 			      struct perf_sample *sample,
-			      struct evsel *evsel,
 			      struct machine *machine);
+
+struct delegate_tool {
+	/** @tool: The actual tool that calls the delegate. */
+	struct perf_tool tool;
+	/** @delegate: The tool that is delegated to. */
+	struct perf_tool *delegate;
+};
+
+void delegate_tool__init(struct delegate_tool *tool, struct perf_tool *delegate);
 
 #endif /* __PERF_TOOL_H */

@@ -36,7 +36,6 @@
 #include <linux/gfp.h>
 #include <linux/vmalloc.h>
 #include <linux/highmem.h>
-#include <linux/hugetlb.h>
 #include <linux/kvm_irqfd.h>
 #include <linux/irqbypass.h>
 #include <linux/module.h>
@@ -2790,7 +2789,7 @@ static struct kvmppc_vcore *kvmppc_vcore_create(struct kvm *kvm, int id)
 {
 	struct kvmppc_vcore *vcore;
 
-	vcore = kzalloc(sizeof(struct kvmppc_vcore), GFP_KERNEL);
+	vcore = kzalloc_obj(struct kvmppc_vcore);
 
 	if (vcore == NULL)
 		return NULL;
@@ -2842,7 +2841,7 @@ static int debugfs_timings_open(struct inode *inode, struct file *file)
 	struct kvm_vcpu *vcpu = inode->i_private;
 	struct debugfs_timings_state *p;
 
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc_obj(*p);
 	if (!p)
 		return -ENOMEM;
 
@@ -5637,7 +5636,7 @@ void kvmppc_alloc_host_rm_ops(void)
 	if (kvmppc_host_rm_ops_hv != NULL)
 		return;
 
-	ops = kzalloc(sizeof(struct kvmppc_host_rm_ops), GFP_KERNEL);
+	ops = kzalloc_obj(struct kvmppc_host_rm_ops);
 	if (!ops)
 		return;
 
@@ -5960,7 +5959,7 @@ void kvmppc_free_pimap(struct kvm *kvm)
 
 static struct kvmppc_passthru_irqmap *kvmppc_alloc_pimap(void)
 {
-	return kzalloc(sizeof(struct kvmppc_passthru_irqmap), GFP_KERNEL);
+	return kzalloc_obj(struct kvmppc_passthru_irqmap);
 }
 
 static int kvmppc_set_passthru_irq(struct kvm *kvm, int host_irq, int guest_gsi)
@@ -6041,7 +6040,7 @@ static int kvmppc_set_passthru_irq(struct kvm *kvm, int host_irq, int guest_gsi)
 	 * the underlying calls, which will EOI the interrupt in real
 	 * mode, need an HW IRQ number mapped in the XICS IRQ domain.
 	 */
-	host_data = irq_domain_get_irq_data(irq_get_default_host(), host_irq);
+	host_data = irq_domain_get_irq_data(irq_get_default_domain(), host_irq);
 	irq_map->r_hwirq = (unsigned int)irqd_to_hwirq(host_data);
 
 	if (i == pimap->n_mapped)
@@ -6541,10 +6540,6 @@ static struct kvmppc_ops kvm_ops_hv = {
 	.fast_vcpu_kick = kvmppc_fast_vcpu_kick_hv,
 	.arch_vm_ioctl  = kvm_arch_vm_ioctl_hv,
 	.hcall_implemented = kvmppc_hcall_impl_hv,
-#ifdef CONFIG_KVM_XICS
-	.irq_bypass_add_producer = kvmppc_irq_bypass_add_producer_hv,
-	.irq_bypass_del_producer = kvmppc_irq_bypass_del_producer_hv,
-#endif
 	.configure_mmu = kvmhv_configure_mmu,
 	.get_rmmu_info = kvmhv_get_rmmu_info,
 	.set_smt_mode = kvmhv_set_smt_mode,
@@ -6661,6 +6656,22 @@ static int kvmppc_book3s_init_hv(void)
 		pr_err("KVM-HV: kvmppc_uvmem_init failed %d\n", r);
 		return r;
 	}
+
+#if defined(CONFIG_KVM_XICS)
+	/*
+	 * IRQ bypass is supported only for interrupts whose EOI operations are
+	 * handled via OPAL calls. Therefore, register IRQ bypass handlers
+	 * exclusively for PowerNV KVM when booted with 'xive=off', indicating
+	 * the use of the emulated XICS interrupt controller.
+	 */
+	if (!kvmhv_on_pseries()) {
+		pr_info("KVM-HV: Enabling IRQ bypass\n");
+		kvm_ops_hv.irq_bypass_add_producer =
+			kvmppc_irq_bypass_add_producer_hv;
+		kvm_ops_hv.irq_bypass_del_producer =
+			kvmppc_irq_bypass_del_producer_hv;
+	}
+#endif
 
 	kvm_ops_hv.owner = THIS_MODULE;
 	kvmppc_hv_ops = &kvm_ops_hv;

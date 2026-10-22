@@ -17,7 +17,7 @@ import textwrap
 from enum import Enum, auto
 from typing import Iterable, Iterator, List, Optional, Tuple
 
-from kunit_printer import Printer, stdout
+from kunit_printer import Printer
 
 class Test:
 	"""
@@ -44,11 +44,12 @@ class Test:
 		self.subtests = []  # type: List[Test]
 		self.log = []  # type: List[str]
 		self.counts = TestCounts()
+		self.skip_reason = ''
 
 	def __str__(self) -> str:
 		"""Returns string representation of a Test class object."""
 		return (f'Test({self.status}, {self.name}, {self.expected_count}, '
-			f'{self.subtests}, {self.log}, {self.counts})')
+			f'{self.subtests}, {self.log}, {self.counts}, {self.skip_reason})')
 
 	def __repr__(self) -> str:
 		"""Returns string representation of a Test class object."""
@@ -57,7 +58,7 @@ class Test:
 	def add_error(self, printer: Printer, error_message: str) -> None:
 		"""Records an error that occurred while parsing this test."""
 		self.counts.errors += 1
-		printer.print_with_timestamp(stdout.red('[ERROR]') + f' Test: {self.name}: {error_message}')
+		printer.print_with_timestamp(printer.red('[ERROR]') + f' Test: {self.name}: {error_message}')
 
 	def ok_status(self) -> bool:
 		"""Returns true if the status was ok, i.e. passed or skipped."""
@@ -268,7 +269,7 @@ def check_version(version_num: int, accepted_versions: List[int],
 	if version_num < min(accepted_versions):
 		test.add_error(printer, f'{version_type} version lower than expected!')
 	elif version_num > max(accepted_versions):
-		test.add_error(printer, f'{version_type} version higer than expected!')
+		test.add_error(printer, f'{version_type} version higher than expected!')
 
 def parse_ktap_header(lines: LineStream, test: Test, printer: Printer) -> bool:
 	"""
@@ -352,9 +353,9 @@ def parse_test_plan(lines: LineStream, test: Test) -> bool:
 	lines.pop()
 	return True
 
-TEST_RESULT = re.compile(r'^\s*(ok|not ok) ([0-9]+) (- )?([^#]*)( # .*)?$')
+TEST_RESULT = re.compile(r'^\s*(ok|not ok) ([0-9]+) ?(:?- )?([^#]*)( # .*)?$')
 
-TEST_RESULT_SKIP = re.compile(r'^\s*(ok|not ok) ([0-9]+) (- )?(.*) # SKIP(.*)$')
+TEST_RESULT_SKIP = re.compile(r'^\s*(ok|not ok) ([0-9]+) ?(:?- )?(.*) # SKIP ?(.*)$')
 
 def peek_test_name_match(lines: LineStream, test: Test) -> bool:
 	"""
@@ -379,6 +380,8 @@ def peek_test_name_match(lines: LineStream, test: Test) -> bool:
 	if not match:
 		return False
 	name = match.group(4)
+	if not name:
+		return False
 	return name == test.name
 
 def parse_test_result(lines: LineStream, test: Test,
@@ -429,6 +432,7 @@ def parse_test_result(lines: LineStream, test: Test,
 	status = match.group(1)
 	if skip_match:
 		test.status = TestStatus.SKIPPED
+		test.skip_reason = skip_match.group(5) or ''
 	elif status == 'ok':
 		test.status = TestStatus.SUCCESS
 	else:
@@ -537,12 +541,15 @@ def format_test_result(test: Test, printer: Printer) -> str:
 	if test.status == TestStatus.SUCCESS:
 		return printer.green('[PASSED] ') + test.name
 	if test.status == TestStatus.SKIPPED:
-		return printer.yellow('[SKIPPED] ') + test.name
+		skip_message = printer.yellow('[SKIPPED] ') + test.name
+		if test.skip_reason != '':
+			skip_message += printer.yellow(' (' + test.skip_reason + ')')
+		return skip_message
 	if test.status == TestStatus.NO_TESTS:
 		return printer.yellow('[NO TESTS RUN] ') + test.name
 	if test.status == TestStatus.TEST_CRASHED:
 		print_log(test.log, printer)
-		return stdout.red('[CRASHED] ') + test.name
+		return printer.red('[CRASHED] ') + test.name
 	print_log(test.log, printer)
 	return printer.red('[FAILED] ') + test.name
 
@@ -649,11 +656,11 @@ def print_summary_line(test: Test, printer: Printer) -> None:
 	printer - Printer object to output results
 	"""
 	if test.status == TestStatus.SUCCESS:
-		color = stdout.green
+		color = printer.green
 	elif test.status in (TestStatus.SKIPPED, TestStatus.NO_TESTS):
-		color = stdout.yellow
+		color = printer.yellow
 	else:
-		color = stdout.red
+		color = printer.red
 	printer.print_with_timestamp(color(f'Testing complete. {test.counts}'))
 
 	# Summarize failures that might have gone off-screen since we had a lot
@@ -686,6 +693,9 @@ def bubble_up_test_results(test: Test) -> None:
 		counts.add_status(status)
 	elif test.counts.get_status() == TestStatus.TEST_CRASHED:
 		test.status = TestStatus.TEST_CRASHED
+
+	if status == TestStatus.FAILURE and test.counts.get_status() == TestStatus.SUCCESS:
+		counts.add_status(status)
 
 def parse_test(lines: LineStream, expected_num: int, log: List[str], is_subtest: bool, printer: Printer) -> Test:
 	"""
@@ -759,7 +769,7 @@ def parse_test(lines: LineStream, expected_num: int, log: List[str], is_subtest:
 		# If parsing the main/top-level test, parse KTAP version line and
 		# test plan
 		test.name = "main"
-		ktap_line = parse_ktap_header(lines, test, printer)
+		parse_ktap_header(lines, test, printer)
 		test.log.extend(parse_diagnostic(lines))
 		parse_test_plan(lines, test)
 		parent_test = True
@@ -768,13 +778,12 @@ def parse_test(lines: LineStream, expected_num: int, log: List[str], is_subtest:
 		# the KTAP version line and/or subtest header line
 		ktap_line = parse_ktap_header(lines, test, printer)
 		subtest_line = parse_test_header(lines, test)
+		test.log.extend(parse_diagnostic(lines))
+		parse_test_plan(lines, test)
 		parent_test = (ktap_line or subtest_line)
 		if parent_test:
-			# If KTAP version line and/or subtest header is found, attempt
-			# to parse test plan and print test header
-			test.log.extend(parse_diagnostic(lines))
-			parse_test_plan(lines, test)
 			print_test_header(test, printer)
+
 	expected_count = test.expected_count
 	subtests = []
 	test_num = 1
@@ -810,6 +819,10 @@ def parse_test(lines: LineStream, expected_num: int, log: List[str], is_subtest:
 		test.log.extend(parse_diagnostic(lines))
 		if test.name != "" and not peek_test_name_match(lines, test):
 			test.add_error(printer, 'missing subtest result line!')
+		elif not lines:
+			print_log(test.log, printer)
+			test.status = TestStatus.NO_TESTS
+			test.add_error(printer, 'No more test results!')
 		else:
 			parse_test_result(lines, test, expected_num, printer)
 
@@ -849,7 +862,8 @@ def parse_run_tests(kernel_output: Iterable[str], printer: Printer) -> Test:
 	test = Test()
 	if not lines:
 		test.name = '<missing>'
-		test.add_error(printer, 'Could not find any KTAP output. Did any KUnit tests run?')
+		test.add_error(printer, 'Could not find any KTAP output. Did any KUnit tests run?\n' +
+			'Try running with the --raw_output=all option to see any log messages.')
 		test.status = TestStatus.FAILURE_TO_PARSE_TESTS
 	else:
 		test = parse_test(lines, 0, [], False, printer)

@@ -57,8 +57,7 @@ extern unsigned long
 raw_copy_from_user(void *to, const void __user *from, unsigned long n);
 extern unsigned long
 raw_copy_to_user(void __user *to, const void *from, unsigned long n);
-#define INLINE_COPY_FROM_USER
-#define INLINE_COPY_TO_USER
+#define INLINE_COPY_USER
 
 extern long strncpy_from_user(char *__to, const char __user *__from,
 			      long __len);
@@ -172,15 +171,15 @@ do {									\
 
 #define __put_user(x, ptr)						\
 ({									\
-	__auto_type __pu_ptr = (ptr);					\
-	typeof(*__pu_ptr) __pu_val = (typeof(*__pu_ptr))(x);		\
+	auto __pu_ptr = (ptr);						\
+	auto __pu_val = (typeof(*__pu_ptr))(x);				\
 	__put_user_common(__pu_val, __pu_ptr);				\
 })
 
 #define put_user(x, ptr)						\
 ({									\
-	__auto_type __pu_ptr = (ptr);					\
-	typeof(*__pu_ptr) __pu_val = (typeof(*__pu_ptr))(x);		\
+	auto __pu_ptr = (ptr);						\
+	auto __pu_val = (typeof(*__pu_ptr))(x);				\
 	access_ok(__pu_ptr, sizeof(*__pu_ptr)) ?			\
 		__put_user_common(__pu_val, __pu_ptr) :			\
 		-EFAULT;						\

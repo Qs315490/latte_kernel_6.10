@@ -20,7 +20,7 @@
 #include <unistd.h>
 #include <sched.h>
 
-#include "../kselftest.h"
+#include "kselftest.h"
 #include "clone3_selftests.h"
 
 #define MAX_PID_NS_LEVEL 32
@@ -141,7 +141,7 @@ int main(int argc, char *argv[])
 {
 	FILE *f;
 	char buf;
-	char *line;
+	char *line = NULL;
 	int status;
 	int ret = -1;
 	size_t len = 0;

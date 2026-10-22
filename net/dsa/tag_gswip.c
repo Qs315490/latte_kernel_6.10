@@ -48,8 +48,7 @@
 
 /* Byte 3 */
 #define GSWIP_TX_DPID_EN		BIT(0)
-#define GSWIP_TX_PORT_MAP_SHIFT		1
-#define GSWIP_TX_PORT_MAP_MASK		GENMASK(6, 1)
+#define GSWIP_TX_PORT_MAP		GENMASK(6, 1)
 
 #define GSWIP_RX_HEADER_LEN	8
 
@@ -61,7 +60,6 @@
 static struct sk_buff *gswip_tag_xmit(struct sk_buff *skb,
 				      struct net_device *dev)
 {
-	struct dsa_port *dp = dsa_user_to_port(dev);
 	u8 *gswip_tag;
 
 	skb_push(skb, GSWIP_TX_HEADER_LEN);
@@ -70,7 +68,7 @@ static struct sk_buff *gswip_tag_xmit(struct sk_buff *skb,
 	gswip_tag[0] = GSWIP_TX_SLPID_CPU;
 	gswip_tag[1] = GSWIP_TX_DPID_ELAN;
 	gswip_tag[2] = GSWIP_TX_PORT_MAP_EN | GSWIP_TX_PORT_MAP_SEL;
-	gswip_tag[3] = BIT(dp->index + GSWIP_TX_PORT_MAP_SHIFT) & GSWIP_TX_PORT_MAP_MASK;
+	gswip_tag[3] = FIELD_PREP(GSWIP_TX_PORT_MAP, dsa_xmit_port_mask(skb, dev));
 	gswip_tag[3] |= GSWIP_TX_DPID_EN;
 
 	return skb;
@@ -82,16 +80,20 @@ static struct sk_buff *gswip_tag_rcv(struct sk_buff *skb,
 	int port;
 	u8 *gswip_tag;
 
-	if (unlikely(!pskb_may_pull(skb, GSWIP_RX_HEADER_LEN)))
+	if (unlikely(!pskb_may_pull(skb, GSWIP_RX_HEADER_LEN))) {
+		kfree_skb(skb);
 		return NULL;
+	}
 
 	gswip_tag = skb->data - ETH_HLEN;
 
 	/* Get source port information */
 	port = (gswip_tag[7] & GSWIP_RX_SPPID_MASK) >> GSWIP_RX_SPPID_SHIFT;
 	skb->dev = dsa_conduit_find_user(dev, 0, port);
-	if (!skb->dev)
+	if (!skb->dev) {
+		kfree_skb(skb);
 		return NULL;
+	}
 
 	/* remove GSWIP tag */
 	skb_pull_rcsum(skb, GSWIP_RX_HEADER_LEN);

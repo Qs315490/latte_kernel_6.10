@@ -17,8 +17,13 @@
 #include <linux/compat.h>
 #include <linux/if_ether.h>
 #include <linux/netlink.h>
+#include <linux/timer_types.h>
 #include <uapi/linux/ethtool.h>
+#include <uapi/linux/ethtool_netlink_generated.h>
 #include <uapi/linux/net_tstamp.h>
+
+#define ETHTOOL_MM_MAX_VERIFY_TIME_MS		128
+#define ETHTOOL_MM_MAX_VERIFY_RETRIES		3
 
 struct compat_ethtool_rx_flow_spec {
 	u32		flow_type;
@@ -171,6 +176,8 @@ static inline u32 ethtool_rxfh_indir_default(u32 index, u32 n_rx_rings)
  * struct ethtool_rxfh_context - a custom RSS context configuration
  * @indir_size: Number of u32 entries in indirection table
  * @key_size: Size of hash key, in bytes
+ * @indir_user_size: number of user provided entries for the
+ *	indirection table
  * @priv_size: Size of driver private data, in bytes
  * @hfunc: RSS hash function identifier.  One of the %ETH_RSS_HASH_*
  * @input_xfrm: Defines how the input data is transformed. Valid values are one
@@ -181,6 +188,7 @@ static inline u32 ethtool_rxfh_indir_default(u32 index, u32 n_rx_rings)
 struct ethtool_rxfh_context {
 	u32 indir_size;
 	u32 key_size;
+	u32 indir_user_size;
 	u16 priv_size;
 	u8 hfunc;
 	u8 input_xfrm;
@@ -209,6 +217,51 @@ static inline u8 *ethtool_rxfh_context_key(struct ethtool_rxfh_context *ctx)
 }
 
 void ethtool_rxfh_context_lost(struct net_device *dev, u32 context_id);
+void ethtool_rxfh_indir_lost(struct net_device *dev);
+bool ethtool_rxfh_indir_can_resize(struct net_device *dev, const u32 *tbl,
+				   u32 old_size, u32 new_size);
+void ethtool_rxfh_indir_resize(struct net_device *dev, u32 *tbl,
+			       u32 old_size, u32 new_size);
+int ethtool_rxfh_ctxs_can_resize(struct net_device *dev, u32 new_indir_size);
+void ethtool_rxfh_ctxs_resize(struct net_device *dev, u32 new_indir_size);
+
+struct link_mode_info {
+	int	speed;
+	u8	lanes;
+	u8	min_pairs;
+	u8	pairs;
+	u8	duplex;
+	u16	mediums;
+};
+
+extern const struct link_mode_info link_mode_params[];
+
+enum ethtool_link_medium {
+	ETHTOOL_LINK_MEDIUM_BASET = 0,
+	ETHTOOL_LINK_MEDIUM_BASEK,
+	ETHTOOL_LINK_MEDIUM_BASES,
+	ETHTOOL_LINK_MEDIUM_BASEC,
+	ETHTOOL_LINK_MEDIUM_BASEL,
+	ETHTOOL_LINK_MEDIUM_BASED,
+	ETHTOOL_LINK_MEDIUM_BASEE,
+	ETHTOOL_LINK_MEDIUM_BASEF,
+	ETHTOOL_LINK_MEDIUM_BASEV,
+	ETHTOOL_LINK_MEDIUM_BASEMLD,
+	ETHTOOL_LINK_MEDIUM_NONE,
+
+	__ETHTOOL_LINK_MEDIUM_LAST,
+};
+
+#define ETHTOOL_MEDIUM_FIBER_BITS (BIT(ETHTOOL_LINK_MEDIUM_BASES) | \
+				   BIT(ETHTOOL_LINK_MEDIUM_BASEL) | \
+				   BIT(ETHTOOL_LINK_MEDIUM_BASEF))
+
+enum ethtool_link_medium ethtool_str_to_medium(const char *str);
+
+static inline int ethtool_linkmode_n_pairs(unsigned int mode)
+{
+	return link_mode_params[mode].pairs;
+}
 
 /* declare a link mode bitmap */
 #define __ETHTOOL_DECLARE_LINK_MODE_MASK(name)		\
@@ -272,6 +325,8 @@ struct ethtool_link_ksettings {
 extern int
 __ethtool_get_link_ksettings(struct net_device *dev,
 			     struct ethtool_link_ksettings *link_ksettings);
+int netif_get_link_ksettings(struct net_device *dev,
+			     struct ethtool_link_ksettings *link_ksettings);
 
 struct ethtool_keee {
 	__ETHTOOL_DECLARE_LINK_MODE_MASK(supported);
@@ -289,6 +344,8 @@ struct kernel_ethtool_coalesce {
 	u32 tx_aggr_max_bytes;
 	u32 tx_aggr_max_frames;
 	u32 tx_aggr_time_usecs;
+	u32 rx_cqe_frames;
+	u32 rx_cqe_nsecs;
 };
 
 /**
@@ -337,7 +394,9 @@ bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
 #define ETHTOOL_COALESCE_TX_AGGR_TIME_USECS	BIT(26)
 #define ETHTOOL_COALESCE_RX_PROFILE		BIT(27)
 #define ETHTOOL_COALESCE_TX_PROFILE		BIT(28)
-#define ETHTOOL_COALESCE_ALL_PARAMS		GENMASK(28, 0)
+#define ETHTOOL_COALESCE_RX_CQE_FRAMES		BIT(29)
+#define ETHTOOL_COALESCE_RX_CQE_NSECS		BIT(30)
+#define ETHTOOL_COALESCE_ALL_PARAMS		GENMASK(30, 0)
 
 #define ETHTOOL_COALESCE_USECS						\
 	(ETHTOOL_COALESCE_RX_USECS | ETHTOOL_COALESCE_TX_USECS)
@@ -469,17 +528,42 @@ struct ethtool_eth_ctrl_stats {
  *
  *	Equivalent to `30.3.4.3 aPAUSEMACCtrlFramesReceived`
  *	from the standard.
+ * @tx_pause_storm_events: TX pause storm event count (see ethtool.yaml).
  */
 struct ethtool_pause_stats {
 	enum ethtool_mac_stats_src src;
 	struct_group(stats,
 		u64 tx_pause_frames;
 		u64 rx_pause_frames;
+		u64 tx_pause_storm_events;
 	);
 };
 
 #define ETHTOOL_MAX_LANES	8
+/*
+ * IEEE 802.3ck/df defines 16 bins for FEC histogram plus one more for
+ * the end-of-list marker, total 17 items
+ */
+#define ETHTOOL_FEC_HIST_MAX	17
+/**
+ * struct ethtool_fec_hist_range - error bits range for FEC histogram
+ * statistics
+ * @low: low bound of the bin (inclusive)
+ * @high: high bound of the bin (inclusive)
+ */
+struct ethtool_fec_hist_range {
+	u16 low;
+	u16 high;
+};
 
+struct ethtool_fec_hist {
+	struct ethtool_fec_hist_value {
+		u64 sum;
+		u64 per_lane[ETHTOOL_MAX_LANES];
+	} values[ETHTOOL_FEC_HIST_MAX];
+	const struct ethtool_fec_hist_range *ranges;
+	struct ethtool_fec_hist_range ranges_buf[ETHTOOL_FEC_HIST_MAX];
+};
 /**
  * struct ethtool_fec_stats - statistics for IEEE 802.3 FEC
  * @corrected_blocks: number of received blocks corrected by FEC
@@ -523,7 +607,7 @@ struct ethtool_rmon_hist_range {
 	u16 high;
 };
 
-#define ETHTOOL_RMON_HIST_MAX	10
+#define ETHTOOL_RMON_HIST_MAX	11
 
 /**
  * struct ethtool_rmon_stats - selected RMON (RFC 2819) statistics
@@ -710,6 +794,75 @@ struct ethtool_mm_stats {
 	u64 MACMergeHoldCount;
 };
 
+enum ethtool_mmsv_event {
+	ETHTOOL_MMSV_LP_SENT_VERIFY_MPACKET,
+	ETHTOOL_MMSV_LD_SENT_VERIFY_MPACKET,
+	ETHTOOL_MMSV_LP_SENT_RESPONSE_MPACKET,
+};
+
+/* MAC Merge verification mPacket type */
+enum ethtool_mpacket {
+	ETHTOOL_MPACKET_VERIFY,
+	ETHTOOL_MPACKET_RESPONSE,
+};
+
+struct ethtool_mmsv;
+
+/**
+ * struct ethtool_mmsv_ops - Operations for MAC Merge Software Verification
+ * @configure_tx: Driver callback for the event where the preemptible TX
+ *		  becomes active or inactive. Preemptible traffic
+ *		  classes must be committed to hardware only while
+ *		  preemptible TX is active.
+ * @configure_pmac: Driver callback for the event where the pMAC state
+ *		    changes as result of an administrative setting
+ *		    (ethtool) or a call to ethtool_mmsv_link_state_handle().
+ * @send_mpacket: Driver-provided method for sending a Verify or a Response
+ *		  mPacket.
+ */
+struct ethtool_mmsv_ops {
+	void (*configure_tx)(struct ethtool_mmsv *mmsv, bool tx_active);
+	void (*configure_pmac)(struct ethtool_mmsv *mmsv, bool pmac_enabled);
+	void (*send_mpacket)(struct ethtool_mmsv *mmsv, enum ethtool_mpacket mpacket);
+};
+
+/**
+ * struct ethtool_mmsv - MAC Merge Software Verification
+ * @ops: operations for MAC Merge Software Verification
+ * @dev: pointer to net_device structure
+ * @lock: serialize access to MAC Merge state between
+ *	  ethtool requests and link state updates.
+ * @status: current verification FSM state
+ * @verify_timer: timer for verification in local TX direction
+ * @verify_enabled: indicates if verification is enabled
+ * @verify_retries: number of retries for verification
+ * @pmac_enabled: indicates if the preemptible MAC is enabled
+ * @verify_time: time for verification in milliseconds
+ * @tx_enabled: indicates if transmission is enabled
+ */
+struct ethtool_mmsv {
+	const struct ethtool_mmsv_ops *ops;
+	struct net_device *dev;
+	spinlock_t lock;
+	enum ethtool_mm_verify_status status;
+	struct timer_list verify_timer;
+	bool verify_enabled;
+	int verify_retries;
+	bool pmac_enabled;
+	u32 verify_time;
+	bool tx_enabled;
+};
+
+void ethtool_mmsv_stop(struct ethtool_mmsv *mmsv);
+void ethtool_mmsv_link_state_handle(struct ethtool_mmsv *mmsv, bool up);
+void ethtool_mmsv_event_handle(struct ethtool_mmsv *mmsv,
+			       enum ethtool_mmsv_event event);
+void ethtool_mmsv_get_mm(struct ethtool_mmsv *mmsv,
+			 struct ethtool_mm_state *state);
+void ethtool_mmsv_set_mm(struct ethtool_mmsv *mmsv, struct ethtool_mm_cfg *cfg);
+void ethtool_mmsv_init(struct ethtool_mmsv *mmsv, struct net_device *dev,
+		       const struct ethtool_mmsv_ops *ops);
+
 /**
  * struct ethtool_rxfh_param - RXFH (RSS) parameters
  * @hfunc: Defines the current RSS hash function used by HW (or to be set to).
@@ -744,11 +897,26 @@ struct ethtool_rxfh_param {
 };
 
 /**
+ * struct ethtool_rxfh_fields - Rx Flow Hashing (RXFH) header field config
+ * @data: which header fields are used for hashing, bitmask of RXH_* defines
+ * @flow_type: L2-L4 network traffic flow type
+ * @rss_context: RSS context, will only be used if rxfh_per_ctx_fields is
+ *	set in struct ethtool_ops
+ */
+struct ethtool_rxfh_fields {
+	u32 data;
+	u32 flow_type;
+	u32 rss_context;
+};
+
+/**
  * struct kernel_ethtool_ts_info - kernel copy of struct ethtool_ts_info
  * @cmd: command number = %ETHTOOL_GET_TS_INFO
  * @so_timestamping: bit mask of the sum of the supported SO_TIMESTAMPING flags
  * @phc_index: device index of the associated PHC, or -1 if there is none
  * @phc_qualifier: qualifier of the associated PHC
+ * @phc_source: source device of the associated PHC
+ * @phc_phyindex: index of PHY device source of the associated PHC
  * @tx_types: bit mask of the supported hwtstamp_tx_types enumeration values
  * @rx_filters: bit mask of the supported hwtstamp_rx_filters enumeration values
  */
@@ -757,19 +925,33 @@ struct kernel_ethtool_ts_info {
 	u32 so_timestamping;
 	int phc_index;
 	enum hwtstamp_provider_qualifier phc_qualifier;
-	enum hwtstamp_tx_types tx_types;
-	enum hwtstamp_rx_filters rx_filters;
+	enum hwtstamp_source phc_source;
+	int phc_phyindex;
+	u32 tx_types;
+	u32 rx_filters;
 };
+
+/* Bits for ethtool_ops::op_needs_rtnl
+ * LINKSETTINGS cover a number of commands, but in most cases we want to keep
+ * these bits separate, per GET and SET. GET is much easier to "unlock".
+ */
+#define ETHTOOL_OP_NEEDS_RTNL_LINKSETTINGS	BIT(0)
+#define ETHTOOL_OP_NEEDS_RTNL_SPFLAGS		BIT(1)
+#define ETHTOOL_OP_NEEDS_RTNL_SRINGPARAM	BIT(2)
+#define ETHTOOL_OP_NEEDS_RTNL_SCHANNELS		BIT(3)
+#define ETHTOOL_OP_NEEDS_RTNL_SCOALESCE		BIT(4)
+#define ETHTOOL_OP_NEEDS_RTNL_GPAUSEPARAM	BIT(5)
+#define ETHTOOL_OP_NEEDS_RTNL_SPAUSEPARAM	BIT(6)
+#define ETHTOOL_OP_NEEDS_RTNL_RSS		BIT(7)
+#define ETHTOOL_OP_NEEDS_RTNL_GLINK		BIT(8)
 
 /**
  * struct ethtool_ops - optional netdev operations
+ * @supported_input_xfrm: supported types of input xfrm from %RXH_XFRM_*.
  * @cap_link_lanes_supported: indicates if the driver supports lanes
  *	parameter.
- * @cap_rss_ctx_supported: indicates if the driver supports RSS
- *	contexts via legacy API, drivers implementing @create_rxfh_context
- *	do not have to set this bit.
- * @cap_rss_sym_xor_supported: indicates if the driver supports symmetric-xor
- *	RSS.
+ * @rxfh_per_ctx_fields: device supports selecting different header fields
+ *	for Rx hash calculation and RSS for each additional context.
  * @rxfh_per_ctx_key: device supports setting different RSS key for each
  *	additional context. Netlink API should report hfunc, key, and input_xfrm
  *	for every context, not just context 0.
@@ -789,6 +971,17 @@ struct kernel_ethtool_ts_info {
  * @supported_coalesce_params: supported types of interrupt coalescing.
  * @supported_ring_params: supported ring params.
  * @supported_hwtstamp_qualifiers: bitfield of supported hwtstamp qualifier.
+ * @op_needs_rtnl: mask of %ETHTOOL_OP_NEEDS_RTNL_* bits.
+ *	For use with ops-locked drivers (ignored otherwise). Selects which
+ *	ethtool callbacks driver needs to still be executed under rtnl_lock
+ *	(in addition to the netdev instance lock).
+ *	The following commonly used core APIs currently require rtnl_lock
+ *	(this list may not be exhaustive):
+ *	 - phylink helpers (note that phydev is currently unsupported!)
+ *	 - netdev_update_features()
+ *	 - netif_set_real_num_tx_queues()
+ *	 - ethtool_op_get_link() (syncs link watch under rtnl_lock)
+ *
  * @get_drvinfo: Report driver/device information. Modern drivers no
  *	longer have to implement this callback. Most fields are
  *	correctly filled in by the core using system information, or
@@ -871,6 +1064,7 @@ struct kernel_ethtool_ts_info {
  * @reset: Reset (part of) the device, as specified by a bitmask of
  *	flags from &enum ethtool_reset_flags.  Returns a negative
  *	error code or zero.
+ * @get_rx_ring_count: Return the number of RX rings
  * @get_rxfh_key_size: Get the size of the RX flow hash key.
  *	Returns zero if not supported for this specific device.
  * @get_rxfh_indir_size: Get the size of the RX flow hash indirection table.
@@ -883,6 +1077,8 @@ struct kernel_ethtool_ts_info {
  *	will remain unchanged.
  *	Returns a negative error code or zero. An error code must be returned
  *	if at least one unsupported change was requested.
+ * @get_rxfh_fields: Get header fields used for flow hashing.
+ * @set_rxfh_fields: Set header fields used for flow hashing.
  * @create_rxfh_context: Create a new RSS context with the specified RX flow
  *	hash indirection table, hash key, and hash function.
  *	The &struct ethtool_rxfh_context for this context is passed in @ctx;
@@ -919,10 +1115,11 @@ struct kernel_ethtool_ts_info {
  * @get_ts_info: Get the time stamping and PTP hardware clock capabilities.
  *	It may be called with RCU, or rtnl or reference on the device.
  *	Drivers supporting transmit time stamps in software should set this to
- *	ethtool_op_get_ts_info(). Drivers must not zero statistics which they
- *	don't report. The stats	structure is initialized to ETHTOOL_STAT_NOT_SET
- *	indicating driver does not report statistics.
- * @get_ts_stats: Query the device hardware timestamping statistics.
+ *	ethtool_op_get_ts_info().
+ * @get_ts_stats: Query the device hardware timestamping statistics. Drivers
+ *	must not zero statistics which they don't report. The stats structure
+ *	is initialized to ETHTOOL_STAT_NOT_SET indicating driver does not
+ *	report statistics.
  * @get_module_info: Get the size and type of the eeprom contained within
  *	a plug-in module.
  * @get_module_eeprom: Get the eeprom information from the plug-in module
@@ -983,8 +1180,14 @@ struct kernel_ethtool_ts_info {
  * @get_mm_stats: Query the 802.3 MAC Merge layer statistics.
  *
  * All operations are optional (i.e. the function pointer may be set
- * to %NULL) and callers must take this into account.  Callers must
- * hold the RTNL lock.
+ * to %NULL) and callers must take this into account.
+ *
+ * For traditional drivers callers hold ``rtnl_lock`` across the call.
+ * For "ops locked" drivers (see Documentation/networking/netdevices.rst)
+ * callers instead hold the netdev instance lock (``netdev_lock_ops``);
+ * ``rtnl_lock`` is additionally held only for callbacks for which
+ * the driver opts in via the matching ``ETHTOOL_OP_NEEDS_RTNL_*`` bit
+ * in @op_needs_rtnl.
  *
  * See the structures used by these operations for further documentation.
  * Note that for all operations using a structure ending with a zero-
@@ -995,9 +1198,9 @@ struct kernel_ethtool_ts_info {
  * of the generic netdev features interface.
  */
 struct ethtool_ops {
+	u32     supported_input_xfrm:8;
 	u32     cap_link_lanes_supported:1;
-	u32     cap_rss_ctx_supported:1;
-	u32	cap_rss_sym_xor_supported:1;
+	u32	rxfh_per_ctx_fields:1;
 	u32	rxfh_per_ctx_key:1;
 	u32	cap_rss_rxnfc_adds:1;
 	u32	rxfh_indir_space;
@@ -1007,6 +1210,7 @@ struct ethtool_ops {
 	u32	supported_coalesce_params;
 	u32	supported_ring_params;
 	u32	supported_hwtstamp_qualifiers;
+	u32	op_needs_rtnl;
 	void	(*get_drvinfo)(struct net_device *, struct ethtool_drvinfo *);
 	int	(*get_regs_len)(struct net_device *);
 	void	(*get_regs)(struct net_device *, struct ethtool_regs *, void *);
@@ -1062,11 +1266,17 @@ struct ethtool_ops {
 	int	(*set_rxnfc)(struct net_device *, struct ethtool_rxnfc *);
 	int	(*flash_device)(struct net_device *, struct ethtool_flash *);
 	int	(*reset)(struct net_device *, u32 *);
+	u32	(*get_rx_ring_count)(struct net_device *dev);
 	u32	(*get_rxfh_key_size)(struct net_device *);
 	u32	(*get_rxfh_indir_size)(struct net_device *);
 	int	(*get_rxfh)(struct net_device *, struct ethtool_rxfh_param *);
 	int	(*set_rxfh)(struct net_device *, struct ethtool_rxfh_param *,
 			    struct netlink_ext_ack *extack);
+	int	(*get_rxfh_fields)(struct net_device *,
+				   struct ethtool_rxfh_fields *);
+	int	(*set_rxfh_fields)(struct net_device *,
+				   const struct ethtool_rxfh_fields *,
+				   struct netlink_ext_ack *extack);
 	int	(*create_rxfh_context)(struct net_device *,
 				       struct ethtool_rxfh_context *ctx,
 				       const struct ethtool_rxfh_param *rxfh,
@@ -1107,7 +1317,8 @@ struct ethtool_ops {
 	int	(*set_link_ksettings)(struct net_device *,
 				      const struct ethtool_link_ksettings *);
 	void	(*get_fec_stats)(struct net_device *dev,
-				 struct ethtool_fec_stats *fec_stats);
+				 struct ethtool_fec_stats *fec_stats,
+				 struct ethtool_fec_hist *hist);
 	int	(*get_fecparam)(struct net_device *,
 				      struct ethtool_fecparam *);
 	int	(*set_fecparam)(struct net_device *,
@@ -1171,12 +1382,17 @@ int ethtool_virtdev_set_link_ksettings(struct net_device *dev,
  * @rss_ctx:		XArray of custom RSS contexts
  * @rss_lock:		Protects entries in @rss_ctx.  May be taken from
  *			within RTNL.
+ * @rss_indir_user_size: Number of user provided entries for the default
+ *			 (context 0) indirection table.
+ * @phys_id_busy:	Loop blinking the device LED is running.
  * @wol_enabled:	Wake-on-LAN is enabled
  * @module_fw_flash_in_progress: Module firmware flashing is in progress.
  */
 struct ethtool_netdev_state {
 	struct xarray		rss_ctx;
 	struct mutex		rss_lock;
+	u32			rss_indir_user_size;
+	unsigned		phys_id_busy:1;
 	unsigned		wol_enabled:1;
 	unsigned		module_fw_flash_in_progress:1;
 };
@@ -1321,6 +1537,17 @@ extern __printf(2, 3) void ethtool_sprintf(u8 **data, const char *fmt, ...);
  * two arguments or if @fmt is just "%s".
  */
 extern void ethtool_puts(u8 **data, const char *str);
+
+/**
+ * ethtool_cpy - Write possibly-not-NUL-terminated string to ethtool string data
+ * @data: Pointer to a pointer to the start of string to write into
+ * @str: NUL-byte padded char array of size ETH_GSTRING_LEN to copy from
+ */
+#define ethtool_cpy(data, str)	do {				\
+	BUILD_BUG_ON(sizeof(str) != ETH_GSTRING_LEN);		\
+	memcpy(*(data), str, ETH_GSTRING_LEN);			\
+	*(data) += ETH_GSTRING_LEN;				\
+} while (0)
 
 /* Link mode to forced speed capabilities maps */
 struct ethtool_forced_speed_map {

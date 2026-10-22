@@ -483,7 +483,7 @@ static void *dma_ringalloc(struct dma_info *di, u32 boundary, uint size,
 	if (((desc_strtaddr + size - 1) & boundary) != (desc_strtaddr
 							& boundary)) {
 		*alignbits = dma_align_sizetobits(size);
-		dma_free_coherent(di->dmadev, size, va, *descpa);
+		dma_free_coherent(di->dmadev, *alloced, va, *descpa);
 		va = dma_alloc_consistent(di, size, *alignbits,
 			alloced, descpa);
 	}
@@ -558,7 +558,7 @@ struct dma_pub *dma_attach(char *name, struct brcms_c_info *wlc,
 	struct si_info *sii = container_of(sih, struct si_info, pub);
 
 	/* allocate private info structure */
-	di = kzalloc(sizeof(*di), GFP_ATOMIC);
+	di = kzalloc_obj(*di, GFP_ATOMIC);
 	if (di == NULL)
 		return NULL;
 
@@ -1348,7 +1348,7 @@ static void prep_ampdu_frame(struct dma_info *di, struct sk_buff *p)
 	ret = brcms_c_ampdu_add_frame(session, p);
 	if (ret == -ENOSPC) {
 		/*
-		 * AMPDU cannot accomodate this frame. Close out the in-
+		 * AMPDU cannot accommodate this frame. Close out the in-
 		 * progress AMPDU session and start a new one.
 		 */
 		ampdu_finalize(di);

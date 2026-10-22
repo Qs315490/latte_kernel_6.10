@@ -20,8 +20,8 @@
 #include <linux/uio.h>
 #include <linux/netfs.h>
 #include <net/9p/9p.h>
-#include <linux/parser.h>
 #include <linux/seq_file.h>
+#include <linux/fs_context.h>
 #include <net/9p/client.h>
 #include <net/9p/transport.h>
 #include "protocol.h"
@@ -29,31 +29,9 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/9p.h>
 
-/* DEFAULT MSIZE = 32 pages worth of payload + P9_HDRSZ +
- * room for write (16 extra) or read (11 extra) operands.
- */
-
-#define DEFAULT_MSIZE ((128 * 1024) + P9_IOHDRSZ)
-
 /* Client Option Parsing (code inspired by NFS code)
  *  - a little lazy - parse all client options
  */
-
-enum {
-	Opt_msize,
-	Opt_trans,
-	Opt_legacy,
-	Opt_version,
-	Opt_err,
-};
-
-static const match_table_t tokens = {
-	{Opt_msize, "msize=%u"},
-	{Opt_legacy, "noextend"},
-	{Opt_trans, "trans=%s"},
-	{Opt_version, "version=%s"},
-	{Opt_err, NULL},
-};
 
 inline int p9_is_proto_dotl(struct p9_client *clnt)
 {
@@ -103,124 +81,16 @@ static int safe_errno(int err)
 	return err;
 }
 
-/* Interpret mount option for protocol version */
-static int get_protocol_version(char *s)
+static int apply_client_options(struct p9_client *clnt, struct fs_context *fc)
 {
-	int version = -EINVAL;
+	struct v9fs_context *ctx = fc->fs_private;
 
-	if (!strcmp(s, "9p2000")) {
-		version = p9_proto_legacy;
-		p9_debug(P9_DEBUG_9P, "Protocol version: Legacy\n");
-	} else if (!strcmp(s, "9p2000.u")) {
-		version = p9_proto_2000u;
-		p9_debug(P9_DEBUG_9P, "Protocol version: 9P2000.u\n");
-	} else if (!strcmp(s, "9p2000.L")) {
-		version = p9_proto_2000L;
-		p9_debug(P9_DEBUG_9P, "Protocol version: 9P2000.L\n");
-	} else {
-		pr_info("Unknown protocol version %s\n", s);
-	}
+	clnt->msize = ctx->client_opts.msize;
+	clnt->trans_mod = ctx->client_opts.trans_mod;
+	ctx->client_opts.trans_mod = NULL;
+	clnt->proto_version = ctx->client_opts.proto_version;
 
-	return version;
-}
-
-/**
- * parse_opts - parse mount options into client structure
- * @opts: options string passed from mount
- * @clnt: existing v9fs client information
- *
- * Return 0 upon success, -ERRNO upon failure
- */
-
-static int parse_opts(char *opts, struct p9_client *clnt)
-{
-	char *options, *tmp_options;
-	char *p;
-	substring_t args[MAX_OPT_ARGS];
-	int option;
-	char *s;
-	int ret = 0;
-
-	clnt->proto_version = p9_proto_2000L;
-	clnt->msize = DEFAULT_MSIZE;
-
-	if (!opts)
-		return 0;
-
-	tmp_options = kstrdup(opts, GFP_KERNEL);
-	if (!tmp_options)
-		return -ENOMEM;
-	options = tmp_options;
-
-	while ((p = strsep(&options, ",")) != NULL) {
-		int token, r;
-
-		if (!*p)
-			continue;
-		token = match_token(p, tokens, args);
-		switch (token) {
-		case Opt_msize:
-			r = match_int(&args[0], &option);
-			if (r < 0) {
-				p9_debug(P9_DEBUG_ERROR,
-					 "integer field, but no integer?\n");
-				ret = r;
-				continue;
-			}
-			if (option < 4096) {
-				p9_debug(P9_DEBUG_ERROR,
-					 "msize should be at least 4k\n");
-				ret = -EINVAL;
-				continue;
-			}
-			clnt->msize = option;
-			break;
-		case Opt_trans:
-			s = match_strdup(&args[0]);
-			if (!s) {
-				ret = -ENOMEM;
-				p9_debug(P9_DEBUG_ERROR,
-					 "problem allocating copy of trans arg\n");
-				goto free_and_return;
-			}
-
-			v9fs_put_trans(clnt->trans_mod);
-			clnt->trans_mod = v9fs_get_trans_by_name(s);
-			if (!clnt->trans_mod) {
-				pr_info("Could not find request transport: %s\n",
-					s);
-				ret = -EINVAL;
-			}
-			kfree(s);
-			break;
-		case Opt_legacy:
-			clnt->proto_version = p9_proto_legacy;
-			break;
-		case Opt_version:
-			s = match_strdup(&args[0]);
-			if (!s) {
-				ret = -ENOMEM;
-				p9_debug(P9_DEBUG_ERROR,
-					 "problem allocating copy of version arg\n");
-				goto free_and_return;
-			}
-			r = get_protocol_version(s);
-			if (r < 0)
-				ret = r;
-			else
-				clnt->proto_version = r;
-			kfree(s);
-			break;
-		default:
-			continue;
-		}
-	}
-
-free_and_return:
-	if (ret)
-		v9fs_put_trans(clnt->trans_mod);
-	kfree(tmp_options);
-	return ret;
+	return 0;
 }
 
 static int p9_fcall_init(struct p9_client *c, struct p9_fcall *fc,
@@ -229,8 +99,15 @@ static int p9_fcall_init(struct p9_client *c, struct p9_fcall *fc,
 	if (likely(c->fcall_cache) && alloc_msize == c->msize) {
 		fc->sdata = kmem_cache_alloc(c->fcall_cache, GFP_NOFS);
 		fc->cache = c->fcall_cache;
+		if (!fc->sdata && c->trans_mod->supports_vmalloc) {
+			fc->sdata = kvmalloc(alloc_msize, GFP_NOFS);
+			fc->cache = NULL;
+		}
 	} else {
-		fc->sdata = kmalloc(alloc_msize, GFP_NOFS);
+		if (c->trans_mod->supports_vmalloc)
+			fc->sdata = kvmalloc(alloc_msize, GFP_NOFS);
+		else
+			fc->sdata = kmalloc(alloc_msize, GFP_NOFS);
 		fc->cache = NULL;
 	}
 	if (!fc->sdata)
@@ -252,7 +129,7 @@ void p9_fcall_fini(struct p9_fcall *fc)
 	if (fc->cache)
 		kmem_cache_free(fc->cache, fc->sdata);
 	else
-		kfree(fc->sdata);
+		kvfree(fc->sdata);
 }
 EXPORT_SYMBOL(p9_fcall_fini);
 
@@ -713,8 +590,8 @@ p9_client_rpc(struct p9_client *c, int8_t type, const char *fmt, ...)
 	}
 again:
 	/* Wait for the response */
-	err = wait_event_killable(req->wq,
-				  READ_ONCE(req->status) >= REQ_STATUS_RCVD);
+	err = io_wait_event_killable(req->wq,
+				     READ_ONCE(req->status) >= REQ_STATUS_RCVD);
 
 	/* Make sure our req is coherent with regard to updates in other
 	 * threads - echoes to wmb() in the callback
@@ -723,6 +600,8 @@ again:
 
 	if (err == -ERESTARTSYS && c->status == Connected &&
 	    type == P9_TFLUSH) {
+		if (fatal_signal_pending(current))
+			goto recalc_sigpending;
 		sigpending = 1;
 		clear_thread_flag(TIF_SIGPENDING);
 		goto again;
@@ -853,7 +732,7 @@ static struct p9_fid *p9_fid_create(struct p9_client *clnt)
 	struct p9_fid *fid;
 
 	p9_debug(P9_DEBUG_FID, "clnt %p\n", clnt);
-	fid = kzalloc(sizeof(*fid), GFP_KERNEL);
+	fid = kzalloc_obj(*fid);
 	if (!fid)
 		return NULL;
 
@@ -888,7 +767,7 @@ static void p9_fid_destroy(struct p9_fid *fid)
 	spin_lock_irqsave(&clnt->lock, flags);
 	idr_remove(&clnt->fids, fid->fid);
 	spin_unlock_irqrestore(&clnt->lock, flags);
-	kfree(fid->rdir);
+	kvfree(fid->rdir);
 	kfree(fid);
 }
 
@@ -974,7 +853,7 @@ error:
 	return err;
 }
 
-struct p9_client *p9_client_create(const char *dev_name, char *options)
+struct p9_client *p9_client_create(struct fs_context *fc)
 {
 	int err;
 	static atomic_t seqno = ATOMIC_INIT(0);
@@ -982,7 +861,7 @@ struct p9_client *p9_client_create(const char *dev_name, char *options)
 	char *client_id;
 	char *cache_name;
 
-	clnt = kmalloc(sizeof(*clnt), GFP_KERNEL);
+	clnt = kmalloc_obj(*clnt);
 	if (!clnt)
 		return ERR_PTR(-ENOMEM);
 
@@ -997,8 +876,8 @@ struct p9_client *p9_client_create(const char *dev_name, char *options)
 	idr_init(&clnt->fids);
 	idr_init(&clnt->reqs);
 
-	err = parse_opts(options, clnt);
-	if (err < 0)
+	err = apply_client_options(clnt, fc);
+	if (err)
 		goto free_client;
 
 	if (!clnt->trans_mod)
@@ -1014,7 +893,7 @@ struct p9_client *p9_client_create(const char *dev_name, char *options)
 	p9_debug(P9_DEBUG_MUX, "clnt %p trans %p msize %d protocol %d\n",
 		 clnt, clnt->trans_mod, clnt->msize, clnt->proto_version);
 
-	err = clnt->trans_mod->create(clnt, dev_name, options);
+	err = clnt->trans_mod->create(clnt, fc);
 	if (err)
 		goto put_trans;
 
@@ -1215,7 +1094,8 @@ struct p9_fid *p9_client_walk(struct p9_fid *oldfid, uint16_t nwname,
 
 clunk_fid:
 	kfree(wqids);
-	p9_fid_put(fid);
+	if (fid != oldfid)
+		p9_fid_put(fid);
 	fid = NULL;
 
 error:
@@ -1548,7 +1428,8 @@ p9_client_read_once(struct p9_fid *fid, u64 offset, struct iov_iter *to,
 	struct p9_client *clnt = fid->clnt;
 	struct p9_req_t *req;
 	int count = iov_iter_count(to);
-	int rsize, received, non_zc = 0;
+	u32 rsize, received;
+	bool non_zc = false;
 	char *dataptr;
 
 	*err = 0;
@@ -1571,7 +1452,7 @@ p9_client_read_once(struct p9_fid *fid, u64 offset, struct iov_iter *to,
 				       0, 11, "dqd", fid->fid,
 				       offset, rsize);
 	} else {
-		non_zc = 1;
+		non_zc = true;
 		req = p9_client_rpc(clnt, P9_TREAD, "dqd", fid->fid, offset,
 				    rsize);
 	}
@@ -1592,11 +1473,13 @@ p9_client_read_once(struct p9_fid *fid, u64 offset, struct iov_iter *to,
 		return 0;
 	}
 	if (rsize < received) {
-		pr_err("bogus RREAD count (%d > %d)\n", received, rsize);
-		received = rsize;
+		pr_err("bogus RREAD count (%u > %u)\n", received, rsize);
+		*err = -EIO;
+		p9_req_put(clnt, req);
+		return 0;
 	}
 
-	p9_debug(P9_DEBUG_9P, "<<< RREAD count %d\n", received);
+	p9_debug(P9_DEBUG_9P, "<<< RREAD count %u\n", received);
 
 	if (non_zc) {
 		int n = copy_to_iter(dataptr, received, to);
@@ -1623,9 +1506,9 @@ p9_client_write(struct p9_fid *fid, u64 offset, struct iov_iter *from, int *err)
 	*err = 0;
 
 	while (iov_iter_count(from)) {
-		int count = iov_iter_count(from);
-		int rsize = fid->iounit;
-		int written;
+		size_t count = iov_iter_count(from);
+		u32 rsize = fid->iounit;
+		u32 written;
 
 		if (!rsize || rsize > clnt->msize - P9_IOHDRSZ)
 			rsize = clnt->msize - P9_IOHDRSZ;
@@ -1633,7 +1516,7 @@ p9_client_write(struct p9_fid *fid, u64 offset, struct iov_iter *from, int *err)
 		if (count < rsize)
 			rsize = count;
 
-		p9_debug(P9_DEBUG_9P, ">>> TWRITE fid %d offset %llu count %d (/%d)\n",
+		p9_debug(P9_DEBUG_9P, ">>> TWRITE fid %d offset %llu count %u (/%zu)\n",
 			 fid->fid, offset, rsize, count);
 
 		/* Don't bother zerocopy for small IO (< 1024) */
@@ -1659,11 +1542,14 @@ p9_client_write(struct p9_fid *fid, u64 offset, struct iov_iter *from, int *err)
 			break;
 		}
 		if (rsize < written) {
-			pr_err("bogus RWRITE count (%d > %d)\n", written, rsize);
-			written = rsize;
+			pr_err("bogus RWRITE count (%u > %u)\n", written, rsize);
+			*err = -EIO;
+			iov_iter_revert(from, count - iov_iter_count(from));
+			p9_req_put(clnt, req);
+			break;
 		}
 
-		p9_debug(P9_DEBUG_9P, "<<< RWRITE count %d\n", written);
+		p9_debug(P9_DEBUG_9P, "<<< RWRITE count %u\n", written);
 
 		p9_req_put(clnt, req);
 		iov_iter_revert(from, count - written - iov_iter_count(from));
@@ -1698,7 +1584,7 @@ p9_client_write_subreq(struct netfs_io_subrequest *subreq)
 				    start, len, &subreq->io_iter);
 	}
 	if (IS_ERR(req)) {
-		netfs_write_subrequest_terminated(subreq, PTR_ERR(req), false);
+		netfs_write_subrequest_terminated(subreq, PTR_ERR(req));
 		return;
 	}
 
@@ -1706,19 +1592,19 @@ p9_client_write_subreq(struct netfs_io_subrequest *subreq)
 	if (err) {
 		trace_9p_protocol_dump(clnt, &req->rc);
 		p9_req_put(clnt, req);
-		netfs_write_subrequest_terminated(subreq, err, false);
+		netfs_write_subrequest_terminated(subreq, err);
 		return;
 	}
 
 	if (written > len) {
 		pr_err("bogus RWRITE count (%d > %u)\n", written, len);
-		written = len;
+		written = -EIO;
 	}
 
 	p9_debug(P9_DEBUG_9P, "<<< RWRITE count %d\n", len);
 
 	p9_req_put(clnt, req);
-	netfs_write_subrequest_terminated(subreq, written, false);
+	netfs_write_subrequest_terminated(subreq, written);
 }
 EXPORT_SYMBOL(p9_client_write_subreq);
 
@@ -1732,7 +1618,7 @@ struct p9_wstat *p9_client_stat(struct p9_fid *fid)
 
 	p9_debug(P9_DEBUG_9P, ">>> TSTAT fid %d\n", fid->fid);
 
-	ret = kmalloc(sizeof(*ret), GFP_KERNEL);
+	ret = kmalloc_obj(*ret);
 	if (!ret)
 		return ERR_PTR(-ENOMEM);
 
@@ -1784,7 +1670,7 @@ struct p9_stat_dotl *p9_client_getattr_dotl(struct p9_fid *fid,
 	p9_debug(P9_DEBUG_9P, ">>> TGETATTR fid %d, request_mask %lld\n",
 		 fid->fid, request_mask);
 
-	ret = kmalloc(sizeof(*ret), GFP_KERNEL);
+	ret = kmalloc_obj(*ret);
 	if (!ret)
 		return ERR_PTR(-ENOMEM);
 
@@ -2098,7 +1984,8 @@ EXPORT_SYMBOL_GPL(p9_client_xattrcreate);
 
 int p9_client_readdir(struct p9_fid *fid, char *data, u32 count, u64 offset)
 {
-	int err, rsize, non_zc = 0;
+	int err, non_zc = 0;
+	u32 rsize;
 	struct p9_client *clnt;
 	struct p9_req_t *req;
 	char *dataptr;
@@ -2107,7 +1994,7 @@ int p9_client_readdir(struct p9_fid *fid, char *data, u32 count, u64 offset)
 
 	iov_iter_kvec(&to, ITER_DEST, &kv, 1, count);
 
-	p9_debug(P9_DEBUG_9P, ">>> TREADDIR fid %d offset %llu count %d\n",
+	p9_debug(P9_DEBUG_9P, ">>> TREADDIR fid %d offset %llu count %u\n",
 		 fid->fid, offset, count);
 
 	clnt = fid->clnt;
@@ -2142,11 +2029,12 @@ int p9_client_readdir(struct p9_fid *fid, char *data, u32 count, u64 offset)
 		goto free_and_error;
 	}
 	if (rsize < count) {
-		pr_err("bogus RREADDIR count (%d > %d)\n", count, rsize);
-		count = rsize;
+		pr_err("bogus RREADDIR count (%u > %u)\n", count, rsize);
+		err = -EIO;
+		goto free_and_error;
 	}
 
-	p9_debug(P9_DEBUG_9P, "<<< RREADDIR count %d\n", count);
+	p9_debug(P9_DEBUG_9P, "<<< RREADDIR count %u\n", count);
 
 	if (non_zc)
 		memmove(data, dataptr, count);

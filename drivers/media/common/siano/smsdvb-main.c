@@ -1110,7 +1110,7 @@ static int smsdvb_hotplug(struct smscore_device_t *coredev,
 	/* device removal handled by onremove callback */
 	if (!arrival)
 		return 0;
-	client = kzalloc(sizeof(struct smsdvb_client_t), GFP_KERNEL);
+	client = kzalloc_obj(struct smsdvb_client_t);
 	if (!client)
 		return -ENOMEM;
 
@@ -1243,6 +1243,8 @@ static int __init smsdvb_module_init(void)
 	smsdvb_debugfs_register();
 
 	rc = smscore_register_hotplug(smsdvb_hotplug);
+	if (rc)
+		smsdvb_debugfs_unregister();
 
 	pr_debug("\n");
 

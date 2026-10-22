@@ -3056,7 +3056,7 @@ static s32 *coef_addr_table[TEGRA210_SFC_NUM_RATES][TEGRA210_SFC_NUM_RATES] = {
 	},
 };
 
-static int __maybe_unused tegra210_sfc_runtime_suspend(struct device *dev)
+static int tegra210_sfc_runtime_suspend(struct device *dev)
 {
 	struct tegra210_sfc *sfc = dev_get_drvdata(dev);
 
@@ -3066,7 +3066,7 @@ static int __maybe_unused tegra210_sfc_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused tegra210_sfc_runtime_resume(struct device *dev)
+static int tegra210_sfc_runtime_resume(struct device *dev)
 {
 	struct tegra210_sfc *sfc = dev_get_drvdata(dev);
 
@@ -3276,7 +3276,7 @@ static int tegra210_sfc_init(struct snd_soc_dapm_widget *w,
 static int tegra210_sfc_iget_stereo_to_mono(struct snd_kcontrol *kcontrol,
 				    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct tegra210_sfc *sfc = snd_soc_component_get_drvdata(cmpnt);
 
 	ucontrol->value.enumerated.item[0] = sfc->stereo_to_mono[SFC_RX_PATH];
@@ -3287,7 +3287,7 @@ static int tegra210_sfc_iget_stereo_to_mono(struct snd_kcontrol *kcontrol,
 static int tegra210_sfc_iput_stereo_to_mono(struct snd_kcontrol *kcontrol,
 				    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct tegra210_sfc *sfc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int value = ucontrol->value.enumerated.item[0];
 
@@ -3302,7 +3302,7 @@ static int tegra210_sfc_iput_stereo_to_mono(struct snd_kcontrol *kcontrol,
 static int tegra210_sfc_iget_mono_to_stereo(struct snd_kcontrol *kcontrol,
 				    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct tegra210_sfc *sfc = snd_soc_component_get_drvdata(cmpnt);
 
 	ucontrol->value.enumerated.item[0] = sfc->mono_to_stereo[SFC_RX_PATH];
@@ -3313,7 +3313,7 @@ static int tegra210_sfc_iget_mono_to_stereo(struct snd_kcontrol *kcontrol,
 static int tegra210_sfc_iput_mono_to_stereo(struct snd_kcontrol *kcontrol,
 				    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct tegra210_sfc *sfc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int value = ucontrol->value.enumerated.item[0];
 
@@ -3328,7 +3328,7 @@ static int tegra210_sfc_iput_mono_to_stereo(struct snd_kcontrol *kcontrol,
 static int tegra210_sfc_oget_stereo_to_mono(struct snd_kcontrol *kcontrol,
 				    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct tegra210_sfc *sfc = snd_soc_component_get_drvdata(cmpnt);
 
 	ucontrol->value.enumerated.item[0] = sfc->stereo_to_mono[SFC_TX_PATH];
@@ -3339,7 +3339,7 @@ static int tegra210_sfc_oget_stereo_to_mono(struct snd_kcontrol *kcontrol,
 static int tegra210_sfc_oput_stereo_to_mono(struct snd_kcontrol *kcontrol,
 				    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct tegra210_sfc *sfc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int value = ucontrol->value.enumerated.item[0];
 
@@ -3354,7 +3354,7 @@ static int tegra210_sfc_oput_stereo_to_mono(struct snd_kcontrol *kcontrol,
 static int tegra210_sfc_oget_mono_to_stereo(struct snd_kcontrol *kcontrol,
 				    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct tegra210_sfc *sfc = snd_soc_component_get_drvdata(cmpnt);
 
 	ucontrol->value.enumerated.item[0] = sfc->mono_to_stereo[SFC_TX_PATH];
@@ -3365,7 +3365,7 @@ static int tegra210_sfc_oget_mono_to_stereo(struct snd_kcontrol *kcontrol,
 static int tegra210_sfc_oput_mono_to_stereo(struct snd_kcontrol *kcontrol,
 				    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct tegra210_sfc *sfc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int value = ucontrol->value.enumerated.item[0];
 
@@ -3569,6 +3569,7 @@ static const struct regmap_config tegra210_sfc_regmap_config = {
 	.precious_reg		= tegra210_sfc_precious_reg,
 	.reg_defaults		= tegra210_sfc_reg_defaults,
 	.num_reg_defaults	= ARRAY_SIZE(tegra210_sfc_reg_defaults),
+	.reg_default_cb		= regmap_default_zero_cb,
 	.cache_type		= REGCACHE_FLAT,
 };
 
@@ -3597,20 +3598,18 @@ static int tegra210_sfc_platform_probe(struct platform_device *pdev)
 
 	sfc->regmap = devm_regmap_init_mmio(dev, regs,
 					    &tegra210_sfc_regmap_config);
-	if (IS_ERR(sfc->regmap)) {
-		dev_err(dev, "regmap init failed\n");
-		return PTR_ERR(sfc->regmap);
-	}
+	if (IS_ERR(sfc->regmap))
+		return dev_err_probe(dev, PTR_ERR(sfc->regmap),
+				     "regmap init failed\n");
 
 	regcache_cache_only(sfc->regmap, true);
 
 	err = devm_snd_soc_register_component(dev, &tegra210_sfc_cmpnt,
 					      tegra210_sfc_dais,
 					      ARRAY_SIZE(tegra210_sfc_dais));
-	if (err) {
-		dev_err(dev, "can't register SFC component, err: %d\n", err);
-		return err;
-	}
+	if (err)
+		return dev_err_probe(dev, err,
+				     "can't register SFC component\n");
 
 	pm_runtime_enable(&pdev->dev);
 
@@ -3623,17 +3622,16 @@ static void tegra210_sfc_platform_remove(struct platform_device *pdev)
 }
 
 static const struct dev_pm_ops tegra210_sfc_pm_ops = {
-	SET_RUNTIME_PM_OPS(tegra210_sfc_runtime_suspend,
-			   tegra210_sfc_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	RUNTIME_PM_OPS(tegra210_sfc_runtime_suspend,
+		       tegra210_sfc_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver tegra210_sfc_driver = {
 	.driver = {
 		.name = "tegra210-sfc",
 		.of_match_table = tegra210_sfc_of_match,
-		.pm = &tegra210_sfc_pm_ops,
+		.pm = pm_ptr(&tegra210_sfc_pm_ops),
 	},
 	.probe = tegra210_sfc_platform_probe,
 	.remove = tegra210_sfc_platform_remove,

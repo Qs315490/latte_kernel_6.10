@@ -42,7 +42,7 @@
 
 /*
  * This is the repository for labels seen so that it is
- * not necessary to keep allocating tiny chuncks of memory
+ * not necessary to keep allocating tiny chunks of memory
  * and so that they can be shared.
  *
  * Labels are never modified in place. Anytime a label
@@ -152,6 +152,7 @@ struct smk_net4addr {
 	struct smack_known	*smk_label;	/* label */
 };
 
+#if IS_ENABLED(CONFIG_IPV6)
 /*
  * An entry in the table identifying IPv6 hosts.
  */
@@ -162,7 +163,9 @@ struct smk_net6addr {
 	int			smk_masks;	/* mask size */
 	struct smack_known	*smk_label;	/* label */
 };
+#endif /* CONFIG_IPV6 */
 
+#ifdef SMACK_IPV6_PORT_LABELING
 /*
  * An entry in the table identifying ports.
  */
@@ -175,6 +178,7 @@ struct smk_port_label {
 	short			smk_sock_type;	/* Socket type */
 	short			smk_can_reuse;
 };
+#endif /* SMACK_IPV6_PORT_LABELING */
 
 struct smack_known_list_elem {
 	struct list_head	list;
@@ -272,6 +276,20 @@ struct smk_audit_info {
 };
 
 /*
+ * Initialization
+ */
+#if defined(CONFIG_SECURITY_SMACK_NETFILTER)
+int smack_nf_ip_init(void);
+#else
+static inline int smack_nf_ip_init(void)
+{
+	return 0;
+}
+#endif
+int init_smk_fs(void);
+int smack_initcall(void);
+
+/*
  * These functions are in smack_access.c
  */
 int smk_access_entry(char *, char *, struct list_head *);
@@ -282,9 +300,12 @@ int smk_tskacc(struct task_smack *, struct smack_known *,
 int smk_curacc(struct smack_known *, u32, struct smk_audit_info *);
 int smack_str_from_perm(char *string, int access);
 struct smack_known *smack_from_secid(const u32);
+int smk_parse_label_len(const char *string, int len);
 char *smk_parse_smack(const char *string, int len);
 int smk_netlbl_mls(int, char *, struct netlbl_lsm_secattr *, int);
 struct smack_known *smk_import_entry(const char *, int);
+struct smack_known *smk_import_valid_label(const char *label, int label_len,
+					   gfp_t gfp);
 void smk_insert_entry(struct smack_known *skp);
 struct smack_known *smk_find_entry(const char *);
 bool smack_privileged(int cap);
@@ -315,7 +336,9 @@ extern struct smack_known smack_known_web;
 extern struct mutex	smack_known_lock;
 extern struct list_head smack_known_list;
 extern struct list_head smk_net4addr_list;
+#if IS_ENABLED(CONFIG_IPV6)
 extern struct list_head smk_net6addr_list;
+#endif /* CONFIG_IPV6 */
 
 extern struct mutex     smack_onlycap_lock;
 extern struct list_head smack_onlycap_list;
@@ -426,18 +449,18 @@ static inline struct smack_known *smk_of_current(void)
 	return smk_of_task(smack_cred(current_cred()));
 }
 
+void smack_log(char *subject_label, char *object_label,
+		int request,
+		int result, struct smk_audit_info *auditdata);
+
+#ifdef CONFIG_AUDIT
+
 /*
  * logging functions
  */
 #define SMACK_AUDIT_DENIED 0x1
 #define SMACK_AUDIT_ACCEPT 0x2
 extern int log_policy;
-
-void smack_log(char *subject_label, char *object_label,
-		int request,
-		int result, struct smk_audit_info *auditdata);
-
-#ifdef CONFIG_AUDIT
 
 /*
  * some inline functions to set up audit data

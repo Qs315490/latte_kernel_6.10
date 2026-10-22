@@ -31,6 +31,7 @@ set -e
 LD="$1"
 KBUILD_LDFLAGS="$2"
 LDFLAGS_vmlinux="$3"
+VMLINUX="$4"
 
 is_enabled() {
 	grep -q "^$1=y" include/config/auto.conf
@@ -59,7 +60,8 @@ vmlinux_link()
 	# skip output file argument
 	shift
 
-	if is_enabled CONFIG_LTO_CLANG || is_enabled CONFIG_X86_KERNEL_IBT; then
+	if is_enabled CONFIG_LTO_CLANG || is_enabled CONFIG_X86_KERNEL_IBT ||
+	   is_enabled CONFIG_KLP_BUILD; then
 		# Use vmlinux.o instead of performing the slow LTO link again.
 		objs=vmlinux.o
 		libs=
@@ -72,10 +74,7 @@ vmlinux_link()
 		objs="${objs} .builtin-dtbs.o"
 	fi
 
-	if is_enabled CONFIG_MODULES; then
-		objs="${objs} .vmlinux.export.o"
-	fi
-
+	objs="${objs} .vmlinux.export.o"
 	objs="${objs} init/version-timestamp.o"
 
 	if [ "${SRCARCH}" = "um" ]; then
@@ -97,42 +96,14 @@ vmlinux_link()
 		ldflags="${ldflags} ${wl}--strip-debug"
 	fi
 
-	if is_enabled CONFIG_VMLINUX_MAP; then
-		ldflags="${ldflags} ${wl}-Map=${output}.map"
+	if [ -n "${generate_map}" ];  then
+		ldflags="${ldflags} ${wl}-Map=vmlinux.map"
 	fi
 
 	${ld} ${ldflags} -o ${output}					\
 		${wl}--whole-archive ${objs} ${wl}--no-whole-archive	\
 		${wl}--start-group ${libs} ${wl}--end-group		\
 		${kallsymso} ${btf_vmlinux_bin_o} ${arch_vmlinux_o} ${ldlibs}
-}
-
-# generate .BTF typeinfo from DWARF debuginfo
-# ${1} - vmlinux image
-gen_btf()
-{
-	local btf_data=${1}.btf.o
-
-	info BTF "${btf_data}"
-	LLVM_OBJCOPY="${OBJCOPY}" ${PAHOLE} -J ${PAHOLE_FLAGS} ${1}
-
-	# Create ${btf_data} which contains just .BTF section but no symbols. Add
-	# SHF_ALLOC because .BTF will be part of the vmlinux image. --strip-all
-	# deletes all symbols including __start_BTF and __stop_BTF, which will
-	# be redefined in the linker script. Add 2>/dev/null to suppress GNU
-	# objcopy warnings: "empty loadable segment detected at ..."
-	${OBJCOPY} --only-section=.BTF --set-section-flags .BTF=alloc,readonly \
-		--strip-all ${1} "${btf_data}" 2>/dev/null
-	# Change e_type to ET_REL so that it can be used to link final vmlinux.
-	# GNU ld 2.35+ and lld do not allow an ET_EXEC input.
-	if is_enabled CONFIG_CPU_BIG_ENDIAN; then
-		et_rel='\0\1'
-	else
-		et_rel='\1\0'
-	fi
-	printf "${et_rel}" | dd of="${btf_data}" conv=notrunc bs=1 seek=16 status=none
-
-	btf_vmlinux_bin_o=${btf_data}
 }
 
 # Create ${2}.o file with all symbols from the ${1} object file
@@ -144,8 +115,8 @@ kallsyms()
 		kallsymopt="${kallsymopt} --all-symbols"
 	fi
 
-	if is_enabled CONFIG_KALLSYMS_ABSOLUTE_PERCPU; then
-		kallsymopt="${kallsymopt} --absolute-percpu"
+	if is_enabled CONFIG_64BIT || is_enabled CONFIG_RELOCATABLE; then
+		kallsymopt="${kallsymopt} --pc-relative"
 	fi
 
 	info KSYMS "${2}.S"
@@ -177,12 +148,14 @@ mksysmap()
 
 sorttable()
 {
-	${objtree}/scripts/sorttable ${1}
+	${NM} -S ${1} > .tmp_vmlinux.nm-sort
+	${objtree}/scripts/sorttable -s .tmp_vmlinux.nm-sort ${1}
 }
 
 cleanup()
 {
 	rm -f .btf.*
+	rm -f .tmp_vmlinux.nm-sort
 	rm -f System.map
 	rm -f vmlinux
 	rm -f vmlinux.map
@@ -208,8 +181,17 @@ if is_enabled CONFIG_ARCH_WANTS_PRE_LINK_VMLINUX; then
 fi
 
 btf_vmlinux_bin_o=
+btfids_vmlinux=
 kallsymso=
 strip_debug=
+generate_map=
+
+# Use "make UT=1" to trigger warnings on unused tracepoints
+case "${WARN_ON_UNUSED_TRACEPOINTS}" in
+*1*)
+	${objtree}/scripts/tracepoint-update vmlinux.o
+	;;
+esac
 
 if is_enabled CONFIG_KALLSYMS; then
 	true > .tmp_vmlinux0.syms
@@ -227,11 +209,14 @@ if is_enabled CONFIG_KALLSYMS || is_enabled CONFIG_DEBUG_INFO_BTF; then
 fi
 
 if is_enabled CONFIG_DEBUG_INFO_BTF; then
-	if ! gen_btf .tmp_vmlinux1; then
+	info BTF .tmp_vmlinux1
+	if ! ${CONFIG_SHELL} ${srctree}/scripts/gen-btf.sh .tmp_vmlinux1; then
 		echo >&2 "Failed to generate BTF for vmlinux"
 		echo >&2 "Try to disable CONFIG_DEBUG_INFO_BTF"
 		exit 1
 	fi
+	btf_vmlinux_bin_o=.tmp_vmlinux1.btf.o
+	btfids_vmlinux=.tmp_vmlinux1.BTF_ids
 fi
 
 if is_enabled CONFIG_KALLSYMS; then
@@ -278,23 +263,22 @@ fi
 
 strip_debug=
 
-vmlinux_link vmlinux
-
-# fill in BTF IDs
-if is_enabled CONFIG_DEBUG_INFO_BTF; then
-	info BTFIDS vmlinux
-	RESOLVE_BTFIDS_ARGS=""
-	if is_enabled CONFIG_WERROR; then
-		RESOLVE_BTFIDS_ARGS=" --fatal_warnings "
-	fi
-	${RESOLVE_BTFIDS} ${RESOLVE_BTFIDS_ARGS} vmlinux
+if is_enabled CONFIG_VMLINUX_MAP; then
+	generate_map=1
 fi
 
-mksysmap vmlinux System.map
+vmlinux_link "${VMLINUX}"
+
+if is_enabled CONFIG_DEBUG_INFO_BTF; then
+	info BTFIDS ${VMLINUX}
+	${RESOLVE_BTFIDS} --patch_btfids ${btfids_vmlinux} ${VMLINUX}
+fi
+
+mksysmap "${VMLINUX}" System.map
 
 if is_enabled CONFIG_BUILDTIME_TABLE_SORT; then
-	info SORTTAB vmlinux
-	if ! sorttable vmlinux; then
+	info SORTTAB "${VMLINUX}"
+	if ! sorttable "${VMLINUX}"; then
 		echo >&2 Failed to sort kernel tables
 		exit 1
 	fi
@@ -310,4 +294,4 @@ if is_enabled CONFIG_KALLSYMS; then
 fi
 
 # For fixdep
-echo "vmlinux: $0" > .vmlinux.d
+echo "${VMLINUX}: $0" > ".${VMLINUX}.d"

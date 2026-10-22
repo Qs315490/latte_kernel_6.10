@@ -3,7 +3,7 @@
  * Copyright (C) 2019-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -123,7 +123,7 @@ xchk_fsfreeze(
 {
 	int			error;
 
-	error = freeze_super(sc->mp->m_super, FREEZE_HOLDER_KERNEL);
+	error = freeze_super(sc->mp->m_super, FREEZE_HOLDER_KERNEL, NULL);
 	trace_xchk_fsfreeze(sc, error);
 	return error;
 }
@@ -135,7 +135,7 @@ xchk_fsthaw(
 	int			error;
 
 	/* This should always succeed, we have a kernel freeze */
-	error = thaw_super(sc->mp->m_super, FREEZE_HOLDER_KERNEL);
+	error = thaw_super(sc->mp->m_super, FREEZE_HOLDER_KERNEL, NULL);
 	trace_xchk_fsthaw(sc, error);
 	return error;
 }
@@ -207,7 +207,7 @@ xchk_setup_fscounters(
 	if (!xfs_has_lazysbcount(sc->mp))
 		xchk_fsgates_enable(sc, XCHK_FSGATES_DRAIN);
 
-	sc->buf = kzalloc(sizeof(struct xchk_fscounters), XCHK_GFP_FLAGS);
+	sc->buf = kzalloc_obj(struct xchk_fscounters, XCHK_GFP_FLAGS);
 	if (!sc->buf)
 		return -ENOMEM;
 	sc->buf_cleanup = xchk_fscounters_cleanup;
@@ -237,7 +237,8 @@ xchk_setup_fscounters(
 			return error;
 	}
 
-	return xchk_trans_alloc_empty(sc);
+	xchk_trans_alloc_empty(sc);
+	return 0;
 }
 
 /*
@@ -350,7 +351,7 @@ retry:
 	 * The global incore space reservation is taken from the incore
 	 * counters, so leave that out of the computation.
 	 */
-	fsc->fdblocks -= mp->m_resblks_avail;
+	fsc->fdblocks -= mp->m_free[XC_FREE_BLOCKS].res_avail;
 
 	/*
 	 * Delayed allocation reservations are taken out of the incore counters
@@ -413,7 +414,13 @@ xchk_fscount_count_frextents(
 
 	fsc->frextents = 0;
 	fsc->frextents_delayed = 0;
-	if (!xfs_has_realtime(mp))
+
+	/*
+	 * Don't bother verifying and repairing the fs counters for zoned file
+	 * systems as they don't track an on-disk frextents count, and the
+	 * in-memory percpu counter also includes reservations.
+	 */
+	if (!xfs_has_realtime(mp) || xfs_has_zoned(mp))
 		return 0;
 
 	while ((rtg = xfs_rtgroup_next(mp, rtg))) {
@@ -513,8 +520,8 @@ xchk_fscounters(
 	/* Snapshot the percpu counters. */
 	icount = percpu_counter_sum(&mp->m_icount);
 	ifree = percpu_counter_sum(&mp->m_ifree);
-	fdblocks = percpu_counter_sum(&mp->m_fdblocks);
-	frextents = percpu_counter_sum(&mp->m_frextents);
+	fdblocks = xfs_sum_freecounter_raw(mp, XC_FREE_BLOCKS);
+	frextents = xfs_sum_freecounter_raw(mp, XC_FREE_RTEXTENTS);
 
 	/* No negative values, please! */
 	if (icount < 0 || ifree < 0)
@@ -589,15 +596,17 @@ xchk_fscounters(
 			try_again = true;
 	}
 
-	if (!xchk_fscount_within_range(sc, fdblocks, &mp->m_fdblocks,
-			fsc->fdblocks)) {
+	if (!xchk_fscount_within_range(sc, fdblocks,
+			&mp->m_free[XC_FREE_BLOCKS].count, fsc->fdblocks)) {
 		if (fsc->frozen)
 			xchk_set_corrupt(sc);
 		else
 			try_again = true;
 	}
 
-	if (!xchk_fscount_within_range(sc, frextents, &mp->m_frextents,
+	if (!xfs_has_zoned(mp) &&
+	    !xchk_fscount_within_range(sc, frextents,
+			&mp->m_free[XC_FREE_RTEXTENTS].count,
 			fsc->frextents - fsc->frextents_delayed)) {
 		if (fsc->frozen)
 			xchk_set_corrupt(sc);

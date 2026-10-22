@@ -31,7 +31,7 @@ void do_secure_storage_access(struct pt_regs *regs);
 void do_non_secure_storage_access(struct pt_regs *regs);
 void do_secure_storage_violation(struct pt_regs *regs);
 void do_report_trap(struct pt_regs *regs, int si_signo, int si_code, char *str);
-void kernel_stack_overflow(struct pt_regs * regs);
+void kernel_stack_invalid(struct pt_regs *regs);
 void handle_signal32(struct ksignal *ksig, sigset_t *oldset,
 		     struct pt_regs *regs);
 
@@ -55,8 +55,6 @@ long sys_s390_guarded_storage(int command, struct gs_cb __user *);
 long sys_s390_pci_mmio_write(unsigned long, const void __user *, size_t);
 long sys_s390_pci_mmio_read(unsigned long, void __user *, size_t);
 long sys_s390_sthyi(unsigned long function_code, void __user *buffer, u64 __user *return_code, unsigned long flags);
-
-DECLARE_PER_CPU(u64, mt_cycles[8]);
 
 unsigned long stack_alloc(void);
 void stack_free(unsigned long stack);

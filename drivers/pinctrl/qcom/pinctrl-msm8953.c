@@ -29,7 +29,6 @@
 		.io_reg = 0x4 + 0x1000 * id,			\
 		.intr_cfg_reg = 0x8 + 0x1000 * id,		\
 		.intr_status_reg = 0xc + 0x1000 * id,		\
-		.intr_target_reg = 0x8 + 0x1000 * id,		\
 		.mux_bit = 2,					\
 		.pull_bit = 0,					\
 		.drv_bit = 6,					\
@@ -55,7 +54,6 @@
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -1533,7 +1531,7 @@ static const struct pinfunction msm8953_functions[] = {
 	MSM_PIN_FUNCTION(gcc_gp3_clk_b),
 	MSM_PIN_FUNCTION(gcc_plltest),
 	MSM_PIN_FUNCTION(gcc_tlmm),
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(gsm0_tx),
 	MSM_PIN_FUNCTION(gsm1_tx),
 	MSM_PIN_FUNCTION(gyro_int),
@@ -1809,6 +1807,7 @@ static const struct of_device_id msm8953_pinctrl_of_match[] = {
 	{ .compatible = "qcom,msm8953-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, msm8953_pinctrl_of_match);
 
 static struct platform_driver msm8953_pinctrl_driver = {
 	.driver = {
@@ -1816,7 +1815,6 @@ static struct platform_driver msm8953_pinctrl_driver = {
 		.of_match_table = msm8953_pinctrl_of_match,
 	},
 	.probe = msm8953_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init msm8953_pinctrl_init(void)
@@ -1833,4 +1831,3 @@ module_exit(msm8953_pinctrl_exit);
 
 MODULE_DESCRIPTION("QTI msm8953 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, msm8953_pinctrl_of_match);

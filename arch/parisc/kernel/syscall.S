@@ -241,7 +241,7 @@ linux_gateway_entry:
 	/* Note!  We cannot use the syscall table that is mapped
 	nearby since the gateway page is mapped execute-only. */
 
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_COMPAT
 	ldil	L%sys_call_table, %r1
 	or,ev	%r2,%r2,%r2
 	ldil	L%sys_call_table64, %r1
@@ -250,7 +250,7 @@ linux_gateway_entry:
 	ldo	R%sys_call_table64(%r1), %r19
 #else
 	load32	sys_call_table, %r19
-#endif	
+#endif
 	comiclr,>>	__NR_Linux_syscalls, %r20, %r0
 	b,n	.Lsyscall_nosys
 	
@@ -374,7 +374,7 @@ tracesys_next:
 	/* Note!  We cannot use the syscall table that is mapped
 	nearby since the gateway page is mapped execute-only. */
 
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_COMPAT
 	LDREG	TASK_PT_GR30(%r1), %r19		/* get users sp back */
 	extrd,u	%r19,63,1,%r2			/* W hidden in bottom bit */
 
@@ -613,6 +613,9 @@ lws_compare_and_swap32:
 lws_compare_and_swap:
 	/* Trigger memory reference interruptions without writing to memory */
 1:	ldw	0(%r26), %r28
+	proberi	(%r26), PRIV_USER, %r28
+	comb,=,n	%r28, %r0, lws_fault /* backwards, likely not taken */
+	nop
 2:	stbys,e	%r0, 0(%r26)
 
 	/* Calculate 8-bit hash index from virtual address */
@@ -767,6 +770,9 @@ cas2_lock_start:
 	copy	%r26, %r28
 	depi_safe	0, 31, 2, %r28
 10:	ldw	0(%r28), %r1
+	proberi	(%r28), PRIV_USER, %r1
+	comb,=,n	%r1, %r0, lws_fault /* backwards, likely not taken */
+	nop
 11:	stbys,e	%r0, 0(%r28)
 
 	/* Calculate 8-bit hash index from virtual address */
@@ -951,41 +957,47 @@ atomic_xchg_begin:
 
 	/* 8-bit exchange */
 1:	ldb	0(%r24), %r20
+	proberi	(%r24), PRIV_USER, %r20
+	comb,=,n	%r20, %r0, lws_fault /* backwards, likely not taken */
+	nop
 	copy	%r23, %r20
 	depi_safe	0, 31, 2, %r20
 	b	atomic_xchg_start
 2:	stbys,e	%r0, 0(%r20)
-	nop
-	nop
-	nop
 
 	/* 16-bit exchange */
 3:	ldh	0(%r24), %r20
+	proberi	(%r24), PRIV_USER, %r20
+	comb,=,n	%r20, %r0, lws_fault /* backwards, likely not taken */
+	nop
 	copy	%r23, %r20
 	depi_safe	0, 31, 2, %r20
 	b	atomic_xchg_start
 4:	stbys,e	%r0, 0(%r20)
-	nop
-	nop
-	nop
 
 	/* 32-bit exchange */
 5:	ldw	0(%r24), %r20
+	proberi	(%r24), PRIV_USER, %r20
+	comb,=,n	%r20, %r0, lws_fault /* backwards, likely not taken */
+	nop
 	b	atomic_xchg_start
 6:	stbys,e	%r0, 0(%r23)
-	nop
-	nop
-	nop
 	nop
 	nop
 
 	/* 64-bit exchange */
 #ifdef CONFIG_64BIT
 7:	ldd	0(%r24), %r20
+	proberi	(%r24), PRIV_USER, %r20
+	comb,=,n	%r20, %r0, lws_fault /* backwards, likely not taken */
+	nop
 8:	stdby,e	%r0, 0(%r23)
 #else
 7:	ldw	0(%r24), %r20
 8:	ldw	4(%r24), %r20
+	proberi	(%r24), PRIV_USER, %r20
+	comb,=,n	%r20, %r0, lws_fault /* backwards, likely not taken */
+	nop
 	copy	%r23, %r20
 	depi_safe	0, 31, 2, %r20
 9:	stbys,e	%r0, 0(%r20)
@@ -1314,16 +1326,19 @@ ENTRY(lws_table)
 END(lws_table)
 	/* End of lws table */
 
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_COMPAT
 #define __SYSCALL_WITH_COMPAT(nr, native, compat)	__SYSCALL(nr, compat)
 #else
 #define __SYSCALL_WITH_COMPAT(nr, native, compat)	__SYSCALL(nr, native)
 #endif
 #define __SYSCALL(nr, entry)	ASM_ULONG_INSN entry
+
 	.align 8
 ENTRY(sys_call_table)
 	.export sys_call_table,data
+#if defined(CONFIG_COMPAT) || !defined(CONFIG_64BIT)
 #include <asm/syscall_table_32.h>    /* 32-bit syscalls */
+#endif
 END(sys_call_table)
 
 #ifdef CONFIG_64BIT

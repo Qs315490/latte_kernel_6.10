@@ -33,18 +33,21 @@
  */
 
 #include <drm/display/drm_dp.h>
-
-#include "i915_drv.h"
-#include "i915_reg.h"
-#include "gvt.h"
+#include <drm/drm_print.h>
 
 #include "display/bxt_dpio_phy_regs.h"
 #include "display/i9xx_plane_regs.h"
 #include "display/intel_crt_regs.h"
 #include "display/intel_cursor_regs.h"
-#include "display/intel_display.h"
+#include "display/intel_display_regs.h"
 #include "display/intel_dpio_phy.h"
+#include "display/intel_dpll_mgr.h"
 #include "display/intel_sprite_regs.h"
+
+#include "display_helpers.h"
+#include "gvt.h"
+#include "i915_drv.h"
+#include "i915_reg.h"
 
 static int get_edp_pipe(struct intel_vgpu *vgpu)
 {
@@ -69,7 +72,7 @@ static int get_edp_pipe(struct intel_vgpu *vgpu)
 static int edp_pipe_is_enabled(struct intel_vgpu *vgpu)
 {
 	struct drm_i915_private *dev_priv = vgpu->gvt->gt->i915;
-	struct intel_display *display = &dev_priv->display;
+	struct intel_display *display = dev_priv->display;
 
 	if (!(vgpu_vreg_t(vgpu, TRANSCONF(display, TRANSCODER_EDP)) & TRANSCONF_ENABLE))
 		return 0;
@@ -82,7 +85,7 @@ static int edp_pipe_is_enabled(struct intel_vgpu *vgpu)
 int pipe_is_enabled(struct intel_vgpu *vgpu, int pipe)
 {
 	struct drm_i915_private *dev_priv = vgpu->gvt->gt->i915;
-	struct intel_display *display = &dev_priv->display;
+	struct intel_display *display = dev_priv->display;
 
 	if (drm_WARN_ON(&dev_priv->drm,
 			pipe < PIPE_A || pipe >= I915_MAX_PIPES))
@@ -97,7 +100,7 @@ int pipe_is_enabled(struct intel_vgpu *vgpu, int pipe)
 	return 0;
 }
 
-static unsigned char virtual_dp_monitor_edid[GVT_EDID_NUM][EDID_SIZE] = {
+static const unsigned char virtual_dp_monitor_edid[GVT_EDID_NUM][EDID_SIZE] = {
 	{
 /* EDID with 1024x768 as its resolution */
 		/*Header*/
@@ -183,8 +186,8 @@ static u8 dpcd_fix_data[DPCD_HEADER_SIZE] = {
 static void emulate_monitor_status_change(struct intel_vgpu *vgpu)
 {
 	struct drm_i915_private *dev_priv = vgpu->gvt->gt->i915;
-	struct intel_display *display = &dev_priv->display;
-	int pipe;
+	struct intel_display *display = dev_priv->display;
+	enum pipe pipe;
 
 	if (IS_BROXTON(dev_priv)) {
 		enum transcoder trans;
@@ -196,7 +199,7 @@ static void emulate_monitor_status_change(struct intel_vgpu *vgpu)
 			  GEN8_DE_PORT_HOTPLUG(HPD_PORT_B) |
 			  GEN8_DE_PORT_HOTPLUG(HPD_PORT_C));
 
-		for_each_pipe(display, pipe) {
+		gvt_for_each_pipe(display, pipe) {
 			vgpu_vreg_t(vgpu, TRANSCONF(display, pipe)) &=
 				~(TRANSCONF_ENABLE | TRANSCONF_STATE_ENABLE);
 			vgpu_vreg_t(vgpu, DSPCNTR(display, pipe)) &= ~DISP_ENABLE;
@@ -512,7 +515,7 @@ static void emulate_monitor_status_change(struct intel_vgpu *vgpu)
 		vgpu_vreg_t(vgpu, PCH_ADPA) &= ~ADPA_CRT_HOTPLUG_MONITOR_MASK;
 
 	/* Disable Primary/Sprite/Cursor plane */
-	for_each_pipe(display, pipe) {
+	gvt_for_each_pipe(display, pipe) {
 		vgpu_vreg_t(vgpu, DSPCNTR(display, pipe)) &= ~DISP_ENABLE;
 		vgpu_vreg_t(vgpu, SPRCTL(pipe)) &= ~SPRITE_ENABLE;
 		vgpu_vreg_t(vgpu, CURCNTR(display, pipe)) &= ~MCURSOR_MODE_MASK;
@@ -558,11 +561,11 @@ static int setup_virtual_dp_monitor(struct intel_vgpu *vgpu, int port_num,
 	if (drm_WARN_ON(&i915->drm, resolution >= GVT_EDID_NUM))
 		return -EINVAL;
 
-	port->edid = kzalloc(sizeof(*(port->edid)), GFP_KERNEL);
+	port->edid = kzalloc_obj(*(port->edid));
 	if (!port->edid)
 		return -ENOMEM;
 
-	port->dpcd = kzalloc(sizeof(*(port->dpcd)), GFP_KERNEL);
+	port->dpcd = kzalloc_obj(*(port->dpcd));
 	if (!port->dpcd) {
 		kfree(port->edid);
 		return -ENOMEM;
@@ -581,8 +584,7 @@ static int setup_virtual_dp_monitor(struct intel_vgpu *vgpu, int port_num,
 	vgpu->display.port_num = port_num;
 
 	/* Init hrtimer based on default refresh rate */
-	hrtimer_init(&vblank_timer->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
-	vblank_timer->timer.function = vblank_timer_fn;
+	hrtimer_setup(&vblank_timer->timer, vblank_timer_fn, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
 	vblank_timer->vrefresh_k = port->vrefresh_k;
 	vblank_timer->period = DIV64_U64_ROUND_CLOSEST(NSEC_PER_SEC * MSEC_PER_SEC, vblank_timer->vrefresh_k);
 
@@ -635,7 +637,7 @@ void vgpu_update_vblank_emulation(struct intel_vgpu *vgpu, bool turnon)
 static void emulate_vblank_on_pipe(struct intel_vgpu *vgpu, int pipe)
 {
 	struct drm_i915_private *dev_priv = vgpu->gvt->gt->i915;
-	struct intel_display *display = &dev_priv->display;
+	struct intel_display *display = dev_priv->display;
 	struct intel_vgpu_irq *irq = &vgpu->irq;
 	int vblank_event[] = {
 		[PIPE_A] = PIPE_A_VBLANK,
@@ -665,11 +667,11 @@ static void emulate_vblank_on_pipe(struct intel_vgpu *vgpu, int pipe)
 void intel_vgpu_emulate_vblank(struct intel_vgpu *vgpu)
 {
 	struct drm_i915_private *i915 = vgpu->gvt->gt->i915;
-	struct intel_display *display = &i915->display;
-	int pipe;
+	struct intel_display *display = i915->display;
+	enum pipe pipe;
 
 	mutex_lock(&vgpu->vgpu_lock);
-	for_each_pipe(display, pipe)
+	gvt_for_each_pipe(display, pipe)
 		emulate_vblank_on_pipe(vgpu, pipe);
 	mutex_unlock(&vgpu->vgpu_lock);
 }

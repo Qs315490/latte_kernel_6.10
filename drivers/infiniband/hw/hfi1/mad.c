@@ -12,7 +12,6 @@
 #include "mad.h"
 #include "trace.h"
 #include "qp.h"
-#include "vnic.h"
 
 /* the reset value from the FM is supposed to be 0xffff, handle both */
 #define OPA_LINK_WIDTH_RESET_OLD 0x0fff
@@ -369,7 +368,7 @@ static void send_trap(struct hfi1_ibport *ibp, struct trap_node *trap)
 
 void hfi1_handle_trap_timer(struct timer_list *t)
 {
-	struct hfi1_ibport *ibp = from_timer(ibp, t, rvp.trap_timer);
+	struct hfi1_ibport *ibp = timer_container_of(ibp, t, rvp.trap_timer);
 	struct trap_node *trap = NULL;
 	unsigned long flags;
 	int i;
@@ -390,7 +389,7 @@ static struct trap_node *create_trap_node(u8 type, __be16 trap_num, u32 lid)
 {
 	struct trap_node *trap;
 
-	trap = kzalloc(sizeof(*trap), GFP_ATOMIC);
+	trap = kzalloc_obj(*trap, GFP_ATOMIC);
 	if (!trap)
 		return NULL;
 
@@ -1160,8 +1159,8 @@ static int port_states_transition_allowed(struct hfi1_pportdata *ppd,
 	if (ret == HFI_TRANSITION_DISALLOWED ||
 	    ret == HFI_TRANSITION_UNDEFINED) {
 		pr_warn("invalid logical state transition %s -> %s\n",
-			opa_lstate_name(logical_old),
-			opa_lstate_name(logical_new));
+			ib_port_state_to_str(logical_old),
+			ib_port_state_to_str(logical_new));
 		return ret;
 	}
 
@@ -3736,7 +3735,7 @@ static void apply_cc_state(struct hfi1_pportdata *ppd)
 {
 	struct cc_state *old_cc_state, *new_cc_state;
 
-	new_cc_state = kzalloc(sizeof(*new_cc_state), GFP_KERNEL);
+	new_cc_state = kzalloc_obj(*new_cc_state);
 	if (!new_cc_state)
 		return;
 

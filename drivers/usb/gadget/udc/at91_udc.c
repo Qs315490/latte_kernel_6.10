@@ -585,7 +585,7 @@ at91_ep_alloc_request(struct usb_ep *_ep, gfp_t gfp_flags)
 {
 	struct at91_request *req;
 
-	req = kzalloc(sizeof (struct at91_request), gfp_flags);
+	req = kzalloc_obj(struct at91_request, gfp_flags);
 	if (!req)
 		return NULL;
 
@@ -1541,7 +1541,7 @@ static void at91_vbus_timer_work(struct work_struct *work)
 
 static void at91_vbus_timer(struct timer_list *t)
 {
-	struct at91_udc *udc = from_timer(udc, t, vbus_timer);
+	struct at91_udc *udc = timer_container_of(udc, t, vbus_timer);
 
 	/*
 	 * If we are polling vbus it is likely that the gpio is on an

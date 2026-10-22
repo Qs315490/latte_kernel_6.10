@@ -45,6 +45,9 @@
 
 /* Debug (16-bit addressable) */
 #define TC358768_VBUFCTRL		0x00E0
+#define TC358768_VBUFCTRL_VBUF_EN	BIT(15)
+#define TC358768_VBUFCTRL_TX_EN		BIT(14)
+#define TC358768_VBUFCTRL_MASK		BIT(13)
 #define TC358768_DBG_WIDTH		0x00E2
 #define TC358768_DBG_VBLANK		0x00E4
 #define TC358768_DBG_DATA		0x00E8
@@ -115,7 +118,7 @@
 #define TC358768_DSI_HACT		0x062C
 
 /* TC358768_DSI_CONTROL (0x040C) register */
-#define TC358768_DSI_CONTROL_DIS_MODE	BIT(15)
+#define TC358768_DSI_CONTROL_DSI_MODE	BIT(15)
 #define TC358768_DSI_CONTROL_TXMD	BIT(7)
 #define TC358768_DSI_CONTROL_HSCKMD	BIT(5)
 #define TC358768_DSI_CONTROL_EOTDIS	BIT(0)
@@ -123,7 +126,7 @@
 /* TC358768_DSI_CONFW (0x0500) register */
 #define TC358768_DSI_CONFW_MODE_SET	(5 << 29)
 #define TC358768_DSI_CONFW_MODE_CLR	(6 << 29)
-#define TC358768_DSI_CONFW_ADDR_DSI_CONTROL	(0x3 << 24)
+#define TC358768_DSI_CONFW_ADDR(x)	((x) << 24)
 
 /* TC358768_DSICMD_TX (0x0600) register */
 #define TC358768_DSI_CMDTX_DC_START	BIT(0)
@@ -230,6 +233,36 @@ static void tc358768_update_bits(struct tc358768_priv *priv, u32 reg, u32 mask,
 	tmp |= val & mask;
 	if (tmp != orig)
 		tc358768_write(priv, reg, tmp);
+}
+
+static void tc358768_confw_update_bits(struct tc358768_priv *priv, u16 reg,
+				       u16 mask, u16 val)
+{
+	u8 confw_addr;
+	u32 confw_val;
+
+	switch (reg) {
+	case TC358768_DSI_CONTROL:
+		confw_addr = 0x3;
+		break;
+	default:
+		priv->error = -EINVAL;
+		return;
+	}
+
+	if (mask != val) {
+		confw_val = TC358768_DSI_CONFW_MODE_CLR |
+			TC358768_DSI_CONFW_ADDR(confw_addr) |
+			mask;
+		tc358768_write(priv, TC358768_DSI_CONFW, confw_val);
+	}
+
+	if (val & mask) {
+		confw_val = TC358768_DSI_CONFW_MODE_SET |
+			TC358768_DSI_CONFW_ADDR(confw_addr) |
+			(val & mask);
+		tc358768_write(priv, TC358768_DSI_CONFW, confw_val);
+	}
 }
 
 static void tc358768_dsicmd_tx(struct tc358768_priv *priv)
@@ -448,6 +481,8 @@ static int tc358768_dsi_host_attach(struct mipi_dsi_host *host,
 						    DRM_MODE_CONNECTOR_DSI);
 		if (IS_ERR(bridge))
 			return PTR_ERR(bridge);
+
+		bridge->pre_enable_prev_first = true;
 	}
 
 	priv->output.dev = dev;
@@ -505,9 +540,21 @@ static ssize_t tc358768_dsi_host_transfer(struct mipi_dsi_host *host,
 		return -ENOTSUPP;
 	}
 
+	if (msg->tx_len > 1024) {
+		dev_warn(priv->dev, "Maximum 1024 byte MIPI tx is supported\n");
+		return -EINVAL;
+	}
+
 	if (msg->tx_len > 8) {
-		dev_warn(priv->dev, "Maximum 8 byte MIPI tx is supported\n");
-		return -ENOTSUPP;
+		u32 confctl;
+
+		tc358768_read(priv, TC358768_CONFCTL, &confctl);
+
+		if (confctl & BIT(6)) {
+			dev_warn(priv->dev,
+				 "Video is currently active. Unable to transmit long command\n");
+			return -EBUSY;
+		}
 	}
 
 	ret = mipi_dsi_create_packet(&packet, msg);
@@ -520,23 +567,66 @@ static ssize_t tc358768_dsi_host_transfer(struct mipi_dsi_host *host,
 		tc358768_write(priv, TC358768_DSICMD_WC, 0);
 		tc358768_write(priv, TC358768_DSICMD_WD0,
 			       (packet.header[2] << 8) | packet.header[1]);
-	} else {
-		int i;
-
+		tc358768_dsicmd_tx(priv);
+	} else if (packet.payload_length <= 8) {
 		tc358768_write(priv, TC358768_DSICMD_TYPE,
 			       (0x40 << 8) | (packet.header[0] & 0x3f));
 		tc358768_write(priv, TC358768_DSICMD_WC, packet.payload_length);
-		for (i = 0; i < packet.payload_length; i += 2) {
+
+		for (int i = 0; i < packet.payload_length; i += 2) {
 			u16 val = packet.payload[i];
 
 			if (i + 1 < packet.payload_length)
 				val |= packet.payload[i + 1] << 8;
-
 			tc358768_write(priv, TC358768_DSICMD_WD0 + i, val);
 		}
-	}
 
-	tc358768_dsicmd_tx(priv);
+		tc358768_dsicmd_tx(priv);
+	} else {
+		unsigned long tx_sleep_us;
+		size_t len;
+
+		/* For packets over 8 bytes we need to use the video buffer */
+		tc358768_write(priv, TC358768_DATAFMT, BIT(0));	/* txdt_en */
+		tc358768_write(priv, TC358768_DSITX_DT, packet.header[0] & 0x3f);
+		tc358768_write(priv, TC358768_CMDBYTE, packet.payload_length);
+		tc358768_write(priv, TC358768_VBUFCTRL, TC358768_VBUFCTRL_VBUF_EN);
+
+		/*
+		 * Write the payload in 2-byte chunks, and pad with zeroes to
+		 * align to 4 bytes.
+		 */
+		len = ALIGN(packet.payload_length, 4);
+
+		for (int i = 0; i < len; i += 2) {
+			u16 val = 0;
+
+			if (i < packet.payload_length)
+				val |= packet.payload[i];
+			if (i + 1 < packet.payload_length)
+				val |= packet.payload[i + 1] << 8;
+
+			tc358768_write(priv, TC358768_DBG_DATA, val);
+		}
+
+		/* Start transmission */
+		tc358768_write(priv, TC358768_VBUFCTRL,
+			       TC358768_VBUFCTRL_VBUF_EN |
+			       TC358768_VBUFCTRL_TX_EN |
+			       TC358768_VBUFCTRL_MASK);
+
+		/*
+		 * The TC358768 spec says to wait until the transmission has
+		 * been finished, estimating the sleep time based on the payload
+		 * and clock rates. We use a simple safe estimate of 2us per
+		 * byte (LP mode transmission).
+		 */
+		tx_sleep_us = packet.payload_length * 2;
+		usleep_range(tx_sleep_us, tx_sleep_us * 2);
+
+		tc358768_write(priv, TC358768_VBUFCTRL, TC358768_VBUFCTRL_MASK);
+		tc358768_write(priv, TC358768_VBUFCTRL, 0); /* Stop transmission */
+	}
 
 	ret = tc358768_clear_error(priv);
 	if (ret)
@@ -554,6 +644,7 @@ static const struct mipi_dsi_host_ops tc358768_dsi_host_ops = {
 };
 
 static int tc358768_bridge_attach(struct drm_bridge *bridge,
+				  struct drm_encoder *encoder,
 				  enum drm_bridge_attach_flags flags)
 {
 	struct tc358768_priv *priv = bridge_to_tc358768(bridge);
@@ -563,7 +654,7 @@ static int tc358768_bridge_attach(struct drm_bridge *bridge,
 		return -ENOTSUPP;
 	}
 
-	return drm_bridge_attach(bridge->encoder, priv->output.bridge, bridge,
+	return drm_bridge_attach(encoder, priv->output.bridge, bridge,
 				 flags);
 }
 
@@ -580,7 +671,8 @@ tc358768_bridge_mode_valid(struct drm_bridge *bridge,
 	return MODE_OK;
 }
 
-static void tc358768_bridge_disable(struct drm_bridge *bridge)
+static void tc358768_bridge_atomic_disable(struct drm_bridge *bridge,
+					   struct drm_atomic_commit *state)
 {
 	struct tc358768_priv *priv = bridge_to_tc358768(bridge);
 	int ret;
@@ -602,7 +694,8 @@ static void tc358768_bridge_disable(struct drm_bridge *bridge)
 		dev_warn(priv->dev, "Software disable failed: %d\n", ret);
 }
 
-static void tc358768_bridge_post_disable(struct drm_bridge *bridge)
+static void tc358768_bridge_atomic_post_disable(struct drm_bridge *bridge,
+						struct drm_atomic_commit *state)
 {
 	struct tc358768_priv *priv = bridge_to_tc358768(bridge);
 
@@ -682,13 +775,16 @@ static u32 tc358768_dsi_bytes_to_ns(struct tc358768_priv *priv, u32 val)
 	return (u32)div_u64(m, n);
 }
 
-static void tc358768_bridge_pre_enable(struct drm_bridge *bridge)
+static void tc358768_bridge_atomic_pre_enable(struct drm_bridge *bridge,
+					      struct drm_atomic_commit *state)
 {
 	struct tc358768_priv *priv = bridge_to_tc358768(bridge);
 	struct mipi_dsi_device *dsi_dev = priv->output.dev;
-	unsigned long mode_flags = dsi_dev->mode_flags;
-	u32 val, val2, lptxcnt, hact, data_type;
+	u32 val, mask, val2, lptxcnt, hact;
 	s32 raw_val;
+	struct drm_crtc_state *crtc_state;
+	struct drm_connector_state *conn_state;
+	struct drm_connector *connector;
 	const struct drm_display_mode *mode;
 	u32 hsbyteclk_ps, dsiclk_ps, ui_ps;
 	u32 dsiclk, hsbyteclk;
@@ -705,11 +801,6 @@ static void tc358768_bridge_pre_enable(struct drm_bridge *bridge)
 	u32 dsi_vsdly;
 	const u32 internal_dly = 40;
 
-	if (mode_flags & MIPI_DSI_CLOCK_NON_CONTINUOUS) {
-		dev_warn_once(dev, "Non-continuous mode unimplemented, falling back to continuous\n");
-		mode_flags &= ~MIPI_DSI_CLOCK_NON_CONTINUOUS;
-	}
-
 	tc358768_hw_enable(priv);
 
 	ret = tc358768_sw_reset(priv);
@@ -719,7 +810,13 @@ static void tc358768_bridge_pre_enable(struct drm_bridge *bridge)
 		return;
 	}
 
-	mode = &bridge->encoder->crtc->state->adjusted_mode;
+	/* Release RstPtr so that the video buffer can be used for DSI commands */
+	tc358768_update_bits(priv, TC358768_PP_MISC, BIT(14), 0);
+
+	connector = drm_atomic_get_new_connector_for_encoder(state, bridge->encoder);
+	conn_state = drm_atomic_get_new_connector_state(state, connector);
+	crtc_state = drm_atomic_get_new_crtc_state(state, conn_state->crtc);
+	mode = &crtc_state->adjusted_mode;
 	ret = tc358768_setup_pll(priv, mode);
 	if (ret) {
 		dev_err(dev, "PLL setup failed: %d\n", ret);
@@ -732,30 +829,20 @@ static void tc358768_bridge_pre_enable(struct drm_bridge *bridge)
 	dsiclk = priv->dsiclk;
 	hsbyteclk = dsiclk / 4;
 
-	/* Data Format Control Register */
-	val = BIT(2) | BIT(1) | BIT(0); /* rdswap_en | dsitx_en | txdt_en */
 	switch (dsi_dev->format) {
 	case MIPI_DSI_FMT_RGB888:
-		val |= (0x3 << 4);
 		hact = vm.hactive * 3;
-		data_type = MIPI_DSI_PACKED_PIXEL_STREAM_24;
 		break;
 	case MIPI_DSI_FMT_RGB666:
-		val |= (0x4 << 4);
 		hact = vm.hactive * 3;
-		data_type = MIPI_DSI_PACKED_PIXEL_STREAM_18;
 		break;
 
 	case MIPI_DSI_FMT_RGB666_PACKED:
-		val |= (0x4 << 4) | BIT(3);
 		hact = vm.hactive * 18 / 8;
-		data_type = MIPI_DSI_PIXEL_STREAM_3BYTE_18;
 		break;
 
 	case MIPI_DSI_FMT_RGB565:
-		val |= (0x5 << 4);
 		hact = vm.hactive * 2;
-		data_type = MIPI_DSI_PACKED_PIXEL_STREAM_16;
 		break;
 	default:
 		dev_err(dev, "Invalid data format (%u)\n",
@@ -911,9 +998,6 @@ static void tc358768_bridge_pre_enable(struct drm_bridge *bridge)
 	/* VSDly[9:0] */
 	tc358768_write(priv, TC358768_VSDLY, dsi_vsdly - internal_dly);
 
-	tc358768_write(priv, TC358768_DATAFMT, val);
-	tc358768_write(priv, TC358768_DSITX_DT, data_type);
-
 	/* Enable D-PHY (HiZ->LP11) */
 	tc358768_write(priv, TC358768_CLW_CNTRL, 0x0000);
 	/* Enable lanes */
@@ -990,7 +1074,7 @@ static void tc358768_bridge_pre_enable(struct drm_bridge *bridge)
 	tc358768_write(priv, TC358768_HSTXVREGEN, val);
 
 	tc358768_write(priv, TC358768_TXOPTIONCNTRL,
-		       (mode_flags & MIPI_DSI_CLOCK_NON_CONTINUOUS) ? 0 : BIT(0));
+		       (dsi_dev->mode_flags & MIPI_DSI_CLOCK_NON_CONTINUOUS) ? 0 : BIT(0));
 
 	/* TXTAGOCNT[26:16] RXTASURECNT[10:0] */
 	val = tc358768_ps_to_ns((lptxcnt + 1) * hsbyteclk_ps * 4);
@@ -1053,37 +1137,65 @@ static void tc358768_bridge_pre_enable(struct drm_bridge *bridge)
 	tc358768_write(priv, TC358768_DSI_START, 0x1);
 
 	/* Configure DSI_Control register */
-	val = TC358768_DSI_CONFW_MODE_CLR | TC358768_DSI_CONFW_ADDR_DSI_CONTROL;
-	val |= TC358768_DSI_CONTROL_TXMD | TC358768_DSI_CONTROL_HSCKMD |
-	       0x3 << 1 | TC358768_DSI_CONTROL_EOTDIS;
-	tc358768_write(priv, TC358768_DSI_CONFW, val);
+	val = (dsi_dev->lanes - 1) << 1;
 
-	val = TC358768_DSI_CONFW_MODE_SET | TC358768_DSI_CONFW_ADDR_DSI_CONTROL;
-	val |= (dsi_dev->lanes - 1) << 1;
+	if (!(dsi_dev->mode_flags & MIPI_DSI_MODE_LPM))
+		val |= TC358768_DSI_CONTROL_TXMD;
 
-	val |= TC358768_DSI_CONTROL_TXMD;
-
-	if (!(mode_flags & MIPI_DSI_CLOCK_NON_CONTINUOUS))
+	if (!(dsi_dev->mode_flags & MIPI_DSI_CLOCK_NON_CONTINUOUS))
 		val |= TC358768_DSI_CONTROL_HSCKMD;
 
 	if (dsi_dev->mode_flags & MIPI_DSI_MODE_NO_EOT_PACKET)
 		val |= TC358768_DSI_CONTROL_EOTDIS;
 
-	tc358768_write(priv, TC358768_DSI_CONFW, val);
+	mask = TC358768_DSI_CONTROL_TXMD | TC358768_DSI_CONTROL_HSCKMD |
+	       0x3 << 1 | TC358768_DSI_CONTROL_EOTDIS;
 
-	val = TC358768_DSI_CONFW_MODE_CLR | TC358768_DSI_CONFW_ADDR_DSI_CONTROL;
-	val |= TC358768_DSI_CONTROL_DIS_MODE; /* DSI mode */
-	tc358768_write(priv, TC358768_DSI_CONFW, val);
+	tc358768_confw_update_bits(priv, TC358768_DSI_CONTROL, mask, val);
+
+	tc358768_confw_update_bits(priv, TC358768_DSI_CONTROL,
+				   TC358768_DSI_CONTROL_DSI_MODE, 0);
 
 	ret = tc358768_clear_error(priv);
-	if (ret) {
+	if (ret)
 		dev_err(dev, "Bridge pre_enable failed: %d\n", ret);
-		tc358768_bridge_disable(bridge);
-		tc358768_bridge_post_disable(bridge);
-	}
 }
 
-static void tc358768_bridge_enable(struct drm_bridge *bridge)
+static void tc358768_config_video_format(struct tc358768_priv *priv)
+{
+	struct mipi_dsi_device *dsi_dev = priv->output.dev;
+	u32 val, data_type;
+
+	/* Data Format Control Register */
+	val = BIT(2) | BIT(1) | BIT(0); /* rdswap_en | dsitx_en | txdt_en */
+	switch (dsi_dev->format) {
+	case MIPI_DSI_FMT_RGB888:
+		val |= (0x3 << 4);
+		data_type = MIPI_DSI_PACKED_PIXEL_STREAM_24;
+		break;
+	case MIPI_DSI_FMT_RGB666:
+		val |= (0x4 << 4);
+		data_type = MIPI_DSI_PACKED_PIXEL_STREAM_18;
+		break;
+	case MIPI_DSI_FMT_RGB666_PACKED:
+		val |= (0x4 << 4) | BIT(3);
+		data_type = MIPI_DSI_PIXEL_STREAM_3BYTE_18;
+		break;
+	case MIPI_DSI_FMT_RGB565:
+		val |= (0x5 << 4);
+		data_type = MIPI_DSI_PACKED_PIXEL_STREAM_16;
+		break;
+	default:
+		dev_err(priv->dev, "Invalid data format (%u)\n", dsi_dev->format);
+		return;
+	}
+
+	tc358768_write(priv, TC358768_DATAFMT, val);
+	tc358768_write(priv, TC358768_DSITX_DT, data_type);
+}
+
+static void tc358768_bridge_atomic_enable(struct drm_bridge *bridge,
+					  struct drm_atomic_commit *state)
 {
 	struct tc358768_priv *priv = bridge_to_tc358768(bridge);
 	int ret;
@@ -1093,6 +1205,14 @@ static void tc358768_bridge_enable(struct drm_bridge *bridge)
 		return;
 	}
 
+	/* Configure video format registers */
+	tc358768_config_video_format(priv);
+
+	/* Enable HS mode for video TX */
+	tc358768_confw_update_bits(priv, TC358768_DSI_CONTROL,
+				   TC358768_DSI_CONTROL_TXMD,
+				   TC358768_DSI_CONTROL_TXMD);
+
 	/* clear FrmStop and RstPtr */
 	tc358768_update_bits(priv, TC358768_PP_MISC, 0x3 << 14, 0);
 
@@ -1100,11 +1220,8 @@ static void tc358768_bridge_enable(struct drm_bridge *bridge)
 	tc358768_update_bits(priv, TC358768_CONFCTL, BIT(6), BIT(6));
 
 	ret = tc358768_clear_error(priv);
-	if (ret) {
+	if (ret)
 		dev_err(priv->dev, "Bridge enable failed: %d\n", ret);
-		tc358768_bridge_disable(bridge);
-		tc358768_bridge_post_disable(bridge);
-	}
 }
 
 #define MAX_INPUT_SEL_FORMATS	1
@@ -1166,10 +1283,10 @@ static const struct drm_bridge_funcs tc358768_bridge_funcs = {
 	.attach = tc358768_bridge_attach,
 	.mode_valid = tc358768_bridge_mode_valid,
 	.mode_fixup = tc358768_mode_fixup,
-	.pre_enable = tc358768_bridge_pre_enable,
-	.enable = tc358768_bridge_enable,
-	.disable = tc358768_bridge_disable,
-	.post_disable = tc358768_bridge_post_disable,
+	.atomic_pre_enable = tc358768_bridge_atomic_pre_enable,
+	.atomic_enable = tc358768_bridge_atomic_enable,
+	.atomic_disable = tc358768_bridge_atomic_disable,
+	.atomic_post_disable = tc358768_bridge_atomic_post_disable,
 
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
@@ -1282,9 +1399,10 @@ static int tc358768_i2c_probe(struct i2c_client *client)
 	if (!np)
 		return -ENODEV;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
-	if (!priv)
-		return -ENOMEM;
+	priv = devm_drm_bridge_alloc(dev, struct tc358768_priv, bridge,
+				     &tc358768_bridge_funcs);
+	if (IS_ERR(priv))
+		return PTR_ERR(priv);
 
 	dev_set_drvdata(dev, priv);
 	priv->dev = dev;
@@ -1316,7 +1434,6 @@ static int tc358768_i2c_probe(struct i2c_client *client)
 	priv->dsi_host.dev = dev;
 	priv->dsi_host.ops = &tc358768_dsi_host_ops;
 
-	priv->bridge.funcs = &tc358768_bridge_funcs;
 	priv->bridge.timings = &default_tc358768_timings;
 	priv->bridge.of_node = np;
 

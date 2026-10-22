@@ -3,14 +3,18 @@
  * Copyright © 2022-2023 Intel Corporation
  */
 
+#include <linux/iopoll.h>
+
+#include <drm/drm_print.h>
 #include <drm/drm_vblank.h>
 
-#include "i915_drv.h"
-#include "i915_reg.h"
 #include "intel_color.h"
 #include "intel_crtc.h"
 #include "intel_de.h"
+#include "intel_display_jiffies.h"
+#include "intel_display_regs.h"
 #include "intel_display_types.h"
+#include "intel_display_utils.h"
 #include "intel_vblank.h"
 #include "intel_vrr.h"
 
@@ -105,8 +109,8 @@ u32 i915_get_vblank_counter(struct drm_crtc *crtc)
 	 * we get a low value that's stable across two reads of the high
 	 * register.
 	 */
-	frame = intel_de_read64_2x32(display, PIPEFRAMEPIXEL(display, pipe),
-				     PIPEFRAME(display, pipe));
+	frame = intel_de_read64_2x32_volatile(display, PIPEFRAMEPIXEL(display, pipe),
+					      PIPEFRAME(display, pipe));
 
 	pixel = frame & PIPE_PIXEL_MASK;
 	frame = (frame >> PIPE_FRAME_LOW_SHIFT) & 0xffffff;
@@ -222,12 +226,15 @@ int intel_crtc_scanline_offset(const struct intel_crtc_state *crtc_state)
 	 * However if queried just before the start of vblank we'll get an
 	 * answer that's slightly in the future.
 	 */
-	if (DISPLAY_VER(display) == 2)
-		return -1;
-	else if (HAS_DDI(display) && intel_crtc_has_type(crtc_state, INTEL_OUTPUT_HDMI))
-		return 2;
-	else
+	if (DISPLAY_VER(display) >= 20 || display->platform.battlemage)
 		return 1;
+	else if (DISPLAY_VER(display) >= 9 ||
+		 display->platform.broadwell || display->platform.haswell)
+		return intel_crtc_has_type(crtc_state, INTEL_OUTPUT_HDMI) ? 2 : 1;
+	else if (DISPLAY_VER(display) >= 3)
+		return 1;
+	else
+		return -1;
 }
 
 /*
@@ -297,17 +304,17 @@ static int __intel_get_crtc_scanline(struct intel_crtc *crtc)
  */
 #ifdef I915
 static void intel_vblank_section_enter(struct intel_display *display)
-	__acquires(i915->uncore.lock)
+	__acquires(uncore->lock)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
-	spin_lock(&i915->uncore.lock);
+	struct intel_uncore *uncore = to_intel_uncore(display->drm);
+	spin_lock(&uncore->lock);
 }
 
 static void intel_vblank_section_exit(struct intel_display *display)
-	__releases(i915->uncore.lock)
+	__releases(uncore->lock)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
-	spin_unlock(&i915->uncore.lock);
+	struct intel_uncore *uncore = to_intel_uncore(display->drm);
+	spin_unlock(&uncore->lock);
 }
 #else
 static void intel_vblank_section_enter(struct intel_display *display)
@@ -369,7 +376,7 @@ static bool i915_get_crtc_scanoutpos(struct drm_crtc *_crtc,
 
 		/*
 		 * Already exiting vblank? If so, shift our position
-		 * so it looks like we're already apporaching the full
+		 * so it looks like we're already approaching the full
 		 * vblank end. This should make the generated timestamp
 		 * more or less match when the active portion will start.
 		 */
@@ -475,7 +482,7 @@ int intel_get_crtc_scanline(struct intel_crtc *crtc)
 static bool pipe_scanline_is_moving(struct intel_display *display,
 				    enum pipe pipe)
 {
-	i915_reg_t reg = PIPEDSL(display, pipe);
+	intel_reg_t reg = PIPEDSL(display, pipe);
 	u32 line1, line2;
 
 	line1 = intel_de_read(display, reg) & PIPEDSL_LINE_MASK;
@@ -489,9 +496,14 @@ static void wait_for_pipe_scanline_moving(struct intel_crtc *crtc, bool state)
 {
 	struct intel_display *display = to_intel_display(crtc);
 	enum pipe pipe = crtc->pipe;
+	bool is_moving;
+	int ret;
 
 	/* Wait for the display line to settle/start moving */
-	if (wait_for(pipe_scanline_is_moving(display, pipe) == state, 100))
+	ret = poll_timeout_us(is_moving = pipe_scanline_is_moving(display, pipe),
+			      is_moving == state,
+			      500, 100 * 1000, false);
+	if (ret)
 		drm_err(display->drm,
 			"pipe %c scanline %s wait timed out\n",
 			pipe_name(pipe), str_on_off(state));
@@ -507,6 +519,23 @@ void intel_wait_for_pipe_scanline_moving(struct intel_crtc *crtc)
 	wait_for_pipe_scanline_moving(crtc, true);
 }
 
+static void intel_crtc_active_timings(struct drm_display_mode *mode,
+				      int *vmax_vblank_start,
+				      const struct intel_crtc_state *crtc_state,
+				      bool vrr_enable)
+{
+	drm_mode_init(mode, &crtc_state->hw.adjusted_mode);
+	*vmax_vblank_start = 0;
+
+	if (!vrr_enable)
+		return;
+
+	mode->crtc_vtotal = intel_vrr_vmax_vtotal(crtc_state);
+	mode->crtc_vblank_end = intel_vrr_vmax_vtotal(crtc_state);
+	mode->crtc_vblank_start = intel_vrr_vmin_vblank_start(crtc_state);
+	*vmax_vblank_start = intel_vrr_vmax_vblank_start(crtc_state);
+}
+
 void intel_crtc_update_active_timings(const struct intel_crtc_state *crtc_state,
 				      bool vrr_enable)
 {
@@ -517,19 +546,13 @@ void intel_crtc_update_active_timings(const struct intel_crtc_state *crtc_state,
 	int vmax_vblank_start = 0;
 	unsigned long irqflags;
 
-	drm_mode_init(&adjusted_mode, &crtc_state->hw.adjusted_mode);
+	intel_crtc_active_timings(&adjusted_mode, &vmax_vblank_start,
+				  crtc_state, vrr_enable);
 
-	if (vrr_enable) {
-		drm_WARN_ON(display->drm,
-			    (mode_flags & I915_MODE_FLAG_VRR) == 0);
-
-		adjusted_mode.crtc_vtotal = crtc_state->vrr.vmax;
-		adjusted_mode.crtc_vblank_end = crtc_state->vrr.vmax;
-		adjusted_mode.crtc_vblank_start = intel_vrr_vmin_vblank_start(crtc_state);
-		vmax_vblank_start = intel_vrr_vmax_vblank_start(crtc_state);
-	} else {
+	if (vrr_enable)
+		drm_WARN_ON(display->drm, (mode_flags & I915_MODE_FLAG_VRR) == 0);
+	else
 		mode_flags &= ~I915_MODE_FLAG_VRR;
-	}
 
 	/*
 	 * Belts and suspenders locking to guarantee everyone sees 100%
@@ -597,6 +620,65 @@ int intel_mode_vtotal(const struct drm_display_mode *mode)
 	return vtotal;
 }
 
+int intel_mode_vblank_delay(const struct drm_display_mode *mode)
+{
+	return intel_mode_vblank_start(mode) - intel_mode_vdisplay(mode);
+}
+
+static const struct intel_crtc_state *
+pre_commit_crtc_state(const struct intel_crtc_state *old_crtc_state,
+		      const struct intel_crtc_state *new_crtc_state)
+{
+	/*
+	 * During fastsets/etc. the transcoder is still
+	 * running with the old timings at this point.
+	 */
+	if (intel_crtc_needs_modeset(new_crtc_state))
+		return new_crtc_state;
+	else
+		return old_crtc_state;
+}
+
+const struct intel_crtc_state *
+intel_pre_commit_crtc_state(struct intel_atomic_state *state,
+			    struct intel_crtc *crtc)
+{
+	const struct intel_crtc_state *old_crtc_state =
+		intel_atomic_get_old_crtc_state(state, crtc);
+	const struct intel_crtc_state *new_crtc_state =
+		intel_atomic_get_new_crtc_state(state, crtc);
+
+	return pre_commit_crtc_state(old_crtc_state, new_crtc_state);
+}
+
+static int vrr_vblank_start(const struct intel_crtc_state *crtc_state)
+{
+	bool is_push_sent = intel_vrr_is_push_sent(crtc_state);
+	int vblank_start;
+
+	if (!crtc_state->vrr.dc_balance.enable) {
+		if (is_push_sent)
+			return intel_vrr_vmin_vblank_start(crtc_state);
+		else
+			return intel_vrr_vmax_vblank_start(crtc_state);
+	}
+
+	if (is_push_sent)
+		vblank_start = intel_vrr_dcb_vmin_vblank_start_next(crtc_state);
+	else
+		vblank_start = intel_vrr_dcb_vmax_vblank_start_next(crtc_state);
+
+	if (vblank_start >= 0)
+		return vblank_start;
+
+	if (is_push_sent)
+		vblank_start = intel_vrr_dcb_vmin_vblank_start_final(crtc_state);
+	else
+		vblank_start = intel_vrr_dcb_vmax_vblank_start_final(crtc_state);
+
+	return vblank_start;
+}
+
 void intel_vblank_evade_init(const struct intel_crtc_state *old_crtc_state,
 			     const struct intel_crtc_state *new_crtc_state,
 			     struct intel_vblank_evade_ctx *evade)
@@ -605,6 +687,7 @@ void intel_vblank_evade_init(const struct intel_crtc_state *old_crtc_state,
 	struct intel_crtc *crtc = to_intel_crtc(new_crtc_state->uapi.crtc);
 	const struct intel_crtc_state *crtc_state;
 	const struct drm_display_mode *adjusted_mode;
+	int vblank_delay;
 
 	evade->crtc = crtc;
 
@@ -612,16 +695,8 @@ void intel_vblank_evade_init(const struct intel_crtc_state *old_crtc_state,
 				  display->platform.cherryview) &&
 		intel_crtc_has_type(new_crtc_state, INTEL_OUTPUT_DSI);
 
-	/*
-	 * During fastsets/etc. the transcoder is still
-	 * running with the old timings at this point.
-	 *
-	 * TODO: maybe just use the active timings here?
-	 */
-	if (intel_crtc_needs_modeset(new_crtc_state))
-		crtc_state = new_crtc_state;
-	else
-		crtc_state = old_crtc_state;
+	/* TODO: maybe just use the active timings here? */
+	crtc_state = pre_commit_crtc_state(old_crtc_state, new_crtc_state);
 
 	adjusted_mode = &crtc_state->hw.adjusted_mode;
 
@@ -630,12 +705,13 @@ void intel_vblank_evade_init(const struct intel_crtc_state *old_crtc_state,
 		drm_WARN_ON(crtc->base.dev, intel_crtc_needs_modeset(new_crtc_state) ||
 			    new_crtc_state->update_m_n || new_crtc_state->update_lrr);
 
-		if (intel_vrr_is_push_sent(crtc_state))
-			evade->vblank_start = intel_vrr_vmin_vblank_start(crtc_state);
-		else
-			evade->vblank_start = intel_vrr_vmax_vblank_start(crtc_state);
+		evade->vblank_start = vrr_vblank_start(crtc_state);
+
+		vblank_delay = crtc_state->set_context_latency;
 	} else {
 		evade->vblank_start = intel_mode_vblank_start(adjusted_mode);
+
+		vblank_delay = intel_mode_vblank_delay(adjusted_mode);
 	}
 
 	/* FIXME needs to be calibrated sensibly */
@@ -653,8 +729,7 @@ void intel_vblank_evade_init(const struct intel_crtc_state *old_crtc_state,
 	 */
 	if (intel_color_uses_dsb(new_crtc_state) ||
 	    new_crtc_state->update_m_n || new_crtc_state->update_lrr)
-		evade->min -= intel_mode_vblank_start(adjusted_mode) -
-			intel_mode_vdisplay(adjusted_mode);
+		evade->min -= vblank_delay;
 }
 
 /* must be called with vblank interrupt already enabled! */
@@ -683,9 +758,9 @@ int intel_vblank_evade(struct intel_vblank_evade_ctx *evade)
 			break;
 
 		if (!timeout) {
-			drm_err(display->drm,
-				"Potential atomic update failure on pipe %c\n",
-				pipe_name(crtc->pipe));
+			drm_dbg_kms(display->drm,
+				    "Potential atomic update failure on pipe %c\n",
+				    pipe_name(crtc->pipe));
 			break;
 		}
 
@@ -717,4 +792,14 @@ int intel_vblank_evade(struct intel_vblank_evade_ctx *evade)
 		scanline = intel_get_crtc_scanline(crtc);
 
 	return scanline;
+}
+
+int intel_crtc_vblank_length(const struct intel_crtc_state *crtc_state)
+{
+	const struct drm_display_mode *adjusted_mode = &crtc_state->hw.adjusted_mode;
+
+	if (crtc_state->vrr.enable)
+		return crtc_state->vrr.guardband;
+	else
+		return adjusted_mode->crtc_vtotal - adjusted_mode->crtc_vblank_start;
 }

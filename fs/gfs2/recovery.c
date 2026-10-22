@@ -69,7 +69,7 @@ int gfs2_revoke_add(struct gfs2_jdesc *jd, u64 blkno, unsigned int where)
 		return 0;
 	}
 
-	rr = kmalloc(sizeof(struct gfs2_revoke_replay), GFP_NOFS);
+	rr = kmalloc_obj(struct gfs2_revoke_replay, GFP_NOFS);
 	if (!rr)
 		return -ENOMEM;
 
@@ -118,6 +118,7 @@ void gfs2_revoke_clean(struct gfs2_jdesc *jd)
 int __get_log_header(struct gfs2_sbd *sdp, const struct gfs2_log_header *lh,
 		     unsigned int blkno, struct gfs2_log_header_host *head)
 {
+	const u32 zero = 0;
 	u32 hash, crc;
 
 	if (lh->lh_header.mh_magic != cpu_to_be32(GFS2_MAGIC) ||
@@ -126,7 +127,7 @@ int __get_log_header(struct gfs2_sbd *sdp, const struct gfs2_log_header *lh,
 		return 1;
 
 	hash = crc32(~0, lh, LH_V1_SIZE - 4);
-	hash = ~crc32_le_shift(hash, 4); /* assume lh_hash is zero */
+	hash = ~crc32(hash, &zero, 4); /* assume lh_hash is zero */
 
 	if (be32_to_cpu(lh->lh_hash) != hash)
 		return 1;
@@ -263,16 +264,12 @@ static void clean_journal(struct gfs2_jdesc *jd,
 			  struct gfs2_log_header_host *head)
 {
 	struct gfs2_sbd *sdp = GFS2_SB(jd->jd_inode);
-	u32 lblock = head->lh_blkno;
 
-	gfs2_replay_incr_blk(jd, &lblock);
-	gfs2_write_log_header(sdp, jd, head->lh_sequence + 1, 0, lblock,
+	gfs2_replay_incr_blk(jd, &head->lh_blkno);
+	head->lh_sequence++;
+	gfs2_write_log_header(sdp, jd, head->lh_sequence, 0, head->lh_blkno,
 			      GFS2_LOG_HEAD_UNMOUNT | GFS2_LOG_HEAD_RECOVERY,
 			      REQ_PREFLUSH | REQ_FUA | REQ_META | REQ_SYNC);
-	if (jd->jd_jid == sdp->sd_lockstruct.ls_jid) {
-		sdp->sd_log_flush_head = lblock;
-		gfs2_log_incr_head(sdp);
-	}
 }
 
 
@@ -411,7 +408,7 @@ void gfs2_recover_func(struct work_struct *work)
 	int error = 0;
 	int jlocked = 0;
 
-	if (gfs2_withdrawing_or_withdrawn(sdp)) {
+	if (gfs2_withdrawn(sdp)) {
 		fs_err(sdp, "jid=%u: Recovery not attempted due to withdraw.\n",
 		       jd->jd_jid);
 		goto fail;
@@ -427,7 +424,8 @@ void gfs2_recover_func(struct work_struct *work)
 
 		error = gfs2_glock_nq_num(sdp, jd->jd_jid, &gfs2_journal_glops,
 					  LM_ST_EXCLUSIVE,
-					  LM_FLAG_NOEXP | LM_FLAG_TRY | GL_NOCACHE,
+					  LM_FLAG_RECOVER | LM_FLAG_TRY |
+					  GL_NOCACHE,
 					  &j_gh);
 		switch (error) {
 		case 0:
@@ -443,7 +441,8 @@ void gfs2_recover_func(struct work_struct *work)
 		}
 
 		error = gfs2_glock_nq_init(ip->i_gl, LM_ST_SHARED,
-					   LM_FLAG_NOEXP | GL_NOCACHE, &ji_gh);
+					   LM_FLAG_RECOVER | GL_NOCACHE,
+					   &ji_gh);
 		if (error)
 			goto fail_gunlock_j;
 	} else {
@@ -457,7 +456,7 @@ void gfs2_recover_func(struct work_struct *work)
 	if (error)
 		goto fail_gunlock_ji;
 
-	error = gfs2_find_jhead(jd, &head, true);
+	error = gfs2_find_jhead(jd, &head);
 	if (error)
 		goto fail_gunlock_ji;
 	t_jhd = ktime_get();
@@ -533,6 +532,9 @@ void gfs2_recover_func(struct work_struct *work)
 			ktime_ms_delta(t_rep, t_tlck));
 	}
 
+	if (jd->jd_jid == sdp->sd_lockstruct.ls_jid)
+		gfs2_log_pointers_init(sdp, &head);
+
 	gfs2_recovery_done(sdp, jd->jd_jid, LM_RD_SUCCESS);
 
 	if (jlocked) {
@@ -580,3 +582,13 @@ int gfs2_recover_journal(struct gfs2_jdesc *jd, bool wait)
 	return wait ? jd->jd_recover_error : 0;
 }
 
+void gfs2_log_pointers_init(struct gfs2_sbd *sdp,
+			    struct gfs2_log_header_host *head)
+{
+	sdp->sd_log_sequence = head->lh_sequence + 1;
+	gfs2_replay_incr_blk(sdp->sd_jdesc, &head->lh_blkno);
+	sdp->sd_log_tail = head->lh_blkno;
+	sdp->sd_log_flush_head = head->lh_blkno;
+	sdp->sd_log_flush_tail = head->lh_blkno;
+	sdp->sd_log_head = head->lh_blkno;
+}

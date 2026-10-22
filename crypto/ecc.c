@@ -71,7 +71,7 @@ EXPORT_SYMBOL(ecc_get_curve);
 void ecc_digits_from_bytes(const u8 *in, unsigned int nbytes,
 			   u64 *out, unsigned int ndigits)
 {
-	int diff = ndigits - DIV_ROUND_UP(nbytes, sizeof(u64));
+	int diff = ndigits - DIV_ROUND_UP_POW2(nbytes, sizeof(u64));
 	unsigned int o = nbytes & 7;
 	__be64 msd = 0;
 
@@ -90,33 +90,24 @@ void ecc_digits_from_bytes(const u8 *in, unsigned int nbytes,
 }
 EXPORT_SYMBOL(ecc_digits_from_bytes);
 
-static u64 *ecc_alloc_digits_space(unsigned int ndigits)
-{
-	size_t len = ndigits * sizeof(u64);
-
-	if (!len)
-		return NULL;
-
-	return kmalloc(len, GFP_KERNEL);
-}
-
-static void ecc_free_digits_space(u64 *space)
-{
-	kfree_sensitive(space);
-}
-
 struct ecc_point *ecc_alloc_point(unsigned int ndigits)
 {
-	struct ecc_point *p = kmalloc(sizeof(*p), GFP_KERNEL);
+	struct ecc_point *p;
+	size_t ndigits_sz;
 
+	if (!ndigits)
+		return NULL;
+
+	p = kmalloc_obj(*p);
 	if (!p)
 		return NULL;
 
-	p->x = ecc_alloc_digits_space(ndigits);
+	ndigits_sz = ndigits * sizeof(u64);
+	p->x = kmalloc(ndigits_sz, GFP_KERNEL);
 	if (!p->x)
 		goto err_alloc_x;
 
-	p->y = ecc_alloc_digits_space(ndigits);
+	p->y = kmalloc(ndigits_sz, GFP_KERNEL);
 	if (!p->y)
 		goto err_alloc_y;
 
@@ -125,7 +116,7 @@ struct ecc_point *ecc_alloc_point(unsigned int ndigits)
 	return p;
 
 err_alloc_y:
-	ecc_free_digits_space(p->x);
+	kfree(p->x);
 err_alloc_x:
 	kfree(p);
 	return NULL;
@@ -402,14 +393,26 @@ static uint128_t mul_64_64(u64 left, u64 right)
 	return result;
 }
 
-static uint128_t add_128_128(uint128_t a, uint128_t b)
+/* Calculate addition with overflow checking. Returns true on wrap-around,
+ * false otherwise.
+ */
+static bool check_add_128_128_overflow(uint128_t *result, uint128_t a,
+				       uint128_t b)
 {
-	uint128_t result;
+	bool carry;
 
-	result.m_low = a.m_low + b.m_low;
-	result.m_high = a.m_high + b.m_high + (result.m_low < a.m_low);
+	result->m_low = a.m_low + b.m_low;
+	carry = (result->m_low < a.m_low);
 
-	return result;
+	result->m_high = a.m_high + b.m_high + carry;
+
+	/* Using constant-time bitwise arithmetic to prevent timing
+	 * side-channels.
+	 */
+	carry = (result->m_high < a.m_high) |
+		((result->m_high == a.m_high) & carry);
+
+	return carry;
 }
 
 static void vli_mult(u64 *result, const u64 *left, const u64 *right,
@@ -434,9 +437,7 @@ static void vli_mult(u64 *result, const u64 *left, const u64 *right,
 			uint128_t product;
 
 			product = mul_64_64(left[i], right[k - i]);
-
-			r01 = add_128_128(r01, product);
-			r2 += (r01.m_high < product.m_high);
+			r2 += check_add_128_128_overflow(&r01, r01, product);
 		}
 
 		result[k] = r01.m_low;
@@ -459,7 +460,7 @@ static void vli_umult(u64 *result, const u64 *left, u32 right,
 		uint128_t product;
 
 		product = mul_64_64(left[k], right);
-		r01 = add_128_128(r01, product);
+		check_add_128_128_overflow(&r01, r01, product);
 		/* no carry */
 		result[k] = r01.m_low;
 		r01.m_low = r01.m_high;
@@ -496,8 +497,7 @@ static void vli_square(u64 *result, const u64 *left, unsigned int ndigits)
 				product.m_low <<= 1;
 			}
 
-			r01 = add_128_128(r01, product);
-			r2 += (r01.m_high < product.m_high);
+			r2 += check_add_128_128_overflow(&r01, r01, product);
 		}
 
 		result[k] = r01.m_low;
@@ -1542,16 +1542,11 @@ int ecc_gen_privkey(unsigned int curve_id, unsigned int ndigits,
 	 * The maximum security strength identified by NIST SP800-57pt1r4 for
 	 * ECC is 256 (N >= 512).
 	 *
-	 * This condition is met by the default RNG because it selects a favored
-	 * DRBG with a security strength of 256.
+	 * This condition is met by stdrng because it selects a favored DRBG
+	 * with a security strength of 256.
 	 */
-	if (crypto_get_default_rng())
-		return -EFAULT;
-
 	/* Step 3: obtain N returned_bits from the DRBG. */
-	err = crypto_rng_get_bytes(crypto_default_rng,
-				   (u8 *)private_key, nbytes);
-	crypto_put_default_rng();
+	err = crypto_stdrng_get_bytes(private_key, nbytes);
 	if (err)
 		return err;
 

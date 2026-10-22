@@ -77,13 +77,6 @@ static irqreturn_t gic_compare_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static struct irqaction gic_compare_irqaction = {
-	.handler = gic_compare_interrupt,
-	.percpu_dev_id = &gic_clockevent_device,
-	.flags = IRQF_PERCPU | IRQF_TIMER,
-	.name = "timer",
-};
-
 static void gic_clockevent_cpu_init(unsigned int cpu,
 				    struct clock_event_device *cd)
 {
@@ -115,6 +108,9 @@ static void gic_update_frequency(void *data)
 
 static int gic_starting_cpu(unsigned int cpu)
 {
+	/* Ensure the GIC counter is running */
+	clear_gic_config(GIC_CONFIG_COUNTSTOP);
+
 	gic_clockevent_cpu_init(cpu, this_cpu_ptr(&gic_clockevent_device));
 	return 0;
 }
@@ -149,7 +145,8 @@ static int gic_clockevent_init(void)
 	if (!gic_frequency)
 		return -ENXIO;
 
-	ret = setup_percpu_irq(gic_timer_irq, &gic_compare_irqaction);
+	ret = request_percpu_irq(gic_timer_irq, gic_compare_interrupt,
+				 "timer", &gic_clockevent_device);
 	if (ret < 0) {
 		pr_err("IRQ %d setup failed (%d)\n", gic_timer_irq, ret);
 		return ret;
@@ -201,7 +198,9 @@ static struct clocksource gic_clocksource = {
 	.name			= "GIC",
 	.read			= gic_hpt_read,
 	.flags			= CLOCK_SOURCE_IS_CONTINUOUS,
+#ifdef CONFIG_GENERIC_GETTIMEOFDAY
 	.vdso_clock_mode	= VDSO_CLOCKMODE_GIC,
+#endif
 };
 
 static void gic_clocksource_unstable(char *reason)
@@ -287,9 +286,6 @@ static int __init gic_clocksource_of_init(struct device_node *node)
 		if (clk_notifier_register(clk, &gic_clk_nb) < 0)
 			pr_warn("Unable to register clock notifier\n");
 	}
-
-	/* And finally start the counter */
-	clear_gic_config(GIC_CONFIG_COUNTSTOP);
 
 	/*
 	 * It's safe to use the MIPS GIC timer as a sched clock source only if

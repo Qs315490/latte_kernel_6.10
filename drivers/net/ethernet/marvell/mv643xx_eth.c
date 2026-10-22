@@ -1333,7 +1333,8 @@ static void mib_counters_update(struct mv643xx_eth_private *mp)
 
 static void mib_counters_timer_wrapper(struct timer_list *t)
 {
-	struct mv643xx_eth_private *mp = from_timer(mp, t, mib_counters_timer);
+	struct mv643xx_eth_private *mp = timer_container_of(mp, t,
+							    mib_counters_timer);
 	mib_counters_update(mp);
 	mod_timer(&mp->mib_counters_timer, jiffies + 30 * HZ);
 }
@@ -1966,8 +1967,7 @@ static int rxq_init(struct mv643xx_eth_private *mp, int index)
 	memset(rxq->rx_desc_area, 0, size);
 
 	rxq->rx_desc_area_size = size;
-	rxq->rx_skb = kcalloc(rxq->rx_ring_size, sizeof(*rxq->rx_skb),
-				    GFP_KERNEL);
+	rxq->rx_skb = kzalloc_objs(*rxq->rx_skb, rxq->rx_ring_size);
 	if (rxq->rx_skb == NULL)
 		goto out_free;
 
@@ -2247,7 +2247,7 @@ static int mv643xx_eth_poll(struct napi_struct *napi, int budget)
 
 	if (unlikely(mp->oom)) {
 		mp->oom = 0;
-		del_timer(&mp->rx_oom);
+		timer_delete(&mp->rx_oom);
 	}
 
 	work_done = 0;
@@ -2306,7 +2306,7 @@ static int mv643xx_eth_poll(struct napi_struct *napi, int budget)
 
 static inline void oom_timer_wrapper(struct timer_list *t)
 {
-	struct mv643xx_eth_private *mp = from_timer(mp, t, rx_oom);
+	struct mv643xx_eth_private *mp = timer_container_of(mp, t, rx_oom);
 
 	napi_schedule(&mp->napi);
 }
@@ -2521,7 +2521,7 @@ static int mv643xx_eth_stop(struct net_device *dev)
 
 	napi_disable(&mp->napi);
 
-	del_timer_sync(&mp->rx_oom);
+	timer_delete_sync(&mp->rx_oom);
 
 	netif_carrier_off(dev);
 	if (dev->phydev)
@@ -2531,7 +2531,7 @@ static int mv643xx_eth_stop(struct net_device *dev)
 	port_reset(mp);
 	mv643xx_eth_get_stats(dev);
 	mib_counters_update(mp);
-	del_timer_sync(&mp->mib_counters_timer);
+	timer_delete_sync(&mp->mib_counters_timer);
 
 	for (i = 0; i < mp->rxq_count; i++)
 		rxq_deinit(mp->rxq + i);
@@ -2780,7 +2780,7 @@ static int mv643xx_eth_shared_of_add_port(struct platform_device *pdev,
 		goto put_err;
 	}
 	ppdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
-	ppdev->dev.of_node = pnp;
+	ppdev->dev.of_node = of_node_get(pnp);
 
 	ret = platform_device_add_resources(ppdev, &res, 1);
 	if (ret)

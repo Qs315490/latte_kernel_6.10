@@ -356,9 +356,8 @@ static void mtdoops_notify_add(struct mtd_info *mtd)
 
 	/* oops_page_used is a bit field */
 	cxt->oops_page_used =
-		vmalloc(array_size(sizeof(unsigned long),
-				   DIV_ROUND_UP(mtdoops_pages,
-						BITS_PER_LONG)));
+		vmalloc_array(DIV_ROUND_UP(mtdoops_pages, BITS_PER_LONG),
+			      sizeof(unsigned long));
 	if (!cxt->oops_page_used) {
 		pr_err("could not allocate page array\n");
 		return;
@@ -404,8 +403,7 @@ static struct mtd_notifier mtdoops_notifier = {
 static int __init mtdoops_init(void)
 {
 	struct mtdoops_context *cxt = &oops_cxt;
-	int mtd_index;
-	char *endp;
+	unsigned int mtd_index;
 
 	if (strlen(mtddev) == 0) {
 		pr_err("mtd device (mtddev=name/number) must be supplied\n");
@@ -422,9 +420,9 @@ static int __init mtdoops_init(void)
 
 	/* Setup the MTD device to use */
 	cxt->mtd_index = -1;
-	mtd_index = simple_strtoul(mtddev, &endp, 0);
-	if (*endp == '\0')
+	if (kstrtouint(mtddev, 0, &mtd_index) == 0) {
 		cxt->mtd_index = mtd_index;
+	}
 
 	cxt->oops_buf = vmalloc(record_size);
 	if (!cxt->oops_buf)

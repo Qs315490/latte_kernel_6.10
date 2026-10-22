@@ -18,13 +18,12 @@
 #include <asm/loongarch.h>
 #include <asm/setup.h>
 
-#include "irq-msi-lib.h"
+#include <linux/irqchip/irq-msi-lib.h>
 #include "irq-loongson.h"
 
 #define VECTORS_PER_REG		64
 #define IRR_VECTOR_MASK		0xffUL
 #define IRR_INVALID_MASK	0x80000000UL
-#define AVEC_MSG_OFFSET		0x100000
 
 #ifdef CONFIG_SMP
 struct pending_list {
@@ -47,22 +46,15 @@ struct avecintc_chip {
 
 static struct avecintc_chip loongarch_avec;
 
-struct avecintc_data {
-	struct list_head	entry;
-	unsigned int		cpu;
-	unsigned int		vec;
-	unsigned int		prev_cpu;
-	unsigned int		prev_vec;
-	unsigned int		moving;
-};
-
 static inline void avecintc_enable(void)
 {
+#ifdef CONFIG_MACH_LOONGSON64
 	u64 value;
 
 	value = iocsr_read64(LOONGARCH_IOCSR_MISC_FUNC);
 	value |= IOCSR_MISC_FUNC_AVEC_EN;
 	iocsr_write64(value, LOONGARCH_IOCSR_MISC_FUNC);
+#endif
 }
 
 static inline void avecintc_ack_irq(struct irq_data *d)
@@ -85,7 +77,7 @@ static inline void pending_list_init(int cpu)
 	INIT_LIST_HEAD(&plist->head);
 }
 
-static void avecintc_sync(struct avecintc_data *adata)
+void avecintc_sync(struct avecintc_data *adata)
 {
 	struct pending_list *plist;
 
@@ -109,7 +101,7 @@ static int avecintc_set_affinity(struct irq_data *data, const struct cpumask *de
 			return -EBUSY;
 
 		if (cpu_online(adata->cpu) && cpumask_test_cpu(adata->cpu, dest))
-			return 0;
+			return IRQ_SET_MASK_OK_DONE;
 
 		cpumask_and(&intersect_mask, dest, cpu_online_mask);
 
@@ -121,7 +113,8 @@ static int avecintc_set_affinity(struct irq_data *data, const struct cpumask *de
 		adata->cpu = cpu;
 		adata->vec = vector;
 		per_cpu_ptr(irq_map, adata->cpu)[adata->vec] = irq_data_to_desc(data);
-		avecintc_sync(adata);
+		if (!cpu_has_redirectint)
+			avecintc_sync(adata);
 	}
 
 	irq_data_update_effective_affinity(data, cpumask_of(cpu));
@@ -167,7 +160,7 @@ void complete_irq_moving(void)
 	struct pending_list *plist = this_cpu_ptr(&pending_list);
 	struct avecintc_data *adata, *tdata;
 	int cpu, vector, bias;
-	uint64_t isr;
+	unsigned long isr;
 
 	guard(raw_spinlock)(&loongarch_avec.lock);
 
@@ -177,16 +170,16 @@ void complete_irq_moving(void)
 		bias = vector / VECTORS_PER_REG;
 		switch (bias) {
 		case 0:
-			isr = csr_read64(LOONGARCH_CSR_ISR0);
+			isr = csr_read(LOONGARCH_CSR_ISR0);
 			break;
 		case 1:
-			isr = csr_read64(LOONGARCH_CSR_ISR1);
+			isr = csr_read(LOONGARCH_CSR_ISR1);
 			break;
 		case 2:
-			isr = csr_read64(LOONGARCH_CSR_ISR2);
+			isr = csr_read(LOONGARCH_CSR_ISR2);
 			break;
 		case 3:
-			isr = csr_read64(LOONGARCH_CSR_ISR3);
+			isr = csr_read(LOONGARCH_CSR_ISR3);
 			break;
 		}
 
@@ -209,8 +202,9 @@ static void avecintc_compose_msi_msg(struct irq_data *d, struct msi_msg *msg)
 	struct avecintc_data *adata = irq_data_get_irq_chip_data(d);
 
 	msg->address_hi = 0x0;
-	msg->address_lo = (loongarch_avec.msi_base_addr | (adata->vec & 0xff) << 4)
-			  | ((cpu_logical_map(adata->cpu & 0xffff)) << 12);
+	msg->address_lo = (loongarch_avec.msi_base_addr |
+			  (adata->vec & AVEC_IRQ_MASK) << AVEC_IRQ_SHIFT) |
+			  ((cpu_logical_map(adata->cpu & AVEC_CPU_MASK)) << AVEC_CPU_SHIFT);
 	msg->data = 0x0;
 }
 
@@ -233,7 +227,7 @@ static void avecintc_irq_dispatch(struct irq_desc *desc)
 	chained_irq_enter(chip, desc);
 
 	while (true) {
-		unsigned long vector = csr_read64(LOONGARCH_CSR_IRR);
+		unsigned long vector = csr_read(LOONGARCH_CSR_IRR);
 		if (vector & IRR_INVALID_MASK)
 			break;
 
@@ -273,7 +267,7 @@ static int avecintc_domain_alloc(struct irq_domain *domain, unsigned int virq,
 {
 	for (unsigned int i = 0; i < nr_irqs; i++) {
 		struct irq_data *irqd = irq_domain_get_irq_data(domain, virq + i);
-		struct avecintc_data *adata = kzalloc(sizeof(*adata), GFP_KERNEL);
+		struct avecintc_data *adata = kzalloc_obj(*adata);
 		int ret;
 
 		if (!adata)
@@ -412,6 +406,9 @@ static int __init pch_msi_parse_madt(union acpi_subtable_headers *header,
 
 static inline int __init acpi_cascade_irqdomain_init(void)
 {
+	if (cpu_has_redirectint)
+		return redirect_acpi_init(loongarch_avec.domain);
+
 	return acpi_table_parse_madt(ACPI_MADT_TYPE_MSI_PIC, pch_msi_parse_madt, 1);
 }
 

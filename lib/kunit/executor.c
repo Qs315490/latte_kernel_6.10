@@ -15,6 +15,16 @@ extern struct kunit_suite * const __kunit_suites_end[];
 extern struct kunit_suite * const __kunit_init_suites_start[];
 extern struct kunit_suite * const __kunit_init_suites_end[];
 
+static struct kunit_suite_set kunit_boot_suites;
+
+void kunit_free_boot_suites(void)
+{
+	if (kunit_boot_suites.start) {
+		kunit_free_suite_set(kunit_boot_suites);
+		kunit_boot_suites = (struct kunit_suite_set){ NULL, NULL };
+	}
+}
+
 static char *action_param;
 
 module_param_named(action, action_param, charp, 0400);
@@ -45,9 +55,11 @@ bool kunit_autorun(void)
 	return autorun_param;
 }
 
-static char *filter_glob_param;
-static char *filter_param;
-static char *filter_action_param;
+#define PARAM_FROM_CONFIG(config) (config[0] ? config : NULL)
+
+static char *filter_glob_param = PARAM_FROM_CONFIG(CONFIG_KUNIT_DEFAULT_FILTER_GLOB);
+static char *filter_param = PARAM_FROM_CONFIG(CONFIG_KUNIT_DEFAULT_FILTER);
+static char *filter_action_param = PARAM_FROM_CONFIG(CONFIG_KUNIT_DEFAULT_FILTER_ACTION);
 
 module_param_named(filter_glob, filter_glob_param, charp, 0600);
 MODULE_PARM_DESC(filter_glob,
@@ -129,7 +141,7 @@ kunit_filter_glob_tests(const struct kunit_suite *const suite, const char *test_
 	if (!copy)
 		return ERR_PTR(-ENOMEM);
 
-	filtered = kcalloc(n + 1, sizeof(*filtered), GFP_KERNEL);
+	filtered = kzalloc_objs(*filtered, n + 1);
 	if (!filtered) {
 		kfree(copy);
 		return ERR_PTR(-ENOMEM);
@@ -177,7 +189,7 @@ kunit_filter_suites(const struct kunit_suite_set *suite_set,
 
 	const size_t max = suite_set->end - suite_set->start;
 
-	copy = kcalloc(max, sizeof(*filtered.start), GFP_KERNEL);
+	copy = kzalloc_objs(*copy, max);
 	if (!copy) { /* won't be able to run anything, return an empty set */
 		return filtered;
 	}
@@ -192,7 +204,7 @@ kunit_filter_suites(const struct kunit_suite_set *suite_set,
 	/* Parse attribute filters */
 	if (filters) {
 		filter_count = kunit_get_filter_count(filters);
-		parsed_filters = kcalloc(filter_count, sizeof(*parsed_filters), GFP_KERNEL);
+		parsed_filters = kzalloc_objs(*parsed_filters, filter_count);
 		if (!parsed_filters) {
 			*err = -ENOMEM;
 			goto free_parsed_glob;
@@ -409,9 +421,12 @@ int kunit_run_all_tests(void)
 		pr_err("kunit executor: unknown action '%s'\n", action_param);
 
 free_out:
-	if (filter_glob_param || filter_param)
-		kunit_free_suite_set(suite_set);
-	else if (init_num_suites > 0)
+	if (filter_glob_param || filter_param) {
+		if (err)
+			kunit_free_suite_set(suite_set);
+		else
+			kunit_boot_suites = suite_set;
+	} else if (init_num_suites > 0)
 		/* Don't use kunit_free_suite_set because suites aren't individually allocated */
 		kfree(suite_set.start);
 

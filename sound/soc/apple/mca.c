@@ -307,7 +307,7 @@ static bool mca_fe_clocks_in_use(struct mca_cluster *cl)
 	struct mca_cluster *be_cl;
 	int stream, i;
 
-	mutex_lock(&mca->port_mutex);
+	guard(mutex)(&mca->port_mutex);
 	for (i = 0; i < mca->nclusters; i++) {
 		be_cl = &mca->clusters[i];
 
@@ -316,12 +316,10 @@ static bool mca_fe_clocks_in_use(struct mca_cluster *cl)
 
 		for_each_pcm_streams(stream) {
 			if (be_cl->clocks_in_use[stream]) {
-				mutex_unlock(&mca->port_mutex);
 				return true;
 			}
 		}
 	}
-	mutex_unlock(&mca->port_mutex);
 	return false;
 }
 
@@ -462,6 +460,28 @@ err:
 		"unsupported SERDES configuration requested (mask=0x%x slots=%d slot_width=%d)\n",
 		mask, slots, slot_width);
 	return -EINVAL;
+}
+
+static int mca_fe_startup(struct snd_pcm_substream *substream,
+			  struct snd_soc_dai *dai)
+{
+	struct mca_cluster *cl = mca_dai_to_cluster(dai);
+	unsigned int mask, nchannels;
+
+	if (cl->tdm_slots) {
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+			mask = cl->tdm_tx_mask;
+		else
+			mask = cl->tdm_rx_mask;
+
+		nchannels = hweight32(mask);
+	} else {
+		nchannels = 2;
+	}
+
+	return snd_pcm_hw_constraint_minmax(substream->runtime,
+					    SNDRV_PCM_HW_PARAM_CHANNELS,
+					    1, nchannels);
 }
 
 static int mca_fe_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
@@ -680,6 +700,7 @@ static int mca_fe_hw_params(struct snd_pcm_substream *substream,
 }
 
 static const struct snd_soc_dai_ops mca_fe_ops = {
+	.startup = mca_fe_startup,
 	.set_fmt = mca_fe_set_fmt,
 	.set_bclk_ratio = mca_set_bclk_ratio,
 	.set_tdm_slot = mca_fe_set_tdm_slot,
@@ -742,9 +763,8 @@ static int mca_be_startup(struct snd_pcm_substream *substream,
 		       cl->base + REG_PORT_CLOCK_SEL);
 	writel_relaxed(PORT_DATA_SEL_TXA(fe_cl->no),
 		       cl->base + REG_PORT_DATA_SEL);
-	mutex_lock(&mca->port_mutex);
-	cl->port_driver = fe_cl->no;
-	mutex_unlock(&mca->port_mutex);
+	scoped_guard(mutex, &mca->port_mutex)
+		cl->port_driver = fe_cl->no;
 	cl->port_started[substream->stream] = true;
 
 	return 0;
@@ -765,9 +785,8 @@ static void mca_be_shutdown(struct snd_pcm_substream *substream,
 		 */
 		writel_relaxed(0, cl->base + REG_PORT_ENABLES);
 		writel_relaxed(0, cl->base + REG_PORT_DATA_SEL);
-		mutex_lock(&mca->port_mutex);
-		cl->port_driver = -1;
-		mutex_unlock(&mca->port_mutex);
+		scoped_guard(mutex, &mca->port_mutex)
+			cl->port_driver = -1;
 	}
 }
 
@@ -979,8 +998,8 @@ static const struct snd_soc_component_driver mca_component = {
 	.hw_params = mca_hw_params,
 	.trigger = mca_trigger,
 	.pointer = mca_pointer,
-	.pcm_construct = mca_pcm_new,
-	.pcm_destruct = mca_pcm_free,
+	.pcm_new = mca_pcm_new,
+	.pcm_free = mca_pcm_free,
 };
 
 static void apple_mca_release(struct mca_data *mca)
@@ -1168,6 +1187,7 @@ static void apple_mca_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id apple_mca_of_match[] = {
+	{ .compatible = "apple,t8103-mca", },
 	{ .compatible = "apple,mca", },
 	{}
 };

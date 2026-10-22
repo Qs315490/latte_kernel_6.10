@@ -28,6 +28,7 @@
 #define FASTCALL_DECL_TAG	"bpf_fastcall"
 
 #define MAX_ROOT_IDS		16
+#define MAX_BTF_FILES		64
 
 static const char * const btf_kind_str[NR_BTF_KINDS] = {
 	[BTF_KIND_UNKN]		= "UNKNOWN",
@@ -178,8 +179,7 @@ static int dump_btf_type(const struct btf *btf, __u32 id,
 	case BTF_KIND_STRUCT:
 	case BTF_KIND_UNION: {
 		const struct btf_member *m = (const void *)(t + 1);
-		__u16 vlen = BTF_INFO_VLEN(t->info);
-		int i;
+		__u32 i, vlen = BTF_INFO_VLEN(t->info);
 
 		if (json_output) {
 			jsonw_uint_field(w, "size", t->size);
@@ -224,9 +224,8 @@ static int dump_btf_type(const struct btf *btf, __u32 id,
 	}
 	case BTF_KIND_ENUM: {
 		const struct btf_enum *v = (const void *)(t + 1);
-		__u16 vlen = BTF_INFO_VLEN(t->info);
+		__u32 i, vlen = BTF_INFO_VLEN(t->info);
 		const char *encoding;
-		int i;
 
 		encoding = btf_kflag(t) ? "SIGNED" : "UNSIGNED";
 		if (json_output) {
@@ -253,7 +252,7 @@ static int dump_btf_type(const struct btf *btf, __u32 id,
 				if (btf_kflag(t))
 					printf("\n\t'%s' val=%d", name, v->val);
 				else
-					printf("\n\t'%s' val=%u", name, v->val);
+					printf("\n\t'%s' val=%u", name, (__u32)v->val);
 			}
 		}
 		if (json_output)
@@ -262,9 +261,8 @@ static int dump_btf_type(const struct btf *btf, __u32 id,
 	}
 	case BTF_KIND_ENUM64: {
 		const struct btf_enum64 *v = btf_enum64(t);
-		__u16 vlen = btf_vlen(t);
+		__u32 i, vlen = btf_vlen(t);
 		const char *encoding;
-		int i;
 
 		encoding = btf_kflag(t) ? "SIGNED" : "UNSIGNED";
 		if (json_output) {
@@ -324,8 +322,7 @@ static int dump_btf_type(const struct btf *btf, __u32 id,
 	}
 	case BTF_KIND_FUNC_PROTO: {
 		const struct btf_param *p = (const void *)(t + 1);
-		__u16 vlen = BTF_INFO_VLEN(t->info);
-		int i;
+		__u32 i, vlen = BTF_INFO_VLEN(t->info);
 
 		if (json_output) {
 			jsonw_uint_field(w, "ret_type_id", t->type);
@@ -368,8 +365,7 @@ static int dump_btf_type(const struct btf *btf, __u32 id,
 	case BTF_KIND_DATASEC: {
 		const struct btf_var_secinfo *v = (const void *)(t + 1);
 		const struct btf_type *vt;
-		__u16 vlen = BTF_INFO_VLEN(t->info);
-		int i;
+		__u32 i, vlen = BTF_INFO_VLEN(t->info);
 
 		if (json_output) {
 			jsonw_uint_field(w, "size", t->size);
@@ -674,7 +670,7 @@ static __u64 btf_name_hasher(__u64 hash, const struct btf *btf, __u32 name_off)
 static __u64 btf_type_disambig_hash(const struct btf *btf, __u32 id, bool include_members)
 {
 	const struct btf_type *t = btf__type_by_id(btf, id);
-	int i;
+	__u32 i;
 	size_t hash = 0;
 
 	hash = btf_name_hasher(hash, btf, t->name_off);
@@ -878,6 +874,45 @@ static bool btf_is_kernel_module(__u32 btf_id)
 	return btf_info.kernel_btf && strncmp(btf_name, "vmlinux", sizeof(btf_name)) != 0;
 }
 
+static struct btf *merge_btf_files(const char **files, int nr_files,
+				   struct btf *vmlinux_base)
+{
+	struct btf *combined, *mod;
+	int ret;
+
+	combined = btf__new_empty_split(vmlinux_base);
+	if (!combined) {
+		p_err("failed to create combined BTF: %s", strerror(errno));
+		return NULL;
+	}
+
+	for (int j = 0; j < nr_files; j++) {
+		mod = btf__parse_split(files[j], vmlinux_base);
+		if (!mod) {
+			p_err("failed to load BTF from %s: %s", files[j], strerror(errno));
+			btf__free(combined);
+			return NULL;
+		}
+
+		ret = btf__add_btf(combined, mod);
+		btf__free(mod);
+		if (ret < 0) {
+			p_err("failed to merge BTF from %s: %s", files[j], strerror(-ret));
+			btf__free(combined);
+			return NULL;
+		}
+	}
+
+	ret = btf__dedup(combined, NULL);
+	if (ret) {
+		p_err("failed to dedup combined BTF: %s", strerror(-ret));
+		btf__free(combined);
+		return NULL;
+	}
+
+	return combined;
+}
+
 static int do_dump(int argc, char **argv)
 {
 	bool dump_c = false, sort_dump_c = true;
@@ -905,7 +940,8 @@ static int do_dump(int argc, char **argv)
 			return -1;
 		}
 
-		fd = map_parse_fd_and_info(&argc, &argv, &info, &len);
+		fd = map_parse_fd_and_info(&argc, &argv, &info, &len,
+					   BPF_F_RDONLY);
 		if (fd < 0)
 			return -1;
 
@@ -957,20 +993,76 @@ static int do_dump(int argc, char **argv)
 		NEXT_ARG();
 	} else if (is_prefix(src, "file")) {
 		const char sysfs_prefix[] = "/sys/kernel/btf/";
+		struct btf *vmlinux_base = base_btf;
+		const char *files[MAX_BTF_FILES];
+		int nr_files = 0;
 
-		if (!base_btf &&
-		    strncmp(*argv, sysfs_prefix, sizeof(sysfs_prefix) - 1) == 0 &&
-		    strcmp(*argv, sysfs_vmlinux) != 0)
-			base = get_vmlinux_btf_from_sysfs();
-
-		btf = btf__parse_split(*argv, base ?: base_btf);
-		if (!btf) {
-			err = -errno;
-			p_err("failed to load BTF from %s: %s",
-			      *argv, strerror(errno));
-			goto done;
+		/* First grab our argument, filtering out the sysfs_vmlinux. */
+		if (strcmp(*argv, sysfs_vmlinux) != 0) {
+			files[nr_files++] = *argv;
+		} else {
+			p_info("skipping %s (will be loaded as base)", *argv);
 		}
 		NEXT_ARG();
+
+		while (argc && is_prefix(*argv, "file")) {
+			NEXT_ARG();
+			if (!REQ_ARGS(1)) {
+				err = -EINVAL;
+				goto done;
+			}
+			/* Filter out any sysfs vmlinux entries. */
+			if (strcmp(*argv, sysfs_vmlinux) == 0) {
+				p_info("skipping %s (will be loaded as base)", *argv);
+				NEXT_ARG();
+				continue;
+			}
+			if (nr_files >= MAX_BTF_FILES) {
+				p_err("too many BTF files (max %d)", MAX_BTF_FILES);
+				err = -E2BIG;
+				goto done;
+			}
+			files[nr_files++] = *argv;
+			NEXT_ARG();
+		}
+
+		/* Auto-detect vmlinux base if any file is from sysfs */
+		if (!vmlinux_base) {
+			for (int j = 0; j < nr_files; j++) {
+				if (strncmp(files[j], sysfs_prefix, sizeof(sysfs_prefix) - 1) == 0) {
+					base = get_vmlinux_btf_from_sysfs();
+					vmlinux_base = base;
+					break;
+				}
+			}
+		}
+
+		/* All files were the sysfs_vmlinux, handle it like we used to */
+		if (nr_files == 0) {
+			nr_files = 1;
+			files[0] = sysfs_vmlinux;
+		}
+
+		if (nr_files == 1) {
+			btf = btf__parse_split(files[0], base ?: base_btf);
+			if (!btf) {
+				err = -errno;
+				p_err("failed to load BTF from %s: %s", files[0], strerror(errno));
+				goto done;
+			}
+		} else {
+			if (!vmlinux_base) {
+				p_err("base BTF is required when merging multiple BTF files; use -B/--base-btf or use sysfs paths");
+				err = -EINVAL;
+				goto done;
+			}
+
+			btf = merge_btf_files(files, nr_files, vmlinux_base);
+			if (!btf) {
+				err = -errno;
+				goto done;
+			}
+		}
 	} else {
 		err = -1;
 		p_err("unrecognized BTF source specifier: '%s'", src);
@@ -1022,7 +1114,7 @@ static int do_dump(int argc, char **argv)
 			for (i = 0; i < root_type_cnt; i++) {
 				if (root_type_ids[i] == root_id) {
 					err = -EINVAL;
-					p_err("duplicate root_id %d supplied", root_id);
+					p_err("duplicate root_id %u supplied", root_id);
 					goto done;
 				}
 			}
@@ -1118,9 +1210,12 @@ build_btf_type_table(struct hashmap *tab, enum bpf_obj_type type,
 		[BPF_OBJ_PROG]		= "prog",
 		[BPF_OBJ_MAP]		= "map",
 	};
+	LIBBPF_OPTS(bpf_get_fd_by_id_opts, opts_ro);
 	__u32 btf_id, id = 0;
 	int err;
 	int fd;
+
+	opts_ro.open_flags = BPF_F_RDONLY;
 
 	while (true) {
 		switch (type) {
@@ -1132,7 +1227,7 @@ build_btf_type_table(struct hashmap *tab, enum bpf_obj_type type,
 			break;
 		default:
 			err = -1;
-			p_err("unexpected object type: %d", type);
+			p_err("unexpected object type: %u", type);
 			goto err_free;
 		}
 		if (err) {
@@ -1151,11 +1246,11 @@ build_btf_type_table(struct hashmap *tab, enum bpf_obj_type type,
 			fd = bpf_prog_get_fd_by_id(id);
 			break;
 		case BPF_OBJ_MAP:
-			fd = bpf_map_get_fd_by_id(id);
+			fd = bpf_map_get_fd_by_id_opts(id, &opts_ro);
 			break;
 		default:
 			err = -1;
-			p_err("unexpected object type: %d", type);
+			p_err("unexpected object type: %u", type);
 			goto err_free;
 		}
 		if (fd < 0) {
@@ -1188,7 +1283,7 @@ build_btf_type_table(struct hashmap *tab, enum bpf_obj_type type,
 			break;
 		default:
 			err = -1;
-			p_err("unexpected object type: %d", type);
+			p_err("unexpected object type: %u", type);
 			goto err_free;
 		}
 		if (!btf_id)
@@ -1254,12 +1349,12 @@ show_btf_plain(struct bpf_btf_info *info, int fd,
 
 	n = 0;
 	hashmap__for_each_key_entry(btf_prog_table, entry, info->id) {
-		printf("%s%lu", n++ == 0 ? "  prog_ids " : ",", entry->value);
+		printf("%s%lu", n++ == 0 ? "  prog_ids " : ",", (unsigned long)entry->value);
 	}
 
 	n = 0;
 	hashmap__for_each_key_entry(btf_map_table, entry, info->id) {
-		printf("%s%lu", n++ == 0 ? "  map_ids " : ",", entry->value);
+		printf("%s%lu", n++ == 0 ? "  map_ids " : ",", (unsigned long)entry->value);
 	}
 
 	emit_obj_refs_plain(refs_table, info->id, "\n\tpids ");
@@ -1441,7 +1536,8 @@ static int do_help(int argc, char **argv)
 		"       %1$s %2$s dump BTF_SRC [format FORMAT] [root_id ROOT_ID]\n"
 		"       %1$s %2$s help\n"
 		"\n"
-		"       BTF_SRC := { id BTF_ID | prog PROG | map MAP [{key | value | kv | all}] | file FILE }\n"
+		"       BTF_SRC := { id BTF_ID | prog PROG | map MAP [{key | value | kv | all}] |\n"
+		"                    file FILE [file FILE]... }\n"
 		"       FORMAT  := { raw | c [unsorted] }\n"
 		"       " HELP_SPEC_MAP "\n"
 		"       " HELP_SPEC_PROGRAM "\n"

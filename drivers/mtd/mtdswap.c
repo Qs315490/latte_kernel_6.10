@@ -125,6 +125,7 @@ struct mtdswap_dev {
 
 	char *page_buf;
 	char *oob_buf;
+	struct dentry *debugfs_stats;
 };
 
 struct mtdswap_oobdata {
@@ -1262,7 +1263,8 @@ static int mtdswap_add_debugfs(struct mtdswap_dev *d)
 	if (IS_ERR_OR_NULL(root))
 		return -1;
 
-	debugfs_create_file("mtdswap_stats", S_IRUSR, root, d, &mtdswap_fops);
+	d->debugfs_stats = debugfs_create_file("mtdswap_stats", 0400, root,
+					       d, &mtdswap_fops);
 
 	return 0;
 }
@@ -1285,11 +1287,11 @@ static int mtdswap_init(struct mtdswap_dev *d, unsigned int eblocks,
 	for (i = 0; i < MTDSWAP_TREE_CNT; i++)
 		d->trees[i].root = RB_ROOT;
 
-	d->page_data = vmalloc(array_size(pages, sizeof(int)));
+	d->page_data = vmalloc_array(pages, sizeof(int));
 	if (!d->page_data)
 		goto page_data_fail;
 
-	d->revmap = vmalloc(array_size(blocks, sizeof(int)));
+	d->revmap = vmalloc_array(blocks, sizeof(int));
 	if (!d->revmap)
 		goto revmap_fail;
 
@@ -1413,11 +1415,11 @@ static void mtdswap_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 		"%u spare, %u bad blocks\n",
 		MTDSWAP_PREFIX, part, swap_size / 1024, spare_cnt, bad_blocks);
 
-	d = kzalloc(sizeof(struct mtdswap_dev), GFP_KERNEL);
+	d = kzalloc_obj(struct mtdswap_dev);
 	if (!d)
 		return;
 
-	mbd_dev = kzalloc(sizeof(struct mtd_blktrans_dev), GFP_KERNEL);
+	mbd_dev = kzalloc_obj(struct mtd_blktrans_dev);
 	if (!mbd_dev) {
 		kfree(d);
 		return;
@@ -1463,6 +1465,7 @@ static void mtdswap_remove_dev(struct mtd_blktrans_dev *dev)
 {
 	struct mtdswap_dev *d = MTDSWAP_MBD_TO_MTDSWAP(dev);
 
+	debugfs_remove(d->debugfs_stats);
 	del_mtd_blktrans_dev(dev);
 	mtdswap_cleanup(d);
 	kfree(d);

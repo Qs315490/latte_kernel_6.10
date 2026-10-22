@@ -212,15 +212,14 @@ void nfs_sb_deactive(struct super_block *sb)
 }
 EXPORT_SYMBOL_GPL(nfs_sb_deactive);
 
-static int __nfs_list_for_each_server(struct list_head *head,
-		int (*fn)(struct nfs_server *, void *),
-		void *data)
+int nfs_client_for_each_server(struct nfs_client *clp,
+		int (*fn)(struct nfs_server *server, void *data), void *data)
 {
 	struct nfs_server *server, *last = NULL;
 	int ret = 0;
 
 	rcu_read_lock();
-	list_for_each_entry_rcu(server, head, client_link) {
+	list_for_each_entry_rcu(server, &clp->cl_superblocks, client_link) {
 		if (!(server->super && nfs_sb_active(server->super)))
 			continue;
 		rcu_read_unlock();
@@ -238,13 +237,6 @@ out:
 	if (last)
 		nfs_sb_deactive(last->super);
 	return ret;
-}
-
-int nfs_client_for_each_server(struct nfs_client *clp,
-		int (*fn)(struct nfs_server *, void *),
-		void *data)
-{
-	return __nfs_list_for_each_server(&clp->cl_superblocks, fn, data);
 }
 EXPORT_SYMBOL_GPL(nfs_client_for_each_server);
 
@@ -454,8 +446,12 @@ static void nfs_show_mount_options(struct seq_file *m, struct nfs_server *nfss,
 		{ NFS_MOUNT_NONLM, ",nolock", "" },
 		{ NFS_MOUNT_NOACL, ",noacl", "" },
 		{ NFS_MOUNT_NORDIRPLUS, ",nordirplus", "" },
+		{ NFS_MOUNT_FORCE_RDIRPLUS, ",rdirplus=force", "" },
 		{ NFS_MOUNT_UNSHARED, ",nosharecache", "" },
 		{ NFS_MOUNT_NORESVPORT, ",noresvport", "" },
+		{ NFS_MOUNT_NETUNREACH_FATAL,
+		  ",fatal_neterrors=ENETDOWN:ENETUNREACH",
+		  ",fatal_neterrors=none" },
 		{ 0, NULL, NULL }
 	};
 	const struct proc_nfs_info *nfs_infop;
@@ -513,6 +509,10 @@ static void nfs_show_mount_options(struct seq_file *m, struct nfs_server *nfss,
 	default:
 		break;
 	}
+	if (clp->cl_xprtsec.cert_serial)
+		seq_puts(m, ",cert_serial=<redacted>");
+	if (clp->cl_xprtsec.privkey_serial)
+		seq_puts(m, ",privkey_serial=<redacted>");
 
 	if (version != 4)
 		nfs_show_mountd_options(m, nfss, showdefaults);
@@ -593,18 +593,13 @@ static void show_lease(struct seq_file *m, struct nfs_server *server)
 	seq_printf(m, ",lease_expired=%ld",
 		   time_after(expire, jiffies) ?  0 : (jiffies - expire) / HZ);
 }
-#ifdef CONFIG_NFS_V4_1
+
 static void show_sessions(struct seq_file *m, struct nfs_server *server)
 {
 	if (nfs4_has_session(server->nfs_client))
 		seq_puts(m, ",sessions");
 }
-#else
-static void show_sessions(struct seq_file *m, struct nfs_server *server) {}
-#endif
-#endif
 
-#ifdef CONFIG_NFS_V4_1
 static void show_pnfs(struct seq_file *m, struct nfs_server *server)
 {
 	seq_printf(m, ",pnfs=");
@@ -624,20 +619,15 @@ static void show_implementation_id(struct seq_file *m, struct nfs_server *nfss)
 			   impl_id->date.seconds, impl_id->date.nseconds);
 	}
 }
-#else
-#if IS_ENABLED(CONFIG_NFS_V4)
-static void show_pnfs(struct seq_file *m, struct nfs_server *server)
-{
-}
-#endif
+#else /* CONFIG_NFS_V4 */
 static void show_implementation_id(struct seq_file *m, struct nfs_server *nfss)
 {
 }
-#endif
+#endif /* CONFIG_NFS_V4 */
 
 int nfs_show_devname(struct seq_file *m, struct dentry *root)
 {
-	char *page = (char *) __get_free_page(GFP_KERNEL);
+	char *page = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	char *devname, *dummy;
 	int err = 0;
 	if (!page)
@@ -647,7 +637,7 @@ int nfs_show_devname(struct seq_file *m, struct dentry *root)
 		err = PTR_ERR(devname);
 	else
 		seq_escape(m, devname, " \t\n\\");
-	free_page((unsigned long)page);
+	kfree(page);
 	return err;
 }
 EXPORT_SYMBOL_GPL(nfs_show_devname);
@@ -1087,8 +1077,9 @@ static void nfs_fill_super(struct super_block *sb, struct nfs_fs_context *ctx)
 	sb->s_blocksize = 0;
 	sb->s_xattr = server->nfs_client->cl_nfs_mod->xattr;
 	sb->s_op = server->nfs_client->cl_nfs_mod->sops;
-	if (ctx->bsize)
-		sb->s_blocksize = nfs_block_size(ctx->bsize, &sb->s_blocksize_bits);
+	if (server->bsize)
+		sb->s_blocksize =
+			nfs_block_size(server->bsize, &sb->s_blocksize_bits);
 
 	switch (server->nfs_client->rpc_ops->version) {
 	case 2:
@@ -1169,7 +1160,7 @@ static int nfs_set_super(struct super_block *s, struct fs_context *fc)
 	struct nfs_server *server = fc->s_fs_info;
 	int ret;
 
-	s->s_d_op = server->nfs_client->rpc_ops->dentry_ops;
+	set_default_d_op(s, server->nfs_client->rpc_ops->dentry_ops);
 	ret = set_anon_super(s, server);
 	if (ret == 0)
 		server->s_dev = s->s_dev;
@@ -1179,12 +1170,18 @@ static int nfs_set_super(struct super_block *s, struct fs_context *fc)
 static int nfs_compare_super_address(struct nfs_server *server1,
 				     struct nfs_server *server2)
 {
+	struct rpc_xprt *xprt1, *xprt2;
 	struct sockaddr *sap1, *sap2;
-	struct rpc_xprt *xprt1 = server1->client->cl_xprt;
-	struct rpc_xprt *xprt2 = server2->client->cl_xprt;
+
+	rcu_read_lock();
+
+	xprt1 = rcu_dereference(server1->client->cl_xprt);
+	xprt2 = rcu_dereference(server2->client->cl_xprt);
 
 	if (!net_eq(xprt1->xprt_net, xprt2->xprt_net))
-		return 0;
+		goto out_unlock;
+
+	rcu_read_unlock();
 
 	sap1 = (struct sockaddr *)&server1->nfs_client->cl_addr;
 	sap2 = (struct sockaddr *)&server2->nfs_client->cl_addr;
@@ -1216,6 +1213,10 @@ static int nfs_compare_super_address(struct nfs_server *server1,
 	}
 
 	return 1;
+
+out_unlock:
+	rcu_read_unlock();
+	return 0;
 }
 
 static int nfs_compare_userns(const struct nfs_server *old,
@@ -1311,10 +1312,6 @@ int nfs_get_tree_common(struct fs_context *fc)
 	if (server->flags & NFS_MOUNT_NOAC)
 		fc->sb_flags |= SB_SYNCHRONOUS;
 
-	if (ctx->clone_data.sb)
-		if (ctx->clone_data.sb->s_flags & SB_SYNCHRONOUS)
-			fc->sb_flags |= SB_SYNCHRONOUS;
-
 	/* Get a superblock - note that we may end up sharing one that already exists */
 	fc->s_fs_info = server;
 	s = sget_fc(fc, compare_super, nfs_set_super);
@@ -1338,13 +1335,8 @@ int nfs_get_tree_common(struct fs_context *fc)
 	}
 
 	if (!s->s_root) {
-		unsigned bsize = ctx->clone_data.inherited_bsize;
 		/* initial superblock/root creation */
 		nfs_fill_super(s, ctx);
-		if (bsize) {
-			s->s_blocksize_bits = bsize;
-			s->s_blocksize = 1U << bsize;
-		}
 		error = nfs_get_cache_cookie(s, ctx);
 		if (error < 0)
 			goto error_splat_super;

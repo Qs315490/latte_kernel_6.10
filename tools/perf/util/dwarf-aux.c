@@ -125,7 +125,8 @@ int cu_find_lineinfo(Dwarf_Die *cu_die, Dwarf_Addr addr,
 	    && die_entrypc(&die_mem, &faddr) == 0 &&
 	    faddr == addr) {
 		*fname = die_get_decl_file(&die_mem);
-		dwarf_decl_line(&die_mem, lineno);
+		if (dwarf_decl_line(&die_mem, lineno) != 0)
+			return -ENOENT;
 		goto out;
 	}
 
@@ -171,7 +172,6 @@ int cu_walk_functions_at(Dwarf_Die *cu_die, Dwarf_Addr addr,
 	}
 
 	return ret;
-
 }
 
 /**
@@ -301,6 +301,33 @@ Dwarf_Die *die_get_real_type(Dwarf_Die *vr_die, Dwarf_Die *die_mem)
 	} while (vr_die && dwarf_tag(vr_die) == DW_TAG_typedef);
 
 	return vr_die;
+}
+
+/**
+ * die_get_pointer_type - Get a pointer/array type die
+ * @type_die: a DIE of a type
+ * @die_mem: where to store a type DIE
+ *
+ * Get a pointer/array type DIE from @type_die. If the type is a typedef or
+ * qualifier (const, volatile, etc.), follow the chain to find the underlying
+ * pointer type.
+ */
+Dwarf_Die *die_get_pointer_type(Dwarf_Die *type_die, Dwarf_Die *die_mem)
+{
+	int tag;
+
+	do {
+		tag = dwarf_tag(type_die);
+		if (tag == DW_TAG_pointer_type || tag == DW_TAG_array_type)
+			return type_die;
+		if (tag != DW_TAG_typedef && tag != DW_TAG_const_type &&
+		    tag != DW_TAG_restrict_type && tag != DW_TAG_volatile_type &&
+		    tag != DW_TAG_shared_type)
+			return NULL;
+		type_die = die_get_type(type_die, die_mem);
+	} while (type_die);
+
+	return NULL;
 }
 
 /* Get attribute and translate it as a udata */
@@ -433,7 +460,7 @@ int die_get_data_member_location(Dwarf_Die *mb_die, Dwarf_Word *offs)
 	size_t nexpr;
 	int ret;
 
-	if (dwarf_attr(mb_die, DW_AT_data_member_location, &attr) == NULL)
+	if (dwarf_attr_integrate(mb_die, DW_AT_data_member_location, &attr) == NULL)
 		return -ENOENT;
 
 	if (dwarf_formudata(&attr, offs) != 0) {
@@ -593,7 +620,7 @@ Dwarf_Die *die_find_tailfunc(Dwarf_Die *cu_die, Dwarf_Addr addr,
 	ad.addr = addr;
 	ad.die_mem = die_mem;
 	/* dwarf_getscopes can't find subprogram. */
-	if (!dwarf_getfuncs(cu_die, __die_search_func_tail_cb, &ad, 0))
+	if (dwarf_getfuncs(cu_die, __die_search_func_tail_cb, &ad, 0) <= 0)
 		return NULL;
 	else
 		return die_mem;
@@ -632,7 +659,7 @@ Dwarf_Die *die_find_realfunc(Dwarf_Die *cu_die, Dwarf_Addr addr,
 	ad.addr = addr;
 	ad.die_mem = die_mem;
 	/* dwarf_getscopes can't find subprogram. */
-	if (!dwarf_getfuncs(cu_die, __die_search_func_cb, &ad, 0))
+	if (dwarf_getfuncs(cu_die, __die_search_func_cb, &ad, 0) <= 0)
 		return NULL;
 	else
 		return die_mem;
@@ -769,8 +796,7 @@ static int __die_walk_instances_cb(Dwarf_Die *inst, void *data)
 
 	/* Ignore redundant instances */
 	if (dwarf_tag(inst) == DW_TAG_inlined_subroutine) {
-		dwarf_decl_line(origin, &tmp);
-		if (die_get_call_lineno(inst) == tmp) {
+		if (dwarf_decl_line(origin, &tmp) == 0 && die_get_call_lineno(inst) == tmp) {
 			tmp = die_get_decl_fileno(origin);
 			if (die_get_call_fileno(inst) == tmp)
 				return DIE_FIND_CB_CONTINUE;
@@ -924,11 +950,6 @@ int die_walk_lines(Dwarf_Die *rt_die, line_walk_callback_t callback, void *data)
 		cu_die = dwarf_diecu(rt_die, &die_mem, NULL, NULL);
 		dwarf_decl_line(rt_die, &decl);
 		decf = die_get_decl_file(rt_die);
-		if (!decf) {
-			pr_debug2("Failed to get the declared file name of %s\n",
-				  dwarf_diename(rt_die));
-			return -EINVAL;
-		}
 	} else
 		cu_die = rt_die;
 	if (!cu_die) {
@@ -972,11 +993,12 @@ int die_walk_lines(Dwarf_Die *rt_die, line_walk_callback_t callback, void *data)
 			if (die_find_inlinefunc(rt_die, addr, &die_mem)) {
 				/* Call-site check */
 				inf = die_get_call_file(&die_mem);
-				if ((inf && !strcmp(inf, decf)) &&
+				if ((inf == decf || (inf && decf && !strcmp(inf, decf))) &&
 				    die_get_call_lineno(&die_mem) == lineno)
 					goto found;
 
-				dwarf_decl_line(&die_mem, &inl);
+				if (dwarf_decl_line(&die_mem, &inl) != 0)
+					inl = 0;
 				if (inl != decl ||
 				    decf != die_get_decl_file(&die_mem))
 					continue;
@@ -1008,8 +1030,10 @@ found:
 			.data = data,
 			.retval = 0,
 		};
-		dwarf_getfuncs(cu_die, __die_walk_culines_cb, &param, 0);
-		ret = param.retval;
+		if (dwarf_getfuncs(cu_die, __die_walk_culines_cb, &param, 0) < 0)
+			ret = -EINVAL;
+		else
+			ret = param.retval;
 	}
 
 	return ret;
@@ -1378,6 +1402,8 @@ struct find_var_data {
 	Dwarf_Addr addr;
 	/* Target register */
 	unsigned reg;
+	/* Access data type */
+	Dwarf_Die type;
 	/* Access offset, set for global data */
 	int offset;
 	/* True if the current register is the frame base */
@@ -1388,38 +1414,69 @@ struct find_var_data {
 #define DWARF_OP_DIRECT_REGS  32
 
 static bool match_var_offset(Dwarf_Die *die_mem, struct find_var_data *data,
-			     u64 addr_offset, u64 addr_type, bool is_pointer)
+			     s64 addr_offset, s64 addr_type, bool is_pointer)
 {
-	Dwarf_Die type_die;
 	Dwarf_Word size;
+	Dwarf_Die ptr_die;
+	Dwarf_Die *ptr_type;
+	s64 offset = addr_offset - addr_type;
 
-	if (addr_offset == addr_type) {
+	if (offset < 0)
+		return false;
+
+	if (__die_get_real_type(die_mem, &data->type) == NULL)
+		return false;
+
+	ptr_type = die_get_pointer_type(&data->type, &ptr_die);
+	if (is_pointer && ptr_type) {
+		/* Get the target type of the pointer */
+		if (__die_get_real_type(ptr_type, &data->type) == NULL)
+			return false;
+	}
+
+	if (offset == 0) {
 		/* Update offset relative to the start of the variable */
 		data->offset = 0;
 		return true;
 	}
 
-	if (addr_offset < addr_type)
+	if (dwarf_aggregate_size(&data->type, &size) < 0)
 		return false;
 
-	if (die_get_real_type(die_mem, &type_die) == NULL)
-		return false;
-
-	if (is_pointer && dwarf_tag(&type_die) == DW_TAG_pointer_type) {
-		/* Get the target type of the pointer */
-		if (die_get_real_type(&type_die, &type_die) == NULL)
-			return false;
-	}
-
-	if (dwarf_aggregate_size(&type_die, &size) < 0)
-		return false;
-
-	if (addr_offset >= addr_type + size)
+	if ((u64)offset >= size)
 		return false;
 
 	/* Update offset relative to the start of the variable */
-	data->offset = addr_offset - addr_type;
+	data->offset = offset;
 	return true;
+}
+
+/**
+ * is_breg_access_indirect - Check if breg based access implies type
+ * dereference
+ * @ops: DWARF operations array
+ * @nops: Number of operations in @ops
+ *
+ * Returns true if the DWARF expression evaluates to the variable's
+ * value, so the memory access on that register needs type dereference.
+ * Returns false if the expression evaluates to the variable's address.
+ * This is called after check_allowed_ops.
+ */
+static bool is_breg_access_indirect(Dwarf_Op *ops, size_t nops)
+{
+	/* only the base register */
+	if (nops == 1)
+		return false;
+
+	if (nops == 2 && ops[1].atom == DW_OP_stack_value)
+		return true;
+
+	if (nops == 3 && (ops[1].atom == DW_OP_deref ||
+		ops[1].atom == DW_OP_deref_size) &&
+		ops[2].atom == DW_OP_stack_value)
+		return false;
+	/* unreachable, OP not supported */
+	return false;
 }
 
 /* Only checks direct child DIEs in the given scope. */
@@ -1450,7 +1507,7 @@ static int __die_find_var_reg_cb(Dwarf_Die *die_mem, void *arg)
 		if (data->is_fbreg && ops->atom == DW_OP_fbreg &&
 		    check_allowed_ops(ops, nops) &&
 		    match_var_offset(die_mem, data, data->offset, ops->number,
-				     /*is_pointer=*/false))
+				     is_breg_access_indirect(ops, nops)))
 			return DIE_FIND_CB_END;
 
 		/* Only match with a simple case */
@@ -1462,11 +1519,11 @@ static int __die_find_var_reg_cb(Dwarf_Die *die_mem, void *arg)
 					     /*is_pointer=*/true))
 				return DIE_FIND_CB_END;
 
-			/* Local variables accessed by a register + offset */
+			/* variables accessed by a register + offset */
 			if (ops->atom == (DW_OP_breg0 + data->reg) &&
 			    check_allowed_ops(ops, nops) &&
 			    match_var_offset(die_mem, data, data->offset, ops->number,
-					     /*is_pointer=*/false))
+					     is_breg_access_indirect(ops, nops)))
 				return DIE_FIND_CB_END;
 		} else {
 			/* pointer variables saved in a register 32 or above */
@@ -1476,11 +1533,11 @@ static int __die_find_var_reg_cb(Dwarf_Die *die_mem, void *arg)
 					     /*is_pointer=*/true))
 				return DIE_FIND_CB_END;
 
-			/* Local variables accessed by a register + offset */
+			/* variables accessed by a register + offset */
 			if (ops->atom == DW_OP_bregx && data->reg == ops->number &&
 			    check_allowed_ops(ops, nops) &&
 			    match_var_offset(die_mem, data, data->offset, ops->number2,
-					     /*is_poitner=*/false))
+					     is_breg_access_indirect(ops, nops)))
 				return DIE_FIND_CB_END;
 		}
 	}
@@ -1500,7 +1557,7 @@ static int __die_find_var_reg_cb(Dwarf_Die *die_mem, void *arg)
  * when the variable is in the stack.
  */
 Dwarf_Die *die_find_variable_by_reg(Dwarf_Die *sc_die, Dwarf_Addr pc, int reg,
-				    int *poffset, bool is_fbreg,
+				    Dwarf_Die *type_die, int *poffset, bool is_fbreg,
 				    Dwarf_Die *die_mem)
 {
 	struct find_var_data data = {
@@ -1512,8 +1569,10 @@ Dwarf_Die *die_find_variable_by_reg(Dwarf_Die *sc_die, Dwarf_Addr pc, int reg,
 	Dwarf_Die *result;
 
 	result = die_find_child(sc_die, __die_find_var_reg_cb, &data, die_mem);
-	if (result)
+	if (result) {
 		*poffset = data.offset;
+		*type_die = data.type;
+	}
 	return result;
 }
 
@@ -1557,7 +1616,8 @@ static int __die_find_var_addr_cb(Dwarf_Die *die_mem, void *arg)
  * This is usually for global variables.
  */
 Dwarf_Die *die_find_variable_by_addr(Dwarf_Die *sc_die, Dwarf_Addr addr,
-				     Dwarf_Die *die_mem, int *offset)
+				     Dwarf_Die *die_mem, Dwarf_Die *type_die,
+				     int *offset)
 {
 	struct find_var_data data = {
 		.addr = addr,
@@ -1565,8 +1625,10 @@ Dwarf_Die *die_find_variable_by_addr(Dwarf_Die *sc_die, Dwarf_Addr addr,
 	Dwarf_Die *result;
 
 	result = die_find_child(sc_die, __die_find_var_addr_cb, &data, die_mem);
-	if (result)
+	if (result) {
 		*offset = data.offset;
+		*type_die = data.type;
+	}
 	return result;
 }
 
@@ -1576,10 +1638,11 @@ static int __die_collect_vars_cb(Dwarf_Die *die_mem, void *arg)
 	Dwarf_Die type_die;
 	int tag = dwarf_tag(die_mem);
 	Dwarf_Attribute attr;
-	Dwarf_Addr base, start, end;
+	Dwarf_Addr base, start, end = 0;
 	Dwarf_Op *ops;
 	size_t nops;
 	struct die_var_type *vt;
+	ptrdiff_t off;
 
 	if (tag != DW_TAG_variable && tag != DW_TAG_formal_parameter)
 		return DIE_FIND_CB_SIBLING;
@@ -1587,30 +1650,40 @@ static int __die_collect_vars_cb(Dwarf_Die *die_mem, void *arg)
 	if (dwarf_attr(die_mem, DW_AT_location, &attr) == NULL)
 		return DIE_FIND_CB_SIBLING;
 
+	if (__die_get_real_type(die_mem, &type_die) == NULL)
+		return DIE_FIND_CB_SIBLING;
+
 	/*
-	 * Only collect the first location as it can reconstruct the
-	 * remaining state by following the instructions.
-	 * start = 0 means it covers the whole range.
+	 * Collect all location entries as variables may have different
+	 * locations across different address ranges.
 	 */
-	if (dwarf_getlocations(&attr, 0, &base, &start, &end, &ops, &nops) <= 0)
-		return DIE_FIND_CB_SIBLING;
+	off = 0;
+	while ((off = dwarf_getlocations(&attr, off, &base, &start, &end, &ops, &nops)) > 0) {
+		if (!check_allowed_ops(ops, nops))
+			continue;
 
-	if (!check_allowed_ops(ops, nops))
-		return DIE_FIND_CB_SIBLING;
+		vt = malloc(sizeof(*vt));
+		if (vt == NULL)
+			return DIE_FIND_CB_END;
 
-	if (die_get_real_type(die_mem, &type_die) == NULL)
-		return DIE_FIND_CB_SIBLING;
+		/* Usually a register holds the value of a variable */
+		vt->is_reg_var_addr = false;
 
-	vt = malloc(sizeof(*vt));
-	if (vt == NULL)
-		return DIE_FIND_CB_END;
+		if (((ops->atom >= DW_OP_breg0 && ops->atom <= DW_OP_breg31) ||
+		      ops->atom == DW_OP_bregx || ops->atom == DW_OP_fbreg) &&
+		      !is_breg_access_indirect(ops, nops))
+			/* The register contains an address of the variable. */
+			vt->is_reg_var_addr = true;
 
-	vt->die_off = dwarf_dieoffset(&type_die);
-	vt->addr = start;
-	vt->reg = reg_from_dwarf_op(ops);
-	vt->offset = offset_from_dwarf_op(ops);
-	vt->next = *var_types;
-	*var_types = vt;
+		vt->die_off = dwarf_dieoffset(&type_die);
+		vt->addr = start;
+		vt->end = end;
+		vt->has_range = (end != 0 || start != 0);
+		vt->reg = reg_from_dwarf_op(ops);
+		vt->offset = offset_from_dwarf_op(ops);
+		vt->next = *var_types;
+		*var_types = vt;
+	}
 
 	return DIE_FIND_CB_SIBLING;
 }
@@ -1669,6 +1742,8 @@ static int __die_collect_global_vars_cb(Dwarf_Die *die_mem, void *arg)
 
 	vt->die_off = dwarf_dieoffset(&type_die);
 	vt->addr = ops->number;
+	vt->end = 0;
+	vt->has_range = false;
 	vt->reg = -1;
 	vt->offset = 0;
 	vt->next = *var_types;
@@ -1862,10 +1937,12 @@ static bool die_get_postprologue_addr(unsigned long entrypc_idx,
 			break;
 	}
 
-	dwarf_lineaddr(line, postprologue_addr);
-	if (*postprologue_addr >= highpc)
-		dwarf_lineaddr(dwarf_onesrcline(lines, i - 1),
-			       postprologue_addr);
+	if (dwarf_lineaddr(line, postprologue_addr) != 0)
+		return false;
+	if (*postprologue_addr >= highpc) {
+		if (dwarf_lineaddr(dwarf_onesrcline(lines, i - 1), postprologue_addr) != 0)
+			return false;
+	}
 
 	return true;
 }
@@ -1920,6 +1997,7 @@ struct find_scope_data {
 static int __die_find_scope_cb(Dwarf_Die *die_mem, void *arg)
 {
 	struct find_scope_data *data = arg;
+	int tag = dwarf_tag(die_mem);
 
 	if (dwarf_haspc(die_mem, data->pc)) {
 		Dwarf_Die *tmp;
@@ -1933,6 +2011,14 @@ static int __die_find_scope_cb(Dwarf_Die *die_mem, void *arg)
 		data->nr++;
 		return DIE_FIND_CB_CHILD;
 	}
+
+	/*
+	 * If the DIE doesn't have the PC, we still need to check its children
+	 * and siblings if it's a container like a namespace.
+	 */
+	if (tag == DW_TAG_namespace)
+		return DIE_FIND_CB_CONTINUE;
+
 	return DIE_FIND_CB_SIBLING;
 }
 
@@ -2044,12 +2130,27 @@ Dwarf_Die *die_get_member_type(Dwarf_Die *type_die, int offset,
 
 		tag = dwarf_tag(&mb_type);
 
-		if (tag == DW_TAG_structure_type || tag == DW_TAG_union_type) {
+		if (tag == DW_TAG_structure_type || tag == DW_TAG_union_type ||
+		    tag == DW_TAG_array_type) {
 			Dwarf_Word loc;
 
 			/* Update offset for the start of the member struct */
 			if (die_get_data_member_location(member, &loc) == 0)
 				offset -= loc;
+		}
+
+		/* Handle array types: resolve to the element type by one level */
+		if (tag == DW_TAG_array_type) {
+			Dwarf_Word size;
+
+			if (die_get_real_type(&mb_type, &mb_type) == NULL)
+				return NULL;
+
+			if (dwarf_aggregate_size(&mb_type, &size) < 0)
+				return NULL;
+
+			offset = offset % size;
+			tag = dwarf_tag(&mb_type);
 		}
 	}
 	*die_mem = mb_type;

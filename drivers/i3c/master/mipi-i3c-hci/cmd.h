@@ -17,6 +17,7 @@
 #define CMD_0_TOC			W0_BIT_(31)
 #define CMD_0_ROC			W0_BIT_(30)
 #define CMD_0_ATTR			W0_MASK(2, 0)
+#define CMD_0_TID			W0_MASK(6, 3)
 
 /*
  * Response Descriptor Structure
@@ -63,5 +64,11 @@ struct hci_cmd_ops {
 /* Our various instances */
 extern const struct hci_cmd_ops mipi_i3c_hci_cmd_v1;
 extern const struct hci_cmd_ops mipi_i3c_hci_cmd_v2;
+
+static inline void hci_cmd_set_resp_err(u32 *response, int resp_err)
+{
+	*response &= ~RESP_ERR_FIELD;
+	*response |= FIELD_PREP(RESP_ERR_FIELD, resp_err);
+}
 
 #endif

@@ -215,7 +215,7 @@ static const int ni_irqpin[] = {
 
 #include "ni_mio_common.c"
 
-static const struct pnp_device_id device_ids[] = {
+static const struct pnp_device_id __maybe_unused device_ids[] = {
 	{.id = "NIC1900", .driver_data = 0},
 	{.id = "NIC2400", .driver_data = 0},
 	{.id = "NIC2500", .driver_data = 0},
@@ -311,7 +311,8 @@ static int ni_atmio_attach(struct comedi_device *dev,
 		comedi_set_hw_dev(dev, &isapnp_dev->dev);
 	}
 
-	ret = comedi_request_region(dev, iobase, 0x20);
+	ret = comedi_check_request_region(dev, iobase, 0x20,
+					  0x20, 0xffff, 32);
 	if (ret)
 		return ret;
 

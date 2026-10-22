@@ -294,7 +294,7 @@ static struct dma_async_tx_descriptor *mdc_prep_dma_memcpy(
 	if (!len)
 		return NULL;
 
-	mdesc = kzalloc(sizeof(*mdesc), GFP_NOWAIT);
+	mdesc = kzalloc_obj(*mdesc, GFP_NOWAIT);
 	if (!mdesc)
 		return NULL;
 	mdesc->chan = mchan;
@@ -382,7 +382,7 @@ static struct dma_async_tx_descriptor *mdc_prep_dma_cyclic(
 	if (mdc_check_slave_width(mchan, dir) < 0)
 		return NULL;
 
-	mdesc = kzalloc(sizeof(*mdesc), GFP_NOWAIT);
+	mdesc = kzalloc_obj(*mdesc, GFP_NOWAIT);
 	if (!mdesc)
 		return NULL;
 	mdesc->chan = mchan;
@@ -465,7 +465,7 @@ static struct dma_async_tx_descriptor *mdc_prep_slave_sg(
 	if (mdc_check_slave_width(mchan, dir) < 0)
 		return NULL;
 
-	mdesc = kzalloc(sizeof(*mdesc), GFP_NOWAIT);
+	mdesc = kzalloc_obj(*mdesc, GFP_NOWAIT);
 	if (!mdesc)
 		return NULL;
 	mdesc->chan = mchan;
@@ -1073,7 +1073,7 @@ static struct platform_driver mdc_dma_driver = {
 	.driver = {
 		.name = "img-mdc-dma",
 		.pm = &img_mdc_pm_ops,
-		.of_match_table = of_match_ptr(mdc_dma_of_match),
+		.of_match_table = mdc_dma_of_match,
 	},
 	.probe = mdc_dma_probe,
 	.remove = mdc_dma_remove,

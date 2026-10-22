@@ -94,6 +94,7 @@ Description:
 What:		/sys/bus/iio/devices/iio:deviceX/sampling_frequency
 What:		/sys/bus/iio/devices/iio:deviceX/in_intensity_sampling_frequency
 What:		/sys/bus/iio/devices/iio:deviceX/buffer/sampling_frequency
+What:		/sys/bus/iio/devices/iio:deviceX/events/sampling_frequency
 What:		/sys/bus/iio/devices/triggerX/sampling_frequency
 KernelVersion:	2.6.35
 Contact:	linux-iio@vger.kernel.org
@@ -140,8 +141,6 @@ Description:
 
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_raw
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_supply_raw
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_i_raw
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_q_raw
 KernelVersion:	2.6.35
 Contact:	linux-iio@vger.kernel.org
 Description:
@@ -168,7 +167,18 @@ Description:
 		is required is a consistent labeling.  Units after application
 		of scale and offset are millivolts.
 
+What:		/sys/bus/iio/devices/iio:deviceX/in_altvoltageY_rms_raw
+KernelVersion:	6.18
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Raw (unscaled) Root Mean Square (RMS) voltage measurement from
+		channel Y. Units after application of scale and offset are
+		millivolts.
+
 What:		/sys/bus/iio/devices/iio:deviceX/in_powerY_raw
+What:		/sys/bus/iio/devices/iio:deviceX/in_powerY_active_raw
+What:		/sys/bus/iio/devices/iio:deviceX/in_powerY_reactive_raw
+What:		/sys/bus/iio/devices/iio:deviceX/in_powerY_apparent_raw
 KernelVersion:	4.5
 Contact:	linux-iio@vger.kernel.org
 Description:
@@ -176,6 +186,13 @@ Description:
 		channel Y. The number must always be specified and
 		unique to allow association with event codes. Units after
 		application of scale and offset are milliwatts.
+
+What:		/sys/bus/iio/devices/iio:deviceX/in_powerY_powerfactor
+KernelVersion:	6.18
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Power factor measurement from channel Y. Power factor is the
+		ratio of active power to apparent power. The value is unitless.
 
 What:		/sys/bus/iio/devices/iio:deviceX/in_capacitanceY_raw
 KernelVersion:	3.2
@@ -416,18 +433,14 @@ What:		/sys/bus/iio/devices/iio:deviceX/in_accel_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_accel_x_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_accel_y_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_accel_z_offset
+What:		/sys/bus/iio/devices/iio:deviceX/in_altvoltage_q_offset
+What:		/sys/bus/iio/devices/iio:deviceX/in_altvoltage_i_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltage_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_i_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_q_offset
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltage_q_offset
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltage_i_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_current_offset
-What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_i_offset
-What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_q_offset
-What:		/sys/bus/iio/devices/iio:deviceX/in_current_q_offset
-What:		/sys/bus/iio/devices/iio:deviceX/in_current_i_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_tempY_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_temp_offset
 What:		/sys/bus/iio/devices/iio:deviceX/in_pressureY_offset
@@ -455,21 +468,15 @@ Description:
 		to the _raw output.
 
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_scale
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_i_scale
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_q_scale
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_supply_scale
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltage_scale
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltage_i_scale
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltage_q_scale
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltage-voltage_scale
 What:		/sys/bus/iio/devices/iio:deviceX/out_voltageY_scale
 What:		/sys/bus/iio/devices/iio:deviceX/out_altvoltageY_scale
 What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_scale
 What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_supply_scale
 What:		/sys/bus/iio/devices/iio:deviceX/in_current_scale
-What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_i_scale
-What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_q_scale
-What:		/sys/bus/iio/devices/iio:deviceX/in_current_i_scale
 What:		/sys/bus/iio/devices/iio:deviceX/in_current_q_scale
 What:		/sys/bus/iio/devices/iio:deviceX/in_accel_scale
 What:		/sys/bus/iio/devices/iio:deviceX/in_accel_peak_scale
@@ -558,6 +565,30 @@ Description:
 		- a small discrete set of values like "0 2 4 6 8"
 		- a range specified as "[min step max]"
 
+What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_convdelay
+KernelVersion:	6.17
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Delay of start of conversion from common reference point shared
+		by all channels. Can be writable when used to compensate for
+		delay variation introduced by external filters feeding a
+		simultaneous sampling ADC.
+
+		E.g., for the ad7606 ADC series, this value is intended as a
+		configurable time delay in seconds, to correct delay introduced
+		by an optional external filtering circuit.
+
+What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_convdelay_available
+KernelVersion:	6.16
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Available values of convdelay. Maybe expressed as:
+
+		- a range specified as "[min step max]"
+
+		If shared across all channels, <type>_convdelay_available
+		is used.
+
 What:		/sys/bus/iio/devices/iio:deviceX/in_accel_x_calibscale
 What:		/sys/bus/iio/devices/iio:deviceX/in_accel_y_calibscale
 What:		/sys/bus/iio/devices/iio:deviceX/in_accel_z_calibscale
@@ -578,11 +609,7 @@ What:		/sys/bus/iio/devices/iio:deviceX/in_pressure_calibscale
 What:		/sys/bus/iio/devices/iio:deviceX/in_pressureY_calibscale
 What:		/sys/bus/iio/devices/iio:deviceX/in_proximity0_calibscale
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltage_calibscale
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltage_i_calibscale
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltage_q_calibscale
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_calibscale
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_i_calibscale
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_q_calibscale
 What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_supply_calibscale
 What:		/sys/bus/iio/devices/iio:deviceX/out_currentY_calibscale
 What:		/sys/bus/iio/devices/iio:deviceX/out_voltageY_calibscale
@@ -737,10 +764,15 @@ Contact:	linux-iio@vger.kernel.org
 Description:
 		Specifies the output powerdown mode.
 		DAC output stage is disconnected from the amplifier and
+		500ohm_to_gnd: connected to ground via a 500Ohm resistor,
 		1kohm_to_gnd: connected to ground via an 1kOhm resistor,
 		2.5kohm_to_gnd: connected to ground via a 2.5kOhm resistor,
+		3.85kohm_to_gnd: connected to ground via a 3.85kOhm resistor,
 		6kohm_to_gnd: connected to ground via a 6kOhm resistor,
+		7.7kohm_to_gnd: connected to ground via a 7.7kOhm resistor,
+		16kohm_to_gnd: connected to ground via a 16kOhm resistor,
 		20kohm_to_gnd: connected to ground via a 20kOhm resistor,
+		32kohm_to_gnd: connected to ground via a 32kOhm resistor,
 		42kohm_to_gnd: connected to ground via a 42kOhm resistor,
 		90kohm_to_gnd: connected to ground via a 90kOhm resistor,
 		100kohm_to_gnd: connected to ground via an 100kOhm resistor,
@@ -802,7 +834,11 @@ Description:
 		all the other channels, since it involves changing the VCO
 		fundamental output frequency.
 
+What:		/sys/bus/iio/devices/iio:deviceX/in_altvoltageY_i_phase
+What:		/sys/bus/iio/devices/iio:deviceX/in_altvoltageY_q_phase
 What:		/sys/bus/iio/devices/iio:deviceX/out_altvoltageY_phase
+What:		/sys/bus/iio/devices/iio:deviceX/out_altvoltageY_i_phase
+What:		/sys/bus/iio/devices/iio:deviceX/out_altvoltageY_q_phase
 KernelVersion:	3.4.0
 Contact:	linux-iio@vger.kernel.org
 Description:
@@ -865,6 +901,7 @@ What:		/sys/.../iio:deviceX/events/in_tempY_thresh_rising_en
 What:		/sys/.../iio:deviceX/events/in_tempY_thresh_falling_en
 What:		/sys/.../iio:deviceX/events/in_capacitanceY_thresh_rising_en
 What:		/sys/.../iio:deviceX/events/in_capacitanceY_thresh_falling_en
+What:		/sys/.../iio:deviceX/events/in_pressure_thresh_rising_en
 KernelVersion:	2.6.37
 Contact:	linux-iio@vger.kernel.org
 Description:
@@ -893,6 +930,7 @@ What:		/sys/.../iio:deviceX/events/in_accel_y_roc_rising_en
 What:		/sys/.../iio:deviceX/events/in_accel_y_roc_falling_en
 What:		/sys/.../iio:deviceX/events/in_accel_z_roc_rising_en
 What:		/sys/.../iio:deviceX/events/in_accel_z_roc_falling_en
+What:		/sys/.../iio:deviceX/events/in_accel_x&y&z_roc_rising_en
 What:		/sys/.../iio:deviceX/events/in_anglvel_x_roc_rising_en
 What:		/sys/.../iio:deviceX/events/in_anglvel_x_roc_falling_en
 What:		/sys/.../iio:deviceX/events/in_anglvel_y_roc_rising_en
@@ -968,6 +1006,7 @@ Description:
 		to the raw signal, allowing slow tracking to resume and the
 		adaptive threshold event detection to function as expected.
 
+What:		/sys/.../events/in_accel_mag_adaptive_rising_value
 What:		/sys/.../events/in_accel_thresh_rising_value
 What:		/sys/.../events/in_accel_thresh_falling_value
 What:		/sys/.../events/in_accel_x_raw_thresh_rising_value
@@ -1012,6 +1051,7 @@ What:		/sys/.../events/in_capacitanceY_thresh_rising_value
 What:		/sys/.../events/in_capacitanceY_thresh_falling_value
 What:		/sys/.../events/in_capacitanceY_thresh_adaptive_rising_value
 What:		/sys/.../events/in_capacitanceY_thresh_falling_rising_value
+What:		/sys/.../events/in_pressure_thresh_rising_value
 KernelVersion:	2.6.37
 Contact:	linux-iio@vger.kernel.org
 Description:
@@ -1114,6 +1154,7 @@ Description:
 		will get activated once in_voltage0_raw goes above 1200 and will become
 		deactivated again once the value falls below 1150.
 
+What:		/sys/.../events/in_accel_roc_rising_value
 What:		/sys/.../events/in_accel_x_raw_roc_rising_value
 What:		/sys/.../events/in_accel_x_raw_roc_falling_value
 What:		/sys/.../events/in_accel_y_raw_roc_rising_value
@@ -1160,6 +1201,8 @@ Description:
 		value is in raw device units or in processed units (as _raw
 		and _input do on sysfs direct channel read attributes).
 
+What:		/sys/.../events/in_accel_mag_adaptive_rising_period
+What:		/sys/.../events/in_accel_roc_rising_period
 What:		/sys/.../events/in_accel_x_thresh_rising_period
 What:		/sys/.../events/in_accel_x_thresh_falling_period
 What:		/sys/.../events/in_accel_x_roc_rising_period
@@ -1329,6 +1372,15 @@ Description:
 		number or direction is not specified, applies to all channels of
 		this type.
 
+What:		/sys/.../iio:deviceX/events/in_accel_x_mag_adaptive_rising_en
+What:		/sys/.../iio:deviceX/events/in_accel_y_mag_adaptive_rising_en
+What:		/sys/.../iio:deviceX/events/in_accel_z_mag_adaptive_rising_en
+KernelVersion:	2.6.37
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Similar to in_accel_x_thresh[_rising|_falling]_en, but here the
+		magnitude of the channel is compared to the adaptive threshold.
+
 What:		/sys/.../iio:deviceX/events/in_accel_mag_referenced_en
 What:		/sys/.../iio:deviceX/events/in_accel_mag_referenced_rising_en
 What:		/sys/.../iio:deviceX/events/in_accel_mag_referenced_falling_en
@@ -1379,7 +1431,7 @@ KernelVersion:	2.6.35
 Contact:	linux-iio@vger.kernel.org
 Description:
 		The name of the trigger source being used, as per string given
-		in /sys/class/iio/triggerY/name.
+		in /sys/bus/iio/devices/triggerY/name.
 
 What:		/sys/bus/iio/devices/iio:deviceX/bufferY/length
 KernelVersion:	5.11
@@ -1431,10 +1483,6 @@ What:		/sys/.../iio:deviceX/bufferY/in_timestamp_en
 What:		/sys/.../iio:deviceX/bufferY/in_voltageY_supply_en
 What:		/sys/.../iio:deviceX/bufferY/in_voltageY_en
 What:		/sys/.../iio:deviceX/bufferY/in_voltageY-voltageZ_en
-What:		/sys/.../iio:deviceX/bufferY/in_voltageY_i_en
-What:		/sys/.../iio:deviceX/bufferY/in_voltageY_q_en
-What:		/sys/.../iio:deviceX/bufferY/in_voltage_i_en
-What:		/sys/.../iio:deviceX/bufferY/in_voltage_q_en
 What:		/sys/.../iio:deviceX/bufferY/in_incli_x_en
 What:		/sys/.../iio:deviceX/bufferY/in_incli_y_en
 What:		/sys/.../iio:deviceX/bufferY/in_pressureY_en
@@ -1455,10 +1503,6 @@ What:		/sys/.../iio:deviceX/bufferY/in_incli_type
 What:		/sys/.../iio:deviceX/bufferY/in_voltageY_type
 What:		/sys/.../iio:deviceX/bufferY/in_voltage_type
 What:		/sys/.../iio:deviceX/bufferY/in_voltageY_supply_type
-What:		/sys/.../iio:deviceX/bufferY/in_voltageY_i_type
-What:		/sys/.../iio:deviceX/bufferY/in_voltageY_q_type
-What:		/sys/.../iio:deviceX/bufferY/in_voltage_i_type
-What:		/sys/.../iio:deviceX/bufferY/in_voltage_q_type
 What:		/sys/.../iio:deviceX/bufferY/in_timestamp_type
 What:		/sys/.../iio:deviceX/bufferY/in_pressureY_type
 What:		/sys/.../iio:deviceX/bufferY/in_pressure_type
@@ -1469,21 +1513,24 @@ Contact:	linux-iio@vger.kernel.org
 Description:
 		Description of the scan element data storage within the buffer
 		and hence the form in which it is read from user-space.
-		Form is [be|le]:[s|u]bits/storagebits[>>shift].
-		be or le specifies big or little endian. s or u specifies if
-		signed (2's complement) or unsigned. bits is the number of bits
-		of data and storagebits is the space (after padding) that it
-		occupies in the buffer. shift if specified, is the shift that
-		needs to be applied prior to masking out unused bits. Some
-		devices put their data in the middle of the transferred elements
-		with additional information on both sides.  Note that some
-		devices will have additional information in the unused bits
-		so to get a clean value, the bits value must be used to mask
-		the buffer output value appropriately.  The storagebits value
-		also specifies the data alignment.  So s48/64>>2 will be a
-		signed 48 bit integer stored in a 64 bit location aligned to
-		a 64 bit boundary. To obtain the clean value, shift right 2
-		and apply a mask to zero the top 16 bits of the result.
+		Form is [be|le]:[f|s|u]bits/storagebits[>>shift].
+		be or le specifies big or little endian. f means floating-point
+		(IEEE 754 binary format), s means signed (2's complement), u means
+		unsigned. bits is the number of bits of data and storagebits is the
+		space (after padding) that it occupies in the buffer; when using a
+		floating-point format, bits must be one of the width values defined
+		in the IEEE 754 standard for binary interchange formats (e.g. 16
+		indicates the binary16 format for half-precision numbers). shift,
+		if specified, is the shift that needs to be applied prior to
+		masking out unused bits. Some devices put their data in the middle
+		of the transferred elements with additional information on both
+		sides. Note that some devices will have additional information in
+		the unused bits, so to get a clean value the bits value must be
+		used to mask the buffer output value appropriately. The storagebits
+		value also specifies the data alignment. So s48/64>>2 will be a
+		signed 48 bit integer stored in a 64 bit location aligned to a 64
+		bit boundary. To obtain the clean value, shift right 2 and apply a
+		mask to zero the top 16 bits of the result.
 		For other storage combinations this attribute will be extended
 		appropriately.
 
@@ -1496,10 +1543,6 @@ Description:
 
 What:		/sys/.../iio:deviceX/bufferY/in_voltageY_index
 What:		/sys/.../iio:deviceX/bufferY/in_voltageY_supply_index
-What:		/sys/.../iio:deviceX/bufferY/in_voltageY_i_index
-What:		/sys/.../iio:deviceX/bufferY/in_voltageY_q_index
-What:		/sys/.../iio:deviceX/bufferY/in_voltage_i_index
-What:		/sys/.../iio:deviceX/bufferY/in_voltage_q_index
 What:		/sys/.../iio:deviceX/bufferY/in_accel_x_index
 What:		/sys/.../iio:deviceX/bufferY/in_accel_y_index
 What:		/sys/.../iio:deviceX/bufferY/in_accel_z_index
@@ -1566,6 +1609,9 @@ Description:
 
 What:		/sys/.../iio:deviceX/in_energy_input
 What:		/sys/.../iio:deviceX/in_energy_raw
+What:		/sys/.../iio:deviceX/in_energyY_active_raw
+What:		/sys/.../iio:deviceX/in_energyY_reactive_raw
+What:		/sys/.../iio:deviceX/in_energyY_apparent_raw
 KernelVersion:	4.0
 Contact:	linux-iio@vger.kernel.org
 Description:
@@ -1689,8 +1735,6 @@ Description:
 
 What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_raw
 What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_supply_raw
-What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_i_raw
-What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_q_raw
 KernelVersion:	3.17
 Contact:	linux-iio@vger.kernel.org
 Description:
@@ -1705,6 +1749,29 @@ Description:
 		channels refer to the same signal. The 'i' channel contains the in-phase
 		component of the signal while the 'q' channel contains the quadrature
 		component.
+
+What:		/sys/bus/iio/devices/iio:deviceX/in_altcurrentY_rms_raw
+KernelVersion:	6.18
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Raw (unscaled no bias removal etc.) Root Mean Square (RMS) current
+		measurement from channel Y. Units after application of scale and
+		offset are milliamps.
+
+What:		/sys/bus/iio/devices/iio:deviceX/in_rot_quaternionaxis_raw
+KernelVersion:	7.1
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Raw value of {x, y, z} components of the quaternion vector. These
+		components represent the axis about which a rotation occurs, and are
+		subject to the following constraints:
+
+		- the quaternion vector is normalized, i.e. w^2 + x^2 + y^2 + z^2 = 1
+		- the rotation angle is within the [-pi, pi] range, i.e. the w
+		  component (which represents the amount of rotation) is non-negative
+
+		These constraints allow the w value to be calculated from the other
+		components: w = sqrt(1 - (x^2 + y^2 + z^2)).
 
 What:		/sys/.../iio:deviceX/in_energy_en
 What:		/sys/.../iio:deviceX/in_distance_en
@@ -1912,6 +1979,23 @@ Contact:	linux-iio@vger.kernel.org
 Description:
 		Raw (unscaled no offset etc.) resistance reading.
 		Units after application of scale and offset are ohms.
+
+What:		/sys/bus/iio/devices/iio:deviceX/in_coverageY_raw
+KernelVersion:	7.2
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Raw (unscaled no offset etc.) coverage reading. Used for sensors
+		that report fractional coverage as a percentage, such as leak
+		detectors where the value represents what portion of the sensing
+		element is wetted. Units after application of scale and offset are
+		percent.
+
+What:		/sys/bus/iio/devices/iio:deviceX/in_coverageY_scale
+KernelVersion:	7.2
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Scale to be applied to in_coverageY_raw to obtain coverage
+		in percent.
 
 What:		/sys/bus/iio/devices/iio:deviceX/heater_enable
 KernelVersion:	4.1.0
@@ -2268,28 +2352,50 @@ Description:
 		representing the sensor unique ID number.
 
 What:		/sys/bus/iio/devices/iio:deviceX/filter_type_available
-What:		/sys/bus/iio/devices/iio:deviceX/in_voltage-voltage_filter_mode_available
+What:		/sys/bus/iio/devices/iio:deviceX/in_voltage-voltage_filter_type_available
 KernelVersion:	6.1
 Contact:	linux-iio@vger.kernel.org
 Description:
 		Reading returns a list with the possible filter modes. Options
 		for the attribute:
 
+		* "none" - Filter is disabled/bypassed.
+		* "sinc1" - The digital sinc1 filter. Fast 1st
+		  conversion time. Poor noise performance.
 		* "sinc3" - The digital sinc3 filter. Moderate 1st
 		  conversion time. Good noise performance.
-		* "sinc4" - Sinc 4. Excellent noise performance. Long
-		  1st conversion time.
-		* "sinc5" - The digital sinc5 filter. Excellent noise
-		  performance
-		* "sinc4+sinc1" - Sinc4 + averaging by 8. Low 1st conversion
-		  time.
-		* "sinc3+rej60" - Sinc3 + 60Hz rejection.
-		* "sinc3+sinc1" - Sinc3 + averaging by 8. Low 1st conversion
-		  time.
 		* "sinc3+pf1" - Sinc3 + device specific Post Filter 1.
 		* "sinc3+pf2" - Sinc3 + device specific Post Filter 2.
 		* "sinc3+pf3" - Sinc3 + device specific Post Filter 3.
 		* "sinc3+pf4" - Sinc3 + device specific Post Filter 4.
+		* "sinc3+rej60" - Sinc3 + 60Hz rejection.
+		* "sinc3+sinc1" - Sinc3 + averaging by 8. Low 1st conversion
+		  time.
+		* "sinc4" - Sinc 4. Excellent noise performance. Long
+		  1st conversion time.
+		* "sinc4+lp" - Sinc4 + Low Pass Filter.
+		* "sinc4+sinc1" - Sinc4 + averaging by 8. Low 1st conversion
+		  time.
+		* "sinc4+rej60" - Sinc4 + 60Hz rejection.
+		* "sinc5" - The digital sinc5 filter. Excellent noise
+		  performance
+		* "sinc5+avg" - Sinc5 + averaging by 4.
+		* "sinc5+pf1" - Sinc5 + device specific Post Filter 1.
+		* "sinc5+sinc1" - Sinc5 + Sinc1.
+		* "sinc5+sinc1+pf1" - Sinc5 + Sinc1 + device specific Post Filter 1.
+		* "sinc5+sinc1+pf2" - Sinc5 + Sinc1 + device specific Post Filter 2.
+		* "sinc5+sinc1+pf3" - Sinc5 + Sinc1 + device specific Post Filter 3.
+		* "sinc5+sinc1+pf4" - Sinc5 + Sinc1 + device specific Post Filter 4.
+		* "wideband" - filter with wideband low ripple passband
+		  and sharp transition band.
+
+What:		/sys/bus/iio/devices/iio:deviceX/filter_type
+What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY-voltageZ_filter_type
+KernelVersion:	6.1
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Specifies which filter type apply to the channel. The possible
+		values are given by the filter_type_available attribute.
 
 What:		/sys/.../events/in_proximity_thresh_either_runningperiod
 KernelVersion:	6.6
@@ -2370,3 +2476,23 @@ Description:
 		Value representing the user's attention to the system expressed
 		in units as percentage. This usually means if the user is
 		looking at the screen or not.
+
+What:		/sys/.../events/in_accel_value_available
+KernelVersion:	6.18
+Contact:	linux-iio@vger.kernel.org
+Description:
+		List of available threshold values for acceleration event
+		generation. Applies to all event types on in_accel channels.
+		Units after application of scale and offset are m/s^2.
+		Expressed as:
+
+		- a range specified as "[min step max]"
+
+What:		/sys/.../events/in_accel_period_available
+KernelVersion:	6.18
+Contact:	linux-iio@vger.kernel.org
+Description:
+		List of available periods for accelerometer event detection in
+		seconds, expressed as:
+
+		- a range specified as "[min step max]"

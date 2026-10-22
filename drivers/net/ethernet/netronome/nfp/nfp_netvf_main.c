@@ -38,23 +38,24 @@ struct nfp_net_vf {
 static const char nfp_net_driver_name[] = "nfp_netvf";
 
 static const struct pci_device_id nfp_netvf_pci_device_ids[] = {
-	{ PCI_VENDOR_ID_NETRONOME, PCI_DEVICE_ID_NFP3800_VF,
-	  PCI_VENDOR_ID_NETRONOME, PCI_ANY_ID,
-	  PCI_ANY_ID, 0, NFP_DEV_NFP3800_VF,
+	{
+		PCI_VDEVICE_SUB(NETRONOME, PCI_DEVICE_ID_NFP3800_VF,
+				PCI_VENDOR_ID_NETRONOME, PCI_ANY_ID),
+		.driver_data = NFP_DEV_NFP3800_VF,
+	}, {
+		PCI_VDEVICE_SUB(NETRONOME, PCI_DEVICE_ID_NFP6000_VF,
+				PCI_VENDOR_ID_NETRONOME, PCI_ANY_ID),
+		.driver_data = NFP_DEV_NFP6000_VF,
+	}, {
+		PCI_VDEVICE_SUB(CORIGINE, PCI_DEVICE_ID_NFP3800_VF,
+				PCI_VENDOR_ID_CORIGINE, PCI_ANY_ID),
+		.driver_data = NFP_DEV_NFP3800_VF,
+	}, {
+		PCI_VDEVICE_SUB(CORIGINE, PCI_DEVICE_ID_NFP6000_VF,
+				PCI_VENDOR_ID_CORIGINE, PCI_ANY_ID),
+		.driver_data = NFP_DEV_NFP6000_VF,
 	},
-	{ PCI_VENDOR_ID_NETRONOME, PCI_DEVICE_ID_NFP6000_VF,
-	  PCI_VENDOR_ID_NETRONOME, PCI_ANY_ID,
-	  PCI_ANY_ID, 0, NFP_DEV_NFP6000_VF,
-	},
-	{ PCI_VENDOR_ID_CORIGINE, PCI_DEVICE_ID_NFP3800_VF,
-	  PCI_VENDOR_ID_CORIGINE, PCI_ANY_ID,
-	  PCI_ANY_ID, 0, NFP_DEV_NFP3800_VF,
-	},
-	{ PCI_VENDOR_ID_CORIGINE, PCI_DEVICE_ID_NFP6000_VF,
-	  PCI_VENDOR_ID_CORIGINE, PCI_ANY_ID,
-	  PCI_ANY_ID, 0, NFP_DEV_NFP6000_VF,
-	},
-	{ 0, } /* Required last entry. */
+	{ } /* Required last entry. */
 };
 MODULE_DEVICE_TABLE(pci, nfp_netvf_pci_device_ids);
 
@@ -93,7 +94,7 @@ static int nfp_netvf_pci_probe(struct pci_dev *pdev,
 
 	dev_info = &nfp_dev_info[pci_id->driver_data];
 
-	vf = kzalloc(sizeof(*vf), GFP_KERNEL);
+	vf = kzalloc_obj(*vf);
 	if (!vf)
 		return -ENOMEM;
 	pci_set_drvdata(pdev, vf);

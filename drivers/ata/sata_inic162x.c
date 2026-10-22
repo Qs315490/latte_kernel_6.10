@@ -660,6 +660,7 @@ static int inic_hardreset(struct ata_link *link, unsigned int *class,
 }
 
 static void inic_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	void __iomem *port_base = inic_port_base(ap);
 
@@ -730,7 +731,7 @@ static struct ata_port_operations inic_port_ops = {
 
 	.freeze			= inic_freeze,
 	.thaw			= inic_thaw,
-	.hardreset		= inic_hardreset,
+	.reset.hardreset	= inic_hardreset,
 	.error_handler		= inic_error_handler,
 	.post_internal_cmd	= inic_post_internal_cmd,
 

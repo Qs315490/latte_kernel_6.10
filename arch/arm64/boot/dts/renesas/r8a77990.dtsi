@@ -13,6 +13,7 @@
 	compatible = "renesas,r8a77990";
 	#address-cells = <2>;
 	#size-cells = <2>;
+	interrupt-parent = <&gic>;
 
 	/*
 	 * The external audio clocks are configured as 0 Hz fixed frequency
@@ -47,16 +48,20 @@
 	cluster1_opp: opp-table-1 {
 		compatible = "operating-points-v2";
 		opp-shared;
+
 		opp-800000000 {
 			opp-hz = /bits/ 64 <800000000>;
+			opp-microvolt = <1030000>;
 			clock-latency-ns = <300000>;
 		};
 		opp-1000000000 {
 			opp-hz = /bits/ 64 <1000000000>;
+			opp-microvolt = <1030000>;
 			clock-latency-ns = <300000>;
 		};
 		opp-1200000000 {
 			opp-hz = /bits/ 64 <1200000000>;
+			opp-microvolt = <1030000>;
 			clock-latency-ns = <300000>;
 			opp-suspend;
 		};
@@ -118,6 +123,7 @@
 		#clock-cells = <0>;
 		/* This value must be overridden by the board */
 		clock-frequency = <0>;
+		bootph-all;
 	};
 
 	/* External PCIe clock - can be overridden by the board */
@@ -129,8 +135,8 @@
 
 	pmu_a53 {
 		compatible = "arm,cortex-a53-pmu";
-		interrupts-extended = <&gic GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>,
-				      <&gic GIC_SPI 85 IRQ_TYPE_LEVEL_HIGH>;
+		interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 85 IRQ_TYPE_LEVEL_HIGH>;
 		interrupt-affinity = <&a53_0>, <&a53_1>;
 	};
 
@@ -148,7 +154,8 @@
 
 	soc: soc {
 		compatible = "simple-bus";
-		interrupt-parent = <&gic>;
+		bootph-all;
+
 		#address-cells = <2>;
 		#size-cells = <2>;
 		ranges;
@@ -161,6 +168,16 @@
 			clocks = <&cpg CPG_MOD 402>;
 			power-domains = <&sysc R8A77990_PD_ALWAYS_ON>;
 			resets = <&cpg 402>;
+			status = "disabled";
+		};
+
+		swdt: watchdog@e6030000 {
+			compatible = "renesas,r8a77990-wdt", "renesas,rcar-gen3-wdt";
+			reg = <0 0xe6030000 0 0x0c>;
+			interrupts = <GIC_SPI 141 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cpg CPG_CORE R8A77990_CLK_OSC>;
+			power-domains = <&sysc R8A77990_PD_ALWAYS_ON>;
+			resets = <&cpg 401>;
 			status = "disabled";
 		};
 
@@ -272,6 +289,7 @@
 		pfc: pinctrl@e6060000 {
 			compatible = "renesas,pfc-r8a77990";
 			reg = <0 0xe6060000 0 0x508>;
+			bootph-all;
 		};
 
 		i2c_dvfs: i2c@e60b0000 {
@@ -368,11 +386,13 @@
 			#clock-cells = <2>;
 			#power-domain-cells = <0>;
 			#reset-cells = <1>;
+			bootph-all;
 		};
 
 		rst: reset-controller@e6160000 {
 			compatible = "renesas,r8a77990-rst";
 			reg = <0 0xe6160000 0 0x0200>;
+			bootph-all;
 		};
 
 		sysc: system-controller@e6180000 {
@@ -1051,7 +1071,7 @@
 			       <&can_clk>;
 			clock-names = "fck", "canfd", "can_clk";
 			assigned-clocks = <&cpg CPG_CORE R8A77990_CLK_CANFD>;
-			assigned-clock-rates = <40000000>;
+			assigned-clock-rates = <80000000>;
 			power-domains = <&sysc R8A77990_PD_ALWAYS_ON>;
 			resets = <&cpg 914>;
 			status = "disabled";
@@ -1892,6 +1912,16 @@
 			iommu-map = <0 &ipmmu_hc 0 1>;
 			iommu-map-mask = <0>;
 			status = "disabled";
+
+			/* PCIe bridge, Root Port */
+			pciec0_rp: pci@0,0 {
+				#address-cells = <3>;
+				#size-cells = <2>;
+				reg = <0x0 0x0 0x0 0x0 0x0>;
+				compatible = "pciclass,0604";
+				device_type = "pci";
+				ranges;
+			};
 		};
 
 		vspb0: vsp@fe960000 {
@@ -2117,6 +2147,7 @@
 		prr: chipid@fff00044 {
 			compatible = "renesas,prr";
 			reg = <0 0xfff00044 0 4>;
+			bootph-all;
 		};
 	};
 
@@ -2153,10 +2184,27 @@
 
 	timer {
 		compatible = "arm,armv8-timer";
-		interrupts-extended = <&gic GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>,
-				      <&gic GIC_PPI 14 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>,
-				      <&gic GIC_PPI 11 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>,
-				      <&gic GIC_PPI 10 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>;
+		interrupts = <GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 14 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 11 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 10 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>;
 		interrupt-names = "sec-phys", "phys", "virt", "hyp-phys";
+	};
+
+	/* External USB clock - to be overridden by boards that provide it */
+	usb3s0_clk: usb3s0-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <0>;
+	};
+
+	usb3_phy0: usb-phy {
+		compatible = "usb-nop-xceiv";
+		clocks = <&usb3s0_clk>;
+		clock-names = "main_clk";
+		clock-frequency = <100000000>;
+		power-domains = <&sysc R8A77990_PD_ALWAYS_ON>;
+		#phy-cells = <0>;
+		status = "disabled";
 	};
 };

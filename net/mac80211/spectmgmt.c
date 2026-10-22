@@ -9,7 +9,7 @@
  * Copyright 2007, Michael Wu <flamingice@sourmilk.net>
  * Copyright 2007-2008, Intel Corporation
  * Copyright 2008, Johannes Berg <johannes@sipsolutions.net>
- * Copyright (C) 2018, 2020, 2022-2024 Intel Corporation
+ * Copyright (C) 2018, 2020, 2022-2024, 2026 Intel Corporation
  */
 
 #include <linux/ieee80211.h>
@@ -147,14 +147,14 @@ validate_chandef_by_6ghz_he_eht_oper(struct ieee80211_sub_if_data *sdata,
 	struct ieee80211_local *local = sdata->local;
 	u32 control_freq, center_freq1, center_freq2;
 	enum nl80211_chan_width chan_width;
-	struct {
-		struct ieee80211_he_operation _oper;
-		struct ieee80211_he_6ghz_oper _6ghz_oper;
-	} __packed he;
-	struct {
-		struct ieee80211_eht_operation _oper;
-		struct ieee80211_eht_operation_info _oper_info;
-	} __packed eht;
+	DEFINE_RAW_FLEX(struct ieee80211_he_operation, he, optional,
+			sizeof(struct ieee80211_he_6ghz_oper));
+	struct ieee80211_he_6ghz_oper *_6ghz_oper =
+				(struct ieee80211_he_6ghz_oper *)he->optional;
+	DEFINE_RAW_FLEX(struct ieee80211_eht_operation, eht, optional,
+			sizeof(struct ieee80211_eht_operation_info));
+	struct ieee80211_eht_operation_info *_oper_info =
+			(struct ieee80211_eht_operation_info *)eht->optional;
 	const struct ieee80211_eht_operation *eht_oper;
 
 	if (conn->mode < IEEE80211_CONN_MODE_HE) {
@@ -167,38 +167,38 @@ validate_chandef_by_6ghz_he_eht_oper(struct ieee80211_sub_if_data *sdata,
 	center_freq2 = chandef->center_freq2;
 	chan_width = chandef->width;
 
-	he._oper.he_oper_params =
+	he->he_oper_params =
 		le32_encode_bits(1, IEEE80211_HE_OPERATION_6GHZ_OP_INFO);
-	he._6ghz_oper.primary =
+	_6ghz_oper->primary =
 		ieee80211_frequency_to_channel(control_freq);
-	he._6ghz_oper.ccfs0 = ieee80211_frequency_to_channel(center_freq1);
-	he._6ghz_oper.ccfs1 = center_freq2 ?
+	_6ghz_oper->ccfs0 = ieee80211_frequency_to_channel(center_freq1);
+	_6ghz_oper->ccfs1 = center_freq2 ?
 		ieee80211_frequency_to_channel(center_freq2) : 0;
 
 	switch (chan_width) {
 	case NL80211_CHAN_WIDTH_320:
-		he._6ghz_oper.ccfs1 = he._6ghz_oper.ccfs0;
-		he._6ghz_oper.ccfs0 += control_freq < center_freq1 ? -16 : 16;
-		he._6ghz_oper.control = IEEE80211_EHT_OPER_CHAN_WIDTH_320MHZ;
+		_6ghz_oper->ccfs1 = _6ghz_oper->ccfs0;
+		_6ghz_oper->ccfs0 += control_freq < center_freq1 ? -16 : 16;
+		_6ghz_oper->control = IEEE80211_EHT_OPER_CHAN_WIDTH_320MHZ;
 		break;
 	case NL80211_CHAN_WIDTH_160:
-		he._6ghz_oper.ccfs1 = he._6ghz_oper.ccfs0;
-		he._6ghz_oper.ccfs0 += control_freq < center_freq1 ? -8 : 8;
+		_6ghz_oper->ccfs1 = _6ghz_oper->ccfs0;
+		_6ghz_oper->ccfs0 += control_freq < center_freq1 ? -8 : 8;
 		fallthrough;
 	case NL80211_CHAN_WIDTH_80P80:
-		he._6ghz_oper.control =
+		_6ghz_oper->control =
 			IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH_160MHZ;
 		break;
 	case NL80211_CHAN_WIDTH_80:
-		he._6ghz_oper.control =
+		_6ghz_oper->control =
 			IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH_80MHZ;
 		break;
 	case NL80211_CHAN_WIDTH_40:
-		he._6ghz_oper.control =
+		_6ghz_oper->control =
 			IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH_40MHZ;
 		break;
 	default:
-		he._6ghz_oper.control =
+		_6ghz_oper->control =
 			IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH_20MHZ;
 		break;
 	}
@@ -206,15 +206,14 @@ validate_chandef_by_6ghz_he_eht_oper(struct ieee80211_sub_if_data *sdata,
 	if (conn->mode < IEEE80211_CONN_MODE_EHT) {
 		eht_oper = NULL;
 	} else {
-		eht._oper.params = IEEE80211_EHT_OPER_INFO_PRESENT;
-		eht._oper_info.control = he._6ghz_oper.control;
-		eht._oper_info.ccfs0 = he._6ghz_oper.ccfs0;
-		eht._oper_info.ccfs1 = he._6ghz_oper.ccfs1;
-		eht_oper = &eht._oper;
+		eht->params = IEEE80211_EHT_OPER_INFO_PRESENT;
+		_oper_info->control = _6ghz_oper->control;
+		_oper_info->ccfs0 = _6ghz_oper->ccfs0;
+		_oper_info->ccfs1 = _6ghz_oper->ccfs1;
+		eht_oper = eht;
 	}
 
-	if (!ieee80211_chandef_he_6ghz_oper(local, &he._oper,
-					    eht_oper, chandef))
+	if (!ieee80211_chandef_he_6ghz_oper(local, he, eht_oper, chandef))
 		chandef->chan = NULL;
 }
 
@@ -330,16 +329,6 @@ int ieee80211_parse_ch_switch_ie(struct ieee80211_sub_if_data *sdata,
 	case -1:
 		cfg80211_chandef_create(&csa_ie->chanreq.oper, new_chan,
 					NL80211_CHAN_NO_HT);
-		/* keep width for 5/10 MHz channels */
-		switch (sdata->vif.bss_conf.chanreq.oper.width) {
-		case NL80211_CHAN_WIDTH_5:
-		case NL80211_CHAN_WIDTH_10:
-			csa_ie->chanreq.oper.width =
-				sdata->vif.bss_conf.chanreq.oper.width;
-			break;
-		default:
-			break;
-		}
 		break;
 	}
 
@@ -410,35 +399,30 @@ static void ieee80211_send_refuse_measurement_request(struct ieee80211_sub_if_da
 	struct sk_buff *skb;
 	struct ieee80211_mgmt *msr_report;
 
-	skb = dev_alloc_skb(sizeof(*msr_report) + local->hw.extra_tx_headroom +
-				sizeof(struct ieee80211_msrment_ie));
+	skb = dev_alloc_skb(IEEE80211_MIN_ACTION_SIZE(measurement) +
+			    local->hw.extra_tx_headroom);
 	if (!skb)
 		return;
 
 	skb_reserve(skb, local->hw.extra_tx_headroom);
-	msr_report = skb_put_zero(skb, 24);
+	msr_report = skb_put_zero(skb, IEEE80211_MIN_ACTION_SIZE(measurement));
 	memcpy(msr_report->da, da, ETH_ALEN);
 	memcpy(msr_report->sa, sdata->vif.addr, ETH_ALEN);
 	memcpy(msr_report->bssid, bssid, ETH_ALEN);
 	msr_report->frame_control = cpu_to_le16(IEEE80211_FTYPE_MGMT |
 						IEEE80211_STYPE_ACTION);
 
-	skb_put(skb, 1 + sizeof(msr_report->u.action.u.measurement));
 	msr_report->u.action.category = WLAN_CATEGORY_SPECTRUM_MGMT;
-	msr_report->u.action.u.measurement.action_code =
-				WLAN_ACTION_SPCT_MSR_RPRT;
-	msr_report->u.action.u.measurement.dialog_token = dialog_token;
+	msr_report->u.action.action_code = WLAN_ACTION_SPCT_MSR_RPRT;
 
-	msr_report->u.action.u.measurement.element_id = WLAN_EID_MEASURE_REPORT;
-	msr_report->u.action.u.measurement.length =
+	msr_report->u.action.measurement.dialog_token = dialog_token;
+	msr_report->u.action.measurement.element_id = WLAN_EID_MEASURE_REPORT;
+	msr_report->u.action.measurement.length =
 			sizeof(struct ieee80211_msrment_ie);
-
-	memset(&msr_report->u.action.u.measurement.msr_elem, 0,
-		sizeof(struct ieee80211_msrment_ie));
-	msr_report->u.action.u.measurement.msr_elem.token = request_ie->token;
-	msr_report->u.action.u.measurement.msr_elem.mode |=
+	msr_report->u.action.measurement.msr_elem.token = request_ie->token;
+	msr_report->u.action.measurement.msr_elem.mode |=
 			IEEE80211_SPCT_MSR_RPRT_MODE_REFUSED;
-	msr_report->u.action.u.measurement.msr_elem.type = request_ie->type;
+	msr_report->u.action.measurement.msr_elem.type = request_ie->type;
 
 	ieee80211_tx_skb(sdata, skb);
 }
@@ -455,7 +439,7 @@ void ieee80211_process_measurement_req(struct ieee80211_sub_if_data *sdata,
 	 * TODO: Answer basic measurement as unmeasured
 	 */
 	ieee80211_send_refuse_measurement_request(sdata,
-			&mgmt->u.action.u.measurement.msr_elem,
+			&mgmt->u.action.measurement.msr_elem,
 			mgmt->sa, mgmt->bssid,
-			mgmt->u.action.u.measurement.dialog_token);
+			mgmt->u.action.measurement.dialog_token);
 }

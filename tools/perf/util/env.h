@@ -6,6 +6,7 @@
 #include <linux/rbtree.h>
 #include "cpumap.h"
 #include "rwsem.h"
+#include "mutex.h"
 
 struct perf_cpu_map;
 
@@ -54,13 +55,27 @@ struct pmu_caps {
 	char            *pmu_name;
 };
 
-typedef const char *(arch_syscalls__strerrno_t)(int err);
+struct domain_info {
+	u32	domain;
+	char	*dname;
+	char	*cpumask;
+	char	*cpulist;
+};
+
+struct cpu_domain_map {
+	u32			cpu;
+	u32			nr_domains;
+	struct domain_info	**domains;
+};
 
 struct perf_env {
 	char			*hostname;
 	char			*os_release;
 	char			*version;
 	char			*arch;
+	/* e_machine expanded from 16 to 32-bits for alignment. */
+	u32			e_machine;
+	u32			e_flags;
 	int			nr_cpus_online;
 	int			nr_cpus_avail;
 	char			*cpu_desc;
@@ -70,6 +85,8 @@ struct perf_env {
 	unsigned int		max_branches;
 	unsigned int		br_cntr_nr;
 	unsigned int		br_cntr_width;
+	unsigned int		schedstat_version;
+	unsigned int		max_sched_domains;
 	int			kernel_is_64_bit;
 
 	int			nr_cmdline;
@@ -92,7 +109,9 @@ struct perf_env {
 	char			**cpu_pmu_caps;
 	struct cpu_topology_map	*cpu;
 	struct cpu_cache_level	*caches;
+	struct cpu_domain_map	**cpu_domain;
 	int			 caches_cnt;
+	unsigned int		cln_size;
 	u32			comp_ratio;
 	u32			comp_ver;
 	u32			comp_type;
@@ -138,7 +157,8 @@ struct perf_env {
 		 */
 		bool	enabled;
 	} clock;
-	arch_syscalls__strerrno_t *arch_strerrno;
+	/* Protects lazy environment initialization (e.g. os_release, e_machine). */
+	struct mutex		lock;
 };
 
 enum perf_compress_type {
@@ -150,11 +170,13 @@ enum perf_compress_type {
 struct bpf_prog_info_node;
 struct btf_node;
 
-extern struct perf_env perf_env;
-
+int perf_env__read_core_pmu_caps(struct perf_env *env);
+void free_cpu_domain_info(struct cpu_domain_map **cd_map, u32 schedstat_version, u32 nr);
 void perf_env__exit(struct perf_env *env);
 
 int perf_env__kernel_is_64_bit(struct perf_env *env);
+bool perf_arch_is_big_endian(const char *arch);
+const char *perf_env__os_release(struct perf_env *env);
 
 int perf_env__set_cmdline(struct perf_env *env, int argc, const char *argv[]);
 
@@ -165,25 +187,46 @@ const char *perf_env__pmu_mappings(struct perf_env *env);
 
 int perf_env__read_cpu_topology_map(struct perf_env *env);
 
+/*
+ * Safe accessor for env->cpu[] topology array.  env->cpu can be NULL when
+ * reading old-format perf.data that predates topology information —
+ * process_cpu_topology() in header.c frees it while nr_cpus_avail remains
+ * set, so callers must not index env->cpu[] without this check.
+ */
+static inline struct cpu_topology_map *
+perf_env__get_cpu_topology(struct perf_env *env, struct perf_cpu cpu)
+{
+	if (env->cpu && cpu.cpu >= 0 && cpu.cpu < env->nr_cpus_avail)
+		return &env->cpu[cpu.cpu];
+	return NULL;
+}
+
 void cpu_cache_level__free(struct cpu_cache_level *cache);
 
+uint16_t perf_env__e_machine_nocache(struct perf_env *env, uint32_t *e_flags);
+uint16_t perf_env__e_machine(struct perf_env *env, uint32_t *e_flags);
 const char *perf_env__arch(struct perf_env *env);
-const char *perf_env__arch_strerrno(struct perf_env *env, int err);
+const char *perf_env__arch_strerrno(uint16_t e_machine, int err);
 const char *perf_env__cpuid(struct perf_env *env);
-const char *perf_env__raw_arch(struct perf_env *env);
 int perf_env__nr_cpus_avail(struct perf_env *env);
 
 void perf_env__init(struct perf_env *env);
+#ifdef HAVE_LIBBPF_SUPPORT
 bool __perf_env__insert_bpf_prog_info(struct perf_env *env,
 				      struct bpf_prog_info_node *info_node);
 bool perf_env__insert_bpf_prog_info(struct perf_env *env,
 				    struct bpf_prog_info_node *info_node);
 struct bpf_prog_info_node *perf_env__find_bpf_prog_info(struct perf_env *env,
 							__u32 prog_id);
+void perf_env__iterate_bpf_prog_info(struct perf_env *env,
+				     void (*cb)(struct bpf_prog_info_node *node,
+						void *data),
+				     void *data);
 bool perf_env__insert_btf(struct perf_env *env, struct btf_node *btf_node);
 bool __perf_env__insert_btf(struct perf_env *env, struct btf_node *btf_node);
 struct btf_node *perf_env__find_btf(struct perf_env *env, __u32 btf_id);
 struct btf_node *__perf_env__find_btf(struct perf_env *env, __u32 btf_id);
+#endif // HAVE_LIBBPF_SUPPORT
 
 int perf_env__numa_node(struct perf_env *env, struct perf_cpu cpu);
 char *perf_env__find_pmu_cap(struct perf_env *env, const char *pmu_name,
@@ -196,5 +239,7 @@ void perf_env__find_br_cntr_info(struct perf_env *env,
 
 bool x86__is_amd_cpu(void);
 bool perf_env__is_x86_amd_cpu(struct perf_env *env);
+bool x86__is_intel_cpu(void);
+bool perf_env__is_x86_intel_cpu(struct perf_env *env);
 
 #endif /* __PERF_ENV_H */

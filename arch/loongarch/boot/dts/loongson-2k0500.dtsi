@@ -84,7 +84,7 @@
 			clock-names = "ref_100m";
 		};
 
-		dma-controller@1fe10c00 {
+		apbdma0: dma-controller@1fe10c00 {
 			compatible = "loongson,ls2k0500-apbdma", "loongson,ls2k1000-apbdma";
 			reg = <0 0x1fe10c00 0 0x8>;
 			interrupt-parent = <&eiointc>;
@@ -104,7 +104,7 @@
 			status = "disabled";
 		};
 
-		dma-controller@1fe10c20 {
+		apbdma2: dma-controller@1fe10c20 {
 			compatible = "loongson,ls2k0500-apbdma", "loongson,ls2k1000-apbdma";
 			reg = <0 0x1fe10c20 0 0x8>;
 			interrupt-parent = <&eiointc>;
@@ -114,7 +114,7 @@
 			status = "disabled";
 		};
 
-		dma-controller@1fe10c30 {
+		apbdma3: dma-controller@1fe10c30 {
 			compatible = "loongson,ls2k0500-apbdma", "loongson,ls2k1000-apbdma";
 			reg = <0 0x1fe10c30 0 0x8>;
 			interrupt-parent = <&eiointc>;
@@ -131,6 +131,7 @@
 			reg-names = "main", "isr0";
 
 			interrupt-controller;
+			#address-cells = <0>;
 			#interrupt-cells = <2>;
 			interrupt-parent = <&cpuintc>;
 			interrupts = <2>;
@@ -149,6 +150,7 @@
 			reg-names = "main", "isr0";
 
 			interrupt-controller;
+			#address-cells = <0>;
 			#interrupt-cells = <2>;
 			interrupt-parent = <&cpuintc>;
 			interrupts = <4>;
@@ -164,9 +166,180 @@
 			compatible = "loongson,ls2k0500-eiointc";
 			reg = <0x0 0x1fe11600 0x0 0xea00>;
 			interrupt-controller;
+			#address-cells = <0>;
 			#interrupt-cells = <1>;
 			interrupt-parent = <&cpuintc>;
 			interrupts = <3>;
+		};
+
+		nand: nand-controller@1ff58000 {
+			compatible = "loongson,ls2k0500-nand-controller";
+			reg = <0 0x1ff58000 0 0x24>,
+			      <0 0x1ff58040 0 0x4>;
+			reg-names = "nand", "nand-dma";
+			dmas = <&apbdma0 0>;
+			dma-names = "rxtx";
+			status = "disabled";
+		};
+
+		pwm@1ff5c000 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c000 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <24 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c010 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c010 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <24 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c020 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c020 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <24 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c030 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c030 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <24 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c040 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c040 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <25 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c050 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c050 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <25 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c060 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c060 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <25 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c070 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c070 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <25 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c080 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c080 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <26 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c090 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c090 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <26 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c0a0 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c0a0 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <26 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c0b0 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c0b0 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <26 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c0c0 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c0c0 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <27 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c0d0 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c0d0 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <27 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c0e0 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c0e0 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <27 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		pwm@1ff5c0f0 {
+			compatible = "loongson,ls2k0500-pwm", "loongson,ls7a-pwm";
+			reg = <0x0 0x1ff5c0f0 0x0 0x10>;
+			interrupt-parent = <&liointc0>;
+			interrupts = <27 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			#pwm-cells = <3>;
+			status = "disabled";
 		};
 
 		gmac0: ethernet@1f020000 {
@@ -220,7 +393,7 @@
 		};
 
 		uart0: serial@1ff40800 {
-			compatible = "ns16550a";
+			compatible = "loongson,ls2k0500-uart", "ns16550a";
 			reg = <0x0 0x1ff40800 0x0 0x10>;
 			clock-frequency = <100000000>;
 			interrupt-parent = <&eiointc>;
@@ -232,6 +405,8 @@
 		i2c0: i2c@1ff48000 {
 			compatible = "loongson,ls2k-i2c";
 			reg = <0x0 0x1ff48000 0x0 0x0800>;
+			clock-frequency = <100000>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
 			interrupt-parent = <&eiointc>;
 			interrupts = <14>;
 			status = "disabled";
@@ -240,6 +415,8 @@
 		i2c@1ff48800 {
 			compatible = "loongson,ls2k-i2c";
 			reg = <0x0 0x1ff48800 0x0 0x0800>;
+			clock-frequency = <100000>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
 			interrupt-parent = <&eiointc>;
 			interrupts = <15>;
 			status = "disabled";
@@ -248,6 +425,8 @@
 		i2c@1ff49000 {
 			compatible = "loongson,ls2k-i2c";
 			reg = <0x0 0x1ff49000 0x0 0x0800>;
+			clock-frequency = <100000>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
 			interrupt-parent = <&eiointc>;
 			interrupts = <16>;
 			status = "disabled";
@@ -256,6 +435,8 @@
 		i2c@1ff49800 {
 			compatible = "loongson,ls2k-i2c";
 			reg = <0x0 0x1ff49800 0x0 0x0800>;
+			clock-frequency = <100000>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
 			interrupt-parent = <&eiointc>;
 			interrupts = <17>;
 			status = "disabled";
@@ -264,6 +445,8 @@
 		i2c@1ff4a000 {
 			compatible = "loongson,ls2k-i2c";
 			reg = <0x0 0x1ff4a000 0x0 0x0800>;
+			clock-frequency = <100000>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
 			interrupt-parent = <&eiointc>;
 			interrupts = <18>;
 			status = "disabled";
@@ -272,8 +455,34 @@
 		i2c@1ff4a800 {
 			compatible = "loongson,ls2k-i2c";
 			reg = <0x0 0x1ff4a800 0x0 0x0800>;
+			clock-frequency = <100000>;
+			clocks = <&clk LOONGSON2_APB_CLK>;
 			interrupt-parent = <&eiointc>;
 			interrupts = <19>;
+			status = "disabled";
+		};
+
+		mmc0: mmc@1ff64000 {
+			compatible = "loongson,ls2k0500-mmc";
+			reg = <0 0x1ff64000 0 0x2000>,
+			      <0 0x1fe10100 0 0x4>;
+			interrupt-parent = <&eiointc>;
+			interrupts = <57>;
+			dmas = <&apbdma3 0>;
+			dma-names = "rx-tx";
+			clocks = <&clk LOONGSON2_APB_CLK>;
+			status = "disabled";
+		};
+
+		mmc@1ff66000 {
+			compatible = "loongson,ls2k0500-mmc";
+			reg = <0 0x1ff66000 0 0x2000>,
+			      <0 0x1fe10100 0 0x4>;
+			interrupt-parent = <&eiointc>;
+			interrupts = <58>;
+			dmas = <&apbdma2 0>;
+			dma-names = "rx-tx";
+			clocks = <&clk LOONGSON2_APB_CLK>;
 			status = "disabled";
 		};
 

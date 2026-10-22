@@ -16,7 +16,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/timer.h>
 
@@ -88,12 +87,12 @@ struct xgene_rng_dev {
 
 static void xgene_rng_expired_timer(struct timer_list *t)
 {
-	struct xgene_rng_dev *ctx = from_timer(ctx, t, failure_timer);
+	struct xgene_rng_dev *ctx = timer_container_of(ctx, t, failure_timer);
 
 	/* Clear failure counter as timer expired */
 	disable_irq(ctx->irq);
 	ctx->failure_cnt = 0;
-	del_timer(&ctx->failure_timer);
+	timer_delete(&ctx->failure_timer);
 	enable_irq(ctx->irq);
 }
 

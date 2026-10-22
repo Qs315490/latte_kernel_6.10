@@ -2,12 +2,7 @@
 
 #include <linux/platform_device.h>
 
-void *rust_helper_platform_get_drvdata(const struct platform_device *pdev)
+__rust_helper bool rust_helper_dev_is_platform(const struct device *dev)
 {
-	return platform_get_drvdata(pdev);
-}
-
-void rust_helper_platform_set_drvdata(struct platform_device *pdev, void *data)
-{
-	platform_set_drvdata(pdev, data);
+	return dev_is_platform(dev);
 }

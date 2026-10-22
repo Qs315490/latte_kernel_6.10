@@ -18,9 +18,10 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/units.h>
 
 #define WAIT_PCLK(n, rate)	\
-	ndelay(DIV_ROUND_UP(DIV_ROUND_UP(1000000000, rate), n) + 10)
+	ndelay(DIV_ROUND_UP(DIV_ROUND_UP(HZ_PER_GHZ, rate), n) + 10)
 
 /* I2C register address definitions */
 #define SYNQUACER_I2C_REG_BSR		(0x00 << 2) // Bus Status
@@ -520,8 +521,8 @@ static u32 synquacer_i2c_functionality(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm synquacer_i2c_algo = {
-	.master_xfer	= synquacer_i2c_xfer,
-	.functionality	= synquacer_i2c_functionality,
+	.xfer = synquacer_i2c_xfer,
+	.functionality = synquacer_i2c_functionality,
 };
 
 static const struct i2c_adapter synquacer_i2c_ops = {

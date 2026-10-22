@@ -12,7 +12,6 @@
 #include <linux/interrupt.h>
 #include <linux/mfd/imx25-tsadc.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -47,7 +46,7 @@ struct mx25_gcq_priv {
 	 * of register writes, then a wait for a completion callback,
 	 * and finally a register read, during which userspace could issue
 	 * another read request. This lock protects a read access from
-	 * ocurring before another one has finished.
+	 * occurring before another one has finished.
 	 */
 	struct mutex lock;
 };
@@ -372,7 +371,7 @@ static int mx25_gcq_probe(struct platform_device *pdev)
 
 static const struct of_device_id mx25_gcq_ids[] = {
 	{ .compatible = "fsl,imx25-gcq", },
-	{ /* Sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(of, mx25_gcq_ids);
 

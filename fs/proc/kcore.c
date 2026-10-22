@@ -34,8 +34,6 @@
 #include <asm/sections.h>
 #include "internal.h"
 
-#define CORE_STR "CORE"
-
 #ifndef ELF_CORE_EFLAGS
 #define ELF_CORE_EFLAGS	0
 #endif
@@ -122,7 +120,9 @@ static void update_kcore_size(void)
 
 	kcore_phdrs_len = kcore_nphdr * sizeof(struct elf_phdr);
 	kcore_notes_len = (4 * sizeof(struct elf_note) +
-			   3 * ALIGN(sizeof(CORE_STR), 4) +
+			   ALIGN(sizeof(NN_PRSTATUS), 4) +
+			   ALIGN(sizeof(NN_PRPSINFO), 4) +
+			   ALIGN(sizeof(NN_TASKSTRUCT), 4) +
 			   VMCOREINFO_NOTE_NAME_BYTES +
 			   ALIGN(sizeof(struct elf_prstatus), 4) +
 			   ALIGN(sizeof(struct elf_prpsinfo), 4) +
@@ -143,7 +143,7 @@ static int kcore_ram_list(struct list_head *head)
 {
 	struct kcore_list *ent;
 
-	ent = kmalloc(sizeof(*ent), GFP_KERNEL);
+	ent = kmalloc_obj(*ent);
 	if (!ent)
 		return -ENOMEM;
 	ent->addr = (unsigned long)__va(0);
@@ -178,7 +178,7 @@ get_sparsemem_vmemmap_info(struct kcore_list *ent, struct list_head *head)
 				end = tmp->addr;
 	}
 	if (start < end) {
-		vmm = kmalloc(sizeof(*vmm), GFP_KERNEL);
+		vmm = kmalloc_obj(*vmm);
 		if (!vmm)
 			return 0;
 		vmm->addr = start;
@@ -210,7 +210,7 @@ kclist_add_private(unsigned long pfn, unsigned long nr_pages, void *arg)
 
 	p = pfn_to_page(pfn);
 
-	ent = kmalloc(sizeof(*ent), GFP_KERNEL);
+	ent = kmalloc_obj(*ent);
 	if (!ent)
 		return -ENOMEM;
 	ent->addr = (unsigned long)page_to_virt(p);
@@ -443,11 +443,11 @@ static ssize_t read_kcore_iter(struct kiocb *iocb, struct iov_iter *iter)
 			goto out;
 		}
 
-		append_kcore_note(notes, &i, CORE_STR, NT_PRSTATUS, &prstatus,
+		append_kcore_note(notes, &i, NN_PRSTATUS, NT_PRSTATUS, &prstatus,
 				  sizeof(prstatus));
-		append_kcore_note(notes, &i, CORE_STR, NT_PRPSINFO, &prpsinfo,
+		append_kcore_note(notes, &i, NN_PRPSINFO, NT_PRPSINFO, &prpsinfo,
 				  sizeof(prpsinfo));
-		append_kcore_note(notes, &i, CORE_STR, NT_TASKSTRUCT, current,
+		append_kcore_note(notes, &i, NN_TASKSTRUCT, NT_TASKSTRUCT, current,
 				  arch_task_struct_size);
 		/*
 		 * vmcoreinfo_size is mostly constant after init time, but it

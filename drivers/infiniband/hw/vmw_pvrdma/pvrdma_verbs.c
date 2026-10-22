@@ -67,9 +67,11 @@ int pvrdma_query_device(struct ib_device *ibdev,
 			struct ib_udata *uhw)
 {
 	struct pvrdma_dev *dev = to_vdev(ibdev);
+	int err;
 
-	if (uhw->inlen || uhw->outlen)
-		return -EINVAL;
+	err = ib_is_udata_in_empty(uhw);
+	if (err)
+		return err;
 
 	props->fw_ver = dev->dsr->caps.fw_ver;
 	props->sys_image_guid = dev->dsr->caps.sys_image_guid;
@@ -114,7 +116,7 @@ int pvrdma_query_device(struct ib_device *ibdev,
 	props->device_cap_flags |= IB_DEVICE_PORT_ACTIVE_EVENT |
 				   IB_DEVICE_RC_RNR_NAK_GEN;
 
-	return 0;
+	return ib_respond_empty_udata(uhw);
 }
 
 /**
@@ -237,34 +239,6 @@ enum rdma_link_layer pvrdma_port_link_layer(struct ib_device *ibdev,
 	return IB_LINK_LAYER_ETHERNET;
 }
 
-int pvrdma_modify_device(struct ib_device *ibdev, int mask,
-			 struct ib_device_modify *props)
-{
-	unsigned long flags;
-
-	if (mask & ~(IB_DEVICE_MODIFY_SYS_IMAGE_GUID |
-		     IB_DEVICE_MODIFY_NODE_DESC)) {
-		dev_warn(&to_vdev(ibdev)->pdev->dev,
-			 "unsupported device modify mask %#x\n", mask);
-		return -EOPNOTSUPP;
-	}
-
-	if (mask & IB_DEVICE_MODIFY_NODE_DESC) {
-		spin_lock_irqsave(&to_vdev(ibdev)->desc_lock, flags);
-		memcpy(ibdev->node_desc, props->node_desc, 64);
-		spin_unlock_irqrestore(&to_vdev(ibdev)->desc_lock, flags);
-	}
-
-	if (mask & IB_DEVICE_MODIFY_SYS_IMAGE_GUID) {
-		mutex_lock(&to_vdev(ibdev)->port_mutex);
-		to_vdev(ibdev)->sys_image_guid =
-			cpu_to_be64(props->sys_image_guid);
-		mutex_unlock(&to_vdev(ibdev)->port_mutex);
-	}
-
-	return 0;
-}
-
 /**
  * pvrdma_modify_port - modify device port attributes
  * @ibdev: the device to modify
@@ -348,11 +322,11 @@ int pvrdma_alloc_ucontext(struct ib_ucontext *uctx, struct ib_udata *udata)
 
 	/* copy back to user */
 	uresp.qp_tab_size = vdev->dsr->caps.max_qp;
-	ret = ib_copy_to_udata(udata, &uresp, sizeof(uresp));
+	ret = ib_respond_udata(udata, uresp);
 	if (ret) {
-		pvrdma_uar_free(vdev, &context->uar);
+		/* pvrdma_dealloc_ucontext() also frees the UAR */
 		pvrdma_dealloc_ucontext(&context->ibucontext);
-		return -EFAULT;
+		return ret;
 	}
 
 	return 0;
@@ -458,11 +432,10 @@ int pvrdma_alloc_pd(struct ib_pd *ibpd, struct ib_udata *udata)
 	pd_resp.pdn = resp->pd_handle;
 
 	if (udata) {
-		if (ib_copy_to_udata(udata, &pd_resp, sizeof(pd_resp))) {
-			dev_warn(&dev->pdev->dev,
-				 "failed to copy back protection domain\n");
+		ret = ib_respond_udata(udata, pd_resp);
+		if (ret) {
 			pvrdma_dealloc_pd(&pd->ibpd, udata);
-			return -EFAULT;
+			return ret;
 		}
 	}
 

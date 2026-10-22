@@ -13,9 +13,10 @@
 #include <syscall.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 
 #include "pidfd.h"
-#include "../kselftest.h"
+#include "kselftest.h"
 
 struct error {
 	int  code;

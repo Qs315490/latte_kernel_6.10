@@ -125,7 +125,7 @@ void tw686x_enable_channel(struct tw686x_dev *dev, unsigned int channel)
  */
 static void tw686x_dma_delay(struct timer_list *t)
 {
-	struct tw686x_dev *dev = from_timer(dev, t, dma_delay_timer);
+	struct tw686x_dev *dev = timer_container_of(dev, t, dma_delay_timer);
 	unsigned long flags;
 
 	spin_lock_irqsave(&dev->lock, flags);
@@ -243,22 +243,22 @@ static int tw686x_probe(struct pci_dev *pci_dev,
 	struct tw686x_dev *dev;
 	int err;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return -ENOMEM;
 	dev->type = pci_id->driver_data;
 	dev->dma_mode = dma_mode;
 	sprintf(dev->name, "tw%04X", pci_dev->device);
 
-	dev->video_channels = kcalloc(max_channels(dev),
-		sizeof(*dev->video_channels), GFP_KERNEL);
+	dev->video_channels = kzalloc_objs(*dev->video_channels,
+					   max_channels(dev));
 	if (!dev->video_channels) {
 		err = -ENOMEM;
 		goto free_dev;
 	}
 
-	dev->audio_channels = kcalloc(max_channels(dev),
-		sizeof(*dev->audio_channels), GFP_KERNEL);
+	dev->audio_channels = kzalloc_objs(*dev->audio_channels,
+					   max_channels(dev));
 	if (!dev->audio_channels) {
 		err = -ENOMEM;
 		goto free_video;
@@ -373,7 +373,7 @@ static void tw686x_remove(struct pci_dev *pci_dev)
 
 	tw686x_video_free(dev);
 	tw686x_audio_free(dev);
-	del_timer_sync(&dev->dma_delay_timer);
+	timer_delete_sync(&dev->dma_delay_timer);
 
 	pci_iounmap(pci_dev, dev->mmio);
 	pci_release_regions(pci_dev);

@@ -10,14 +10,16 @@
 #include <linux/compiler_types.h>
 #include <linux/fault-inject.h>
 
+#include <generated/xe_device_wa_oob.h>
 #include <generated/xe_wa_oob.h>
 
 #include "regs/xe_engine_regs.h"
 #include "regs/xe_gt_regs.h"
+#include "regs/xe_guc_regs.h"
 #include "regs/xe_regs.h"
 #include "xe_device_types.h"
 #include "xe_force_wake.h"
-#include "xe_gt.h"
+#include "xe_gt_types.h"
 #include "xe_hw_engine_types.h"
 #include "xe_mmio.h"
 #include "xe_platform_types.h"
@@ -38,7 +40,8 @@
  *   Register Immediate commands) once when initializing the device and saved in
  *   the default context. That default context is then used on every context
  *   creation to have a "primed golden context", i.e. a context image that
- *   already contains the changes needed to all the registers.
+ *   already contains the changes needed to all the registers. See
+ *   drivers/gpu/drm/xe/xe_lrc.c for default context handling.
  *
  * - Engine workarounds: the list of these WAs is applied whenever the specific
  *   engine is reset. It's also possible that a set of engine classes share a
@@ -47,10 +50,10 @@
  *   them need to keeep the workaround programming: the approach taken in the
  *   driver is to tie those workarounds to the first compute/render engine that
  *   is registered.  When executing with GuC submission, engine resets are
- *   outside of kernel driver control, hence the list of registers involved in
+ *   outside of kernel driver control, hence the list of registers involved is
  *   written once, on engine initialization, and then passed to GuC, that
  *   saves/restores their values before/after the reset takes place. See
- *   ``drivers/gpu/drm/xe/xe_guc_ads.c`` for reference.
+ *   drivers/gpu/drm/xe/xe_guc_ads.c for reference.
  *
  * - GT workarounds: the list of these WAs is applied whenever these registers
  *   revert to their default values: on GPU reset, suspend/resume [1]_, etc.
@@ -65,21 +68,39 @@
  *   hardware on every HW context restore. These buffers are created and
  *   programmed in the default context so the hardware always go through those
  *   programming sequences when switching contexts. The support for workaround
- *   batchbuffers is enabled these hardware mechanisms:
+ *   batchbuffers is enabled via these hardware mechanisms:
  *
- *   #. INDIRECT_CTX: A batchbuffer and an offset are provided in the default
- *      context, pointing the hardware to jump to that location when that offset
- *      is reached in the context restore. Workaround batchbuffer in the driver
- *      currently uses this mechanism for all platforms.
+ *   #. INDIRECT_CTX (also known as **mid context restore bb**): A batchbuffer
+ *      and an offset are provided in the default context, pointing the hardware
+ *      to jump to that location when that offset is reached in the context
+ *      restore.  When a context is being restored, this is executed after the
+ *      ring context, in the middle (or beginning) of the engine context image.
  *
- *   #. BB_PER_CTX_PTR: A batchbuffer is provided in the default context,
- *      pointing the hardware to a buffer to continue executing after the
- *      engine registers are restored in a context restore sequence. This is
- *      currently not used in the driver.
+ *   #. BB_PER_CTX_PTR (also known as **post context restore bb**): A
+ *      batchbuffer is provided in the default context, pointing the hardware to
+ *      a buffer to continue executing after the engine registers are restored
+ *      in a context restore sequence.
+ *
+ *   Below is the timeline for a context restore sequence:
+ *
+ *   .. code::
+ *
+ *                        INDIRECT_CTX_OFFSET
+ *                   |----------->|
+ *      .------------.------------.-------------.------------.--------------.-----------.
+ *      |Ring        | Engine     | Mid-context | Engine     | Post-context | Ring      |
+ *      |Restore     | Restore (1)| BB Restore  | Restore (2)| BB Restore   | Execution |
+ *      `------------'------------'-------------'------------'--------------'-----------'
  *
  * - Other/OOB:  There are WAs that, due to their nature, cannot be applied from
  *   a central place. Those are peppered around the rest of the code, as needed.
- *   Workarounds related to the display IP are the main example.
+ *   There's a central place to control which workarounds are enabled:
+ *   drivers/gpu/drm/xe/xe_wa_oob.rules for GT workarounds and
+ *   drivers/gpu/drm/xe/xe_device_wa_oob.rules for device/SoC workarounds.
+ *   These files only record which workarounds are enabled: during early device
+ *   initialization those rules are evaluated and recorded by the driver. Then
+ *   later the driver checks with ``XE_GT_WA()`` and ``XE_DEVICE_WA()`` to
+ *   implement them.
  *
  * .. [1] Technically, some registers are powercontext saved & restored, so they
  *    survive a suspend/resume. In practice, writing them again is not too
@@ -90,6 +111,17 @@
  *    difference of how they are maintained in the code. In xe it uses the
  *    xe_rtp infrastructure so the workarounds can be kept in tables, following
  *    a more declarative approach rather than procedural.
+ *
+ * .. note::
+ *    When a workaround applies to every single known IP version in a range,
+ *    the preferred handling is to use a single range-based RTP entry rather
+ *    than individual entries for each version, even if some of the intermediate
+ *    version numbers are currently unused.  If a new intermediate IP version
+ *    appears in the future and is enabled in the driver, any existing
+ *    range-based entries that contain the new version number will need to be
+ *    analyzed to determine whether their workarounds should apply to the new
+ *    version, or whether any existing range based entries needs to be split
+ *    into two entries that do not include the new intermediate version.
  */
 
 #undef XE_REG_MCR
@@ -98,7 +130,9 @@
 __diag_push();
 __diag_ignore_all("-Woverride-init", "Allow field overrides in table");
 
-static const struct xe_rtp_entry_sr gt_was[] = {
+static const struct xe_rtp_table_sr gt_was = XE_RTP_TABLE_SR(
+	/* Workarounds applying over a range of IPs */
+
 	{ XE_RTP_NAME("14011060649"),
 	  XE_RTP_RULES(MEDIA_VERSION_RANGE(1200, 1255),
 		       ENGINE_CLASS(VIDEO_DECODE),
@@ -113,6 +147,27 @@ static const struct xe_rtp_entry_sr gt_was[] = {
 	{ XE_RTP_NAME("14015795083"),
 	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1200, 1260)),
 	  XE_RTP_ACTIONS(CLR(MISCCPCTL, DOP_CLOCK_GATE_RENDER_ENABLE))
+	},
+	{ XE_RTP_NAME("16021867713"),
+	  XE_RTP_RULES(MEDIA_VERSION_RANGE(1300, 3002),
+		       ENGINE_CLASS(VIDEO_DECODE)),
+	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F1C(0), MFXPIPE_CLKGATE_DIS)),
+	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
+	},
+	{ XE_RTP_NAME("14019449301"),
+	  XE_RTP_RULES(MEDIA_VERSION_RANGE(1301, 2000), ENGINE_CLASS(VIDEO_DECODE)),
+	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F08(0), CG3DDISHRS_CLKGATE_DIS)),
+	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
+	},
+	{ XE_RTP_NAME("16028005424"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(3000, 3005), OR,
+		       MEDIA_VERSION_RANGE(1301, 3500)),
+	  XE_RTP_ACTIONS(SET(GUC_INTR_CHICKEN, DISABLE_SIGNALING_ENGINES))
+	},
+	{ XE_RTP_NAME("14026578760"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(3510, 3511), OR,
+		       MEDIA_VERSION(3503)),
+	  XE_RTP_ACTIONS(SET(GAMSTLB_CTRL, DIS_PEND_GPA_LINK))
 	},
 
 	/* DG1 */
@@ -170,10 +225,6 @@ static const struct xe_rtp_entry_sr gt_was[] = {
 
 	/* Xe_LPG */
 
-	{ XE_RTP_NAME("14015795083"),
-	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1270, 1271), GRAPHICS_STEP(A0, B0)),
-	  XE_RTP_ACTIONS(CLR(MISCCPCTL, DOP_CLOCK_GATE_RENDER_ENABLE))
-	},
 	{ XE_RTP_NAME("14018575942"),
 	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1270, 1274)),
 	  XE_RTP_ACTIONS(SET(COMP_MOD_CTRL, FORCE_MISS_FTLB))
@@ -185,29 +236,9 @@ static const struct xe_rtp_entry_sr gt_was[] = {
 
 	/* Xe_LPM+ */
 
-	{ XE_RTP_NAME("16021867713"),
-	  XE_RTP_RULES(MEDIA_VERSION(1300),
-		       ENGINE_CLASS(VIDEO_DECODE)),
-	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F1C(0), MFXPIPE_CLKGATE_DIS)),
-	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
-	},
 	{ XE_RTP_NAME("22016670082"),
 	  XE_RTP_RULES(MEDIA_VERSION(1300)),
 	  XE_RTP_ACTIONS(SET(XELPMP_SQCNT1, ENFORCE_RAR))
-	},
-
-	/* Xe2_LPG */
-
-	{ XE_RTP_NAME("16020975621"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), GRAPHICS_STEP(A0, B0)),
-	  XE_RTP_ACTIONS(SET(XEHP_SLICE_UNIT_LEVEL_CLKGATE, SBEUNIT_CLKGATE_DIS))
-	},
-	{ XE_RTP_NAME("14018157293"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), GRAPHICS_STEP(A0, B0)),
-	  XE_RTP_ACTIONS(SET(XEHPC_L3CLOS_MASK(0), ~0),
-			 SET(XEHPC_L3CLOS_MASK(1), ~0),
-			 SET(XEHPC_L3CLOS_MASK(2), ~0),
-			 SET(XEHPC_L3CLOS_MASK(3), ~0))
 	},
 
 	/* Xe2_LPM */
@@ -218,38 +249,19 @@ static const struct xe_rtp_entry_sr gt_was[] = {
 	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F10(0), IECPUNIT_CLKGATE_DIS)),
 	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
 	},
-	{ XE_RTP_NAME("16021867713"),
-	  XE_RTP_RULES(MEDIA_VERSION(2000),
-		       ENGINE_CLASS(VIDEO_DECODE)),
-	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F1C(0), MFXPIPE_CLKGATE_DIS)),
-	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
-	},
-	{ XE_RTP_NAME("14019449301"),
-	  XE_RTP_RULES(MEDIA_VERSION(2000), ENGINE_CLASS(VIDEO_DECODE)),
-	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F08(0), CG3DDISHRS_CLKGATE_DIS)),
-	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
-	},
 
-	/* Xe2_HPM */
+	/* Xe2_HPG */
 
-	{ XE_RTP_NAME("16021867713"),
-	  XE_RTP_RULES(MEDIA_VERSION(1301),
-		       ENGINE_CLASS(VIDEO_DECODE)),
-	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F1C(0), MFXPIPE_CLKGATE_DIS)),
-	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
-	},
-	{ XE_RTP_NAME("14020316580"),
-	  XE_RTP_RULES(MEDIA_VERSION(1301)),
-	  XE_RTP_ACTIONS(CLR(POWERGATE_ENABLE,
-			     VDN_HCP_POWERGATE_ENABLE(0) |
-			     VDN_MFXVDENC_POWERGATE_ENABLE(0) |
-			     VDN_HCP_POWERGATE_ENABLE(2) |
-			     VDN_MFXVDENC_POWERGATE_ENABLE(2))),
-	},
-	{ XE_RTP_NAME("14019449301"),
-	  XE_RTP_RULES(MEDIA_VERSION(1301), ENGINE_CLASS(VIDEO_DECODE)),
-	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F08(0), CG3DDISHRS_CLKGATE_DIS)),
-	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
+	{ XE_RTP_NAME("16025250150"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(2001)),
+	  XE_RTP_ACTIONS(FIELD_SET(LSN_VC_REG2,
+				   LSN_LNI_WGT_MASK | LSN_LNE_WGT_MASK |
+				   LSN_DIM_X_WGT_MASK | LSN_DIM_Y_WGT_MASK |
+				   LSN_DIM_Z_WGT_MASK,
+				   LSN_LNI_WGT(1) | LSN_LNE_WGT(1) |
+				   LSN_DIM_X_WGT(1) | LSN_DIM_Y_WGT(1) |
+				   LSN_DIM_Z_WGT(1)),
+			SET(LSC_CHICKEN_BIT_0_UDW, L3_128B_256B_WRT_DIS))
 	},
 
 	/* Xe3_LPG */
@@ -261,14 +273,8 @@ static const struct xe_rtp_entry_sr gt_was[] = {
 
 	/* Xe3_LPM */
 
-	{ XE_RTP_NAME("16021867713"),
-	  XE_RTP_RULES(MEDIA_VERSION(3000),
-		       ENGINE_CLASS(VIDEO_DECODE)),
-	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F1C(0), MFXPIPE_CLKGATE_DIS)),
-	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
-	},
 	{ XE_RTP_NAME("16021865536"),
-	  XE_RTP_RULES(MEDIA_VERSION(3000),
+	  XE_RTP_RULES(MEDIA_VERSION_RANGE(3000, 3002),
 		       ENGINE_CLASS(VIDEO_DECODE)),
 	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F10(0), IECPUNIT_CLKGATE_DIS)),
 	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
@@ -280,10 +286,31 @@ static const struct xe_rtp_entry_sr gt_was[] = {
 	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
 	},
 
-	{}
-};
+	/* Xe3P_LPG */
 
-static const struct xe_rtp_entry_sr engine_was[] = {
+	{ XE_RTP_NAME("14025160223"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(3510), GRAPHICS_STEP(A0, B0)),
+	  XE_RTP_ACTIONS(SET(MMIOATSREQLIMIT_GAM_WALK_3D,
+			     DIS_ATS_WRONLY_PG))
+	},
+	{ XE_RTP_NAME("14026144927, 16029437861"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(3510), GRAPHICS_STEP(A0, B0)),
+	  XE_RTP_ACTIONS(SET(L3SQCREG2, L3_SQ_DISABLE_COAMA_2WAY_COH |
+			     L3_SQ_DISABLE_COAMA))
+	},
+	{ XE_RTP_NAME("14025635424"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(3510), GRAPHICS_STEP(A0, B0)),
+	  XE_RTP_ACTIONS(SET(GAMSTLB_CTRL2, STLB_SINGLE_BANK_MODE))
+	},
+	{ XE_RTP_NAME("16028005424"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(3510), GRAPHICS_STEP(A0, B0)),
+	  XE_RTP_ACTIONS(SET(GUC_INTR_CHICKEN, DISABLE_SIGNALING_ENGINES))
+	},
+);
+
+static const struct xe_rtp_table_sr engine_was = XE_RTP_TABLE_SR(
+	/* Workarounds applying over a range of IPs */
+
 	{ XE_RTP_NAME("22010931296, 18011464164, 14010919138"),
 	  XE_RTP_RULES(GRAPHICS_VERSION(1200), ENGINE_CLASS(RENDER)),
 	  XE_RTP_ACTIONS(SET(FF_THREAD_MODE(RENDER_RING_BASE),
@@ -318,6 +345,54 @@ static const struct xe_rtp_entry_sr engine_was[] = {
 	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1200, 1250), ENGINE_CLASS(RENDER)),
 	  XE_RTP_ACTIONS(SET(FF_SLICE_CS_CHICKEN1(RENDER_RING_BASE),
 			     FFSC_PERCTX_PREEMPT_CTRL))
+	},
+	{ XE_RTP_NAME("18032247524"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0, SEQUENTIAL_ACCESS_UPGRADE_DISABLE))
+	},
+	{ XE_RTP_NAME("16018712365"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0_UDW, XE2_ALLOC_DPA_STARVE_FIX_DIS))
+	},
+	{ XE_RTP_NAME("14020338487"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(ROW_CHICKEN3, XE2_EUPEND_CHK_FLUSH_DIS))
+	},
+	{ XE_RTP_NAME("14018471104"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0_UDW, ENABLE_SMP_LD_RENDER_SURFACE_CONTROL))
+	},
+	/*
+	 * Although this workaround isn't required for the RCS, disabling these
+	 * reports has no impact for our driver or the GuC, so we go ahead and
+	 * apply this to all engines for simplicity.
+	 */
+	{ XE_RTP_NAME("16021639441"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004), OR,
+		       MEDIA_VERSION_RANGE(1301, 2000)),
+	  XE_RTP_ACTIONS(SET(CSFE_CHICKEN1(0),
+			     GHWSP_CSB_REPORT_DIS |
+			     PPHWSP_CSB_AND_TIMESTAMP_REPORT_DIS,
+			     XE_RTP_ACTION_FLAG(ENGINE_BASE)))
+	},
+	{ XE_RTP_NAME("14021402888"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 3005), ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(HALF_SLICE_CHICKEN7, CLEAR_OPTIMIZATION_DISABLE))
+	},
+	{ XE_RTP_NAME("13012615864"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 3005),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(TDL_TSL_CHICKEN, RES_CHK_SPR_DIS))
+	},
+	{ XE_RTP_NAME("18041344222"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 3000),
+		       FUNC(xe_rtp_match_first_render_or_compute),
+		       FUNC(xe_rtp_match_gt_has_discontiguous_dss_groups)),
+	  XE_RTP_ACTIONS(SET(TDL_CHICKEN, EUSTALL_PERF_SAMPLING_DISABLE))
 	},
 
 	/* TGL */
@@ -434,11 +509,6 @@ static const struct xe_rtp_entry_sr engine_was[] = {
 		       ENGINE_CLASS(COMPUTE)),
 	  XE_RTP_ACTIONS(SET(RING_HWSTAM(RENDER_RING_BASE), ~0))
 	},
-	{ XE_RTP_NAME("14014999345"),
-	  XE_RTP_RULES(PLATFORM(PVC), ENGINE_CLASS(COMPUTE),
-		       GRAPHICS_STEP(B0, C0)),
-	  XE_RTP_ACTIONS(SET(CACHE_MODE_SS, DISABLE_ECC))
-	},
 
 	/* Xe_LPG */
 
@@ -461,147 +531,36 @@ static const struct xe_rtp_entry_sr engine_was[] = {
 
 	/* Xe2_LPG */
 
-	{ XE_RTP_NAME("18032247524"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004),
-		       FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0, SEQUENTIAL_ACCESS_UPGRADE_DISABLE))
-	},
-	{ XE_RTP_NAME("16018712365"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0_UDW, XE2_ALLOC_DPA_STARVE_FIX_DIS))
-	},
-	{ XE_RTP_NAME("14018957109"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), GRAPHICS_STEP(A0, B0),
-		       FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(HALF_SLICE_CHICKEN5, DISABLE_SAMPLE_G_PERFORMANCE))
-	},
-	{ XE_RTP_NAME("14020338487"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(ROW_CHICKEN3, XE2_EUPEND_CHK_FLUSH_DIS))
-	},
 	{ XE_RTP_NAME("18034896535, 16021540221"), /* 16021540221: GRAPHICS_STEP(A0, B0) */
 	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004),
 		       FUNC(xe_rtp_match_first_render_or_compute)),
 	  XE_RTP_ACTIONS(SET(ROW_CHICKEN4, DISABLE_TDL_PUSH))
 	},
-	{ XE_RTP_NAME("14019322943"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), GRAPHICS_STEP(A0, B0),
-		       FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0, TGM_WRITE_EOM_FORCE))
-	},
-	{ XE_RTP_NAME("14018471104"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0_UDW, ENABLE_SMP_LD_RENDER_SURFACE_CONTROL))
-	},
-	{ XE_RTP_NAME("16018737384"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(ROW_CHICKEN, EARLY_EOT_DIS))
-	},
-	/*
-	 * These two workarounds are the same, just applying to different
-	 * engines.  Although Wa_18032095049 (for the RCS) isn't required on
-	 * all steppings, disabling these reports has no impact for our
-	 * driver or the GuC, so we go ahead and treat it the same as
-	 * Wa_16021639441 which does apply to all steppings.
-	 */
-	{ XE_RTP_NAME("18032095049, 16021639441"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004)),
-	  XE_RTP_ACTIONS(SET(CSFE_CHICKEN1(0),
-			     GHWSP_CSB_REPORT_DIS |
-			     PPHWSP_CSB_AND_TIMESTAMP_REPORT_DIS,
-			     XE_RTP_ACTION_FLAG(ENGINE_BASE)))
-	},
 	{ XE_RTP_NAME("16018610683"),
 	  XE_RTP_RULES(GRAPHICS_VERSION(2004), FUNC(xe_rtp_match_first_render_or_compute)),
 	  XE_RTP_ACTIONS(SET(TDL_TSL_CHICKEN, SLM_WMTP_RESTORE))
 	},
-	{ XE_RTP_NAME("14021402888"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(HALF_SLICE_CHICKEN7, CLEAR_OPTIMIZATION_DISABLE))
-	},
 
 	/* Xe2_HPG */
 
-	{ XE_RTP_NAME("16018712365"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0_UDW, XE2_ALLOC_DPA_STARVE_FIX_DIS))
-	},
 	{ XE_RTP_NAME("16018737384"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2999),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
 	  XE_RTP_ACTIONS(SET(ROW_CHICKEN, EARLY_EOT_DIS))
-	},
-	{ XE_RTP_NAME("14019988906"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(XEHP_PSS_CHICKEN, FLSH_IGNORES_PSD))
-	},
-	{ XE_RTP_NAME("14019877138"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(XEHP_PSS_CHICKEN, FD_END_COLLECT))
-	},
-	{ XE_RTP_NAME("14020338487"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(ROW_CHICKEN3, XE2_EUPEND_CHK_FLUSH_DIS))
-	},
-	{ XE_RTP_NAME("18032247524"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0, SEQUENTIAL_ACCESS_UPGRADE_DISABLE))
-	},
-	{ XE_RTP_NAME("14018471104"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0_UDW, ENABLE_SMP_LD_RENDER_SURFACE_CONTROL))
-	},
-	/*
-	 * Although this workaround isn't required for the RCS, disabling these
-	 * reports has no impact for our driver or the GuC, so we go ahead and
-	 * apply this to all engines for simplicity.
-	 */
-	{ XE_RTP_NAME("16021639441"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001)),
-	  XE_RTP_ACTIONS(SET(CSFE_CHICKEN1(0),
-			     GHWSP_CSB_REPORT_DIS |
-			     PPHWSP_CSB_AND_TIMESTAMP_REPORT_DIS,
-			     XE_RTP_ACTION_FLAG(ENGINE_BASE)))
 	},
 	{ XE_RTP_NAME("14019811474"),
 	  XE_RTP_RULES(GRAPHICS_VERSION(2001),
 		       FUNC(xe_rtp_match_first_render_or_compute)),
 	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0, WR_REQ_CHAINING_DIS))
 	},
-	{ XE_RTP_NAME("14021402888"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(HALF_SLICE_CHICKEN7, CLEAR_OPTIMIZATION_DISABLE))
-	},
-	{ XE_RTP_NAME("14021821874"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), FUNC(xe_rtp_match_first_render_or_compute)),
+	{ XE_RTP_NAME("14021821874, 14022954250"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2002),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
 	  XE_RTP_ACTIONS(SET(TDL_TSL_CHICKEN, STK_ID_RESTRICT))
-	},
-
-	/* Xe2_LPM */
-
-	{ XE_RTP_NAME("16021639441"),
-	  XE_RTP_RULES(MEDIA_VERSION(2000)),
-	  XE_RTP_ACTIONS(SET(CSFE_CHICKEN1(0),
-			     GHWSP_CSB_REPORT_DIS |
-			     PPHWSP_CSB_AND_TIMESTAMP_REPORT_DIS,
-			     XE_RTP_ACTION_FLAG(ENGINE_BASE)))
-	},
-
-	/* Xe2_HPM */
-
-	{ XE_RTP_NAME("16021639441"),
-	  XE_RTP_RULES(MEDIA_VERSION(1301)),
-	  XE_RTP_ACTIONS(SET(CSFE_CHICKEN1(0),
-			     GHWSP_CSB_REPORT_DIS |
-			     PPHWSP_CSB_AND_TIMESTAMP_REPORT_DIS,
-			     XE_RTP_ACTION_FLAG(ENGINE_BASE)))
 	},
 
 	/* Xe3_LPG */
 
-	{ XE_RTP_NAME("14021402888"),
-	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(3000, 3001), FUNC(xe_rtp_match_first_render_or_compute)),
-	  XE_RTP_ACTIONS(SET(HALF_SLICE_CHICKEN7, CLEAR_OPTIMIZATION_DISABLE))
-	},
 	{ XE_RTP_NAME("18034896535"),
 	  XE_RTP_RULES(GRAPHICS_VERSION(3000), GRAPHICS_STEP(A0, B0),
 		       FUNC(xe_rtp_match_first_render_or_compute)),
@@ -613,11 +572,65 @@ static const struct xe_rtp_entry_sr engine_was[] = {
 	  XE_RTP_ACTIONS(FIELD_SET(SAMPLER_MODE, SMP_WAIT_FETCH_MERGING_COUNTER,
 				   SMP_FORCE_128B_OVERFETCH))
 	},
+	{ XE_RTP_NAME("14023061436"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(3000, 3005),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(TDL_CHICKEN, QID_WAIT_FOR_THREAD_NOT_RUN_DISABLE))
+	},
+	{ XE_RTP_NAME("16023105232"),
+	  XE_RTP_RULES(MEDIA_VERSION_RANGE(1301, 3000), OR,
+		       GRAPHICS_VERSION_RANGE(2001, 3001)),
+	  XE_RTP_ACTIONS(SET(RING_PSMI_CTL(0), RC_SEMA_IDLE_MSG_DISABLE,
+			     XE_RTP_ACTION_FLAG(ENGINE_BASE)))
+	},
 
-	{}
-};
+	/* Xe3p_LPG*/
 
-static const struct xe_rtp_entry_sr lrc_was[] = {
+	{ XE_RTP_NAME("22021149932"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(3510), GRAPHICS_STEP(A0, B0),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0_UDW, SAMPLER_LD_LSC_DISABLE))
+	},
+	{ XE_RTP_NAME("14025676848"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(3510), GRAPHICS_STEP(A0, B0),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(LSC_CHICKEN_BIT_0_UDW, LSCFE_SAME_ADDRESS_ATOMICS_COALESCING_DISABLE))
+	},
+	{ XE_RTP_NAME("16028951944"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(3510), GRAPHICS_STEP(A0, B0),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(ROW_CHICKEN5, CPSS_AWARE_DIS))
+	},
+
+	/* Xe3p_XPC */
+
+	{ XE_RTP_NAME("14026999295"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(3511),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(ROW_CHICKEN3, DIS_EU_GRF_POISON_TO_LSC))
+	},
+	{ XE_RTP_NAME("18044193044"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(3510), GRAPHICS_STEP(A0, B0),
+		       FUNC(xe_rtp_match_first_render_or_compute)),
+	  XE_RTP_ACTIONS(SET(TDL_CHICKEN, BIT_APQ_OPT_DIS))
+	},
+);
+
+static const struct xe_rtp_table_sr lrc_was = XE_RTP_TABLE_SR(
+	{ XE_RTP_NAME("16011163337"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1200, 1210), ENGINE_CLASS(RENDER)),
+	  /* read verification is ignored due to 1608008084. */
+	  XE_RTP_ACTIONS(FIELD_SET_NO_READ_MASK(FF_MODE2,
+						FF_MODE2_GS_TIMER_MASK,
+						FF_MODE2_GS_TIMER_224))
+	},
+	{ XE_RTP_NAME("1604555607"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1200, 1210), ENGINE_CLASS(RENDER)),
+	  /* read verification is ignored due to 1608008084. */
+	  XE_RTP_ACTIONS(FIELD_SET_NO_READ_MASK(FF_MODE2,
+						FF_MODE2_TDS_TIMER_MASK,
+						FF_MODE2_TDS_TIMER_128))
+	},
 	{ XE_RTP_NAME("1409342910, 14010698770, 14010443199, 1408979724, 1409178076, 1409207793, 1409217633, 1409252684, 1409347922, 1409142259"),
 	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1200, 1210)),
 	  XE_RTP_ACTIONS(SET(COMMON_SLICE_CHICKEN3,
@@ -636,6 +649,30 @@ static const struct xe_rtp_entry_sr lrc_was[] = {
 	{ XE_RTP_NAME("1606376872"),
 	  XE_RTP_RULES(GRAPHICS_VERSION(1200)),
 	  XE_RTP_ACTIONS(SET(COMMON_SLICE_CHICKEN4, DISABLE_TDC_LOAD_BALANCING_CALC))
+	},
+	{ XE_RTP_NAME("14019877138"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1255, 2004), ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(XEHP_PSS_CHICKEN, FD_END_COLLECT))
+	},
+	{ XE_RTP_NAME("14019386621"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004), ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(VF_SCRATCHPAD, XE2_VFG_TED_CREDIT_INTERFACE_DISABLE))
+	},
+	{ XE_RTP_NAME("14019988906"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004), ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(XEHP_PSS_CHICKEN, FLSH_IGNORES_PSD))
+	},
+	{ XE_RTP_NAME("18033852989"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004), ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(XEHP_COMMON_SLICE_CHICKEN1, DISABLE_BOTTOM_CLIP_RECTANGLE_TEST))
+	},
+	{ XE_RTP_NAME("15016589081"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004), ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(CHICKEN_RASTER_1, DIS_CLIP_NEGATIVE_BOUNDING_BOX))
+	},
+	{ XE_RTP_NAME("14026781792"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(3000, 3510), ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(FF_MODE, DIS_TE_PATCH_CTRL))
 	},
 
 	/* DG1 */
@@ -673,10 +710,6 @@ static const struct xe_rtp_entry_sr lrc_was[] = {
 	  XE_RTP_RULES(PLATFORM(DG2)),
 	  XE_RTP_ACTIONS(SET(CACHE_MODE_1, MSAA_OPTIMIZATION_REDUC_DISABLE))
 	},
-	{ XE_RTP_NAME("14019877138"),
-	  XE_RTP_RULES(PLATFORM(DG2)),
-	  XE_RTP_ACTIONS(SET(XEHP_PSS_CHICKEN, FD_END_COLLECT))
-	},
 
 	/* PVC */
 
@@ -694,50 +727,9 @@ static const struct xe_rtp_entry_sr lrc_was[] = {
 	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1270, 1274)),
 	  XE_RTP_ACTIONS(SET(CACHE_MODE_1, MSAA_OPTIMIZATION_REDUC_DISABLE))
 	},
-	{ XE_RTP_NAME("14019877138"),
-	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1270, 1274), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(XEHP_PSS_CHICKEN, FD_END_COLLECT))
-	},
 
 	/* Xe2_LPG */
 
-	{ XE_RTP_NAME("16020518922"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), GRAPHICS_STEP(A0, B0),
-		       ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(FF_MODE,
-			     DIS_TE_AUTOSTRIP |
-			     DIS_MESH_PARTIAL_AUTOSTRIP |
-			     DIS_MESH_AUTOSTRIP),
-			 SET(VFLSKPD,
-			     DIS_PARTIAL_AUTOSTRIP |
-			     DIS_AUTOSTRIP))
-	},
-	{ XE_RTP_NAME("14019386621"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(VF_SCRATCHPAD, XE2_VFG_TED_CREDIT_INTERFACE_DISABLE))
-	},
-	{ XE_RTP_NAME("14019877138"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(XEHP_PSS_CHICKEN, FD_END_COLLECT))
-	},
-	{ XE_RTP_NAME("14020013138"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), GRAPHICS_STEP(A0, B0),
-		       ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(WM_CHICKEN3, HIZ_PLANE_COMPRESSION_DIS))
-	},
-	{ XE_RTP_NAME("14019988906"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(XEHP_PSS_CHICKEN, FLSH_IGNORES_PSD))
-	},
-	{ XE_RTP_NAME("16020183090"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), GRAPHICS_STEP(A0, B0),
-		       ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(INSTPM(RENDER_RING_BASE), ENABLE_SEMAPHORE_POLL_BIT))
-	},
-	{ XE_RTP_NAME("18033852989"),
-	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2004), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(COMMON_SLICE_CHICKEN1, DISABLE_BOTTOM_CLIP_RECTANGLE_TEST))
-	},
 	{ XE_RTP_NAME("14021567978"),
 	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, XE_RTP_END_VERSION_UNDEFINED),
 		       ENGINE_CLASS(RENDER)),
@@ -757,20 +749,9 @@ static const struct xe_rtp_entry_sr lrc_was[] = {
 			     DIS_PARTIAL_AUTOSTRIP |
 			     DIS_AUTOSTRIP))
 	},
-	{ XE_RTP_NAME("15016589081"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2004), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(CHICKEN_RASTER_1, DIS_CLIP_NEGATIVE_BOUNDING_BOX))
-	},
 
 	/* Xe2_HPG */
-	{ XE_RTP_NAME("15010599737"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(CHICKEN_RASTER_1, DIS_SF_ROUND_NEAREST_EVEN))
-	},
-	{ XE_RTP_NAME("14019386621"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(VF_SCRATCHPAD, XE2_VFG_TED_CREDIT_INTERFACE_DISABLE))
-	},
+
 	{ XE_RTP_NAME("14020756599"),
 	  XE_RTP_RULES(GRAPHICS_VERSION(2001), ENGINE_CLASS(RENDER)),
 	  XE_RTP_ACTIONS(SET(WM_CHICKEN3, HIZ_PLANE_COMPRESSION_DIS))
@@ -784,9 +765,9 @@ static const struct xe_rtp_entry_sr lrc_was[] = {
 			     DIS_PARTIAL_AUTOSTRIP |
 			     DIS_AUTOSTRIP))
 	},
-	{ XE_RTP_NAME("15016589081"),
-	  XE_RTP_RULES(GRAPHICS_VERSION(2001), ENGINE_CLASS(RENDER)),
-	  XE_RTP_ACTIONS(SET(CHICKEN_RASTER_1, DIS_CLIP_NEGATIVE_BOUNDING_BOX))
+	{ XE_RTP_NAME("22021007897"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, 2002), ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(XEHP_COMMON_SLICE_CHICKEN4, SBE_PUSH_CONSTANT_BEHIND_FIX_ENABLE))
 	},
 
 	/* Xe3_LPG */
@@ -800,34 +781,78 @@ static const struct xe_rtp_entry_sr lrc_was[] = {
 			     DIS_PARTIAL_AUTOSTRIP |
 			     DIS_AUTOSTRIP))
 	},
+	{ XE_RTP_NAME("22021007897"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(3000, 3005), ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(XEHP_COMMON_SLICE_CHICKEN4, SBE_PUSH_CONSTANT_BEHIND_FIX_ENABLE))
+	},
+	{ XE_RTP_NAME("14024681466"),
+	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(3000, 3005), ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(XEHP_SLICE_COMMON_ECO_CHICKEN1, FAST_CLEAR_VALIGN_FIX))
+	},
+	{ XE_RTP_NAME("15016589081"),
+	  XE_RTP_RULES(GRAPHICS_VERSION(3000), GRAPHICS_STEP(A0, B0),
+		       ENGINE_CLASS(RENDER)),
+	  XE_RTP_ACTIONS(SET(CHICKEN_RASTER_1, DIS_CLIP_NEGATIVE_BOUNDING_BOX))
+	},
+);
 
-	{}
-};
-
-static __maybe_unused const struct xe_rtp_entry oob_was[] = {
+static const struct xe_rtp_entry oob_was_entries[] = {
 #include <generated/xe_wa_oob.c>
-	{}
 };
 
-static_assert(ARRAY_SIZE(oob_was) - 1 == _XE_WA_OOB_COUNT);
+static_assert(ARRAY_SIZE(oob_was_entries)  == _XE_WA_OOB_COUNT);
+
+static __maybe_unused const struct xe_rtp_table oob_was = {
+	.entries = oob_was_entries,
+	.n_entries = ARRAY_SIZE(oob_was_entries),
+};
+
+static const struct xe_rtp_entry device_oob_was_entries[] = {
+#include <generated/xe_device_wa_oob.c>
+};
+
+static_assert(ARRAY_SIZE(device_oob_was_entries) == _XE_DEVICE_WA_OOB_COUNT);
+
+static __maybe_unused const struct xe_rtp_table device_oob_was = {
+	.entries = device_oob_was_entries,
+	.n_entries = ARRAY_SIZE(device_oob_was_entries),
+};
 
 __diag_pop();
 
 /**
- * xe_wa_process_oob - process OOB workaround table
+ * xe_wa_process_device_oob - process OOB workaround table
+ * @xe: device instance to process workarounds for
+ *
+ * process OOB workaround table for this device, marking in @xe the
+ * workarounds that are active.
+ */
+
+void xe_wa_process_device_oob(struct xe_device *xe)
+{
+	struct xe_rtp_process_ctx ctx = XE_RTP_PROCESS_CTX_INITIALIZER(xe);
+
+	xe_rtp_process_ctx_enable_active_tracking(&ctx, xe->wa_active.oob, device_oob_was.n_entries);
+
+	xe->wa_active.oob_initialized = true;
+	xe_rtp_process(&ctx, &device_oob_was);
+}
+
+/**
+ * xe_wa_process_gt_oob - process GT OOB workaround table
  * @gt: GT instance to process workarounds for
  *
  * Process OOB workaround table for this platform, marking in @gt the
  * workarounds that are active.
  */
-void xe_wa_process_oob(struct xe_gt *gt)
+void xe_wa_process_gt_oob(struct xe_gt *gt)
 {
 	struct xe_rtp_process_ctx ctx = XE_RTP_PROCESS_CTX_INITIALIZER(gt);
 
 	xe_rtp_process_ctx_enable_active_tracking(&ctx, gt->wa_active.oob,
-						  ARRAY_SIZE(oob_was));
+						  oob_was.n_entries);
 	gt->wa_active.oob_initialized = true;
-	xe_rtp_process(&ctx, oob_was);
+	xe_rtp_process(&ctx, &oob_was);
 }
 
 /**
@@ -842,8 +867,8 @@ void xe_wa_process_gt(struct xe_gt *gt)
 	struct xe_rtp_process_ctx ctx = XE_RTP_PROCESS_CTX_INITIALIZER(gt);
 
 	xe_rtp_process_ctx_enable_active_tracking(&ctx, gt->wa_active.gt,
-						  ARRAY_SIZE(gt_was));
-	xe_rtp_process_to_sr(&ctx, gt_was, &gt->reg_sr);
+						  gt_was.n_entries);
+	xe_rtp_process_to_sr(&ctx, &gt_was, &gt->reg_sr, false);
 }
 EXPORT_SYMBOL_IF_KUNIT(xe_wa_process_gt);
 
@@ -860,8 +885,8 @@ void xe_wa_process_engine(struct xe_hw_engine *hwe)
 	struct xe_rtp_process_ctx ctx = XE_RTP_PROCESS_CTX_INITIALIZER(hwe);
 
 	xe_rtp_process_ctx_enable_active_tracking(&ctx, hwe->gt->wa_active.engine,
-						  ARRAY_SIZE(engine_was));
-	xe_rtp_process_to_sr(&ctx, engine_was, &hwe->reg_sr);
+						  engine_was.n_entries);
+	xe_rtp_process_to_sr(&ctx, &engine_was, &hwe->reg_sr, false);
 }
 
 /**
@@ -877,26 +902,48 @@ void xe_wa_process_lrc(struct xe_hw_engine *hwe)
 	struct xe_rtp_process_ctx ctx = XE_RTP_PROCESS_CTX_INITIALIZER(hwe);
 
 	xe_rtp_process_ctx_enable_active_tracking(&ctx, hwe->gt->wa_active.lrc,
-						  ARRAY_SIZE(lrc_was));
-	xe_rtp_process_to_sr(&ctx, lrc_was, &hwe->reg_lrc);
+						  lrc_was.n_entries);
+	xe_rtp_process_to_sr(&ctx, &lrc_was, &hwe->reg_lrc, true);
 }
 
 /**
- * xe_wa_init - initialize gt with workaround bookkeeping
+ * xe_wa_device_init - initialize device with workaround oob bookkeeping
+ * @xe: Xe device instance to initialize
+ *
+ * Returns 0 for success, negative with error code otherwise
+ */
+int xe_wa_device_init(struct xe_device *xe)
+{
+	unsigned long *p;
+
+	p = drmm_kzalloc(&xe->drm,
+			 sizeof(*p) * BITS_TO_LONGS(device_oob_was.n_entries),
+			 GFP_KERNEL);
+
+	if (!p)
+		return -ENOMEM;
+
+	xe->wa_active.oob = p;
+
+	return 0;
+}
+
+/**
+ * xe_wa_gt_init - initialize gt with workaround bookkeeping
  * @gt: GT instance to initialize
  *
  * Returns 0 for success, negative error code otherwise.
  */
-int xe_wa_init(struct xe_gt *gt)
+int xe_wa_gt_init(struct xe_gt *gt)
 {
 	struct xe_device *xe = gt_to_xe(gt);
 	size_t n_oob, n_lrc, n_engine, n_gt, total;
 	unsigned long *p;
 
-	n_gt = BITS_TO_LONGS(ARRAY_SIZE(gt_was));
-	n_engine = BITS_TO_LONGS(ARRAY_SIZE(engine_was));
-	n_lrc = BITS_TO_LONGS(ARRAY_SIZE(lrc_was));
-	n_oob = BITS_TO_LONGS(ARRAY_SIZE(oob_was));
+	n_gt = BITS_TO_LONGS(gt_was.n_entries);
+	n_engine = BITS_TO_LONGS(engine_was.n_entries);
+	n_lrc = BITS_TO_LONGS(lrc_was.n_entries);
+	n_oob = BITS_TO_LONGS(oob_was.n_entries);
 	total = n_gt + n_engine + n_lrc + n_oob;
 
 	p = drmm_kzalloc(&xe->drm, sizeof(*p) * total, GFP_KERNEL);
@@ -913,28 +960,49 @@ int xe_wa_init(struct xe_gt *gt)
 
 	return 0;
 }
-ALLOW_ERROR_INJECTION(xe_wa_init, ERRNO); /* See xe_pci_probe() */
+ALLOW_ERROR_INJECTION(xe_wa_gt_init, ERRNO); /* See xe_pci_probe() */
 
-void xe_wa_dump(struct xe_gt *gt, struct drm_printer *p)
+void xe_wa_device_dump(struct xe_device *xe, struct drm_printer *p)
+{
+	size_t idx;
+
+	drm_printf(p, "Device OOB Workarounds\n");
+	for_each_set_bit(idx, xe->wa_active.oob, device_oob_was.n_entries)
+		if (device_oob_was.entries[idx].name)
+			drm_printf_indent(p, 1, "%s\n", device_oob_was.entries[idx].name);
+}
+
+/**
+ * xe_wa_gt_dump() - Dump GT workarounds into a drm printer.
+ * @gt: the &xe_gt
+ * @p: the &drm_printer
+ *
+ * Return: always 0.
+ */
+int xe_wa_gt_dump(struct xe_gt *gt, struct drm_printer *p)
 {
 	size_t idx;
 
 	drm_printf(p, "GT Workarounds\n");
-	for_each_set_bit(idx, gt->wa_active.gt, ARRAY_SIZE(gt_was))
-		drm_printf_indent(p, 1, "%s\n", gt_was[idx].name);
+	for_each_set_bit(idx, gt->wa_active.gt, gt_was.n_entries)
+		drm_printf_indent(p, 1, "%s\n", gt_was.entries[idx].name);
 
-	drm_printf(p, "\nEngine Workarounds\n");
-	for_each_set_bit(idx, gt->wa_active.engine, ARRAY_SIZE(engine_was))
-		drm_printf_indent(p, 1, "%s\n", engine_was[idx].name);
+	drm_puts(p, "\n");
+	drm_printf(p, "Engine Workarounds\n");
+	for_each_set_bit(idx, gt->wa_active.engine, engine_was.n_entries)
+		drm_printf_indent(p, 1, "%s\n", engine_was.entries[idx].name);
 
-	drm_printf(p, "\nLRC Workarounds\n");
-	for_each_set_bit(idx, gt->wa_active.lrc, ARRAY_SIZE(lrc_was))
-		drm_printf_indent(p, 1, "%s\n", lrc_was[idx].name);
+	drm_puts(p, "\n");
+	drm_printf(p, "LRC Workarounds\n");
+	for_each_set_bit(idx, gt->wa_active.lrc, lrc_was.n_entries)
+		drm_printf_indent(p, 1, "%s\n", lrc_was.entries[idx].name);
 
-	drm_printf(p, "\nOOB Workarounds\n");
-	for_each_set_bit(idx, gt->wa_active.oob, ARRAY_SIZE(oob_was))
-		if (oob_was[idx].name)
-			drm_printf_indent(p, 1, "%s\n", oob_was[idx].name);
+	drm_puts(p, "\n");
+	drm_printf(p, "OOB Workarounds\n");
+	for_each_set_bit(idx, gt->wa_active.oob, oob_was.n_entries)
+		if (oob_was.entries[idx].name)
+			drm_printf_indent(p, 1, "%s\n", oob_was.entries[idx].name);
+	return 0;
 }
 
 /*
@@ -956,6 +1024,6 @@ void xe_wa_apply_tile_workarounds(struct xe_tile *tile)
 	if (IS_SRIOV_VF(tile->xe))
 		return;
 
-	if (XE_WA(tile->primary_gt, 22010954014))
+	if (XE_DEVICE_WA(tile->xe, 22010954014))
 		xe_mmio_rmw32(mmio, XEHP_CLOCK_GATE_DIS, 0, SGSI_SIDECLK_DIS);
 }

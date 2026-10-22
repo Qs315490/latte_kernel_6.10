@@ -81,7 +81,6 @@ struct cc2_data {
 	struct completion complete;
 	struct device *hwmon;
 	struct i2c_client *client;
-	struct mutex dev_access_lock; /* device access lock */
 	struct regulator *regulator;
 	const char *name;
 	int irq_ready;
@@ -558,8 +557,6 @@ static int cc2_read(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 {
 	struct cc2_data *data = dev_get_drvdata(dev);
 
-	guard(mutex)(&data->dev_access_lock);
-
 	switch (type) {
 	case hwmon_temp:
 		return cc2_measurement(data, type, val);
@@ -599,8 +596,6 @@ static int cc2_write(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 
 	if (val < 0 || val > CC2_RH_MAX)
 		return -EINVAL;
-
-	guard(mutex)(&data->dev_access_lock);
 
 	switch (attr) {
 	case hwmon_humidity_min:
@@ -708,8 +703,6 @@ static int cc2_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, data);
 
-	mutex_init(&data->dev_access_lock);
-
 	data->client = client;
 
 	data->regulator = devm_regulator_get_exclusive(dev, "vdd");
@@ -743,14 +736,14 @@ static void cc2_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id cc2_id[] = {
-	{ "cc2d23" },
-	{ "cc2d23s" },
-	{ "cc2d25" },
-	{ "cc2d25s" },
-	{ "cc2d33" },
-	{ "cc2d33s" },
-	{ "cc2d35" },
-	{ "cc2d35s" },
+	{ .name = "cc2d23" },
+	{ .name = "cc2d23s" },
+	{ .name = "cc2d25" },
+	{ .name = "cc2d25s" },
+	{ .name = "cc2d33" },
+	{ .name = "cc2d33s" },
+	{ .name = "cc2d35" },
+	{ .name = "cc2d35s" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cc2_id);

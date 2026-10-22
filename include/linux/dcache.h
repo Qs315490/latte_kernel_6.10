@@ -57,7 +57,8 @@ struct qstr {
 };
 
 #define QSTR_INIT(n,l) { { { .len = l } }, .name = n }
-#define QSTR(n) (struct qstr)QSTR_INIT(n, strlen(n))
+#define QSTR_LEN(n,l) (struct qstr)QSTR_INIT(n,l)
+#define QSTR(n) QSTR_LEN(n, strlen(n))
 
 extern const struct qstr empty_name;
 extern const struct qstr slash_name;
@@ -87,6 +88,7 @@ union shortname_store {
 
 #define d_lock	d_lockref.lock
 #define d_iname d_shortname.string
+struct completion_list;
 
 struct dentry {
 	/* RCU lookup touched fields */
@@ -94,7 +96,10 @@ struct dentry {
 	seqcount_spinlock_t d_seq;	/* per dentry seqlock */
 	struct hlist_bl_node d_hash;	/* lookup hash list */
 	struct dentry *d_parent;	/* parent directory */
-	struct qstr d_name;
+	union {
+	struct qstr __d_name;		/* for use ONLY in fs/dcache.c */
+	const struct qstr d_name;
+	};
 	struct inode *d_inode;		/* Where the name belongs to - NULL is
 					 * negative */
 	union shortname_store d_shortname;
@@ -111,20 +116,28 @@ struct dentry {
 					 * possible!
 					 */
 
-	union {
-		struct list_head d_lru;		/* LRU list */
-		wait_queue_head_t *d_wait;	/* in-lookup ones only */
-	};
+	struct list_head d_lru;		/* LRU list */
 	struct hlist_node d_sib;	/* child of parent list */
 	struct hlist_head d_children;	/* our children */
 	/*
-	 * d_alias and d_rcu can share memory
+	 * the following members can share memory - their uses are
+	 * mutually exclusive.
 	 */
 	union {
-		struct hlist_node d_alias;	/* inode alias list */
-		struct hlist_bl_node d_in_lookup_hash;	/* only for in-lookup ones */
+		/* positives: inode alias list */
+		struct hlist_node d_alias;
+		/* in-lookup ones (all negative, live): hash chain */
+		struct hlist_bl_node d_in_lookup_hash;
+		/* killed ones: (already negative) used to schedule freeing */
 	 	struct rcu_head d_rcu;
-	} d_u;
+		/*
+		 * live non-in-lookup negatives: used if shrink_dcache_tree()
+		 * races with eviction by another thread and needs to wait for
+		 * this dentry to get killed .  Remains NULL for almost all
+		 * negative dentries.
+		 */
+		struct completion_list *waiters;
+	};
 };
 
 /*
@@ -173,64 +186,61 @@ struct dentry_operations {
  */
 
 /* d_flags entries */
-#define DCACHE_OP_HASH			BIT(0)
-#define DCACHE_OP_COMPARE		BIT(1)
-#define DCACHE_OP_REVALIDATE		BIT(2)
-#define DCACHE_OP_DELETE		BIT(3)
-#define DCACHE_OP_PRUNE			BIT(4)
+enum dentry_flags {
+	DCACHE_OP_HASH			= BIT(0),
+	DCACHE_OP_COMPARE		= BIT(1),
+	DCACHE_OP_REVALIDATE		= BIT(2),
+	DCACHE_OP_DELETE		= BIT(3),
+	DCACHE_OP_PRUNE			= BIT(4),
+	/*
+	 * This dentry is possibly not currently connected to the dcache tree,
+	 * in which case its parent will either be itself, or will have this
+	 * flag as well.  nfsd will not use a dentry with this bit set, but will
+	 * first endeavour to clear the bit either by discovering that it is
+	 * connected, or by performing lookup operations.  Any filesystem which
+	 * supports nfsd_operations MUST have a lookup function which, if it
+	 * finds a directory inode with a DCACHE_DISCONNECTED dentry, will
+	 * d_move that dentry into place and return that dentry rather than the
+	 * passed one, typically using d_splice_alias.
+	 */
+	DCACHE_DISCONNECTED		= BIT(5),
+	DCACHE_REFERENCED		= BIT(6),	/* Recently used, don't discard. */
+	DCACHE_DONTCACHE		= BIT(7),	/* Purge from memory on final dput() */
+	DCACHE_CANT_MOUNT		= BIT(8),
+	DCACHE_LOOKUP_WAITERS		= BIT(9),	/* A thread is waiting for
+							 * PAR_LOOKUP to clear
+							 */
+	DCACHE_SHRINK_LIST		= BIT(10),
+	DCACHE_OP_WEAK_REVALIDATE	= BIT(11),
+	/*
+	 * this dentry has been "silly renamed" and has to be deleted on the
+	 * last dput()
+	 */
+	DCACHE_NFSFS_RENAMED		= BIT(12),
+	DCACHE_FSNOTIFY_PARENT_WATCHED	= BIT(13),	/* Parent inode is watched by some fsnotify listener */
+	DCACHE_DENTRY_KILLED		= BIT(14),
+	DCACHE_MOUNTED			= BIT(15),	/* is a mountpoint */
+	DCACHE_NEED_AUTOMOUNT		= BIT(16),	/* handle automount on this dir */
+	DCACHE_MANAGE_TRANSIT		= BIT(17),	/* manage transit from this dirent */
+	DCACHE_LRU_LIST			= BIT(18),
+	DCACHE_ENTRY_TYPE		= (7 << 19),	/* bits 19..21 are for storing type: */
+	DCACHE_MISS_TYPE		= (0 << 19),	/* Negative dentry */
+	DCACHE_WHITEOUT_TYPE		= (1 << 19),	/* Whiteout dentry (stop pathwalk) */
+	DCACHE_DIRECTORY_TYPE		= (2 << 19),	/* Normal directory */
+	DCACHE_AUTODIR_TYPE		= (3 << 19),	/* Lookupless directory (presumed automount) */
+	DCACHE_REGULAR_TYPE		= (4 << 19),	/* Regular file type */
+	DCACHE_SPECIAL_TYPE		= (5 << 19),	/* Other file type */
+	DCACHE_SYMLINK_TYPE		= (6 << 19),	/* Symlink */
+	DCACHE_NOKEY_NAME		= BIT(22),	/* Encrypted name encoded without key */
+	DCACHE_OP_REAL			= BIT(23),
+	DCACHE_PAR_LOOKUP		= BIT(24),	/* being looked up (with parent locked shared) */
+	DCACHE_DENTRY_CURSOR		= BIT(25),
+	DCACHE_NORCU			= BIT(26),	/* No RCU delay for freeing */
+	DCACHE_PERSISTENT		= BIT(27)
+};
 
-#define	DCACHE_DISCONNECTED		BIT(5)
-     /* This dentry is possibly not currently connected to the dcache tree, in
-      * which case its parent will either be itself, or will have this flag as
-      * well.  nfsd will not use a dentry with this bit set, but will first
-      * endeavour to clear the bit either by discovering that it is connected,
-      * or by performing lookup operations.   Any filesystem which supports
-      * nfsd_operations MUST have a lookup function which, if it finds a
-      * directory inode with a DCACHE_DISCONNECTED dentry, will d_move that
-      * dentry into place and return that dentry rather than the passed one,
-      * typically using d_splice_alias. */
-
-#define DCACHE_REFERENCED		BIT(6) /* Recently used, don't discard. */
-
-#define DCACHE_DONTCACHE		BIT(7) /* Purge from memory on final dput() */
-
-#define DCACHE_CANT_MOUNT		BIT(8)
-#define DCACHE_GENOCIDE			BIT(9)
-#define DCACHE_SHRINK_LIST		BIT(10)
-
-#define DCACHE_OP_WEAK_REVALIDATE	BIT(11)
-
-#define DCACHE_NFSFS_RENAMED		BIT(12)
-     /* this dentry has been "silly renamed" and has to be deleted on the last
-      * dput() */
-#define DCACHE_FSNOTIFY_PARENT_WATCHED	BIT(14)
-     /* Parent inode is watched by some fsnotify listener */
-
-#define DCACHE_DENTRY_KILLED		BIT(15)
-
-#define DCACHE_MOUNTED			BIT(16) /* is a mountpoint */
-#define DCACHE_NEED_AUTOMOUNT		BIT(17) /* handle automount on this dir */
-#define DCACHE_MANAGE_TRANSIT		BIT(18) /* manage transit from this dirent */
 #define DCACHE_MANAGED_DENTRY \
 	(DCACHE_MOUNTED|DCACHE_NEED_AUTOMOUNT|DCACHE_MANAGE_TRANSIT)
-
-#define DCACHE_LRU_LIST			BIT(19)
-
-#define DCACHE_ENTRY_TYPE		(7 << 20) /* bits 20..22 are for storing type: */
-#define DCACHE_MISS_TYPE		(0 << 20) /* Negative dentry */
-#define DCACHE_WHITEOUT_TYPE		(1 << 20) /* Whiteout dentry (stop pathwalk) */
-#define DCACHE_DIRECTORY_TYPE		(2 << 20) /* Normal directory */
-#define DCACHE_AUTODIR_TYPE		(3 << 20) /* Lookupless directory (presumed automount) */
-#define DCACHE_REGULAR_TYPE		(4 << 20) /* Regular file type */
-#define DCACHE_SPECIAL_TYPE		(5 << 20) /* Other file type */
-#define DCACHE_SYMLINK_TYPE		(6 << 20) /* Symlink */
-
-#define DCACHE_NOKEY_NAME		BIT(25) /* Encrypted name encoded without key */
-#define DCACHE_OP_REAL			BIT(26)
-
-#define DCACHE_PAR_LOOKUP		BIT(28) /* being looked up (with parent locked shared) */
-#define DCACHE_DENTRY_CURSOR		BIT(29)
-#define DCACHE_NORCU			BIT(30) /* No RCU delay for freeing */
 
 extern seqlock_t rename_lock;
 
@@ -242,18 +252,18 @@ extern void d_instantiate_new(struct dentry *, struct inode *);
 extern void __d_drop(struct dentry *dentry);
 extern void d_drop(struct dentry *dentry);
 extern void d_delete(struct dentry *);
-extern void d_set_d_op(struct dentry *dentry, const struct dentry_operations *op);
 
 /* allocate/de-allocate */
 extern struct dentry * d_alloc(struct dentry *, const struct qstr *);
 extern struct dentry * d_alloc_anon(struct super_block *);
-extern struct dentry * d_alloc_parallel(struct dentry *, const struct qstr *,
-					wait_queue_head_t *);
+extern struct dentry * d_alloc_parallel(struct dentry *, const struct qstr *);
 extern struct dentry * d_splice_alias(struct inode *, struct dentry *);
+/* weird procfs mess; *NOT* exported */
+extern struct dentry * d_splice_alias_ops(struct inode *, struct dentry *,
+					  const struct dentry_operations *);
 extern struct dentry * d_add_ci(struct dentry *, struct inode *, struct qstr *);
 extern bool d_same_name(const struct dentry *dentry, const struct dentry *parent,
 			const struct qstr *name);
-extern struct dentry * d_exact_alias(struct dentry *, struct inode *);
 extern struct dentry *d_find_any_alias(struct inode *inode);
 extern struct dentry * d_obtain_alias(struct inode *);
 extern struct dentry * d_obtain_root(struct inode *);
@@ -265,10 +275,13 @@ extern void d_invalidate(struct dentry *);
 extern struct dentry * d_make_root(struct inode *);
 
 extern void d_mark_tmpfile(struct file *, struct inode *);
+int d_mark_tmpfile_name(struct file *file, const struct qstr *name);
 extern void d_tmpfile(struct file *, struct inode *);
 
 extern struct dentry *d_find_alias(struct inode *);
 extern void d_prune_aliases(struct inode *);
+extern bool __move_to_shrink_list(struct dentry *, struct list_head *);
+extern void shrink_dentry_list(struct list_head *);
 
 extern struct dentry *d_find_alias_rcu(struct inode *);
 
@@ -288,7 +301,6 @@ extern void d_exchange(struct dentry *, struct dentry *);
 extern struct dentry *d_ancestor(struct dentry *, struct dentry *);
 
 extern struct dentry *d_lookup(const struct dentry *, const struct qstr *);
-extern struct dentry *d_hash_and_lookup(struct dentry *, struct qstr *);
 
 static inline unsigned d_count(const struct dentry *dentry)
 {
@@ -351,6 +363,24 @@ static inline struct dentry *dget(struct dentry *dentry)
 	if (dentry)
 		lockref_get(&dentry->d_lockref);
 	return dentry;
+}
+
+/* dentry->d_inode->i_lock must be held by caller */
+static inline bool dget_alias_ilocked(struct dentry *dentry)
+{
+	if (likely(!(READ_ONCE(dentry->d_flags) & DCACHE_NORCU))) {
+		lockref_get(&dentry->d_lockref);
+		return true;
+	}
+	// NORCU dentries with zero refcount MUST NOT be grabbed
+	spin_lock(&dentry->d_lock);
+	if (dentry->d_lockref.count > 0) {
+		dget_dlock(dentry);
+		spin_unlock(&dentry->d_lock);
+		return true;
+	}
+	spin_unlock(&dentry->d_lock);
+	return false;
 }
 
 extern struct dentry *dget_parent(struct dentry *dentry);
@@ -520,12 +550,7 @@ static inline int simple_positive(const struct dentry *dentry)
 	return d_really_is_positive(dentry) && !d_unhashed(dentry);
 }
 
-extern int sysctl_vfs_cache_pressure;
-
-static inline unsigned long vfs_pressure_ratio(unsigned long val)
-{
-	return mult_frac(val, sysctl_vfs_cache_pressure, 100);
-}
+unsigned long vfs_pressure_ratio(unsigned long val);
 
 /**
  * d_inode - Get the actual inode of this dentry
@@ -615,5 +640,13 @@ static inline struct dentry *d_next_sibling(const struct dentry *dentry)
 {
 	return hlist_entry_safe(dentry->d_sib.next, struct dentry, d_sib);
 }
+
+void set_default_d_op(struct super_block *, const struct dentry_operations *);
+struct dentry *d_make_persistent(struct dentry *, struct inode *);
+void d_make_discardable(struct dentry *dentry);
+
+/* inode->i_lock must be held over that */
+#define for_each_alias(dentry, inode) \
+	hlist_for_each_entry(dentry, &(inode)->i_dentry, d_alias)
 
 #endif	/* __LINUX_DCACHE_H */

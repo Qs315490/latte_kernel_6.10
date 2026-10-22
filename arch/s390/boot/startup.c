@@ -6,9 +6,13 @@
 #include <asm/boot_data.h>
 #include <asm/extmem.h>
 #include <asm/sections.h>
+#include <asm/diag288.h>
 #include <asm/maccess.h>
+#include <asm/machine.h>
+#include <asm/sysinfo.h>
 #include <asm/cpu_mf.h>
 #include <asm/setup.h>
+#include <asm/timex.h>
 #include <asm/kasan.h>
 #include <asm/kexec.h>
 #include <asm/sclp.h>
@@ -16,6 +20,9 @@
 #include <asm/uv.h>
 #include <asm/abs_lowcore.h>
 #include <asm/physmem_info.h>
+#include <asm/stacktrace.h>
+#include <asm/asm-offsets.h>
+#include <asm/arch-stackprotector.h>
 #include "decompressor.h"
 #include "boot.h"
 #include "uv.h"
@@ -34,64 +41,121 @@ unsigned long __bootdata_preserved(max_mappable);
 unsigned long __bootdata_preserved(page_noexec_mask);
 unsigned long __bootdata_preserved(segment_noexec_mask);
 unsigned long __bootdata_preserved(region_noexec_mask);
-int __bootdata_preserved(relocate_lowcore);
+union tod_clock __bootdata_preserved(tod_clock_base);
+u64 __bootdata_preserved(clock_comparator_max) = -1UL;
 
 u64 __bootdata_preserved(stfle_fac_list[16]);
 struct oldmem_data __bootdata_preserved(oldmem_data);
 
-struct machine_info machine;
+static char sysinfo_page[PAGE_SIZE] __aligned(PAGE_SIZE);
 
-void error(char *x)
+static void detect_machine_type(void)
 {
-	boot_emerg("%s\n", x);
-	boot_emerg(" -- System halted\n");
-	disabled_wait();
+	struct sysinfo_3_2_2 *vmms = (struct sysinfo_3_2_2 *)&sysinfo_page;
+
+	/* Check current-configuration-level */
+	if (stsi(NULL, 0, 0, 0) <= 2) {
+		set_machine_feature(MFEATURE_LPAR);
+		return;
+	}
+	/* Get virtual-machine cpu information. */
+	if (stsi(vmms, 3, 2, 2) || !vmms->count)
+		return;
+	/* Detect known hypervisors */
+	if (!memcmp(vmms->vm[0].cpi, "\xd2\xe5\xd4", 3))
+		set_machine_feature(MFEATURE_KVM);
+	else if (!memcmp(vmms->vm[0].cpi, "\xa9\x61\xe5\xd4", 4))
+		set_machine_feature(MFEATURE_VM);
+}
+
+static void detect_diag288(void)
+{
+	/* "BEGIN" in EBCDIC character set */
+	static const char cmd[] = "\xc2\xc5\xc7\xc9\xd5";
+	unsigned long action, len;
+
+	action = machine_is_vm() ? (unsigned long)cmd : LPARWDT_RESTART;
+	len = machine_is_vm() ? sizeof(cmd) : 0;
+	if (__diag288(WDT_FUNC_INIT, MIN_INTERVAL, action, len))
+		return;
+	__diag288(WDT_FUNC_CANCEL, 0, 0, 0);
+	set_machine_feature(MFEATURE_DIAG288);
+}
+
+static void detect_diag9c(void)
+{
+	unsigned int cpu;
+	int rc = 1;
+
+	cpu = stap();
+	asm_inline volatile(
+		"	diag	%[cpu],%%r0,0x9c\n"
+		"0:	lhi	%[rc],0\n"
+		"1:\n"
+		EX_TABLE(0b, 1b)
+		: [rc] "+d" (rc)
+		: [cpu] "d" (cpu)
+		: "cc", "memory");
+	if (!rc)
+		set_machine_feature(MFEATURE_DIAG9C);
+}
+
+static void reset_tod_clock(void)
+{
+	union tod_clock clk;
+
+	if (store_tod_clock_ext_cc(&clk) == 0)
+		return;
+	/* TOD clock not running. Set the clock to Unix Epoch. */
+	if (set_tod_clock(TOD_UNIX_EPOCH) || store_tod_clock_ext_cc(&clk))
+		disabled_wait();
+	memset(&tod_clock_base, 0, sizeof(tod_clock_base));
+	tod_clock_base.tod = TOD_UNIX_EPOCH;
+	get_lowcore()->last_update_clock = TOD_UNIX_EPOCH;
 }
 
 static void detect_facilities(void)
 {
-	if (test_facility(8)) {
-		machine.has_edat1 = 1;
+	if (cpu_has_edat1())
 		local_ctl_set_bit(0, CR0_EDAT_BIT);
-	}
-	if (test_facility(78))
-		machine.has_edat2 = 1;
 	page_noexec_mask = -1UL;
 	segment_noexec_mask = -1UL;
 	region_noexec_mask = -1UL;
-	if (!test_facility(130)) {
+	if (!cpu_has_nx()) {
 		page_noexec_mask &= ~_PAGE_NOEXEC;
 		segment_noexec_mask &= ~_SEGMENT_ENTRY_NOEXEC;
 		region_noexec_mask &= ~_REGION_ENTRY_NOEXEC;
 	}
+	if (IS_ENABLED(CONFIG_PCI) && test_facility(153))
+		set_machine_feature(MFEATURE_PCI_MIO);
+	reset_tod_clock();
+	if (test_facility(139) && (tod_clock_base.tod >> 63)) {
+		/* Enable signed clock comparator comparisons */
+		set_machine_feature(MFEATURE_SCC);
+		clock_comparator_max = -1UL >> 1;
+		local_ctl_set_bit(0, CR0_CLOCK_COMPARATOR_SIGN_BIT);
+	}
+	if (test_facility(50) && test_facility(73)) {
+		set_machine_feature(MFEATURE_TX);
+		local_ctl_set_bit(0, CR0_TRANSACTIONAL_EXECUTION_BIT);
+	}
+	if (cpu_has_vx())
+		local_ctl_set_bit(0, CR0_VECTOR_BIT);
 }
 
 static int cmma_test_essa(void)
 {
-	unsigned long reg1, reg2, tmp = 0;
+	unsigned long tmp = 0;
 	int rc = 1;
-	psw_t old;
 
 	/* Test ESSA_GET_STATE */
-	asm volatile(
-		"	mvc	0(16,%[psw_old]),0(%[psw_pgm])\n"
-		"	epsw	%[reg1],%[reg2]\n"
-		"	st	%[reg1],0(%[psw_pgm])\n"
-		"	st	%[reg2],4(%[psw_pgm])\n"
-		"	larl	%[reg1],1f\n"
-		"	stg	%[reg1],8(%[psw_pgm])\n"
+	asm_inline volatile(
 		"	.insn	rrf,0xb9ab0000,%[tmp],%[tmp],%[cmd],0\n"
-		"	la	%[rc],0\n"
-		"1:	mvc	0(16,%[psw_pgm]),0(%[psw_old])\n"
-		: [reg1] "=&d" (reg1),
-		  [reg2] "=&a" (reg2),
-		  [rc] "+&d" (rc),
-		  [tmp] "+&d" (tmp),
-		  "+Q" (get_lowcore()->program_new_psw),
-		  "=Q" (old)
-		: [psw_old] "a" (&old),
-		  [psw_pgm] "a" (&get_lowcore()->program_new_psw),
-		  [cmd] "i" (ESSA_GET_STATE)
+		"0:	lhi	%[rc],0\n"
+		"1:\n"
+		EX_TABLE(0b, 1b)
+		: [rc] "+d" (rc), [tmp] "+d" (tmp)
+		: [cmd] "i" (ESSA_GET_STATE)
 		: "cc", "memory");
 	return rc;
 }
@@ -152,10 +216,10 @@ static void rescue_initrd(unsigned long min, unsigned long max)
 static void copy_bootdata(void)
 {
 	if (__boot_data_end - __boot_data_start != vmlinux.bootdata_size)
-		error(".boot.data section size mismatch");
+		boot_panic(".boot.data section size mismatch\n");
 	memcpy((void *)vmlinux.bootdata_off, __boot_data_start, vmlinux.bootdata_size);
 	if (__boot_data_preserved_end - __boot_data_preserved_start != vmlinux.bootdata_preserved_size)
-		error(".boot.preserved.data section size mismatch");
+		boot_panic(".boot.preserved.data section size mismatch\n");
 	memcpy((void *)vmlinux.bootdata_preserved_off, __boot_data_preserved_start, vmlinux.bootdata_preserved_size);
 }
 
@@ -169,7 +233,7 @@ static void kaslr_adjust_relocs(unsigned long min_addr, unsigned long max_addr,
 	for (reloc = (int *)__vmlinux_relocs_64_start; reloc < (int *)__vmlinux_relocs_64_end; reloc++) {
 		loc = (long)*reloc + phys_offset;
 		if (loc < min_addr || loc > max_addr)
-			error("64-bit relocation outside of kernel!\n");
+			boot_panic("64-bit relocation outside of kernel!\n");
 		*(u64 *)loc += offset;
 	}
 }
@@ -272,6 +336,7 @@ static unsigned long setup_kernel_memory_layout(unsigned long kernel_size)
 	BUILD_BUG_ON(!IS_ALIGNED(TEXT_OFFSET, THREAD_SIZE));
 	BUILD_BUG_ON(!IS_ALIGNED(__NO_KASLR_START_KERNEL, THREAD_SIZE));
 	BUILD_BUG_ON(__NO_KASLR_END_KERNEL > _REGION1_SIZE);
+	BUILD_BUG_ON(CONFIG_ILLEGAL_POINTER_VALUE < _REGION1_SIZE);
 	vsize = get_vmem_size(ident_map_size, vmemmap_size, vmalloc_size, _REGION3_SIZE);
 	boot_debug("vmem size estimated: 0x%016lx\n", vsize);
 	if (IS_ENABLED(CONFIG_KASAN) || __NO_KASLR_END_KERNEL > _REGION2_SIZE ||
@@ -316,7 +381,7 @@ static unsigned long setup_kernel_memory_layout(unsigned long kernel_size)
 		kernel_start = round_down(kernel_end - kernel_size, THREAD_SIZE);
 		boot_debug("Randomization range: 0x%016lx-0x%016lx\n", vmax - kaslr_len, vmax);
 		boot_debug("kernel image:        0x%016lx-0x%016lx (kaslr)\n", kernel_start,
-			   kernel_size + kernel_size);
+			   kernel_start + kernel_size);
 	} else if (vmax < __NO_KASLR_END_KERNEL || vsize > __NO_KASLR_END_KERNEL) {
 		kernel_start = round_down(vmax - kernel_size, THREAD_SIZE);
 		boot_debug("kernel image:        0x%016lx-0x%016lx (constrained)\n", kernel_start,
@@ -375,7 +440,8 @@ static unsigned long setup_kernel_memory_layout(unsigned long kernel_size)
 	max_mappable = max(ident_map_size, MAX_DCSS_ADDR);
 	max_mappable = min(max_mappable, vmemmap_start);
 #ifdef CONFIG_RANDOMIZE_IDENTITY_BASE
-	__identity_base = round_down(vmemmap_start - max_mappable, rte_size);
+	if (kaslr_enabled())
+		__identity_base = round_down(vmemmap_start - max_mappable, rte_size);
 #endif
 	boot_debug("identity map:        0x%016lx-0x%016lx\n", __identity_base,
 		   __identity_base + ident_map_size);
@@ -416,6 +482,10 @@ static void kaslr_adjust_vmlinux_info(long offset)
 	vmlinux.invalid_pg_dir_off += offset;
 	vmlinux.alt_instructions += offset;
 	vmlinux.alt_instructions_end += offset;
+#ifdef CONFIG_STACKPROTECTOR
+	vmlinux.stack_prot_start += offset;
+	vmlinux.stack_prot_end += offset;
+#endif
 #ifdef CONFIG_KASAN
 	vmlinux.kasan_early_shadow_page_off += offset;
 	vmlinux.kasan_early_shadow_pte_off += offset;
@@ -462,7 +532,12 @@ void startup_kernel(void)
 
 	read_ipl_report();
 	sclp_early_read_info();
+	sclp_early_detect_machine_features();
 	detect_facilities();
+	detect_diag9c();
+	detect_machine_type();
+	/* detect_diag288() needs machine type */
+	detect_diag288();
 	cmma_init();
 	sanitize_prot_virt_host();
 	max_physmem_end = detect_max_physmem_end();
@@ -556,6 +631,7 @@ void startup_kernel(void)
 	__apply_alternatives((struct alt_instr *)_vmlinux_info.alt_instructions,
 			     (struct alt_instr *)_vmlinux_info.alt_instructions_end,
 			     ALT_CTX_EARLY);
+	stack_protector_apply_early(text_lma);
 
 	/*
 	 * Save KASLR offset for early dumps, before vmcore_info is set.
@@ -569,5 +645,5 @@ void startup_kernel(void)
 	psw.addr = __kaslr_offset + vmlinux.entry;
 	psw.mask = PSW_KERNEL_BITS;
 	boot_debug("Starting kernel at:  0x%016lx\n", psw.addr);
-	__load_psw(psw);
+	jump_to_kernel(&psw);
 }

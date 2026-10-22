@@ -30,7 +30,7 @@ struct nf_conntrack_l4proto {
 	/* called by gc worker if table is full */
 	bool (*can_early_drop)(const struct nf_conn *ct);
 
-	/* convert protoinfo to nfnetink attributes */
+	/* convert protoinfo to nfnetlink attributes */
 	int (*to_nlattr)(struct sk_buff *skb, struct nlattr *nla,
 			 struct nf_conn *ct, bool destroy);
 
@@ -107,21 +107,11 @@ int nf_conntrack_udp_packet(struct nf_conn *ct,
 			    unsigned int dataoff,
 			    enum ip_conntrack_info ctinfo,
 			    const struct nf_hook_state *state);
-int nf_conntrack_udplite_packet(struct nf_conn *ct,
-				struct sk_buff *skb,
-				unsigned int dataoff,
-				enum ip_conntrack_info ctinfo,
-				const struct nf_hook_state *state);
 int nf_conntrack_tcp_packet(struct nf_conn *ct,
 			    struct sk_buff *skb,
 			    unsigned int dataoff,
 			    enum ip_conntrack_info ctinfo,
 			    const struct nf_hook_state *state);
-int nf_conntrack_dccp_packet(struct nf_conn *ct,
-			     struct sk_buff *skb,
-			     unsigned int dataoff,
-			     enum ip_conntrack_info ctinfo,
-			     const struct nf_hook_state *state);
 int nf_conntrack_sctp_packet(struct nf_conn *ct,
 			     struct sk_buff *skb,
 			     unsigned int dataoff,
@@ -137,15 +127,12 @@ void nf_conntrack_generic_init_net(struct net *net);
 void nf_conntrack_tcp_init_net(struct net *net);
 void nf_conntrack_udp_init_net(struct net *net);
 void nf_conntrack_gre_init_net(struct net *net);
-void nf_conntrack_dccp_init_net(struct net *net);
 void nf_conntrack_sctp_init_net(struct net *net);
 void nf_conntrack_icmp_init_net(struct net *net);
 void nf_conntrack_icmpv6_init_net(struct net *net);
 
 /* Existing built-in generic protocol */
 extern const struct nf_conntrack_l4proto nf_conntrack_l4proto_generic;
-
-#define MAX_NF_CT_PROTO IPPROTO_UDPLITE
 
 const struct nf_conntrack_l4proto *nf_ct_l4proto_find(u8 l4proto);
 
@@ -220,13 +207,6 @@ static inline bool nf_conntrack_tcp_established(const struct nf_conn *ct)
 {
 	return ct->proto.tcp.state == TCP_CONNTRACK_ESTABLISHED &&
 	       test_bit(IPS_ASSURED_BIT, &ct->status);
-}
-#endif
-
-#ifdef CONFIG_NF_CT_PROTO_DCCP
-static inline struct nf_dccp_net *nf_dccp_pernet(struct net *net)
-{
-	return &net->ct.nf_ct_proto.dccp;
 }
 #endif
 

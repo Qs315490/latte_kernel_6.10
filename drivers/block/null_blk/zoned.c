@@ -91,8 +91,8 @@ int null_init_zoned_dev(struct nullb_device *dev,
 	dev->nr_zones = round_up(dev_capacity_sects, dev->zone_size_sects)
 		>> ilog2(dev->zone_size_sects);
 
-	dev->zones = kvmalloc_array(dev->nr_zones, sizeof(struct nullb_zone),
-				    GFP_KERNEL | __GFP_ZERO);
+	dev->zones = kvmalloc_objs(struct nullb_zone, dev->nr_zones,
+				   GFP_KERNEL | __GFP_ZERO);
 	if (!dev->zones)
 		return -ENOMEM;
 
@@ -191,7 +191,7 @@ void null_free_zoned_dev(struct nullb_device *dev)
 }
 
 int null_report_zones(struct gendisk *disk, sector_t sector,
-		unsigned int nr_zones, report_zones_cb cb, void *data)
+		unsigned int nr_zones, struct blk_report_zones_args *args)
 {
 	struct nullb *nullb = disk->private_data;
 	struct nullb_device *dev = nullb->dev;
@@ -225,7 +225,7 @@ int null_report_zones(struct gendisk *disk, sector_t sector,
 		blkz.capacity = zone->capacity;
 		null_unlock_zone(dev, zone);
 
-		error = cb(&blkz, i, data);
+		error = disk_report_zone(disk, &blkz, i, args);
 		if (error)
 			return error;
 	}
@@ -242,7 +242,7 @@ size_t null_zone_valid_read_len(struct nullb *nullb,
 {
 	struct nullb_device *dev = nullb->dev;
 	struct nullb_zone *zone = &dev->zones[null_zone_no(dev, sector)];
-	unsigned int nr_sectors = len >> SECTOR_SHIFT;
+	unsigned int nr_sectors = DIV_ROUND_UP(len, SECTOR_SIZE);
 
 	/* Read must be below the write pointer position */
 	if (zone->type == BLK_ZONE_TYPE_CONVENTIONAL ||
@@ -353,6 +353,7 @@ static blk_status_t null_zone_write(struct nullb_cmd *cmd, sector_t sector,
 	struct nullb_device *dev = cmd->nq->dev;
 	unsigned int zno = null_zone_no(dev, sector);
 	struct nullb_zone *zone = &dev->zones[zno];
+	blk_status_t badblocks_ret = BLK_STS_OK;
 	blk_status_t ret;
 
 	trace_nullb_zone_op(cmd, zno, zone->cond);
@@ -412,9 +413,20 @@ static blk_status_t null_zone_write(struct nullb_cmd *cmd, sector_t sector,
 		zone->cond = BLK_ZONE_COND_IMP_OPEN;
 	}
 
-	ret = null_process_cmd(cmd, REQ_OP_WRITE, sector, nr_sectors);
-	if (ret != BLK_STS_OK)
-		goto unlock_zone;
+	if (dev->badblocks.shift != -1) {
+		badblocks_ret = null_handle_badblocks(cmd, sector, &nr_sectors);
+		if (badblocks_ret != BLK_STS_OK && !nr_sectors) {
+			ret = badblocks_ret;
+			goto unlock_zone;
+		}
+	}
+
+	if (dev->memory_backed) {
+		ret = null_handle_memory_backed(cmd, REQ_OP_WRITE, sector,
+						nr_sectors);
+		if (ret != BLK_STS_OK)
+			goto unlock_zone;
+	}
 
 	zone->wp += nr_sectors;
 	if (zone->wp == zone->start + zone->capacity) {
@@ -429,7 +441,7 @@ static blk_status_t null_zone_write(struct nullb_cmd *cmd, sector_t sector,
 		zone->cond = BLK_ZONE_COND_FULL;
 	}
 
-	ret = BLK_STS_OK;
+	ret = badblocks_ret;
 
 unlock_zone:
 	null_unlock_zone(dev, zone);

@@ -29,7 +29,7 @@ int vxlan_igmp_join(struct vxlan_dev *vxlan, union vxlan_addr *rip,
 			.imr_ifindex		= ifindex,
 		};
 
-		sk = sock4->sock->sk;
+		sk = sock4->sk;
 		lock_sock(sk);
 		ret = ip_mc_join_group(sk, &mreq);
 		release_sock(sk);
@@ -37,10 +37,9 @@ int vxlan_igmp_join(struct vxlan_dev *vxlan, union vxlan_addr *rip,
 	} else {
 		struct vxlan_sock *sock6 = rtnl_dereference(vxlan->vn6_sock);
 
-		sk = sock6->sock->sk;
+		sk = sock6->sk;
 		lock_sock(sk);
-		ret = ipv6_stub->ipv6_sock_mc_join(sk, ifindex,
-						   &ip->sin6.sin6_addr);
+		ret = ipv6_sock_mc_join(sk, ifindex, &ip->sin6.sin6_addr);
 		release_sock(sk);
 #endif
 	}
@@ -63,7 +62,7 @@ int vxlan_igmp_leave(struct vxlan_dev *vxlan, union vxlan_addr *rip,
 			.imr_ifindex		= ifindex,
 		};
 
-		sk = sock4->sock->sk;
+		sk = sock4->sk;
 		lock_sock(sk);
 		ret = ip_mc_leave_group(sk, &mreq);
 		release_sock(sk);
@@ -71,10 +70,9 @@ int vxlan_igmp_leave(struct vxlan_dev *vxlan, union vxlan_addr *rip,
 	} else {
 		struct vxlan_sock *sock6 = rtnl_dereference(vxlan->vn6_sock);
 
-		sk = sock6->sock->sk;
+		sk = sock6->sk;
 		lock_sock(sk);
-		ret = ipv6_stub->ipv6_sock_mc_drop(sk, ifindex,
-						   &ip->sin6.sin6_addr);
+		ret = ipv6_sock_mc_drop(sk, ifindex, &ip->sin6.sin6_addr);
 		release_sock(sk);
 #endif
 	}

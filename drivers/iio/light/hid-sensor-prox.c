@@ -3,10 +3,10 @@
  * HID Sensors Driver
  * Copyright (c) 2014, Intel Corporation.
  */
+#include <linux/bitops.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/hid-sensor-hub.h>
 #include <linux/iio/iio.h>
@@ -34,9 +34,9 @@ struct prox_state {
 	struct iio_chan_spec channels[MAX_CHANNELS];
 	u32 channel2usage[MAX_CHANNELS];
 	u32 human_presence[MAX_CHANNELS];
-	int scale_pre_decml;
-	int scale_post_decml;
-	int scale_precision;
+	int scale_pre_decml[MAX_CHANNELS];
+	int scale_post_decml[MAX_CHANNELS];
+	int scale_precision[MAX_CHANNELS];
 	unsigned long scan_mask[2]; /* One entry plus one terminator. */
 	int num_channels;
 };
@@ -66,17 +66,6 @@ static const struct iio_chan_spec prox_channels[] = {
 	PROX_CHANNEL(true, HID_HUMAN_PROXIMITY),
 	PROX_CHANNEL(false, 0),
 };
-
-/* Adjust channel real bits based on report descriptor */
-static void prox_adjust_channel_bit_mask(struct iio_chan_spec *channels,
-					int channel, int size)
-{
-	channels[channel].scan_type.sign = 's';
-	/* Real storage bits will change based on the report desc. */
-	channels[channel].scan_type.realbits = size * 8;
-	/* Maximum size of a sample to capture is u32 */
-	channels[channel].scan_type.storagebits = sizeof(u32) * 8;
-}
 
 /* Channel read_raw handler */
 static int prox_read_raw(struct iio_dev *indio_dev,
@@ -116,13 +105,15 @@ static int prox_read_raw(struct iio_dev *indio_dev,
 		ret_type = IIO_VAL_INT;
 		break;
 	case IIO_CHAN_INFO_SCALE:
-		*val = prox_state->scale_pre_decml;
-		*val2 = prox_state->scale_post_decml;
-		ret_type = prox_state->scale_precision;
+		if (chan->scan_index >= prox_state->num_channels)
+			return -EINVAL;
+
+		*val = prox_state->scale_pre_decml[chan->scan_index];
+		*val2 = prox_state->scale_post_decml[chan->scan_index];
+		ret_type = prox_state->scale_precision[chan->scan_index];
 		break;
 	case IIO_CHAN_INFO_OFFSET:
-		*val = hid_sensor_convert_exponent(
-			prox_state->prox_attr[chan->scan_index].unit_expo);
+		*val = 0;
 		ret_type = IIO_VAL_INT;
 		break;
 	case IIO_CHAN_INFO_SAMP_FREQ:
@@ -213,6 +204,9 @@ static int prox_capture_sample(struct hid_sensor_hub_device *hsdev,
 	case 1:
 		prox_state->human_presence[chan] = *(u8 *)raw_data * multiplier;
 		return 0;
+	case 2:
+		prox_state->human_presence[chan] = *(u16 *)raw_data * multiplier;
+		return 0;
 	case 4:
 		prox_state->human_presence[chan] = *(u32 *)raw_data * multiplier;
 		return 0;
@@ -245,10 +239,17 @@ static int prox_parse_report(struct platform_device *pdev,
 		st->scan_mask[0] |= BIT(index);
 		channels[index] = prox_channels[i];
 		channels[index].scan_index = index;
-		prox_adjust_channel_bit_mask(channels, index,
-					     st->prox_attr[index].size);
+		channels[index].scan_type = (struct iio_scan_type) {
+			.format = 's',
+			.realbits = BYTES_TO_BITS(st->prox_attr[index].size),
+			.storagebits = BITS_PER_TYPE(u32),
+		};
 		dev_dbg(&pdev->dev, "prox %x:%x\n", st->prox_attr[index].index,
 			st->prox_attr[index].report_id);
+		st->scale_precision[index] =
+			hid_sensor_format_scale(usage_id, &st->prox_attr[index],
+						&st->scale_pre_decml[index],
+						&st->scale_post_decml[index]);
 		index++;
 	}
 
@@ -356,7 +357,7 @@ static const struct platform_device_id hid_prox_ids[] = {
 		/* Format: HID-SENSOR-tag-usage_id_in_hex_lowercase */
 		.name = "HID-SENSOR-LISS-0226",
 	},
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, hid_prox_ids);
 

@@ -20,7 +20,9 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
+#include <drm/drm_device.h>
 #include <drm/drm_file.h>
+#include <drm/drm_print.h>
 #include <drm/exynos_drm.h>
 
 #include "exynos_drm_drv.h"
@@ -277,7 +279,7 @@ static int g2d_init_cmdlist(struct g2d_data *g2d)
 
 	g2d->cmdlist_dma_attrs = DMA_ATTR_WRITE_COMBINE;
 
-	g2d->cmdlist_pool_virt = dma_alloc_attrs(to_dma_dev(g2d->drm_dev),
+	g2d->cmdlist_pool_virt = dma_alloc_attrs(drm_dev_dma_dev(g2d->drm_dev),
 						G2D_CMDLIST_POOL_SIZE,
 						&g2d->cmdlist_pool, GFP_KERNEL,
 						g2d->cmdlist_dma_attrs);
@@ -286,7 +288,7 @@ static int g2d_init_cmdlist(struct g2d_data *g2d)
 		return -ENOMEM;
 	}
 
-	node = kcalloc(G2D_CMDLIST_NUM, sizeof(*node), GFP_KERNEL);
+	node = kzalloc_objs(*node, G2D_CMDLIST_NUM);
 	if (!node) {
 		ret = -ENOMEM;
 		goto err;
@@ -310,7 +312,7 @@ static int g2d_init_cmdlist(struct g2d_data *g2d)
 	return 0;
 
 err:
-	dma_free_attrs(to_dma_dev(g2d->drm_dev), G2D_CMDLIST_POOL_SIZE,
+	dma_free_attrs(drm_dev_dma_dev(g2d->drm_dev), G2D_CMDLIST_POOL_SIZE,
 			g2d->cmdlist_pool_virt,
 			g2d->cmdlist_pool, g2d->cmdlist_dma_attrs);
 	return ret;
@@ -321,7 +323,7 @@ static void g2d_fini_cmdlist(struct g2d_data *g2d)
 	kfree(g2d->cmdlist_node);
 
 	if (g2d->cmdlist_pool_virt && g2d->cmdlist_pool) {
-		dma_free_attrs(to_dma_dev(g2d->drm_dev),
+		dma_free_attrs(drm_dev_dma_dev(g2d->drm_dev),
 				G2D_CMDLIST_POOL_SIZE,
 				g2d->cmdlist_pool_virt,
 				g2d->cmdlist_pool, g2d->cmdlist_dma_attrs);
@@ -396,7 +398,7 @@ static void g2d_userptr_put_dma_addr(struct g2d_data *g2d,
 		return;
 
 out:
-	dma_unmap_sgtable(to_dma_dev(g2d->drm_dev), g2d_userptr->sgt,
+	dma_unmap_sgtable(drm_dev_dma_dev(g2d->drm_dev), g2d_userptr->sgt,
 			  DMA_BIDIRECTIONAL, 0);
 
 	unpin_user_pages_dirty_lock(g2d_userptr->pages, g2d_userptr->npages,
@@ -458,7 +460,7 @@ static dma_addr_t *g2d_userptr_get_dma_addr(struct g2d_data *g2d,
 		}
 	}
 
-	g2d_userptr = kzalloc(sizeof(*g2d_userptr), GFP_KERNEL);
+	g2d_userptr = kzalloc_obj(*g2d_userptr);
 	if (!g2d_userptr)
 		return ERR_PTR(-ENOMEM);
 
@@ -469,8 +471,7 @@ static dma_addr_t *g2d_userptr_get_dma_addr(struct g2d_data *g2d,
 	offset = userptr & ~PAGE_MASK;
 	end = PAGE_ALIGN(userptr + size);
 	npages = (end - start) >> PAGE_SHIFT;
-	g2d_userptr->pages = kvmalloc_array(npages, sizeof(*g2d_userptr->pages),
-					    GFP_KERNEL);
+	g2d_userptr->pages = kvmalloc_objs(*g2d_userptr->pages, npages);
 	if (!g2d_userptr->pages) {
 		ret = -ENOMEM;
 		goto err_free;
@@ -490,7 +491,7 @@ static dma_addr_t *g2d_userptr_get_dma_addr(struct g2d_data *g2d,
 	}
 	g2d_userptr->npages = npages;
 
-	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
+	sgt = kzalloc_obj(*sgt);
 	if (!sgt) {
 		ret = -ENOMEM;
 		goto err_unpin_pages;
@@ -506,7 +507,7 @@ static dma_addr_t *g2d_userptr_get_dma_addr(struct g2d_data *g2d,
 
 	g2d_userptr->sgt = sgt;
 
-	ret = dma_map_sgtable(to_dma_dev(g2d->drm_dev), sgt,
+	ret = dma_map_sgtable(drm_dev_dma_dev(g2d->drm_dev), sgt,
 			      DMA_BIDIRECTIONAL, 0);
 	if (ret) {
 		DRM_DEV_ERROR(g2d->dev, "failed to map sgt with dma region.\n");
@@ -719,7 +720,7 @@ static int g2d_map_cmdlist_gem(struct g2d_data *g2d,
 			}
 
 			if (!g2d_check_buf_desc_is_valid(g2d, buf_desc,
-							 reg_type, exynos_gem->size)) {
+							 reg_type, exynos_gem->base.size)) {
 				exynos_drm_gem_put(exynos_gem);
 				ret = -EFAULT;
 				goto err;
@@ -1168,7 +1169,7 @@ int exynos_g2d_set_cmdlist_ioctl(struct drm_device *drm_dev, void *data,
 	node->event = NULL;
 
 	if (req->event_type != G2D_EVENT_NOT) {
-		e = kzalloc(sizeof(*node->event), GFP_KERNEL);
+		e = kzalloc_obj(*node->event);
 		if (!e) {
 			ret = -ENOMEM;
 			goto err;

@@ -4,6 +4,9 @@
  * Copyright (c) 2015, Intel Corporation.
  */
 
+#include <linux/overflow.h>
+#include <linux/math.h>
+
 #include "gdc_device.h"		/* gdc_lut_store(), ... */
 #include "isp.h"			/* ISP_VEC_ELEMBITS */
 #include "vamem.h"
@@ -21,8 +24,6 @@
 
 #include "platform_support.h"
 #include "assert_support.h"
-#include "misc_support.h"	/* NOT_USED */
-#include "math_support.h"	/* max(), min()  EVEN_FLOOR()*/
 
 #include "ia_css_stream.h"
 #include "sh_css_params_internal.h"
@@ -657,11 +658,7 @@ static const int zoom_table[4][HRT_GDC_N] = {
 static const struct ia_css_dz_config default_dz_config = {
 	HRT_GDC_N,
 	HRT_GDC_N,
-	{
-		\
-		{0, 0}, \
-		{0, 0}, \
-	}
+	{ 0, 0, 0, 0 }
 };
 
 static const struct ia_css_vector default_motion_config = {
@@ -875,7 +872,8 @@ ia_css_process_kernel(struct ia_css_stream *stream,
 
 		/* update the other buffers to the pipe specific copies */
 		for (stage = pipeline->stages; stage; stage = stage->next) {
-			if (!stage || !stage->binary) continue;
+			if (!stage || !stage->binary)
+				continue;
 			process(pipeline->pipe_id, stage, params);
 		}
 	}
@@ -1210,8 +1208,8 @@ ia_css_process_zoom_and_motion(
 		}
 
 		assert(stage->stage_num < SH_CSS_MAX_STAGES);
-		if (params->dz_config.zoom_region.resolution.width == 0 &&
-		    params->dz_config.zoom_region.resolution.height == 0) {
+		if (params->dz_config.zoom_region.width == 0 &&
+		    params->dz_config.zoom_region.height == 0) {
 			sh_css_update_uds_and_crop_info(
 			    &info->sp,
 			    &binary->in_frame_info,
@@ -1369,7 +1367,7 @@ struct ia_css_morph_table *ia_css_morph_table_allocate(
 
 	IA_CSS_ENTER("");
 
-	me = kvmalloc(sizeof(*me), GFP_KERNEL);
+	me = kvmalloc_obj(*me);
 	if (!me) {
 		IA_CSS_ERROR("out of memory");
 		return me;
@@ -1381,11 +1379,11 @@ struct ia_css_morph_table *ia_css_morph_table_allocate(
 	}
 
 	for (i = 0; i < IA_CSS_MORPH_TABLE_NUM_PLANES; i++) {
-		me->coordinates_x[i] = kvmalloc(height * width *
-						sizeof(*me->coordinates_x[i]),
+		me->coordinates_x[i] = kvmalloc(array3_size(height, width,
+							    sizeof(*me->coordinates_x[i])),
 						GFP_KERNEL);
-		me->coordinates_y[i] = kvmalloc(height * width *
-						sizeof(*me->coordinates_y[i]),
+		me->coordinates_y[i] = kvmalloc(array3_size(height, width,
+							    sizeof(*me->coordinates_y[i])),
 						GFP_KERNEL);
 
 		if ((!me->coordinates_x[i]) ||
@@ -1516,7 +1514,7 @@ ia_css_isp_3a_statistics_map_allocate(
 	 * so we use a local char * instead. */
 	char *base_ptr;
 
-	me = kvmalloc(sizeof(*me), GFP_KERNEL);
+	me = kvmalloc_obj(*me);
 	if (!me) {
 		IA_CSS_LEAVE("cannot allocate memory");
 		goto err;
@@ -1928,9 +1926,8 @@ sh_css_set_per_frame_isp_config_on_pipe(
 	params = stream->per_frame_isp_params_configs;
 
 	/* update new ISP params object with the new config */
-	if (!sh_css_init_isp_params_from_global(stream, params, false, pipe)) {
+	if (!sh_css_init_isp_params_from_global(stream, params, false, pipe))
 		err1 = -EINVAL;
-	}
 
 	err2 = sh_css_init_isp_params_from_config(stream->pipes[0], params, config, pipe);
 
@@ -2004,9 +2001,8 @@ sh_css_init_isp_params_from_config(struct ia_css_pipe *pipe,
 		 * user. */
 		/* we do not exit from this point immediately to allow internal
 		 * firmware feature testing. */
-		if (is_dp_10bpp) {
+		if (is_dp_10bpp)
 			err = -EINVAL;
-		}
 	} else {
 		err = -EINVAL;
 		goto exit;
@@ -2136,7 +2132,7 @@ ia_css_isp_3a_statistics_allocate(const struct ia_css_3a_grid_info *grid)
 	if (!grid->enable)
 		return NULL;
 
-	me = kvcalloc(1, sizeof(*me), GFP_KERNEL);
+	me = kvzalloc_objs(*me, 1);
 	if (!me)
 		goto err;
 
@@ -2200,7 +2196,7 @@ ia_css_metadata_allocate(const struct ia_css_metadata_info *metadata_info)
 	if (metadata_info->size == 0)
 		return NULL;
 
-	md = kvmalloc(sizeof(*md), GFP_KERNEL);
+	md = kvmalloc_obj(*md);
 	if (!md)
 		goto error;
 
@@ -2330,7 +2326,7 @@ sh_css_create_isp_params(struct ia_css_stream *stream,
 	int err;
 	size_t params_size;
 	struct ia_css_isp_parameters *params =
-	kvmalloc(sizeof(struct ia_css_isp_parameters), GFP_KERNEL);
+	kvmalloc_obj(struct ia_css_isp_parameters);
 
 	if (!params) {
 		*isp_params_out = NULL;
@@ -3034,9 +3030,8 @@ process_kernel_parameters(unsigned int pipe_id,
 		ia_css_ob_configure(&params->stream_configs.ob,
 				    isp_pipe_version, raw_bit_depth);
 	}
-	if (params->config_changed[IA_CSS_S3A_ID]) {
+	if (params->config_changed[IA_CSS_S3A_ID])
 		ia_css_s3a_configure(raw_bit_depth);
-	}
 	/* Copy stage uds parameters to config, since they can differ per stage.
 	 */
 	params->crop_config.crop_pos = params->uds[stage->stage_num].crop_pos;
@@ -3045,7 +3040,8 @@ process_kernel_parameters(unsigned int pipe_id,
 	/* Call parameter process functions for all kernels */
 	/* Skip SC, since that is called on a temp sc table */
 	for (param_id = 0; param_id < IA_CSS_NUM_PARAMETER_IDS; param_id++) {
-		if (param_id == IA_CSS_SC_ID) continue;
+		if (param_id == IA_CSS_SC_ID)
+			continue;
 		if (params->config_changed[param_id])
 			ia_css_kernel_process_param[param_id](pipe_id, stage, params);
 	}
@@ -3600,7 +3596,8 @@ sh_css_params_write_to_ddr_internal(
 						    IA_CSS_PARAM_CLASS_PARAM, mem);
 		size_t size = isp_data->size;
 
-		if (!size) continue;
+		if (!size)
+			continue;
 		buff_realloced = reallocate_buffer(&ddr_map->isp_mem_param[stage_num][mem],
 						&ddr_map_size->isp_mem_param[stage_num][mem],
 						size,
@@ -3899,9 +3896,8 @@ sh_css_invalidate_params(struct ia_css_stream *stream)
 	params->isp_params_changed = true;
 	for (i = 0; i < IA_CSS_PIPE_ID_NUM; i++) {
 		for (j = 0; j < SH_CSS_MAX_STAGES; j++) {
-			for (mem = 0; mem < N_IA_CSS_MEMORIES; mem++) {
+			for (mem = 0; mem < N_IA_CSS_MEMORIES; mem++)
 				params->isp_mem_params_changed[i][j][mem] = true;
-			}
 		}
 	}
 
@@ -4042,10 +4038,10 @@ sh_css_update_uds_and_crop_info(
 		}
 
 		/* Must enforce that the crop position is even */
-		crop_x = EVEN_FLOOR(crop_x);
-		crop_y = EVEN_FLOOR(crop_y);
-		uds_xc = EVEN_FLOOR(uds_xc);
-		uds_yc = EVEN_FLOOR(uds_yc);
+		crop_x = round_down(crop_x, 2);
+		crop_y = round_down(crop_y, 2);
+		uds_xc = round_down(uds_xc, 2);
+		uds_yc = round_down(uds_yc, 2);
 
 		uds->xc = (uint16_t)uds_xc;
 		uds->yc = (uint16_t)uds_yc;
@@ -4096,10 +4092,10 @@ sh_css_update_uds_and_crop_info_based_on_zoom_region(
 	assert(motion_vector);
 	assert(uds);
 	assert(sp_out_crop_pos);
-	x0 = zoom->zoom_region.origin.x;
-	y0 = zoom->zoom_region.origin.y;
-	x1 = zoom->zoom_region.resolution.width + x0;
-	y1 = zoom->zoom_region.resolution.height + y0;
+	x0 = zoom->zoom_region.left;
+	y0 = zoom->zoom_region.top;
+	x1 = zoom->zoom_region.width + x0;
+	y1 = zoom->zoom_region.height + y0;
 
 	if ((x0 > x1) || (y0 > y1) || (x1 > pipe_in_res.width) || (y1 > pipe_in_res.height))
 		return -EINVAL;
@@ -4161,7 +4157,7 @@ ia_css_3a_statistics_allocate(const struct ia_css_3a_grid_info *grid)
 
 	assert(grid);
 
-	me = kvcalloc(1, sizeof(*me), GFP_KERNEL);
+	me = kvzalloc_objs(*me, 1);
 	if (!me)
 		goto err;
 
@@ -4201,18 +4197,22 @@ ia_css_dvs_statistics_allocate(const struct ia_css_dvs_grid_info *grid)
 
 	assert(grid);
 
-	me = kvcalloc(1, sizeof(*me), GFP_KERNEL);
+	me = kvzalloc_objs(*me, 1);
 	if (!me)
 		goto err;
 
 	me->grid = *grid;
-	me->hor_proj = kvmalloc(grid->height * IA_CSS_DVS_NUM_COEF_TYPES *
-				sizeof(*me->hor_proj), GFP_KERNEL);
+	me->hor_proj = kvmalloc(array3_size(grid->height,
+					    IA_CSS_DVS_NUM_COEF_TYPES,
+						sizeof(*me->hor_proj)),
+				GFP_KERNEL);
 	if (!me->hor_proj)
 		goto err;
 
-	me->ver_proj = kvmalloc(grid->width * IA_CSS_DVS_NUM_COEF_TYPES *
-				sizeof(*me->ver_proj), GFP_KERNEL);
+	me->ver_proj = kvmalloc(array3_size(grid->width,
+					    IA_CSS_DVS_NUM_COEF_TYPES,
+						sizeof(*me->ver_proj)),
+				GFP_KERNEL);
 	if (!me->ver_proj)
 		goto err;
 
@@ -4239,7 +4239,7 @@ ia_css_dvs_coefficients_allocate(const struct ia_css_dvs_grid_info *grid)
 
 	assert(grid);
 
-	me = kvcalloc(1, sizeof(*me), GFP_KERNEL);
+	me = kvzalloc_objs(*me, 1);
 	if (!me)
 		goto err;
 
@@ -4280,7 +4280,7 @@ ia_css_dvs2_statistics_allocate(const struct ia_css_dvs_grid_info *grid)
 
 	assert(grid);
 
-	me = kvcalloc(1, sizeof(*me), GFP_KERNEL);
+	me = kvzalloc_objs(*me, 1);
 	if (!me)
 		goto err;
 
@@ -4371,7 +4371,7 @@ ia_css_dvs2_coefficients_allocate(const struct ia_css_dvs_grid_info *grid)
 
 	assert(grid);
 
-	me = kvcalloc(1, sizeof(*me), GFP_KERNEL);
+	me = kvzalloc_objs(*me, 1);
 	if (!me)
 		goto err;
 
@@ -4464,8 +4464,7 @@ ia_css_dvs2_6axis_config_allocate(const struct ia_css_stream *stream)
 	if (!params || !params->pipe_dvs_6axis_config[IA_CSS_PIPE_ID_VIDEO])
 		goto err;
 
-	dvs_config = kvcalloc(1, sizeof(struct ia_css_dvs_6axis_config),
-			      GFP_KERNEL);
+	dvs_config = kvzalloc_objs(struct ia_css_dvs_6axis_config, 1);
 	if (!dvs_config)
 		goto err;
 
@@ -4479,24 +4478,26 @@ ia_css_dvs2_6axis_config_allocate(const struct ia_css_stream *stream)
 				    params->pipe_dvs_6axis_config[IA_CSS_PIPE_ID_VIDEO]->height_uv;
 	IA_CSS_LOG("table Y: W %d H %d", width_y, height_y);
 	IA_CSS_LOG("table UV: W %d H %d", width_uv, height_uv);
-	dvs_config->xcoords_y = kvmalloc(width_y * height_y * sizeof(uint32_t),
+	dvs_config->xcoords_y = kvmalloc(array3_size(width_y, height_y,
+						     sizeof(uint32_t)),
 					 GFP_KERNEL);
 	if (!dvs_config->xcoords_y)
 		goto err;
 
-	dvs_config->ycoords_y = kvmalloc(width_y * height_y * sizeof(uint32_t),
+	dvs_config->ycoords_y = kvmalloc(array3_size(width_y, height_y,
+						     sizeof(uint32_t)),
 					 GFP_KERNEL);
 	if (!dvs_config->ycoords_y)
 		goto err;
 
-	dvs_config->xcoords_uv = kvmalloc(width_uv * height_uv *
-					  sizeof(uint32_t),
+	dvs_config->xcoords_uv = kvmalloc(array3_size(width_uv, height_uv,
+						      sizeof(uint32_t)),
 					  GFP_KERNEL);
 	if (!dvs_config->xcoords_uv)
 		goto err;
 
-	dvs_config->ycoords_uv = kvmalloc(width_uv * height_uv *
-					  sizeof(uint32_t),
+	dvs_config->ycoords_uv = kvmalloc(array3_size(width_uv, height_uv,
+						      sizeof(uint32_t)),
 					  GFP_KERNEL);
 	if (!dvs_config->ycoords_uv)
 		goto err;

@@ -61,6 +61,7 @@
 #include <linux/pci.h>
 #include <linux/pm_runtime.h>
 #include <linux/prefetch.h>
+#include <linux/ptp_classify.h>
 #include <linux/rtnetlink.h>
 #include <linux/tcp.h>
 #include <asm/irq.h>
@@ -239,6 +240,8 @@ static void rtase_tx_clear(struct rtase_private *tp)
 		rtase_tx_clear_range(ring, ring->dirty_idx, RTASE_NUM_DESC);
 		ring->cur_idx = 0;
 		ring->dirty_idx = 0;
+
+		netdev_tx_reset_subqueue(tp->dev, i);
 	}
 }
 
@@ -326,6 +329,7 @@ static void rtase_tx_desc_init(struct rtase_private *tp, u16 idx)
 	ring->cur_idx = 0;
 	ring->dirty_idx = 0;
 	ring->index = idx;
+	ring->type = NETDEV_QUEUE_TYPE_TX;
 	ring->alloc_fail = 0;
 
 	for (i = 0; i < RTASE_NUM_DESC; i++) {
@@ -345,6 +349,9 @@ static void rtase_tx_desc_init(struct rtase_private *tp, u16 idx)
 		ring->ivec = &tp->int_vector[0];
 		list_add_tail(&ring->ring_entry, &tp->int_vector[0].ring_list);
 	}
+
+	netif_queue_set_napi(tp->dev, ring->index,
+			     ring->type, &ring->ivec->napi);
 }
 
 static void rtase_map_to_asic(union rtase_rx_desc *desc, dma_addr_t mapping,
@@ -590,6 +597,7 @@ static void rtase_rx_desc_init(struct rtase_private *tp, u16 idx)
 	ring->cur_idx = 0;
 	ring->dirty_idx = 0;
 	ring->index = idx;
+	ring->type = NETDEV_QUEUE_TYPE_RX;
 	ring->alloc_fail = 0;
 
 	for (i = 0; i < RTASE_NUM_DESC; i++)
@@ -597,6 +605,8 @@ static void rtase_rx_desc_init(struct rtase_private *tp, u16 idx)
 
 	ring->ring_handler = rx_handler;
 	ring->ivec = &tp->int_vector[idx];
+	netif_queue_set_napi(tp->dev, ring->index,
+			     ring->type, &ring->ivec->napi);
 	list_add_tail(&ring->ring_entry, &tp->int_vector[idx].ring_list);
 }
 
@@ -967,6 +977,9 @@ static void rtase_hw_config(struct net_device *dev)
 	rtase_hw_set_features(dev, dev->features);
 
 	/* enable flow control */
+	reg_data16 = rtase_r16(tp, RTASE_GPHY_STD_00);
+	reg_data16 &= ~(RTASE_TXFLOW_EN | RTASE_RXFLOW_EN);
+	rtase_w16(tp, RTASE_GPHY_STD_00, reg_data16);
 	reg_data16 = rtase_r16(tp, RTASE_CPLUS_CMD);
 	reg_data16 |= (RTASE_FORCE_TXFLOW_EN | RTASE_FORCE_RXFLOW_EN);
 	rtase_w16(tp, RTASE_CPLUS_CMD, reg_data16);
@@ -1114,7 +1127,7 @@ static int rtase_open(struct net_device *dev)
 		/* request other interrupts to handle multiqueue */
 		for (i = 1; i < tp->int_nums; i++) {
 			ivec = &tp->int_vector[i];
-			snprintf(ivec->name, sizeof(ivec->name), "%s_int%i",
+			snprintf(ivec->name, sizeof(ivec->name), "%s_int%u",
 				 tp->dev->name, i);
 			ret = request_irq(ivec->irq, rtase_q_interrupt, 0,
 					  ivec->name, ivec);
@@ -1161,8 +1174,12 @@ static void rtase_down(struct net_device *dev)
 		ivec = &tp->int_vector[i];
 		napi_disable(&ivec->napi);
 		list_for_each_entry_safe(ring, tmp, &ivec->ring_list,
-					 ring_entry)
+					 ring_entry) {
+			netif_queue_set_napi(tp->dev, ring->index,
+					     ring->type, NULL);
+
 			list_del(&ring->ring_entry);
+		}
 	}
 
 	netif_tx_disable(dev);
@@ -1234,6 +1251,199 @@ static u32 rtase_tx_csum(struct sk_buff *skb, const struct net_device *dev)
 				    RTASE_TCPHO_MASK);
 
 	return csum_cmd;
+}
+
+static enum rtase_parse_result rtase_get_l3_proto(struct sk_buff *skb,
+						  __be16 *proto,
+						  u32 *network_offset)
+{
+	struct vlan_hdr *vh, _vh;
+	struct ethhdr *eh, _eh;
+	u32 offset = ETH_HLEN;
+
+	eh = skb_header_pointer(skb, 0, sizeof(_eh), &_eh);
+	if (!eh)
+		return RTASE_PARSE_DROP;
+
+	*proto = eh->h_proto;
+
+	while (eth_type_vlan(*proto)) {
+		vh = skb_header_pointer(skb, offset, sizeof(_vh), &_vh);
+		if (!vh)
+			return RTASE_PARSE_DROP;
+
+		*proto = vh->h_vlan_encapsulated_proto;
+		offset += VLAN_HLEN;
+	}
+
+	*network_offset = offset;
+
+	return RTASE_PARSE_OK;
+}
+
+static bool rtase_pad_to_transport_len(struct sk_buff *skb,
+				       u32 transport_offset,
+				       u32 pad_to_len)
+{
+	u32 trans_data_len;
+	u32 pad_len;
+
+	trans_data_len = skb->len - transport_offset;
+	if (trans_data_len >= pad_to_len)
+		return true;
+
+	if (skb_is_nonlinear(skb)) {
+		if (skb_linearize(skb))
+			return false;
+	}
+
+	pad_len = pad_to_len - trans_data_len;
+	if (__skb_put_padto(skb, skb->len + pad_len, false))
+		return false;
+
+	return true;
+}
+
+static enum rtase_parse_result rtase_get_transport_offset(struct sk_buff *skb,
+							  u32 *transport_offset,
+							  u8 *transport_proto,
+							  u32 *pad_to_len)
+{
+	enum rtase_parse_result ret;
+	struct ipv6hdr *i6h, _i6h;
+	struct iphdr *ih, _ih;
+	bool non_first_frag;
+	__be16 proto;
+	u32 offset;
+	u32 no;
+
+	ret = rtase_get_l3_proto(skb, &proto, &no);
+	if (ret != RTASE_PARSE_OK)
+		return ret;
+
+	switch (proto) {
+	case htons(ETH_P_IP):
+		ih = skb_header_pointer(skb, no, sizeof(_ih), &_ih);
+		if (!ih)
+			return RTASE_PARSE_DROP;
+
+		if (ih->ihl < 5)
+			return RTASE_PARSE_DROP;
+
+		offset = no + ih->ihl * 4;
+		if (offset > skb->len)
+			return RTASE_PARSE_DROP;
+
+		non_first_frag = ntohs(ih->frag_off) & IP_OFFSET;
+
+		if (ih->protocol == IPPROTO_TCP) {
+			if (skb->len - offset < sizeof(struct tcphdr)) {
+				if (non_first_frag) {
+					*transport_offset = offset;
+					*transport_proto = IPPROTO_TCP;
+					*pad_to_len = sizeof(struct tcphdr);
+
+					return RTASE_PARSE_OK;
+				}
+
+				return RTASE_PARSE_DROP;
+			}
+
+			return RTASE_PARSE_SKIP;
+		}
+
+		if (ih->protocol != IPPROTO_UDP)
+			return RTASE_PARSE_SKIP;
+
+		*transport_offset = offset;
+		*transport_proto = IPPROTO_UDP;
+
+		if (skb->len - offset < sizeof(struct udphdr)) {
+			if (non_first_frag) {
+				*pad_to_len = sizeof(struct udphdr);
+
+				return RTASE_PARSE_OK;
+			}
+
+			return RTASE_PARSE_DROP;
+		}
+
+		return RTASE_PARSE_OK;
+
+	case htons(ETH_P_IPV6):
+		i6h = skb_header_pointer(skb, no, sizeof(_i6h), &_i6h);
+		if (!i6h)
+			return RTASE_PARSE_DROP;
+
+		offset = no + sizeof(*i6h);
+
+		if (i6h->nexthdr == IPPROTO_TCP) {
+			if (skb->len - offset < sizeof(struct tcphdr))
+				return RTASE_PARSE_DROP;
+
+			return RTASE_PARSE_SKIP;
+		}
+
+		if (i6h->nexthdr != IPPROTO_UDP)
+			return RTASE_PARSE_SKIP;
+
+		if (skb->len - offset < sizeof(struct udphdr))
+			return RTASE_PARSE_DROP;
+
+		*transport_offset = offset;
+		*transport_proto = IPPROTO_UDP;
+
+		return RTASE_PARSE_OK;
+
+	default:
+		return RTASE_PARSE_SKIP;
+	}
+}
+
+static bool rtase_skb_pad(struct sk_buff *skb)
+{
+	enum rtase_parse_result ret;
+	u32 transport_offset;
+	__be16 *dest, _dest;
+	u32 trans_data_len;
+	u32 pad_to_len = 0;
+	u8 transport_proto;
+	u16 dest_port;
+
+	ret = rtase_get_transport_offset(skb, &transport_offset,
+					 &transport_proto, &pad_to_len);
+	if (ret == RTASE_PARSE_SKIP) {
+		return true;
+	} else if (ret == RTASE_PARSE_DROP) {
+		netdev_dbg(skb->dev, "drop malformed packet\n");
+		return false;
+	}
+
+	if (pad_to_len &&
+	    !rtase_pad_to_transport_len(skb, transport_offset, pad_to_len))
+		return false;
+
+	if (transport_proto != IPPROTO_UDP)
+		return true;
+
+	trans_data_len = skb->len - transport_offset;
+	if (trans_data_len < offsetof(struct udphdr, len) ||
+	    trans_data_len >= RTASE_MIN_PAD_LEN)
+		return true;
+
+	dest = skb_header_pointer(skb,
+				  transport_offset +
+				  offsetof(struct udphdr, dest),
+				  sizeof(_dest), &_dest);
+	if (!dest)
+		return true;
+
+	dest_port = ntohs(*dest);
+	if (dest_port != PTP_EV_PORT && dest_port != PTP_GEN_PORT)
+		return true;
+
+	return rtase_pad_to_transport_len(skb, transport_offset,
+					  RTASE_MIN_PAD_LEN);
 }
 
 static int rtase_xmit_frags(struct rtase_ring *ring, struct sk_buff *skb,
@@ -1349,6 +1559,9 @@ static netdev_tx_t rtase_start_xmit(struct sk_buff *skb,
 		opts2 |= rtase_tx_csum(skb, dev);
 	}
 
+	if (!rtase_skb_pad(skb))
+		goto err_dma_0;
+
 	frags = rtase_xmit_frags(ring, skb, opts1, opts2);
 	if (unlikely(frags < 0))
 		goto err_dma_0;
@@ -1410,6 +1623,9 @@ static netdev_tx_t rtase_start_xmit(struct sk_buff *skb,
 err_dma_1:
 	ring->skbuff[entry] = NULL;
 	rtase_tx_clear_range(ring, ring->cur_idx + 1, frags);
+	if (frags)
+		/* the frags were cleared above, along with the skb */
+		return NETDEV_TX_OK;
 
 err_dma_0:
 	tp->stats.tx_dropped++;
@@ -1518,8 +1734,12 @@ static void rtase_sw_reset(struct net_device *dev)
 	for (i = 0; i < tp->int_nums; i++) {
 		ivec = &tp->int_vector[i];
 		list_for_each_entry_safe(ring, tmp, &ivec->ring_list,
-					 ring_entry)
+					 ring_entry) {
+			netif_queue_set_napi(tp->dev, ring->index,
+					     ring->type, NULL);
+
 			list_del(&ring->ring_entry);
+		}
 	}
 
 	ret = rtase_init_ring(dev);
@@ -1548,8 +1768,9 @@ static void rtase_dump_tally_counter(const struct rtase_private *tp)
 	rtase_w32(tp, RTASE_DTCCR0, cmd);
 	rtase_w32(tp, RTASE_DTCCR0, cmd | RTASE_COUNTER_DUMP);
 
-	err = read_poll_timeout(rtase_r32, val, !(val & RTASE_COUNTER_DUMP),
-				10, 250, false, tp, RTASE_DTCCR0);
+	err = read_poll_timeout_atomic(rtase_r32, val,
+				       !(val & RTASE_COUNTER_DUMP),
+				       10, 250, false, tp, RTASE_DTCCR0);
 
 	if (err == -ETIMEDOUT)
 		netdev_err(tp->dev, "error occurred in dump tally counter\n");
@@ -1661,6 +1882,65 @@ static void rtase_get_stats64(struct net_device *dev,
 	stats->rx_length_errors = tp->stats.rx_length_errors;
 }
 
+static void rtase_set_hw_cbs(const struct rtase_private *tp, u32 queue)
+{
+	u32 idle = tp->tx_qos[queue].idleslope * RTASE_1T_CLOCK;
+	u32 val, i;
+
+	val = u32_encode_bits(idle / RTASE_1T_POWER, RTASE_IDLESLOPE_INT_MASK);
+	idle %= RTASE_1T_POWER;
+
+	for (i = 1; i <= RTASE_IDLESLOPE_INT_SHIFT; i++) {
+		idle *= 2;
+		if ((idle / RTASE_1T_POWER) == 1)
+			val |= BIT(RTASE_IDLESLOPE_INT_SHIFT - i);
+
+		idle %= RTASE_1T_POWER;
+	}
+
+	rtase_w32(tp, RTASE_TXQCRDT_0 + queue * 4, val);
+}
+
+static int rtase_setup_tc_cbs(struct rtase_private *tp,
+			      const struct tc_cbs_qopt_offload *qopt)
+{
+	int queue = qopt->queue;
+
+	if (queue < 0 || queue >= tp->func_tx_queue_num)
+		return -EINVAL;
+
+	if (!qopt->enable) {
+		tp->tx_qos[queue].hicredit = 0;
+		tp->tx_qos[queue].locredit = 0;
+		tp->tx_qos[queue].idleslope = 0;
+		tp->tx_qos[queue].sendslope = 0;
+
+		rtase_w32(tp, RTASE_TXQCRDT_0 + queue * 4, 0);
+	} else {
+		tp->tx_qos[queue].hicredit = qopt->hicredit;
+		tp->tx_qos[queue].locredit = qopt->locredit;
+		tp->tx_qos[queue].idleslope = qopt->idleslope;
+		tp->tx_qos[queue].sendslope = qopt->sendslope;
+
+		rtase_set_hw_cbs(tp, queue);
+	}
+
+	return 0;
+}
+
+static int rtase_setup_tc(struct net_device *dev, enum tc_setup_type type,
+			  void *type_data)
+{
+	struct rtase_private *tp = netdev_priv(dev);
+
+	switch (type) {
+	case TC_SETUP_QDISC_CBS:
+		return rtase_setup_tc_cbs(tp, type_data);
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
 static netdev_features_t rtase_fix_features(struct net_device *dev,
 					    netdev_features_t features)
 {
@@ -1696,6 +1976,7 @@ static const struct net_device_ops rtase_netdev_ops = {
 	.ndo_change_mtu = rtase_change_mtu,
 	.ndo_tx_timeout = rtase_tx_timeout,
 	.ndo_get_stats64 = rtase_get_stats64,
+	.ndo_setup_tc = rtase_setup_tc,
 	.ndo_fix_features = rtase_fix_features,
 	.ndo_set_features = rtase_set_features,
 };
@@ -1811,6 +2092,18 @@ static void rtase_init_netdev_ops(struct net_device *dev)
 	dev->ethtool_ops = &rtase_ethtool_ops;
 }
 
+static void rtase_init_napi(struct rtase_private *tp)
+{
+	u16 i;
+
+	for (i = 0; i < tp->int_nums; i++) {
+		netif_napi_add_config(tp->dev, &tp->int_vector[i].napi,
+				      tp->int_vector[i].poll, i);
+		netif_napi_set_irq(&tp->int_vector[i].napi,
+				   tp->int_vector[i].irq);
+	}
+}
+
 static void rtase_reset_interrupt(struct pci_dev *pdev,
 				  const struct rtase_private *tp)
 {
@@ -1896,9 +2189,6 @@ static void rtase_init_int_vector(struct rtase_private *tp)
 	memset(tp->int_vector[0].name, 0x0, sizeof(tp->int_vector[0].name));
 	INIT_LIST_HEAD(&tp->int_vector[0].ring_list);
 
-	netif_napi_add(tp->dev, &tp->int_vector[0].napi,
-		       tp->int_vector[0].poll);
-
 	/* interrupt vector 1 ~ 3 */
 	for (i = 1; i < tp->int_nums; i++) {
 		tp->int_vector[i].tp = tp;
@@ -1912,9 +2202,6 @@ static void rtase_init_int_vector(struct rtase_private *tp)
 		memset(tp->int_vector[i].name, 0x0,
 		       sizeof(tp->int_vector[0].name));
 		INIT_LIST_HEAD(&tp->int_vector[i].ring_list);
-
-		netif_napi_add(tp->dev, &tp->int_vector[i].napi,
-			       tp->int_vector[i].poll);
 	}
 }
 
@@ -1923,10 +2210,10 @@ static u16 rtase_calc_time_mitigation(u32 time_us)
 	u8 msb, time_count, time_unit;
 	u16 int_miti;
 
-	time_us = min_t(int, time_us, RTASE_MITI_MAX_TIME);
+	time_us = min(time_us, RTASE_MITI_MAX_TIME);
 
-	msb = fls(time_us);
-	if (msb >= RTASE_MITI_COUNT_BIT_NUM) {
+	if (time_us > RTASE_MITI_TIME_COUNT_MASK) {
+		msb = fls(time_us);
 		time_unit = msb - RTASE_MITI_COUNT_BIT_NUM;
 		time_count = time_us >> (msb - RTASE_MITI_COUNT_BIT_NUM);
 	} else {
@@ -1945,7 +2232,7 @@ static u16 rtase_calc_packet_num_mitigation(u16 pkt_num)
 	u8 msb, pkt_num_count, pkt_num_unit;
 	u16 int_miti;
 
-	pkt_num = min_t(int, pkt_num, RTASE_MITI_MAX_PKT_NUM);
+	pkt_num = min(pkt_num, RTASE_MITI_MAX_PKT_NUM);
 
 	if (pkt_num > 60) {
 		pkt_num_unit = RTASE_MITI_MAX_PKT_NUM_IDX;
@@ -2145,6 +2432,8 @@ static int rtase_init_one(struct pci_dev *pdev,
 		dev_err(&pdev->dev, "unable to alloc MSIX/MSI\n");
 		goto err_out_del_napi;
 	}
+
+	rtase_init_napi(tp);
 
 	rtase_init_netdev_ops(dev);
 

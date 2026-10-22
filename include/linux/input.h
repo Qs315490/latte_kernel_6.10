@@ -19,7 +19,7 @@
 #include <linux/device.h>
 #include <linux/fs.h>
 #include <linux/timer.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/input.h>
 
 struct input_dev_poller;
 
@@ -517,6 +517,10 @@ INPUT_GENERATE_ABS_ACCESSORS(res, resolution)
 int input_scancode_to_scalar(const struct input_keymap_entry *ke,
 			     unsigned int *scancode);
 
+int input_default_setkeycode(struct input_dev *dev,
+			     const struct input_keymap_entry *ke,
+			     unsigned int *old_keycode);
+
 int input_get_keycode(struct input_dev *dev, struct input_keymap_entry *ke);
 int input_set_keycode(struct input_dev *dev,
 		      const struct input_keymap_entry *ke);
@@ -539,6 +543,8 @@ extern const struct class input_class;
  * @set_autocenter: Called to auto-center device
  * @destroy: called by input core when parent input device is being
  *	destroyed
+ * @stop: called by input core when parent input device is being
+ *	unregistered
  * @private: driver-specific data, will be freed automatically
  * @ffbit: bitmap of force feedback capabilities truly supported by
  *	device (not emulated like ones in input_dev->ffbit)
@@ -567,6 +573,7 @@ struct ff_device {
 	void (*set_autocenter)(struct input_dev *dev, u16 magnitude);
 
 	void (*destroy)(struct ff_device *);
+	void (*stop)(struct ff_device *);
 
 	void *private;
 

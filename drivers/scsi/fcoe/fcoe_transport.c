@@ -111,6 +111,8 @@ static inline u32 eth2fc_speed(u32 eth_port_speed)
  * fcoe_link_speed_update() - Update the supported and actual link speeds
  * @lport: The local port to update speeds for
  *
+ * Caller must hold the netdev's ops lock.
+ *
  * Returns: 0 if the ethtool query was successful
  *          -1 if the ethtool query failed
  */
@@ -119,7 +121,7 @@ int fcoe_link_speed_update(struct fc_lport *lport)
 	struct net_device *netdev = fcoe_get_netdev(lport);
 	struct ethtool_link_ksettings ecmd;
 
-	if (!__ethtool_get_link_ksettings(netdev, &ecmd)) {
+	if (!netif_get_link_ksettings(netdev, &ecmd)) {
 		lport->link_supported_speeds &= ~(FC_PORTSPEED_1GBIT  |
 		                                  FC_PORTSPEED_10GBIT |
 		                                  FC_PORTSPEED_20GBIT |
@@ -447,7 +449,7 @@ EXPORT_SYMBOL_GPL(fcoe_check_wait_queue);
  */
 void fcoe_queue_timer(struct timer_list *t)
 {
-	struct fcoe_port *port = from_timer(port, t, timer);
+	struct fcoe_port *port = timer_container_of(port, t, timer);
 
 	fcoe_check_wait_queue(port->lport, NULL);
 }
@@ -638,7 +640,7 @@ static int fcoe_add_netdev_mapping(struct net_device *netdev,
 {
 	struct fcoe_netdev_mapping *nm;
 
-	nm = kmalloc(sizeof(*nm), GFP_KERNEL);
+	nm = kmalloc_obj(*nm);
 	if (!nm) {
 		printk(KERN_ERR "Unable to allocate netdev_mapping");
 		return -ENOMEM;

@@ -152,7 +152,6 @@ struct ad7793_chip_info {
 
 struct ad7793_state {
 	const struct ad7793_chip_info	*chip_info;
-	u16				int_vref_mv;
 	u16				mode;
 	u16				conf;
 	u32				scale_avail[8][2];
@@ -269,7 +268,12 @@ static int ad7793_setup(struct iio_dev *indio_dev,
 	ret = ad_sd_reset(&st->sd);
 	if (ret < 0)
 		goto out;
-	usleep_range(500, 2000); /* Wait for at least 500us */
+
+	/*
+	 * Per AD7792/AD7793 datasheet (Rev. B, page 25, RESET section),
+	 * allow 500 us after a reset before accessing on-chip registers.
+	 */
+	fsleep(500);
 
 	/* write/read test for device presence */
 	ret = ad_sd_read_reg(&st->sd, AD7793_REG_ID, 1, &id);
@@ -279,8 +283,8 @@ static int ad7793_setup(struct iio_dev *indio_dev,
 	id &= AD7793_ID_MASK;
 
 	if (id != st->chip_info->id) {
-		ret = -ENODEV;
-		dev_err(&st->sd.spi->dev, "device ID query failed\n");
+		ret = dev_err_probe(&st->sd.spi->dev, -ENODEV,
+				    "device ID query failed\n");
 		goto out;
 	}
 
@@ -339,8 +343,7 @@ static int ad7793_setup(struct iio_dev *indio_dev,
 
 	return 0;
 out:
-	dev_err(&st->sd.spi->dev, "setup failed\n");
-	return ret;
+	return dev_err_probe(&st->sd.spi->dev, ret, "setup failed\n");
 }
 
 static const u16 ad7793_sample_freq_avail[16] = {0, 470, 242, 123, 62, 50, 39,
@@ -462,64 +465,68 @@ static int ad7793_read_raw(struct iio_dev *indio_dev,
 	return -EINVAL;
 }
 
-static int ad7793_write_raw(struct iio_dev *indio_dev,
-			       struct iio_chan_spec const *chan,
-			       int val,
-			       int val2,
-			       long mask)
+static int __ad7793_write_raw(struct iio_dev *indio_dev,
+			      struct iio_chan_spec const *chan,
+			      int val, int val2, long mask)
 {
 	struct ad7793_state *st = iio_priv(indio_dev);
-	int ret, i;
+	int i;
 	unsigned int tmp;
-
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret)
-		return ret;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_SCALE:
-		ret = -EINVAL;
-		for (i = 0; i < ARRAY_SIZE(st->scale_avail); i++)
-			if (val2 == st->scale_avail[i][1]) {
-				ret = 0;
-				tmp = st->conf;
-				st->conf &= ~AD7793_CONF_GAIN(-1);
-				st->conf |= AD7793_CONF_GAIN(i);
+		for (i = 0; i < ARRAY_SIZE(st->scale_avail); i++) {
+			if (val2 != st->scale_avail[i][1])
+				continue;
 
-				if (tmp == st->conf)
-					break;
+			tmp = st->conf;
+			st->conf &= ~AD7793_CONF_GAIN(-1);
+			st->conf |= AD7793_CONF_GAIN(i);
 
-				ad_sd_write_reg(&st->sd, AD7793_REG_CONF,
-						sizeof(st->conf), st->conf);
-				ad7793_calibrate_all(st);
-				break;
-			}
-		break;
-	case IIO_CHAN_INFO_SAMP_FREQ:
-		if (!val) {
-			ret = -EINVAL;
-			break;
+			if (tmp == st->conf)
+				return 0;
+
+			ad_sd_write_reg(&st->sd, AD7793_REG_CONF,
+					sizeof(st->conf), st->conf);
+			ad7793_calibrate_all(st);
+
+			return 0;
 		}
+		return -EINVAL;
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		if (!val)
+			return -EINVAL;
 
 		for (i = 0; i < 16; i++)
 			if (val == st->chip_info->sample_freq_avail[i])
 				break;
 
-		if (i == 16) {
-			ret = -EINVAL;
-			break;
-		}
+		if (i == 16)
+			return -EINVAL;
 
 		st->mode &= ~AD7793_MODE_RATE(-1);
 		st->mode |= AD7793_MODE_RATE(i);
 		ad_sd_write_reg(&st->sd, AD7793_REG_MODE, sizeof(st->mode),
 				st->mode);
-		break;
+		return 0;
 	default:
-		ret = -EINVAL;
+		return -EINVAL;
 	}
+}
 
-	iio_device_release_direct_mode(indio_dev);
+static int ad7793_write_raw(struct iio_dev *indio_dev,
+			    struct iio_chan_spec const *chan,
+			    int val, int val2, long mask)
+{
+	int ret;
+
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
+
+	ret = __ad7793_write_raw(indio_dev, chan, val, val2, mask);
+
+	iio_device_release_direct(indio_dev);
+
 	return ret;
 }
 
@@ -771,22 +778,19 @@ static const struct ad7793_chip_info ad7793_chip_info_tbl[] = {
 
 static int ad7793_probe(struct spi_device *spi)
 {
-	const struct ad7793_platform_data *pdata = dev_get_platdata(&spi->dev);
+	struct device *dev = &spi->dev;
+	const struct ad7793_platform_data *pdata = dev_get_platdata(dev);
 	struct ad7793_state *st;
 	struct iio_dev *indio_dev;
 	int ret, vref_mv = 0;
 
-	if (!pdata) {
-		dev_err(&spi->dev, "no platform data?\n");
-		return -ENODEV;
-	}
+	if (!pdata)
+		return dev_err_probe(dev, -ENODEV, "no platform data?\n");
 
-	if (!spi->irq) {
-		dev_err(&spi->dev, "no IRQ?\n");
-		return -ENODEV;
-	}
+	if (!spi->irq)
+		return dev_err_probe(dev, -ENODEV, "no IRQ?\n");
 
-	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	indio_dev = devm_iio_device_alloc(dev, sizeof(*st));
 	if (indio_dev == NULL)
 		return -ENOMEM;
 
@@ -795,13 +799,13 @@ static int ad7793_probe(struct spi_device *spi)
 	ad_sd_init(&st->sd, indio_dev, spi, &ad7793_sigma_delta_info);
 
 	if (pdata->refsel != AD7793_REFSEL_INTERNAL) {
-		ret = devm_regulator_get_enable_read_voltage(&spi->dev, "refin");
+		ret = devm_regulator_get_enable_read_voltage(dev, "refin");
 		if (ret < 0)
 			return ret;
 
 		vref_mv = ret / 1000;
 	} else {
-		vref_mv = 1170; /* Build-in ref */
+		vref_mv = 1170; /* Built-in ref */
 	}
 
 	st->chip_info =
@@ -813,7 +817,7 @@ static int ad7793_probe(struct spi_device *spi)
 	indio_dev->num_channels = st->chip_info->num_channels;
 	indio_dev->info = st->chip_info->iio_info;
 
-	ret = devm_ad_sd_setup_buffer_and_trigger(&spi->dev, indio_dev);
+	ret = devm_ad_sd_setup_buffer_and_trigger(dev, indio_dev);
 	if (ret)
 		return ret;
 
@@ -821,7 +825,7 @@ static int ad7793_probe(struct spi_device *spi)
 	if (ret)
 		return ret;
 
-	return devm_iio_device_register(&spi->dev, indio_dev);
+	return devm_iio_device_register(dev, indio_dev);
 }
 
 static const struct spi_device_id ad7793_id[] = {

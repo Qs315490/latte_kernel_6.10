@@ -134,24 +134,24 @@ static int snd_gusmax_mixer(struct snd_wss *chip)
 	memset(&id2, 0, sizeof(id2));
 	id1.iface = id2.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	/* reassign AUXA to SYNTHESIZER */
-	strcpy(id1.name, "Aux Playback Switch");
-	strcpy(id2.name, "Synth Playback Switch");
+	strscpy(id1.name, "Aux Playback Switch");
+	strscpy(id2.name, "Synth Playback Switch");
 	err = snd_ctl_rename_id(card, &id1, &id2);
 	if (err < 0)
 		return err;
-	strcpy(id1.name, "Aux Playback Volume");
-	strcpy(id2.name, "Synth Playback Volume");
+	strscpy(id1.name, "Aux Playback Volume");
+	strscpy(id2.name, "Synth Playback Volume");
 	err = snd_ctl_rename_id(card, &id1, &id2);
 	if (err < 0)
 		return err;
 	/* reassign AUXB to CD */
-	strcpy(id1.name, "Aux Playback Switch"); id1.index = 1;
-	strcpy(id2.name, "CD Playback Switch");
+	strscpy(id1.name, "Aux Playback Switch"); id1.index = 1;
+	strscpy(id2.name, "CD Playback Switch");
 	err = snd_ctl_rename_id(card, &id1, &id2);
 	if (err < 0)
 		return err;
-	strcpy(id1.name, "Aux Playback Volume");
-	strcpy(id2.name, "CD Playback Volume");
+	strscpy(id1.name, "Aux Playback Volume");
+	strscpy(id2.name, "CD Playback Volume");
 	err = snd_ctl_rename_id(card, &id1, &id2);
 	if (err < 0)
 		return err;
@@ -328,12 +328,38 @@ static int snd_gusmax_probe(struct device *pdev, unsigned int dev)
 	return 0;
 }
 
+#ifdef CONFIG_PM
+static int snd_gusmax_suspend(struct device *dev, unsigned int n,
+			      pm_message_t state)
+{
+	struct snd_card *card = dev_get_drvdata(dev);
+	struct snd_gusmax *maxcard = card->private_data;
+
+	maxcard->wss->suspend(maxcard->wss);
+	return snd_gus_suspend(maxcard->gus);
+}
+
+static int snd_gusmax_resume(struct device *dev, unsigned int n)
+{
+	struct snd_card *card = dev_get_drvdata(dev);
+	struct snd_gusmax *maxcard = card->private_data;
+
+	/* Restore the board routing latch before resuming the codec and GF1. */
+	outb(maxcard->gus->max_cntrl_val, GUSP(maxcard->gus, MAXCNTRLPORT));
+	maxcard->wss->resume(maxcard->wss);
+	return snd_gus_resume(maxcard->gus);
+}
+#endif
+
 #define DEV_NAME "gusmax"
 
 static struct isa_driver snd_gusmax_driver = {
 	.match		= snd_gusmax_match,
 	.probe		= snd_gusmax_probe,
-	/* FIXME: suspend/resume */
+#ifdef CONFIG_PM
+	.suspend	= snd_gusmax_suspend,
+	.resume		= snd_gusmax_resume,
+#endif
 	.driver		= {
 		.name	= DEV_NAME
 	},

@@ -28,6 +28,9 @@ properties:
       - fsl,imx95-aonmix-mqs
       - fsl,imx95-netcmix-mqs
 
+  "#sound-dai-cells":
+    const: 0
+
   clocks:
     minItems: 1
     maxItems: 2
@@ -49,12 +52,27 @@ properties:
   resets:
     maxItems: 1
 
+  port:
+    $ref: audio-graph-port.yaml#
+    unevaluatedProperties: false
+
 required:
   - compatible
   - clocks
   - clock-names
 
 allOf:
+  - $ref: dai-common.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - fsl,imx6sx-mqs
+              - fsl,imx93-mqs
+    then:
+      required:
+        - gpr
   - if:
       properties:
         compatible:
@@ -83,10 +101,8 @@ allOf:
         clock-names:
           items:
             - const: mclk
-      required:
-        - gpr
 
-additionalProperties: false
+unevaluatedProperties: false
 
 examples:
   - |

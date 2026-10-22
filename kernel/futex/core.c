@@ -32,13 +32,21 @@
  *  "But they come in a choice of three flavours!"
  */
 #include <linux/compat.h>
-#include <linux/jhash.h>
-#include <linux/pagemap.h>
 #include <linux/debugfs.h>
-#include <linux/plist.h>
-#include <linux/memblock.h>
 #include <linux/fault-inject.h>
+#include <linux/gfp.h>
+#include <linux/jhash.h>
+#include <linux/memblock.h>
+#include <linux/mempolicy.h>
+#include <linux/mmap_lock.h>
+#include <linux/pagemap.h>
+#include <linux/plist.h>
+#include <linux/prctl.h>
+#include <linux/rseq.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
+
+#include <vdso/futex.h>
 
 #include "futex.h"
 #include "../locking/rtmutex_common.h"
@@ -49,12 +57,23 @@
  * reside in the same cacheline.
  */
 static struct {
-	struct futex_hash_bucket *queues;
-	unsigned long            hashsize;
+	unsigned long            hashmask;
+	unsigned int		 hashshift;
+	struct futex_hash_bucket *queues[MAX_NUMNODES];
 } __futex_data __read_mostly __aligned(2*sizeof(long));
-#define futex_queues   (__futex_data.queues)
-#define futex_hashsize (__futex_data.hashsize)
 
+#define futex_hashmask	(__futex_data.hashmask)
+#define futex_hashshift	(__futex_data.hashshift)
+#define futex_queues	(__futex_data.queues)
+
+struct futex_private_hash {
+	int		state;
+	unsigned int	hash_mask;
+	struct rcu_head	rcu;
+	void		*mm;
+	bool		custom;
+	struct futex_hash_bucket queues[];
+};
 
 /*
  * Fault injections for futexes.
@@ -107,21 +126,283 @@ late_initcall(fail_futex_debugfs);
 
 #endif /* CONFIG_FAIL_FUTEX */
 
-/**
- * futex_hash - Return the hash bucket in the global hash
- * @key:	Pointer to the futex key for which the hash is calculated
- *
- * We hash on the keys returned from get_futex_key (see below) and return the
- * corresponding hash bucket in the global hash.
- */
-struct futex_hash_bucket *futex_hash(union futex_key *key)
-{
-	u32 hash = jhash2((u32 *)key, offsetof(typeof(*key), both.offset) / 4,
-			  key->both.offset);
+static struct futex_hash_bucket *
+__futex_hash(union futex_key *key, struct futex_private_hash *fph, struct futex_private_hash **fph_p);
 
-	return &futex_queues[hash & (futex_hashsize - 1)];
+#ifdef CONFIG_FUTEX_PRIVATE_HASH
+static bool futex_ref_get(struct futex_private_hash *fph);
+static bool futex_ref_put(struct futex_private_hash *fph);
+static bool futex_ref_is_dead(struct futex_private_hash *fph);
+
+enum { FR_PERCPU = 0, FR_ATOMIC };
+
+static bool futex_private_hash_get(struct futex_private_hash *fph)
+{
+	return futex_ref_get(fph);
 }
 
+void futex_private_hash_put(struct futex_private_hash *fph)
+{
+	if (fph && futex_ref_put(fph))
+		wake_up_var(fph->mm);
+}
+
+static struct futex_hash_bucket *
+__futex_hash_private(union futex_key *key, struct futex_private_hash *fph)
+{
+	u32 hash;
+
+	hash = jhash2((void *)&key->private.address, sizeof(key->private.address) / 4,
+		      key->both.offset);
+
+	return &fph->queues[hash & fph->hash_mask];
+}
+
+static void futex_rehash_private(struct futex_private_hash *old,
+				 struct futex_private_hash *new)
+{
+	struct futex_hash_bucket *hb_old, *hb_new;
+	unsigned int slots = old->hash_mask + 1;
+	unsigned int i;
+
+	for (i = 0; i < slots; i++) {
+		struct futex_q *this, *tmp;
+
+		hb_old = &old->queues[i];
+
+		spin_lock(&hb_old->lock);
+		plist_for_each_entry_safe(this, tmp, &hb_old->chain, list) {
+			plist_del(&this->list, &hb_old->chain);
+			futex_hb_waiters_dec(hb_old);
+
+			WARN_ON_ONCE(this->lock_ptr != &hb_old->lock);
+
+			hb_new = __futex_hash(&this->key, new, NULL);
+			futex_hb_waiters_inc(hb_new);
+			/*
+			 * The new pointer isn't published yet but an already
+			 * moved user can be unqueued due to timeout or signal.
+			 */
+			spin_lock_nested(&hb_new->lock, SINGLE_DEPTH_NESTING);
+			plist_add(&this->list, &hb_new->chain);
+			this->lock_ptr = &hb_new->lock;
+			spin_unlock(&hb_new->lock);
+		}
+		spin_unlock(&hb_old->lock);
+	}
+}
+
+static bool __futex_pivot_hash(struct mm_struct *mm, struct futex_private_hash *new)
+{
+	struct futex_mm_phash *mmph = &mm->futex.phash;
+	struct futex_private_hash *fph;
+
+	WARN_ON_ONCE(mmph->hash_new);
+
+	fph = rcu_dereference_protected(mmph->hash, lockdep_is_held(&mmph->lock));
+	if (fph) {
+		if (!futex_ref_is_dead(fph)) {
+			mmph->hash_new = new;
+			return false;
+		}
+
+		futex_rehash_private(fph, new);
+	}
+	new->state = FR_PERCPU;
+	scoped_guard(rcu) {
+		mmph->batches = get_state_synchronize_rcu();
+		rcu_assign_pointer(mmph->hash, new);
+	}
+	kvfree_rcu(fph, rcu);
+	return true;
+}
+
+static void futex_pivot_hash(struct mm_struct *mm)
+{
+	scoped_guard(mutex, &mm->futex.phash.lock) {
+		struct futex_private_hash *fph;
+
+		fph = mm->futex.phash.hash_new;
+		if (fph) {
+			mm->futex.phash.hash_new = NULL;
+			__futex_pivot_hash(mm, fph);
+		}
+	}
+}
+
+struct futex_private_hash *futex_private_hash(struct mm_struct *mm)
+{
+	/*
+	 * Ideally we don't loop. If there is a replacement in progress
+	 * then a new private hash is already prepared and a reference can't be
+	 * obtained once the last user dropped it's.
+	 * In that case we block on mm_struct::futex_hash_lock and either have
+	 * to perform the replacement or wait while someone else is doing the
+	 * job. Eitherway, on the second iteration we acquire a reference on the
+	 * new private hash or loop again because a new replacement has been
+	 * requested.
+	 */
+again:
+	scoped_guard(rcu) {
+		struct futex_private_hash *fph;
+
+		fph = rcu_dereference(mm->futex.phash.hash);
+		if (!fph)
+			return NULL;
+
+		if (futex_private_hash_get(fph))
+			return fph;
+	}
+	futex_pivot_hash(mm);
+	goto again;
+}
+
+struct futex_bucket_ref futex_hash(union futex_key *key)
+{
+again:
+	scoped_guard(rcu) {
+		struct futex_private_hash *fph = NULL;
+		struct futex_hash_bucket *hb;
+
+		hb = __futex_hash(key, NULL, &fph);
+
+		if (!fph || futex_private_hash_get(fph))
+			return (struct futex_bucket_ref){ .hb = hb, .fph = fph };
+	}
+	futex_pivot_hash(key->private.mm);
+	goto again;
+}
+
+#else /* !CONFIG_FUTEX_PRIVATE_HASH */
+
+struct futex_bucket_ref futex_hash(union futex_key *key)
+{
+	return (struct futex_bucket_ref){ .hb = __futex_hash(key, NULL, NULL), .fph = NULL };
+}
+
+#endif /* CONFIG_FUTEX_PRIVATE_HASH */
+
+#ifdef CONFIG_FUTEX_MPOL
+
+static int __futex_key_to_node(struct mm_struct *mm, unsigned long addr)
+{
+	struct vm_area_struct *vma = vma_lookup(mm, addr);
+	struct mempolicy *mpol;
+	int node = FUTEX_NO_NODE;
+
+	if (!vma)
+		return FUTEX_NO_NODE;
+
+	mpol = READ_ONCE(vma->vm_policy);
+	if (!mpol)
+		return FUTEX_NO_NODE;
+
+	switch (mpol->mode) {
+	case MPOL_PREFERRED:
+		node = first_node(mpol->nodes);
+		break;
+	case MPOL_PREFERRED_MANY:
+	case MPOL_BIND:
+		if (mpol->home_node != NUMA_NO_NODE)
+			node = mpol->home_node;
+		break;
+	default:
+		break;
+	}
+
+	return node;
+}
+
+static int futex_key_to_node_opt(struct mm_struct *mm, unsigned long addr)
+{
+	int seq, node;
+
+	guard(rcu)();
+
+	if (!mmap_lock_speculate_try_begin(mm, &seq))
+		return -EBUSY;
+
+	node = __futex_key_to_node(mm, addr);
+
+	if (mmap_lock_speculate_retry(mm, seq))
+		return -EAGAIN;
+
+	return node;
+}
+
+static int futex_mpol(struct mm_struct *mm, unsigned long addr)
+{
+	int node;
+
+	node = futex_key_to_node_opt(mm, addr);
+	if (node >= FUTEX_NO_NODE)
+		return node;
+
+	guard(mmap_read_lock)(mm);
+	return __futex_key_to_node(mm, addr);
+}
+
+#else /* !CONFIG_FUTEX_MPOL */
+
+static int futex_mpol(struct mm_struct *mm, unsigned long addr)
+{
+	return FUTEX_NO_NODE;
+}
+
+#endif /* CONFIG_FUTEX_MPOL */
+
+/**
+ * __futex_hash - Return the hash bucket
+ * @key:	Pointer to the futex key for which the hash is calculated
+ * @fph:	Pointer to private hash if known
+ * @fph_p:	Pointer to a private hash pointer; output for the private hash
+ *              used when set.
+ *
+ * We hash on the keys returned from get_futex_key (see below) and return the
+ * corresponding hash bucket.
+ * If the FUTEX is PROCESS_PRIVATE then a per-process hash bucket (from the
+ * private hash) is returned if existing. Otherwise a hash bucket from the
+ * global hash is returned.
+ */
+static struct futex_hash_bucket *
+__futex_hash(union futex_key *key, struct futex_private_hash *fph, struct futex_private_hash **fph_p)
+{
+	int node = key->both.node;
+	u32 hash;
+
+#ifdef CONFIG_FUTEX_PRIVATE_HASH
+	if (node == FUTEX_NO_NODE && futex_key_is_private(key)) {
+		if (!fph)
+			fph = rcu_dereference(key->private.mm->futex.phash.hash);
+		if (fph && fph->hash_mask) {
+			if (fph_p)
+				*fph_p = fph;
+			return __futex_hash_private(key, fph);
+		}
+	}
+#endif
+
+	hash = jhash2((u32 *)key, offsetof(typeof(*key), both.offset) / sizeof(u32),
+		      key->both.offset);
+
+	if (node == FUTEX_NO_NODE) {
+		/*
+		 * In case of !FLAGS_NUMA, use some unused hash bits to pick a
+		 * node -- this ensures regular futexes are interleaved across
+		 * the nodes and avoids having to allocate multiple
+		 * hash-tables.
+		 *
+		 * NOTE: this isn't perfectly uniform, but it is fast and
+		 * handles sparse node masks.
+		 */
+		node = (hash >> futex_hashshift) % nr_node_ids;
+		if (!node_possible(node)) {
+			node = find_next_bit_wrap(node_possible_map.bits, nr_node_ids, node);
+		}
+	}
+
+	return &futex_queues[node][hash & futex_hashmask];
+}
 
 /**
  * futex_setup_timer - set up the sleeping hrtimer.
@@ -133,9 +414,8 @@ struct futex_hash_bucket *futex_hash(union futex_key *key)
  * Return: Initialized hrtimer_sleeper structure or NULL if no timeout
  *	   value given
  */
-struct hrtimer_sleeper *
-futex_setup_timer(ktime_t *time, struct hrtimer_sleeper *timeout,
-		  int flags, u64 range_ns)
+struct hrtimer_sleeper *futex_setup_timer(ktime_t *time, struct hrtimer_sleeper *timeout,
+					  int flags, u64 range_ns)
 {
 	if (!time)
 		return NULL;
@@ -206,7 +486,7 @@ static u64 get_inode_sequence_number(struct inode *inode)
  *
  * For shared mappings (when @fshared), the key is:
  *
- *   ( inode->i_sequence, page->index, offset_within_page )
+ *   ( inode->i_sequence, page offset within mapping, offset_within_page )
  *
  * [ also see get_inode_sequence_number() ]
  *
@@ -227,24 +507,59 @@ int get_futex_key(u32 __user *uaddr, unsigned int flags, union futex_key *key,
 	struct page *page;
 	struct folio *folio;
 	struct address_space *mapping;
-	int err, ro = 0;
+	int node, err, size, ro = 0;
+	bool node_updated = false;
 	bool fshared;
 
 	fshared = flags & FLAGS_SHARED;
+	size = futex_size(flags);
+	if (flags & FLAGS_NUMA)
+		size *= 2;
 
 	/*
 	 * The futex address must be "naturally" aligned.
 	 */
 	key->both.offset = address % PAGE_SIZE;
-	if (unlikely((address % sizeof(u32)) != 0))
+	if (unlikely((address % size) != 0))
 		return -EINVAL;
 	address -= key->both.offset;
 
-	if (unlikely(!access_ok(uaddr, sizeof(u32))))
+	if (unlikely(!access_ok(uaddr, size)))
 		return -EFAULT;
 
 	if (unlikely(should_fail_futex(fshared)))
 		return -EFAULT;
+
+	node = FUTEX_NO_NODE;
+
+	if (flags & FLAGS_NUMA) {
+		u32 __user *naddr = (void *)uaddr + size / 2;
+
+		if (get_user_inline(node, naddr))
+			return -EFAULT;
+
+		if ((node != FUTEX_NO_NODE) &&
+		    ((unsigned int)node >= MAX_NUMNODES || !node_possible(node)))
+			return -EINVAL;
+	}
+
+	if (node == FUTEX_NO_NODE && (flags & FLAGS_MPOL)) {
+		node = futex_mpol(mm, address);
+		node_updated = true;
+	}
+
+	if (flags & FLAGS_NUMA) {
+		u32 __user *naddr = (void *)uaddr + size / 2;
+
+		if (node == FUTEX_NO_NODE) {
+			node = numa_node_id();
+			node_updated = true;
+		}
+		if (node_updated && put_user_inline(node, naddr))
+			return -EFAULT;
+	}
+
+	key->both.node = node;
 
 	/*
 	 * PROCESS_PRIVATE futexes are fast.
@@ -468,7 +783,7 @@ void wait_for_owner_exiting(int ret, struct task_struct *exiting)
 	if (WARN_ON_ONCE(ret == -EBUSY && !exiting))
 		return;
 
-	mutex_lock(&exiting->futex_exit_mutex);
+	mutex_lock(&exiting->futex.exit_mutex);
 	/*
 	 * No point in doing state checking here. If the waiter got here
 	 * while the task was in exec()->exec_futex_release() then it can
@@ -477,7 +792,7 @@ void wait_for_owner_exiting(int ret, struct task_struct *exiting)
 	 * already. Highly unlikely and not a problem. Just one more round
 	 * through the futex maze.
 	 */
-	mutex_unlock(&exiting->futex_exit_mutex);
+	mutex_unlock(&exiting->futex.exit_mutex);
 
 	put_task_struct(exiting);
 }
@@ -502,13 +817,8 @@ void __futex_unqueue(struct futex_q *q)
 }
 
 /* The key must be already stored in q->key. */
-struct futex_hash_bucket *futex_q_lock(struct futex_q *q)
-	__acquires(&hb->lock)
+void futex_q_lock(struct futex_q *q, struct futex_hash_bucket *hb)
 {
-	struct futex_hash_bucket *hb;
-
-	hb = futex_hash(&q->key);
-
 	/*
 	 * Increment the counter before taking the lock so that
 	 * a potential waker won't miss a to-be-slept task that is
@@ -522,14 +832,13 @@ struct futex_hash_bucket *futex_q_lock(struct futex_q *q)
 	q->lock_ptr = &hb->lock;
 
 	spin_lock(&hb->lock);
-	return hb;
+	__acquire(q->lock_ptr);
 }
 
 void futex_q_unlock(struct futex_hash_bucket *hb)
-	__releases(&hb->lock)
 {
-	spin_unlock(&hb->lock);
 	futex_hb_waiters_dec(hb);
+	spin_unlock(&hb->lock);
 }
 
 void __futex_queue(struct futex_q *q, struct futex_hash_bucket *hb,
@@ -568,6 +877,8 @@ int futex_unqueue(struct futex_q *q)
 	spinlock_t *lock_ptr;
 	int ret = 0;
 
+	/* RCU so lock_ptr is not going away during locking. */
+	guard(rcu)();
 	/* In the common case we don't take the spinlock, which is nice. */
 retry:
 	/*
@@ -606,6 +917,24 @@ retry:
 	return ret;
 }
 
+void futex_q_lockptr_lock(struct futex_q *q)
+{
+	spinlock_t *lock_ptr;
+
+	/*
+	 * See futex_unqueue() why lock_ptr can change.
+	 */
+	guard(rcu)();
+retry:
+	lock_ptr = READ_ONCE(q->lock_ptr);
+	spin_lock(lock_ptr);
+
+	if (unlikely(lock_ptr != q->lock_ptr)) {
+		spin_unlock(lock_ptr);
+		goto retry;
+	}
+}
+
 /*
  * PI futexes can not be requeued and must remove themselves from the hash
  * bucket. The hash bucket lock (i.e. lock_ptr) is held.
@@ -637,8 +966,9 @@ void futex_unqueue_pi(struct futex_q *q)
  * dying task, and do notification if so:
  */
 static int handle_futex_death(u32 __user *uaddr, struct task_struct *curr,
-			      bool pi, bool pending_op)
+			      unsigned int mod, bool pending_op)
 {
+	bool pi = !!(mod & FUTEX_ROBUST_MOD_PI);
 	u32 uval, nval, mval;
 	pid_t owner;
 	int err;
@@ -652,8 +982,11 @@ retry:
 		return -1;
 
 	/*
-	 * Special case for regular (non PI) futexes. The unlock path in
-	 * user space has two race scenarios:
+	 * Special case for regular (non PI) futexes. Ordinarily, we do
+	 * not perform any processing here unless the current thread was
+	 * the owner of the futex (by the TID check below).
+	 *
+	 * However, the unlock path has three race scenarios:
 	 *
 	 * 1. The unlock path releases the user space futex value and
 	 *    before it can execute the futex() syscall to wake up
@@ -662,41 +995,69 @@ retry:
 	 * 2. A woken up waiter is killed before it can acquire the
 	 *    futex in user space.
 	 *
-	 * In the second case, the wake up notification could be generated
-	 * by the unlock path in user space after setting the futex value
-	 * to zero or by the kernel after setting the OWNER_DIED bit below.
+	 * 3. A woken up waiter is killed in user space after another
+	 *    thread has acquired the futex, but before it can set
+	 *    FUTEX_WAITERS.
 	 *
-	 * In both cases the TID validation below prevents a wakeup of
-	 * potential waiters which can cause these waiters to block
-	 * forever.
+	 * Note that, if userspace uses the FUTEX_ROBUST_UNLOCK flag, we
+	 * will not see case 1 here.
 	 *
-	 * In both cases the following conditions are met:
+	 * In the second and third case, the wake up notification could
+	 * be generated from any of:
 	 *
-	 *	1) task->robust_list->list_op_pending != NULL
-	 *	   @pending_op == true
-	 *	2) The owner part of user space futex value == 0
+	 *    i.   An ordinary futex wakeup after unlock (with or
+	 *         without FUTEX_ROBUST_UNLOCK)
+	 *    ii.  A robust wakeup from another thread's death
+	 *    iii. A previous round through this special case
+	 *
+	 * As a result, the futex world will be in one of four states:
+	 *
+	 *    A. The futex word is 0 (unlocked)
+	 *    B. The futex word is owned by another thread
+	 *       (FUTEX_WAITERS is not set)
+	 *    C. The futex word is owned by another thread
+	 *       (FUTEX_WAITERS set)
+	 *    D. The futex's owner died and OWNER_DIED is set
+	 *       (the owner part of the word is 0)
+	 *
+	 * The key issue is that the kernel usually (at least from
+	 * sources ii. and iii. or when so requested by userspace from
+	 * source i.) only ever wakes *one* waiter at a time. If this
+	 * waiter dies before acquiring the futex (or setting the
+	 * FUTEX_WAITERS bit), the kernel *must* still wake the next
+	 * waiter down the line to uphold the futex invariants and
+	 * avoid lost wakeups. Note we do not need to handle state C,
+	 * as it does not matter to us whether *we* successfully set
+	 * the bit or a third thread did so in the meantime.
+	 *
+	 * Therefore, in these cases we must issue an additional
+	 * futex_wake(). Note however that we *must not* set OWNER_DIED
+	 * here. Our thread is *not* the owner of the futex.
+	 *
+	 * Thus to summarize, the conditions for needing the additional
+	 * futex_wake() are:
+	 *
+	 *	1) @pending_op == true (the thread has not finished the
+	 *	   mutex operation)
+	 *	2) The futex word is in one of the states A, B or D
 	 *	3) Regular futex: @pi == false
 	 *
-	 * If these conditions are met, it is safe to attempt waking up a
-	 * potential waiter without touching the user space futex value and
-	 * trying to set the OWNER_DIED bit. If the futex value is zero,
-	 * the rest of the user space mutex state is consistent, so a woken
-	 * waiter will just take over the uncontended futex. Setting the
-	 * OWNER_DIED bit would create inconsistent state and malfunction
-	 * of the user space owner died handling. Otherwise, the OWNER_DIED
-	 * bit is already set, and the woken waiter is expected to deal with
-	 * this.
+	 * Note in particular that in all of the states A-D the owner
+	 * portion of the futex word differs from our thread's TID
+	 * (unless the actual owner has the same TID in another PID
+	 * namespace, but we cannot currently distinguish that
+	 * scenario), so this can be a special-case wakeup in the bail
+	 * path of the ordinary TID check.
 	 */
 	owner = uval & FUTEX_TID_MASK;
 
-	if (pending_op && !pi && !owner) {
-		futex_wake(uaddr, FLAGS_SIZE_32 | FLAGS_SHARED, 1,
-			   FUTEX_BITSET_MATCH_ANY);
+	if (owner != task_pid_vnr(curr)) {
+		if (pending_op && !pi && (!owner || !(uval & FUTEX_WAITERS))) {
+			futex_wake(uaddr, FLAGS_SIZE_32 | FLAGS_SHARED, NULL, 1,
+				   FUTEX_BITSET_MATCH_ANY);
+		}
 		return 0;
 	}
-
-	if (owner != task_pid_vnr(curr))
-		return 0;
 
 	/*
 	 * Ok, this dying thread is truly holding a futex
@@ -744,7 +1105,7 @@ retry:
 	 * PI futexes happens in exit_pi_state():
 	 */
 	if (!pi && (uval & FUTEX_WAITERS)) {
-		futex_wake(uaddr, FLAGS_SIZE_32 | FLAGS_SHARED, 1,
+		futex_wake(uaddr, FLAGS_SIZE_32 | FLAGS_SHARED, NULL, 1,
 			   FUTEX_BITSET_MATCH_ANY);
 	}
 
@@ -756,31 +1117,30 @@ retry:
  */
 static inline int fetch_robust_entry(struct robust_list __user **entry,
 				     struct robust_list __user * __user *head,
-				     unsigned int *pi)
+				     unsigned int *mod)
 {
 	unsigned long uentry;
 
 	if (get_user(uentry, (unsigned long __user *)head))
 		return -EFAULT;
 
-	*entry = (void __user *)(uentry & ~1UL);
-	*pi = uentry & 1;
+	*entry = (void __user *)(uentry & ~FUTEX_ROBUST_MOD_MASK);
+	*mod = uentry & FUTEX_ROBUST_MOD_MASK;
 
 	return 0;
 }
 
 /*
- * Walk curr->robust_list (very carefully, it's a userspace list!)
+ * Walk curr->futex.robust_list (very carefully, it's a userspace list!)
  * and mark any locks found there dead, and notify any waiters.
  *
  * We silently return on any sign of list-walking problem.
  */
 static void exit_robust_list(struct task_struct *curr)
 {
-	struct robust_list_head __user *head = curr->robust_list;
+	struct robust_list_head __user *head = curr->futex.robust_list;
+	unsigned int limit = ROBUST_LIST_LIMIT, cur_mod, next_mod, pend_mod;
 	struct robust_list __user *entry, *next_entry, *pending;
-	unsigned int limit = ROBUST_LIST_LIMIT, pi, pip;
-	unsigned int next_pi;
 	unsigned long futex_offset;
 	int rc;
 
@@ -788,7 +1148,7 @@ static void exit_robust_list(struct task_struct *curr)
 	 * Fetch the list head (which was registered earlier, via
 	 * sys_set_robust_list()):
 	 */
-	if (fetch_robust_entry(&entry, &head->list.next, &pi))
+	if (fetch_robust_entry(&entry, &head->list.next, &cur_mod))
 		return;
 	/*
 	 * Fetch the relative futex offset:
@@ -799,7 +1159,7 @@ static void exit_robust_list(struct task_struct *curr)
 	 * Fetch any possibly pending lock-add first, and handle it
 	 * if it exists:
 	 */
-	if (fetch_robust_entry(&pending, &head->list_op_pending, &pip))
+	if (fetch_robust_entry(&pending, &head->list_op_pending, &pend_mod))
 		return;
 
 	next_entry = NULL;	/* avoid warning with gcc */
@@ -808,20 +1168,20 @@ static void exit_robust_list(struct task_struct *curr)
 		 * Fetch the next entry in the list before calling
 		 * handle_futex_death:
 		 */
-		rc = fetch_robust_entry(&next_entry, &entry->next, &next_pi);
+		rc = fetch_robust_entry(&next_entry, &entry->next, &next_mod);
 		/*
 		 * A pending lock might already be on the list, so
 		 * don't process it twice:
 		 */
 		if (entry != pending) {
 			if (handle_futex_death((void __user *)entry + futex_offset,
-						curr, pi, HANDLE_DEATH_LIST))
+						curr, cur_mod, HANDLE_DEATH_LIST))
 				return;
 		}
 		if (rc)
 			return;
 		entry = next_entry;
-		pi = next_pi;
+		cur_mod = next_mod;
 		/*
 		 * Avoid excessively long or circular lists:
 		 */
@@ -833,8 +1193,29 @@ static void exit_robust_list(struct task_struct *curr)
 
 	if (pending) {
 		handle_futex_death((void __user *)pending + futex_offset,
-				   curr, pip, HANDLE_DEATH_PENDING);
+				   curr, pend_mod, HANDLE_DEATH_PENDING);
 	}
+}
+
+static bool robust_list_clear_pending(unsigned long __user *pop)
+{
+	struct robust_list_head __user *head = current->futex.robust_list;
+
+	if (!put_user(0UL, pop))
+		return true;
+
+	/*
+	 * Just give up. The robust list head is usually part of TLS, so the
+	 * chance that this gets resolved is close to zero.
+	 *
+	 * If @pop_addr is the robust_list_head::list_op_pending pointer then
+	 * clear the robust list head pointer to prevent further damage when the
+	 * task exits.  Better a few stale futexes than corrupted memory. But
+	 * that's mostly an academic exercise.
+	 */
+	if (pop == (unsigned long __user *)&head->list_op_pending)
+		current->futex.robust_list = NULL;
+	return false;
 }
 
 #ifdef CONFIG_COMPAT
@@ -852,29 +1233,28 @@ static void __user *futex_uaddr(struct robust_list __user *entry,
  */
 static inline int
 compat_fetch_robust_entry(compat_uptr_t *uentry, struct robust_list __user **entry,
-		   compat_uptr_t __user *head, unsigned int *pi)
+		   compat_uptr_t __user *head, unsigned int *pflags)
 {
 	if (get_user(*uentry, head))
 		return -EFAULT;
 
-	*entry = compat_ptr((*uentry) & ~1);
-	*pi = (unsigned int)(*uentry) & 1;
+	*entry = compat_ptr((*uentry) & ~FUTEX_ROBUST_MOD_MASK);
+	*pflags = (unsigned int)(*uentry) & FUTEX_ROBUST_MOD_MASK;
 
 	return 0;
 }
 
 /*
- * Walk curr->robust_list (very carefully, it's a userspace list!)
+ * Walk curr->futex.robust_list (very carefully, it's a userspace list!)
  * and mark any locks found there dead, and notify any waiters.
  *
  * We silently return on any sign of list-walking problem.
  */
 static void compat_exit_robust_list(struct task_struct *curr)
 {
-	struct compat_robust_list_head __user *head = curr->compat_robust_list;
+	struct compat_robust_list_head __user *head = current->futex.compat_robust_list;
+	unsigned int limit = ROBUST_LIST_LIMIT, cur_mod, next_mod, pend_mod;
 	struct robust_list __user *entry, *next_entry, *pending;
-	unsigned int limit = ROBUST_LIST_LIMIT, pi, pip;
-	unsigned int next_pi;
 	compat_uptr_t uentry, next_uentry, upending;
 	compat_long_t futex_offset;
 	int rc;
@@ -883,7 +1263,7 @@ static void compat_exit_robust_list(struct task_struct *curr)
 	 * Fetch the list head (which was registered earlier, via
 	 * sys_set_robust_list()):
 	 */
-	if (compat_fetch_robust_entry(&uentry, &entry, &head->list.next, &pi))
+	if (compat_fetch_robust_entry(&uentry, &entry, &head->list.next, &cur_mod))
 		return;
 	/*
 	 * Fetch the relative futex offset:
@@ -894,8 +1274,7 @@ static void compat_exit_robust_list(struct task_struct *curr)
 	 * Fetch any possibly pending lock-add first, and handle it
 	 * if it exists:
 	 */
-	if (compat_fetch_robust_entry(&upending, &pending,
-			       &head->list_op_pending, &pip))
+	if (compat_fetch_robust_entry(&upending, &pending, &head->list_op_pending, &pend_mod))
 		return;
 
 	next_entry = NULL;	/* avoid warning with gcc */
@@ -905,7 +1284,7 @@ static void compat_exit_robust_list(struct task_struct *curr)
 		 * handle_futex_death:
 		 */
 		rc = compat_fetch_robust_entry(&next_uentry, &next_entry,
-			(compat_uptr_t __user *)&entry->next, &next_pi);
+			(compat_uptr_t __user *)&entry->next, &next_mod);
 		/*
 		 * A pending lock might already be on the list, so
 		 * dont process it twice:
@@ -913,15 +1292,14 @@ static void compat_exit_robust_list(struct task_struct *curr)
 		if (entry != pending) {
 			void __user *uaddr = futex_uaddr(entry, futex_offset);
 
-			if (handle_futex_death(uaddr, curr, pi,
-					       HANDLE_DEATH_LIST))
+			if (handle_futex_death(uaddr, curr, cur_mod, HANDLE_DEATH_LIST))
 				return;
 		}
 		if (rc)
 			return;
 		uentry = next_uentry;
 		entry = next_entry;
-		pi = next_pi;
+		cur_mod = next_mod;
 		/*
 		 * Avoid excessively long or circular lists:
 		 */
@@ -933,9 +1311,24 @@ static void compat_exit_robust_list(struct task_struct *curr)
 	if (pending) {
 		void __user *uaddr = futex_uaddr(pending, futex_offset);
 
-		handle_futex_death(uaddr, curr, pip, HANDLE_DEATH_PENDING);
+		handle_futex_death(uaddr, curr, pend_mod, HANDLE_DEATH_PENDING);
 	}
 }
+
+static bool compat_robust_list_clear_pending(u32 __user *pop)
+{
+	struct compat_robust_list_head __user *head = current->futex.compat_robust_list;
+
+	if (!put_user(0U, pop))
+		return true;
+
+	/* See comment in robust_list_clear_pending(). */
+	if (pop == &head->list_op_pending)
+		current->futex.compat_robust_list = NULL;
+	return false;
+}
+#else
+static bool compat_robust_list_clear_pending(u32 __user *pop_addr) { return false; }
 #endif
 
 #ifdef CONFIG_FUTEX_PI
@@ -947,11 +1340,21 @@ static void compat_exit_robust_list(struct task_struct *curr)
  */
 static void exit_pi_state_list(struct task_struct *curr)
 {
-	struct list_head *next, *head = &curr->pi_state_list;
+	struct list_head *next, *head = &curr->futex.pi_state_list;
 	struct futex_pi_state *pi_state;
-	struct futex_hash_bucket *hb;
 	union futex_key key = FUTEX_KEY_INIT;
 
+	/*
+	 * The mutex mm_struct::futex_hash_lock might be acquired.
+	 */
+	might_sleep();
+	/*
+	 * Ensure the hash remains stable (no resize) during the while loop
+	 * below. The hb pointer is acquired under the pi_lock so we can't block
+	 * on the mutex.
+	 */
+	WARN_ON(curr != current);
+	guard(private_hash)(current->mm);
 	/*
 	 * We are a ZOMBIE and nobody can enqueue itself on
 	 * pi_state_list anymore, but we have to be careful
@@ -962,49 +1365,52 @@ static void exit_pi_state_list(struct task_struct *curr)
 		next = head->next;
 		pi_state = list_entry(next, struct futex_pi_state, list);
 		key = pi_state->key;
-		hb = futex_hash(&key);
+		if (1) {
+			CLASS(hbr, hbr)(&key);
+			auto hb = hbr.hb;
 
-		/*
-		 * We can race against put_pi_state() removing itself from the
-		 * list (a waiter going away). put_pi_state() will first
-		 * decrement the reference count and then modify the list, so
-		 * its possible to see the list entry but fail this reference
-		 * acquire.
-		 *
-		 * In that case; drop the locks to let put_pi_state() make
-		 * progress and retry the loop.
-		 */
-		if (!refcount_inc_not_zero(&pi_state->refcount)) {
+			/*
+			 * We can race against put_pi_state() removing itself from the
+			 * list (a waiter going away). put_pi_state() will first
+			 * decrement the reference count and then modify the list, so
+			 * its possible to see the list entry but fail this reference
+			 * acquire.
+			 *
+			 * In that case; drop the locks to let put_pi_state() make
+			 * progress and retry the loop.
+			 */
+			if (!refcount_inc_not_zero(&pi_state->refcount)) {
+				raw_spin_unlock_irq(&curr->pi_lock);
+				cpu_relax();
+				raw_spin_lock_irq(&curr->pi_lock);
+				continue;
+			}
 			raw_spin_unlock_irq(&curr->pi_lock);
-			cpu_relax();
-			raw_spin_lock_irq(&curr->pi_lock);
-			continue;
-		}
-		raw_spin_unlock_irq(&curr->pi_lock);
 
-		spin_lock(&hb->lock);
-		raw_spin_lock_irq(&pi_state->pi_mutex.wait_lock);
-		raw_spin_lock(&curr->pi_lock);
-		/*
-		 * We dropped the pi-lock, so re-check whether this
-		 * task still owns the PI-state:
-		 */
-		if (head->next != next) {
-			/* retain curr->pi_lock for the loop invariant */
-			raw_spin_unlock(&pi_state->pi_mutex.wait_lock);
+			spin_lock(&hb->lock);
+			raw_spin_lock_irq(&pi_state->pi_mutex.wait_lock);
+			raw_spin_lock(&curr->pi_lock);
+			/*
+			 * We dropped the pi-lock, so re-check whether this
+			 * task still owns the PI-state:
+			 */
+			if (head->next != next) {
+				/* retain curr->pi_lock for the loop invariant */
+				raw_spin_unlock(&pi_state->pi_mutex.wait_lock);
+				spin_unlock(&hb->lock);
+				put_pi_state(pi_state);
+				continue;
+			}
+
+			WARN_ON(pi_state->owner != curr);
+			WARN_ON(list_empty(&pi_state->list));
+			list_del_init(&pi_state->list);
+			pi_state->owner = NULL;
+
+			raw_spin_unlock(&curr->pi_lock);
+			raw_spin_unlock_irq(&pi_state->pi_mutex.wait_lock);
 			spin_unlock(&hb->lock);
-			put_pi_state(pi_state);
-			continue;
 		}
-
-		WARN_ON(pi_state->owner != curr);
-		WARN_ON(list_empty(&pi_state->list));
-		list_del_init(&pi_state->list);
-		pi_state->owner = NULL;
-
-		raw_spin_unlock(&curr->pi_lock);
-		raw_spin_unlock_irq(&pi_state->pi_mutex.wait_lock);
-		spin_unlock(&hb->lock);
 
 		rt_mutex_futex_unlock(&pi_state->pi_mutex);
 		put_pi_state(pi_state);
@@ -1017,21 +1423,50 @@ static void exit_pi_state_list(struct task_struct *curr)
 static inline void exit_pi_state_list(struct task_struct *curr) { }
 #endif
 
+bool futex_robust_list_clear_pending(void __user *pop, unsigned int flags)
+{
+	bool size32bit = !!(flags & FLAGS_ROBUST_LIST32);
+
+	if (!IS_ENABLED(CONFIG_64BIT) && !size32bit)
+		return false;
+
+	if (IS_ENABLED(CONFIG_64BIT) && size32bit)
+		return compat_robust_list_clear_pending(pop);
+
+	return robust_list_clear_pending(pop);
+}
+
+#ifdef CONFIG_FUTEX_ROBUST_UNLOCK
+void __futex_fixup_robust_unlock(struct pt_regs *regs, struct futex_unlock_cs_range *csr)
+{
+	/*
+	 * arch_futex_robust_unlock_get_pop() returns the list pending op pointer from
+	 * @regs if the try_cmpxchg() succeeded.
+	 */
+	void __user *pop = arch_futex_robust_unlock_get_pop(regs);
+
+	if (!pop)
+		return;
+
+	futex_robust_list_clear_pending(pop, csr->pop_size32 ? FLAGS_ROBUST_LIST32 : 0);
+}
+#endif /* CONFIG_FUTEX_ROBUST_UNLOCK */
+
 static void futex_cleanup(struct task_struct *tsk)
 {
-	if (unlikely(tsk->robust_list)) {
+	if (unlikely(tsk->futex.robust_list)) {
 		exit_robust_list(tsk);
-		tsk->robust_list = NULL;
+		tsk->futex.robust_list = NULL;
 	}
 
 #ifdef CONFIG_COMPAT
-	if (unlikely(tsk->compat_robust_list)) {
+	if (unlikely(tsk->futex.compat_robust_list)) {
 		compat_exit_robust_list(tsk);
-		tsk->compat_robust_list = NULL;
+		tsk->futex.compat_robust_list = NULL;
 	}
 #endif
 
-	if (unlikely(!list_empty(&tsk->pi_state_list)))
+	if (unlikely(!list_empty(&tsk->futex.pi_state_list)))
 		exit_pi_state_list(tsk);
 }
 
@@ -1055,20 +1490,23 @@ static void futex_cleanup(struct task_struct *tsk)
 void futex_exit_recursive(struct task_struct *tsk)
 {
 	/* If the state is FUTEX_STATE_EXITING then futex_exit_mutex is held */
-	if (tsk->futex_state == FUTEX_STATE_EXITING)
-		mutex_unlock(&tsk->futex_exit_mutex);
-	tsk->futex_state = FUTEX_STATE_DEAD;
+	if (tsk->futex.state == FUTEX_STATE_EXITING) {
+		__assume_ctx_lock(&tsk->futex.exit_mutex);
+		mutex_unlock(&tsk->futex.exit_mutex);
+	}
+	tsk->futex.state = FUTEX_STATE_DEAD;
 }
 
 static void futex_cleanup_begin(struct task_struct *tsk)
+	__acquires(&tsk->futex.exit_mutex)
 {
 	/*
 	 * Prevent various race issues against a concurrent incoming waiter
 	 * including live locks by forcing the waiter to block on
-	 * tsk->futex_exit_mutex when it observes FUTEX_STATE_EXITING in
+	 * tsk->futex.exit_mutex when it observes FUTEX_STATE_EXITING in
 	 * attach_to_pi_owner().
 	 */
-	mutex_lock(&tsk->futex_exit_mutex);
+	mutex_lock(&tsk->futex.exit_mutex);
 
 	/*
 	 * Switch the state to FUTEX_STATE_EXITING under tsk->pi_lock.
@@ -1082,22 +1520,23 @@ static void futex_cleanup_begin(struct task_struct *tsk)
 	 * be observed in exit_pi_state_list().
 	 */
 	raw_spin_lock_irq(&tsk->pi_lock);
-	tsk->futex_state = FUTEX_STATE_EXITING;
+	tsk->futex.state = FUTEX_STATE_EXITING;
 	raw_spin_unlock_irq(&tsk->pi_lock);
 }
 
 static void futex_cleanup_end(struct task_struct *tsk, int state)
+	__releases(&tsk->futex.exit_mutex)
 {
 	/*
 	 * Lockless store. The only side effect is that an observer might
 	 * take another loop until it becomes visible.
 	 */
-	tsk->futex_state = state;
+	tsk->futex.state = state;
 	/*
 	 * Drop the exit protection. This unblocks waiters which observed
 	 * FUTEX_STATE_EXITING to reevaluate the state.
 	 */
-	mutex_unlock(&tsk->futex_exit_mutex);
+	mutex_unlock(&tsk->futex.exit_mutex);
 }
 
 void futex_exec_release(struct task_struct *tsk)
@@ -1125,29 +1564,518 @@ void futex_exit_release(struct task_struct *tsk)
 	futex_cleanup_end(tsk, FUTEX_STATE_DEAD);
 }
 
-static int __init futex_init(void)
+static void futex_hash_bucket_init(struct futex_hash_bucket *fhb)
 {
-	unsigned int futex_shift;
-	unsigned long i;
+	atomic_set(&fhb->waiters, 0);
+	plist_head_init(&fhb->chain);
+	spin_lock_init(&fhb->lock);
+}
 
-#ifdef CONFIG_BASE_SMALL
-	futex_hashsize = 16;
-#else
-	futex_hashsize = roundup_pow_of_two(256 * num_possible_cpus());
-#endif
+#define FH_CUSTOM	0x01
 
-	futex_queues = alloc_large_system_hash("futex", sizeof(*futex_queues),
-					       futex_hashsize, 0, 0,
-					       &futex_shift, NULL,
-					       futex_hashsize, futex_hashsize);
-	futex_hashsize = 1UL << futex_shift;
+#ifdef CONFIG_FUTEX_PRIVATE_HASH
 
-	for (i = 0; i < futex_hashsize; i++) {
-		atomic_set(&futex_queues[i].waiters, 0);
-		plist_head_init(&futex_queues[i].chain);
-		spin_lock_init(&futex_queues[i].lock);
+/*
+ * futex-ref
+ *
+ * Heavily inspired by percpu-rwsem/percpu-refcount; not reusing any of that
+ * code because it just doesn't fit right.
+ *
+ * Dual counter, per-cpu / atomic approach like percpu-refcount, except it
+ * re-initializes the state automatically, such that the fph swizzle is also a
+ * transition back to per-cpu.
+ */
+
+static void futex_ref_rcu(struct rcu_head *head);
+
+static void __futex_ref_atomic_begin(struct futex_private_hash *fph)
+{
+	struct mm_struct *mm = fph->mm;
+
+	/*
+	 * The counter we're about to switch to must have fully switched;
+	 * otherwise it would be impossible for it to have reported success
+	 * from futex_ref_is_dead().
+	 */
+	WARN_ON_ONCE(atomic_long_read(&mm->futex.phash.atomic) != 0);
+
+	/*
+	 * Set the atomic to the bias value such that futex_ref_{get,put}()
+	 * will never observe 0. Will be fixed up in __futex_ref_atomic_end()
+	 * when folding in the percpu count.
+	 */
+	atomic_long_set(&mm->futex.phash.atomic, LONG_MAX);
+	smp_store_release(&fph->state, FR_ATOMIC);
+
+	call_rcu_hurry(&mm->futex.phash.rcu, futex_ref_rcu);
+}
+
+static void __futex_ref_atomic_end(struct futex_private_hash *fph)
+{
+	struct mm_struct *mm = fph->mm;
+	unsigned int count = 0;
+	long ret;
+	int cpu;
+
+	/*
+	 * Per __futex_ref_atomic_begin() the state of the fph must be ATOMIC
+	 * and per this RCU callback, everybody must now observe this state and
+	 * use the atomic variable.
+	 */
+	WARN_ON_ONCE(fph->state != FR_ATOMIC);
+
+	/*
+	 * Therefore the per-cpu counter is now stable, sum and reset.
+	 */
+	for_each_possible_cpu(cpu) {
+		unsigned int *ptr = per_cpu_ptr(mm->futex.phash.ref, cpu);
+		count += *ptr;
+		*ptr = 0;
 	}
 
+	/*
+	 * Re-init for the next cycle.
+	 */
+	this_cpu_inc(*mm->futex.phash.ref); /* 0 -> 1 */
+
+	/*
+	 * Add actual count, subtract bias and initial refcount.
+	 *
+	 * The moment this atomic operation happens, futex_ref_is_dead() can
+	 * become true.
+	 */
+	ret = atomic_long_add_return(count - LONG_MAX - 1, &mm->futex.phash.atomic);
+	if (!ret)
+		wake_up_var(mm);
+
+	WARN_ON_ONCE(ret < 0);
+	mmput_async(mm);
+}
+
+static void futex_ref_rcu(struct rcu_head *head)
+{
+	struct mm_struct *mm = container_of(head, struct mm_struct, futex.phash.rcu);
+	struct futex_private_hash *fph = rcu_dereference_raw(mm->futex.phash.hash);
+
+	if (fph->state == FR_PERCPU) {
+		/*
+		 * Per this extra grace-period, everybody must now observe
+		 * fph as the current fph and no previously observed fph's
+		 * are in-flight.
+		 *
+		 * Notably, nobody will now rely on the atomic
+		 * futex_ref_is_dead() state anymore so we can begin the
+		 * migration of the per-cpu counter into the atomic.
+		 */
+		__futex_ref_atomic_begin(fph);
+		return;
+	}
+
+	__futex_ref_atomic_end(fph);
+}
+
+/*
+ * Drop the initial refcount and transition to atomics.
+ */
+static void futex_ref_drop(struct futex_private_hash *fph)
+{
+	struct mm_struct *mm = fph->mm;
+
+	/*
+	 * Can only transition the current fph;
+	 */
+	WARN_ON_ONCE(rcu_dereference_raw(mm->futex.phash.hash) != fph);
+	/*
+	 * We enqueue at least one RCU callback. Ensure mm stays if the task
+	 * exits before the transition is completed.
+	 */
+	mmget(mm);
+
+	/*
+	 * In order to avoid the following scenario:
+	 *
+	 * futex_hash()			__futex_pivot_hash()
+	 *   guard(rcu);		  guard(mm->futex.phash.lock);
+	 *   fph = mm->futex.phash.hash;
+	 *				  rcu_assign_pointer(&mm->futex.phash.hash, new);
+	 *				futex_hash_allocate()
+	 *				  futex_ref_drop()
+	 *				    fph->state = FR_ATOMIC;
+	 *				    atomic_set(, BIAS);
+	 *
+	 *   futex_private_hash_get(fph); // OOPS
+	 *
+	 * Where an old fph (which is FR_ATOMIC) and should fail on
+	 * inc_not_zero, will succeed because a new transition is started and
+	 * the atomic is bias'ed away from 0.
+	 *
+	 * There must be at least one full grace-period between publishing a
+	 * new fph and trying to replace it.
+	 */
+	if (poll_state_synchronize_rcu(mm->futex.phash.batches)) {
+		/*
+		 * There was a grace-period, we can begin now.
+		 */
+		__futex_ref_atomic_begin(fph);
+		return;
+	}
+
+	call_rcu_hurry(&mm->futex.phash.rcu, futex_ref_rcu);
+}
+
+static bool futex_ref_get(struct futex_private_hash *fph)
+{
+	struct mm_struct *mm = fph->mm;
+
+	guard(preempt)();
+
+	if (READ_ONCE(fph->state) == FR_PERCPU) {
+		__this_cpu_inc(*mm->futex.phash.ref);
+		return true;
+	}
+
+	return atomic_long_inc_not_zero(&mm->futex.phash.atomic);
+}
+
+static bool futex_ref_put(struct futex_private_hash *fph)
+{
+	struct mm_struct *mm = fph->mm;
+
+	guard(preempt)();
+
+	if (READ_ONCE(fph->state) == FR_PERCPU) {
+		__this_cpu_dec(*mm->futex.phash.ref);
+		return false;
+	}
+
+	return atomic_long_dec_and_test(&mm->futex.phash.atomic);
+}
+
+static bool futex_ref_is_dead(struct futex_private_hash *fph)
+{
+	struct mm_struct *mm = fph->mm;
+
+	guard(rcu)();
+
+	if (smp_load_acquire(&fph->state) == FR_PERCPU)
+		return false;
+
+	return atomic_long_read(&mm->futex.phash.atomic) == 0;
+}
+
+static void futex_hash_init_mm(struct futex_mm_data *fd)
+{
+	memset(&fd->phash, 0, sizeof(fd->phash));
+	mutex_init(&fd->phash.lock);
+	fd->phash.batches = get_state_synchronize_rcu();
+}
+
+void futex_hash_free(struct mm_struct *mm)
+{
+	struct futex_private_hash *fph;
+
+	free_percpu(mm->futex.phash.ref);
+	kvfree(mm->futex.phash.hash_new);
+	fph = rcu_dereference_raw(mm->futex.phash.hash);
+	if (fph)
+		kvfree(fph);
+}
+
+static bool futex_pivot_pending(struct mm_struct *mm)
+{
+	struct futex_mm_phash *mmph = &mm->futex.phash;
+	struct futex_private_hash *fph;
+
+	guard(mutex)(&mmph->lock);
+
+	if (!mmph->hash_new)
+		return true;
+
+	fph = rcu_dereference_raw(mmph->hash);
+	return futex_ref_is_dead(fph);
+}
+
+static bool futex_hash_less(struct futex_private_hash *a,
+			    struct futex_private_hash *b)
+{
+	/* user provided always wins */
+	if (!a->custom && b->custom)
+		return true;
+	if (a->custom && !b->custom)
+		return false;
+
+	/* zero-sized hash wins */
+	if (!b->hash_mask)
+		return true;
+	if (!a->hash_mask)
+		return false;
+
+	/* keep the biggest */
+	if (a->hash_mask < b->hash_mask)
+		return true;
+	if (a->hash_mask > b->hash_mask)
+		return false;
+
+	return false; /* equal */
+}
+
+static int futex_hash_allocate(unsigned int hash_slots, unsigned int flags)
+{
+	struct mm_struct *mm = current->mm;
+	struct futex_private_hash *fph;
+	bool custom = flags & FH_CUSTOM;
+	int i;
+
+	if (hash_slots && (hash_slots == 1 || !is_power_of_2(hash_slots)))
+		return -EINVAL;
+
+	/*
+	 * Once we've disabled the global hash there is no way back.
+	 */
+	scoped_guard(rcu) {
+		fph = rcu_dereference(mm->futex.phash.hash);
+		if (fph && !fph->hash_mask) {
+			if (custom)
+				return -EBUSY;
+			return 0;
+		}
+	}
+
+	if (!mm->futex.phash.ref) {
+		/*
+		 * This will always be allocated by the first thread and
+		 * therefore requires no locking.
+		 */
+		mm->futex.phash.ref = alloc_percpu(unsigned int);
+		if (!mm->futex.phash.ref)
+			return -ENOMEM;
+		this_cpu_inc(*mm->futex.phash.ref); /* 0 -> 1 */
+	}
+
+	fph = kvzalloc(struct_size(fph, queues, hash_slots),
+		       GFP_KERNEL_ACCOUNT | __GFP_NOWARN);
+	if (!fph)
+		return -ENOMEM;
+
+	fph->hash_mask = hash_slots ? hash_slots - 1 : 0;
+	fph->custom = custom;
+	fph->mm = mm;
+
+	for (i = 0; i < hash_slots; i++)
+		futex_hash_bucket_init(&fph->queues[i]);
+
+	if (custom) {
+		/*
+		 * Only let prctl() wait / retry; don't unduly delay clone().
+		 */
+again:
+		wait_var_event(mm, futex_pivot_pending(mm));
+	}
+
+	scoped_guard(mutex, &mm->futex.phash.lock) {
+		struct futex_private_hash *free __free(kvfree) = NULL;
+		struct futex_private_hash *cur, *new;
+
+		cur = rcu_dereference_protected(mm->futex.phash.hash,
+						lockdep_is_held(&mm->futex.phash.lock));
+		new = mm->futex.phash.hash_new;
+		mm->futex.phash.hash_new = NULL;
+
+		if (fph) {
+			if (cur && !cur->hash_mask) {
+				/*
+				 * If two threads simultaneously request the global
+				 * hash then the first one performs the switch,
+				 * the second one returns here.
+				 */
+				free = fph;
+				mm->futex.phash.hash_new = new;
+				return -EBUSY;
+			}
+			if (cur && !new) {
+				/*
+				 * If we have an existing hash, but do not yet have
+				 * allocated a replacement hash, drop the initial
+				 * reference on the existing hash.
+				 */
+				futex_ref_drop(cur);
+			}
+
+			if (new) {
+				/*
+				 * Two updates raced; throw out the lesser one.
+				 */
+				if (futex_hash_less(new, fph)) {
+					free = new;
+					new = fph;
+				} else {
+					free = fph;
+				}
+			} else {
+				new = fph;
+			}
+			fph = NULL;
+		}
+
+		if (new) {
+			/*
+			 * Will set mm->futex.phash.new_hash on failure;
+			 * futex_private_hash_get() will try again.
+			 */
+			if (!__futex_pivot_hash(mm, new) && custom)
+				goto again;
+		}
+	}
+	return 0;
+}
+
+int futex_hash_allocate_default(void)
+{
+	unsigned int threads, buckets, current_buckets = 0;
+	struct futex_private_hash *fph;
+
+	if (!current->mm)
+		return 0;
+
+	scoped_guard(rcu) {
+		threads = min_t(unsigned int, get_nr_threads(current), num_online_cpus());
+
+		fph = rcu_dereference(current->mm->futex.phash.hash);
+		if (fph) {
+			if (fph->custom)
+				return 0;
+
+			current_buckets = fph->hash_mask + 1;
+		}
+	}
+
+	/*
+	 * The default allocation will remain within
+	 *   16 <= threads * 4 <= global hash size
+	 */
+	buckets = roundup_pow_of_two(4 * threads);
+	buckets = clamp(buckets, 16, futex_hashmask + 1);
+
+	if (current_buckets >= buckets)
+		return 0;
+
+	return futex_hash_allocate(buckets, 0);
+}
+
+static int futex_hash_get_slots(void)
+{
+	struct futex_private_hash *fph;
+
+	guard(rcu)();
+	fph = rcu_dereference(current->mm->futex.phash.hash);
+	if (fph && fph->hash_mask)
+		return fph->hash_mask + 1;
+	return 0;
+}
+#else  /* CONFIG_FUTEX_PRIVATE_HASH */
+static inline int futex_hash_allocate(unsigned int hslots, unsigned int flags) { return -EINVAL; }
+static inline int futex_hash_get_slots(void) { return 0; }
+static inline void futex_hash_init_mm(struct futex_mm_data *fd) { }
+#endif /* !CONFIG_FUTEX_PRIVATE_HASH */
+
+#ifdef CONFIG_FUTEX_ROBUST_UNLOCK
+static void futex_invalidate_cs_ranges(struct futex_mm_data *fd)
+{
+	/*
+	 * Invalidate start_ip so that the quick check fails for ip >= start_ip
+	 * if VDSO is not mapped or the second slot is not available for compat
+	 * tasks as they use VDSO32 which does not provide the 64-bit pointer
+	 * variant.
+	 */
+	for (int i = 0; i < FUTEX_ROBUST_MAX_CS_RANGES; i++)
+		fd->unlock.cs_ranges[i].start_ip = ~0UL;
+}
+
+void futex_reset_cs_ranges(struct futex_mm_data *fd)
+{
+	memset(fd->unlock.cs_ranges, 0, sizeof(fd->unlock.cs_ranges));
+	futex_invalidate_cs_ranges(fd);
+}
+
+static void futex_robust_unlock_init_mm(struct futex_mm_data *fd)
+{
+	/* mm_dup() preserves the range, mm_alloc() clears it */
+	if (!fd->unlock.cs_ranges[0].start_ip)
+		futex_invalidate_cs_ranges(fd);
+}
+#else  /* CONFIG_FUTEX_ROBUST_UNLOCK */
+static inline void futex_robust_unlock_init_mm(struct futex_mm_data *fd) { }
+#endif /* !CONFIG_FUTEX_ROBUST_UNLOCK */
+
+#if defined(CONFIG_FUTEX_PRIVATE_HASH) || defined(CONFIG_FUTEX_ROBUST_UNLOCK)
+void futex_mm_init(struct mm_struct *mm)
+{
+	futex_hash_init_mm(&mm->futex);
+	futex_robust_unlock_init_mm(&mm->futex);
+}
+#endif
+
+int futex_hash_prctl(unsigned long arg2, unsigned long arg3, unsigned long arg4)
+{
+	unsigned int flags = FH_CUSTOM;
+	int ret;
+
+	switch (arg2) {
+	case PR_FUTEX_HASH_SET_SLOTS:
+		if (arg4)
+			return -EINVAL;
+		ret = futex_hash_allocate(arg3, flags);
+		break;
+
+	case PR_FUTEX_HASH_GET_SLOTS:
+		ret = futex_hash_get_slots();
+		break;
+
+	default:
+		ret = -EINVAL;
+		break;
+	}
+	return ret;
+}
+
+static int __init futex_init(void)
+{
+	unsigned long hashsize, i;
+	unsigned int order, n;
+	unsigned long size;
+
+#ifdef CONFIG_BASE_SMALL
+	hashsize = 16;
+#else
+	hashsize = 256 * num_possible_cpus();
+	hashsize /= num_possible_nodes();
+	hashsize = max(4, hashsize);
+	hashsize = roundup_pow_of_two(hashsize);
+#endif
+	futex_hashshift = ilog2(hashsize);
+	size = sizeof(struct futex_hash_bucket) * hashsize;
+	order = get_order(size);
+
+	for_each_node(n) {
+		struct futex_hash_bucket *table;
+
+		if (order > MAX_PAGE_ORDER)
+			table = vmalloc_huge_node(size, GFP_KERNEL, n);
+		else
+			table = alloc_pages_exact_nid(n, size, GFP_KERNEL);
+
+		BUG_ON(!table);
+
+		for (i = 0; i < hashsize; i++)
+			futex_hash_bucket_init(&table[i]);
+
+		futex_queues[n] = table;
+	}
+
+	futex_hashmask = hashsize - 1;
+	pr_info("futex hash table entries: %lu (%lu bytes on %d NUMA nodes, total %lu KiB, %s).\n",
+		hashsize, size, num_possible_nodes(), size * num_possible_nodes() / 1024,
+		order > MAX_PAGE_ORDER ? "vmalloc" : "linear");
 	return 0;
 }
 core_initcall(futex_init);

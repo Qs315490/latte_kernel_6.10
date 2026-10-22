@@ -135,15 +135,27 @@ out:
 	sock_put(sk);
 }
 
+static bool smc_rx_pipe_buf_get(struct pipe_inode_info *pipe,
+				struct pipe_buffer *buf)
+{
+	/* smc_spd_priv in buf->private is not shareable; disallow cloning. */
+	return false;
+}
+
 static const struct pipe_buf_operations smc_pipe_ops = {
 	.release = smc_rx_pipe_buf_release,
-	.get = generic_pipe_buf_get
+	.get	 = smc_rx_pipe_buf_get,
 };
 
 static void smc_rx_spd_release(struct splice_pipe_desc *spd,
 			       unsigned int i)
 {
+	struct smc_spd_priv *priv = (struct smc_spd_priv *)spd->partial[i].private;
+	struct sock *sk = &priv->smc->sk;
+
+	kfree(priv);
 	put_page(spd->pages[i]);
+	sock_put(sk);
 }
 
 static int smc_rx_splice(struct pipe_inode_info *pipe, char *src, size_t len,
@@ -161,17 +173,17 @@ static int smc_rx_splice(struct pipe_inode_info *pipe, char *src, size_t len,
 	nr_pages = !lgr->is_smcd && smc->conn.rmb_desc->is_vm ?
 		   PAGE_ALIGN(len + offset) / PAGE_SIZE : 1;
 
-	pages = kcalloc(nr_pages, sizeof(*pages), GFP_KERNEL);
+	pages = kzalloc_objs(*pages, nr_pages);
 	if (!pages)
 		goto out;
-	partial = kcalloc(nr_pages, sizeof(*partial), GFP_KERNEL);
+	partial = kzalloc_objs(*partial, nr_pages);
 	if (!partial)
 		goto out_page;
-	priv = kcalloc(nr_pages, sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_objs(*priv, nr_pages);
 	if (!priv)
 		goto out_part;
 	for (i = 0; i < nr_pages; i++) {
-		priv[i] = kzalloc(sizeof(**priv), GFP_KERNEL);
+		priv[i] = kzalloc_obj(**priv);
 		if (!priv[i])
 			goto out_priv;
 	}
@@ -202,6 +214,10 @@ static int smc_rx_splice(struct pipe_inode_info *pipe, char *src, size_t len,
 			offset = 0;
 		}
 	}
+	for (i = 0; i < nr_pages; i++) {
+		get_page(pages[i]);
+		sock_hold(&smc->sk);
+	}
 	spd.nr_pages_max = nr_pages;
 	spd.nr_pages = nr_pages;
 	spd.pages = pages;
@@ -210,16 +226,8 @@ static int smc_rx_splice(struct pipe_inode_info *pipe, char *src, size_t len,
 	spd.spd_release = smc_rx_spd_release;
 
 	bytes = splice_to_pipe(pipe, &spd);
-	if (bytes > 0) {
-		sock_hold(&smc->sk);
-		if (!lgr->is_smcd && smc->conn.rmb_desc->is_vm) {
-			for (i = 0; i < PAGE_ALIGN(bytes + offset) / PAGE_SIZE; i++)
-				get_page(pages[i]);
-		} else {
-			get_page(smc->conn.rmb_desc->pages);
-		}
+	if (bytes > 0)
 		atomic_add(bytes, &smc->conn.splice_pending);
-	}
 	kfree(priv);
 	kfree(partial);
 	kfree(pages);

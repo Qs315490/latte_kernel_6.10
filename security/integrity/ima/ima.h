@@ -28,6 +28,15 @@ enum ima_show_type { IMA_SHOW_BINARY, IMA_SHOW_BINARY_NO_FIELD_LEN,
 		     IMA_SHOW_BINARY_OLD_STRING_FMT, IMA_SHOW_ASCII };
 enum tpm_pcrs { TPM_PCR0 = 0, TPM_PCR8 = 8, TPM_PCR10 = 10 };
 
+/*
+ * BINARY: current binary measurements list
+ * BINARY_STAGED: staged binary measurements list
+ * BINARY_FULL: binary measurements list since IMA init (lost after kexec)
+ */
+enum binary_lists {
+	BINARY, BINARY_STAGED, BINARY_FULL, BINARY__LAST
+};
+
 /* digest size for IMA, fits SHA1 or MD5 */
 #define IMA_DIGEST_SIZE		SHA1_DIGEST_SIZE
 #define IMA_EVENT_NAME_LEN_MAX	255
@@ -53,6 +62,7 @@ extern atomic_t ima_setxattr_allowed_hash_algorithms;
 struct ima_algo_desc {
 	struct crypto_shash *tfm;
 	enum hash_algo algo;
+	unsigned int digest_size;
 };
 
 /* set during initialization */
@@ -117,6 +127,7 @@ struct ima_queue_entry {
 	struct ima_template_entry *entry;
 };
 extern struct list_head ima_measurements;	/* list of all measurements */
+extern struct list_head ima_measurements_staged; /* list of staged meas. */
 
 /* Some details preceding the binary serialized measurement list */
 struct ima_kexec_hdr {
@@ -144,6 +155,7 @@ struct ima_kexec_hdr {
 #define IMA_DIGSIG_REQUIRED	0x01000000
 #define IMA_PERMIT_DIRECTIO	0x02000000
 #define IMA_NEW_FILE		0x04000000
+#define IMA_SIGV3_REQUIRED	0x08000000
 #define IMA_FAIL_UNVERIFIABLE_SIGS	0x10000000
 #define IMA_MODSIG_ALLOWED	0x20000000
 #define IMA_CHECK_BLACKLIST	0x40000000
@@ -176,12 +188,38 @@ struct ima_kexec_hdr {
 				 IMA_BPRM_APPRAISED | IMA_READ_APPRAISED | \
 				 IMA_CREDS_APPRAISED)
 
-/* IMA iint cache atomic_flags */
+/*
+ * IMA iint cache atomic_flags
+ *
+ * IMA_CHANGE_ATTR - indicates that chATTR() was called (chmod, chown, chgrp)
+ * and file attributes have changed. On file open, it causes IMA to clear
+ * iint->flags to re-evaluate policy and perform IMA functions again.
+ *
+ * IMA_CHANGE_XATTR - indicates that setxattr or removexattr was called and
+ * extended attributes have changed. On file open, it causes IMA to clear
+ * iint->flags IMA_DONE_MASK to re-appraise.
+ *
+ * IMA_UPDATE_XATTR - indicates that security.ima needs to be updated. It is
+ * cleared if file policy changes and no update is needed.
+ *
+ * IMA_DIGSIG - indicates that file security.ima has signature and file
+ * security.ima must not update on file close.
+ *
+ * IMA_MAY_EMIT_TOMTOU - indicates to add Time-of-Measure-Time-of-Use (ToMToU)
+ * integrity violation (a file that is already opened for read is opened for
+ * write) to the measurement list and to also emit an audit message.
+ *
+ * IMA_EMITTED_OPENWRITERS - indicates to add open-writers integrity violation
+ * (a file that is already opened for write is opened for read) to the
+ * measurement list and to also emit an audit message.
+ *
+ */
 #define IMA_CHANGE_XATTR	0
 #define IMA_UPDATE_XATTR	1
 #define IMA_CHANGE_ATTR		2
 #define IMA_DIGSIG		3
-#define IMA_MUST_MEASURE	4
+#define IMA_MAY_EMIT_TOMTOU	4
+#define IMA_EMITTED_OPENWRITERS	5
 
 /* IMA integrity metadata associated with an inode */
 struct ima_iint_cache {
@@ -243,6 +281,12 @@ void ima_post_key_create_or_update(struct key *keyring, struct key *key,
 				   unsigned long flags, bool create);
 #endif
 
+#ifdef CONFIG_IMA_KEXEC
+void ima_measure_kexec_event(const char *event_name);
+#else
+static inline void ima_measure_kexec_event(const char *event_name) {}
+#endif
+
 /*
  * The default binary_runtime_measurements list format is defined as the
  * platform native format.  The canonical format is defined as little-endian.
@@ -274,10 +318,14 @@ struct ima_template_desc *ima_template_desc_current(void);
 struct ima_template_desc *ima_template_desc_buf(void);
 struct ima_template_desc *lookup_template_desc(const char *name);
 bool ima_template_has_modsig(const struct ima_template_desc *ima_template);
+int ima_queue_stage(void);
+int ima_queue_staged_delete_all(void);
+int ima_queue_delete_partial(unsigned long req_value);
 int ima_restore_measurement_entry(struct ima_template_entry *entry);
 int ima_restore_measurement_list(loff_t bufsize, void *buf);
 int ima_measurements_show(struct seq_file *m, void *v);
-unsigned long ima_get_binary_runtime_size(void);
+int __init ima_init_htable(void);
+unsigned long ima_get_binary_runtime_size(enum binary_lists binary_list);
 int ima_init_template(void);
 void ima_init_template_list(void);
 int __init ima_init_digests(void);
@@ -290,12 +338,12 @@ int ima_lsm_policy_change(struct notifier_block *nb, unsigned long event,
  */
 extern spinlock_t ima_queue_lock;
 
-struct ima_h_table {
-	atomic_long_t len;	/* number of stored measurements in the list */
-	atomic_long_t violations;
-	struct hlist_head queue[IMA_MEASURE_HTABLE_SIZE];
-};
-extern struct ima_h_table ima_htable;
+/* Total number of measurement list records since hard boot. */
+extern atomic_long_t ima_num_records[BINARY__LAST];
+/* Total number of violations since hard boot. */
+extern atomic_long_t ima_num_violations;
+extern struct hlist_head __rcu *ima_htable;
+extern bool ima_flush_htable;
 
 static inline unsigned int ima_hash_key(u8 *digest)
 {
@@ -434,7 +482,8 @@ int ima_check_blacklist(struct ima_iint_cache *iint,
 int ima_appraise_measurement(enum ima_hooks func, struct ima_iint_cache *iint,
 			     struct file *file, const unsigned char *filename,
 			     struct evm_ima_xattr_data *xattr_value,
-			     int xattr_len, const struct modsig *modsig);
+			     int xattr_len, const struct modsig *modsig,
+			     bool bprm_is_check);
 int ima_must_appraise(struct mnt_idmap *idmap, struct inode *inode,
 		      int mask, enum ima_hooks func);
 void ima_update_xattr(struct ima_iint_cache *iint, struct file *file);
@@ -459,7 +508,8 @@ static inline int ima_appraise_measurement(enum ima_hooks func,
 					   const unsigned char *filename,
 					   struct evm_ima_xattr_data *xattr_value,
 					   int xattr_len,
-					   const struct modsig *modsig)
+					   const struct modsig *modsig,
+					   bool bprm_is_check)
 {
 	return INTEGRITY_UNKNOWN;
 }

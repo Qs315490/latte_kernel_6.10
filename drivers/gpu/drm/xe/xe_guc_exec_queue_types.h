@@ -3,13 +3,14 @@
  * Copyright © 2022 Intel Corporation
  */
 
-#ifndef _XE_GUC_ENGINE_TYPES_H_
-#define _XE_GUC_ENGINE_TYPES_H_
+#ifndef _XE_GUC_EXEC_QUEUE_TYPES_H_
+#define _XE_GUC_EXEC_QUEUE_TYPES_H_
 
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
 #include "xe_gpu_scheduler_types.h"
+#include "xe_hw_fence_types.h"
 
 struct dma_fence;
 struct xe_exec_queue;
@@ -20,8 +21,14 @@ struct xe_exec_queue;
 struct xe_guc_exec_queue {
 	/** @q: Backpointer to parent xe_exec_queue */
 	struct xe_exec_queue *q;
+	/** @rcu: For safe freeing of exported dma fences */
+	struct rcu_head rcu;
 	/** @sched: GPU scheduler for this xe_exec_queue */
 	struct xe_gpu_scheduler sched;
+	/**
+	 * @name: Scheduler timeline name, kept with @sched until RCU free.
+	 */
+	char name[MAX_FENCE_NAME_LEN];
 	/** @entity: Scheduler entity for this xe_exec_queue */
 	struct xe_sched_entity entity;
 	/**
@@ -31,10 +38,8 @@ struct xe_guc_exec_queue {
 	 */
 #define MAX_STATIC_MSG_TYPE	3
 	struct xe_sched_msg static_msgs[MAX_STATIC_MSG_TYPE];
-	/** @lr_tdr: long running TDR worker */
-	struct work_struct lr_tdr;
-	/** @fini_async: do final fini async from this worker */
-	struct work_struct fini_async;
+	/** @destroy_async: do final destroy async from this worker */
+	struct work_struct destroy_async;
 	/** @resume_time: time of last resume */
 	u64 resume_time;
 	/** @state: GuC specific state for this xe_exec_queue */
@@ -49,6 +54,21 @@ struct xe_guc_exec_queue {
 	wait_queue_head_t suspend_wait;
 	/** @suspend_pending: a suspend of the exec_queue is pending */
 	bool suspend_pending;
+	/**
+	 * @needs_cleanup: Needs a cleanup message during VF post migration
+	 * recovery.
+	 */
+	bool needs_cleanup;
+	/**
+	 * @needs_suspend: Needs a suspend message during VF post migration
+	 * recovery.
+	 */
+	bool needs_suspend;
+	/**
+	 * @needs_resume: Needs a resume message during VF post migration
+	 * recovery.
+	 */
+	bool needs_resume;
 };
 
 #endif

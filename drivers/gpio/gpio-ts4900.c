@@ -95,16 +95,16 @@ static int ts4900_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	return !!(reg & priv->input_bit);
 }
 
-static void ts4900_gpio_set(struct gpio_chip *chip, unsigned int offset,
-			    int value)
+static int ts4900_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			   int value)
 {
 	struct ts4900_gpio_priv *priv = gpiochip_get_data(chip);
 
 	if (value)
-		regmap_update_bits(priv->regmap, offset, TS4900_GPIO_OUT,
-				   TS4900_GPIO_OUT);
-	else
-		regmap_update_bits(priv->regmap, offset, TS4900_GPIO_OUT, 0);
+		return regmap_update_bits(priv->regmap, offset,
+					  TS4900_GPIO_OUT, TS4900_GPIO_OUT);
+
+	return regmap_update_bits(priv->regmap, offset, TS4900_GPIO_OUT, 0);
 }
 
 static const struct regmap_config ts4900_regmap_config = {
@@ -175,7 +175,7 @@ static int ts4900_gpio_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ts4900_gpio_id_table[] = {
-	{ "ts4900-gpio", },
+	{ .name = "ts4900-gpio" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, ts4900_gpio_id_table);

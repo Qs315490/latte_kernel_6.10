@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 config IOMMUFD_DRIVER_CORE
-	tristate
+	bool
 	default (IOMMUFD_DRIVER || IOMMUFD) if IOMMUFD!=n
 
 config IOMMUFD
@@ -41,6 +41,8 @@ config IOMMUFD_TEST
 	depends on DEBUG_KERNEL
 	depends on FAULT_INJECTION
 	depends on RUNTIME_TESTING_MENU
+	depends on IOMMU_PT_AMDV1=y || IOMMUFD=IOMMU_PT_AMDV1
+	select DMA_SHARED_BUFFER
 	select IOMMUFD_DRIVER
 	default n
 	help

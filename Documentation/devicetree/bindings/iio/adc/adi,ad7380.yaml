@@ -25,9 +25,10 @@ description: |
   * https://www.analog.com/en/products/ad7386-4.html
   * https://www.analog.com/en/products/ad7387-4.html
   * https://www.analog.com/en/products/ad7388-4.html
+  * https://www.analog.com/en/products/ad7389-4.html
   * https://www.analog.com/en/products/adaq4370-4.html
   * https://www.analog.com/en/products/adaq4380-4.html
-
+  * https://www.analog.com/en/products/adaq4381-4.html
 
 $ref: /schemas/spi/spi-peripheral-props.yaml#
 
@@ -48,8 +49,10 @@ properties:
       - adi,ad7386-4
       - adi,ad7387-4
       - adi,ad7388-4
+      - adi,ad7389-4
       - adi,adaq4370-4
       - adi,adaq4380-4
+      - adi,adaq4381-4
 
   reg:
     maxItems: 1
@@ -58,6 +61,11 @@ properties:
     maximum: 80000000
   spi-cpol: true
   spi-cpha: true
+
+  spi-rx-bus-width:
+    maxItems: 4
+    items:
+      maximum: 1
 
   vcc-supply:
     description: A 3V to 3.6V supply that powers the chip.
@@ -157,6 +165,23 @@ patternProperties:
 unevaluatedProperties: false
 
 allOf:
+  # 2-channel chips only have two SDO lines
+  - if:
+      properties:
+        compatible:
+          enum:
+            - adi,ad7380
+            - adi,ad7381
+            - adi,ad7383
+            - adi,ad7384
+            - adi,ad7386
+            - adi,ad7387
+            - adi,ad7388
+    then:
+      properties:
+        spi-rx-bus-width:
+          maxItems: 2
+
   # pseudo-differential chips require common mode voltage supplies,
   # true differential chips don't use them
   - if:
@@ -201,6 +226,7 @@ allOf:
             - adi,ad7380-4
             - adi,adaq4370-4
             - adi,adaq4380-4
+            - adi,adaq4381-4
     then:
       properties:
         refio-supply: false
@@ -210,6 +236,15 @@ allOf:
       properties:
         refin-supply: false
 
+  # adi,ad7389-4 is internal reference only
+  - if:
+      properties:
+        compatible:
+          const: adi,ad7389-4
+    then:
+      properties:
+        refio-supply: false
+
   # adaq devices need more supplies and using channel to declare gain property
   # only applies to adaq devices
   - if:
@@ -218,6 +253,7 @@ allOf:
           enum:
             - adi,adaq4370-4
             - adi,adaq4380-4
+            - adi,adaq4381-4
     then:
       required:
         - vs-p-supply
@@ -270,6 +306,7 @@ examples:
             spi-cpol;
             spi-cpha;
             spi-max-frequency = <80000000>;
+            spi-rx-bus-width = <1>, <1>, <1>, <1>;
 
             interrupts = <27 IRQ_TYPE_EDGE_FALLING>;
             interrupt-parent = <&gpio0>;

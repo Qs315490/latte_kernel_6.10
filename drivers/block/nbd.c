@@ -307,11 +307,11 @@ static void nbd_mark_nsock_dead(struct nbd_device *nbd, struct nbd_sock *nsock,
 {
 	if (!nsock->dead && notify && !nbd_disconnected(nbd->config)) {
 		struct link_dead_args *args;
-		args = kmalloc(sizeof(struct link_dead_args), GFP_NOIO);
+		args = kmalloc_obj(struct link_dead_args, GFP_NOIO);
 		if (args) {
 			INIT_WORK(&args->work, nbd_dead_link_work);
 			args->index = nbd->index;
-			queue_work(system_wq, &args->work);
+			queue_work(system_percpu_wq, &args->work);
 		}
 	}
 	if (!nsock->dead) {
@@ -565,24 +565,27 @@ static int __sock_xmit(struct nbd_device *nbd, struct socket *sock, int send,
 	msg.msg_iter = *iter;
 
 	noreclaim_flag = memalloc_noreclaim_save();
-	do {
-		sock->sk->sk_allocation = GFP_NOIO | __GFP_MEMALLOC;
-		sock->sk->sk_use_task_frag = false;
-		msg.msg_flags = msg_flags | MSG_NOSIGNAL;
 
-		if (send)
-			result = sock_sendmsg(sock, &msg);
-		else
-			result = sock_recvmsg(sock, &msg, msg.msg_flags);
+	scoped_with_kernel_creds() {
+		do {
+			sock->sk->sk_allocation = GFP_NOIO | __GFP_MEMALLOC;
+			sock->sk->sk_use_task_frag = false;
+			msg.msg_flags = msg_flags | MSG_NOSIGNAL;
 
-		if (result <= 0) {
-			if (result == 0)
-				result = -EPIPE; /* short read */
-			break;
-		}
-		if (sent)
-			*sent += result;
-	} while (msg_data_left(&msg));
+			if (send)
+				result = sock_sendmsg(sock, &msg);
+			else
+				result = sock_recvmsg(sock, &msg, msg.msg_flags);
+
+			if (result <= 0) {
+				if (result == 0)
+					result = -EPIPE; /* short read */
+				break;
+			}
+			if (sent)
+				*sent += result;
+		} while (msg_data_left(&msg));
+	}
 
 	memalloc_noreclaim_restore(noreclaim_flag);
 
@@ -1018,9 +1021,9 @@ static void recv_work(struct work_struct *work)
 	nbd_mark_nsock_dead(nbd, nsock, 1);
 	mutex_unlock(&nsock->tx_lock);
 
-	nbd_config_put(nbd);
 	atomic_dec(&config->recv_threads);
 	wake_up(&config->recv_wq);
+	nbd_config_put(nbd);
 	kfree(args);
 }
 
@@ -1217,6 +1220,14 @@ static struct socket *nbd_get_socket(struct nbd_device *nbd, unsigned long fd,
 	if (!sock)
 		return NULL;
 
+	if (!sk_is_tcp(sock->sk) &&
+	    !sk_is_stream_unix(sock->sk)) {
+		dev_err(disk_to_dev(nbd->disk), "Unsupported socket: should be TCP or UNIX.\n");
+		*err = -EINVAL;
+		sockfd_put(sock);
+		return NULL;
+	}
+
 	if (sock->ops->shutdown == sock_no_shutdown) {
 		dev_err(disk_to_dev(nbd->disk), "Unsupported socket: shutdown callout must be supported.\n");
 		*err = -EINVAL;
@@ -1226,6 +1237,42 @@ static struct socket *nbd_get_socket(struct nbd_device *nbd, unsigned long fd,
 
 	return sock;
 }
+
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+static struct lock_class_key nbd_key[3];
+static struct lock_class_key nbd_slock_key[3];
+
+static void nbd_reclassify_socket(struct socket *sock)
+{
+	struct sock *sk = sock->sk;
+
+	if (!sock_allow_reclassification(sk))
+		return;
+
+	switch (sk->sk_family) {
+	case AF_INET:
+		sock_lock_init_class_and_name(sk, "slock-AF_INET-NBD",
+					      &nbd_slock_key[0],
+					      "sk_lock-AF_INET-NBD",
+					      &nbd_key[0]);
+		break;
+	case AF_INET6:
+		sock_lock_init_class_and_name(sk, "slock-AF_INET6-NBD",
+					      &nbd_slock_key[1],
+					      "sk_lock-AF_INET6-NBD",
+					      &nbd_key[1]);
+		break;
+	case AF_UNIX:
+		sock_lock_init_class_and_name(sk, "slock-AF_UNIX-NBD",
+					      &nbd_slock_key[2],
+					      "sk_lock-AF_UNIX-NBD",
+					      &nbd_key[2]);
+		break;
+	}
+}
+#else
+static inline void nbd_reclassify_socket(struct socket *sock) {}
+#endif
 
 static int nbd_add_socket(struct nbd_device *nbd, unsigned long arg,
 			  bool netlink)
@@ -1243,6 +1290,7 @@ static int nbd_add_socket(struct nbd_device *nbd, unsigned long arg,
 	sock = nbd_get_socket(nbd, arg, &err);
 	if (!sock)
 		return err;
+	nbd_reclassify_socket(sock);
 
 	/*
 	 * We need to make sure we don't get any errant requests while we're
@@ -1263,7 +1311,7 @@ static int nbd_add_socket(struct nbd_device *nbd, unsigned long arg,
 		goto put_socket;
 	}
 
-	nsock = kzalloc(sizeof(*nsock), GFP_KERNEL);
+	nsock = kzalloc_obj(*nsock);
 	if (!nsock) {
 		err = -ENOMEM;
 		goto put_socket;
@@ -1311,7 +1359,7 @@ static int nbd_reconnect_socket(struct nbd_device *nbd, unsigned long arg)
 	if (!sock)
 		return err;
 
-	args = kzalloc(sizeof(*args), GFP_KERNEL);
+	args = kzalloc_obj(*args);
 	if (!args) {
 		sockfd_put(sock);
 		return -ENOMEM;
@@ -1473,7 +1521,17 @@ static int nbd_start_device(struct nbd_device *nbd)
 		return -EINVAL;
 	}
 
-	blk_mq_update_nr_hw_queues(&nbd->tag_set, config->num_connections);
+retry:
+	mutex_unlock(&nbd->config_lock);
+	blk_mq_update_nr_hw_queues(&nbd->tag_set, num_connections);
+	mutex_lock(&nbd->config_lock);
+
+	/* if another code path updated nr_hw_queues, retry until succeed */
+	if (num_connections != config->num_connections) {
+		num_connections = config->num_connections;
+		goto retry;
+	}
+
 	nbd->pid = task_pid_nr(current);
 
 	nbd_parse_flags(nbd);
@@ -1489,7 +1547,7 @@ static int nbd_start_device(struct nbd_device *nbd)
 	for (i = 0; i < num_connections; i++) {
 		struct recv_thread_args *args;
 
-		args = kzalloc(sizeof(*args), GFP_KERNEL);
+		args = kzalloc_obj(*args);
 		if (!args) {
 			sock_shutdown(nbd);
 			/*
@@ -1656,7 +1714,7 @@ static int nbd_alloc_and_init_config(struct nbd_device *nbd)
 	if (!try_module_get(THIS_MODULE))
 		return -ENODEV;
 
-	config = kzalloc(sizeof(struct nbd_config), GFP_NOFS);
+	config = kzalloc_obj(struct nbd_config, GFP_NOFS);
 	if (!config) {
 		module_put(THIS_MODULE);
 		return -ENOMEM;
@@ -1867,7 +1925,7 @@ static void nbd_dbg_close(void)
 #endif
 
 static int nbd_init_request(struct blk_mq_tag_set *set, struct request *rq,
-			    unsigned int hctx_idx, unsigned int numa_node)
+			    unsigned int hctx_idx, int numa_node)
 {
 	struct nbd_cmd *cmd = blk_mq_rq_to_pdu(rq);
 	cmd->nbd = set->driver_data;
@@ -1895,7 +1953,7 @@ static struct nbd_device *nbd_dev_add(int index, unsigned int refs)
 	struct gendisk *disk;
 	int err = -ENOMEM;
 
-	nbd = kzalloc(sizeof(struct nbd_device), GFP_KERNEL);
+	nbd = kzalloc_obj(struct nbd_device);
 	if (!nbd)
 		goto out;
 
@@ -2198,9 +2256,7 @@ again:
 				goto out;
 		}
 	}
-	ret = nbd_start_device(nbd);
-	if (ret)
-		goto out;
+
 	if (info->attrs[NBD_ATTR_BACKEND_IDENTIFIER]) {
 		nbd->backend = nla_strdup(info->attrs[NBD_ATTR_BACKEND_IDENTIFIER],
 					  GFP_KERNEL);
@@ -2216,13 +2272,16 @@ again:
 		goto out;
 	}
 	set_bit(NBD_RT_HAS_BACKEND_FILE, &config->runtime_flags);
+
+	ret = nbd_start_device(nbd);
 out:
-	mutex_unlock(&nbd->config_lock);
 	if (!ret) {
 		set_bit(NBD_RT_HAS_CONFIG_REF, &config->runtime_flags);
 		refcount_inc(&nbd->config_refs);
 		nbd_connect_reply(info, nbd->index);
 	}
+	mutex_unlock(&nbd->config_lock);
+
 	nbd_config_put(nbd);
 	if (put_dev)
 		nbd_put(nbd);

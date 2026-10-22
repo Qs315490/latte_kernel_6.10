@@ -32,7 +32,6 @@
 		.io_reg = 0x4 + REG_SIZE * id,		\
 		.intr_cfg_reg = 0x8 + REG_SIZE * id,		\
 		.intr_status_reg = 0xc + REG_SIZE * id,	\
-		.intr_target_reg = 0x8 + REG_SIZE * id,	\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
@@ -891,7 +890,7 @@ static const struct pinfunction ipq6018_functions[] = {
 	MSM_PIN_FUNCTION(dbg_out),
 	MSM_PIN_FUNCTION(gcc_plltest),
 	MSM_PIN_FUNCTION(gcc_tlmm),
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(lpass_aud),
 	MSM_PIN_FUNCTION(lpass_aud0),
 	MSM_PIN_FUNCTION(lpass_aud1),
@@ -1073,6 +1072,7 @@ static const struct of_device_id ipq6018_pinctrl_of_match[] = {
 	{ .compatible = "qcom,ipq6018-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, ipq6018_pinctrl_of_match);
 
 static struct platform_driver ipq6018_pinctrl_driver = {
 	.driver = {
@@ -1080,7 +1080,6 @@ static struct platform_driver ipq6018_pinctrl_driver = {
 		.of_match_table = ipq6018_pinctrl_of_match,
 	},
 	.probe = ipq6018_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init ipq6018_pinctrl_init(void)
@@ -1097,4 +1096,3 @@ module_exit(ipq6018_pinctrl_exit);
 
 MODULE_DESCRIPTION("QTI ipq6018 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, ipq6018_pinctrl_of_match);

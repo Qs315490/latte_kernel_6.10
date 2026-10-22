@@ -17,7 +17,6 @@
 #include <linux/firewire-constants.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -233,5 +232,6 @@ int snd_dice_detect_presonus_formats(struct snd_dice *dice);
 int snd_dice_detect_harman_formats(struct snd_dice *dice);
 int snd_dice_detect_focusrite_pro40_tcd3070_formats(struct snd_dice *dice);
 int snd_dice_detect_weiss_formats(struct snd_dice *dice);
+int snd_dice_detect_teac_formats(struct snd_dice *dice);
 
 #endif

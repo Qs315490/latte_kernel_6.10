@@ -79,8 +79,7 @@
 	status = "okay";
 
 	phy0: ethernet-phy@7 {
-		compatible = "ethernet-phy-id0022.1640",
-			     "ethernet-phy-ieee802.3-c22";
+		compatible = "ethernet-phy-id0022.1640";
 		reg = <7>;
 		interrupts-extended = <&irqc RZG2L_IRQ0 IRQ_TYPE_LEVEL_LOW>;
 		rxc-skew-psec = <2400>;
@@ -246,7 +245,7 @@
 	status = "okay";
 
 	flash@0 {
-		compatible = "micron,mt25qu512a", "jedec,spi-nor";
+		compatible = "jedec,spi-nor";
 		reg = <0>;
 		m25p,fast-read;
 		spi-max-frequency = <50000000>;

@@ -21,6 +21,9 @@
 #include <linux/bpf.h>
 #include <linux/bpf_trace.h>
 #include <linux/kstrtox.h>
+#include <linux/xattr.h>
+#include <linux/security.h>
+
 #include "preload/bpf_preload.h"
 
 enum bpf_type {
@@ -29,6 +32,23 @@ enum bpf_type {
 	BPF_TYPE_MAP,
 	BPF_TYPE_LINK,
 };
+
+struct bpf_fs_inode {
+	struct list_head		xattrs;
+	struct simple_xattr_limits	xlimits;
+	struct inode			vfs_inode;
+};
+
+static inline struct bpf_fs_inode *BPF_FS_I(struct inode *inode)
+{
+	return container_of(inode, struct bpf_fs_inode, vfs_inode);
+}
+
+static struct kmem_cache *bpf_fs_inode_cachep __ro_after_init;
+
+static int bpf_fs_initxattrs(struct inode *inode,
+			     const struct xattr *xattr_array, void *fs_info);
+static ssize_t bpf_fs_listxattr(struct dentry *dentry, char *buf, size_t size);
 
 static void *bpf_any_get(void *raw, enum bpf_type type)
 {
@@ -94,10 +114,17 @@ static void *bpf_fd_probe_obj(u32 ufd, enum bpf_type *type)
 }
 
 static const struct inode_operations bpf_dir_iops;
+static const struct inode_operations bpf_symlink_iops;
 
-static const struct inode_operations bpf_prog_iops = { };
-static const struct inode_operations bpf_map_iops  = { };
-static const struct inode_operations bpf_link_iops  = { };
+static const struct inode_operations bpf_prog_iops = {
+	.listxattr	= bpf_fs_listxattr,
+};
+static const struct inode_operations bpf_map_iops  = {
+	.listxattr	= bpf_fs_listxattr,
+};
+static const struct inode_operations bpf_link_iops  = {
+	.listxattr	= bpf_fs_listxattr,
+};
 
 struct inode *bpf_get_inode(struct super_block *sb,
 			    const struct inode *dir,
@@ -144,20 +171,27 @@ static int bpf_inode_type(const struct inode *inode, enum bpf_type *type)
 static void bpf_dentry_finalize(struct dentry *dentry, struct inode *inode,
 				struct inode *dir)
 {
-	d_instantiate(dentry, inode);
-	dget(dentry);
+	d_make_persistent(dentry, inode);
 
 	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
 }
 
-static int bpf_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-		     struct dentry *dentry, umode_t mode)
+static struct dentry *bpf_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+				struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode;
+	int ret;
 
 	inode = bpf_get_inode(dir->i_sb, dir, mode | S_IFDIR);
 	if (IS_ERR(inode))
-		return PTR_ERR(inode);
+		return ERR_CAST(inode);
+
+	ret = security_inode_init_security(inode, dir, &dentry->d_name,
+					   bpf_fs_initxattrs, NULL);
+	if (ret && ret != -EOPNOTSUPP) {
+		iput(inode);
+		return ERR_PTR(ret);
+	}
 
 	inode->i_op = &bpf_dir_iops;
 	inode->i_fop = &simple_dir_operations;
@@ -166,7 +200,7 @@ static int bpf_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	inc_nlink(dir);
 
 	bpf_dentry_finalize(dentry, inode, dir);
-	return 0;
+	return NULL;
 }
 
 struct map_iter {
@@ -196,7 +230,7 @@ static struct map_iter *map_iter_alloc(struct bpf_map *map)
 {
 	struct map_iter *iter;
 
-	iter = kzalloc(sizeof(*iter), GFP_KERNEL | __GFP_NOWARN);
+	iter = kzalloc_obj(*iter, GFP_KERNEL | __GFP_NOWARN);
 	if (!iter)
 		goto error;
 
@@ -331,9 +365,19 @@ static int bpf_mkobj_ops(struct dentry *dentry, umode_t mode, void *raw,
 			 const struct file_operations *fops)
 {
 	struct inode *dir = dentry->d_parent->d_inode;
-	struct inode *inode = bpf_get_inode(dir->i_sb, dir, mode);
+	struct inode *inode;
+	int ret;
+
+	inode = bpf_get_inode(dir->i_sb, dir, mode);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
+
+	ret = security_inode_init_security(inode, dir, &dentry->d_name,
+					   bpf_fs_initxattrs, NULL);
+	if (ret && ret != -EOPNOTSUPP) {
+		iput(inode);
+		return ret;
+	}
 
 	inode->i_op = iops;
 	inode->i_fop = fops;
@@ -383,9 +427,11 @@ bpf_lookup(struct inode *dir, struct dentry *dentry, unsigned flags)
 static int bpf_symlink(struct mnt_idmap *idmap, struct inode *dir,
 		       struct dentry *dentry, const char *target)
 {
-	char *link = kstrdup(target, GFP_USER | __GFP_NOWARN);
 	struct inode *inode;
+	char *link;
+	int ret;
 
+	link = kstrdup(target, GFP_KERNEL_ACCOUNT | __GFP_NOWARN);
 	if (!link)
 		return -ENOMEM;
 
@@ -395,12 +441,24 @@ static int bpf_symlink(struct mnt_idmap *idmap, struct inode *dir,
 		return PTR_ERR(inode);
 	}
 
-	inode->i_op = &simple_symlink_inode_operations;
+	inode->i_op = &bpf_symlink_iops;
 	inode->i_link = link;
+
+	ret = security_inode_init_security(inode, dir, &dentry->d_name,
+					   bpf_fs_initxattrs, NULL);
+	if (ret && ret != -EOPNOTSUPP) {
+		iput(inode);
+		return ret;
+	}
 
 	bpf_dentry_finalize(dentry, inode, dir);
 	return 0;
 }
+
+static const struct inode_operations bpf_symlink_iops = {
+	.get_link	= simple_get_link,
+	.listxattr	= bpf_fs_listxattr,
+};
 
 static const struct inode_operations bpf_dir_iops = {
 	.lookup		= bpf_lookup,
@@ -410,6 +468,7 @@ static const struct inode_operations bpf_dir_iops = {
 	.rename		= simple_rename,
 	.link		= simple_link,
 	.unlink		= simple_unlink,
+	.listxattr	= bpf_fs_listxattr,
 };
 
 /* pin iterator link into bpffs */
@@ -420,16 +479,12 @@ static int bpf_iter_link_pin_kernel(struct dentry *parent,
 	struct dentry *dentry;
 	int ret;
 
-	inode_lock(parent->d_inode);
-	dentry = lookup_one_len(name, parent, strlen(name));
-	if (IS_ERR(dentry)) {
-		inode_unlock(parent->d_inode);
+	dentry = simple_start_creating(parent, name);
+	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
-	}
 	ret = bpf_mkobj_ops(dentry, mode, link, &bpf_link_iops,
 			    &bpf_iter_fops);
-	dput(dentry);
-	inode_unlock(parent->d_inode);
+	simple_done_creating(dentry);
 	return ret;
 }
 
@@ -442,7 +497,7 @@ static int bpf_obj_do_pin(int path_fd, const char __user *pathname, void *raw,
 	umode_t mode;
 	int ret;
 
-	dentry = user_path_create(path_fd, pathname, &path, 0);
+	dentry = start_creating_user_path(path_fd, pathname, &path, 0);
 	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
 
@@ -471,7 +526,7 @@ static int bpf_obj_do_pin(int path_fd, const char __user *pathname, void *raw,
 		ret = -EPERM;
 	}
 out:
-	done_path_create(&path, dentry);
+	end_creating_path(&path, dentry);
 	return ret;
 }
 
@@ -605,10 +660,17 @@ struct bpffs_btf_enums {
 
 static int find_bpffs_btf_enums(struct bpffs_btf_enums *info)
 {
+	struct {
+		const struct btf_type **type;
+		const char *name;
+	} btf_enums[] = {
+		{&info->cmd_t,		"bpf_cmd"},
+		{&info->map_t,		"bpf_map_type"},
+		{&info->prog_t,		"bpf_prog_type"},
+		{&info->attach_t,	"bpf_attach_type"},
+	};
 	const struct btf *btf;
-	const struct btf_type *t;
-	const char *name;
-	int i, n;
+	int i, id;
 
 	memset(info, 0, sizeof(*info));
 
@@ -620,31 +682,16 @@ static int find_bpffs_btf_enums(struct bpffs_btf_enums *info)
 
 	info->btf = btf;
 
-	for (i = 1, n = btf_nr_types(btf); i < n; i++) {
-		t = btf_type_by_id(btf, i);
-		if (!btf_type_is_enum(t))
-			continue;
+	for (i = 0; i < ARRAY_SIZE(btf_enums); i++) {
+		id = btf_find_by_name_kind(btf, btf_enums[i].name,
+					   BTF_KIND_ENUM);
+		if (id < 0)
+			return -ESRCH;
 
-		name = btf_name_by_offset(btf, t->name_off);
-		if (!name)
-			continue;
-
-		if (strcmp(name, "bpf_cmd") == 0)
-			info->cmd_t = t;
-		else if (strcmp(name, "bpf_map_type") == 0)
-			info->map_t = t;
-		else if (strcmp(name, "bpf_prog_type") == 0)
-			info->prog_t = t;
-		else if (strcmp(name, "bpf_attach_type") == 0)
-			info->attach_t = t;
-		else
-			continue;
-
-		if (info->cmd_t && info->map_t && info->prog_t && info->attach_t)
-			return 0;
+		*btf_enums[i].type = btf_type_by_id(btf, id);
 	}
 
-	return -ESRCH;
+	return 0;
 }
 
 static bool find_btf_enum_const(const struct btf *btf, const struct btf_type *enum_t,
@@ -775,21 +822,150 @@ static int bpf_show_options(struct seq_file *m, struct dentry *root)
 	return 0;
 }
 
-static void bpf_free_inode(struct inode *inode)
+static struct inode *bpf_fs_alloc_inode(struct super_block *sb)
 {
+	struct bpf_fs_inode *bi;
+
+	bi = alloc_inode_sb(sb, bpf_fs_inode_cachep, GFP_KERNEL);
+	if (!bi)
+		return NULL;
+	INIT_LIST_HEAD_RCU(&bi->xattrs);
+	simple_xattr_limits_init(&bi->xlimits);
+	return &bi->vfs_inode;
+}
+
+static void bpf_destroy_inode(struct inode *inode)
+{
+	struct bpf_mount_opts *opts = inode->i_sb->s_fs_info;
+	struct bpf_fs_inode *bi = BPF_FS_I(inode);
 	enum bpf_type type;
 
-	if (S_ISLNK(inode->i_mode))
-		kfree(inode->i_link);
 	if (!bpf_inode_type(inode, &type))
 		bpf_any_put(inode->i_private, type);
-	free_inode_nonrcu(inode);
+	simple_xattrs_free(&opts->xa_cache, &bi->xattrs, NULL);
+}
+
+/*
+ * Called after RCU grace period - safe to free inode and anything
+ *  that might be accessed by RCU pathwalk (inode fields, i_link).
+ */
+static void bpf_free_inode(struct inode *inode)
+{
+	if (S_ISLNK(inode->i_mode))
+		kfree(inode->i_link);
+	kmem_cache_free(bpf_fs_inode_cachep, BPF_FS_I(inode));
+}
+
+static int bpf_fs_xattr_get(const struct xattr_handler *handler,
+			    struct dentry *unused, struct inode *inode,
+			    const char *name, void *value, size_t size)
+{
+	struct bpf_mount_opts *opts = inode->i_sb->s_fs_info;
+	struct bpf_fs_inode *bi = BPF_FS_I(inode);
+
+	name = xattr_full_name(handler, name);
+	return simple_xattr_get(&opts->xa_cache, &bi->xattrs, name, value, size);
+}
+
+enum {
+	BPF_FS_XATTR_UNSPEC,
+	BPF_FS_XATTR_SECURITY,
+	BPF_FS_XATTR_TRUSTED,
+};
+
+static int bpf_fs_xattr_set(const struct xattr_handler *handler,
+			    struct mnt_idmap *idmap, struct dentry *unused,
+			    struct inode *inode, const char *name,
+			    const void *value, size_t size, int flags)
+{
+	struct bpf_mount_opts *opts = inode->i_sb->s_fs_info;
+	struct bpf_fs_inode *bi = BPF_FS_I(inode);
+	struct simple_xattr *old;
+	int err = -EINVAL;
+
+	name = xattr_full_name(handler, name);
+	switch (handler->flags) {
+	case BPF_FS_XATTR_SECURITY:
+		err = simple_xattr_set_limited(&opts->xa_cache, &bi->xattrs,
+					       &bi->xlimits, name, value, size,
+					       flags);
+		break;
+	case BPF_FS_XATTR_TRUSTED:
+		old = simple_xattr_set(&opts->xa_cache, &bi->xattrs, name,
+				       value, size, flags);
+		err = IS_ERR(old) ? PTR_ERR(old) : 0;
+		if (!err)
+			simple_xattr_free_rcu(old);
+		break;
+	}
+	if (err)
+		return err;
+	inode_set_ctime_current(inode);
+	return 0;
+}
+
+static const struct xattr_handler bpf_fs_trusted_xattr_handler = {
+	.prefix	= XATTR_TRUSTED_PREFIX,
+	.flags	= BPF_FS_XATTR_TRUSTED,
+	.get	= bpf_fs_xattr_get,
+	.set	= bpf_fs_xattr_set,
+};
+
+static const struct xattr_handler bpf_fs_security_xattr_handler = {
+	.prefix	= XATTR_SECURITY_PREFIX,
+	.flags	= BPF_FS_XATTR_SECURITY,
+	.get	= bpf_fs_xattr_get,
+	.set	= bpf_fs_xattr_set,
+};
+
+static const struct xattr_handler * const bpf_fs_xattr_handlers[] = {
+	&bpf_fs_trusted_xattr_handler,
+	&bpf_fs_security_xattr_handler,
+	NULL,
+};
+
+static ssize_t bpf_fs_listxattr(struct dentry *dentry, char *buf, size_t size)
+{
+	struct inode *inode = d_inode(dentry);
+
+	return simple_xattr_list(inode, &BPF_FS_I(inode)->xattrs, buf, size);
+}
+
+static int bpf_fs_initxattrs(struct inode *inode,
+			     const struct xattr *xattr_array, void *fs_info)
+{
+	struct bpf_mount_opts *opts = inode->i_sb->s_fs_info;
+	struct bpf_fs_inode *bi = BPF_FS_I(inode);
+	const struct xattr *xattr;
+	int err;
+
+	for (xattr = xattr_array; xattr->name != NULL; xattr++) {
+		CLASS(simple_xattr, new_xattr)(xattr->value, xattr->value_len);
+		if (IS_ERR(new_xattr))
+			return PTR_ERR(new_xattr);
+
+		new_xattr->name = kasprintf(GFP_KERNEL_ACCOUNT,
+					    XATTR_SECURITY_PREFIX "%s",
+					    xattr->name);
+		if (!new_xattr->name)
+			return -ENOMEM;
+
+		err = simple_xattr_add_limited(&opts->xa_cache, &bi->xattrs,
+					       &bi->xlimits, new_xattr);
+		if (err)
+			return err;
+
+		retain_and_null_ptr(new_xattr);
+	}
+	return 0;
 }
 
 const struct super_operations bpf_super_ops = {
 	.statfs		= simple_statfs,
-	.drop_inode	= generic_delete_inode,
+	.drop_inode	= inode_just_drop,
 	.show_options	= bpf_show_options,
+	.alloc_inode	= bpf_fs_alloc_inode,
+	.destroy_inode	= bpf_destroy_inode,
 	.free_inode	= bpf_free_inode,
 };
 
@@ -1009,25 +1185,38 @@ out:
 
 static int bpf_fill_super(struct super_block *sb, struct fs_context *fc)
 {
-	static const struct tree_descr bpf_rfiles[] = { { "" } };
 	struct bpf_mount_opts *opts = sb->s_fs_info;
 	struct inode *inode;
-	int ret;
 
 	/* Mounting an instance of BPF FS requires privileges */
 	if (fc->user_ns != &init_user_ns && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	ret = simple_fill_super(sb, BPF_FS_MAGIC, bpf_rfiles);
-	if (ret)
-		return ret;
-
+	sb->s_blocksize = PAGE_SIZE;
+	sb->s_blocksize_bits = PAGE_SHIFT;
+	sb->s_magic = BPF_FS_MAGIC;
 	sb->s_op = &bpf_super_ops;
+	sb->s_xattr = bpf_fs_xattr_handlers;
+	sb->s_iflags |= SB_I_NOEXEC;
+	sb->s_iflags |= SB_I_NODEV;
+	sb->s_time_gran = 1;
 
-	inode = sb->s_root->d_inode;
+	inode = bpf_get_inode(sb, NULL, S_IFDIR | 0777);
+	if (IS_ERR(inode))
+		return PTR_ERR(inode);
+
+	inode->i_ino = 1;
+	inode->i_op = &bpf_dir_iops;
+	inode->i_fop = &simple_dir_operations;
+	set_nlink(inode, 2);
+
+	sb->s_root = d_make_root(inode);
+	if (!sb->s_root)
+		return -ENOMEM;
+
+	inode = d_inode(sb->s_root);
 	inode->i_uid = opts->uid;
 	inode->i_gid = opts->gid;
-	inode->i_op = &bpf_dir_iops;
 	inode->i_mode &= ~S_IALLUGO;
 	populate_bpffs(sb->s_root);
 	inode->i_mode |= S_ISVTX | opts->mode;
@@ -1057,7 +1246,7 @@ static int bpf_init_fs_context(struct fs_context *fc)
 {
 	struct bpf_mount_opts *opts;
 
-	opts = kzalloc(sizeof(struct bpf_mount_opts), GFP_KERNEL);
+	opts = kzalloc_obj(struct bpf_mount_opts);
 	if (!opts)
 		return -ENOMEM;
 
@@ -1080,7 +1269,8 @@ static void bpf_kill_super(struct super_block *sb)
 {
 	struct bpf_mount_opts *opts = sb->s_fs_info;
 
-	kill_litter_super(sb);
+	kill_anon_super(sb);
+	simple_xattr_cache_cleanup(&opts->xa_cache);
 	kfree(opts);
 }
 
@@ -1093,18 +1283,37 @@ static struct file_system_type bpf_fs_type = {
 	.fs_flags	= FS_USERNS_MOUNT,
 };
 
+static void bpf_fs_inode_init_once(void *foo)
+{
+	struct bpf_fs_inode *bi = foo;
+
+	inode_init_once(&bi->vfs_inode);
+}
+
 static int __init bpf_init(void)
 {
 	int ret;
 
+	bpf_fs_inode_cachep = kmem_cache_create("bpf_fs_inode_cache",
+						sizeof(struct bpf_fs_inode),
+						0, SLAB_ACCOUNT,
+						bpf_fs_inode_init_once);
+	if (!bpf_fs_inode_cachep)
+		return -ENOMEM;
+
 	ret = sysfs_create_mount_point(fs_kobj, "bpf");
 	if (ret)
-		return ret;
+		goto out_cache;
 
 	ret = register_filesystem(&bpf_fs_type);
-	if (ret)
+	if (ret) {
 		sysfs_remove_mount_point(fs_kobj, "bpf");
+		goto out_cache;
+	}
 
+	return 0;
+out_cache:
+	kmem_cache_destroy(bpf_fs_inode_cachep);
 	return ret;
 }
 fs_initcall(bpf_init);

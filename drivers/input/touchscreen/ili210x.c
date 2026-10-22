@@ -8,7 +8,6 @@
 #include <linux/input/mt.h>
 #include <linux/input/touchscreen.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
@@ -327,9 +326,8 @@ static bool ili210x_report_events(struct ili210x *priv, u8 *touchdata)
 	return contact;
 }
 
-static irqreturn_t ili210x_irq(int irq, void *irq_data)
+static void ili210x_process_events(struct ili210x *priv)
 {
-	struct ili210x *priv = irq_data;
 	struct i2c_client *client = priv->client;
 	const struct ili2xxx_chip *chip = priv->chip;
 	u8 touchdata[ILI210X_DATA_SIZE] = { 0 };
@@ -356,8 +354,22 @@ static irqreturn_t ili210x_irq(int irq, void *irq_data)
 				usleep_range(time_delta, time_delta + 1000);
 		}
 	} while (!priv->stop && keep_polling);
+}
+
+static irqreturn_t ili210x_irq(int irq, void *irq_data)
+{
+	struct ili210x *priv = irq_data;
+
+	ili210x_process_events(priv);
 
 	return IRQ_HANDLED;
+};
+
+static void ili210x_work_i2c_poll(struct input_dev *input)
+{
+	struct ili210x *priv = input_get_drvdata(input);
+
+	ili210x_process_events(priv);
 }
 
 static int ili251x_firmware_update_resolution(struct device *dev)
@@ -829,12 +841,32 @@ static int ili210x_do_firmware_update(struct ili210x *priv,
 	return 0;
 }
 
+static ssize_t ili210x_firmware_update(struct device *dev, const u8 *fwbuf,
+				       u16 ac_end, u16 df_end)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct ili210x *priv = i2c_get_clientdata(client);
+	const char *fwname = ILI251X_FW_FILENAME;
+	int error;
+
+	dev_dbg(dev, "Firmware update started, firmware=%s\n", fwname);
+
+	ili210x_hardware_reset(priv->reset_gpio);
+
+	error = ili210x_do_firmware_update(priv, fwbuf, ac_end, df_end);
+
+	ili210x_hardware_reset(priv->reset_gpio);
+
+	dev_dbg(dev, "Firmware update ended, error=%i\n", error);
+
+	return error;
+}
+
 static ssize_t ili210x_firmware_update_store(struct device *dev,
 					     struct device_attribute *attr,
 					     const char *buf, size_t count)
 {
 	struct i2c_client *client = to_i2c_client(dev);
-	struct ili210x *priv = i2c_get_clientdata(client);
 	const char *fwname = ILI251X_FW_FILENAME;
 	u16 ac_end, df_end;
 	int error;
@@ -860,16 +892,11 @@ static ssize_t ili210x_firmware_update_store(struct device *dev,
 	 * the touch controller to disable the IRQs during update, so we have
 	 * to do it this way here.
 	 */
-	scoped_guard(disable_irq, &client->irq) {
-		dev_dbg(dev, "Firmware update started, firmware=%s\n", fwname);
-
-		ili210x_hardware_reset(priv->reset_gpio);
-
-		error = ili210x_do_firmware_update(priv, fwbuf, ac_end, df_end);
-
-		ili210x_hardware_reset(priv->reset_gpio);
-
-		dev_dbg(dev, "Firmware update ended, error=%i\n", error);
+	if (client->irq > 0) {
+		guard(disable_irq)(&client->irq);
+		error = ili210x_firmware_update(dev, fwbuf, ac_end, df_end);
+	} else {
+		error = ili210x_firmware_update(dev, fwbuf, ac_end, df_end);
 	}
 
 	return error ?: count;
@@ -942,15 +969,8 @@ static int ili210x_i2c_probe(struct i2c_client *client)
 	chip = device_get_match_data(dev);
 	if (!chip && id)
 		chip = (const struct ili2xxx_chip *)id->driver_data;
-	if (!chip) {
-		dev_err(&client->dev, "unknown device model\n");
-		return -ENODEV;
-	}
-
-	if (client->irq <= 0) {
-		dev_err(dev, "No IRQ!\n");
-		return -EINVAL;
-	}
+	if (!chip)
+		return dev_err_probe(&client->dev, -ENODEV, "unknown device model\n");
 
 	reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(reset_gpio))
@@ -998,17 +1018,22 @@ static int ili210x_i2c_probe(struct i2c_client *client)
 
 	error = input_mt_init_slots(input, priv->chip->max_touches,
 				    INPUT_MT_DIRECT);
-	if (error) {
-		dev_err(dev, "Unable to set up slots, err: %d\n", error);
-		return error;
-	}
+	if (error)
+		return dev_err_probe(dev, error, "Unable to set up slots\n");
 
-	error = devm_request_threaded_irq(dev, client->irq, NULL, ili210x_irq,
-					  IRQF_ONESHOT, client->name, priv);
-	if (error) {
-		dev_err(dev, "Unable to request touchscreen IRQ, err: %d\n",
-			error);
-		return error;
+	input_set_drvdata(input, priv);
+
+	if (client->irq > 0) {
+		error = devm_request_threaded_irq(dev, client->irq, NULL, ili210x_irq,
+						  IRQF_ONESHOT, client->name, priv);
+		if (error)
+			return dev_err_probe(dev, error, "Unable to request touchscreen IRQ\n");
+	} else {
+		error = input_setup_polling(input, ili210x_work_i2c_poll);
+		if (error)
+			return dev_err_probe(dev, error, "Could not set up polling mode\n");
+
+		input_set_poll_interval(input, ILI2XXX_POLL_PERIOD);
 	}
 
 	error = devm_add_action_or_reset(dev, ili210x_stop, priv);
@@ -1016,19 +1041,17 @@ static int ili210x_i2c_probe(struct i2c_client *client)
 		return error;
 
 	error = input_register_device(priv->input);
-	if (error) {
-		dev_err(dev, "Cannot register input device, err: %d\n", error);
-		return error;
-	}
+	if (error)
+		return dev_err_probe(dev, error, "Cannot register input device\n");
 
 	return 0;
 }
 
 static const struct i2c_device_id ili210x_i2c_id[] = {
-	{ "ili210x", (long)&ili210x_chip },
-	{ "ili2117", (long)&ili211x_chip },
-	{ "ili2120", (long)&ili212x_chip },
-	{ "ili251x", (long)&ili251x_chip },
+	{ .name = "ili210x", .driver_data = (long)&ili210x_chip },
+	{ .name = "ili2117", .driver_data = (long)&ili211x_chip },
+	{ .name = "ili2120", .driver_data = (long)&ili212x_chip },
+	{ .name = "ili251x", .driver_data = (long)&ili251x_chip },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ili210x_i2c_id);

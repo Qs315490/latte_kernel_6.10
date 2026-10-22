@@ -34,7 +34,7 @@
 
 #define DRV_NAME "tegra20-i2s"
 
-static __maybe_unused int tegra20_i2s_runtime_suspend(struct device *dev)
+static int tegra20_i2s_runtime_suspend(struct device *dev)
 {
 	struct tegra20_i2s *i2s = dev_get_drvdata(dev);
 
@@ -45,7 +45,7 @@ static __maybe_unused int tegra20_i2s_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static __maybe_unused int tegra20_i2s_runtime_resume(struct device *dev)
+static int tegra20_i2s_runtime_resume(struct device *dev)
 {
 	struct tegra20_i2s *i2s = dev_get_drvdata(dev);
 	int ret;
@@ -485,19 +485,19 @@ static const struct of_device_id tegra20_i2s_of_match[] = {
 	{ .compatible = "nvidia,tegra20-i2s", },
 	{},
 };
+MODULE_DEVICE_TABLE(of, tegra20_i2s_of_match);
 
 static const struct dev_pm_ops tegra20_i2s_pm_ops = {
-	SET_RUNTIME_PM_OPS(tegra20_i2s_runtime_suspend,
-			   tegra20_i2s_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	RUNTIME_PM_OPS(tegra20_i2s_runtime_suspend,
+		       tegra20_i2s_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver tegra20_i2s_driver = {
 	.driver = {
 		.name = DRV_NAME,
 		.of_match_table = tegra20_i2s_of_match,
-		.pm = &tegra20_i2s_pm_ops,
+		.pm = pm_ptr(&tegra20_i2s_pm_ops),
 	},
 	.probe = tegra20_i2s_platform_probe,
 	.remove = tegra20_i2s_platform_remove,
@@ -508,4 +508,3 @@ MODULE_AUTHOR("Stephen Warren <swarren@nvidia.com>");
 MODULE_DESCRIPTION("Tegra20 I2S ASoC driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:" DRV_NAME);
-MODULE_DEVICE_TABLE(of, tegra20_i2s_of_match);

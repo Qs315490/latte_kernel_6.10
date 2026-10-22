@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2021 Samsung Electrnoics
+ * Copyright (C) 2021 Samsung Electronics
  * Bongsu Jeon <bongsu.jeon@samsung.com>
  *
  * Test code for nci
@@ -16,7 +16,7 @@
 #include <sys/socket.h>
 #include <linux/nfc.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 
 #define GENLMSG_DATA(glh)	((void *)(NLMSG_DATA(glh) + GENL_HDRLEN))
 #define GENLMSG_PAYLOAD(glh)	(NLMSG_PAYLOAD(glh, 0) - GENL_HDRLEN)

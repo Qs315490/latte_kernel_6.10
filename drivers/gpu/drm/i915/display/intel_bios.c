@@ -32,13 +32,16 @@
 #include <drm/display/drm_dsc_helper.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_fixed.h>
+#include <drm/drm_print.h>
 
-#include "soc/intel_rom.h"
-
-#include "i915_drv.h"
 #include "intel_display.h"
+#include "intel_display_core.h"
+#include "intel_display_rpm.h"
 #include "intel_display_types.h"
+#include "intel_display_utils.h"
 #include "intel_gmbus.h"
+#include "intel_rom.h"
+#include "intel_vdsc.h"
 
 #define _INTEL_BIOS_PRIVATE
 #include "intel_vbt_defs.h"
@@ -484,8 +487,7 @@ init_bdb_block(struct intel_display *display,
 	if (section_id == BDB_MIPI_SEQUENCE && *(const u8 *)block >= 3)
 		block_size += 5;
 
-	entry = kzalloc(struct_size(entry, data, max(min_size, block_size) + 3),
-			GFP_KERNEL);
+	entry = kzalloc_flex(*entry, data, max(min_size, block_size) + 3);
 	if (!entry) {
 		kfree(temp_block);
 		return;
@@ -621,6 +623,21 @@ get_lfp_data_tail(const struct bdb_lfp_data *data,
 		return NULL;
 }
 
+static bool is_panel_type_valid(int panel_type)
+{
+	return panel_type >= 0 && panel_type < 16;
+}
+
+static bool is_panel_type_pnp(int panel_type)
+{
+	return panel_type == 0xff;
+}
+
+static bool is_panel_type_valid_or_pnp(int panel_type)
+{
+	return is_panel_type_valid(panel_type) || is_panel_type_pnp(panel_type);
+}
+
 static int opregion_get_panel_type(struct intel_display *display,
 				   const struct intel_bios_encoder_data *devdata,
 				   const struct drm_edid *drm_edid, bool use_fallback)
@@ -638,15 +655,21 @@ static int vbt_get_panel_type(struct intel_display *display,
 	if (!lfp_options)
 		return -1;
 
-	if (lfp_options->panel_type > 0xf &&
-	    lfp_options->panel_type != 0xff) {
+	if (!is_panel_type_valid_or_pnp(lfp_options->panel_type)) {
 		drm_dbg_kms(display->drm, "Invalid VBT panel type 0x%x\n",
 			    lfp_options->panel_type);
 		return -1;
 	}
 
-	if (devdata && devdata->child.handle == DEVICE_HANDLE_LFP2)
+	if (devdata && devdata->child.handle == DEVICE_HANDLE_LFP2) {
+		if (!is_panel_type_valid_or_pnp(lfp_options->panel_type2)) {
+			drm_dbg_kms(display->drm, "Invalid VBT panel type 2 0x%x\n",
+				    lfp_options->panel_type2);
+			return -1;
+		}
+
 		return lfp_options->panel_type2;
+	}
 
 	drm_WARN_ON(display->drm,
 		    devdata && devdata->child.handle != DEVICE_HANDLE_LFP1);
@@ -760,13 +783,12 @@ static int get_panel_type(struct intel_display *display,
 				    panel_types[i].name, panel_types[i].panel_type);
 	}
 
-	if (panel_types[PANEL_TYPE_OPREGION].panel_type >= 0)
+	if (is_panel_type_valid(panel_types[PANEL_TYPE_OPREGION].panel_type))
 		i = PANEL_TYPE_OPREGION;
-	else if (panel_types[PANEL_TYPE_VBT].panel_type == 0xff &&
-		 panel_types[PANEL_TYPE_PNPID].panel_type >= 0)
+	else if (is_panel_type_pnp(panel_types[PANEL_TYPE_VBT].panel_type) &&
+		 is_panel_type_valid(panel_types[PANEL_TYPE_PNPID].panel_type))
 		i = PANEL_TYPE_PNPID;
-	else if (panel_types[PANEL_TYPE_VBT].panel_type != 0xff &&
-		 panel_types[PANEL_TYPE_VBT].panel_type >= 0)
+	else if (is_panel_type_valid(panel_types[PANEL_TYPE_VBT].panel_type))
 		i = PANEL_TYPE_VBT;
 	else
 		i = PANEL_TYPE_FALLBACK;
@@ -850,7 +872,7 @@ parse_lfp_panel_dtd(struct intel_display *display,
 					      lfp_data_ptrs,
 					      panel_type);
 
-	panel_fixed_mode = kzalloc(sizeof(*panel_fixed_mode), GFP_KERNEL);
+	panel_fixed_mode = kzalloc_obj(*panel_fixed_mode);
 	if (!panel_fixed_mode)
 		return;
 
@@ -966,7 +988,7 @@ parse_generic_dtd(struct intel_display *display,
 
 	dtd = &generic_dtd->dtd[panel->vbt.panel_type];
 
-	panel_fixed_mode = kzalloc(sizeof(*panel_fixed_mode), GFP_KERNEL);
+	panel_fixed_mode = kzalloc_obj(*panel_fixed_mode);
 	if (!panel_fixed_mode)
 		return;
 
@@ -1139,7 +1161,7 @@ parse_sdvo_lvds_data(struct intel_display *display,
 		return;
 	}
 
-	panel_fixed_mode = kzalloc(sizeof(*panel_fixed_mode), GFP_KERNEL);
+	panel_fixed_mode = kzalloc_obj(*panel_fixed_mode);
 	if (!panel_fixed_mode)
 		return;
 
@@ -1544,6 +1566,10 @@ parse_edp(struct intel_display *display,
 	if (display->vbt.version >= 251)
 		panel->vbt.edp.dsc_disable =
 			panel_bool(edp->edp_dsc_disable, panel_type);
+
+	if (display->vbt.version >= 261)
+		panel->vbt.edp.pipe_joiner_enable =
+			panel_bool(edp->pipe_joiner_enable, panel_type);
 }
 
 static void
@@ -1564,10 +1590,7 @@ parse_psr(struct intel_display *display,
 
 	panel->vbt.psr.full_link = psr_table->full_link;
 	panel->vbt.psr.require_aux_wakeup = psr_table->require_aux_to_wakeup;
-
-	/* Allowed VBT values goes from 0 to 15 */
-	panel->vbt.psr.idle_frames = psr_table->idle_frames < 0 ? 0 :
-		psr_table->idle_frames > 15 ? 15 : psr_table->idle_frames;
+	panel->vbt.psr.idle_frames = psr_table->idle_frames;
 
 	/*
 	 * New psr options 0=500us, 1=100us, 2=2500us, 3=0us
@@ -1937,7 +1960,7 @@ static int get_init_otp_deassert_fragment_len(struct intel_display *display,
 	int index, len;
 
 	if (drm_WARN_ON(display->drm,
-			!data || panel->vbt.dsi.seq_version != 1))
+			!data || panel->vbt.dsi.seq_version >= 3))
 		return 0;
 
 	/* index = 1 to skip sequence byte */
@@ -1960,7 +1983,7 @@ static int get_init_otp_deassert_fragment_len(struct intel_display *display,
 }
 
 /*
- * Some v1 VBT MIPI sequences do the deassert in the init OTP sequence.
+ * Some v1/v2 VBT MIPI sequences do the deassert in the init OTP sequence.
  * The deassert must be done before calling intel_dsi_device_ready, so for
  * these devices we split the init OTP sequence into a deassert sequence and
  * the actual init OTP part.
@@ -1971,9 +1994,9 @@ static void vlv_fixup_mipi_sequences(struct intel_display *display,
 	u8 *init_otp;
 	int len;
 
-	/* Limit this to v1 vid-mode sequences */
+	/* Limit this to v1/v2 vid-mode sequences */
 	if (panel->vbt.dsi.config->is_cmd_mode ||
-	    panel->vbt.dsi.seq_version != 1)
+	    panel->vbt.dsi.seq_version >= 3)
 		return;
 
 	/* Only do this if there are otp and assert seqs and no deassert seq */
@@ -2244,28 +2267,27 @@ static const u8 adlp_ddc_pin_map[] = {
 
 static u8 map_ddc_pin(struct intel_display *display, u8 vbt_pin)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
 	const u8 *ddc_pin_map;
 	int i, n_entries;
 
-	if (INTEL_PCH_TYPE(i915) >= PCH_MTL || display->platform.alderlake_p) {
+	if (INTEL_PCH_TYPE(display) >= PCH_MTL || display->platform.alderlake_p) {
 		ddc_pin_map = adlp_ddc_pin_map;
 		n_entries = ARRAY_SIZE(adlp_ddc_pin_map);
 	} else if (display->platform.alderlake_s) {
 		ddc_pin_map = adls_ddc_pin_map;
 		n_entries = ARRAY_SIZE(adls_ddc_pin_map);
-	} else if (INTEL_PCH_TYPE(i915) >= PCH_DG1) {
+	} else if (INTEL_PCH_TYPE(display) >= PCH_DG1) {
 		return vbt_pin;
-	} else if (display->platform.rocketlake && INTEL_PCH_TYPE(i915) == PCH_TGP) {
+	} else if (display->platform.rocketlake && INTEL_PCH_TYPE(display) == PCH_TGP) {
 		ddc_pin_map = rkl_pch_tgp_ddc_pin_map;
 		n_entries = ARRAY_SIZE(rkl_pch_tgp_ddc_pin_map);
-	} else if (HAS_PCH_TGP(i915) && DISPLAY_VER(display) == 9) {
+	} else if (HAS_PCH_TGP(display) && DISPLAY_VER(display) == 9) {
 		ddc_pin_map = gen9bc_tgp_ddc_pin_map;
 		n_entries = ARRAY_SIZE(gen9bc_tgp_ddc_pin_map);
-	} else if (INTEL_PCH_TYPE(i915) >= PCH_ICP) {
+	} else if (INTEL_PCH_TYPE(display) >= PCH_ICP) {
 		ddc_pin_map = icp_ddc_pin_map;
 		n_entries = ARRAY_SIZE(icp_ddc_pin_map);
-	} else if (HAS_PCH_CNP(i915)) {
+	} else if (HAS_PCH_CNP(display)) {
 		ddc_pin_map = cnp_ddc_pin_map;
 		n_entries = ARRAY_SIZE(cnp_ddc_pin_map);
 	} else {
@@ -2479,6 +2501,25 @@ static int parse_bdb_216_dp_max_link_rate(const int vbt_max_link_rate)
 	}
 }
 
+static u32 edp_rate_override_mask(int rate)
+{
+	switch (rate) {
+	case 2000000: return BDB_263_VBT_EDP_LINK_RATE_20;
+	case 1350000: return BDB_263_VBT_EDP_LINK_RATE_13_5;
+	case 1000000: return BDB_263_VBT_EDP_LINK_RATE_10;
+	case 810000: return BDB_263_VBT_EDP_LINK_RATE_8_1;
+	case 675000: return BDB_263_VBT_EDP_LINK_RATE_6_75;
+	case 540000: return BDB_263_VBT_EDP_LINK_RATE_5_4;
+	case 432000: return BDB_263_VBT_EDP_LINK_RATE_4_32;
+	case 324000: return BDB_263_VBT_EDP_LINK_RATE_3_24;
+	case 270000: return BDB_263_VBT_EDP_LINK_RATE_2_7;
+	case 243000: return BDB_263_VBT_EDP_LINK_RATE_2_43;
+	case 216000: return BDB_263_VBT_EDP_LINK_RATE_2_16;
+	case 162000: return BDB_263_VBT_EDP_LINK_RATE_1_62;
+	default: return 0;
+	}
+}
+
 int intel_bios_dp_max_link_rate(const struct intel_bios_encoder_data *devdata)
 {
 	if (!devdata || devdata->display->vbt.version < 216)
@@ -2496,6 +2537,67 @@ int intel_bios_dp_max_lane_count(const struct intel_bios_encoder_data *devdata)
 		return 0;
 
 	return devdata->child.dp_max_lane_count + 1;
+}
+
+bool
+intel_bios_encoder_reject_edp_rate(const struct intel_bios_encoder_data *devdata,
+				   int rate)
+{
+	if (!devdata || devdata->display->vbt.version < 263)
+		return false;
+
+	if (devdata->child.edp_data_rate_override == BDB_263_VBT_EDP_RATES_MASK)
+		return false;
+
+	return devdata->child.edp_data_rate_override & edp_rate_override_mask(rate);
+}
+
+static void sanitize_dedicated_external(struct intel_bios_encoder_data *devdata,
+					enum port port)
+{
+	struct intel_display *display = devdata->display;
+
+	if (!intel_bios_encoder_is_dedicated_external(devdata))
+		return;
+
+	/*
+	 * Since dedicated_external is for ports connected to PHYs outside of
+	 * the Type-C subsystem, clear bits that would only make sense for ports
+	 * with PHYs in the Type-C subsystem.
+	 */
+
+	/*
+	 * Bit dp_usb_type_c is marked as "don't care" in Bspec when
+	 * dedicated_external is set.
+	 */
+	if (devdata->child.dp_usb_type_c) {
+		drm_dbg_kms(display->drm,
+			    "VBT claims Port %c supports USB Type-C, but the port is dedicated external, ignoring\n",
+			    port_name(port));
+		devdata->child.dp_usb_type_c = 0;
+	}
+
+	/*
+	 * Bit tbt is marked as "don't care" in Bspec when dedicated_external is
+	 * set.
+	 */
+	if (devdata->child.tbt) {
+		drm_dbg_kms(display->drm,
+			    "VBT claims Port %c supports TBT, but the port is dedicated external, ignoring\n",
+			    port_name(port));
+		devdata->child.tbt = 0;
+	}
+
+	/*
+	 * DDI allocation for TC capable ports only make sense for PHYs in the
+	 * Type-C subsystem.
+	 */
+	if (devdata->child.dyn_port_over_tc) {
+		drm_dbg_kms(display->drm,
+			    "VBT claims Port %c supports dynamic DDI allocation in TCSS, but the port is dedicated external, ignoring\n",
+			    port_name(port));
+		devdata->child.dyn_port_over_tc = 0;
+	}
 }
 
 static void sanitize_device_type(struct intel_bios_encoder_data *devdata,
@@ -2662,6 +2764,16 @@ static void print_ddi_port(const struct intel_bios_encoder_data *devdata)
 		    supports_typec_usb, supports_tbt,
 		    devdata->dsc != NULL);
 
+	if (intel_bios_encoder_is_dedicated_external(devdata))
+		drm_dbg_kms(display->drm,
+			    "Port %c is dedicated external\n",
+			    port_name(port));
+
+	if (intel_bios_encoder_supports_dyn_port_over_tc(devdata))
+		drm_dbg_kms(display->drm,
+			    "Port %c supports dynamic DDI allocation in TCSS\n",
+			    port_name(port));
+
 	hdmi_level_shift = intel_bios_hdmi_level_shift(devdata);
 	if (hdmi_level_shift >= 0) {
 		drm_dbg_kms(display->drm,
@@ -2719,6 +2831,7 @@ static void parse_ddi_port(struct intel_bios_encoder_data *devdata)
 		return;
 	}
 
+	sanitize_dedicated_external(devdata, port);
 	sanitize_device_type(devdata, port);
 	sanitize_hdmi_level_shift(devdata, port);
 }
@@ -2746,8 +2859,10 @@ static int child_device_expected_size(u16 version)
 {
 	BUILD_BUG_ON(sizeof(struct child_device_config) < 40);
 
-	if (version > 256)
+	if (version > 264)
 		return -ENOENT;
+	else if (version >= 263)
+		return 44;
 	else if (version >= 256)
 		return 40;
 	else if (version >= 216)
@@ -2838,7 +2953,7 @@ parse_general_definitions(struct intel_display *display)
 			    "Found VBT child device with type 0x%x\n",
 			    child->device_type);
 
-		devdata = kzalloc(sizeof(*devdata), GFP_KERNEL);
+		devdata = kzalloc_obj(*devdata);
 		if (!devdata)
 			break;
 
@@ -2864,8 +2979,6 @@ parse_general_definitions(struct intel_display *display)
 static void
 init_vbt_defaults(struct intel_display *display)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
-
 	display->vbt.crt_ddc_pin = GMBUS_PIN_VGADDC;
 
 	/* general features */
@@ -2882,7 +2995,7 @@ init_vbt_defaults(struct intel_display *display)
 	 * clock for LVDS.
 	 */
 	display->vbt.lvds_ssc_freq = intel_bios_ssc_frequency(display,
-							      !HAS_PCH_SPLIT(i915));
+							      !HAS_PCH_SPLIT(display));
 	drm_dbg_kms(display->drm, "Set default to SSC at %d kHz\n",
 		    display->vbt.lvds_ssc_freq);
 }
@@ -2902,7 +3015,6 @@ init_vbt_panel_defaults(struct intel_panel *panel)
 static void
 init_vbt_missing_defaults(struct intel_display *display)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
 	unsigned int ports = DISPLAY_RUNTIME_INFO(display)->port_mask;
 	enum port port;
 
@@ -2912,17 +3024,17 @@ init_vbt_missing_defaults(struct intel_display *display)
 	for_each_port_masked(port, ports) {
 		struct intel_bios_encoder_data *devdata;
 		struct child_device_config *child;
-		enum phy phy = intel_port_to_phy(i915, port);
+		enum phy phy = intel_port_to_phy(display, port);
 
 		/*
 		 * VBT has the TypeC mode (native,TBT/USB) and we don't want
 		 * to detect it.
 		 */
-		if (intel_phy_is_tc(i915, phy))
+		if (intel_phy_is_tc(display, phy))
 			continue;
 
 		/* Create fake child device config */
-		devdata = kzalloc(sizeof(*devdata), GFP_KERNEL);
+		devdata = kzalloc_obj(*devdata);
 		if (!devdata)
 			break;
 
@@ -3114,9 +3226,7 @@ err_free_rom:
 static const struct vbt_header *intel_bios_get_vbt(struct intel_display *display,
 						   size_t *sizep)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
 	const struct vbt_header *vbt = NULL;
-	intel_wakeref_t wakeref;
 
 	vbt = firmware_get_vbt(display, sizep);
 
@@ -3127,13 +3237,13 @@ static const struct vbt_header *intel_bios_get_vbt(struct intel_display *display
 	 * If the OpRegion does not have VBT, look in SPI flash
 	 * through MMIO or PCI mapping
 	 */
-	if (!vbt && IS_DGFX(i915))
-		with_intel_runtime_pm(&i915->runtime_pm, wakeref)
-			vbt = oprom_get_vbt(display, intel_rom_spi(i915), sizep, "SPI flash");
+	if (!vbt && display->platform.dgfx)
+		with_intel_display_rpm(display)
+			vbt = oprom_get_vbt(display, intel_rom_spi(display->drm), sizep, "SPI flash");
 
 	if (!vbt)
-		with_intel_runtime_pm(&i915->runtime_pm, wakeref)
-			vbt = oprom_get_vbt(display, intel_rom_pci(i915), sizep, "PCI ROM");
+		with_intel_display_rpm(display)
+			vbt = oprom_get_vbt(display, intel_rom_pci(display->drm), sizep, "PCI ROM");
 
 	return vbt;
 }
@@ -3458,12 +3568,13 @@ bool intel_bios_is_dsi_present(struct intel_display *display,
 	return false;
 }
 
-static void fill_dsc(struct intel_crtc_state *crtc_state,
+static bool fill_dsc(struct intel_crtc_state *crtc_state,
 		     struct dsc_compression_parameters_entry *dsc,
 		     int dsc_max_bpc)
 {
 	struct intel_display *display = to_intel_display(crtc_state);
 	struct drm_dsc_config *vdsc_cfg = &crtc_state->dsc.config;
+	int slices_per_line;
 	int bpc = 8;
 
 	vdsc_cfg->dsc_version_major = dsc->version_major;
@@ -3489,26 +3600,33 @@ static void fill_dsc(struct intel_crtc_state *crtc_state,
 	 * throughput etc. into account.
 	 *
 	 * Also, per spec DSI supports 1, 2, 3 or 4 horizontal slices.
+	 *
+	 * FIXME: split only when necessary
 	 */
 	if (dsc->slices_per_line & BIT(2)) {
-		crtc_state->dsc.slice_count = 4;
+		slices_per_line = 4;
 	} else if (dsc->slices_per_line & BIT(1)) {
-		crtc_state->dsc.slice_count = 2;
+		slices_per_line = 2;
 	} else {
 		/* FIXME */
 		if (!(dsc->slices_per_line & BIT(0)))
 			drm_dbg_kms(display->drm,
 				    "VBT: Unsupported DSC slice count for DSI\n");
 
-		crtc_state->dsc.slice_count = 1;
+		slices_per_line = 1;
 	}
 
+	if (drm_WARN_ON(display->drm,
+			!intel_dsc_get_slice_config(display, 1, slices_per_line,
+						    &crtc_state->dsc.slice_config)))
+		return false;
+
 	if (crtc_state->hw.adjusted_mode.crtc_hdisplay %
-	    crtc_state->dsc.slice_count != 0)
+	    intel_dsc_line_slice_count(&crtc_state->dsc.slice_config) != 0)
 		drm_dbg_kms(display->drm,
 			    "VBT: DSC hdisplay %d not divisible by slice count %d\n",
 			    crtc_state->hw.adjusted_mode.crtc_hdisplay,
-			    crtc_state->dsc.slice_count);
+			    intel_dsc_line_slice_count(&crtc_state->dsc.slice_config));
 
 	/*
 	 * The VBT rc_buffer_block_size and rc_buffer_size definitions
@@ -3523,6 +3641,8 @@ static void fill_dsc(struct intel_crtc_state *crtc_state,
 	vdsc_cfg->block_pred_enable = dsc->block_prediction_enable;
 
 	vdsc_cfg->slice_height = dsc->slice_height;
+
+	return true;
 }
 
 /* FIXME: initially DSI specific */
@@ -3543,9 +3663,7 @@ bool intel_bios_get_dsc_params(struct intel_encoder *encoder,
 			if (!devdata->dsc)
 				return false;
 
-			fill_dsc(crtc_state, devdata->dsc, dsc_max_bpc);
-
-			return true;
+			return fill_dsc(crtc_state, devdata->dsc, dsc_max_bpc);
 		}
 	}
 
@@ -3693,6 +3811,18 @@ bool intel_bios_encoder_supports_tbt(const struct intel_bios_encoder_data *devda
 	return devdata->display->vbt.version >= 209 && devdata->child.tbt;
 }
 
+bool intel_bios_encoder_is_dedicated_external(const struct intel_bios_encoder_data *devdata)
+{
+	return devdata->display->vbt.version >= 264 &&
+		devdata->child.dedicated_external;
+}
+
+bool intel_bios_encoder_supports_dyn_port_over_tc(const struct intel_bios_encoder_data *devdata)
+{
+	return devdata->display->vbt.version >= 264 &&
+		devdata->child.dyn_port_over_tc;
+}
+
 bool intel_bios_encoder_lane_reversal(const struct intel_bios_encoder_data *devdata)
 {
 	return devdata && devdata->child.lane_reversal;
@@ -3746,8 +3876,6 @@ DEFINE_SHOW_ATTRIBUTE(intel_bios_vbt);
 
 void intel_bios_debugfs_register(struct intel_display *display)
 {
-	struct drm_minor *minor = display->drm->primary;
-
-	debugfs_create_file("i915_vbt", 0444, minor->debugfs_root,
+	debugfs_create_file("i915_vbt", 0444, display->drm->debugfs_root,
 			    display, &intel_bios_vbt_fops);
 }

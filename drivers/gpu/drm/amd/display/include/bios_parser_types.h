@@ -93,6 +93,8 @@ enum bp_external_encoder_control_action {
 	EXTERNAL_ENCODER_CONTROL_SETUP = 0xf,
 	EXTERNAL_ENCODER_CONTROL_UNBLANK = 0x10,
 	EXTERNAL_ENCODER_CONTROL_BLANK = 0x11,
+	EXTERNAL_ENCODER_CONTROL_DAC_LOAD_DETECT = 0x12,
+	EXTERNAL_ENCODER_CONTROL_DDC_SETUP = 0x14,
 };
 
 enum bp_pipe_control_action {
@@ -135,12 +137,8 @@ struct bp_external_encoder_control {
 struct bp_crtc_source_select {
 	enum engine_id engine_id;
 	enum controller_id controller_id;
-	/* from GPU Tx aka asic_signal */
-	enum signal_type signal;
-	/* sink_signal may differ from asicSignal if Translator encoder */
 	enum signal_type sink_signal;
-	enum display_output_bit_depth display_output_bit_depth;
-	bool enable_dp_audio;
+	enum dc_color_depth color_depth;
 };
 
 struct bp_transmitter_control {
@@ -164,6 +162,11 @@ struct bp_transmitter_control {
 	bool coherent;
 	bool multi_path;
 	bool single_pll_mode;
+};
+
+struct bp_load_detection_parameters {
+	enum engine_id engine_id;
+	uint16_t device_id;
 };
 
 struct bp_hw_crtc_timing_parameters {
@@ -314,6 +317,7 @@ struct bp_spread_spectrum_parameters {
 struct bp_disp_connector_caps_info {
 	uint32_t INTERNAL_DISPLAY    : 1;
 	uint32_t INTERNAL_DISPLAY_BL : 1;
+	uint32_t NO_DDC_PIN : 1;
 };
 
 struct bp_encoder_cap_info {
@@ -326,7 +330,11 @@ struct bp_encoder_cap_info {
 	uint32_t DP_UHBR13_5_EN:1;
 	uint32_t DP_UHBR20_EN:1;
 	uint32_t DP_IS_USB_C:1;
-	uint32_t RESERVED:27;
+	uint32_t IS_HDMI_FRL_CAPABLE:1;
+	uint32_t FRL_8G_EN:1;
+	uint32_t FRL_10G_EN:1;
+	uint32_t FRL_12G_EN:1;
+	uint32_t RESERVED:19;
 };
 
 struct bp_soc_bb_info {
@@ -343,7 +351,13 @@ struct bp_connector_speed_cap_info {
 	uint32_t DP_UHBR13_5_EN:1;
 	uint32_t DP_UHBR20_EN:1;
 	uint32_t DP_IS_USB_C:1;
-	uint32_t RESERVED:28;
+	uint32_t FRL_8G_EN:1;
+	uint32_t FRL_10G_EN:1;
+	uint32_t FRL_12G_EN:1;
+	uint32_t FRL_16G_EN:1;
+	uint32_t FRL_20G_EN:1;
+	uint32_t FRL_24G_EN:1;
+	uint32_t RESERVED:19;
 };
 
 #endif /*__DAL_BIOS_PARSER_TYPES_H__ */

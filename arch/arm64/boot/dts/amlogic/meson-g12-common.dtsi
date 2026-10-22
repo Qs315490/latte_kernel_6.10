@@ -138,7 +138,7 @@
 			reg = <0x0 0xfc000000 0x0 0x400000>,
 			      <0x0 0xff648000 0x0 0x2000>,
 			      <0x0 0xfc400000 0x0 0x200000>;
-			reg-names = "elbi", "cfg", "config";
+			reg-names = "dbi", "cfg", "config";
 			interrupts = <GIC_SPI 221 IRQ_TYPE_LEVEL_HIGH>;
 			#interrupt-cells = <1>;
 			interrupt-map-mask = <0 0 0 0>;
@@ -1503,7 +1503,7 @@
 							groups = "uart_a_tx",
 								 "uart_a_rx";
 							function = "uart_a";
-							bias-disable;
+							bias-pull-up;
 						};
 					};
 
@@ -1521,7 +1521,7 @@
 							groups = "uart_b_tx",
 								 "uart_b_rx";
 							function = "uart_b";
-							bias-disable;
+							bias-pull-up;
 						};
 					};
 
@@ -1918,7 +1918,7 @@
 						groups = "uart_ao_a_tx",
 							 "uart_ao_a_rx";
 						function = "uart_ao_a";
-						bias-disable;
+						bias-pull-up;
 					};
 				};
 
@@ -1936,7 +1936,7 @@
 						groups = "uart_ao_b_tx_2",
 							 "uart_ao_b_rx_3";
 						function = "uart_ao_b";
-						bias-disable;
+						bias-pull-up;
 					};
 				};
 
@@ -1945,7 +1945,7 @@
 						groups = "uart_ao_b_tx_8",
 							 "uart_ao_b_rx_9";
 						function = "uart_ao_b";
-						bias-disable;
+						bias-pull-up;
 					};
 				};
 
@@ -2060,8 +2060,11 @@
 			};
 
 			pwm_AO_cd: pwm@2000 {
-				compatible = "amlogic,meson-g12a-ao-pwm-cd";
+				compatible = "amlogic,meson-g12-pwm-v2",
+					     "amlogic,meson8-pwm-v2";
 				reg = <0x0 0x2000 0x0 0x20>;
+				clocks = <&xtal>,
+					 <&clkc_AO CLKID_AO_CLK81>;
 				#pwm-cells = <3>;
 				status = "disabled";
 			};
@@ -2099,8 +2102,13 @@
 			};
 
 			pwm_AO_ab: pwm@7000 {
-				compatible = "amlogic,meson-g12a-ao-pwm-ab";
+				compatible = "amlogic,meson-g12-pwm-v2",
+					     "amlogic,meson8-pwm-v2";
 				reg = <0x0 0x7000 0x0 0x20>;
+				clocks = <&xtal>,
+					 <&clkc_AO CLKID_AO_CLK81>,
+					 <&clkc CLKID_FCLK_DIV4>,
+					 <&clkc CLKID_FCLK_DIV5>;
 				#pwm-cells = <3>;
 				status = "disabled";
 			};
@@ -2301,22 +2309,37 @@
 			};
 
 			pwm_ef: pwm@19000 {
-				compatible = "amlogic,meson-g12a-ee-pwm";
+				compatible = "amlogic,meson-g12-pwm-v2",
+					     "amlogic,meson8-pwm-v2";
 				reg = <0x0 0x19000 0x0 0x20>;
+				clocks = <&xtal>,
+					 <0>, /* unknown/untested, the datasheet calls it "vid_pll" */
+					 <&clkc CLKID_FCLK_DIV4>,
+					 <&clkc CLKID_FCLK_DIV3>;
 				#pwm-cells = <3>;
 				status = "disabled";
 			};
 
 			pwm_cd: pwm@1a000 {
-				compatible = "amlogic,meson-g12a-ee-pwm";
+				compatible = "amlogic,meson-g12-pwm-v2",
+					     "amlogic,meson8-pwm-v2";
 				reg = <0x0 0x1a000 0x0 0x20>;
+				clocks = <&xtal>,
+					 <0>, /* unknown/untested, the datasheet calls it "vid_pll" */
+					 <&clkc CLKID_FCLK_DIV4>,
+					 <&clkc CLKID_FCLK_DIV3>;
 				#pwm-cells = <3>;
 				status = "disabled";
 			};
 
 			pwm_ab: pwm@1b000 {
-				compatible = "amlogic,meson-g12a-ee-pwm";
+				compatible = "amlogic,meson-g12-pwm-v2",
+					     "amlogic,meson8-pwm-v2";
 				reg = <0x0 0x1b000 0x0 0x20>;
+				clocks = <&xtal>,
+					 <0>, /* unknown/untested, the datasheet calls it "vid_pll" */
+					 <&clkc CLKID_FCLK_DIV4>,
+					 <&clkc CLKID_FCLK_DIV3>;
 				#pwm-cells = <3>;
 				status = "disabled";
 			};
@@ -2408,6 +2431,9 @@
 				 <&clkc CLKID_FCLK_DIV2>;
 			clock-names = "core", "clkin0", "clkin1";
 			resets = <&reset RESET_SD_EMMC_A>;
+
+			assigned-clocks = <&clkc CLKID_SD_EMMC_A_CLK0>;
+			assigned-clock-rates = <24000000>;
 		};
 
 		sd_emmc_b: mmc@ffe05000 {
@@ -2420,6 +2446,9 @@
 				 <&clkc CLKID_FCLK_DIV2>;
 			clock-names = "core", "clkin0", "clkin1";
 			resets = <&reset RESET_SD_EMMC_B>;
+
+			assigned-clocks = <&clkc CLKID_SD_EMMC_B_CLK0>;
+			assigned-clock-rates = <24000000>;
 		};
 
 		sd_emmc_c: mmc@ffe07000 {
@@ -2432,6 +2461,9 @@
 				 <&clkc CLKID_FCLK_DIV2>;
 			clock-names = "core", "clkin0", "clkin1";
 			resets = <&reset RESET_SD_EMMC_C>;
+
+			assigned-clocks = <&clkc CLKID_SD_EMMC_C_CLK0>;
+			assigned-clock-rates = <24000000>;
 		};
 
 		usb: usb@ffe09000 {

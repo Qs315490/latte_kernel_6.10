@@ -260,7 +260,7 @@ static void serial_attr_release(struct config_item *item)
 	usb_put_function_instance(&opts->func_inst);
 }
 
-static struct configfs_item_operations serial_item_ops = {
+static const struct configfs_item_operations serial_item_ops = {
 	.release	= serial_attr_release,
 };
 
@@ -317,7 +317,7 @@ static struct usb_function_instance *gser_alloc_inst(void)
 	struct f_serial_opts *opts;
 	int ret;
 
-	opts = kzalloc(sizeof(*opts), GFP_KERNEL);
+	opts = kzalloc_obj(*opts);
 	if (!opts)
 		return ERR_PTR(-ENOMEM);
 
@@ -364,13 +364,19 @@ static void gser_suspend(struct usb_function *f)
 	gserial_suspend(&gser->port);
 }
 
+static int gser_get_status(struct usb_function *f)
+{
+	return (f->func_wakeup_armed ? USB_INTRF_STAT_FUNC_RW : 0) |
+		USB_INTRF_STAT_FUNC_RW_CAP;
+}
+
 static struct usb_function *gser_alloc(struct usb_function_instance *fi)
 {
 	struct f_gser	*gser;
 	struct f_serial_opts *opts;
 
 	/* allocate and initialize one new instance */
-	gser = kzalloc(sizeof(*gser), GFP_KERNEL);
+	gser = kzalloc_obj(*gser);
 	if (!gser)
 		return ERR_PTR(-ENOMEM);
 
@@ -387,6 +393,7 @@ static struct usb_function *gser_alloc(struct usb_function_instance *fi)
 	gser->port.func.free_func = gser_free;
 	gser->port.func.resume = gser_resume;
 	gser->port.func.suspend = gser_suspend;
+	gser->port.func.get_status = gser_get_status;
 
 	return &gser->port.func;
 }

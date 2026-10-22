@@ -2,10 +2,8 @@
 config SCSI_BNX2X_FCOE
 	tristate "QLogic FCoE offload support"
 	depends on PCI
-	depends on (IPV6 || IPV6=n)
 	depends on LIBFC
 	depends on LIBFCOE
-	depends on MMU
 	select NETDEVICES
 	select ETHERNET
 	select NET_VENDOR_BROADCOM

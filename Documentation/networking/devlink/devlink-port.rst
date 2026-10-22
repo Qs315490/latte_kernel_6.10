@@ -38,7 +38,7 @@ Devlink port flavours are described below.
      - This indicates an eswitch port representing a port of PCI
        subfunction (SF).
    * - ``DEVLINK_PORT_FLAVOUR_VIRTUAL``
-     - This indicates a virtual port for the PCI virtual function.
+     - Any virtual port facing the user.
 
 Devlink port can have a different type based on the link layer described below.
 
@@ -133,6 +133,9 @@ Users may also set the IPsec crypto capability of the function using
 
 Users may also set the IPsec packet capability of the function using
 `devlink port function set ipsec_packet` command.
+
+The ``migratable`` attribute may be set only on ports with
+``DEVLINK_PORT_FLAVOUR_PCI_VF``.
 
 Users may also set the maximum IO event queues of the function
 using `devlink port function set max_io_eqs` command.
@@ -417,6 +420,14 @@ API allows to configure following rate object's parameters:
   Parent node name. Parent node rate limits are considered as additional limits
   to all node children limits. ``tx_max`` is an upper limit for children.
   ``tx_share`` is a total bandwidth distributed among children.
+
+``tc_bw``
+  Allow users to set the bandwidth allocation per traffic class on rate
+  objects. This enables fine-grained QoS configurations by assigning a relative
+  share value to each traffic class. The bandwidth is distributed in proportion
+  to the share value for each class, relative to the sum of all shares.
+  When applied to a non-leaf node, tc_bw determines how bandwidth is shared
+  among its child elements.
 
 ``tx_priority`` and ``tx_weight`` can be used simultaneously. In that case
 nodes with the same priority form a WFQ subgroup in the sibling group

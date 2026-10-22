@@ -58,7 +58,7 @@ debug
     2 = verbose debug messages);
     This option appears only when ``CONFIG_SND_DEBUG=y``.
     This option can be dynamically changed via sysfs
-    /sys/modules/snd/parameters/debug file.
+    /sys/module/snd/parameters/debug file.
   
 Module snd-pcm-oss
 ------------------
@@ -1097,7 +1097,7 @@ output (with ``--no-upload`` option) to kernel bugzilla or alsa-devel
 ML (see the section `Links and Addresses`_).
 
 ``power_save`` and ``power_save_controller`` options are for power-saving
-mode.  See powersave.rst for details.
+mode.  See Documentation/sound/designs/powersave.rst for details.
 
 Note 2: If you get click noises on output, try the module option
 ``position_fix=1`` or ``2``.  ``position_fix=1`` will use the SD_LPIB
@@ -1168,7 +1168,7 @@ line_outs_monitor
 enable_monitor
     Enable Analog Out on Channel 63/64 by default.
 
-See hdspm.rst for details.
+See Documentation/sound/cards/hdspm.rst for details.
 
 Module snd-ice1712
 ------------------
@@ -2253,8 +2253,15 @@ device_setup
     Default: 0x0000 
 ignore_ctl_error
     Ignore any USB-controller regarding mixer interface (default: no)
+    ``ignore_ctl_error=1`` may help when you get an error at accessing
+    the mixer element such as URB error -22.  This happens on some
+    buggy USB device or the controller.  This workaround corresponds to
+    the ``quirk_flags`` bit 14, too.
 autoclock
     Enable auto-clock selection for UAC2 devices (default: yes)
+lowlatency
+    Enable low latency playback mode (default: yes).
+    Could disable it to switch back to the old mode if face a regression.
 quirk_alias
     Quirk alias list, pass strings like ``0123abcd:5678beef``, which
     applies the existing quirk for the device 5678:beef to a new
@@ -2284,29 +2291,116 @@ delayed_register
     The driver prints a message like "Found post-registration device
     assignment: 1234abcd:04" for such a device, so that user can
     notice the need.
+skip_validation
+    Skip unit descriptor validation (default: no).
+    The option is used to ignore the validation errors with the hexdump
+    of the unit descriptor instead of a driver probe error, so that we
+    can check its details.
 quirk_flags
-    Contains the bit flags for various device specific workarounds.
-    Applied to the corresponding card index.
+    The option provides a refined and flexible control for applying quirk
+    flags.  It allows to specify the quirk flags for each device, and can
+    be modified dynamically via sysfs.
+    The old usage accepts an array of integers, each of which applies quirk
+    flags on the device in the order of probing.
+    E.g., ``quirk_flags=0x01,0x02`` applies get_sample_rate to the first
+    device, and share_media_device to the second device.
+    The new usage accepts a string in the format of
+    ``VID1:PID1:FLAGS1;VID2:PID2:FLAGS2;...``, where ``VIDx`` and ``PIDx``
+    specify the device, and ``FLAGSx`` specify the flags to be applied.
+    ``VIDx`` and ``PIDx`` are 4-digit hexadecimal numbers, and can be
+    specified as ``*`` to match any value.  ``FLAGSx`` can be a set of
+    flags given by name, separated by ``|``, or a hexadecimal number
+    representing the bit flags.  The available flag names are listed below.
+    An exclamation mark can be prefixed to a flag name to negate the flag.
+    For example, ``1234:abcd:mixer_playback_min_mute|!ignore_ctl_error;*:*:0x01;``
+    applies the ``mixer_playback_min_mute`` flag and clears the
+    ``ignore_ctl_error`` flag for the device 1234:abcd, and applies the
+    ``skip_sample_rate`` flag for all devices.
 
-        * bit 0: Skip reading sample rate for devices
-        * bit 1: Create Media Controller API entries
-        * bit 2: Allow alignment on audio sub-slot at transfer
-        * bit 3: Add length specifier to transfers
-        * bit 4: Start playback stream at first in implement feedback mode
-        * bit 5: Skip clock selector setup
-        * bit 6: Ignore errors from clock source search
-        * bit 7: Indicates ITF-USB DSD based DACs
-        * bit 8: Add a delay of 20ms at each control message handling
-        * bit 9: Add a delay of 1-2ms at each control message handling
-        * bit 10: Add a delay of 5-6ms at each control message handling
-        * bit 11: Add a delay of 50ms at each interface setup
-        * bit 12: Perform sample rate validations at probe
-        * bit 13: Disable runtime PM autosuspend
-        * bit 14: Ignore errors for mixer access
-        * bit 15: Support generic DSD raw U32_BE format
-        * bit 16: Set up the interface at first like UAC1
-        * bit 17: Apply the generic implicit feedback sync mode
-        * bit 18: Don't apply implicit feedback sync mode
+        * bit 0: ``get_sample_rate``
+          Skip reading sample rate for devices
+        * bit 1: ``share_media_device``
+          Create Media Controller API entries
+        * bit 2: ``align_transfer``
+          Allow alignment on audio sub-slot at transfer
+        * bit 3: ``tx_length``
+          Add length specifier to transfers
+        * bit 4: ``playback_first``
+          Start playback stream at first in implement feedback mode
+        * bit 5: ``skip_clock_selector``
+          Skip clock selector setup
+        * bit 6: ``ignore_clock_source``
+          Ignore errors from clock source search
+        * bit 7: ``itf_usb_dsd_dac``
+          Indicates ITF-USB DSD-based DACs
+        * bit 8: ``ctl_msg_delay``
+          Add a delay of 20ms at each control message handling
+        * bit 9: ``ctl_msg_delay_1m``
+          Add a delay of 1-2ms at each control message handling
+        * bit 10: ``ctl_msg_delay_5m``
+          Add a delay of 5-6ms at each control message handling
+        * bit 11: ``iface_delay``
+          Add a delay of 50ms at each interface setup
+        * bit 12: ``validate_rates``
+          Perform sample rate validations at probe
+        * bit 13: ``disable_autosuspend``
+          Disable runtime PM autosuspend
+        * bit 14: ``ignore_ctl_error``
+          Ignore errors for mixer access
+        * bit 15: ``dsd_raw``
+          Support generic DSD raw U32_BE format
+        * bit 16: ``set_iface_first``
+          Set up the interface at first like UAC1
+        * bit 17: ``generic_implicit_fb``
+          Apply the generic implicit feedback sync mode
+        * bit 18: ``skip_implicit_fb``
+          Don't apply implicit feedback sync mode
+        * bit 19: ``iface_skip_close``
+          Don't close interface during setting sample rate
+        * bit 20: ``force_iface_reset``
+          Force an interface reset whenever stopping & restarting a stream
+        * bit 21: ``fixed_rate``
+          Do not set PCM rate (frequency) when only one rate is available
+          for the given endpoint
+        * bit 22: ``mic_res_16``
+          Set the fixed resolution 16 for Mic Capture Volume
+        * bit 23: ``mic_res_384``
+          Set the fixed resolution 384 for Mic Capture Volume
+        * bit 24: ``mixer_playback_min_mute``
+          Set minimum volume control value as mute for devices where the
+          lowest playback value represents muted state instead of minimum
+          audible volume
+        * bit 25: ``mixer_capture_min_mute``
+          Similar to bit 24 but for capture streams
+        * bit 26: ``skip_iface_setup``
+          Skip the probe-time interface setup (usb_set_interface,
+          init_pitch, init_sample_rate); redundant with
+          snd_usb_endpoint_prepare() at stream-open time
+        * bit 27: ``mixer_playback_linear_vol``
+          Set linear volume mapping for devices where the playback volume
+          control value is mapped to voltage (instead of dB) level linearly.
+          In short: ``x(raw) = (raw - raw_min) / (raw_max - raw_min)``;
+          ``V(x) = k * x``; ``dB(x) = 20 * log10(x)``. Overrides bit 24
+        * bit 28: ``mixer_capture_linear_vol``
+          Similar to bit 27 but for capture streams. Overrides bit 25
+        * bit 29: ``ifb_silence_on_empty``
+          In implicit feedback mode, when an entire capture URB returns with
+          all iso_frame_desc[i].status != 0 (bytes==0), do not silently return
+          from snd_usb_handle_sync_urb. Instead fall through and enqueue a
+          packet_info containing only size-0 packets, so the OUT ring keeps
+          moving (emits silence). Needed by Behringer Flow 8 (1397:050c).
+        * bit 30: ``mixer_get_cur_broken``
+          Some mixers are sticky, which means that setting their current volume
+          is a no-op, and reading the current volume returns a constant value.
+          The sticky check disables these mixers to prevent confusing userspace.
+          However, some devices do have a tunable volume despite the reported
+          current volume being constant. As the sticky check can't distinguish
+          between the two categories, setting this flag tells that the device
+          should fall into the second category when GET_CUR returns a constant
+          value, resulting in the sticky check being non-fatal and only
+          disabling GET_CUR instead of the whole mixer. The current volume will
+          then be provided by the internal cache that stores the last set
+          volume
 
 This module supports multiple devices, autoprobe and hotplugging.
 
@@ -2314,10 +2408,9 @@ NB: ``nrpacks`` parameter can be modified dynamically via sysfs.
 Don't put the value over 20.  Changing via sysfs has no sanity
 check.
 
-NB: ``ignore_ctl_error=1`` may help when you get an error at accessing
-the mixer element such as URB error -22.  This happens on some
-buggy USB device or the controller.  This workaround corresponds to
-the ``quirk_flags`` bit 14, too.
+NB: ``ignore_ctl_error=1`` just provides a quick way to work around the
+issues.  If you have a buggy device that requires these quirks, please
+report it to the upstream.
 
 NB: ``quirk_alias`` option is provided only for testing / development.
 If you want to have a proper support, contact to upstream for

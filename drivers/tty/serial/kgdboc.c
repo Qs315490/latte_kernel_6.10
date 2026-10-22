@@ -186,8 +186,6 @@ static void cleanup_kgdboc(void)
 	if (configured != 1)
 		return;
 
-	if (kgdb_unregister_nmi_console())
-		return;
 	kgdboc_unregister_kbd();
 	kgdb_unregister_io_module(&kgdboc_io_ops);
 }
@@ -250,16 +248,10 @@ do_register:
 	if (err)
 		goto noconfig;
 
-	err = kgdb_register_nmi_console();
-	if (err)
-		goto nmi_con_failed;
-
 	configured = 1;
 
 	return 0;
 
-nmi_con_failed:
-	kgdb_unregister_io_module(&kgdboc_io_ops);
 noconfig:
 	kgdboc_unregister_kbd();
 	configured = 0;
@@ -585,7 +577,6 @@ static int __init kgdboc_earlycon_init(char *opt)
 	console_list_lock();
 	for_each_console(con) {
 		if (con->write && con->read &&
-		    (con->flags & (CON_BOOT | CON_ENABLED)) &&
 		    (!opt || !opt[0] || strcmp(con->name, opt) == 0))
 			break;
 	}

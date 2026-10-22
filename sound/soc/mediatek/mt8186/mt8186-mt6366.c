@@ -88,9 +88,9 @@ static struct snd_soc_codec_conf mt8186_mt6366_rt1019_rt5682s_codec_conf[] = {
 static int dmic_get(struct snd_kcontrol *kcontrol,
 		    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_dapm(kcontrol);
-	struct mtk_soc_card_data *soc_card_data =
-		snd_soc_card_get_drvdata(dapm->card);
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
+	struct snd_soc_card *card = snd_soc_dapm_to_card(dapm);
+	struct mtk_soc_card_data *soc_card_data = snd_soc_card_get_drvdata(card);
 	struct mt8186_mt6366_rt1019_rt5682s_priv *priv = soc_card_data->mach_priv;
 
 	ucontrol->value.integer.value[0] = priv->dmic_switch;
@@ -100,15 +100,15 @@ static int dmic_get(struct snd_kcontrol *kcontrol,
 static int dmic_set(struct snd_kcontrol *kcontrol,
 		    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_dapm(kcontrol);
-	struct mtk_soc_card_data *soc_card_data =
-		snd_soc_card_get_drvdata(dapm->card);
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
+	struct snd_soc_card *card = snd_soc_dapm_to_card(dapm);
+	struct mtk_soc_card_data *soc_card_data = snd_soc_card_get_drvdata(card);
 	struct mt8186_mt6366_rt1019_rt5682s_priv *priv = soc_card_data->mach_priv;
 
 	priv->dmic_switch = ucontrol->value.integer.value[0];
 	if (priv->dmic_sel) {
 		gpiod_set_value(priv->dmic_sel, priv->dmic_switch);
-		dev_dbg(dapm->card->dev, "dmic_set_value %d\n",
+		dev_dbg(card->dev, "dmic_set_value %d\n",
 			 priv->dmic_switch);
 	}
 	return 0;
@@ -140,6 +140,7 @@ static const struct snd_soc_dapm_route dmic_map[] = {
 static int primary_codec_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_card *card = rtd->card;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	struct mtk_soc_card_data *soc_card_data = snd_soc_card_get_drvdata(card);
 	struct mt8186_mt6366_rt1019_rt5682s_priv *priv = soc_card_data->mach_priv;
 	int ret;
@@ -156,7 +157,7 @@ static int primary_codec_init(struct snd_soc_pcm_runtime *rtd)
 		return 0;
 	}
 
-	ret = snd_soc_dapm_new_controls(&card->dapm, dmic_widgets,
+	ret = snd_soc_dapm_new_controls(dapm, dmic_widgets,
 					ARRAY_SIZE(dmic_widgets));
 	if (ret) {
 		dev_err(card->dev, "DMic widget addition failed: %d\n", ret);
@@ -164,7 +165,7 @@ static int primary_codec_init(struct snd_soc_pcm_runtime *rtd)
 		return ret;
 	}
 
-	ret = snd_soc_dapm_add_routes(&card->dapm, dmic_map,
+	ret = snd_soc_dapm_add_routes(dapm, dmic_map,
 				      ARRAY_SIZE(dmic_map));
 
 	if (ret)
@@ -362,7 +363,7 @@ static int mt8186_mt6366_rt1019_rt5682s_hdmi_init(struct snd_soc_pcm_runtime *rt
 		return ret;
 	}
 
-	ret = snd_soc_card_jack_new(rtd->card, "HDMI Jack", SND_JACK_LINEOUT, jack);
+	ret = snd_soc_card_jack_new(rtd->card, "HDMI Jack", SND_JACK_AVOUT, jack);
 	if (ret) {
 		dev_err(rtd->dev, "HDMI Jack creation failed: %d\n", ret);
 		return ret;
@@ -875,7 +876,7 @@ static struct snd_soc_dai_link mt8186_mt6366_rt1019_rt5682s_dai_links[] = {
 		.no_pcm = 1,
 		.dai_fmt = SND_SOC_DAIFMT_I2S |
 			   SND_SOC_DAIFMT_IB_IF |
-			   SND_SOC_DAIFMT_CBM_CFM,
+			   SND_SOC_DAIFMT_CBP_CFP,
 		.playback_only = 1,
 		.ignore_suspend = 1,
 		.init = mt8186_mt6366_rt1019_rt5682s_hdmi_init,
@@ -1177,21 +1178,21 @@ static int mt8186_mt6366_legacy_probe(struct mtk_soc_card_data *soc_card_data)
 	}
 
 	for_each_card_prelinks(card, i, dai_link) {
-		ret = mt8186_mt6366_card_set_be_link(card, dai_link, playback_codec, "I2S3");
+		ret = mt8186_mt6366_card_set_be_link(dev, dai_link, playback_codec, "I2S3");
 		if (ret) {
 			dev_err_probe(dev, ret, "%s set playback_codec fail\n",
 				      dai_link->name);
 			break;
 		}
 
-		ret = mt8186_mt6366_card_set_be_link(card, dai_link, headset_codec, "I2S0");
+		ret = mt8186_mt6366_card_set_be_link(dev, dai_link, headset_codec, "I2S0");
 		if (ret) {
 			dev_err_probe(dev, ret, "%s set headset_codec fail\n",
 				      dai_link->name);
 			break;
 		}
 
-		ret = mt8186_mt6366_card_set_be_link(card, dai_link, headset_codec, "I2S1");
+		ret = mt8186_mt6366_card_set_be_link(dev, dai_link, headset_codec, "I2S1");
 		if (ret) {
 			dev_err_probe(dev, ret, "%s set headset_codec fail\n",
 				      dai_link->name);
@@ -1210,18 +1211,18 @@ static int mt8186_mt6366_soc_card_probe(struct mtk_soc_card_data *soc_card_data,
 	struct snd_soc_card *card = card_data->card;
 	struct snd_soc_dai_link *dai_link;
 	struct mt8186_mt6366_rt1019_rt5682s_priv *mach_priv;
+	struct device *dev = card->dev;
 	int i, ret;
 
-	mach_priv = devm_kzalloc(card->dev, sizeof(*mach_priv), GFP_KERNEL);
+	mach_priv = devm_kzalloc(dev, sizeof(*mach_priv), GFP_KERNEL);
 	if (!mach_priv)
 		return -ENOMEM;
 
 	soc_card_data->mach_priv = mach_priv;
 
-	mach_priv->dmic_sel = devm_gpiod_get_optional(card->dev,
-						      "dmic", GPIOD_OUT_LOW);
+	mach_priv->dmic_sel = devm_gpiod_get_optional(dev, "dmic", GPIOD_OUT_LOW);
 	if (IS_ERR(mach_priv->dmic_sel))
-		return dev_err_probe(card->dev, PTR_ERR(mach_priv->dmic_sel),
+		return dev_err_probe(dev, PTR_ERR(mach_priv->dmic_sel),
 				     "DMIC gpio failed\n");
 
 	for_each_card_prelinks(card, i, dai_link) {
@@ -1249,9 +1250,9 @@ static int mt8186_mt6366_soc_card_probe(struct mtk_soc_card_data *soc_card_data,
 			return ret;
 	}
 
-	ret = mt8186_afe_gpio_init(card->dev);
+	ret = mt8186_afe_gpio_init(dev);
 	if (ret)
-		return dev_err_probe(card->dev, ret, "init AFE gpio error\n");
+		return dev_err_probe(dev, ret, "init AFE gpio error\n");
 
 	return 0;
 }

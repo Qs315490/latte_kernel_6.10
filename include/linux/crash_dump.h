@@ -15,6 +15,8 @@
 extern unsigned long long elfcorehdr_addr;
 extern unsigned long long elfcorehdr_size;
 
+extern unsigned long long dm_crypt_keys_addr;
+
 #ifdef CONFIG_CRASH_DUMP
 extern int elfcorehdr_alloc(unsigned long long *addr, unsigned long long *size);
 extern void elfcorehdr_free(unsigned long long addr);
@@ -134,7 +136,7 @@ struct vmcore_range {
 static inline int vmcore_alloc_add_range(struct list_head *list,
 		unsigned long long paddr, unsigned long long size)
 {
-	struct vmcore_range *m = kzalloc(sizeof(*m), GFP_KERNEL);
+	struct vmcore_range *m = kzalloc_obj(*m);
 
 	if (!m)
 		return -ENOMEM;

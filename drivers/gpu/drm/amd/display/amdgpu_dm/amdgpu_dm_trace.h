@@ -1,3 +1,4 @@
+//SPDX-License-Identifier: MIT
 /*
  * Copyright 2018 Advanced Micro Devices, Inc.
  *
@@ -107,7 +108,7 @@ TRACE_EVENT(amdgpu_dm_connector_atomic_check,
 	    TP_STRUCT__entry(
 			     __field(uint32_t, conn_id)
 			     __field(const struct drm_connector_state *, conn_state)
-			     __field(const struct drm_atomic_state *, state)
+			     __field(const struct drm_atomic_commit *, state)
 			     __field(const struct drm_crtc_commit *, commit)
 			     __field(uint32_t, crtc_id)
 			     __field(uint32_t, best_encoder_id)
@@ -162,7 +163,7 @@ TRACE_EVENT(amdgpu_dm_crtc_atomic_check,
 	    TP_ARGS(state),
 
 	    TP_STRUCT__entry(
-			     __field(const struct drm_atomic_state *, state)
+			     __field(const struct drm_atomic_commit *, state)
 			     __field(const struct drm_crtc_state *, crtc_state)
 			     __field(const struct drm_crtc_commit *, commit)
 			     __field(uint32_t, crtc_id)
@@ -228,7 +229,7 @@ DECLARE_EVENT_CLASS(amdgpu_dm_plane_state_template,
 			     __field(uint32_t, plane_id)
 			     __field(enum drm_plane_type, plane_type)
 			     __field(const struct drm_plane_state *, plane_state)
-			     __field(const struct drm_atomic_state *, state)
+			     __field(const struct drm_atomic_commit *, state)
 			     __field(uint32_t, crtc_id)
 			     __field(uint32_t, fb_id)
 			     __field(uint32_t, fb_format)
@@ -314,11 +315,11 @@ DEFINE_EVENT(amdgpu_dm_plane_state_template, amdgpu_dm_atomic_update_cursor,
 	     TP_ARGS(state));
 
 TRACE_EVENT(amdgpu_dm_atomic_state_template,
-	    TP_PROTO(const struct drm_atomic_state *state),
+	    TP_PROTO(const struct drm_atomic_commit *state),
 	    TP_ARGS(state),
 
 	    TP_STRUCT__entry(
-			     __field(const struct drm_atomic_state *, state)
+			     __field(const struct drm_atomic_commit *, state)
 			     __field(bool, allow_modeset)
 			     __field(bool, legacy_cursor_update)
 			     __field(bool, async_update)
@@ -346,23 +347,23 @@ TRACE_EVENT(amdgpu_dm_atomic_state_template,
 );
 
 DEFINE_EVENT(amdgpu_dm_atomic_state_template, amdgpu_dm_atomic_commit_tail_begin,
-	     TP_PROTO(const struct drm_atomic_state *state),
+	     TP_PROTO(const struct drm_atomic_commit *state),
 	     TP_ARGS(state));
 
 DEFINE_EVENT(amdgpu_dm_atomic_state_template, amdgpu_dm_atomic_commit_tail_finish,
-	     TP_PROTO(const struct drm_atomic_state *state),
+	     TP_PROTO(const struct drm_atomic_commit *state),
 	     TP_ARGS(state));
 
 DEFINE_EVENT(amdgpu_dm_atomic_state_template, amdgpu_dm_atomic_check_begin,
-	     TP_PROTO(const struct drm_atomic_state *state),
+	     TP_PROTO(const struct drm_atomic_commit *state),
 	     TP_ARGS(state));
 
 TRACE_EVENT(amdgpu_dm_atomic_check_finish,
-	    TP_PROTO(const struct drm_atomic_state *state, int res),
+	    TP_PROTO(const struct drm_atomic_commit *state, int res),
 	    TP_ARGS(state, res),
 
 	    TP_STRUCT__entry(
-			     __field(const struct drm_atomic_state *, state)
+			     __field(const struct drm_atomic_commit *, state)
 			     __field(int, res)
 			     __field(bool, async_update)
 			     __field(bool, allow_modeset)
@@ -725,6 +726,95 @@ TRACE_EVENT(dcn_optc_lock_unlock_state,
 		      __entry->vready_offset
 	    )
 );
+
+TRACE_EVENT(amdgpu_dm_brightness,
+	TP_PROTO(void *function, u32 user_brightness, u32 converted_brightness, bool aux, bool ac),
+	TP_ARGS(function, user_brightness, converted_brightness, aux, ac),
+	TP_STRUCT__entry(
+		__field(void *, function)
+		__field(u32, user_brightness)
+		__field(u32, converted_brightness)
+		__field(bool, aux)
+		__field(bool, ac)
+	),
+	TP_fast_assign(
+		__entry->function = function;
+		__entry->user_brightness = user_brightness;
+		__entry->converted_brightness = converted_brightness;
+		__entry->aux = aux;
+		__entry->ac = ac;
+	),
+	TP_printk("%ps: brightness requested=%u converted=%u aux=%s power=%s",
+		  (void *)__entry->function,
+		  (u32)__entry->user_brightness,
+		  (u32)__entry->converted_brightness,
+		  (__entry->aux) ? "true" : "false",
+		  (__entry->ac) ? "AC" : "DC"
+	)
+);
+
+TRACE_EVENT(amdgpu_dm_ism_commit,
+	TP_PROTO(
+		int active_vblank_irq_count,
+		bool vblank_enabled,
+		bool allow_panel_sso
+	),
+	TP_ARGS(
+		active_vblank_irq_count,
+		vblank_enabled,
+		allow_panel_sso
+	),
+	TP_STRUCT__entry(
+		__field(int, active_vblank_irq_count)
+		__field(bool, vblank_enabled)
+		__field(bool, allow_panel_sso)
+	),
+	TP_fast_assign(
+		__entry->active_vblank_irq_count = active_vblank_irq_count;
+		__entry->vblank_enabled = vblank_enabled;
+		__entry->allow_panel_sso = allow_panel_sso;
+	),
+	TP_printk(
+		"active_vblank_irq_count=%d vblank_enabled=%d allow_panel_sso=%d",
+		__entry->active_vblank_irq_count,
+		__entry->vblank_enabled,
+		__entry->allow_panel_sso
+	)
+);
+
+TRACE_EVENT(amdgpu_dm_ism_event,
+	TP_PROTO(
+		int crtc_id,
+		const char *prev_state,
+		const char *curr_state,
+		const char *event
+	),
+	TP_ARGS(
+		crtc_id,
+		prev_state,
+		curr_state,
+		event
+	),
+	TP_STRUCT__entry(
+		__field(int, crtc_id)
+		__string(prev_state, prev_state)
+		__string(curr_state, curr_state)
+		__string(event, event)
+	),
+	TP_fast_assign(
+		__entry->crtc_id = crtc_id;
+		__assign_str(prev_state);
+		__assign_str(curr_state);
+		__assign_str(event);
+	),
+	TP_printk(
+		"[CRTC %d] %s -> %s on event %s",
+		__entry->crtc_id,
+		__get_str(prev_state),
+		__get_str(curr_state),
+		__get_str(event))
+);
+
 
 #endif /* _AMDGPU_DM_TRACE_H_ */
 

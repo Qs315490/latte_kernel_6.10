@@ -143,6 +143,12 @@ static inline struct host1x_bo_mapping *to_host1x_bo_mapping(struct kref *ref)
 	return container_of(ref, struct host1x_bo_mapping, ref);
 }
 
+/**
+ * struct host1x_bo_ops - operations implemented by a host1x_bo provider
+ *
+ * @pin: create a DMA mapping. Implementation must not touch the bo's refcount.
+ * @unpin: destroy a DMA mapping. Implementation must not touch the bo's refcount.
+ */
 struct host1x_bo_ops {
 	struct host1x_bo *(*get)(struct host1x_bo *bo);
 	void (*put)(struct host1x_bo *bo);
@@ -181,6 +187,7 @@ struct host1x_bo_mapping *host1x_bo_pin(struct device *dev, struct host1x_bo *bo
 					enum dma_data_direction dir,
 					struct host1x_bo_cache *cache);
 void host1x_bo_unpin(struct host1x_bo_mapping *map);
+void host1x_bo_clear_cached_mappings(struct host1x_bo *bo);
 
 static inline void *host1x_bo_mmap(struct host1x_bo *bo)
 {
@@ -380,7 +387,7 @@ struct host1x_driver {
 	struct list_head list;
 
 	int (*probe)(struct host1x_device *device);
-	int (*remove)(struct host1x_device *device);
+	void (*remove)(struct host1x_device *device);
 	void (*shutdown)(struct host1x_device *device);
 };
 
@@ -452,16 +459,6 @@ void host1x_client_unregister(struct host1x_client *client);
 
 int host1x_client_suspend(struct host1x_client *client);
 int host1x_client_resume(struct host1x_client *client);
-
-struct tegra_mipi_device;
-
-struct tegra_mipi_device *tegra_mipi_request(struct device *device,
-					     struct device_node *np);
-void tegra_mipi_free(struct tegra_mipi_device *device);
-int tegra_mipi_enable(struct tegra_mipi_device *device);
-int tegra_mipi_disable(struct tegra_mipi_device *device);
-int tegra_mipi_start_calibration(struct tegra_mipi_device *device);
-int tegra_mipi_finish_calibration(struct tegra_mipi_device *device);
 
 /* host1x memory contexts */
 

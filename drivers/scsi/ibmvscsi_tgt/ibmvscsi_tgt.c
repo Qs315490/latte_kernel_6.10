@@ -425,7 +425,7 @@ static void ibmvscsis_disconnect(struct work_struct *work)
 
 	/*
 	 * check which state we are in and see if we
-	 * should transitition to the new state
+	 * should transition to the new state
 	 */
 	switch (vscsi->state) {
 	/* Should never be called while in this state. */
@@ -2214,7 +2214,7 @@ static int ibmvscsis_make_nexus(struct ibmvscsis_tport *tport)
 		return 0;
 	}
 
-	nexus = kzalloc(sizeof(*nexus), GFP_KERNEL);
+	nexus = kzalloc_obj(*nexus);
 	if (!nexus) {
 		dev_err(&vscsi->dev, "Unable to allocate struct ibmvscsis_nexus\n");
 		return -ENOMEM;
@@ -2922,9 +2922,7 @@ static long ibmvscsis_alloctimer(struct scsi_info *vscsi)
 	struct timer_cb *p_timer;
 
 	p_timer = &vscsi->rsp_q_timer;
-	hrtimer_init(&p_timer->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-
-	p_timer->timer.function = ibmvscsis_service_wait_q;
+	hrtimer_setup(&p_timer->timer, ibmvscsis_service_wait_q, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	p_timer->started = false;
 	p_timer->timer_pops = 0;
 
@@ -3426,7 +3424,7 @@ static int ibmvscsis_probe(struct vio_dev *vdev,
 	int rc = 0;
 	long hrc = 0;
 
-	vscsi = kzalloc(sizeof(*vscsi), GFP_KERNEL);
+	vscsi = kzalloc_obj(*vscsi);
 	if (!vscsi) {
 		rc = -ENOMEM;
 		dev_err(&vdev->dev, "probe: allocation of adapter failed\n");
@@ -3535,7 +3533,8 @@ static int ibmvscsis_probe(struct vio_dev *vdev,
 	init_completion(&vscsi->wait_idle);
 	init_completion(&vscsi->unconfig);
 
-	vscsi->work_q = alloc_workqueue("ibmvscsis%s", WQ_MEM_RECLAIM, 1,
+	vscsi->work_q = alloc_workqueue("ibmvscsis%s",
+					WQ_MEM_RECLAIM | WQ_PERCPU, 1,
 					dev_name(&vdev->dev));
 	if (!vscsi->work_q) {
 		rc = -ENOMEM;
@@ -3969,6 +3968,7 @@ static const struct target_core_fabric_ops ibmvscsis_ops = {
 
 	.tfc_wwn_attrs			= ibmvscsis_wwn_attrs,
 
+	.default_compl_type		= TARGET_QUEUE_COMPL,
 	.default_submit_type		= TARGET_DIRECT_SUBMIT,
 	.direct_submit_supp		= 1,
 };

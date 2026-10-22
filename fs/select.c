@@ -150,7 +150,7 @@ void poll_freewait(struct poll_wqueues *pwq)
 		} while (entry > p->entries);
 		old = p;
 		p = p->next;
-		free_page((unsigned long) old);
+		kfree(old);
 	}
 }
 EXPORT_SYMBOL(poll_freewait);
@@ -165,7 +165,7 @@ static struct poll_table_entry *poll_get_entry(struct poll_wqueues *p)
 	if (!table || POLL_TABLE_FULL(table)) {
 		struct poll_table_page *new_table;
 
-		new_table = (struct poll_table_page *) __get_free_page(GFP_KERNEL);
+		new_table = kmalloc(PAGE_SIZE, GFP_KERNEL);
 		if (!new_table) {
 			p->error = -ENOMEM;
 			return NULL;
@@ -192,7 +192,7 @@ static int __pollwake(wait_queue_entry_t *wait, unsigned mode, int sync, void *k
 	 * and is paired with smp_store_mb() in poll_schedule_timeout.
 	 */
 	smp_wmb();
-	pwq->triggered = 1;
+	WRITE_ONCE(pwq->triggered, 1);
 
 	/*
 	 * Perform the default wake up operation using a dummy
@@ -237,7 +237,7 @@ static int poll_schedule_timeout(struct poll_wqueues *pwq, int state,
 	int rc = -EINTR;
 
 	set_current_state(state);
-	if (!pwq->triggered)
+	if (!READ_ONCE(pwq->triggered))
 		rc = schedule_hrtimeout_range(expires, slack, HRTIMER_MODE_ABS);
 	__set_current_state(TASK_RUNNING);
 
@@ -630,7 +630,7 @@ int core_sys_select(int n, fd_set __user *inp, fd_set __user *outp,
 	long stack_fds[SELECT_STACK_ALLOC/sizeof(long)];
 
 	ret = -EINVAL;
-	if (n < 0)
+	if (unlikely(n < 0))
 		goto out_nofds;
 
 	/* max_fds can increase, so grab it once to avoid race */
@@ -708,6 +708,17 @@ static int kern_select(int n, fd_set __user *inp, fd_set __user *outp,
 		if (copy_from_user(&tv, tvp, sizeof(tv)))
 			return -EFAULT;
 
+		/*
+		 * Reject negative components before normalisation. The seconds
+		 * sum below is performed in signed long and a crafted negative
+		 * timeval can wrap to a positive value that passes
+		 * timespec64_valid() and turns into an effectively-infinite
+		 * deadline via timespec64_add_safe()'s saturation, instead of
+		 * the -EINVAL POSIX requires for negative timeouts.
+		 */
+		if (tv.tv_sec < 0 || tv.tv_usec < 0)
+			return -EINVAL;
+
 		to = &end_time;
 		if (poll_select_set_timeout(to,
 				tv.tv_sec + (tv.tv_usec / USEC_PER_SEC),
@@ -776,17 +787,13 @@ static inline int get_sigset_argpack(struct sigset_argpack *to,
 {
 	// the path is hot enough for overhead of copy_from_user() to matter
 	if (from) {
-		if (can_do_masked_user_access())
-			from = masked_user_access_begin(from);
-		else if (!user_read_access_begin(from, sizeof(*from)))
-			return -EFAULT;
-		unsafe_get_user(to->p, &from->p, Efault);
-		unsafe_get_user(to->size, &from->size, Efault);
-		user_read_access_end();
+		scoped_user_read_access(from, Efault) {
+			unsafe_get_user(to->p, &from->p, Efault);
+			unsafe_get_user(to->size, &from->size, Efault);
+		}
 	}
 	return 0;
 Efault:
-	user_read_access_end();
 	return -EFAULT;
 }
 
@@ -857,7 +864,7 @@ static inline __poll_t do_pollfd(struct pollfd *pollfd, poll_table *pwait,
 	int fd = pollfd->fd;
 	__poll_t mask, filter;
 
-	if (fd < 0)
+	if (unlikely(fd < 0))
 		return 0;
 
 	CLASS(fd, f)(fd);
@@ -997,8 +1004,7 @@ static int do_sys_poll(struct pollfd __user *ufds, unsigned int nfds,
 		todo -= walk->len;
 
 		len = min(todo, POLLFD_PER_PAGE);
-		walk = walk->next = kmalloc(struct_size(walk, entries, len),
-					    GFP_KERNEL);
+		walk = walk->next = kmalloc_flex(*walk, entries, len);
 		if (!walk) {
 			err = -ENOMEM;
 			goto out_fds;
@@ -1009,17 +1015,17 @@ static int do_sys_poll(struct pollfd __user *ufds, unsigned int nfds,
 	fdcount = do_poll(head, &table, end_time);
 	poll_freewait(&table);
 
-	if (!user_write_access_begin(ufds, nfds * sizeof(*ufds)))
-		goto out_fds;
+	scoped_user_write_access_size(ufds, nfds * sizeof(*ufds), out_fds) {
+		struct pollfd __user *_ufds = ufds;
 
-	for (walk = head; walk; walk = walk->next) {
-		struct pollfd *fds = walk->entries;
-		unsigned int j;
+		for (walk = head; walk; walk = walk->next) {
+			struct pollfd *fds = walk->entries;
+			unsigned int j;
 
-		for (j = walk->len; j; fds++, ufds++, j--)
-			unsafe_put_user(fds->revents, &ufds->revents, Efault);
-  	}
-	user_write_access_end();
+			for (j = walk->len; j; fds++, _ufds++, j--)
+				unsafe_put_user(fds->revents, &_ufds->revents, out_fds);
+		}
+	}
 
 	err = fdcount;
 out_fds:
@@ -1031,25 +1037,17 @@ out_fds:
 	}
 
 	return err;
-
-Efault:
-	user_write_access_end();
-	err = -EFAULT;
-	goto out_fds;
 }
 
 static long do_restart_poll(struct restart_block *restart_block)
 {
 	struct pollfd __user *ufds = restart_block->poll.ufds;
 	int nfds = restart_block->poll.nfds;
-	struct timespec64 *to = NULL, end_time;
+	struct timespec64 *to = NULL;
 	int ret;
 
-	if (restart_block->poll.has_timeout) {
-		end_time.tv_sec = restart_block->poll.tv_sec;
-		end_time.tv_nsec = restart_block->poll.tv_nsec;
-		to = &end_time;
-	}
+	if (restart_block->poll.has_timeout)
+		to = &restart_block->poll.end_time;
 
 	ret = do_sys_poll(ufds, nfds, to);
 
@@ -1081,8 +1079,7 @@ SYSCALL_DEFINE3(poll, struct pollfd __user *, ufds, unsigned int, nfds,
 		restart_block->poll.nfds = nfds;
 
 		if (timeout_msecs >= 0) {
-			restart_block->poll.tv_sec = end_time.tv_sec;
-			restart_block->poll.tv_nsec = end_time.tv_nsec;
+			restart_block->poll.end_time = end_time;
 			restart_block->poll.has_timeout = 1;
 		} else
 			restart_block->poll.has_timeout = 0;
@@ -1347,15 +1344,13 @@ static inline int get_compat_sigset_argpack(struct compat_sigset_argpack *to,
 					    struct compat_sigset_argpack __user *from)
 {
 	if (from) {
-		if (!user_read_access_begin(from, sizeof(*from)))
-			return -EFAULT;
-		unsafe_get_user(to->p, &from->p, Efault);
-		unsafe_get_user(to->size, &from->size, Efault);
-		user_read_access_end();
+		scoped_user_read_access(from, efault) {
+			unsafe_get_user(to->p, &from->p, efault);
+			unsafe_get_user(to->size, &from->size, efault);
+		}
 	}
 	return 0;
-Efault:
-	user_read_access_end();
+efault:
 	return -EFAULT;
 }
 

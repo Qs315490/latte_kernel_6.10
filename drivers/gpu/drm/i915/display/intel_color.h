@@ -13,7 +13,9 @@ struct intel_crtc_state;
 struct intel_crtc;
 struct intel_display;
 struct intel_dsb;
+struct intel_plane_state;
 struct drm_property_blob;
+enum pipe;
 
 void intel_color_init_hooks(struct intel_display *display);
 int intel_color_init(struct intel_display *display);
@@ -24,6 +26,8 @@ void intel_color_prepare_commit(struct intel_atomic_state *state,
 				struct intel_crtc *crtc);
 void intel_color_cleanup_commit(struct intel_crtc_state *crtc_state);
 bool intel_color_uses_dsb(const struct intel_crtc_state *crtc_state);
+bool intel_color_uses_chained_dsb(const struct intel_crtc_state *crtc_state);
+bool intel_color_uses_gosub_dsb(const struct intel_crtc_state *crtc_state);
 void intel_color_wait_commit(const struct intel_crtc_state *crtc_state);
 void intel_color_commit_noarm(struct intel_dsb *dsb,
 			      const struct intel_crtc_state *crtc_state);
@@ -38,5 +42,12 @@ bool intel_color_lut_equal(const struct intel_crtc_state *crtc_state,
 			   const struct drm_property_blob *blob2,
 			   bool is_pre_csc_lut);
 void intel_color_assert_luts(const struct intel_crtc_state *crtc_state);
+void intel_color_plane_program_pipeline(struct intel_dsb *dsb,
+					const struct intel_plane_state *plane_state);
+void intel_color_plane_commit_arm(struct intel_dsb *dsb,
+				  const struct intel_plane_state *plane_state);
+bool intel_color_crtc_has_3dlut(struct intel_display *display, enum pipe pipe);
+u32 intel_color_background_color_drm_to_hw(u64 drm_background_color);
+u64 intel_color_background_color_hw_to_drm(u32 hw_background_color);
 
 #endif /* __INTEL_COLOR_H__ */

@@ -4,13 +4,15 @@
  * A simple wrapper around refcount. An allocated sched_core_cookie's
  * address is used to compute the cookie of the task.
  */
+#include "sched.h"
+
 struct sched_core_cookie {
 	refcount_t refcnt;
 };
 
 static unsigned long sched_core_alloc_cookie(void)
 {
-	struct sched_core_cookie *ck = kmalloc(sizeof(*ck), GFP_KERNEL);
+	struct sched_core_cookie *ck = kmalloc_obj(*ck);
 	if (!ck)
 		return 0;
 
@@ -65,7 +67,7 @@ static unsigned long sched_core_update_cookie(struct task_struct *p,
 	 * a cookie until after we've removed it, we must have core scheduling
 	 * enabled here.
 	 */
-	SCHED_WARN_ON((p->core_cookie || cookie) && !sched_core_enabled(rq));
+	WARN_ON_ONCE((p->core_cookie || cookie) && !sched_core_enabled(rq));
 
 	if (sched_core_enqueued(p))
 		sched_core_dequeue(rq, p, DEQUEUE_SAVE);
@@ -134,7 +136,7 @@ int sched_core_share_pid(unsigned int cmd, pid_t pid, enum pid_type type,
 	struct pid *grp;
 	int err = 0;
 
-	if (!static_branch_likely(&sched_smt_present))
+	if (!sched_smt_active())
 		return -ENODEV;
 
 	BUILD_BUG_ON(PR_SCHED_CORE_SCOPE_THREAD != PIDTYPE_PID);

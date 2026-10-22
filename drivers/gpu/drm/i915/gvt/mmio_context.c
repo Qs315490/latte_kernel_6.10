@@ -33,14 +33,19 @@
  *
  */
 
-#include "i915_drv.h"
-#include "i915_reg.h"
+#include <drm/drm_print.h>
+#include <drm/intel/intel_gmd_misc_regs.h>
+
 #include "gt/intel_context.h"
 #include "gt/intel_engine_regs.h"
 #include "gt/intel_gpu_commands.h"
 #include "gt/intel_gt_regs.h"
 #include "gt/intel_ring.h"
+
 #include "gvt.h"
+#include "i915_drv.h"
+#include "i915_reg.h"
+#include "i915_wait_util.h"
 #include "trace.h"
 
 #define GEN9_MOCS_SIZE		64
@@ -53,7 +58,7 @@ struct engine_mmio {
 	u32 value;
 };
 
-/* Raw offset is appened to each line for convenience. */
+/* Raw offset is append to each line for convenience. */
 static struct engine_mmio gen8_engine_mmio_list[] __cacheline_aligned = {
 	{RCS0, RING_MODE_GEN7(RENDER_RING_BASE), 0xffff, false}, /* 0x229c */
 	{RCS0, GEN9_CTX_PREEMPT_REG, 0x0, false}, /* 0x2248 */
@@ -471,7 +476,7 @@ bool is_inhibit_context(struct intel_context *ce)
 {
 	const u32 *reg_state = ce->lrc_reg_state;
 	u32 inhibit_mask =
-		_MASKED_BIT_ENABLE(CTX_CTRL_ENGINE_CTX_RESTORE_INHIBIT);
+		REG_MASKED_FIELD_ENABLE(CTX_CTRL_ENGINE_CTX_RESTORE_INHIBIT);
 
 	return inhibit_mask ==
 		(reg_state[CTX_CONTEXT_CONTROL_VAL] & inhibit_mask);
@@ -576,8 +581,8 @@ void intel_gvt_switch_mmio(struct intel_vgpu *pre,
 
 	/**
 	 * We are using raw mmio access wrapper to improve the
-	 * performace for batch mmio read/write, so we need
-	 * handle forcewake mannually.
+	 * performance for batch mmio read/write, so we need
+	 * handle forcewake manually.
 	 */
 	intel_uncore_forcewake_get(engine->uncore, FORCEWAKE_ALL);
 	switch_mmio(pre, next, engine);

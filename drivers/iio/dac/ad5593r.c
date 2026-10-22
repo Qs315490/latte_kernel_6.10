@@ -11,7 +11,6 @@
 #include <linux/bitops.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 
 #include <linux/unaligned.h>
 
@@ -116,19 +115,19 @@ static void ad5593r_i2c_remove(struct i2c_client *i2c)
 
 static const struct i2c_device_id ad5593r_i2c_ids[] = {
 	{ .name = "ad5593r", },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ad5593r_i2c_ids);
 
 static const struct of_device_id ad5593r_of_match[] = {
 	{ .compatible = "adi,ad5593r", },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ad5593r_of_match);
 
 static const struct acpi_device_id ad5593r_acpi_match[] = {
 	{"ADS5593", },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, ad5593r_acpi_match);
 

@@ -12,6 +12,7 @@
 #include "util/lock-contention.h"
 #include <linux/zalloc.h>
 #include <linux/string.h>
+#include <api/fs/fs.h>
 #include <bpf/bpf.h>
 #include <bpf/btf.h>
 #include <inttypes.h>
@@ -35,28 +36,26 @@ static bool slab_cache_equal(long key1, long key2, void *ctx __maybe_unused)
 
 static void check_slab_cache_iter(struct lock_contention *con)
 {
-	struct btf *btf = btf__load_vmlinux_btf();
 	s32 ret;
 
 	hashmap__init(&slab_hash, slab_cache_hash, slab_cache_equal, /*ctx=*/NULL);
 
-	if (btf == NULL) {
-		pr_debug("BTF loading failed: %s\n", strerror(errno));
+	con->btf = btf__load_vmlinux_btf();
+	if (con->btf == NULL) {
+		pr_debug("BTF loading failed: %m\n");
 		return;
 	}
 
-	ret = btf__find_by_name_kind(btf, "bpf_iter__kmem_cache", BTF_KIND_STRUCT);
+	ret = btf__find_by_name_kind(con->btf, "bpf_iter__kmem_cache", BTF_KIND_STRUCT);
 	if (ret < 0) {
 		bpf_program__set_autoload(skel->progs.slab_cache_iter, false);
 		pr_debug("slab cache iterator is not available: %d\n", ret);
-		goto out;
+		return;
 	}
 
 	has_slab_iter = true;
 
 	bpf_map__set_max_entries(skel->maps.slab_caches, con->map_nr_entries);
-out:
-	btf__free(btf);
 }
 
 static void run_slab_cache_iter(void)
@@ -109,12 +108,88 @@ static void exit_slab_cache_iter(void)
 	hashmap__clear(&slab_hash);
 }
 
+static void init_numa_data(struct lock_contention *con)
+{
+	struct symbol *sym;
+	struct map *kmap;
+	char *buf = NULL, *p;
+	size_t len;
+	long last = -1;
+	int ret;
+
+	if (!con->btf)
+		return;
+
+	/*
+	 * 'struct zone' is embedded in 'struct pglist_data' as an array.
+	 * As we may not have full information of the struct zone in the
+	 * (fake) vmlinux.h, let's get the actual size from BTF.
+	 */
+	ret = btf__find_by_name_kind(con->btf, "zone", BTF_KIND_STRUCT);
+	if (ret < 0) {
+		pr_debug("cannot get type of struct zone: %d\n", ret);
+		return;
+	}
+
+	ret = btf__resolve_size(con->btf, ret);
+	if (ret < 0) {
+		pr_debug("cannot get size of struct zone: %d\n", ret);
+		return;
+	}
+	skel->rodata->sizeof_zone = ret;
+
+	/* UMA system doesn't have 'node_data[]' - just use contig_page_data. */
+	sym = machine__find_kernel_symbol_by_name(con->machine,
+						  "contig_page_data",
+						  &kmap);
+	if (sym) {
+		skel->rodata->contig_page_data_addr = map__unmap_ip(kmap, sym->start);
+		map__put(kmap);
+		return;
+	}
+
+	/*
+	 * The 'node_data' is an array of pointers to struct pglist_data.
+	 * It needs to follow the pointer for each node in BPF to get the
+	 * address of struct pglist_data and its zones.
+	 */
+	sym = machine__find_kernel_symbol_by_name(con->machine,
+						  "node_data",
+						  &kmap);
+	if (sym == NULL)
+		return;
+
+	skel->rodata->node_data_addr = map__unmap_ip(kmap, sym->start);
+	map__put(kmap);
+
+	/* get the number of online nodes using the last node number + 1 */
+	ret = sysfs__read_str("devices/system/node/online", &buf, &len);
+	if (ret < 0) {
+		pr_debug("failed to read online node: %d\n", ret);
+		return;
+	}
+
+	p = buf;
+	while (p && *p) {
+		last = strtol(p, &p, 0);
+
+		if (p && (*p == ',' || *p == '-' || *p == '\n'))
+			p++;
+	}
+	skel->rodata->nr_nodes = last + 1;
+	free(buf);
+}
+
 int lock_contention_prepare(struct lock_contention *con)
 {
 	int i, fd;
 	int ncpus = 1, ntasks = 1, ntypes = 1, naddrs = 1, ncgrps = 1, nslabs = 1;
 	struct evlist *evlist = con->evlist;
 	struct target *target = con->target;
+	bool has_mmap_lock = false;
+
+	/* make sure it loads the kernel map before lookup */
+	map__load(machine__kernel_map(con->machine));
 
 	skel = lock_contention_bpf__open();
 	if (!skel) {
@@ -131,10 +206,20 @@ int lock_contention_prepare(struct lock_contention *con)
 	else
 		bpf_map__set_max_entries(skel->maps.task_data, 1);
 
-	if (con->save_callstack)
+	if (con->save_callstack) {
 		bpf_map__set_max_entries(skel->maps.stacks, con->map_nr_entries);
-	else
+		if (con->owner) {
+			bpf_map__set_value_size(skel->maps.stack_buf, con->max_stack * sizeof(u64));
+			bpf_map__set_key_size(skel->maps.owner_stacks,
+						con->max_stack * sizeof(u64));
+			bpf_map__set_max_entries(skel->maps.owner_stacks, con->map_nr_entries);
+			bpf_map__set_max_entries(skel->maps.owner_data, con->map_nr_entries);
+			bpf_map__set_max_entries(skel->maps.owner_stat, con->map_nr_entries);
+			skel->rodata->max_stack = con->max_stack;
+		}
+	} else {
 		bpf_map__set_max_entries(skel->maps.stacks, 1);
+	}
 
 	if (target__has_cpu(target)) {
 		skel->rodata->has_cpu = 1;
@@ -160,6 +245,11 @@ int lock_contention_prepare(struct lock_contention *con)
 		unsigned long *addrs;
 
 		for (i = 0; i < con->filters->nr_syms; i++) {
+			if (!strcmp(con->filters->syms[i], "mmap_lock")) {
+				has_mmap_lock = true;
+				continue;
+			}
+
 			sym = machine__find_kernel_symbol_by_name(con->machine,
 								  con->filters->syms[i],
 								  &kmap);
@@ -179,8 +269,29 @@ int lock_contention_prepare(struct lock_contention *con)
 			addrs[con->filters->nr_addrs++] = map__unmap_ip(kmap, sym->start);
 			con->filters->addrs = addrs;
 		}
-		naddrs = con->filters->nr_addrs;
+		naddrs = con->filters->nr_addrs ?: has_mmap_lock;
 		skel->rodata->has_addr = 1;
+	}
+
+	/* resolve lock name in delays */
+	if (con->nr_delays) {
+		struct symbol *sym;
+		struct map *kmap;
+
+		for (i = 0; i < con->nr_delays; i++) {
+			sym = machine__find_kernel_symbol_by_name(con->machine,
+								  con->delays[i].sym,
+								  &kmap);
+			if (sym == NULL) {
+				pr_warning("ignore unknown symbol: %s\n",
+					   con->delays[i].sym);
+				continue;
+			}
+
+			con->delays[i].addr = map__unmap_ip(kmap, sym->start);
+		}
+		skel->rodata->lock_delay = 1;
+		bpf_map__set_max_entries(skel->maps.lock_delays, con->nr_delays);
 	}
 
 	bpf_map__set_max_entries(skel->maps.cpu_filter, ncpus);
@@ -193,6 +304,7 @@ int lock_contention_prepare(struct lock_contention *con)
 	skel->rodata->aggr_mode = con->aggr_mode;
 	skel->rodata->needs_callstack = con->save_callstack;
 	skel->rodata->lock_owner = con->owner;
+	skel->rodata->has_mmap_lock = has_mmap_lock;
 
 	if (con->aggr_mode == LOCK_AGGR_CGROUP || con->filters->nr_cgrps) {
 		if (cgroup_is_v2("perf_event"))
@@ -207,6 +319,8 @@ int lock_contention_prepare(struct lock_contention *con)
 	}
 
 	bpf_map__set_max_entries(skel->maps.slab_filter, nslabs);
+
+	init_numa_data(con);
 
 	if (lock_contention_bpf__load(skel) < 0) {
 		pr_err("Failed to load lock-contention BPF skeleton\n");
@@ -270,6 +384,13 @@ int lock_contention_prepare(struct lock_contention *con)
 
 		for (i = 0; i < con->filters->nr_cgrps; i++)
 			bpf_map_update_elem(fd, &con->filters->cgrps[i], &val, BPF_ANY);
+	}
+
+	if (con->nr_delays) {
+		fd = bpf_map__fd(skel->maps.lock_delays);
+
+		for (i = 0; i < con->nr_delays; i++)
+			bpf_map_update_elem(fd, &con->delays[i].addr, &con->delays[i].time, BPF_ANY);
 	}
 
 	if (con->aggr_mode == LOCK_AGGR_CGROUP)
@@ -349,8 +470,8 @@ static void update_lock_stat(int map_fd, int pid, u64 end_ts,
 		stat_key.lock_addr_or_cgroup = ts_data->lock;
 		break;
 	case LOCK_AGGR_CGROUP:
-		/* TODO */
-		return;
+		stat_key.lock_addr_or_cgroup = ts_data->cgroup_id;
+		break;
 	default:
 		return;
 	}
@@ -450,7 +571,6 @@ static const char *lock_contention_get_name(struct lock_contention *con,
 {
 	int idx = 0;
 	u64 addr;
-	const char *name = "";
 	static char name_buf[KSYM_NAME_LEN];
 	struct symbol *sym;
 	struct map *kmap;
@@ -465,13 +585,14 @@ static const char *lock_contention_get_name(struct lock_contention *con,
 		if (pid) {
 			struct thread *t = machine__findnew_thread(machine, /*pid=*/-1, pid);
 
-			if (t == NULL)
-				return name;
-			if (!bpf_map_lookup_elem(task_fd, &pid, &task) &&
-			    thread__set_comm(t, task.comm, /*timestamp=*/0))
-				name = task.comm;
+			if (t != NULL &&
+			    !bpf_map_lookup_elem(task_fd, &pid, &task) &&
+			    thread__set_comm(t, task.comm, /*timestamp=*/0)) {
+				snprintf(name_buf, sizeof(name_buf), "%s", task.comm);
+				return name_buf;
+			}
 		}
-		return name;
+		return "";
 	}
 
 	if (con->aggr_mode == LOCK_AGGR_ADDR) {
@@ -493,6 +614,11 @@ static const char *lock_contention_get_name(struct lock_contention *con,
 		if (!bpf_map_lookup_elem(lock_fd, &key->lock_addr_or_cgroup, &flags)) {
 			if (flags == LOCK_CLASS_RQLOCK)
 				return "rq_lock";
+		}
+
+		if (!bpf_map_lookup_elem(lock_fd, &key->lock_addr_or_cgroup, &flags)) {
+			if (flags == LOCK_CLASS_ZONE_LOCK)
+				return "zone_lock";
 		}
 
 		/* look slab_hash for dynamic locks in a slab object */
@@ -539,6 +665,63 @@ static const char *lock_contention_get_name(struct lock_contention *con,
 	return name_buf;
 }
 
+struct lock_stat *pop_owner_stack_trace(struct lock_contention *con)
+{
+	int stacks_fd, stat_fd;
+	u64 *stack_trace = NULL;
+	s32 stack_id;
+	struct contention_key ckey = {};
+	struct contention_data cdata = {};
+	size_t stack_size = con->max_stack * sizeof(*stack_trace);
+	struct lock_stat *st = NULL;
+
+	stacks_fd = bpf_map__fd(skel->maps.owner_stacks);
+	stat_fd = bpf_map__fd(skel->maps.owner_stat);
+	if (!stacks_fd || !stat_fd)
+		goto out_err;
+
+	stack_trace = zalloc(stack_size);
+	if (stack_trace == NULL)
+		goto out_err;
+
+	if (bpf_map_get_next_key(stacks_fd, NULL, stack_trace))
+		goto out_err;
+
+	bpf_map_lookup_elem(stacks_fd, stack_trace, &stack_id);
+	ckey.stack_id = stack_id;
+	bpf_map_lookup_elem(stat_fd, &ckey, &cdata);
+
+	st = zalloc(sizeof(struct lock_stat));
+	if (!st)
+		goto out_err;
+
+	st->name = strdup(stack_trace[0] ? lock_contention_get_name(con, NULL, stack_trace, 0) :
+					   "unknown");
+	if (!st->name)
+		goto out_err;
+
+	st->flags = cdata.flags;
+	st->nr_contended = cdata.count;
+	st->wait_time_total = cdata.total_time;
+	st->wait_time_max = cdata.max_time;
+	st->wait_time_min = cdata.min_time;
+	st->callstack = stack_trace;
+
+	if (cdata.count)
+		st->avg_wait_time = cdata.total_time / cdata.count;
+
+	bpf_map_delete_elem(stacks_fd, stack_trace);
+	bpf_map_delete_elem(stat_fd, &ckey);
+
+	return st;
+
+out_err:
+	free(stack_trace);
+	free(st);
+
+	return NULL;
+}
+
 int lock_contention_read(struct lock_contention *con)
 {
 	int fd, stack, err = 0;
@@ -578,9 +761,6 @@ int lock_contention_read(struct lock_contention *con)
 
 		bpf_prog_test_run_opts(prog_fd, &opts);
 	}
-
-	/* make sure it loads the kernel map */
-	maps__load_first(machine->kmaps);
 
 	prev_key = NULL;
 	while (!bpf_map_get_next_key(fd, prev_key, &key)) {
@@ -676,6 +856,7 @@ int lock_contention_finish(struct lock_contention *con)
 	}
 
 	exit_slab_cache_iter();
+	btf__free(con->btf);
 
 	return 0;
 }

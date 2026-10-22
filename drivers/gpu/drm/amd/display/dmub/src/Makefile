@@ -1,5 +1,5 @@
 #
-# Copyright 2019 Advanced Micro Devices, Inc.
+# Copyright 2019-2026 Advanced Micro Devices, Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -26,7 +26,10 @@ DMUB += dmub_dcn31.o dmub_dcn314.o dmub_dcn315.o dmub_dcn316.o
 DMUB += dmub_dcn32.o
 DMUB += dmub_dcn35.o
 DMUB += dmub_dcn351.o
+DMUB += dmub_dcn36.o
 DMUB += dmub_dcn401.o
+DMUB += dmub_dcn42.o
+DMUB += dmub_dcn42b.o
 
 AMD_DAL_DMUB = $(addprefix $(AMDDALPATH)/dmub/src/,$(DMUB))
 

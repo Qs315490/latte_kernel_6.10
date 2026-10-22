@@ -10,7 +10,6 @@
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include "zpa2326.h"
 
 /*
@@ -25,7 +24,6 @@ static const struct regmap_config zpa2326_regmap_i2c_config = {
 	.precious_reg   = zpa2326_isreg_precious,
 	.max_register   = ZPA2326_TEMP_OUT_H_REG,
 	.read_flag_mask = BIT(7),
-	.cache_type     = REGCACHE_NONE,
 };
 
 static unsigned int zpa2326_i2c_hwid(const struct i2c_client *client)
@@ -59,7 +57,7 @@ static void zpa2326_remove_i2c(struct i2c_client *client)
 }
 
 static const struct i2c_device_id zpa2326_i2c_ids[] = {
-	{ "zpa2326" },
+	{ .name = "zpa2326" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, zpa2326_i2c_ids);

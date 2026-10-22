@@ -22,13 +22,13 @@ extern unsigned long _find_first_bit(const unsigned long *addr, unsigned long si
 unsigned long __find_nth_bit(const unsigned long *addr, unsigned long size, unsigned long n);
 unsigned long __find_nth_and_bit(const unsigned long *addr1, const unsigned long *addr2,
 				unsigned long size, unsigned long n);
-unsigned long __find_nth_andnot_bit(const unsigned long *addr1, const unsigned long *addr2,
-					unsigned long size, unsigned long n);
 unsigned long __find_nth_and_andnot_bit(const unsigned long *addr1, const unsigned long *addr2,
 					const unsigned long *addr3, unsigned long size,
 					unsigned long n);
 extern unsigned long _find_first_and_bit(const unsigned long *addr1,
 					 const unsigned long *addr2, unsigned long size);
+unsigned long _find_first_andnot_bit(const unsigned long *addr1, const unsigned long *addr2,
+				 unsigned long size);
 unsigned long _find_first_and_and_bit(const unsigned long *addr1, const unsigned long *addr2,
 				      const unsigned long *addr3, unsigned long size);
 extern unsigned long _find_first_zero_bit(const unsigned long *addr, unsigned long size);
@@ -41,6 +41,8 @@ unsigned long _find_next_zero_bit_le(const  unsigned long *addr, unsigned
 unsigned long _find_next_bit_le(const unsigned long *addr, unsigned
 				long size, unsigned long offset);
 #endif
+
+unsigned long find_random_bit(const unsigned long *addr, unsigned long size);
 
 #ifndef find_next_bit
 /**
@@ -247,7 +249,7 @@ unsigned long find_nth_bit(const unsigned long *addr, unsigned long size, unsign
  * @n: The number of set bit, which position is needed, counting from 0
  *
  * Returns the bit number of the N'th set bit.
- * If no such, returns @size.
+ * If no such, returns >= @size.
  */
 static __always_inline
 unsigned long find_nth_and_bit(const unsigned long *addr1, const unsigned long *addr2,
@@ -266,33 +268,6 @@ unsigned long find_nth_and_bit(const unsigned long *addr1, const unsigned long *
 }
 
 /**
- * find_nth_andnot_bit - find N'th set bit in 2 memory regions,
- *			 flipping bits in 2nd region
- * @addr1: The 1st address to start the search at
- * @addr2: The 2nd address to start the search at
- * @size: The maximum number of bits to search
- * @n: The number of set bit, which position is needed, counting from 0
- *
- * Returns the bit number of the N'th set bit.
- * If no such, returns @size.
- */
-static __always_inline
-unsigned long find_nth_andnot_bit(const unsigned long *addr1, const unsigned long *addr2,
-				unsigned long size, unsigned long n)
-{
-	if (n >= size)
-		return size;
-
-	if (small_const_nbits(size)) {
-		unsigned long val =  *addr1 & (~*addr2) & GENMASK(size - 1, 0);
-
-		return val ? fns(val, n) : size;
-	}
-
-	return __find_nth_andnot_bit(addr1, addr2, size, n);
-}
-
-/**
  * find_nth_and_andnot_bit - find N'th set bit in 2 memory regions,
  *			     excluding those set in 3rd region
  * @addr1: The 1st address to start the search at
@@ -302,7 +277,7 @@ unsigned long find_nth_andnot_bit(const unsigned long *addr1, const unsigned lon
  * @n: The number of set bit, which position is needed, counting from 0
  *
  * Returns the bit number of the N'th set bit.
- * If no such, returns @size.
+ * If no such, returns >= @size.
  */
 static __always_inline
 unsigned long find_nth_and_andnot_bit(const unsigned long *addr1,
@@ -346,6 +321,29 @@ unsigned long find_first_and_bit(const unsigned long *addr1,
 	return _find_first_and_bit(addr1, addr2, size);
 }
 #endif
+
+/**
+ * find_first_andnot_bit - find the first bit set in 1st memory region and unset in 2nd
+ * @addr1: The first address to base the search on
+ * @addr2: The second address to base the search on
+ * @size: The bitmap size in bits
+ *
+ * Returns the bit number for the first set bit
+ * If no bits are set, returns >= @size.
+ */
+static __always_inline
+unsigned long find_first_andnot_bit(const unsigned long *addr1,
+				 const unsigned long *addr2,
+				 unsigned long size)
+{
+	if (small_const_nbits(size)) {
+		unsigned long val = *addr1 & (~*addr2) & GENMASK(size - 1, 0);
+
+		return val ? __ffs(val) : size;
+	}
+
+	return _find_first_andnot_bit(addr1, addr2, size);
+}
 
 /**
  * find_first_and_and_bit - find the first set bit in 3 memory regions
@@ -657,8 +655,8 @@ unsigned long find_next_bit_le(const void *addr, unsigned
 
 /**
  * for_each_clear_bitrange_from - iterate over all unset bit ranges [b; e)
- * @b: bit offset of start of current bitrange (first set bit); must be initialized
- * @e: bit offset of end of current bitrange (first unset bit)
+ * @b: bit offset of start of current bitrange (first unset bit); must be initialized
+ * @e: bit offset of end of current bitrange (first set bit)
  * @addr: bitmap address to base the search on
  * @size: bitmap size in number of bits
  */

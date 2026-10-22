@@ -14,8 +14,13 @@ struct xe_bo;
  * struct xe_guc_ads - GuC additional data structures (ADS)
  */
 struct xe_guc_ads {
-	/** @bo: XE BO for GuC ads blob */
+	/** @bo: Xe BO for GuC ads blob */
 	struct xe_bo *bo;
+	/**
+	 * @um_queue_bo: Dedicated BO for the HW fault ring (UM queues).
+	 * NULL if the platform does not support USM.
+	 */
+	struct xe_bo *um_queue_bo;
 	/** @golden_lrc_size: golden LRC size */
 	size_t golden_lrc_size;
 	/** @regset_size: size of register set passed to GuC for save/restore */

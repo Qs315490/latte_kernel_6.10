@@ -111,6 +111,11 @@ static u32 osif_func(struct i2c_adapter *adapter)
 	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
 }
 
+/* prevent invalid 0-length usb_control_msg */
+static const struct i2c_adapter_quirks osif_quirks = {
+	.flags = I2C_AQ_NO_ZERO_LEN_READ,
+};
+
 static const struct i2c_algorithm osif_algorithm = {
 	.xfer = osif_xfer,
 	.functionality = osif_func,
@@ -136,13 +141,14 @@ static int osif_probe(struct usb_interface *interface,
 	if (!priv)
 		return -ENOMEM;
 
-	priv->usb_dev = usb_get_dev(interface_to_usbdev(interface));
+	priv->usb_dev = interface_to_usbdev(interface);
 	priv->interface = interface;
 
 	usb_set_intfdata(interface, priv);
 
 	priv->adapter.owner = THIS_MODULE;
 	priv->adapter.class = I2C_CLASS_HWMON;
+	priv->adapter.quirks = &osif_quirks;
 	priv->adapter.algo = &osif_algorithm;
 	priv->adapter.algo_data = priv;
 	snprintf(priv->adapter.name, sizeof(priv->adapter.name),
@@ -157,7 +163,6 @@ static int osif_probe(struct usb_interface *interface,
 			    NULL, 0);
 	if (ret) {
 		dev_err(&interface->dev, "failure sending bit rate");
-		usb_put_dev(priv->usb_dev);
 		return ret;
 	}
 
@@ -178,7 +183,6 @@ static void osif_disconnect(struct usb_interface *interface)
 
 	i2c_del_adapter(&(priv->adapter));
 	usb_set_intfdata(interface, NULL);
-	usb_put_dev(priv->usb_dev);
 }
 
 static struct usb_driver osif_driver = {

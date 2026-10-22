@@ -50,7 +50,7 @@ static int exynos_drm_open(struct drm_device *dev, struct drm_file *file)
 	struct drm_exynos_file_private *file_priv;
 	int ret;
 
-	file_priv = kzalloc(sizeof(*file_priv), GFP_KERNEL);
+	file_priv = kzalloc_obj(*file_priv);
 	if (!file_priv)
 		return -ENOMEM;
 
@@ -109,7 +109,6 @@ static const struct drm_driver exynos_drm_driver = {
 	.open			= exynos_drm_open,
 	.postclose		= exynos_drm_postclose,
 	.dumb_create		= exynos_drm_gem_dumb_create,
-	.gem_prime_import	= exynos_drm_gem_prime_import,
 	.gem_prime_import_sg_table	= exynos_drm_gem_prime_import_sg_table,
 	EXYNOS_DRM_FBDEV_DRIVER_OPS,
 	.ioctls			= exynos_ioctls,
@@ -245,7 +244,7 @@ static int exynos_drm_bind(struct device *dev)
 	if (IS_ERR(drm))
 		return PTR_ERR(drm);
 
-	private = kzalloc(sizeof(struct exynos_drm_private), GFP_KERNEL);
+	private = kzalloc_obj(struct exynos_drm_private);
 	if (!private) {
 		ret = -ENOMEM;
 		goto err_free_drm;
@@ -355,8 +354,7 @@ static void exynos_drm_platform_shutdown(struct platform_device *pdev)
 {
 	struct drm_device *drm = platform_get_drvdata(pdev);
 
-	if (drm)
-		drm_atomic_helper_shutdown(drm);
+	drm_atomic_helper_shutdown(drm);
 }
 
 static struct platform_driver exynos_drm_platform_driver = {

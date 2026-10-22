@@ -18,12 +18,12 @@
 /*
  * This gives the physical RAM offset.
  */
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #ifndef PHYS_OFFSET
 #define PHYS_OFFSET	_UL(0)
 #endif
 extern unsigned long vm_map_base;
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #ifndef IO_BASE
 #define IO_BASE			CSR_DMW0_BASE
@@ -38,11 +38,20 @@ extern unsigned long vm_map_base;
 #endif
 
 #ifndef WRITECOMBINE_BASE
+#ifdef CONFIG_32BIT
+#define WRITECOMBINE_BASE	CSR_DMW0_BASE
+#else
 #define WRITECOMBINE_BASE	CSR_DMW2_BASE
 #endif
+#endif
 
+#ifdef CONFIG_32BIT
+#define DMW_PABITS	29
+#define TO_PHYS_MASK	((_UL(1) << _UL(DMW_PABITS)) - 1)
+#else
 #define DMW_PABITS	48
-#define TO_PHYS_MASK	((1ULL << DMW_PABITS) - 1)
+#define TO_PHYS_MASK	((_ULL(1) << _ULL(DMW_PABITS)) - 1)
+#endif
 
 /*
  * Memory above this physical address will be considered highmem.
@@ -66,7 +75,7 @@ extern unsigned long vm_map_base;
 #define FIXADDR_TOP		((unsigned long)(long)(int)0xfffe0000)
 #endif
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define _ATYPE_
 #define _ATYPE32_
 #define _ATYPE64_
@@ -85,7 +94,7 @@ extern unsigned long vm_map_base;
 /*
  *  32/64-bit LoongArch address spaces
  */
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define _ACAST32_
 #define _ACAST64_
 #else
@@ -112,7 +121,11 @@ extern unsigned long vm_map_base;
 /*
  * Returns the physical address of a KPRANGEx / XKPRANGE address
  */
+#ifdef CONFIG_32BIT
+#define PHYSADDR(a)		((_ACAST32_(a)) & TO_PHYS_MASK)
+#else
 #define PHYSADDR(a)		((_ACAST64_(a)) & TO_PHYS_MASK)
+#endif
 
 /*
  * On LoongArch, I/O ports mappring is following:

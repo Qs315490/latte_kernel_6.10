@@ -760,7 +760,7 @@ static void load_code(struct icom_port *icom_port)
 		dma_free_coherent(&dev->dev, 4096, new_page, temp_pci);
 }
 
-static int startup(struct icom_port *icom_port)
+static int icom_startup(struct icom_port *icom_port)
 {
 	unsigned long temp;
 	unsigned char cable_id, raw_cable_id;
@@ -832,7 +832,7 @@ unlock:
 	return 0;
 }
 
-static void shutdown(struct icom_port *icom_port)
+static void icom_shutdown(struct icom_port *icom_port)
 {
 	unsigned long temp;
 	unsigned char cmdReg;
@@ -1311,7 +1311,7 @@ static int icom_open(struct uart_port *port)
 	int retval;
 
 	kref_get(&icom_port->adapter->kref);
-	retval = startup(icom_port);
+	retval = icom_startup(icom_port);
 
 	if (retval) {
 		kref_put(&icom_port->adapter->kref, icom_kref_release);
@@ -1333,7 +1333,7 @@ static void icom_close(struct uart_port *port)
 	cmdReg = readb(&icom_port->dram->CmdReg);
 	writeb(cmdReg & ~CMD_RCV_ENABLE, &icom_port->dram->CmdReg);
 
-	shutdown(icom_port);
+	icom_shutdown(icom_port);
 
 	kref_put(&icom_port->adapter->kref, icom_kref_release);
 }
@@ -1396,8 +1396,6 @@ static void icom_set_termios(struct uart_port *port, struct ktermios *termios,
 	baud = uart_get_baud_rate(port, termios, old_termios,
 				  icom_acfg_baud[0],
 				  icom_acfg_baud[BAUD_TABLE_LIMIT]);
-	if (!baud)
-		baud = 9600;	/* B0 transition handled in rs_set_termios */
 
 	for (index = 0; index < BAUD_TABLE_LIMIT; index++) {
 		if (icom_acfg_baud[index] == baud) {
@@ -1632,7 +1630,7 @@ static int icom_alloc_adapter(struct icom_adapter
 	struct icom_adapter *icom_adapter;
 	struct icom_adapter *cur_adapter_entry;
 
-	icom_adapter = kzalloc(sizeof(struct icom_adapter), GFP_KERNEL);
+	icom_adapter = kzalloc_obj(struct icom_adapter);
 
 	if (!icom_adapter) {
 		return -ENOMEM;
@@ -1723,6 +1721,7 @@ static int icom_probe(struct pci_dev *dev,
 	retval = pci_read_config_dword(dev, PCI_COMMAND, &command_reg);
 	if (retval) {
 		dev_err(&dev->dev, "PCI Config read FAILED\n");
+		retval = pcibios_err_to_errno(retval);
 		goto probe_exit0;
 	}
 
@@ -1764,11 +1763,10 @@ static int icom_probe(struct pci_dev *dev,
 		goto probe_exit1;
 	}
 
-	 /* save off irq and request irq line */
-	 retval = request_irq(dev->irq, icom_interrupt, IRQF_SHARED, ICOM_DRIVER_NAME, (void *)icom_adapter);
-	 if (retval) {
-		  goto probe_exit2;
-	 }
+	/* save off irq and request irq line */
+	retval = request_irq(dev->irq, icom_interrupt, IRQF_SHARED, ICOM_DRIVER_NAME, icom_adapter);
+	if (retval)
+		goto probe_exit2;
 
 	retval = icom_load_ports(icom_adapter);
 

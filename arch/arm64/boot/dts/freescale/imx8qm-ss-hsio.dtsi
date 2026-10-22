@@ -12,7 +12,7 @@
 	#address-cells = <1>;
 	#size-cells = <1>;
 
-	pciea: pcie@5f000000 {
+	pcie0: pciea: pcie@5f000000 {
 		compatible = "fsl,imx8q-pcie";
 		reg = <0x5f000000 0x10000>,
 		      <0x4ff00000 0x80000>;
@@ -20,8 +20,9 @@
 		ranges = <0x81000000 0 0x00000000 0x4ff80000 0 0x00010000>,
 			 <0x82000000 0 0x40000000 0x40000000 0 0x0ff00000>;
 		#interrupt-cells = <1>;
-		interrupts = <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>;
-		interrupt-names = "msi";
+		interrupts = <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 72 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "msi", "dma";
 		#address-cells = <3>;
 		#size-cells = <2>;
 		clocks = <&pciea_lpcg IMX_LPCG_CLK_6>,
@@ -30,19 +31,49 @@
 		clock-names = "dbi", "mstr", "slv";
 		bus-range = <0x00 0xff>;
 		device_type = "pci";
-		interrupt-map = <0 0 0 1 &gic 0 73 4>,
-				<0 0 0 2 &gic 0 74 4>,
-				<0 0 0 3 &gic 0 75 4>,
-				<0 0 0 4 &gic 0 76 4>;
+		interrupt-map = <0 0 0 1 &gic GIC_SPI 73 IRQ_TYPE_LEVEL_HIGH>,
+				<0 0 0 2 &gic GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH>,
+				<0 0 0 3 &gic GIC_SPI 75 IRQ_TYPE_LEVEL_HIGH>,
+				<0 0 0 4 &gic GIC_SPI 76 IRQ_TYPE_LEVEL_HIGH>;
 		interrupt-map-mask = <0 0 0 0x7>;
 		num-lanes = <1>;
 		num-viewport = <4>;
 		power-domains = <&pd IMX_SC_R_PCIE_A>;
 		fsl,max-link-speed = <3>;
 		status = "disabled";
+
+		pciea_port0: pcie@0 {
+			compatible = "pciclass,0604";
+			device_type = "pci";
+			reg = <0x0 0x0 0x0 0x0 0x0>;
+			bus-range = <0x01 0xff>;
+
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges;
+		};
 	};
 
-	pcieb: pcie@5f010000 {
+	pcie0_ep: pciea_ep: pcie-ep@5f000000 {
+		compatible = "fsl,imx8q-pcie-ep";
+		reg = <0x5f000000 0x00010000>,
+		      <0x40000000 0x10000000>;
+		reg-names = "dbi", "addr_space";
+		num-lanes = <1>;
+		interrupts = <GIC_SPI 72 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "dma";
+		clocks = <&pciea_lpcg IMX_LPCG_CLK_6>,
+			 <&pciea_lpcg IMX_LPCG_CLK_4>,
+			 <&pciea_lpcg IMX_LPCG_CLK_5>;
+		clock-names = "dbi", "mstr", "slv";
+		power-domains = <&pd IMX_SC_R_PCIE_A>;
+		fsl,max-link-speed = <3>;
+		num-ib-windows = <6>;
+		num-ob-windows = <6>;
+		status = "disabled";
+	};
+
+	pcie1: pcieb: pcie@5f010000 {
 		compatible = "fsl,imx8q-pcie";
 		reg = <0x5f010000 0x10000>,
 		      <0x8ff00000 0x80000>;
@@ -50,8 +81,9 @@
 		ranges = <0x81000000 0 0x00000000 0x8ff80000 0 0x00010000>,
 			 <0x82000000 0 0x80000000 0x80000000 0 0x0ff00000>;
 		#interrupt-cells = <1>;
-		interrupts = <GIC_SPI 102 IRQ_TYPE_LEVEL_HIGH>;
-		interrupt-names = "msi";
+		interrupts = <GIC_SPI 102 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 104 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "msi", "dma";
 		#address-cells = <3>;
 		#size-cells = <2>;
 		clocks = <&pcieb_lpcg IMX_LPCG_CLK_6>,
@@ -60,16 +92,27 @@
 		clock-names = "dbi", "mstr", "slv";
 		bus-range = <0x00 0xff>;
 		device_type = "pci";
-		interrupt-map = <0 0 0 1 &gic 0 105 4>,
-				<0 0 0 2 &gic 0 106 4>,
-				<0 0 0 3 &gic 0 107 4>,
-				<0 0 0 4 &gic 0 108 4>;
+		interrupt-map = <0 0 0 1 &gic GIC_SPI 105 IRQ_TYPE_LEVEL_HIGH>,
+				<0 0 0 2 &gic GIC_SPI 106 IRQ_TYPE_LEVEL_HIGH>,
+				<0 0 0 3 &gic GIC_SPI 107 IRQ_TYPE_LEVEL_HIGH>,
+				<0 0 0 4 &gic GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH>;
 		interrupt-map-mask = <0 0 0 0x7>;
 		num-lanes = <1>;
 		num-viewport = <4>;
 		power-domains = <&pd IMX_SC_R_PCIE_B>;
 		fsl,max-link-speed = <3>;
 		status = "disabled";
+
+		pcieb_port0: pcie@0 {
+			compatible = "pciclass,0604";
+			device_type = "pci";
+			reg = <0x0 0x0 0x0 0x0 0x0>;
+			bus-range = <0x01 0xff>;
+
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges;
+		};
 	};
 
 	sata: sata@5f020000 {

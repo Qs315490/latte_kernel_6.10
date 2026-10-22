@@ -16,7 +16,6 @@
 #include <linux/interrupt.h>
 #include <linux/ctype.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/edac.h>
 #include <linux/smp.h>
 #include <linux/gfp.h>
@@ -399,7 +398,7 @@ static ssize_t mpc85xx_l2_inject_ctrl_store(struct edac_device_ctl_info
 	return 0;
 }
 
-static struct edac_dev_sysfs_attribute mpc85xx_l2_sysfs_attributes[] = {
+static const struct edac_dev_sysfs_attribute mpc85xx_l2_sysfs_attributes[] = {
 	{
 	 .attr = {
 		  .name = "inject_data_hi",

@@ -522,7 +522,7 @@ static const struct iio_chan_spec_ext_info ad5755_ext_info[] = {
 		.write = ad5755_write_powerdown,
 		.shared = IIO_SEPARATE,
 	},
-	{ },
+	{ }
 };
 
 #define AD5755_CHANNEL(_bits) {					\
@@ -827,8 +827,9 @@ static int ad5755_probe(struct spi_device *spi)
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->num_channels = AD5755_NUM_CHANNELS;
 
-	mutex_init(&st->lock);
-
+	ret = devm_mutex_init(&spi->dev, &st->lock);
+	if (ret)
+		return ret;
 
 	pdata = ad5755_parse_fw(&spi->dev);
 	if (!pdata) {
@@ -853,7 +854,7 @@ static const struct spi_device_id ad5755_id[] = {
 	{ "ad5757", (kernel_ulong_t)&ad5755_chip_info_tbl[ID_AD5757] },
 	{ "ad5735", (kernel_ulong_t)&ad5755_chip_info_tbl[ID_AD5735] },
 	{ "ad5737", (kernel_ulong_t)&ad5755_chip_info_tbl[ID_AD5737] },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad5755_id);
 

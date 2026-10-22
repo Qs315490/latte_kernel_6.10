@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-15 Advanced Micro Devices, Inc.
+ * Copyright 2012-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -65,7 +65,6 @@ union defer_reg_writes {
 	} bits;
 	uint32_t raw;
 };
-
 struct dpp {
 	const struct dpp_funcs *funcs;
 	struct dc_context *ctx;
@@ -84,6 +83,7 @@ struct dpp {
 
 	struct pwl_params shaper_params;
 	bool cm_bypass_mode;
+	bool cursor_offload;
 
 	struct cursor_position_cache_dpp  pos;
 	struct cursor_attribute_cache_dpp att;
@@ -119,10 +119,14 @@ static const struct dpp_input_csc_matrix __maybe_unused dpp_input_csc_matrix[] =
 		{ 0x39a6, 0x2568, 0,      0xe0d6,
 		  0xeedd, 0x2568, 0xf925, 0x9a8,
 		  0,      0x2568, 0x43ee, 0xdbb2 } },
-	{ COLOR_SPACE_2020_YCBCR,
+	{ COLOR_SPACE_2020_YCBCR_FULL,
 		{ 0x2F30, 0x2000, 0,      0xE869,
 		  0xEDB7, 0x2000, 0xFABC, 0xBC6,
 		  0,      0x2000, 0x3C34, 0xE1E6 } },
+	{ COLOR_SPACE_2020_YCBCR_LIMITED,
+		{ 0x35B9, 0x2543, 0,      0xE2B2,
+		  0xEB2F, 0x2543, 0xFA01, 0x0B1F,
+		  0,      0x2543, 0x4489, 0xDB42 } },
 	{ COLOR_SPACE_2020_RGB_LIMITEDRANGE,
 		{ 0x35E0, 0x255F, 0,      0xE2B3,
 		  0xEB20, 0x255F, 0xF9FD, 0xB1E,
@@ -198,6 +202,19 @@ struct dcn_dpp_state {
 	uint32_t gamcor_mode;
 };
 
+struct dcn_dpp_reg_state {
+	uint32_t recout_start;
+	uint32_t recout_size;
+	uint32_t scl_horz_filter_scale_ratio;
+	uint32_t scl_vert_filter_scale_ratio;
+	uint32_t scl_mode;
+	uint32_t cm_control;
+	uint32_t dpp_control;
+	uint32_t dscl_control;
+	uint32_t obuf_control;
+	uint32_t mpc_size;
+};
+
 struct CM_bias_params {
 	uint32_t cm_bias_cr_r;
 	uint32_t cm_bias_y_g;
@@ -220,6 +237,8 @@ struct dpp_funcs {
 		struct CM_bias_params *bias_params);
 
 	void (*dpp_read_state)(struct dpp *dpp, struct dcn_dpp_state *s);
+
+	void (*dpp_read_reg_state)(struct dpp *dpp, struct dcn_dpp_reg_state *dpp_reg_state);
 
 	void (*dpp_reset)(struct dpp *dpp);
 
@@ -345,6 +364,17 @@ struct dpp_funcs {
 		struct dpp *dpp_base,
 		enum dc_color_space color_space,
 		struct dc_csc_transform cursor_csc_color_matrix);
+
+	void (*dpp_force_disable_cursor)(struct dpp *dpp_base);
+
+	void (*dpp_cm_hist_control)(
+		struct dpp *dpp_base,
+		struct cm_hist_control cm_hist_control,
+		enum dc_color_space color_space);
+
+	bool (*dpp_cm_hist_read)(
+		struct dpp *dpp_base,
+		struct cm_hist *cm_hist);
 };
 
 

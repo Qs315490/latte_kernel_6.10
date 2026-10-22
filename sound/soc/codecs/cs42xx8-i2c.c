@@ -1,18 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Cirrus Logic CS42448/CS42888 Audio CODEC DAI I2C driver
  *
  * Copyright (C) 2014 Freescale Semiconductor, Inc.
  *
  * Author: Nicolin Chen <Guangyu.Chen@freescale.com>
- *
- * This file is licensed under the terms of the GNU General Public License
- * version 2. This program is licensed "as is" without any warranty of any
- * kind, whether express or implied.
  */
 
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/pm_runtime.h>
 #include <sound/soc.h>
 
@@ -52,16 +48,16 @@ static const struct of_device_id cs42xx8_of_match[] = {
 MODULE_DEVICE_TABLE(of, cs42xx8_of_match);
 
 static const struct i2c_device_id cs42xx8_i2c_id[] = {
-	{"cs42448", (kernel_ulong_t)&cs42448_data},
-	{"cs42888", (kernel_ulong_t)&cs42888_data},
-	{}
+	{ .name = "cs42448", .driver_data = (kernel_ulong_t)&cs42448_data },
+	{ .name = "cs42888", .driver_data = (kernel_ulong_t)&cs42888_data },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cs42xx8_i2c_id);
 
 static struct i2c_driver cs42xx8_i2c_driver = {
 	.driver = {
 		.name = "cs42xx8",
-		.pm = &cs42xx8_pm,
+		.pm = pm_ptr(&cs42xx8_pm),
 		.of_match_table = cs42xx8_of_match,
 	},
 	.probe = cs42xx8_i2c_probe,

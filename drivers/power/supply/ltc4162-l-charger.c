@@ -1119,7 +1119,7 @@ static const struct regmap_config ltc4162l_regmap_config = {
 	.writeable_reg	= ltc4162l_is_writeable_reg,
 	.volatile_reg	= ltc4162l_is_volatile_reg,
 	.max_register	= LTC4162L_INPUT_UNDERVOLTAGE_DAC,
-	.cache_type	= REGCACHE_RBTREE,
+	.cache_type	= REGCACHE_MAPLE,
 };
 
 static void ltc4162l_clear_interrupts(struct ltc4162l_info *info)
@@ -1185,7 +1185,7 @@ static int ltc4162l_probe(struct i2c_client *client)
 	if (!device_property_read_u32(dev, "lltc,cell-count", &value))
 		info->cell_count = value;
 
-	ltc4162l_config.of_node = dev->of_node;
+	ltc4162l_config.fwnode = dev_fwnode(dev);
 	ltc4162l_config.drv_data = info;
 	ltc4162l_config.attr_grp = ltc4162l_attr_groups;
 
@@ -1229,10 +1229,10 @@ static void ltc4162l_alert(struct i2c_client *client,
 }
 
 static const struct i2c_device_id ltc4162l_i2c_id_table[] = {
-	{ "ltc4015", (kernel_ulong_t)&ltc4015_chip_info },
-	{ "ltc4162-f", (kernel_ulong_t)&ltc4162f_chip_info },
-	{ "ltc4162-l", (kernel_ulong_t)&ltc4162l_chip_info },
-	{ "ltc4162-s", (kernel_ulong_t)&ltc4162s_chip_info },
+	{ .name = "ltc4015", .driver_data = (kernel_ulong_t)&ltc4015_chip_info },
+	{ .name = "ltc4162-f", .driver_data = (kernel_ulong_t)&ltc4162f_chip_info },
+	{ .name = "ltc4162-l", .driver_data = (kernel_ulong_t)&ltc4162l_chip_info },
+	{ .name = "ltc4162-s", .driver_data = (kernel_ulong_t)&ltc4162s_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ltc4162l_i2c_id_table);

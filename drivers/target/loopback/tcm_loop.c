@@ -26,6 +26,7 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/configfs.h>
+#include <linux/blk-mq.h>
 #include <scsi/scsi.h>
 #include <scsi/scsi_tcq.h>
 #include <scsi/scsi_host.h>
@@ -165,7 +166,8 @@ out_done:
  * ->queuecommand can be and usually is called from interrupt context, so
  * defer the actual submission to a workqueue.
  */
-static int tcm_loop_queuecommand(struct Scsi_Host *sh, struct scsi_cmnd *sc)
+static enum scsi_qc_status tcm_loop_queuecommand(struct Scsi_Host *sh,
+						 struct scsi_cmnd *sc)
 {
 	struct tcm_loop_cmd *tl_cmd = scsi_cmd_priv(sc);
 
@@ -176,7 +178,7 @@ static int tcm_loop_queuecommand(struct Scsi_Host *sh, struct scsi_cmnd *sc)
 
 	memset(tl_cmd, 0, sizeof(*tl_cmd));
 	tl_cmd->sc = sc;
-	tl_cmd->sc_cmd_tag = scsi_cmd_to_rq(sc)->tag;
+	tl_cmd->sc_cmd_tag = blk_mq_unique_tag(scsi_cmd_to_rq(sc));
 
 	tcm_loop_target_queue_cmd(tl_cmd);
 	return 0;
@@ -242,7 +244,8 @@ static int tcm_loop_abort_task(struct scsi_cmnd *sc)
 	tl_hba = *(struct tcm_loop_hba **)shost_priv(sc->device->host);
 	tl_tpg = &tl_hba->tl_hba_tpgs[sc->device->id];
 	ret = tcm_loop_issue_tmr(tl_tpg, sc->device->lun,
-				 scsi_cmd_to_rq(sc)->tag, TMR_ABORT_TASK);
+				 blk_mq_unique_tag(scsi_cmd_to_rq(sc)),
+				 TMR_ABORT_TASK);
 	return (ret == TMR_FUNCTION_COMPLETE) ? SUCCESS : FAILED;
 }
 
@@ -267,30 +270,6 @@ static int tcm_loop_device_reset(struct scsi_cmnd *sc)
 	return (ret == TMR_FUNCTION_COMPLETE) ? SUCCESS : FAILED;
 }
 
-static int tcm_loop_target_reset(struct scsi_cmnd *sc)
-{
-	struct tcm_loop_hba *tl_hba;
-	struct tcm_loop_tpg *tl_tpg;
-
-	/*
-	 * Locate the tcm_loop_hba_t pointer
-	 */
-	tl_hba = *(struct tcm_loop_hba **)shost_priv(sc->device->host);
-	if (!tl_hba) {
-		pr_err("Unable to perform device reset without active I_T Nexus\n");
-		return FAILED;
-	}
-	/*
-	 * Locate the tl_tpg pointer from TargetID in sc->device->id
-	 */
-	tl_tpg = &tl_hba->tl_hba_tpgs[sc->device->id];
-	if (tl_tpg) {
-		tl_tpg->tl_transport_status = TCM_TRANSPORT_ONLINE;
-		return SUCCESS;
-	}
-	return FAILED;
-}
-
 static const struct scsi_host_template tcm_loop_driver_template = {
 	.show_info		= tcm_loop_show_info,
 	.proc_name		= "tcm_loopback",
@@ -299,7 +278,6 @@ static const struct scsi_host_template tcm_loop_driver_template = {
 	.change_queue_depth	= scsi_change_queue_depth,
 	.eh_abort_handler = tcm_loop_abort_task,
 	.eh_device_reset_handler = tcm_loop_device_reset,
-	.eh_target_reset_handler = tcm_loop_target_reset,
 	.this_id		= -1,
 	.sg_tablesize		= 256,
 	.max_sectors		= 0xFFFF,
@@ -351,6 +329,7 @@ static int tcm_loop_driver_probe(struct device *dev)
 	if (error) {
 		pr_err("%s: scsi_add_host failed\n", __func__);
 		scsi_host_put(sh);
+		tl_hba->sh = NULL;
 		return -ENODEV;
 	}
 	return 0;
@@ -364,8 +343,10 @@ static void tcm_loop_driver_remove(struct device *dev)
 	tl_hba = to_tcm_loop_hba(dev);
 	sh = tl_hba->sh;
 
-	scsi_remove_host(sh);
-	scsi_host_put(sh);
+	if (sh) {
+		scsi_remove_host(sh);
+		scsi_host_put(sh);
+	}
 }
 
 static void tcm_loop_release_adapter(struct device *dev)
@@ -391,6 +372,11 @@ static int tcm_loop_setup_hba_bus(struct tcm_loop_hba *tl_hba, int tcm_loop_host
 	if (ret) {
 		pr_err("device_register() failed for tl_hba->dev: %d\n", ret);
 		put_device(&tl_hba->dev);
+		return -ENODEV;
+	}
+
+	if (!tl_hba->sh) {
+		device_unregister(&tl_hba->dev);
 		return -ENODEV;
 	}
 
@@ -691,7 +677,7 @@ static int tcm_loop_make_nexus(
 		return -EEXIST;
 	}
 
-	tl_nexus = kzalloc(sizeof(*tl_nexus), GFP_KERNEL);
+	tl_nexus = kzalloc_obj(*tl_nexus);
 	if (!tl_nexus)
 		return -ENOMEM;
 
@@ -893,6 +879,9 @@ static ssize_t tcm_loop_tpg_address_show(struct config_item *item,
 			struct tcm_loop_tpg, tl_se_tpg);
 	struct tcm_loop_hba *tl_hba = tl_tpg->tl_hba;
 
+	if (!tl_hba->sh)
+		return -ENODEV;
+
 	return snprintf(page, PAGE_SIZE, "%d:0:%d\n",
 			tl_hba->sh->host_no, tl_tpg->tl_tpgt);
 }
@@ -989,7 +978,7 @@ static struct se_wwn *tcm_loop_make_scsi_hba(
 	char *ptr;
 	int ret, off = 0;
 
-	tl_hba = kzalloc(sizeof(*tl_hba), GFP_KERNEL);
+	tl_hba = kzalloc_obj(*tl_hba);
 	if (!tl_hba)
 		return ERR_PTR(-ENOMEM);
 
@@ -1102,6 +1091,7 @@ static const struct target_core_fabric_ops loop_ops = {
 	.tfc_wwn_attrs			= tcm_loop_wwn_attrs,
 	.tfc_tpg_base_attrs		= tcm_loop_tpg_attrs,
 	.tfc_tpg_attrib_attrs		= tcm_loop_tpg_attrib_attrs,
+	.default_compl_type		= TARGET_QUEUE_COMPL,
 	.default_submit_type		= TARGET_QUEUE_SUBMIT,
 	.direct_submit_supp		= 0,
 };

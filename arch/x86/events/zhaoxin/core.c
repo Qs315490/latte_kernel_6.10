@@ -13,8 +13,10 @@
 #include <linux/nmi.h>
 
 #include <asm/cpufeature.h>
+#include <asm/cpuid/api.h>
 #include <asm/hardirq.h>
 #include <asm/apic.h>
+#include <asm/msr.h>
 
 #include "../perf_event.h"
 
@@ -254,26 +256,26 @@ static __initconst const u64 zxe_hw_cache_event_ids
 
 static void zhaoxin_pmu_disable_all(void)
 {
-	wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, 0);
+	wrmsrq(MSR_CORE_PERF_GLOBAL_CTRL, 0);
 }
 
 static void zhaoxin_pmu_enable_all(int added)
 {
-	wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, x86_pmu.intel_ctrl);
+	wrmsrq(MSR_CORE_PERF_GLOBAL_CTRL, x86_pmu.intel_ctrl);
 }
 
 static inline u64 zhaoxin_pmu_get_status(void)
 {
 	u64 status;
 
-	rdmsrl(MSR_CORE_PERF_GLOBAL_STATUS, status);
+	rdmsrq(MSR_CORE_PERF_GLOBAL_STATUS, status);
 
 	return status;
 }
 
 static inline void zhaoxin_pmu_ack_status(u64 ack)
 {
-	wrmsrl(MSR_CORE_PERF_GLOBAL_OVF_CTRL, ack);
+	wrmsrq(MSR_CORE_PERF_GLOBAL_OVF_CTRL, ack);
 }
 
 static inline void zxc_pmu_ack_status(u64 ack)
@@ -293,9 +295,9 @@ static void zhaoxin_pmu_disable_fixed(struct hw_perf_event *hwc)
 
 	mask = 0xfULL << (idx * 4);
 
-	rdmsrl(hwc->config_base, ctrl_val);
+	rdmsrq(hwc->config_base, ctrl_val);
 	ctrl_val &= ~mask;
-	wrmsrl(hwc->config_base, ctrl_val);
+	wrmsrq(hwc->config_base, ctrl_val);
 }
 
 static void zhaoxin_pmu_disable_event(struct perf_event *event)
@@ -329,10 +331,10 @@ static void zhaoxin_pmu_enable_fixed(struct hw_perf_event *hwc)
 	bits <<= (idx * 4);
 	mask = 0xfULL << (idx * 4);
 
-	rdmsrl(hwc->config_base, ctrl_val);
+	rdmsrq(hwc->config_base, ctrl_val);
 	ctrl_val &= ~mask;
 	ctrl_val |= bits;
-	wrmsrl(hwc->config_base, ctrl_val);
+	wrmsrq(hwc->config_base, ctrl_val);
 }
 
 static void zhaoxin_pmu_enable_event(struct perf_event *event)
@@ -372,7 +374,7 @@ again:
 	else
 		zhaoxin_pmu_ack_status(status);
 
-	inc_irq_stat(apic_perf_irqs);
+	inc_perf_irq_stat();
 
 	/*
 	 * CondChgd bit 63 doesn't mean any overflow status. Ignore
@@ -397,8 +399,7 @@ again:
 		if (!x86_perf_event_set_period(event))
 			continue;
 
-		if (perf_event_overflow(event, &data, regs))
-			x86_pmu_stop(event, 0);
+		perf_event_overflow(event, &data, regs);
 	}
 
 	/*

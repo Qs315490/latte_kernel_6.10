@@ -56,6 +56,7 @@
 #include <linux/iio/kfifo_buf.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/buffer.h>
+#include <linux/iio/sysfs.h>
 #include <linux/regmap.h>
 #include <linux/bitfield.h>
 
@@ -87,6 +88,7 @@ enum st_lsm6dsx_fifo_tag {
 	ST_LSM6DSX_EXT0_TAG = 0x0f,
 	ST_LSM6DSX_EXT1_TAG = 0x10,
 	ST_LSM6DSX_EXT2_TAG = 0x11,
+	ST_LSM6DSX_ROT_TAG = 0x13,
 };
 
 static const
@@ -105,7 +107,7 @@ static int
 st_lsm6dsx_get_decimator_val(struct st_lsm6dsx_sensor *sensor, u32 max_odr)
 {
 	const int max_size = ARRAY_SIZE(st_lsm6dsx_decimator_table);
-	u32 decimator =  max_odr / sensor->odr;
+	u32 decimator = max_odr / sensor->hwfifo_odr_mHz;
 	int i;
 
 	if (decimator > 1)
@@ -136,14 +138,14 @@ static void st_lsm6dsx_get_max_min_odr(struct st_lsm6dsx_hw *hw,
 		if (!(hw->enable_mask & BIT(sensor->id)))
 			continue;
 
-		*max_odr = max_t(u32, *max_odr, sensor->odr);
-		*min_odr = min_t(u32, *min_odr, sensor->odr);
+		*max_odr = max(*max_odr, sensor->hwfifo_odr_mHz);
+		*min_odr = min(*min_odr, sensor->hwfifo_odr_mHz);
 	}
 }
 
 static u8 st_lsm6dsx_get_sip(struct st_lsm6dsx_sensor *sensor, u32 min_odr)
 {
-	u8 sip = sensor->odr / min_odr;
+	u8 sip = sensor->hwfifo_odr_mHz / min_odr;
 
 	return sip > 1 ? round_down(sip, 2) : sip;
 }
@@ -224,6 +226,13 @@ static int st_lsm6dsx_set_fifo_odr(struct st_lsm6dsx_sensor *sensor,
 	const struct st_lsm6dsx_reg *batch_reg;
 	u8 data;
 
+	/* Only internal sensors have a FIFO ODR configuration register. */
+	if (sensor->id >= ARRAY_SIZE(hw->settings->batch)) {
+		if (sensor->id == ST_LSM6DSX_ID_FUSION)
+			return st_lsm6dsx_fusion_set_odr(sensor, enable);
+		return 0;
+	}
+
 	batch_reg = &hw->settings->batch[sensor->id];
 	if (batch_reg->addr) {
 		int val;
@@ -231,7 +240,7 @@ static int st_lsm6dsx_set_fifo_odr(struct st_lsm6dsx_sensor *sensor,
 		if (enable) {
 			int err;
 
-			err = st_lsm6dsx_check_odr(sensor, sensor->odr,
+			err = st_lsm6dsx_check_odr(sensor, sensor->hwfifo_odr_mHz,
 						   &data);
 			if (err < 0)
 				return err;
@@ -360,8 +369,6 @@ static inline int st_lsm6dsx_read_block(struct st_lsm6dsx_hw *hw, u8 addr,
 	return 0;
 }
 
-#define ST_LSM6DSX_IIO_BUFF_SIZE	(ALIGN(ST_LSM6DSX_SAMPLE_SIZE, \
-					       sizeof(s64)) + sizeof(s64))
 /**
  * st_lsm6dsx_read_fifo() - hw FIFO read routine
  * @hw: Pointer to instance of struct st_lsm6dsx_hw.
@@ -391,6 +398,9 @@ int st_lsm6dsx_read_fifo(struct st_lsm6dsx_hw *hw)
 
 	if (fifo_status & cpu_to_le16(ST_LSM6DSX_FIFO_EMPTY_MASK))
 		return 0;
+
+	if (!pattern_len)
+		pattern_len = ST_LSM6DSX_SAMPLE_SIZE;
 
 	fifo_len = (le16_to_cpu(fifo_status) & fifo_diff_mask) *
 		   ST_LSM6DSX_CHAN_SIZE;
@@ -529,16 +539,23 @@ int st_lsm6dsx_read_fifo(struct st_lsm6dsx_hw *hw)
 }
 
 #define ST_LSM6DSX_INVALID_SAMPLE	0x7ffd
-static int
-st_lsm6dsx_push_tagged_data(struct st_lsm6dsx_hw *hw, u8 tag,
-			    u8 *data, s64 ts)
+static bool st_lsm6dsx_check_data(u8 tag, __le16 *data)
 {
-	s16 val = le16_to_cpu(*(__le16 *)data);
+	if ((tag == ST_LSM6DSX_GYRO_TAG || tag == ST_LSM6DSX_ACC_TAG) &&
+	    (s16)le16_to_cpup(data) >= ST_LSM6DSX_INVALID_SAMPLE)
+		return false;
+
+	return true;
+}
+
+static int st_lsm6dsx_push_tagged_data(struct st_lsm6dsx_hw *hw, u8 tag,
+				       __le16 *data, s64 ts)
+{
 	struct st_lsm6dsx_sensor *sensor;
 	struct iio_dev *iio_dev;
 
 	/* invalid sample during bootstrap phase */
-	if (val >= ST_LSM6DSX_INVALID_SAMPLE)
+	if (!st_lsm6dsx_check_data(tag, data))
 		return -EINVAL;
 
 	/*
@@ -572,6 +589,9 @@ st_lsm6dsx_push_tagged_data(struct st_lsm6dsx_hw *hw, u8 tag,
 	case ST_LSM6DSX_EXT2_TAG:
 		iio_dev = hw->iio_devs[ST_LSM6DSX_ID_EXT2];
 		break;
+	case ST_LSM6DSX_ROT_TAG:
+		iio_dev = hw->iio_devs[ST_LSM6DSX_ID_FUSION];
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -601,7 +621,13 @@ int st_lsm6dsx_read_tagged_fifo(struct st_lsm6dsx_hw *hw)
 	 * must be passed a buffer that is aligned to 8 bytes so
 	 * as to allow insertion of a naturally aligned timestamp.
 	 */
-	u8 iio_buff[ST_LSM6DSX_IIO_BUFF_SIZE] __aligned(8);
+	struct {
+		union {
+			__le16 data[3];
+			__le32 fifo_ts;
+		};
+		aligned_s64 timestamp;
+	} iio_buff = { };
 	u8 tag;
 	bool reset_ts = false;
 	int i, err, read_len;
@@ -623,6 +649,9 @@ int st_lsm6dsx_read_tagged_fifo(struct st_lsm6dsx_hw *hw)
 	if (!fifo_len)
 		return 0;
 
+	if (!pattern_len)
+		pattern_len = ST_LSM6DSX_TAGGED_SAMPLE_SIZE;
+
 	for (read_len = 0; read_len < fifo_len; read_len += pattern_len) {
 		err = st_lsm6dsx_read_block(hw,
 					    ST_LSM6DSX_REG_FIFO_OUT_TAG_ADDR,
@@ -637,7 +666,7 @@ int st_lsm6dsx_read_tagged_fifo(struct st_lsm6dsx_hw *hw)
 
 		for (i = 0; i < pattern_len;
 		     i += ST_LSM6DSX_TAGGED_SAMPLE_SIZE) {
-			memcpy(iio_buff, &hw->buff[i + ST_LSM6DSX_TAG_SIZE],
+			memcpy(&iio_buff, &hw->buff[i + ST_LSM6DSX_TAG_SIZE],
 			       ST_LSM6DSX_SAMPLE_SIZE);
 
 			tag = hw->buff[i] >> 3;
@@ -648,7 +677,7 @@ int st_lsm6dsx_read_tagged_fifo(struct st_lsm6dsx_hw *hw)
 				 * B0 = ts[7:0], B1 = ts[15:8], B2 = ts[23:16],
 				 * B3 = ts[31:24]
 				 */
-				ts = le32_to_cpu(*((__le32 *)iio_buff));
+				ts = le32_to_cpu(iio_buff.fifo_ts);
 				/*
 				 * check if hw timestamp engine is going to
 				 * reset (the sensor generates an interrupt
@@ -659,7 +688,8 @@ int st_lsm6dsx_read_tagged_fifo(struct st_lsm6dsx_hw *hw)
 					reset_ts = true;
 				ts *= hw->ts_gain;
 			} else {
-				st_lsm6dsx_push_tagged_data(hw, tag, iio_buff,
+				st_lsm6dsx_push_tagged_data(hw, tag,
+							    iio_buff.data,
 							    ts);
 			}
 		}
@@ -707,7 +737,7 @@ st_lsm6dsx_update_samples_to_discard(struct st_lsm6dsx_sensor *sensor)
 
 	data = &hw->settings->samples_to_discard[sensor->id];
 	for (i = 0; i < ST_LSM6DSX_ODR_LIST_SIZE; i++) {
-		if (data->val[i].milli_hz == sensor->odr) {
+		if (data->val[i].milli_hz == sensor->hwfifo_odr_mHz) {
 			sensor->samples_to_discard = data->val[i].samples;
 			return;
 		}
@@ -793,16 +823,79 @@ static const struct iio_buffer_setup_ops st_lsm6dsx_buffer_ops = {
 	.postdisable = st_lsm6dsx_buffer_postdisable,
 };
 
+static ssize_t st_lsm6dsx_hwfifo_odr_show(struct device *dev,
+					  struct device_attribute *attr, char *buf)
+{
+	struct st_lsm6dsx_sensor *sensor = iio_priv(dev_to_iio_dev(dev));
+
+	return sysfs_emit(buf, "%d.%03d\n", sensor->hwfifo_odr_mHz / 1000,
+			  sensor->hwfifo_odr_mHz % 1000);
+}
+
+static ssize_t st_lsm6dsx_hwfifo_odr_store(struct device *dev,
+					   struct device_attribute *attr,
+					   const char *buf, size_t len)
+{
+	struct iio_dev *iio_dev = dev_to_iio_dev(dev);
+	struct st_lsm6dsx_sensor *sensor = iio_priv(iio_dev);
+	int integer, milli;
+	int ret;
+	u32 hwfifo_odr;
+	u8 data;
+
+	if (!iio_device_claim_direct(iio_dev))
+		return -EBUSY;
+
+	ret = iio_str_to_fixpoint(buf, 100, &integer, &milli);
+	if (ret)
+		goto out;
+
+	hwfifo_odr = integer * 1000 + milli;
+	ret = st_lsm6dsx_check_odr(sensor, hwfifo_odr, &data);
+	if (ret < 0)
+		goto out;
+
+	hwfifo_odr = ret;
+
+	/* the batch data rate must not exceed the sensor output data rate */
+	if (hwfifo_odr <= sensor->odr)
+		sensor->hwfifo_odr_mHz = hwfifo_odr;
+	else
+		ret = -EINVAL;
+
+out:
+	iio_device_release_direct(iio_dev);
+
+	return ret < 0 ? ret : len;
+}
+
+static IIO_DEV_ATTR_SAMP_FREQ(0664, st_lsm6dsx_hwfifo_odr_show, st_lsm6dsx_hwfifo_odr_store);
+
+static const struct iio_dev_attr *st_lsm6dsx_buffer_attrs[] = {
+	&iio_dev_attr_sampling_frequency,
+	NULL
+};
+
 int st_lsm6dsx_fifo_setup(struct st_lsm6dsx_hw *hw)
 {
 	int i, ret;
 
 	for (i = 0; i < ST_LSM6DSX_ID_MAX; i++) {
+		const struct iio_dev_attr **attrs;
+
 		if (!hw->iio_devs[i])
 			continue;
 
-		ret = devm_iio_kfifo_buffer_setup(hw->dev, hw->iio_devs[i],
-						  &st_lsm6dsx_buffer_ops);
+		/*
+		 * For the accelerometer, allow setting FIFO sampling frequency
+		 * values different from the sensor sampling frequency, which
+		 * may be needed to keep FIFO data rate low while sampling
+		 * acceleration data at high rates for accurate event detection.
+		 */
+		attrs = i == ST_LSM6DSX_ID_ACC ? st_lsm6dsx_buffer_attrs : NULL;
+		ret = devm_iio_kfifo_buffer_setup_ext(hw->dev, hw->iio_devs[i],
+						      &st_lsm6dsx_buffer_ops,
+						      attrs);
 		if (ret)
 			return ret;
 	}

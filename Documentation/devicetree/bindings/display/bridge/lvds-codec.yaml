@@ -33,14 +33,19 @@ properties:
     oneOf:
       - items:
           - enum:
+              - doestek,dtc34lm85am # For the Doestek DTC34LM85AM Flat Panel Display (FPD) Transmitter
+              - idt,v103      # For the Triple 10-BIT LVDS Transmitter
+              - onnn,fin3385  # OnSemi FIN3385
               - ti,ds90c185   # For the TI DS90C185 FPD-Link Serializer
               - ti,ds90c187   # For the TI DS90C187 FPD-Link Serializer
               - ti,sn75lvds83 # For the TI SN75LVDS83 FlatLink transmitter
+              - ti,sn75lvds93 # For the TI SN75LVDS93 FlatLink transmitter
           - const: lvds-encoder # Generic LVDS encoder compatible fallback
       - items:
           - enum:
               - ti,ds90cf364a # For the DS90CF364A FPD-Link LVDS Receiver
               - ti,ds90cf384a # For the DS90CF384A FPD-Link LVDS Receiver
+              - ti,sn65lvds822  # For the SN65LVDS822 FlatLink LVDS Receiver
               - ti,sn65lvds94 # For the SN65DS94 LVDS serdes
           - const: lvds-decoder # Generic LVDS decoders compatible fallback
       - enum:
@@ -129,7 +134,6 @@ required:
   - ports
 
 additionalProperties: false
-
 
 examples:
   - |

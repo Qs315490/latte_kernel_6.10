@@ -11,7 +11,6 @@
 #include <linux/i2c.h>
 #include <linux/leds.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
 
@@ -188,16 +187,16 @@ static int pca995x_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id pca995x_id[] = {
-	{ "pca9952", .driver_data = (kernel_ulong_t)&pca9952_chipdef },
-	{ "pca9955b", .driver_data = (kernel_ulong_t)&pca9955b_chipdef },
-	{ "pca9956b", .driver_data = (kernel_ulong_t)&pca9956b_chipdef },
-	{}
+	{ .name = "pca9952", .driver_data = (kernel_ulong_t)&pca9952_chipdef },
+	{ .name = "pca9955b", .driver_data = (kernel_ulong_t)&pca9955b_chipdef },
+	{ .name = "pca9956b", .driver_data = (kernel_ulong_t)&pca9956b_chipdef },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pca995x_id);
 
 static const struct of_device_id pca995x_of_match[] = {
 	{ .compatible = "nxp,pca9952", .data = &pca9952_chipdef },
-	{ .compatible = "nxp,pca9955b", . data = &pca9955b_chipdef },
+	{ .compatible = "nxp,pca9955b", .data = &pca9955b_chipdef },
 	{ .compatible = "nxp,pca9956b", .data = &pca9956b_chipdef },
 	{},
 };

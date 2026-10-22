@@ -13,6 +13,7 @@
 #include <drm/drm_exec.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_gpuvm.h>
+#include <drm/drm_print.h>
 
 #include <linux/bug.h>
 #include <linux/container_of.h>
@@ -185,12 +186,17 @@ struct pvr_vm_bind_op {
 static int pvr_vm_bind_op_exec(struct pvr_vm_bind_op *bind_op)
 {
 	switch (bind_op->type) {
-	case PVR_VM_BIND_TYPE_MAP:
+	case PVR_VM_BIND_TYPE_MAP: {
+		const struct drm_gpuvm_map_req map_req = {
+			.map.va.addr = bind_op->device_addr,
+			.map.va.range = bind_op->size,
+			.map.gem.obj = gem_from_pvr_gem(bind_op->pvr_obj),
+			.map.gem.offset = bind_op->offset,
+		};
+
 		return drm_gpuvm_sm_map(&bind_op->vm_ctx->gpuvm_mgr,
-					bind_op, bind_op->device_addr,
-					bind_op->size,
-					gem_from_pvr_gem(bind_op->pvr_obj),
-					bind_op->offset);
+					bind_op, &map_req);
+	}
 
 	case PVR_VM_BIND_TYPE_UNMAP:
 		return drm_gpuvm_sm_unmap(&bind_op->vm_ctx->gpuvm_mgr,
@@ -250,14 +256,14 @@ pvr_vm_bind_op_map_init(struct pvr_vm_bind_op *bind_op,
 	bind_op->type = PVR_VM_BIND_TYPE_MAP;
 
 	dma_resv_lock(obj->resv, NULL);
-	bind_op->gpuvm_bo = drm_gpuvm_bo_obtain(&vm_ctx->gpuvm_mgr, obj);
+	bind_op->gpuvm_bo = drm_gpuvm_bo_obtain_locked(&vm_ctx->gpuvm_mgr, obj);
 	dma_resv_unlock(obj->resv);
 	if (IS_ERR(bind_op->gpuvm_bo))
 		return PTR_ERR(bind_op->gpuvm_bo);
 
-	bind_op->new_va = kzalloc(sizeof(*bind_op->new_va), GFP_KERNEL);
-	bind_op->prev_va = kzalloc(sizeof(*bind_op->prev_va), GFP_KERNEL);
-	bind_op->next_va = kzalloc(sizeof(*bind_op->next_va), GFP_KERNEL);
+	bind_op->new_va = kzalloc_obj(*bind_op->new_va);
+	bind_op->prev_va = kzalloc_obj(*bind_op->prev_va);
+	bind_op->next_va = kzalloc_obj(*bind_op->next_va);
 	if (!bind_op->new_va || !bind_op->prev_va || !bind_op->next_va) {
 		err = -ENOMEM;
 		goto err_bind_op_fini;
@@ -304,8 +310,8 @@ pvr_vm_bind_op_unmap_init(struct pvr_vm_bind_op *bind_op,
 
 	bind_op->type = PVR_VM_BIND_TYPE_UNMAP;
 
-	bind_op->prev_va = kzalloc(sizeof(*bind_op->prev_va), GFP_KERNEL);
-	bind_op->next_va = kzalloc(sizeof(*bind_op->next_va), GFP_KERNEL);
+	bind_op->prev_va = kzalloc_obj(*bind_op->prev_va);
+	bind_op->next_va = kzalloc_obj(*bind_op->next_va);
 	if (!bind_op->prev_va || !bind_op->next_va) {
 		err = -ENOMEM;
 		goto err_bind_op_fini;
@@ -559,7 +565,7 @@ pvr_vm_create_context(struct pvr_device *pvr_dev, bool is_userspace_context)
 		return ERR_PTR(-EINVAL);
 	}
 
-	vm_ctx = kzalloc(sizeof(*vm_ctx), GFP_KERNEL);
+	vm_ctx = kzalloc_obj(*vm_ctx);
 	if (!vm_ctx)
 		return ERR_PTR(-ENOMEM);
 
@@ -741,6 +747,7 @@ pvr_vm_map(struct pvr_vm_context *vm_ctx, struct pvr_gem_object *pvr_obj,
 
 	pvr_gem_object_get(pvr_obj);
 
+	mutex_lock(&vm_ctx->lock);
 	err = drm_gpuvm_exec_lock(&vm_exec);
 	if (err)
 		goto err_cleanup;
@@ -750,6 +757,7 @@ pvr_vm_map(struct pvr_vm_context *vm_ctx, struct pvr_gem_object *pvr_obj,
 	drm_gpuvm_exec_unlock(&vm_exec);
 
 err_cleanup:
+	mutex_unlock(&vm_ctx->lock);
 	pvr_vm_bind_op_fini(&bind_op);
 
 	return err;
@@ -1013,7 +1021,8 @@ copy_out:
 	if (err < 0)
 		return err;
 
-	args->size = sizeof(query);
+	if (args->size > sizeof(query))
+		args->size = sizeof(query);
 	return 0;
 }
 
@@ -1063,7 +1072,8 @@ copy_out:
 	if (err < 0)
 		return err;
 
-	args->size = sizeof(query);
+	if (args->size > sizeof(query))
+		args->size = sizeof(query);
 	return 0;
 }
 

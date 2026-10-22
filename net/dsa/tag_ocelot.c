@@ -46,11 +46,10 @@ static void ocelot_xmit_common(struct sk_buff *skb, struct net_device *netdev,
 static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
 				   struct net_device *netdev)
 {
-	struct dsa_port *dp = dsa_user_to_port(netdev);
 	void *injection;
 
 	ocelot_xmit_common(skb, netdev, cpu_to_be32(0x8880000a), &injection);
-	ocelot_ifh_set_dest(injection, BIT_ULL(dp->index));
+	ocelot_ifh_set_dest(injection, dsa_xmit_port_mask(skb, netdev));
 
 	return skb;
 }
@@ -58,11 +57,10 @@ static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
 static struct sk_buff *seville_xmit(struct sk_buff *skb,
 				    struct net_device *netdev)
 {
-	struct dsa_port *dp = dsa_user_to_port(netdev);
 	void *injection;
 
 	ocelot_xmit_common(skb, netdev, cpu_to_be32(0x88800005), &injection);
-	seville_ifh_set_dest(injection, BIT_ULL(dp->index));
+	seville_ifh_set_dest(injection, dsa_xmit_port_mask(skb, netdev));
 
 	return skb;
 }
@@ -109,14 +107,16 @@ static struct sk_buff *ocelot_rcv(struct sk_buff *skb,
 	ocelot_xfh_get_rew_val(extraction, &rew_val);
 
 	skb->dev = dsa_conduit_find_user(netdev, 0, src_port);
-	if (!skb->dev)
+	if (!skb->dev) {
 		/* The switch will reflect back some frames sent through
 		 * sockets opened on the bare DSA conduit. These will come back
 		 * with src_port equal to the index of the CPU port, for which
 		 * there is no user registered. So don't print any error
 		 * message here (ignore and drop those frames).
 		 */
+		kfree_skb(skb);
 		return NULL;
+	}
 
 	dsa_default_offload_fwd_mark(skb);
 	skb->priority = qos_class;

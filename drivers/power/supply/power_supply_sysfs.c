@@ -33,7 +33,7 @@ struct power_supply_attr {
 [POWER_SUPPLY_PROP_ ## _name] =			\
 {						\
 	.prop_name = #_name,			\
-	.attr_name = #_name "\0",		\
+	.attr_name = #_name,			\
 	.text_values = _text,			\
 	.text_values_len = _len,		\
 }
@@ -70,6 +70,8 @@ static const char * const POWER_SUPPLY_USB_TYPE_TEXT[] = {
 	[POWER_SUPPLY_USB_TYPE_PD]		= "PD",
 	[POWER_SUPPLY_USB_TYPE_PD_DRP]		= "PD_DRP",
 	[POWER_SUPPLY_USB_TYPE_PD_PPS]		= "PD_PPS",
+	[POWER_SUPPLY_USB_TYPE_PD_SPR_AVS]	= "PD_SPR_AVS",
+	[POWER_SUPPLY_USB_TYPE_PD_PPS_SPR_AVS]	= "PD_PPS_SPR_AVS",
 	[POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID]	= "BrickID",
 };
 
@@ -110,6 +112,8 @@ static const char * const POWER_SUPPLY_HEALTH_TEXT[] = {
 	[POWER_SUPPLY_HEALTH_COOL]		    = "Cool",
 	[POWER_SUPPLY_HEALTH_HOT]		    = "Hot",
 	[POWER_SUPPLY_HEALTH_NO_BATTERY]	    = "No battery",
+	[POWER_SUPPLY_HEALTH_BLOWN_FUSE]	    = "Blown fuse",
+	[POWER_SUPPLY_HEALTH_CELL_IMBALANCE]	    = "Cell imbalance",
 };
 
 static const char * const POWER_SUPPLY_TECHNOLOGY_TEXT[] = {
@@ -138,9 +142,10 @@ static const char * const POWER_SUPPLY_SCOPE_TEXT[] = {
 };
 
 static const char * const POWER_SUPPLY_CHARGE_BEHAVIOUR_TEXT[] = {
-	[POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO]		= "auto",
-	[POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE]	= "inhibit-charge",
-	[POWER_SUPPLY_CHARGE_BEHAVIOUR_FORCE_DISCHARGE]	= "force-discharge",
+	[POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO]			= "auto",
+	[POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE]		= "inhibit-charge",
+	[POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE_AWAKE]	= "inhibit-charge-awake",
+	[POWER_SUPPLY_CHARGE_BEHAVIOUR_FORCE_DISCHARGE]		= "force-discharge",
 };
 
 static struct power_supply_attr power_supply_attrs[] __ro_after_init = {
@@ -220,6 +225,8 @@ static struct power_supply_attr power_supply_attrs[] __ro_after_init = {
 	POWER_SUPPLY_ATTR(MANUFACTURE_YEAR),
 	POWER_SUPPLY_ATTR(MANUFACTURE_MONTH),
 	POWER_SUPPLY_ATTR(MANUFACTURE_DAY),
+	POWER_SUPPLY_ATTR(INTERNAL_RESISTANCE),
+	POWER_SUPPLY_ATTR(STATE_OF_HEALTH),
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_ATTR(MODEL_NAME),
 	POWER_SUPPLY_ATTR(MANUFACTURER),
@@ -230,12 +237,12 @@ static struct power_supply_attr power_supply_attrs[] __ro_after_init = {
 static struct attribute *
 __power_supply_attrs[POWER_SUPPLY_ATTR_CNT + 1] __ro_after_init;
 
-static const struct power_supply_attr *to_ps_attr(struct device_attribute *attr)
+static const struct power_supply_attr *to_ps_attr(const struct device_attribute *attr)
 {
-	return container_of(attr, struct power_supply_attr, dev_attr);
+	return container_of_const(attr, struct power_supply_attr, dev_attr);
 }
 
-static enum power_supply_property dev_attr_psp(struct device_attribute *attr)
+static enum power_supply_property dev_attr_psp(const struct device_attribute *attr)
 {
 	return  to_ps_attr(attr) - power_supply_attrs;
 }
@@ -321,6 +328,27 @@ static ssize_t power_supply_show_charge_behaviour(struct device *dev,
 						  value->intval, buf);
 }
 
+static ssize_t power_supply_show_charge_types(struct device *dev,
+					      struct power_supply *psy,
+					      enum power_supply_charge_type current_type,
+					      char *buf)
+{
+	struct power_supply_ext_registration *reg;
+
+	scoped_guard(rwsem_read, &psy->extensions_sem) {
+		power_supply_for_each_extension(reg, psy) {
+			if (power_supply_ext_has_property(reg->ext,
+							  POWER_SUPPLY_PROP_CHARGE_TYPES))
+				return power_supply_charge_types_show(dev,
+						reg->ext->charge_types,
+						current_type, buf);
+		}
+	}
+
+	return power_supply_charge_types_show(dev, psy->desc->charge_types,
+						  current_type, buf);
+}
+
 static ssize_t power_supply_format_property(struct device *dev,
 					    bool uevent,
 					    struct device_attribute *attr,
@@ -365,7 +393,7 @@ static ssize_t power_supply_format_property(struct device *dev,
 	case POWER_SUPPLY_PROP_CHARGE_TYPES:
 		if (uevent) /* no possible values in uevents */
 			goto default_format;
-		ret = power_supply_charge_types_show(dev, psy->desc->charge_types,
+		ret = power_supply_show_charge_types(dev, psy,
 						     value.intval, buf);
 		break;
 	case POWER_SUPPLY_PROP_MODEL_NAME ... POWER_SUPPLY_PROP_SERIAL_NUMBER:

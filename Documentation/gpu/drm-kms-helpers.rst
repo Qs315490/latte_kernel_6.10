@@ -33,6 +33,8 @@ There are a few areas these helpers can grouped into:
   pipeline: Planes, handling rectangles for visibility checking and scissoring,
   flip queues and assorted bits.
 
+.. contents::
+
 Modeset Helper Reference for Common Vtables
 ===========================================
 
@@ -92,16 +94,16 @@ GEM Atomic Helper Reference
 .. kernel-doc:: drivers/gpu/drm/drm_gem_atomic_helper.c
    :export:
 
-Simple KMS Helper Reference
-===========================
+VBLANK Helper Reference
+-----------------------
 
-.. kernel-doc:: drivers/gpu/drm/drm_simple_kms_helper.c
+.. kernel-doc:: drivers/gpu/drm/drm_vblank_helper.c
    :doc: overview
 
-.. kernel-doc:: include/drm/drm_simple_kms_helper.h
+.. kernel-doc:: include/drm/drm_vblank_helper.h
    :internal:
 
-.. kernel-doc:: drivers/gpu/drm/drm_simple_kms_helper.c
+.. kernel-doc:: drivers/gpu/drm/drm_vblank_helper.c
    :export:
 
 fbdev Helper Functions Reference
@@ -231,6 +233,21 @@ Panel Self Refresh Helper Reference
    :doc: overview
 
 .. kernel-doc:: drivers/gpu/drm/drm_self_refresh_helper.c
+   :export:
+
+HDMI Atomic State Helpers
+=========================
+
+Overview
+--------
+
+.. kernel-doc:: drivers/gpu/drm/display/drm_hdmi_state_helper.c
+   :doc: hdmi helpers
+
+Functions Reference
+-------------------
+
+.. kernel-doc:: drivers/gpu/drm/display/drm_hdmi_state_helper.c
    :export:
 
 HDCP Helper Functions Reference

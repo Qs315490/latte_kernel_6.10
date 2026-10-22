@@ -225,13 +225,13 @@ static struct fschmd_data *fschmd_update_device(struct device *dev);
  */
 
 static const struct i2c_device_id fschmd_id[] = {
-	{ "fscpos", fscpos },
-	{ "fscher", fscher },
-	{ "fscscy", fscscy },
-	{ "fschrc", fschrc },
-	{ "fschmd", fschmd },
-	{ "fschds", fschds },
-	{ "fscsyl", fscsyl },
+	{ .name = "fscpos", .driver_data = fscpos },
+	{ .name = "fscher", .driver_data = fscher },
+	{ .name = "fscscy", .driver_data = fscscy },
+	{ .name = "fschrc", .driver_data = fschrc },
+	{ .name = "fschmd", .driver_data = fschmd },
+	{ .name = "fschds", .driver_data = fschds },
+	{ .name = "fscsyl", .driver_data = fscsyl },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, fschmd_id);
@@ -1088,7 +1088,7 @@ static int fschmd_probe(struct i2c_client *client)
 	int i, err;
 	enum chips kind = (uintptr_t)i2c_get_match_data(client);
 
-	data = kzalloc(sizeof(struct fschmd_data), GFP_KERNEL);
+	data = kzalloc_obj(struct fschmd_data);
 	if (!data)
 		return -ENOMEM;
 

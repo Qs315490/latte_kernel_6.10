@@ -28,7 +28,7 @@ Sphinx Install
 ==============
 
 The ReST markups currently used by the Documentation/ files are meant to be
-built with ``Sphinx`` version 2.4.4 or higher.
+built with ``Sphinx`` version 3.4.3 or higher.
 
 There's a script that checks for the Sphinx requirements. Please see
 :ref:`sphinx-pre-install` for further details.
@@ -41,12 +41,6 @@ A way to avoid that is to use a different version than the one shipped
 with your distributions. In order to do so, it is recommended to install
 Sphinx inside a virtual environment, using ``virtualenv-3``
 or ``virtualenv``, depending on how your distribution packaged Python 3.
-
-.. note::
-
-   #) It is recommended to use the RTD theme for html output. Depending
-      on the Sphinx version, it should be installed separately,
-      with ``pip install sphinx_rtd_theme``.
 
 In summary, if you want to install the latest version of Sphinx, you
 should do::
@@ -112,7 +106,7 @@ There's a script that automatically checks for Sphinx dependencies. If it can
 recognize your distribution, it will also give a hint about the install
 command line options for your distro::
 
-	$ ./scripts/sphinx-pre-install
+	$ ./tools/docs/sphinx-pre-install
 	Checking if the needed tools for Fedora release 26 (Twenty Six) are available
 	Warning: better to also install "texlive-luatex85".
 	You should run:
@@ -122,7 +116,7 @@ command line options for your distro::
 		. sphinx_2.4.4/bin/activate
 		pip install -r Documentation/sphinx/requirements.txt
 
-	Can't build as 1 mandatory dependency is missing at ./scripts/sphinx-pre-install line 468.
+	Can't build as 1 mandatory dependency is missing at ./tools/docs/sphinx-pre-install line 468.
 
 By default, it checks all the requirements for both html and PDF, including
 the requirements for images, math expressions and LaTeX build, and assumes
@@ -136,6 +130,29 @@ It supports two optional parameters:
 
 ``--no-virtualenv``
 	Use OS packaging for Sphinx instead of Python virtual environment.
+
+Installing Sphinx Minimal Version
+---------------------------------
+
+When changing Sphinx build system, it is important to ensure that
+the minimal version will still be supported. Nowadays, it is
+becoming harder to do that on modern distributions, as it is not
+possible to install with Python 3.13 and above.
+
+Testing with the lowest supported Python version as defined at
+Documentation/process/changes.rst can be done by creating
+a venv with it with, and install minimal requirements with::
+
+	/usr/bin/python3.9 -m venv sphinx_min
+	. sphinx_min/bin/activate
+	pip install -r Documentation/sphinx/min_requirements.txt
+
+A more comprehensive test can be done by using:
+
+	tools/docs/test_doc_build.py
+
+Such script create one Python venv per supported version,
+optionally building documentation for a range of Sphinx versions.
 
 
 Sphinx Build
@@ -161,6 +178,12 @@ the html layout, by using the ``DOCS_CSS`` make variable.
 By default, the "Alabaster" theme is used to build the HTML documentation;
 this theme is bundled with Sphinx and need not be installed separately.
 The Sphinx theme can be overridden by using the ``DOCS_THEME`` make variable.
+
+.. note::
+
+   Some people might prefer to use the RTD theme for html output.
+   Depending on the Sphinx version, it should be installed separately,
+   with ``pip install sphinx_rtd_theme``.
 
 There is another make variable ``SPHINXDIRS``, which is useful when test
 building a subset of documentation.  For example, you can build documents

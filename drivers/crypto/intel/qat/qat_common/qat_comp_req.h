@@ -23,16 +23,7 @@ static inline void qat_comp_create_req(void *ctx, void *req, u64 src, u32 slen,
 	fw_req->comn_mid.opaque_data = opaque;
 	req_pars->comp_len = slen;
 	req_pars->out_buffer_sz = dlen;
-}
-
-static inline void qat_comp_override_dst(void *req, u64 dst, u32 dlen)
-{
-	struct icp_qat_fw_comp_req *fw_req = req;
-	struct icp_qat_fw_comp_req_params *req_pars = &fw_req->comp_pars;
-
-	fw_req->comn_mid.dest_data_addr = dst;
-	fw_req->comn_mid.dst_length = dlen;
-	req_pars->out_buffer_sz = dlen;
+	fw_req->u3.asb_threshold.asb_value *= slen >> 4;
 }
 
 static inline void qat_comp_create_compression_req(void *ctx, void *req,
@@ -118,6 +109,14 @@ static inline u8 qat_comp_get_cmp_cnv_flag(void *resp)
 	u8 flags = qat_resp->comn_resp.hdr_flags;
 
 	return ICP_QAT_FW_COMN_HDR_CNV_FLAG_GET(flags);
+}
+
+static inline u8 qat_comp_get_cmp_uncomp_flag(void *resp)
+{
+	struct icp_qat_fw_comp_resp *qat_resp = resp;
+	u8 flags = qat_resp->comn_resp.hdr_flags;
+
+	return ICP_QAT_FW_COMN_HDR_ST_BLK_FLAG_GET(flags);
 }
 
 #endif

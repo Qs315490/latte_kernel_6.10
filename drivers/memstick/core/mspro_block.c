@@ -189,10 +189,10 @@ static void mspro_block_bd_free_disk(struct gendisk *disk)
 	kfree(msb);
 }
 
-static int mspro_block_bd_getgeo(struct block_device *bdev,
+static int mspro_block_bd_getgeo(struct gendisk *disk,
 				 struct hd_geometry *geo)
 {
-	struct mspro_block_data *msb = bdev->bd_disk->private_data;
+	struct mspro_block_data *msb = disk->private_data;
 
 	geo->heads = msb->heads;
 	geo->sectors = msb->sectors_per_track;
@@ -560,8 +560,7 @@ has_int_reg:
 		t_offset += msb->current_page * msb->page_size;
 
 		sg_set_page(&t_sg,
-			    nth_page(sg_page(&(msb->req_sg[msb->current_seg])),
-				     t_offset >> PAGE_SHIFT),
+			    sg_page(&(msb->req_sg[msb->current_seg])) + (t_offset >> PAGE_SHIFT),
 			    msb->page_size, offset_in_page(t_offset));
 
 		memstick_init_req_sg(*mrq, msb->data_dir == READ
@@ -627,9 +626,7 @@ static int mspro_block_issue_req(struct memstick_dev *card)
 	while (true) {
 		msb->current_page = 0;
 		msb->current_seg = 0;
-		msb->seg_count = blk_rq_map_sg(msb->block_req->q,
-					       msb->block_req,
-					       msb->req_sg);
+		msb->seg_count = blk_rq_map_sg(msb->block_req, msb->req_sg);
 
 		if (!msb->seg_count) {
 			unsigned int bytes = blk_rq_cur_bytes(msb->block_req);
@@ -942,9 +939,8 @@ static int mspro_block_read_attributes(struct memstick_dev *card)
 	} else
 		attr_count = attr->count;
 
-	msb->attr_group.attrs = kcalloc(attr_count + 1,
-					sizeof(*msb->attr_group.attrs),
-					GFP_KERNEL);
+	msb->attr_group.attrs = kzalloc_objs(*msb->attr_group.attrs,
+					     attr_count + 1);
 	if (!msb->attr_group.attrs) {
 		rc = -ENOMEM;
 		goto out_free_attr;
@@ -958,7 +954,7 @@ static int mspro_block_read_attributes(struct memstick_dev *card)
 	}
 
 	for (cnt = 0; cnt < attr_count; ++cnt) {
-		s_attr = kzalloc(sizeof(struct mspro_sys_attr), GFP_KERNEL);
+		s_attr = kzalloc_obj(struct mspro_sys_attr);
 		if (!s_attr) {
 			rc = -ENOMEM;
 			goto out_free_buffer;
@@ -1214,7 +1210,7 @@ static int mspro_block_probe(struct memstick_dev *card)
 	struct mspro_block_data *msb;
 	int rc = 0;
 
-	msb = kzalloc(sizeof(struct mspro_block_data), GFP_KERNEL);
+	msb = kzalloc_obj(struct mspro_block_data);
 	if (!msb)
 		return -ENOMEM;
 	memstick_set_drvdata(card, msb);
@@ -1301,7 +1297,7 @@ static int mspro_block_resume(struct memstick_dev *card)
 	unsigned char cnt;
 
 	mutex_lock(&host->lock);
-	new_msb = kzalloc(sizeof(struct mspro_block_data), GFP_KERNEL);
+	new_msb = kzalloc_obj(struct mspro_block_data);
 	if (!new_msb) {
 		rc = -ENOMEM;
 		goto out_unlock;

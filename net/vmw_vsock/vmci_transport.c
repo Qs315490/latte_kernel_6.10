@@ -119,6 +119,8 @@ vmci_transport_packet_init(struct vmci_transport_packet *pkt,
 			   u16 proto,
 			   struct vmci_handle handle)
 {
+	memset(pkt, 0, sizeof(*pkt));
+
 	/* We register the stream control handler as an any cid handle so we
 	 * must always send from a source address of VMADDR_CID_ANY
 	 */
@@ -131,8 +133,6 @@ vmci_transport_packet_init(struct vmci_transport_packet *pkt,
 	pkt->type = type;
 	pkt->src_port = src->svm_port;
 	pkt->dst_port = dst->svm_port;
-	memset(&pkt->proto, 0, sizeof(pkt->proto));
-	memset(&pkt->_reserved2, 0, sizeof(pkt->_reserved2));
 
 	switch (pkt->type) {
 	case VMCI_TRANSPORT_PACKET_TYPE_INVALID:
@@ -161,7 +161,7 @@ vmci_transport_packet_init(struct vmci_transport_packet *pkt,
 
 	case VMCI_TRANSPORT_PACKET_TYPE_WAITING_READ:
 	case VMCI_TRANSPORT_PACKET_TYPE_WAITING_WRITE:
-		memcpy(&pkt->u.wait, wait, sizeof(pkt->u.wait));
+		pkt->u.wait = *wait;
 		break;
 
 	case VMCI_TRANSPORT_PACKET_TYPE_REQUEST2:
@@ -262,7 +262,7 @@ vmci_transport_alloc_send_control_pkt(struct sockaddr_vm *src,
 	struct vmci_transport_packet *pkt;
 	int err;
 
-	pkt = kmalloc(sizeof(*pkt), GFP_KERNEL);
+	pkt = kmalloc_obj(*pkt);
 	if (!pkt)
 		return -ENOMEM;
 
@@ -646,12 +646,16 @@ static int vmci_transport_recv_dgram_cb(void *data, struct vmci_datagram *dg)
 	return VMCI_SUCCESS;
 }
 
-static bool vmci_transport_stream_allow(u32 cid, u32 port)
+static bool vmci_transport_stream_allow(struct vsock_sock *vsk, u32 cid,
+					u32 port)
 {
 	static const u32 non_socket_contexts[] = {
 		VMADDR_CID_LOCAL,
 	};
 	int i;
+
+	if (!vsock_net_mode_global(vsk))
+		return false;
 
 	BUILD_BUG_ON(sizeof(cid) != sizeof(*non_socket_contexts));
 
@@ -682,12 +686,10 @@ static int vmci_transport_recv_stream_cb(void *data, struct vmci_datagram *dg)
 	err = VMCI_SUCCESS;
 	bh_process_pkt = false;
 
-	/* Ignore incoming packets from contexts without sockets, or resources
-	 * that aren't vsock implementations.
+	/* Ignore incoming packets from resources that aren't vsock
+	 * implementations.
 	 */
-
-	if (!vmci_transport_stream_allow(dg->src.context, -1)
-	    || vmci_transport_peer_rid(dg->src.context) != dg->src.resource)
+	if (vmci_transport_peer_rid(dg->src.context) != dg->src.resource)
 		return VMCI_ERROR_NO_ACCESS;
 
 	if (VMCI_DG_SIZE(dg) < sizeof(*pkt))
@@ -749,6 +751,12 @@ static int vmci_transport_recv_stream_cb(void *data, struct vmci_datagram *dg)
 		goto out;
 	}
 
+	/* Ignore incoming packets from contexts without sockets. */
+	if (!vmci_transport_stream_allow(vsk, dg->src.context, -1)) {
+		err = VMCI_ERROR_NO_ACCESS;
+		goto out;
+	}
+
 	/* We do most everything in a work queue, but let's fast path the
 	 * notification of reads and writes to help data transfer performance.
 	 * We can only do this if there is no process context code executing
@@ -771,7 +779,7 @@ static int vmci_transport_recv_stream_cb(void *data, struct vmci_datagram *dg)
 	if (!bh_process_pkt) {
 		struct vmci_transport_recv_pkt_info *recv_pkt_info;
 
-		recv_pkt_info = kmalloc(sizeof(*recv_pkt_info), GFP_ATOMIC);
+		recv_pkt_info = kmalloc_obj(*recv_pkt_info, GFP_ATOMIC);
 		if (!recv_pkt_info) {
 			if (vmci_transport_send_reset_bh(&dst, &src, pkt) < 0)
 				pr_err("unable to send reset\n");
@@ -811,7 +819,7 @@ static void vmci_transport_handle_detach(struct sock *sk)
 		/* On a detach the peer will not be sending or receiving
 		 * anymore.
 		 */
-		vsk->peer_shutdown = SHUTDOWN_MASK;
+		WRITE_ONCE(vsk->peer_shutdown, SHUTDOWN_MASK);
 
 		/* We should not be sending anymore since the peer won't be
 		 * there to receive, but we can still receive if there is data
@@ -1000,7 +1008,7 @@ static int vmci_transport_recv_listen(struct sock *sk,
 	 * reset.  Otherwise we create and initialize a child socket and reply
 	 * with a connection negotiation.
 	 */
-	if (sk->sk_ack_backlog >= sk->sk_max_ack_backlog) {
+	if (sk_acceptq_is_full(sk)) {
 		vmci_transport_reply_reset(pkt);
 		return -ECONNREFUSED;
 	}
@@ -1099,7 +1107,6 @@ static int vmci_transport_recv_listen(struct sock *sk,
 	}
 
 	vsock_add_pending(sk, pending);
-	sk_acceptq_added(sk);
 
 	pending->sk_state = TCP_SYN_SENT;
 	vmci_trans(vpending)->produce_size =
@@ -1156,7 +1163,7 @@ vmci_transport_recv_connecting_server(struct sock *listener,
 		/* Close and cleanup the connection. */
 		vmci_transport_send_reset(pending, pkt);
 		skerr = EPROTO;
-		err = pkt->type == VMCI_TRANSPORT_PACKET_TYPE_RST ? 0 : -EINVAL;
+		err = -EINVAL;
 		goto destroy;
 	}
 
@@ -1248,8 +1255,7 @@ vmci_transport_recv_connecting_server(struct sock *listener,
 	 * listener's pending list to the accept queue so callers of accept()
 	 * can find it.
 	 */
-	vsock_remove_pending(listener, pending);
-	vsock_enqueue_accept(listener, pending);
+	vsock_pending_to_accept(listener, pending);
 
 	/* Callers of accept() will be waiting on the listening socket, not
 	 * the pending socket.
@@ -1534,7 +1540,9 @@ static int vmci_transport_recv_connected(struct sock *sk,
 		if (pkt->u.mode) {
 			vsk = vsock_sk(sk);
 
-			vsk->peer_shutdown |= pkt->u.mode;
+			WRITE_ONCE(vsk->peer_shutdown,
+				   READ_ONCE(vsk->peer_shutdown) |
+				   pkt->u.mode);
 			sk->sk_state_change(sk);
 		}
 		break;
@@ -1551,7 +1559,7 @@ static int vmci_transport_recv_connected(struct sock *sk,
 		 * a clean shutdown.
 		 */
 		sock_set_flag(sk, SOCK_DONE);
-		vsk->peer_shutdown = SHUTDOWN_MASK;
+		WRITE_ONCE(vsk->peer_shutdown, SHUTDOWN_MASK);
 		if (vsock_stream_has_data(vsk) <= 0)
 			sk->sk_state = TCP_CLOSING;
 
@@ -1575,7 +1583,7 @@ static int vmci_transport_recv_connected(struct sock *sk,
 static int vmci_transport_socket_init(struct vsock_sock *vsk,
 				      struct vsock_sock *psk)
 {
-	vsk->trans = kmalloc(sizeof(struct vmci_transport), GFP_KERNEL);
+	vsk->trans = kmalloc_obj(struct vmci_transport);
 	if (!vsk->trans)
 		return -ENOMEM;
 
@@ -1784,8 +1792,12 @@ out:
 	return err;
 }
 
-static bool vmci_transport_dgram_allow(u32 cid, u32 port)
+static bool vmci_transport_dgram_allow(struct vsock_sock *vsk, u32 cid,
+				       u32 port)
 {
+	if (!vsock_net_mode_global(vsk))
+		return false;
+
 	if (cid == VMADDR_CID_HYPERVISOR) {
 		/* Registrations of PBRPC Servers do not modify VMX/Hypervisor
 		 * state and are allowed.

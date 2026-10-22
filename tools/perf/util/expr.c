@@ -27,6 +27,7 @@ struct expr_id_data {
 		struct {
 			double val;
 			int source_count;
+			int aggr_nr;
 		} val;
 		struct {
 			double val;
@@ -151,8 +152,8 @@ int expr__add_id_val(struct expr_parse_ctx *ctx, const char *id, double val)
 }
 
 /* Caller must make sure id is allocated */
-int expr__add_id_val_source_count(struct expr_parse_ctx *ctx, const char *id,
-				  double val, int source_count)
+int expr__add_id_val_source_count_aggr_nr(struct expr_parse_ctx *ctx, const char *id,
+					  double val, int source_count, int aggr_nr)
 {
 	struct expr_id_data *data_ptr = NULL, *old_data = NULL;
 	char *old_key = NULL;
@@ -163,14 +164,27 @@ int expr__add_id_val_source_count(struct expr_parse_ctx *ctx, const char *id,
 		return -ENOMEM;
 	data_ptr->val.val = val;
 	data_ptr->val.source_count = source_count;
+	data_ptr->val.aggr_nr = aggr_nr;
 	data_ptr->kind = EXPR_ID_DATA__VALUE;
 
 	ret = hashmap__set(ctx->ids, id, data_ptr, &old_key, &old_data);
-	if (ret)
+	if (ret) {
 		free(data_ptr);
+	} else if (old_data) {
+		data_ptr->val.val += old_data->val.val;
+		data_ptr->val.source_count += old_data->val.source_count;
+		data_ptr->val.aggr_nr += old_data->val.aggr_nr;
+	}
 	free(old_key);
 	free(old_data);
 	return ret;
+}
+
+/* Caller must make sure id is allocated */
+int expr__add_id_val_source_count(struct expr_parse_ctx *ctx, const char *id,
+				  double val, int source_count)
+{
+	return expr__add_id_val_source_count_aggr_nr(ctx, id, val, source_count, 1);
 }
 
 int expr__add_ref(struct expr_parse_ctx *ctx, struct metric_ref *ref)
@@ -215,6 +229,8 @@ int expr__add_ref(struct expr_parse_ctx *ctx, struct metric_ref *ref)
 int expr__get_id(struct expr_parse_ctx *ctx, const char *id,
 		 struct expr_id_data **data)
 {
+	if (!ctx || !id)
+		return -1;
 	return hashmap__find(ctx->ids, id, data) ? 0 : -1;
 }
 
@@ -370,7 +386,8 @@ int expr__find_ids(const char *expr, const char *one,
 	if (one)
 		expr__del_id(ctx, one);
 
-	return ret;
+	/* A positive value means syntax error, convert to -EINVAL */
+	return ret > 0 ? -EINVAL : ret;
 }
 
 double expr_id_data__value(const struct expr_id_data *data)
@@ -383,8 +400,16 @@ double expr_id_data__value(const struct expr_id_data *data)
 
 double expr_id_data__source_count(const struct expr_id_data *data)
 {
-	assert(data->kind == EXPR_ID_DATA__VALUE);
-	return data->val.source_count;
+	if (data->kind == EXPR_ID_DATA__VALUE)
+		return data->val.source_count;
+	return 1.0;
+}
+
+double expr_id_data__aggr_nr(const struct expr_id_data *data)
+{
+	if (data->kind == EXPR_ID_DATA__VALUE)
+		return data->val.aggr_nr;
+	return 1.0;
 }
 
 double expr__get_literal(const char *literal, const struct expr_scanner_ctx *ctx)
@@ -395,16 +420,14 @@ double expr__get_literal(const char *literal, const struct expr_scanner_ctx *ctx
 	if (ev != TOOL_PMU__EVENT_NONE) {
 		u64 count;
 
-		if (tool_pmu__read_event(ev, &count))
+		if (tool_pmu__read_event(ev, /*evsel=*/NULL,
+					 ctx->system_wide, ctx->user_requested_cpu_list,
+					 &count))
 			result = count;
 		else
-			pr_err("Failure to read '%s'", literal);
-
-	} else if (!strcmp("#core_wide", literal)) {
-		result = core_wide(ctx->system_wide, ctx->user_requested_cpu_list)
-			? 1.0 : 0.0;
+			pr_err("Failure to read '%s'\n", literal);
 	} else {
-		pr_err("Unrecognized literal '%s'", literal);
+		pr_err("Unrecognized literal '%s'\n", literal);
 	}
 
 	pr_debug2("literal: %s = %f\n", literal, result);

@@ -39,6 +39,8 @@ static const struct rpc_authops authgss_ops;
 static const struct rpc_credops gss_credops;
 static const struct rpc_credops gss_nullops;
 
+static void gss_free_callback(struct kref *kref);
+
 #define GSS_RETRY_EXPIRED 5
 static unsigned int gss_expired_cred_retry_delay = GSS_RETRY_EXPIRED;
 
@@ -162,7 +164,7 @@ gss_alloc_context(void)
 {
 	struct gss_cl_ctx *ctx;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (ctx != NULL) {
 		ctx->gc_proc = RPC_GSS_PROC_DATA;
 		ctx->gc_seq = 1;	/* NetApp 6.4R1 doesn't accept seq. no. 0 */
@@ -527,7 +529,7 @@ gss_alloc_msg(struct gss_auth *gss_auth,
 	int vers;
 	int err = -ENOMEM;
 
-	gss_msg = kzalloc(sizeof(*gss_msg), GFP_KERNEL);
+	gss_msg = kzalloc_obj(*gss_msg);
 	if (gss_msg == NULL)
 		goto err;
 	vers = get_pipe_version(gss_auth->net);
@@ -551,6 +553,7 @@ gss_alloc_msg(struct gss_auth *gss_auth,
 	}
 	return gss_msg;
 err_put_pipe_version:
+	kref_put(&gss_auth->kref, gss_free_callback);
 	put_pipe_version(gss_auth->net);
 err_free_msg:
 	kfree(gss_msg);
@@ -887,25 +890,16 @@ static void gss_pipe_dentry_destroy(struct dentry *dir,
 		struct rpc_pipe_dir_object *pdo)
 {
 	struct gss_pipe *gss_pipe = pdo->pdo_data;
-	struct rpc_pipe *pipe = gss_pipe->pipe;
 
-	if (pipe->dentry != NULL) {
-		rpc_unlink(pipe->dentry);
-		pipe->dentry = NULL;
-	}
+	rpc_unlink(gss_pipe->pipe);
 }
 
 static int gss_pipe_dentry_create(struct dentry *dir,
 		struct rpc_pipe_dir_object *pdo)
 {
 	struct gss_pipe *p = pdo->pdo_data;
-	struct dentry *dentry;
 
-	dentry = rpc_mkpipe_dentry(dir, p->name, p->clnt, p->pipe);
-	if (IS_ERR(dentry))
-		return PTR_ERR(dentry);
-	p->pipe->dentry = dentry;
-	return 0;
+	return rpc_mkpipe_dentry(dir, p->name, p->clnt, p->pipe);
 }
 
 static const struct rpc_pipe_dir_object_ops gss_pipe_dir_object_ops = {
@@ -920,7 +914,7 @@ static struct gss_pipe *gss_pipe_alloc(struct rpc_clnt *clnt,
 	struct gss_pipe *p;
 	int err = -ENOMEM;
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kmalloc_obj(*p);
 	if (p == NULL)
 		goto err;
 	p->pipe = rpc_mkpipe_data(upcall_ops, RPC_PIPE_WAIT_FOR_OPEN);
@@ -1035,7 +1029,7 @@ gss_create_new(const struct rpc_auth_create_args *args, struct rpc_clnt *clnt)
 
 	if (!try_module_get(THIS_MODULE))
 		return ERR_PTR(err);
-	if (!(gss_auth = kmalloc(sizeof(*gss_auth), GFP_KERNEL)))
+	if (!(gss_auth = kmalloc_obj(*gss_auth)))
 		goto out_dec;
 	INIT_HLIST_NODE(&gss_auth->hash);
 	gss_auth->target_name = NULL;
@@ -1252,7 +1246,7 @@ gss_dup_cred(struct gss_auth *gss_auth, struct gss_cred *gss_cred)
 	struct gss_cred *new;
 
 	/* Make a copy of the cred so that we can reference count it */
-	new = kzalloc(sizeof(*gss_cred), GFP_KERNEL);
+	new = kzalloc_obj(*gss_cred);
 	if (new) {
 		struct auth_cred acred = {
 			.cred = gss_cred->gc_base.cr_cred,
@@ -1386,7 +1380,7 @@ gss_create_cred(struct rpc_auth *auth, struct auth_cred *acred, int flags, gfp_t
 	struct gss_cred	*cred = NULL;
 	int err = -ENOMEM;
 
-	if (!(cred = kzalloc(sizeof(*cred), gfp)))
+	if (!(cred = kzalloc_obj(*cred, gfp)))
 		goto out_err;
 
 	rpcauth_init_cred(&cred->gc_base, acred, auth, &gss_credops);
@@ -1545,6 +1539,7 @@ static int gss_marshal(struct rpc_task *task, struct xdr_stream *xdr)
 	struct kvec	iov;
 	struct xdr_buf	verf_buf;
 	int status;
+	u32 seqno;
 
 	/* Credential */
 
@@ -1556,15 +1551,16 @@ static int gss_marshal(struct rpc_task *task, struct xdr_stream *xdr)
 	cred_len = p++;
 
 	spin_lock(&ctx->gc_seq_lock);
-	req->rq_seqno = (ctx->gc_seq < MAXSEQ) ? ctx->gc_seq++ : MAXSEQ;
+	seqno = (ctx->gc_seq < MAXSEQ) ? ctx->gc_seq++ : MAXSEQ;
+	xprt_rqst_add_seqno(req, seqno);
 	spin_unlock(&ctx->gc_seq_lock);
-	if (req->rq_seqno == MAXSEQ)
+	if (*req->rq_seqnos == MAXSEQ)
 		goto expired;
 	trace_rpcgss_seqno(task);
 
 	*p++ = cpu_to_be32(RPC_GSS_VERSION);
 	*p++ = cpu_to_be32(ctx->gc_proc);
-	*p++ = cpu_to_be32(req->rq_seqno);
+	*p++ = cpu_to_be32(*req->rq_seqnos);
 	*p++ = cpu_to_be32(gss_cred->gc_service);
 	p = xdr_encode_netobj(p, &ctx->gc_wire_ctx);
 	*cred_len = cpu_to_be32((p - (cred_len + 1)) << 2);
@@ -1678,17 +1674,31 @@ gss_refresh_null(struct rpc_task *task)
 	return 0;
 }
 
+static u32
+gss_validate_seqno_mic(struct gss_cl_ctx *ctx, u32 seqno, __be32 *seq, __be32 *p, u32 len)
+{
+	struct kvec iov;
+	struct xdr_buf verf_buf;
+	struct xdr_netobj mic;
+
+	*seq = cpu_to_be32(seqno);
+	iov.iov_base = seq;
+	iov.iov_len = 4;
+	xdr_buf_from_iov(&iov, &verf_buf);
+	mic.data = (u8 *)p;
+	mic.len = len;
+	return gss_verify_mic(ctx->gc_gss_ctx, &verf_buf, &mic);
+}
+
 static int
 gss_validate(struct rpc_task *task, struct xdr_stream *xdr)
 {
 	struct rpc_cred *cred = task->tk_rqstp->rq_cred;
 	struct gss_cl_ctx *ctx = gss_cred_get_ctx(cred);
 	__be32		*p, *seq = NULL;
-	struct kvec	iov;
-	struct xdr_buf	verf_buf;
-	struct xdr_netobj mic;
 	u32		len, maj_stat;
 	int		status;
+	int		i = 1; /* don't recheck the first item */
 
 	p = xdr_inline_decode(xdr, 2 * sizeof(*p));
 	if (!p)
@@ -1705,13 +1715,10 @@ gss_validate(struct rpc_task *task, struct xdr_stream *xdr)
 	seq = kmalloc(4, GFP_KERNEL);
 	if (!seq)
 		goto validate_failed;
-	*seq = cpu_to_be32(task->tk_rqstp->rq_seqno);
-	iov.iov_base = seq;
-	iov.iov_len = 4;
-	xdr_buf_from_iov(&iov, &verf_buf);
-	mic.data = (u8 *)p;
-	mic.len = len;
-	maj_stat = gss_verify_mic(ctx->gc_gss_ctx, &verf_buf, &mic);
+	maj_stat = gss_validate_seqno_mic(ctx, task->tk_rqstp->rq_seqnos[0], seq, p, len);
+	/* RFC 2203 5.3.3.1 - compute the checksum of each sequence number in the cache */
+	while (unlikely(maj_stat == GSS_S_BAD_SIG && i < task->tk_rqstp->rq_seqno_count))
+		maj_stat = gss_validate_seqno_mic(ctx, task->tk_rqstp->rq_seqnos[i++], seq, p, len);
 	if (maj_stat == GSS_S_CONTEXT_EXPIRED)
 		clear_bit(RPCAUTH_CRED_UPTODATE, &cred->cr_flags);
 	if (maj_stat)
@@ -1750,7 +1757,7 @@ gss_wrap_req_integ(struct rpc_cred *cred, struct gss_cl_ctx *ctx,
 	if (!p)
 		goto wrap_failed;
 	integ_len = p++;
-	*p = cpu_to_be32(rqstp->rq_seqno);
+	*p = cpu_to_be32(*rqstp->rq_seqnos);
 
 	if (rpcauth_wrap_req_encode(task, xdr))
 		goto wrap_failed;
@@ -1810,9 +1817,7 @@ alloc_enc_pages(struct rpc_rqst *rqstp)
 	last = (snd_buf->page_base + snd_buf->page_len - 1) >> PAGE_SHIFT;
 	rqstp->rq_enc_pages_num = last - first + 1 + 1;
 	rqstp->rq_enc_pages
-		= kmalloc_array(rqstp->rq_enc_pages_num,
-				sizeof(struct page *),
-				GFP_KERNEL);
+		= kmalloc_objs(struct page *, rqstp->rq_enc_pages_num);
 	if (!rqstp->rq_enc_pages)
 		goto out;
 	for (i=0; i < rqstp->rq_enc_pages_num; i++) {
@@ -1847,7 +1852,7 @@ gss_wrap_req_priv(struct rpc_cred *cred, struct gss_cl_ctx *ctx,
 	if (!p)
 		goto wrap_failed;
 	opaque_len = p++;
-	*p = cpu_to_be32(rqstp->rq_seqno);
+	*p = cpu_to_be32(*rqstp->rq_seqnos);
 
 	if (rpcauth_wrap_req_encode(task, xdr))
 		goto wrap_failed;
@@ -2001,7 +2006,7 @@ gss_unwrap_resp_integ(struct rpc_task *task, struct rpc_cred *cred,
 	offset = rcv_buf->len - xdr_stream_remaining(xdr);
 	if (xdr_stream_decode_u32(xdr, &seqno))
 		goto unwrap_failed;
-	if (seqno != rqstp->rq_seqno)
+	if (seqno != *rqstp->rq_seqnos)
 		goto bad_seqno;
 	if (xdr_buf_subsegment(rcv_buf, &gss_data, offset, len))
 		goto unwrap_failed;
@@ -2045,7 +2050,7 @@ unwrap_failed:
 	trace_rpcgss_unwrap_failed(task);
 	goto out;
 bad_seqno:
-	trace_rpcgss_bad_seqno(task, rqstp->rq_seqno, seqno);
+	trace_rpcgss_bad_seqno(task, *rqstp->rq_seqnos, seqno);
 	goto out;
 bad_mic:
 	trace_rpcgss_verify_mic(task, maj_stat);
@@ -2077,7 +2082,7 @@ gss_unwrap_resp_priv(struct rpc_task *task, struct rpc_cred *cred,
 	if (maj_stat != GSS_S_COMPLETE)
 		goto bad_unwrap;
 	/* gss_unwrap decrypted the sequence number */
-	if (be32_to_cpup(p++) != rqstp->rq_seqno)
+	if (be32_to_cpup(p++) != *rqstp->rq_seqnos)
 		goto bad_seqno;
 
 	/* gss_unwrap redacts the opaque blob from the head iovec.
@@ -2093,7 +2098,7 @@ unwrap_failed:
 	trace_rpcgss_unwrap_failed(task);
 	return -EIO;
 bad_seqno:
-	trace_rpcgss_bad_seqno(task, rqstp->rq_seqno, be32_to_cpup(--p));
+	trace_rpcgss_bad_seqno(task, *rqstp->rq_seqnos, be32_to_cpup(--p));
 	return -EIO;
 bad_unwrap:
 	trace_rpcgss_unwrap(task, maj_stat);
@@ -2118,14 +2123,14 @@ gss_xmit_need_reencode(struct rpc_task *task)
 	if (!ctx)
 		goto out;
 
-	if (gss_seq_is_newer(req->rq_seqno, READ_ONCE(ctx->gc_seq)))
+	if (gss_seq_is_newer(*req->rq_seqnos, READ_ONCE(ctx->gc_seq)))
 		goto out_ctx;
 
 	seq_xmit = READ_ONCE(ctx->gc_seq_xmit);
-	while (gss_seq_is_newer(req->rq_seqno, seq_xmit)) {
+	while (gss_seq_is_newer(*req->rq_seqnos, seq_xmit)) {
 		u32 tmp = seq_xmit;
 
-		seq_xmit = cmpxchg(&ctx->gc_seq_xmit, tmp, req->rq_seqno);
+		seq_xmit = cmpxchg(&ctx->gc_seq_xmit, tmp, *req->rq_seqnos);
 		if (seq_xmit == tmp) {
 			ret = false;
 			goto out_ctx;
@@ -2134,7 +2139,7 @@ gss_xmit_need_reencode(struct rpc_task *task)
 
 	win = ctx->gc_win;
 	if (win > 0)
-		ret = !gss_seq_is_newer(req->rq_seqno, seq_xmit - win);
+		ret = !gss_seq_is_newer(*req->rq_seqnos, seq_xmit - win);
 
 out_ctx:
 	gss_put_ctx(ctx);

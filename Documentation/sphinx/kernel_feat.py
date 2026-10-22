@@ -1,7 +1,7 @@
 # coding=utf-8
 # SPDX-License-Identifier: GPL-2.0
 #
-u"""
+"""
     kernel-feat
     ~~~~~~~~~~~
 
@@ -13,7 +13,7 @@ u"""
     :license:    GPL Version 2, June 1991 see Linux/COPYING for details.
 
     The ``kernel-feat`` (:py:class:`KernelFeat`) directive calls the
-    scripts/get_feat.pl script to parse the Kernel ABI files.
+    tools/docs/get_feat.pl script to parse the Kernel ABI files.
 
     Overview of directive's argument and options.
 
@@ -34,14 +34,20 @@ u"""
 import codecs
 import os
 import re
-import subprocess
 import sys
 
 from docutils import nodes, statemachine
 from docutils.statemachine import ViewList
 from docutils.parsers.rst import directives, Directive
-from docutils.utils.error_reporting import ErrorString
 from sphinx.util.docutils import switch_source_input
+
+srctree = os.path.abspath(os.environ["srctree"])
+sys.path.insert(0, os.path.join(srctree, "tools/lib/python"))
+
+from feat.parse_features import ParseFeature                # pylint: disable=C0413
+
+def ErrorString(exc):  # Shamelessly stolen from docutils
+    return f'{exc.__class__.__name}: {exc}'
 
 __version__  = '1.0'
 
@@ -56,7 +62,7 @@ def setup(app):
 
 class KernelFeat(Directive):
 
-    u"""KernelFeat (``kernel-feat``) directive"""
+    """KernelFeat (``kernel-feat``) directive"""
 
     required_arguments = 1
     optional_arguments = 2
@@ -82,18 +88,16 @@ class KernelFeat(Directive):
 
         srctree = os.path.abspath(os.environ["srctree"])
 
-        args = [
-            os.path.join(srctree, 'scripts/get_feat.pl'),
-            'rest',
-            '--enable-fname',
-            '--dir',
-            os.path.join(srctree, 'Documentation', self.arguments[0]),
-        ]
+        feature_dir = os.path.join(srctree, 'Documentation', self.arguments[0])
+
+        feat = ParseFeature(feature_dir, False, True)
+        feat.parse()
 
         if len(self.arguments) > 1:
-            args.extend(['--arch', self.arguments[1]])
-
-        lines = subprocess.check_output(args, cwd=os.path.dirname(doc.current_source)).decode('utf-8')
+            arch = self.arguments[1]
+            lines = feat.output_arch_table(arch)
+        else:
+            lines = feat.output_matrix()
 
         line_regex = re.compile(r"^\.\. FILE (\S+)$")
 

@@ -3,13 +3,21 @@
 #ifndef __MAILBOX_CONTROLLER_H
 #define __MAILBOX_CONTROLLER_H
 
+#include <linux/bits.h>
+#include <linux/completion.h>
+#include <linux/device.h>
+#include <linux/hrtimer.h>
 #include <linux/of.h>
 #include <linux/types.h>
-#include <linux/hrtimer.h>
-#include <linux/device.h>
-#include <linux/completion.h>
 
 struct mbox_chan;
+
+/* Sentinel value distinguishing "no active request" from "NULL message data" */
+#define MBOX_NO_MSG	((void *)-1)
+
+#define MBOX_TXDONE_BY_IRQ	BIT(0) /* controller has remote RTR irq */
+#define MBOX_TXDONE_BY_POLL	BIT(1) /* controller can read status of last TX */
+#define MBOX_TXDONE_BY_ACK	BIT(2) /* S/W ACK received by Client ticks the TX */
 
 /**
  * struct mbox_chan_ops - methods to control mailbox channels
@@ -54,10 +62,10 @@ struct mbox_chan_ops {
 
 /**
  * struct mbox_controller - Controller of a class of communication channels
- * @dev:		Device backing this controller
- * @ops:		Operators that work on each communication chan
- * @chans:		Array of channels
- * @num_chans:		Number of channels in the 'chans' array.
+ * @dev:		Device backing this controller. Required.
+ * @ops:		Operators that work on each communication chan. Required.
+ * @chans:		Array of channels. Required.
+ * @num_chans:		Number of channels in the 'chans' array. Required.
  * @txdone_irq:		Indicates if the controller can report to API when
  *			the last transmitted data was read by the remote.
  *			Eg, if it has some TX ACK irq.
@@ -66,9 +74,11 @@ struct mbox_chan_ops {
  *			no interrupt rises. Ignored if 'txdone_irq' is set.
  * @txpoll_period:	If 'txdone_poll' is in effect, the API polls for
  *			last TX's status after these many millisecs
+ * @fw_xlate:		Controller driver specific mapping of channel via fwnode
  * @of_xlate:		Controller driver specific mapping of channel via DT
  * @poll_hrt:		API private. hrtimer used to poll for TXDONE on all
  *			channels.
+ * @poll_hrt_lock:	API private. Lock protecting access to poll_hrt.
  * @node:		API private. To hook into list of controllers.
  */
 struct mbox_controller {
@@ -79,6 +89,8 @@ struct mbox_controller {
 	bool txdone_irq;
 	bool txdone_poll;
 	unsigned txpoll_period;
+	struct mbox_chan *(*fw_xlate)(struct mbox_controller *mbox,
+				      const struct fwnode_reference_args *sp);
 	struct mbox_chan *(*of_xlate)(struct mbox_controller *mbox,
 				      const struct of_phandle_args *sp);
 	/* Internal to API */
@@ -108,6 +120,7 @@ struct mbox_controller {
  * @txdone_method:	Way to detect TXDone chosen by the API
  * @cl:			Pointer to the current owner of this channel
  * @tx_complete:	Transmission completion
+ * @tx_status:		Transmission status
  * @active_req:		Currently active request hook
  * @msg_count:		No. of mssg currently queued
  * @msg_free:		Index of next available mssg slot
@@ -120,6 +133,7 @@ struct mbox_chan {
 	unsigned txdone_method;
 	struct mbox_client *cl;
 	struct completion tx_complete;
+	int tx_status;
 	void *active_req;
 	unsigned msg_count, msg_free;
 	void *msg_data[MBOX_TX_QUEUE_LEN];
@@ -134,7 +148,4 @@ void mbox_chan_txdone(struct mbox_chan *chan, int r); /* atomic */
 
 int devm_mbox_controller_register(struct device *dev,
 				  struct mbox_controller *mbox);
-void devm_mbox_controller_unregister(struct device *dev,
-				     struct mbox_controller *mbox);
-
 #endif /* __MAILBOX_CONTROLLER_H */

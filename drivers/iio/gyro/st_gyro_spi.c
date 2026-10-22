@@ -9,7 +9,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/spi/spi.h>
 #include <linux/iio/iio.h>
 
@@ -59,7 +58,7 @@ static const struct of_device_id st_gyro_of_match[] = {
 		.compatible = "st,lsm9ds0-gyro",
 		.data = LSM9DS0_GYRO_DEV_NAME,
 	},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, st_gyro_of_match);
 
@@ -107,7 +106,7 @@ static const struct spi_device_id st_gyro_id_table[] = {
 	{ L3G4IS_GYRO_DEV_NAME },
 	{ LSM330_GYRO_DEV_NAME },
 	{ LSM9DS0_GYRO_DEV_NAME },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, st_gyro_id_table);
 

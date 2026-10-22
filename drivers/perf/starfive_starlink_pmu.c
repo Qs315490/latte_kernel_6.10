@@ -17,7 +17,6 @@
 #include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/perf_event.h>
 #include <linux/platform_device.h>
 #include <linux/sysfs.h>
@@ -450,8 +449,7 @@ static int starlink_pmu_pm_notify(struct notifier_block *b,
 							 starlink_pmu_pm_nb);
 	struct starlink_hw_events *hw_events =
 					this_cpu_ptr(starlink_pmu->hw_events);
-	int enabled = bitmap_weight(hw_events->used_mask,
-				    STARLINK_PMU_MAX_COUNTERS);
+	bool enabled = !bitmap_empty(hw_events->used_mask, STARLINK_PMU_MAX_COUNTERS);
 	struct perf_event *event;
 	int idx;
 

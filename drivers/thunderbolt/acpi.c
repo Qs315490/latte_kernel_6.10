@@ -28,7 +28,7 @@ static acpi_status tb_acpi_add_link(acpi_handle handle, u32 level, void *data,
 		return AE_OK;
 
 	/* It needs to reference this NHI */
-	if (dev_fwnode(&nhi->pdev->dev) != fwnode)
+	if (dev_fwnode(nhi->dev) != fwnode)
 		goto out_put;
 
 	/*
@@ -57,16 +57,16 @@ static acpi_status tb_acpi_add_link(acpi_handle handle, u32 level, void *data,
 		 */
 		pm_runtime_get_sync(&pdev->dev);
 
-		link = device_link_add(&pdev->dev, &nhi->pdev->dev,
+		link = device_link_add(&pdev->dev, nhi->dev,
 				       DL_FLAG_AUTOREMOVE_SUPPLIER |
 				       DL_FLAG_RPM_ACTIVE |
 				       DL_FLAG_PM_RUNTIME);
 		if (link) {
-			dev_dbg(&nhi->pdev->dev, "created link from %s\n",
+			dev_dbg(nhi->dev, "created link from %s\n",
 				dev_name(&pdev->dev));
 			*(bool *)ret = true;
 		} else {
-			dev_warn(&nhi->pdev->dev, "device link creation from %s failed\n",
+			dev_warn(nhi->dev, "device link creation from %s failed\n",
 				 dev_name(&pdev->dev));
 		}
 
@@ -86,14 +86,14 @@ out_put:
  * @nhi ACPI node. For each reference a device link is added. The link
  * is automatically removed by the driver core.
  *
- * Returns %true if at least one link was created.
+ * Returns %true if at least one link was created, %false otherwise.
  */
 bool tb_acpi_add_links(struct tb_nhi *nhi)
 {
 	acpi_status status;
 	bool ret = false;
 
-	if (!has_acpi_companion(&nhi->pdev->dev))
+	if (!has_acpi_companion(nhi->dev))
 		return false;
 
 	/*
@@ -103,7 +103,7 @@ bool tb_acpi_add_links(struct tb_nhi *nhi)
 	status = acpi_walk_namespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT, 32,
 				     tb_acpi_add_link, NULL, nhi, (void **)&ret);
 	if (ACPI_FAILURE(status)) {
-		dev_warn(&nhi->pdev->dev, "failed to enumerate tunneled ports\n");
+		dev_warn(nhi->dev, "failed to enumerate tunneled ports\n");
 		return false;
 	}
 
@@ -113,8 +113,10 @@ bool tb_acpi_add_links(struct tb_nhi *nhi)
 /**
  * tb_acpi_is_native() - Did the platform grant native TBT/USB4 control
  *
- * Returns %true if the platform granted OS native control over
- * TBT/USB4. In this case software based connection manager can be used,
+ * Return: %true if the platform granted OS native control over
+ * TBT/USB4, %false otherwise.
+ *
+ * When returned %true, software based connection manager can be used,
  * otherwise there is firmware based connection manager running.
  */
 bool tb_acpi_is_native(void)
@@ -126,8 +128,8 @@ bool tb_acpi_is_native(void)
 /**
  * tb_acpi_may_tunnel_usb3() - Is USB3 tunneling allowed by the platform
  *
- * When software based connection manager is used, this function
- * returns %true if platform allows native USB3 tunneling.
+ * Return: %true if software based connection manager is used and
+ * platform allows native USB 3.x tunneling, %false otherwise.
  */
 bool tb_acpi_may_tunnel_usb3(void)
 {
@@ -139,8 +141,8 @@ bool tb_acpi_may_tunnel_usb3(void)
 /**
  * tb_acpi_may_tunnel_dp() - Is DisplayPort tunneling allowed by the platform
  *
- * When software based connection manager is used, this function
- * returns %true if platform allows native DP tunneling.
+ * Return: %true if software based connection manager is used and
+ * platform allows native DP tunneling, %false otherwise.
  */
 bool tb_acpi_may_tunnel_dp(void)
 {
@@ -152,8 +154,8 @@ bool tb_acpi_may_tunnel_dp(void)
 /**
  * tb_acpi_may_tunnel_pcie() - Is PCIe tunneling allowed by the platform
  *
- * When software based connection manager is used, this function
- * returns %true if platform allows native PCIe tunneling.
+ * Return: %true if software based connection manager is used and
+ * platform allows native PCIe tunneling, %false otherwise.
  */
 bool tb_acpi_may_tunnel_pcie(void)
 {
@@ -165,8 +167,8 @@ bool tb_acpi_may_tunnel_pcie(void)
 /**
  * tb_acpi_is_xdomain_allowed() - Are XDomain connections allowed
  *
- * When software based connection manager is used, this function
- * returns %true if platform allows XDomain connections.
+ * Return: %true if software based connection manager is used and
+ * platform allows XDomain tunneling, %false otherwise.
  */
 bool tb_acpi_is_xdomain_allowed(void)
 {
@@ -256,7 +258,7 @@ static int tb_acpi_retimer_set_power(struct tb_port *port, bool power)
  *
  * This should only be called if the USB4/TBT link is not up.
  *
- * Returns %0 on success.
+ * Return: %0 on success, negative errno otherwise.
  */
 int tb_acpi_power_on_retimers(struct tb_port *port)
 {
@@ -270,7 +272,7 @@ int tb_acpi_power_on_retimers(struct tb_port *port)
  * This is the opposite of tb_acpi_power_on_retimers(). After returning
  * successfully the normal operations with the @port can continue.
  *
- * Returns %0 on success.
+ * Return: %0 on success, negative errno otherwise.
  */
 int tb_acpi_power_off_retimers(struct tb_port *port)
 {
@@ -303,7 +305,7 @@ static struct acpi_device *tb_acpi_switch_find_companion(struct tb_switch *sw)
 		struct tb_nhi *nhi = sw->tb->nhi;
 		struct acpi_device *parent_adev;
 
-		parent_adev = ACPI_COMPANION(&nhi->pdev->dev);
+		parent_adev = ACPI_COMPANION(nhi->dev);
 		if (parent_adev)
 			adev = acpi_find_child_device(parent_adev, 0, false);
 	}

@@ -19,8 +19,8 @@
 
 /* List of platforms this NAND controller has be integrated into */
 static const struct pci_device_id denali_pci_ids[] = {
-	{ PCI_VDEVICE(INTEL, 0x0701), INTEL_CE4100 },
-	{ PCI_VDEVICE(INTEL, 0x0809), INTEL_MRST },
+	{ PCI_VDEVICE(INTEL, 0x0701), .driver_data = INTEL_CE4100 },
+	{ PCI_VDEVICE(INTEL, 0x0809), .driver_data = INTEL_MRST },
 	{ /* end: all zeroes */ }
 };
 MODULE_DEVICE_TABLE(pci, denali_pci_ids);
@@ -68,7 +68,7 @@ static int denali_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	denali->clk_rate = 50000000;		/* 50 MHz */
 	denali->clk_x_rate = 200000000;		/* 200 MHz */
 
-	ret = pci_request_regions(dev, DENALI_NAND_NAME);
+	ret = pcim_request_all_regions(dev, DENALI_NAND_NAME);
 	if (ret) {
 		dev_err(&dev->dev, "Spectra: Unable to request memory regions\n");
 		return ret;
@@ -77,20 +77,18 @@ static int denali_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	denali->reg = devm_ioremap(denali->dev, csr_base, csr_len);
 	if (!denali->reg) {
 		dev_err(&dev->dev, "Spectra: Unable to remap memory region\n");
-		ret = -ENOMEM;
-		goto regions_release;
+		return -ENOMEM;
 	}
 
 	denali->host = devm_ioremap(denali->dev, mem_base, mem_len);
 	if (!denali->host) {
 		dev_err(&dev->dev, "Spectra: ioremap failed!");
-		ret = -ENOMEM;
-		goto regions_release;
+		return -ENOMEM;
 	}
 
 	ret = denali_init(denali);
 	if (ret)
-		goto regions_release;
+		return ret;
 
 	nsels = denali->nbanks;
 
@@ -118,8 +116,6 @@ static int denali_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
 out_remove_denali:
 	denali_remove(denali);
-regions_release:
-	pci_release_regions(dev);
 	return ret;
 }
 
@@ -127,7 +123,6 @@ static void denali_pci_remove(struct pci_dev *dev)
 {
 	struct denali_controller *denali = pci_get_drvdata(dev);
 
-	pci_release_regions(dev);
 	denali_remove(denali);
 }
 

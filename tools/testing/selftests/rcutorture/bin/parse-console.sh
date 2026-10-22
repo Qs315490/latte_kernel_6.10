@@ -113,7 +113,6 @@ then
 		then
 			print_warning $title `cat $T.seq`
 		fi
-		exit 2
 	fi
 fi | tee -a $file.diags
 
@@ -148,7 +147,7 @@ then
 			summary="$summary  KCSAN: $n_kcsan"
 		fi
 	fi
-	n_calltrace=`grep -c 'Call Trace:' $file`
+	n_calltrace=`grep -Ec 'Call Trace:|Call trace:' $file`
 	if test "$n_calltrace" -ne 0
 	then
 		summary="$summary  Call Traces: $n_calltrace"

@@ -356,7 +356,7 @@ done:
 
 static void vcc_rx_timer(struct timer_list *t)
 {
-	struct vcc_port *port = from_timer(port, t, rx_timer);
+	struct vcc_port *port = timer_container_of(port, t, rx_timer);
 	struct vio_driver_state *vio;
 	unsigned long flags;
 	int rv;
@@ -382,7 +382,7 @@ done:
 
 static void vcc_tx_timer(struct timer_list *t)
 {
-	struct vcc_port *port = from_timer(port, t, tx_timer);
+	struct vcc_port *port = timer_container_of(port, t, tx_timer);
 	struct vio_vcc *pkt;
 	unsigned long flags;
 	size_t tosend = 0;
@@ -574,7 +574,7 @@ static int vcc_probe(struct vio_dev *vdev, const struct vio_device_id *id)
 		return -ENODEV;
 	}
 
-	port = kzalloc(sizeof(struct vcc_port), GFP_KERNEL);
+	port = kzalloc_obj(struct vcc_port);
 	if (!port)
 		return -ENOMEM;
 
@@ -683,8 +683,8 @@ static void vcc_remove(struct vio_dev *vdev)
 {
 	struct vcc_port *port = dev_get_drvdata(&vdev->dev);
 
-	del_timer_sync(&port->rx_timer);
-	del_timer_sync(&port->tx_timer);
+	timer_delete_sync(&port->rx_timer);
+	timer_delete_sync(&port->tx_timer);
 
 	/* If there's a process with the device open, do a synchronous
 	 * hangup of the TTY. This *may* cause the process to call close
@@ -700,7 +700,7 @@ static void vcc_remove(struct vio_dev *vdev)
 
 	tty_unregister_device(vcc_tty_driver, port->index);
 
-	del_timer_sync(&port->vio.timer);
+	timer_delete_sync(&port->vio.timer);
 	vio_ldc_free(&port->vio);
 	sysfs_remove_group(&vdev->dev.kobj, &vcc_attribute_group);
 	dev_set_drvdata(&vdev->dev, NULL);
@@ -957,7 +957,7 @@ static int vcc_install(struct tty_driver *driver, struct tty_struct *tty)
 	if (ret)
 		return ret;
 
-	port_tty = kzalloc(sizeof(struct tty_port), GFP_KERNEL);
+	port_tty = kzalloc_obj(struct tty_port);
 	if (!port_tty)
 		return -ENOMEM;
 

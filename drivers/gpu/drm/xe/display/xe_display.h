@@ -6,25 +6,25 @@
 #ifndef _XE_DISPLAY_H_
 #define _XE_DISPLAY_H_
 
-#include "xe_device.h"
+#include <linux/types.h>
 
 struct drm_driver;
+struct drm_fb_helper;
+struct drm_fb_helper_surface_size;
+struct pci_dev;
+struct xe_device;
 
 #if IS_ENABLED(CONFIG_DRM_XE_DISPLAY)
 
 bool xe_display_driver_probe_defer(struct pci_dev *pdev);
-void xe_display_driver_set_hooks(struct drm_driver *driver);
-void xe_display_driver_remove(struct xe_device *xe);
 
-int xe_display_create(struct xe_device *xe);
+int xe_display_driver_fbdev_probe(struct drm_fb_helper *fbh,
+				  struct drm_fb_helper_surface_size *sizes);
 
 int xe_display_probe(struct xe_device *xe);
 
-int xe_display_init_nommio(struct xe_device *xe);
-int xe_display_init_noirq(struct xe_device *xe);
-int xe_display_init_noaccel(struct xe_device *xe);
+int xe_display_init_early(struct xe_device *xe);
 int xe_display_init(struct xe_device *xe);
-void xe_display_fini(struct xe_device *xe);
 
 void xe_display_register(struct xe_device *xe);
 void xe_display_unregister(struct xe_device *xe);
@@ -32,7 +32,7 @@ void xe_display_unregister(struct xe_device *xe);
 void xe_display_irq_handler(struct xe_device *xe, u32 master_ctl);
 void xe_display_irq_enable(struct xe_device *xe, u32 gu_misc_iir);
 void xe_display_irq_reset(struct xe_device *xe);
-void xe_display_irq_postinstall(struct xe_device *xe, struct xe_gt *gt);
+void xe_display_irq_postinstall(struct xe_device *xe);
 
 void xe_display_pm_suspend(struct xe_device *xe);
 void xe_display_pm_shutdown(struct xe_device *xe);
@@ -44,21 +44,23 @@ void xe_display_pm_runtime_suspend(struct xe_device *xe);
 void xe_display_pm_runtime_suspend_late(struct xe_device *xe);
 void xe_display_pm_runtime_resume(struct xe_device *xe);
 
+#define XE_DISPLAY_DRIVER_FEATURES	(DRIVER_MODESET | DRIVER_ATOMIC)
+#define XE_DISPLAY_DRIVER_OPS						\
+	.fbdev_probe = PTR_IF(IS_ENABLED(CONFIG_DRM_FBDEV_EMULATION),	\
+			      xe_display_driver_fbdev_probe)
+
 #else
 
-static inline int xe_display_driver_probe_defer(struct pci_dev *pdev) { return 0; }
-static inline void xe_display_driver_set_hooks(struct drm_driver *driver) { }
-static inline void xe_display_driver_remove(struct xe_device *xe) {}
+#define XE_DISPLAY_DRIVER_FEATURES	0
+#define XE_DISPLAY_DRIVER_OPS \
+	.fbdev_probe = NULL
 
-static inline int xe_display_create(struct xe_device *xe) { return 0; }
+static inline int xe_display_driver_probe_defer(struct pci_dev *pdev) { return 0; }
 
 static inline int xe_display_probe(struct xe_device *xe) { return 0; }
 
-static inline int xe_display_init_nommio(struct xe_device *xe) { return 0; }
-static inline int xe_display_init_noirq(struct xe_device *xe) { return 0; }
-static inline int xe_display_init_noaccel(struct xe_device *xe) { return 0; }
+static inline int xe_display_init_early(struct xe_device *xe) { return 0; }
 static inline int xe_display_init(struct xe_device *xe) { return 0; }
-static inline void xe_display_fini(struct xe_device *xe) {}
 
 static inline void xe_display_register(struct xe_device *xe) {}
 static inline void xe_display_unregister(struct xe_device *xe) {}
@@ -66,7 +68,7 @@ static inline void xe_display_unregister(struct xe_device *xe) {}
 static inline void xe_display_irq_handler(struct xe_device *xe, u32 master_ctl) {}
 static inline void xe_display_irq_enable(struct xe_device *xe, u32 gu_misc_iir) {}
 static inline void xe_display_irq_reset(struct xe_device *xe) {}
-static inline void xe_display_irq_postinstall(struct xe_device *xe, struct xe_gt *gt) {}
+static inline void xe_display_irq_postinstall(struct xe_device *xe) {}
 
 static inline void xe_display_pm_suspend(struct xe_device *xe) {}
 static inline void xe_display_pm_shutdown(struct xe_device *xe) {}

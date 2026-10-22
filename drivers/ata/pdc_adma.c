@@ -140,7 +140,7 @@ static struct ata_port_operations adma_ata_ops = {
 
 	.freeze			= adma_freeze,
 	.thaw			= adma_thaw,
-	.prereset		= adma_prereset,
+	.reset.prereset		= adma_prereset,
 
 	.port_start		= adma_port_start,
 	.port_stop		= adma_port_stop,
@@ -157,8 +157,7 @@ static struct ata_port_info adma_port_info[] = {
 };
 
 static const struct pci_device_id adma_ata_pci_tbl[] = {
-	{ PCI_VDEVICE(PDC, 0x1841), board_1841_idx },
-
+	{ PCI_VDEVICE(PDC, 0x1841), .driver_data = board_1841_idx },
 	{ }	/* terminate list */
 };
 

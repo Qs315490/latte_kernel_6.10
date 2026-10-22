@@ -621,7 +621,7 @@ static int e4000_probe(struct i2c_client *client)
 		.val_bits = 8,
 	};
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev) {
 		ret = -ENOMEM;
 		goto err;
@@ -719,8 +719,8 @@ static void e4000_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id e4000_id_table[] = {
-	{ "e4000" },
-	{}
+	{ .name = "e4000" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, e4000_id_table);
 

@@ -284,11 +284,10 @@ static ssize_t ab8500_sysfs_show_rtc_calibration(struct device *dev,
 	retval = ab8500_rtc_get_calibration(dev, &calibration);
 	if (retval < 0) {
 		dev_err(dev, "Failed to read RTC calibration attribute\n");
-		sprintf(buf, "0\n");
 		return retval;
 	}
 
-	return sprintf(buf, "%d\n", calibration);
+	return sysfs_emit(buf, "%d\n", calibration);
 }
 
 static DEVICE_ATTR(rtc_calibration, S_IRUGO | S_IWUSR,
@@ -324,14 +323,13 @@ static const struct rtc_class_ops ab8500_rtc_ops = {
 };
 
 static const struct platform_device_id ab85xx_rtc_ids[] = {
-	{ "ab8500-rtc", (kernel_ulong_t)&ab8500_rtc_ops, },
+	{ .name = "ab8500-rtc" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, ab85xx_rtc_ids);
 
 static int ab8500_rtc_probe(struct platform_device *pdev)
 {
-	const struct platform_device_id *platid = platform_get_device_id(pdev);
 	int err;
 	struct rtc_device *rtc;
 	u8 rtc_ctrl;
@@ -361,13 +359,13 @@ static int ab8500_rtc_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	device_init_wakeup(&pdev->dev, true);
+	devm_device_init_wakeup(&pdev->dev);
 
 	rtc = devm_rtc_allocate_device(&pdev->dev);
 	if (IS_ERR(rtc))
 		return PTR_ERR(rtc);
 
-	rtc->ops = (struct rtc_class_ops *)platid->driver_data;
+	rtc->ops = &ab8500_rtc_ops;
 
 	err = devm_request_threaded_irq(&pdev->dev, irq, NULL,
 			rtc_alarm_handler, IRQF_ONESHOT,
@@ -375,7 +373,7 @@ static int ab8500_rtc_probe(struct platform_device *pdev)
 	if (err < 0)
 		return err;
 
-	dev_pm_set_wake_irq(&pdev->dev, irq);
+	devm_pm_set_wake_irq(&pdev->dev, irq);
 	platform_set_drvdata(pdev, rtc);
 
 	set_bit(RTC_FEATURE_ALARM_RES_MINUTE, rtc->features);
@@ -392,18 +390,11 @@ static int ab8500_rtc_probe(struct platform_device *pdev)
 	return devm_rtc_register_device(rtc);
 }
 
-static void ab8500_rtc_remove(struct platform_device *pdev)
-{
-	dev_pm_clear_wake_irq(&pdev->dev);
-	device_init_wakeup(&pdev->dev, false);
-}
-
 static struct platform_driver ab8500_rtc_driver = {
 	.driver = {
 		.name = "ab8500-rtc",
 	},
 	.probe	= ab8500_rtc_probe,
-	.remove = ab8500_rtc_remove,
 	.id_table = ab85xx_rtc_ids,
 };
 

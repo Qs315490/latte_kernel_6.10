@@ -38,9 +38,9 @@ do {									\
 	might_fault();							\
 	__asm__ __volatile__(						\
 		ASM_STAC "\n"						\
-		"0:	rep; stosl\n"					\
+		"0:	rep stosl\n"					\
 		"	movl %2,%0\n"					\
-		"1:	rep; stosb\n"					\
+		"1:	rep stosb\n"					\
 		"2: " ASM_CLAC "\n"					\
 		_ASM_EXTABLE_TYPE_REG(0b, 2b, EX_TYPE_UCOPY_LEN4, %2)	\
 		_ASM_EXTABLE_UA(1b, 2b)					\
@@ -140,9 +140,9 @@ __copy_user_intel(void __user *to, const void *from, unsigned long size)
 		       "       shrl  $2, %0\n"
 		       "       andl  $3, %%eax\n"
 		       "       cld\n"
-		       "99:    rep; movsl\n"
+		       "99:    rep movsl\n"
 		       "36:    movl %%eax, %0\n"
-		       "37:    rep; movsb\n"
+		       "37:    rep movsb\n"
 		       "100:\n"
 		       _ASM_EXTABLE_UA(1b, 100b)
 		       _ASM_EXTABLE_UA(2b, 100b)
@@ -242,9 +242,9 @@ static unsigned long __copy_user_intel_nocache(void *to,
 	       "        shrl  $2, %0\n"
 	       "        andl $3, %%eax\n"
 	       "        cld\n"
-	       "6:      rep; movsl\n"
+	       "6:      rep movsl\n"
 	       "        movl %%eax,%0\n"
-	       "7:      rep; movsb\n"
+	       "7:      rep movsb\n"
 	       "8:\n"
 	       _ASM_EXTABLE_UA(0b, 8b)
 	       _ASM_EXTABLE_UA(1b, 8b)
@@ -293,14 +293,14 @@ do {									\
 		"	negl %0\n"					\
 		"	andl $7,%0\n"					\
 		"	subl %0,%3\n"					\
-		"4:	rep; movsb\n"					\
+		"4:	rep movsb\n"					\
 		"	movl %3,%0\n"					\
 		"	shrl $2,%0\n"					\
 		"	andl $3,%3\n"					\
 		"	.align 2,0x90\n"				\
-		"0:	rep; movsl\n"					\
+		"0:	rep movsl\n"					\
 		"	movl %3,%0\n"					\
-		"1:	rep; movsb\n"					\
+		"1:	rep movsb\n"					\
 		"2:\n"							\
 		_ASM_EXTABLE_TYPE_REG(4b, 2b, EX_TYPE_UCOPY_LEN1, %3)	\
 		_ASM_EXTABLE_TYPE_REG(0b, 2b, EX_TYPE_UCOPY_LEN4, %3)	\
@@ -322,10 +322,11 @@ unsigned long __copy_user_ll(void *to, const void *from, unsigned long n)
 }
 EXPORT_SYMBOL(__copy_user_ll);
 
-unsigned long __copy_from_user_ll_nocache_nozero(void *to, const void __user *from,
+unsigned long copy_from_user_inatomic_nontemporal(void *to, const void __user *from,
 					unsigned long n)
 {
-	__uaccess_begin_nospec();
+	if (!user_access_begin(from, n))
+		return n;
 #ifdef CONFIG_X86_INTEL_USERCOPY
 	if (n > 64 && static_cpu_has(X86_FEATURE_XMM2))
 		n = __copy_user_intel_nocache(to, from, n);
@@ -334,7 +335,7 @@ unsigned long __copy_from_user_ll_nocache_nozero(void *to, const void __user *fr
 #else
 	__copy_user(to, from, n);
 #endif
-	__uaccess_end();
+	user_access_end();
 	return n;
 }
-EXPORT_SYMBOL(__copy_from_user_ll_nocache_nozero);
+EXPORT_SYMBOL(copy_from_user_inatomic_nontemporal);

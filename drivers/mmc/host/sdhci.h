@@ -659,7 +659,7 @@ struct sdhci_host {
 
 	unsigned int		tuning_count;	/* Timer count for re-tuning */
 	unsigned int		tuning_mode;	/* Re-tuning mode supported by host */
-	unsigned int		tuning_err;	/* Error code for re-tuning */
+	int			tuning_err;	/* Error code for re-tuning */
 #define SDHCI_TUNING_MODE_1	0
 #define SDHCI_TUNING_MODE_2	1
 #define SDHCI_TUNING_MODE_3	2
@@ -811,7 +811,6 @@ static inline u8 sdhci_readb(struct sdhci_host *host, int reg)
 #endif /* CONFIG_MMC_SDHCI_IO_ACCESSORS */
 
 struct sdhci_host *sdhci_alloc_host(struct device *dev, size_t priv_size);
-void sdhci_free_host(struct sdhci_host *host);
 
 static inline void *sdhci_priv(struct sdhci_host *host)
 {
@@ -875,10 +874,19 @@ void sdhci_adma_write_desc(struct sdhci_host *host, void **desc,
 			   dma_addr_t addr, int len, unsigned int cmd);
 
 #ifdef CONFIG_PM
+bool sdhci_enable_irq_wakeups(struct sdhci_host *host);
+void sdhci_disable_irq_wakeups(struct sdhci_host *host);
 int sdhci_suspend_host(struct sdhci_host *host);
 int sdhci_resume_host(struct sdhci_host *host);
-int sdhci_runtime_suspend_host(struct sdhci_host *host);
-int sdhci_runtime_resume_host(struct sdhci_host *host, int soft_reset);
+void sdhci_runtime_suspend_host(struct sdhci_host *host);
+void sdhci_runtime_resume_host(struct sdhci_host *host, int soft_reset);
+#else
+static inline bool sdhci_enable_irq_wakeups(struct sdhci_host *host) { return false; }
+static inline void sdhci_disable_irq_wakeups(struct sdhci_host *host) {}
+static inline int sdhci_suspend_host(struct sdhci_host *host) { return -EOPNOTSUPP; }
+static inline int sdhci_resume_host(struct sdhci_host *host) { return -EOPNOTSUPP; }
+static inline void sdhci_runtime_suspend_host(struct sdhci_host *host) {}
+static inline void sdhci_runtime_resume_host(struct sdhci_host *host, int soft_reset) {}
 #endif
 
 void sdhci_cqe_enable(struct mmc_host *mmc);
@@ -897,5 +905,21 @@ void sdhci_abort_tuning(struct sdhci_host *host, u32 opcode);
 void sdhci_switch_external_dma(struct sdhci_host *host, bool en);
 void sdhci_set_data_timeout_irq(struct sdhci_host *host, bool enable);
 void __sdhci_set_timeout(struct sdhci_host *host, struct mmc_command *cmd);
+
+#if defined(CONFIG_DYNAMIC_DEBUG) || \
+	(defined(CONFIG_DYNAMIC_DEBUG_CORE) && defined(DYNAMIC_DEBUG_MODULE))
+#define SDHCI_DBG_ANYWAY 0
+#elif defined(DEBUG)
+#define SDHCI_DBG_ANYWAY 1
+#else
+#define SDHCI_DBG_ANYWAY 0
+#endif
+
+#define sdhci_dbg_dumpregs(host, fmt)					\
+do {									\
+	DEFINE_DYNAMIC_DEBUG_METADATA(descriptor, fmt);			\
+	if (DYNAMIC_DEBUG_BRANCH(descriptor) ||	SDHCI_DBG_ANYWAY)	\
+		sdhci_dumpregs(host);					\
+} while (0)
 
 #endif /* __SDHCI_HW_H */

@@ -38,8 +38,6 @@
 
 #include <linux/types.h>
 
-#include "display/intel_display_limits.h"
-
 struct intel_vgpu;
 
 #define _PLANE_CTL_FORMAT_SHIFT		24
@@ -156,7 +154,5 @@ int intel_vgpu_decode_primary_plane(struct intel_vgpu *vgpu,
 	struct intel_vgpu_primary_plane_format *plane);
 int intel_vgpu_decode_cursor_plane(struct intel_vgpu *vgpu,
 	struct intel_vgpu_cursor_plane_format *plane);
-int intel_vgpu_decode_sprite_plane(struct intel_vgpu *vgpu,
-	struct intel_vgpu_sprite_plane_format *plane);
 
 #endif

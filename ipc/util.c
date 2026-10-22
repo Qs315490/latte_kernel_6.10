@@ -141,7 +141,7 @@ void __init ipc_init_proc_interface(const char *path, const char *header,
 	struct proc_dir_entry *pde;
 	struct ipc_proc_iface *iface;
 
-	iface = kmalloc(sizeof(*iface), GFP_KERNEL);
+	iface = kmalloc_obj(*iface);
 	if (!iface)
 		return;
 	iface->path	= path;
@@ -253,7 +253,7 @@ static inline int ipc_idr_alloc(struct ipc_ids *ids, struct kern_ipc_perm *new)
 	} else {
 		new->seq = ipcid_to_seqx(next_id);
 		idx = idr_alloc(&ids->ipcs_idr, new, ipcid_to_idx(next_id),
-				0, GFP_NOWAIT);
+				ipc_mni, GFP_NOWAIT);
 	}
 	if (idx >= 0)
 		new->id = (new->seq << ipcmni_seq_shift()) + idx;

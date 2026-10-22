@@ -183,7 +183,7 @@ int tty_alloc_file(struct file *file)
 {
 	struct tty_file_private *priv;
 
-	priv = kmalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kmalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -276,11 +276,10 @@ static void check_tty_count(struct tty_struct *tty, const char *routine)
 	struct list_head *p;
 	int count = 0, kopen_count = 0;
 
-	spin_lock(&tty->files_lock);
-	list_for_each(p, &tty->tty_files) {
-		count++;
-	}
-	spin_unlock(&tty->files_lock);
+	scoped_guard(spinlock, &tty->files_lock)
+		list_for_each(p, &tty->tty_files)
+			count++;
+
 	if (tty->driver->type == TTY_DRIVER_TYPE_PTY &&
 	    tty->driver->subtype == PTY_TYPE_SLAVE &&
 	    tty->link && tty->link->count)
@@ -378,7 +377,7 @@ EXPORT_SYMBOL_GPL(tty_dev_name_to_number);
  */
 struct tty_driver *tty_find_polling_driver(char *name, int *line)
 {
-	struct tty_driver *p, *res = NULL;
+	struct tty_driver *p;
 	int tty_line = 0;
 	int len;
 	char *str, *stp;
@@ -392,7 +391,8 @@ struct tty_driver *tty_find_polling_driver(char *name, int *line)
 	len = str - name;
 	tty_line = simple_strtoul(str, &str, 10);
 
-	mutex_lock(&tty_mutex);
+	guard(mutex)(&tty_mutex);
+
 	/* Search through the tty devices to look for a match */
 	list_for_each_entry(p, &tty_drivers, tty_drivers) {
 		if (!len || strncmp(name, p->name, len) != 0)
@@ -405,14 +405,12 @@ struct tty_driver *tty_find_polling_driver(char *name, int *line)
 
 		if (tty_line >= 0 && tty_line < p->num && p->ops &&
 		    p->ops->poll_init && !p->ops->poll_init(p, tty_line, stp)) {
-			res = tty_driver_kref_get(p);
 			*line = tty_line;
-			break;
+			return tty_driver_kref_get(p);
 		}
 	}
-	mutex_unlock(&tty_mutex);
 
-	return res;
+	return NULL;
 }
 EXPORT_SYMBOL_GPL(tty_find_polling_driver);
 #endif
@@ -531,16 +529,15 @@ EXPORT_SYMBOL_GPL(tty_wakeup);
  */
 static struct file *tty_release_redirect(struct tty_struct *tty)
 {
-	struct file *f = NULL;
+	guard(spinlock)(&redirect_lock);
 
-	spin_lock(&redirect_lock);
 	if (redirect && file_tty(redirect) == tty) {
-		f = redirect;
+		struct file *f = redirect;
 		redirect = NULL;
+		return f;
 	}
-	spin_unlock(&redirect_lock);
 
-	return f;
+	return NULL;
 }
 
 /**
@@ -765,11 +762,8 @@ void __stop_tty(struct tty_struct *tty)
  */
 void stop_tty(struct tty_struct *tty)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&tty->flow.lock, flags);
+	guard(spinlock_irqsave)(&tty->flow.lock);
 	__stop_tty(tty);
-	spin_unlock_irqrestore(&tty->flow.lock, flags);
 }
 EXPORT_SYMBOL(stop_tty);
 
@@ -796,11 +790,8 @@ void __start_tty(struct tty_struct *tty)
  */
 void start_tty(struct tty_struct *tty)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&tty->flow.lock, flags);
+	guard(spinlock_irqsave)(&tty->flow.lock);
 	__start_tty(tty);
-	spin_unlock_irqrestore(&tty->flow.lock, flags);
 }
 EXPORT_SYMBOL(start_tty);
 
@@ -809,7 +800,8 @@ static void tty_update_time(struct tty_struct *tty, bool mtime)
 	time64_t sec = ktime_get_real_seconds();
 	struct tty_file_private *priv;
 
-	spin_lock(&tty->files_lock);
+	guard(spinlock)(&tty->files_lock);
+
 	list_for_each_entry(priv, &tty->tty_files, list) {
 		struct inode *inode = file_inode(priv->file);
 		struct timespec64 time = mtime ? inode_get_mtime(inode) : inode_get_atime(inode);
@@ -827,7 +819,6 @@ static void tty_update_time(struct tty_struct *tty, bool mtime)
 				inode_set_atime(inode, sec, 0);
 		}
 	}
-	spin_unlock(&tty->files_lock);
 }
 
 /*
@@ -1480,7 +1471,7 @@ void tty_save_termios(struct tty_struct *tty)
 	/* Stash the termios data */
 	tp = tty->driver->termios[idx];
 	if (tp == NULL) {
-		tp = kmalloc(sizeof(*tp), GFP_KERNEL);
+		tp = kmalloc_obj(*tp);
 		if (tp == NULL)
 			return;
 		tty->driver->termios[idx] = tp;
@@ -2314,13 +2305,12 @@ static int tiocsti(struct tty_struct *tty, u8 __user *p)
  */
 static int tiocgwinsz(struct tty_struct *tty, struct winsize __user *arg)
 {
-	int err;
+	guard(mutex)(&tty->winsize_mutex);
 
-	mutex_lock(&tty->winsize_mutex);
-	err = copy_to_user(arg, &tty->winsize, sizeof(*arg));
-	mutex_unlock(&tty->winsize_mutex);
+	if (copy_to_user(arg, &tty->winsize, sizeof(*arg)))
+		return -EFAULT;
 
-	return err ? -EFAULT : 0;
+	return 0;
 }
 
 /**
@@ -2335,10 +2325,10 @@ int tty_do_resize(struct tty_struct *tty, struct winsize *ws)
 {
 	struct pid *pgrp;
 
-	/* Lock the tty */
-	mutex_lock(&tty->winsize_mutex);
+	guard(mutex)(&tty->winsize_mutex);
+
 	if (!memcmp(ws, &tty->winsize, sizeof(*ws)))
-		goto done;
+		return 0;
 
 	/* Signal the foreground process group */
 	pgrp = tty_get_pgrp(tty);
@@ -2347,8 +2337,7 @@ int tty_do_resize(struct tty_struct *tty, struct winsize *ws)
 	put_pid(pgrp);
 
 	tty->winsize = *ws;
-done:
-	mutex_unlock(&tty->winsize_mutex);
+
 	return 0;
 }
 EXPORT_SYMBOL(tty_do_resize);
@@ -2409,13 +2398,14 @@ static int tioccons(struct file *file)
 		return -EBADF;
 	if (!(file->f_mode & FMODE_CAN_WRITE))
 		return -EINVAL;
-	spin_lock(&redirect_lock);
-	if (redirect) {
-		spin_unlock(&redirect_lock);
+
+	guard(spinlock)(&redirect_lock);
+
+	if (redirect)
 		return -EBUSY;
-	}
+
 	redirect = get_file(file);
-	spin_unlock(&redirect_lock);
+
 	return 0;
 }
 
@@ -3028,11 +3018,9 @@ void __do_SAK(struct tty_struct *tty)
 	struct task_struct *g, *p;
 	struct pid *session;
 	int i;
-	unsigned long flags;
 
-	spin_lock_irqsave(&tty->ctrl.lock, flags);
-	session = get_pid(tty->ctrl.session);
-	spin_unlock_irqrestore(&tty->ctrl.lock, flags);
+	scoped_guard(spinlock_irqsave, &tty->ctrl.lock)
+		session = get_pid(tty->ctrl.session);
 
 	tty_ldisc_flush(tty);
 
@@ -3055,7 +3043,7 @@ void __do_SAK(struct tty_struct *tty)
 					PIDTYPE_SID);
 			continue;
 		}
-		task_lock(p);
+		guard(task_lock)(p);
 		i = iterate_fd(p->files, 0, this_tty, tty);
 		if (i != 0) {
 			tty_notice(tty, "SAK: killed process %d (%s): by fd#%d\n",
@@ -3063,7 +3051,6 @@ void __do_SAK(struct tty_struct *tty)
 			group_send_sig_info(SIGKILL, SEND_SIG_PRIV, p,
 					PIDTYPE_SID);
 		}
-		task_unlock(p);
 	}
 	read_unlock(&tasklist_lock);
 	put_pid(session);
@@ -3112,7 +3099,7 @@ struct tty_struct *alloc_tty_struct(struct tty_driver *driver, int idx)
 {
 	struct tty_struct *tty;
 
-	tty = kzalloc(sizeof(*tty), GFP_KERNEL_ACCOUNT);
+	tty = kzalloc_obj(*tty, GFP_KERNEL_ACCOUNT);
 	if (!tty)
 		return NULL;
 
@@ -3257,7 +3244,7 @@ struct device *tty_register_device_attr(struct tty_driver *driver,
 	else
 		tty_line_name(driver, index, name);
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -3329,10 +3316,12 @@ EXPORT_SYMBOL(tty_unregister_device);
  * __tty_alloc_driver - allocate tty driver
  * @lines: count of lines this driver can handle at most
  * @owner: module which is responsible for this driver
- * @flags: some of %TTY_DRIVER_ flags, will be set in driver->flags
+ * @flags: some of enum tty_driver_flag, will be set in driver->flags
  *
- * This should not be called directly, some of the provided macros should be
- * used instead. Use IS_ERR() and friends on @retval.
+ * This should not be called directly, tty_alloc_driver() should be used
+ * instead.
+ *
+ * Returns: struct tty_driver or a PTR-encoded error (use IS_ERR() and friends).
  */
 struct tty_driver *__tty_alloc_driver(unsigned int lines, struct module *owner,
 		unsigned long flags)
@@ -3344,7 +3333,7 @@ struct tty_driver *__tty_alloc_driver(unsigned int lines, struct module *owner,
 	if (!lines || (flags & TTY_DRIVER_UNNUMBERED_NODE && lines > 1))
 		return ERR_PTR(-EINVAL);
 
-	driver = kzalloc(sizeof(*driver), GFP_KERNEL);
+	driver = kzalloc_obj(*driver);
 	if (!driver)
 		return ERR_PTR(-ENOMEM);
 
@@ -3354,10 +3343,8 @@ struct tty_driver *__tty_alloc_driver(unsigned int lines, struct module *owner,
 	driver->flags = flags;
 
 	if (!(flags & TTY_DRIVER_DEVPTS_MEM)) {
-		driver->ttys = kcalloc(lines, sizeof(*driver->ttys),
-				GFP_KERNEL);
-		driver->termios = kcalloc(lines, sizeof(*driver->termios),
-				GFP_KERNEL);
+		driver->ttys = kzalloc_objs(*driver->ttys, lines);
+		driver->termios = kzalloc_objs(*driver->termios, lines);
 		if (!driver->ttys || !driver->termios) {
 			err = -ENOMEM;
 			goto err_free_all;
@@ -3365,8 +3352,7 @@ struct tty_driver *__tty_alloc_driver(unsigned int lines, struct module *owner,
 	}
 
 	if (!(flags & TTY_DRIVER_DYNAMIC_ALLOC)) {
-		driver->ports = kcalloc(lines, sizeof(*driver->ports),
-				GFP_KERNEL);
+		driver->ports = kzalloc_objs(*driver->ports, lines);
 		if (!driver->ports) {
 			err = -ENOMEM;
 			goto err_free_all;
@@ -3374,7 +3360,7 @@ struct tty_driver *__tty_alloc_driver(unsigned int lines, struct module *owner,
 		cdevs = lines;
 	}
 
-	driver->cdevs = kcalloc(cdevs, sizeof(*driver->cdevs), GFP_KERNEL);
+	driver->cdevs = kzalloc_objs(*driver->cdevs, cdevs);
 	if (!driver->cdevs) {
 		err = -ENOMEM;
 		goto err_free_all;
@@ -3457,15 +3443,31 @@ int tty_register_driver(struct tty_driver *driver)
 	if (error < 0)
 		goto err;
 
+	/*
+	 * Drivers that do not define driver_name are potentially in-memory devices
+	 * like vty, which generally do not require special workqueue settings.
+	 */
+	if (!(driver->flags & TTY_DRIVER_NO_WORKQUEUE) && driver->driver_name) {
+		driver->flip_wq = alloc_workqueue("%s-%s", WQ_UNBOUND | WQ_SYSFS,
+						  0, driver->name, driver->driver_name);
+		if (!driver->flip_wq) {
+			error = -ENOMEM;
+			goto err_unreg_char;
+		}
+		for (i = 0; i < driver->num; i++) {
+			if (driver->ports[i])
+				tty_port_link_driver_wq(driver->ports[i], driver);
+		}
+	}
+
 	if (driver->flags & TTY_DRIVER_DYNAMIC_ALLOC) {
 		error = tty_cdev_add(driver, dev, 0, driver->num);
 		if (error)
-			goto err_unreg_char;
+			goto err_destroy_wq;
 	}
 
-	mutex_lock(&tty_mutex);
-	list_add(&driver->tty_drivers, &tty_drivers);
-	mutex_unlock(&tty_mutex);
+	scoped_guard(mutex, &tty_mutex)
+		list_add(&driver->tty_drivers, &tty_drivers);
 
 	if (!(driver->flags & TTY_DRIVER_DYNAMIC_DEV)) {
 		for (i = 0; i < driver->num; i++) {
@@ -3484,9 +3486,12 @@ err_unreg_devs:
 	for (i--; i >= 0; i--)
 		tty_unregister_device(driver, i);
 
-	mutex_lock(&tty_mutex);
-	list_del(&driver->tty_drivers);
-	mutex_unlock(&tty_mutex);
+	scoped_guard(mutex, &tty_mutex)
+		list_del(&driver->tty_drivers);
+
+err_destroy_wq:
+	if (driver->flip_wq)
+		destroy_workqueue(driver->flip_wq);
 
 err_unreg_char:
 	unregister_chrdev_region(dev, driver->num);
@@ -3505,9 +3510,10 @@ void tty_unregister_driver(struct tty_driver *driver)
 {
 	unregister_chrdev_region(MKDEV(driver->major, driver->minor_start),
 				driver->num);
-	mutex_lock(&tty_mutex);
-	list_del(&driver->tty_drivers);
-	mutex_unlock(&tty_mutex);
+	scoped_guard(mutex, &tty_mutex)
+		list_del(&driver->tty_drivers);
+	if (driver->flip_wq)
+		destroy_workqueue(driver->flip_wq);
 }
 EXPORT_SYMBOL(tty_unregister_driver);
 

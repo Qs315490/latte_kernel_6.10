@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-menu "SoC Audio for Freescale CPUs"
+menu "Freescale"
 
 comment "Common SoC Audio options for Freescale CPUs:"
 
@@ -19,6 +19,7 @@ config SND_SOC_FSL_ASRC
 
 config SND_SOC_FSL_SAI
 	tristate "Synchronous Audio Interface (SAI) module support"
+	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	select REGMAP_MMIO
 	select SND_SOC_IMX_PCM_DMA if SND_IMX_SOC != n
 	select SND_SOC_GENERIC_DMAENGINE_PCM
@@ -32,7 +33,6 @@ config SND_SOC_FSL_SAI
 config SND_SOC_FSL_MQS
 	tristate "Medium Quality Sound (MQS) module support"
 	depends on SND_SOC_FSL_SAI
-	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	select REGMAP_MMIO
 	help
 	  Say Y if you want to add Medium Quality Sound (MQS)
@@ -165,7 +165,7 @@ config SND_SOC_IMX_AUDMUX
 
 config SND_POWERPC_SOC
 	tristate "SoC Audio for Freescale PowerPC CPUs"
-	depends on FSL_SOC || PPC_MPC52xx
+	depends on FSL_SOC || PPC_MPC52xx || (PPC && COMPILE_TEST)
 	help
 	  Say Y or M if you want to add support for codecs attached to
 	  the PowerPC CPUs.
@@ -226,7 +226,7 @@ config SND_SOC_P1022_RDK
 
 config SND_SOC_MPC5200_I2S
 	tristate "Freescale MPC5200 PSC in I2S mode driver"
-	depends on PPC_MPC52xx && PPC_BESTCOMM
+	depends on PPC_BESTCOMM
 	select SND_MPC52xx_DMA
 	select PPC_BESTCOMM_GEN_BD
 	help
@@ -234,7 +234,7 @@ config SND_SOC_MPC5200_I2S
 
 config SND_SOC_MPC5200_AC97
 	tristate "Freescale MPC5200 PSC in AC97 mode driver"
-	depends on PPC_MPC52xx && PPC_BESTCOMM
+	depends on PPC_BESTCOMM
 	select SND_SOC_AC97_BUS
 	select SND_MPC52xx_DMA
 	select PPC_BESTCOMM_GEN_BD
@@ -309,6 +309,7 @@ config SND_SOC_IMX_SGTL5000
 
 config SND_SOC_FSL_ASOC_CARD
 	tristate "Generic ASoC Sound Card with ASRC support"
+	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	depends on OF && I2C
 	# enforce SND_SOC_FSL_ASOC_CARD=m if SND_AC97_CODEC=m:
 	depends on SND_AC97_CODEC || SND_AC97_CODEC=n
@@ -330,6 +331,7 @@ config SND_SOC_FSL_ASOC_CARD
 
 config SND_SOC_IMX_AUDMIX
 	tristate "SoC Audio support for i.MX boards with AUDMIX"
+	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	select SND_SOC_FSL_AUDMIX
 	select SND_SOC_FSL_SAI
 	help
@@ -339,6 +341,7 @@ config SND_SOC_IMX_AUDMIX
 
 config SND_SOC_IMX_HDMI
 	tristate "SoC Audio support for i.MX boards with HDMI port"
+	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	select SND_SOC_FSL_SAI
 	select SND_SOC_FSL_AUD2HTX
 	select SND_SOC_HDMI_CODEC
@@ -355,6 +358,7 @@ config SND_SOC_IMX_RPMSG
 	depends on OF && I2C
 	select SND_SOC_IMX_PCM_RPMSG
 	select SND_SOC_IMX_AUDIO_RPMSG
+	select SND_SIMPLE_CARD_UTILS
 	help
 	  SoC Audio support for i.MX boards with rpmsg.
 	  There should be rpmsg devices defined in other core (M core)
@@ -364,6 +368,7 @@ config SND_SOC_IMX_RPMSG
 config SND_SOC_IMX_CARD
 	tristate "SoC Audio Graph Sound Card support for i.MX boards"
 	depends on OF && I2C
+	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	select SND_SOC_AK4458
 	select SND_SOC_AK5558
 	select SND_SOC_IMX_PCM_DMA

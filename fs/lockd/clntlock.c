@@ -15,9 +15,9 @@
 #include <linux/sunrpc/addr.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/svc_xprt.h>
-#include <linux/lockd/lockd.h>
 #include <linux/kthread.h>
 
+#include "lockd.h"
 #include "trace.h"
 
 #define NLMDBG_FACILITY		NLMDBG_CLIENT
@@ -158,7 +158,7 @@ int nlmclnt_wait(struct nlm_wait *block, struct nlm_rqst *req, long timeout)
 /*
  * The server lockd has called us back to tell us the lock was granted
  */
-__be32 nlmclnt_grant(const struct sockaddr *addr, const struct nlm_lock *lock)
+__be32 nlmclnt_grant(const struct sockaddr *addr, const struct lockd_lock *lock)
 {
 	const struct file_lock *fl = &lock->fl;
 	const struct nfs_fh *fh = &lock->fh;
@@ -233,7 +233,7 @@ reclaimer(void *ptr)
 	u32 nsmstate;
 	struct net *net = host->net;
 
-	req = kmalloc(sizeof(*req), GFP_KERNEL);
+	req = kmalloc_obj(*req);
 	if (!req)
 		return 0;
 

@@ -50,23 +50,6 @@ board_info
 .. kernel-doc:: drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
    :doc: board_info
 
-Accelerated Processing Units (APU) Info
----------------------------------------
-
-.. csv-table::
-   :header-rows: 1
-   :widths: 3, 2, 2, 1, 1, 1, 1
-   :file: ./apu-asic-info-table.csv
-
-Discrete GPU Info
------------------
-
-.. csv-table::
-   :header-rows: 1
-   :widths: 3, 2, 2, 1, 1, 1
-   :file: ./dgpu-asic-info-table.csv
-
-
 GPU Memory Usage Information
 ============================
 
@@ -145,3 +128,29 @@ smartshift_bias
 
 .. kernel-doc:: drivers/gpu/drm/amd/pm/amdgpu_pm.c
    :doc: smartshift_bias
+
+UMA Carveout
+============
+
+Some versions of Atom ROM expose available options for the VRAM carveout sizes,
+and allow changes to the carveout size via the ATCS function code 0xA on supported
+BIOS implementations.
+
+For those platforms, users can use the following files under uma/ to set the
+carveout size, in a way similar to what Windows users can do in the "Tuning"
+tab in AMD Adrenalin.
+
+Note that for BIOS implementations that don't support this, these files will not
+be created at all.
+
+uma/carveout_options
+--------------------
+
+.. kernel-doc:: drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+   :doc: uma/carveout_options
+
+uma/carveout
+--------------------
+
+.. kernel-doc:: drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+   :doc: uma/carveout

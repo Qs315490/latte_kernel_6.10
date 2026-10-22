@@ -1,20 +1,16 @@
-
+// SPDX-License-Identifier: GPL-2.0
 /*
  * jazz16.c - driver for Media Vision Jazz16 based soundcards.
  * Copyright (C) 2009 Krzysztof Helt <krzysztof.h1@wp.pl>
  * Based on patches posted by Rask Ingemann Lambertsen and Rene Herman.
  * Based on OSS Sound Blaster driver.
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file COPYING in the main directory of this archive for
- * more details.
- *
  */
 
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/io.h>
 #include <linux/delay.h>
+#include <linux/string.h>
 #include <asm/dma.h>
 #include <linux/isa.h>
 #include <sound/core.h>
@@ -286,8 +282,8 @@ static int snd_jazz16_probe(struct device *devptr, unsigned int dev)
 
 	jazz16->chip = chip;
 
-	strcpy(card->driver, "jazz16");
-	strcpy(card->shortname, "Media Vision Jazz16");
+	strscpy(card->driver, "jazz16");
+	strscpy(card->shortname, "Media Vision Jazz16");
 	sprintf(card->longname,
 		"Media Vision Jazz16 at 0x%lx, irq %d, dma8 %d, dma16 %d",
 		port[dev], xirq, xdma8, xdma16);

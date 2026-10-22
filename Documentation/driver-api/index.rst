@@ -81,6 +81,7 @@ Subsystem-specific APIs
    acpi/index
    backlight/lp855x-driver.rst
    clk
+   coco/index
    console
    crypto/index
    dmaengine/index
@@ -92,9 +93,11 @@ Subsystem-specific APIs
    frame-buffer
    aperture
    generic-counter
+   generic_pt
    gpio/index
    hsi
    hte/index
+   hw-recoverable-errors
    i2c
    iio/index
    infiniband
@@ -146,10 +149,3 @@ Subsystem-specific APIs
    wmi
    xilinx/index
    zorro
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

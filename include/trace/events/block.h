@@ -11,7 +11,7 @@
 #include <linux/tracepoint.h>
 #include <uapi/linux/ioprio.h>
 
-#define RWBS_LEN	8
+#define RWBS_LEN	10
 
 #define IOPRIO_CLASS_STRINGS \
 	{ IOPRIO_CLASS_NONE,	"none" }, \
@@ -227,6 +227,65 @@ DECLARE_EVENT_CLASS(block_rq,
 );
 
 /**
+ * block_rq_tag_wait - triggered when a request is starved of a tag
+ * @q: request queue of the target device
+ * @hctx: hardware context of the request experiencing starvation
+ * @is_sched_tag: indicates whether the starved pool is the software scheduler
+ * @alloc_flags: allocation flags dictating the specific tag pool
+ *
+ * Called immediately before the submitting context is forced to block due
+ * to the exhaustion of available tags (i.e., physical hardware driver
+ * tags, software scheduler tags, or reserved tags). This trace point
+ * indicates that the context will be placed into an uninterruptible state
+ * via sbitmap_prepare_to_wait(). If a tag is not acquired in the final
+ * lockless retry, the context will yield the CPU via io_schedule() until
+ * an active request completes and relinquishes its assigned tag.
+ */
+TRACE_EVENT(block_rq_tag_wait,
+
+	TP_PROTO(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
+		 bool is_sched_tag, unsigned int alloc_flags),
+
+	TP_ARGS(q, hctx, is_sched_tag, alloc_flags),
+
+	TP_STRUCT__entry(
+		__field( dev_t,		dev			)
+		__field( u32,		hctx_id			)
+		__field( u32,		nr_tags			)
+		__field( bool,		is_sched_tag		)
+		__field( bool,		is_reserved		)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= q->disk ? disk_devt(q->disk) : 0;
+		__entry->hctx_id	= hctx->queue_num;
+		__entry->is_sched_tag	= is_sched_tag;
+		__entry->is_reserved	= alloc_flags & BLK_MQ_REQ_RESERVED;
+
+		if (__entry->is_reserved) {
+			__entry->nr_tags = is_sched_tag ?
+					   hctx->sched_tags->nr_reserved_tags :
+					   hctx->tags->nr_reserved_tags;
+		} else {
+			if (is_sched_tag)
+				__entry->nr_tags = hctx->sched_tags->nr_tags -
+						   hctx->sched_tags->nr_reserved_tags;
+			else
+				__entry->nr_tags = hctx->tags->nr_tags -
+						   hctx->tags->nr_reserved_tags;
+		}
+
+	),
+
+	TP_printk("%d,%d hctx=%u starved on %s%s tags (depth=%u)",
+		  MAJOR(__entry->dev), MINOR(__entry->dev),
+		  __entry->hctx_id,
+		  __entry->is_sched_tag ? "scheduler" : "hardware",
+		  __entry->is_reserved ? " reserved" : "",
+		  __entry->nr_tags)
+);
+
+/**
  * block_rq_insert - insert block operation request into queue
  * @rq: block IO operation request
  *
@@ -361,21 +420,6 @@ DECLARE_EVENT_CLASS(block_bio,
 );
 
 /**
- * block_bio_bounce - used bounce buffer when processing block operation
- * @bio: block operation
- *
- * A bounce buffer was used to handle the block operation @bio in @q.
- * This occurs when hardware limitations prevent a direct transfer of
- * data between the @bio data memory area and the IO device.  Use of a
- * bounce buffer requires extra copying of data and decreases
- * performance.
- */
-DEFINE_EVENT(block_bio, block_bio_bounce,
-	TP_PROTO(struct bio *bio),
-	TP_ARGS(bio)
-);
-
-/**
  * block_bio_backmerge - merging block operation to the end of an existing operation
  * @bio: new block operation to merge
  *
@@ -417,6 +461,17 @@ DEFINE_EVENT(block_bio, block_bio_queue,
 DEFINE_EVENT(block_bio, block_getrq,
 	TP_PROTO(struct bio *bio),
 	TP_ARGS(bio)
+);
+
+/**
+ * blk_zone_append_update_request_bio - update bio sector after zone append
+ * @rq: the completed request that sets the bio sector
+ *
+ * Update the bio's bi_sector after a zone append command has been completed.
+ */
+DEFINE_EVENT(block_rq, blk_zone_append_update_request_bio,
+	     TP_PROTO(struct request *rq),
+	     TP_ARGS(rq)
 );
 
 /**
@@ -601,6 +656,84 @@ TRACE_EVENT(block_rq_remap,
 		  __entry->nr_sector,
 		  MAJOR(__entry->old_dev), MINOR(__entry->old_dev),
 		  (unsigned long long)__entry->old_sector, __entry->nr_bios)
+);
+
+/**
+ * blkdev_zone_mgmt - Execute a zone management operation on a range of zones
+ * @bio: The block IO operation sent down to the device
+ * @nr_sectors: The number of sectors affected by this operation
+ *
+ * Execute a zone management operation on a specified range of zones. This
+ * range is encoded in %nr_sectors, which has to be a multiple of the zone
+ * size.
+ */
+TRACE_EVENT(blkdev_zone_mgmt,
+
+	TP_PROTO(struct bio *bio, sector_t nr_sectors),
+
+	TP_ARGS(bio, nr_sectors),
+
+	TP_STRUCT__entry(
+	    __field(  dev_t,	dev		)
+	    __field(  sector_t,	sector		)
+	    __field(  sector_t, nr_sectors	)
+	    __array(  char,	rwbs,	RWBS_LEN)
+	),
+
+	TP_fast_assign(
+	    __entry->dev	= bio_dev(bio);
+	    __entry->sector	= bio->bi_iter.bi_sector;
+	    __entry->nr_sectors	= bio_sectors(bio);
+	    blk_fill_rwbs(__entry->rwbs, bio->bi_opf);
+        ),
+
+	TP_printk("%d,%d %s %llu + %llu",
+		  MAJOR(__entry->dev), MINOR(__entry->dev), __entry->rwbs,
+		  (unsigned long long)__entry->sector,
+		  __entry->nr_sectors)
+);
+
+DECLARE_EVENT_CLASS(block_zwplug,
+
+	TP_PROTO(struct request_queue *q, unsigned int zno, sector_t sector,
+		 unsigned int nr_sectors),
+
+	TP_ARGS(q, zno, sector, nr_sectors),
+
+	TP_STRUCT__entry(
+		__field( dev_t,		dev		)
+		__field( unsigned int,	zno		)
+		__field( sector_t,	sector		)
+		__field( unsigned int,	nr_sectors	)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= disk_devt(q->disk);
+		__entry->zno		= zno;
+		__entry->sector		= sector;
+		__entry->nr_sectors	= nr_sectors;
+	),
+
+	TP_printk("%d,%d zone %u, BIO %llu + %u",
+		  MAJOR(__entry->dev), MINOR(__entry->dev), __entry->zno,
+		  (unsigned long long)__entry->sector,
+		  __entry->nr_sectors)
+);
+
+DEFINE_EVENT(block_zwplug, disk_zone_wplug_add_bio,
+
+	TP_PROTO(struct request_queue *q, unsigned int zno, sector_t sector,
+		 unsigned int nr_sectors),
+
+	TP_ARGS(q, zno, sector, nr_sectors)
+);
+
+DEFINE_EVENT(block_zwplug, blk_zone_wplug_bio,
+
+	TP_PROTO(struct request_queue *q, unsigned int zno, sector_t sector,
+		 unsigned int nr_sectors),
+
+	TP_ARGS(q, zno, sector, nr_sectors)
 );
 
 #endif /* _TRACE_BLOCK_H */

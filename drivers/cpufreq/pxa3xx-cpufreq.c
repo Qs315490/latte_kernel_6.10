@@ -110,7 +110,7 @@ static int setup_freqs_table(struct cpufreq_policy *policy,
 	struct cpufreq_frequency_table *table;
 	int i;
 
-	table = kcalloc(num + 1, sizeof(*table), GFP_KERNEL);
+	table = kzalloc_objs(*table, num + 1);
 	if (table == NULL)
 		return -ENOMEM;
 
@@ -185,9 +185,8 @@ static int pxa3xx_cpufreq_init(struct cpufreq_policy *policy)
 	int ret = -EINVAL;
 
 	/* set default policy and cpuinfo */
-	policy->min = policy->cpuinfo.min_freq = 104000;
-	policy->max = policy->cpuinfo.max_freq =
-		(cpu_is_pxa320()) ? 806000 : 624000;
+	policy->cpuinfo.min_freq = 104000;
+	policy->cpuinfo.max_freq = (cpu_is_pxa320()) ? 806000 : 624000;
 	policy->cpuinfo.transition_latency = 1000; /* FIXME: 1 ms, assumed */
 
 	if (cpu_is_pxa300() || cpu_is_pxa310())

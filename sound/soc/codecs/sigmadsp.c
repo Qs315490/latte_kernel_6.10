@@ -35,7 +35,7 @@ struct sigmadsp_control {
 	struct snd_kcontrol *kcontrol;
 	bool is_readback;
 	bool cached;
-	uint8_t cache[];
+	u8 cache[] __counted_by(num_bytes);
 };
 
 struct sigmadsp_data {
@@ -223,7 +223,7 @@ static int sigma_fw_load_control(struct sigmadsp *sigmadsp,
 		return -EINVAL;
 
 	num_bytes = le16_to_cpu(ctrl_chunk->num_bytes);
-	ctrl = kzalloc(sizeof(*ctrl) + num_bytes, GFP_KERNEL);
+	ctrl = kzalloc_flex(*ctrl, cache, num_bytes);
 	if (!ctrl)
 		return -ENOMEM;
 
@@ -270,7 +270,7 @@ static int sigma_fw_load_data(struct sigmadsp *sigmadsp,
 
 	length -= sizeof(*data_chunk);
 
-	data = kzalloc(struct_size(data, data, length), GFP_KERNEL);
+	data = kzalloc_flex(*data, data, length);
 	if (!data)
 		return -ENOMEM;
 
@@ -413,8 +413,7 @@ static int process_sigma_action(struct sigmadsp *sigmadsp,
 		if (len < 3)
 			return -EINVAL;
 
-		data = kzalloc(struct_size(data, data, size_sub(len, 2)),
-			       GFP_KERNEL);
+		data = kzalloc_flex(*data, data, size_sub(len, 2));
 		if (!data)
 			return -ENOMEM;
 

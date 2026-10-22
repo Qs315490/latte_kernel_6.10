@@ -5,20 +5,26 @@
 #include "test_bpf_nf.skel.h"
 #include "test_bpf_nf_fail.skel.h"
 
+#define CT_OPTS_ERROR_GUARD 0x12345678
+
 static char log_buf[1024 * 1024];
 
 struct {
 	const char *prog_name;
 	const char *err_msg;
 } test_bpf_nf_fail_tests[] = {
-	{ "alloc_release", "kernel function bpf_ct_release args#0 expected pointer to STRUCT nf_conn but" },
-	{ "insert_insert", "kernel function bpf_ct_insert_entry args#0 expected pointer to STRUCT nf_conn___init but" },
-	{ "lookup_insert", "kernel function bpf_ct_insert_entry args#0 expected pointer to STRUCT nf_conn___init but" },
-	{ "set_timeout_after_insert", "kernel function bpf_ct_set_timeout args#0 expected pointer to STRUCT nf_conn___init but" },
-	{ "set_status_after_insert", "kernel function bpf_ct_set_status args#0 expected pointer to STRUCT nf_conn___init but" },
-	{ "change_timeout_after_alloc", "kernel function bpf_ct_change_timeout args#0 expected pointer to STRUCT nf_conn but" },
-	{ "change_status_after_alloc", "kernel function bpf_ct_change_status args#0 expected pointer to STRUCT nf_conn but" },
+	{ "alloc_release", "kernel function bpf_ct_release R1 expected pointer to STRUCT nf_conn but" },
+	{ "insert_insert", "kernel function bpf_ct_insert_entry R1 expected pointer to STRUCT nf_conn___init but" },
+	{ "lookup_insert", "kernel function bpf_ct_insert_entry R1 expected pointer to STRUCT nf_conn___init but" },
+	{ "set_timeout_after_insert", "kernel function bpf_ct_set_timeout R1 expected pointer to STRUCT nf_conn___init but" },
+	{ "set_status_after_insert", "kernel function bpf_ct_set_status R1 expected pointer to STRUCT nf_conn___init but" },
+	{ "change_timeout_after_alloc", "kernel function bpf_ct_change_timeout R1 expected pointer to STRUCT nf_conn but" },
+	{ "change_status_after_alloc", "kernel function bpf_ct_change_status R1 expected pointer to STRUCT nf_conn but" },
 	{ "write_not_allowlisted_field", "no write support to nf_conn at off" },
+	{ "lookup_null_bpf_tuple", "Possibly NULL pointer passed to trusted R2" },
+	{ "lookup_null_bpf_opts", "Possibly NULL pointer passed to trusted R4" },
+	{ "xdp_lookup_null_bpf_tuple", "Possibly NULL pointer passed to trusted R2" },
+	{ "xdp_lookup_null_bpf_opts", "Possibly NULL pointer passed to trusted R4" },
 };
 
 enum {
@@ -63,6 +69,12 @@ static void test_bpf_nf_ct(int mode)
 		.repeat = 1,
 	);
 
+	if (SYS_NOFAIL("iptables-legacy --version")) {
+		fprintf(stdout, "Missing required iptables-legacy tool\n");
+		test__skip();
+		return;
+	}
+
 	skel = test_bpf_nf__open_and_load();
 	if (!ASSERT_OK_PTR(skel, "test_bpf_nf__open_and_load"))
 		return;
@@ -72,9 +84,12 @@ static void test_bpf_nf_ct(int mode)
 	if (!ASSERT_OK(system(cmd), cmd))
 		goto end;
 
-	srv_port = (mode == TEST_XDP) ? 5005 : 5006;
-	srv_fd = start_server(AF_INET, SOCK_STREAM, "127.0.0.1", srv_port, TIMEOUT_MS);
+	srv_fd = start_server(AF_INET, SOCK_STREAM, "127.0.0.1", 0, TIMEOUT_MS);
 	if (!ASSERT_GE(srv_fd, 0, "start_server"))
+		goto end;
+
+	srv_port = get_socket_local_port(srv_fd);
+	if (!ASSERT_GE(srv_port, 0, "get_sock_local_port"))
 		goto end;
 
 	client_fd = connect_to_server(srv_fd);
@@ -91,7 +106,7 @@ static void test_bpf_nf_ct(int mode)
 	skel->bss->saddr = peer_addr.sin_addr.s_addr;
 	skel->bss->sport = peer_addr.sin_port;
 	skel->bss->daddr = peer_addr.sin_addr.s_addr;
-	skel->bss->dport = htons(srv_port);
+	skel->bss->dport = srv_port;
 
 	if (mode == TEST_XDP)
 		prog_fd = bpf_program__fd(skel->progs.nf_xdp_ct_test);
@@ -102,11 +117,14 @@ static void test_bpf_nf_ct(int mode)
 	if (!ASSERT_OK(err, "bpf_prog_test_run"))
 		goto end;
 
-	ASSERT_EQ(skel->bss->test_einval_bpf_tuple, -EINVAL, "Test EINVAL for NULL bpf_tuple");
 	ASSERT_EQ(skel->bss->test_einval_reserved, -EINVAL, "Test EINVAL for reserved not set to 0");
 	ASSERT_EQ(skel->bss->test_einval_reserved_new, -EINVAL, "Test EINVAL for reserved in new struct not set to 0");
 	ASSERT_EQ(skel->bss->test_einval_netns_id, -EINVAL, "Test EINVAL for netns_id < -1");
 	ASSERT_EQ(skel->bss->test_einval_len_opts, -EINVAL, "Test EINVAL for len__opts != NF_BPF_CT_OPTS_SZ");
+	ASSERT_EQ(skel->bss->test_einval_len_opts_small_lookup, CT_OPTS_ERROR_GUARD,
+		  "Test no error write for lookup opts__sz before error field");
+	ASSERT_EQ(skel->bss->test_einval_len_opts_small_alloc, CT_OPTS_ERROR_GUARD,
+		  "Test no error write for alloc opts__sz before error field");
 	ASSERT_EQ(skel->bss->test_eproto_l4proto, -EPROTO, "Test EPROTO for l4proto != TCP or UDP");
 	ASSERT_EQ(skel->bss->test_enonet_netns_id, -ENONET, "Test ENONET for bad but valid netns_id");
 	ASSERT_EQ(skel->bss->test_enoent_lookup, -ENOENT, "Test ENOENT for failed lookup");

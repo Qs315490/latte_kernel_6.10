@@ -13,12 +13,8 @@
 /*  */
 /*  Creadted by Roger, 2011.01.31. */
 /*  */
-static void hal_sdio_get_cmd_addr_8723b(
-	struct adapter *adapter,
-	u8 device_id,
-	u32 addr,
-	u32 *cmdaddr
-)
+static void hal_sdio_get_cmd_addr_8723b(struct adapter *adapter, u8 device_id,
+					u32 addr, u32 *cmdaddr)
 {
 	switch (device_id) {
 	case SDIO_LOCAL_DEVICE_ID:
@@ -132,6 +128,7 @@ static u32 _cvrt2ftaddr(const u32 addr, u8 *pdevice_id, u16 *poffset)
 static u8 sdio_read8(struct intf_hdl *intfhdl, u32 addr)
 {
 	u32 ftaddr;
+
 	ftaddr = _cvrt2ftaddr(addr, NULL, NULL);
 
 	return sd_read8(intfhdl, ftaddr, NULL);
@@ -180,7 +177,7 @@ static u32 sdio_read32(struct intf_hdl *intfhdl, u32 addr)
 	} else {
 		u8 *tmpbuf;
 
-		tmpbuf = rtw_malloc(8);
+		tmpbuf = kmalloc(8, GFP_ATOMIC);
 		if (!tmpbuf)
 			return SDIO_ERR_VAL32;
 
@@ -192,51 +189,6 @@ static u32 sdio_read32(struct intf_hdl *intfhdl, u32 addr)
 		kfree(tmpbuf);
 	}
 	return val;
-}
-
-static s32 sdio_readN(struct intf_hdl *intfhdl, u32 addr, u32 cnt, u8 *buf)
-{
-	struct adapter *adapter;
-	u8 mac_pwr_ctrl_on;
-	u8 device_id;
-	u16 offset;
-	u32 ftaddr;
-	u8 shift;
-	s32 err;
-
-	adapter = intfhdl->padapter;
-	err = 0;
-
-	ftaddr = _cvrt2ftaddr(addr, &device_id, &offset);
-
-	rtw_hal_get_hwreg(adapter, HW_VAR_APFM_ON_MAC, &mac_pwr_ctrl_on);
-	if (
-		((device_id == WLAN_IOREG_DEVICE_ID) && (offset < 0x100)) ||
-		(!mac_pwr_ctrl_on) ||
-		(adapter_to_pwrctl(adapter)->fw_current_in_ps_mode)
-	)
-		return sd_cmd52_read(intfhdl, ftaddr, cnt, buf);
-
-	/*  4 bytes alignment */
-	shift = ftaddr & 0x3;
-	if (shift == 0) {
-		err = sd_read(intfhdl, ftaddr, cnt, buf);
-	} else {
-		u8 *tmpbuf;
-		u32 n;
-
-		ftaddr &= ~(u16)0x3;
-		n = cnt + shift;
-		tmpbuf = rtw_malloc(n);
-		if (!tmpbuf)
-			return -1;
-
-		err = sd_read(intfhdl, ftaddr, n, tmpbuf);
-		if (!err)
-			memcpy(buf, tmpbuf + shift, cnt);
-		kfree(tmpbuf);
-	}
-	return err;
 }
 
 static s32 sdio_write8(struct intf_hdl *intfhdl, u32 addr, u8 val)
@@ -296,73 +248,6 @@ static s32 sdio_write32(struct intf_hdl *intfhdl, u32 addr, u32 val)
 		err = sd_cmd52_write(intfhdl, ftaddr, 4, (u8 *)&le_tmp);
 	}
 	return err;
-}
-
-static s32 sdio_writeN(struct intf_hdl *intfhdl, u32 addr, u32 cnt, u8 *buf)
-{
-	struct adapter *adapter;
-	u8 mac_pwr_ctrl_on;
-	u8 device_id;
-	u16 offset;
-	u32 ftaddr;
-	u8 shift;
-	s32 err;
-
-	adapter = intfhdl->padapter;
-	err = 0;
-
-	ftaddr = _cvrt2ftaddr(addr, &device_id, &offset);
-
-	rtw_hal_get_hwreg(adapter, HW_VAR_APFM_ON_MAC, &mac_pwr_ctrl_on);
-	if (
-		((device_id == WLAN_IOREG_DEVICE_ID) && (offset < 0x100)) ||
-		(!mac_pwr_ctrl_on) ||
-		(adapter_to_pwrctl(adapter)->fw_current_in_ps_mode)
-	)
-		return sd_cmd52_write(intfhdl, ftaddr, cnt, buf);
-
-	shift = ftaddr & 0x3;
-	if (shift == 0) {
-		err = sd_write(intfhdl, ftaddr, cnt, buf);
-	} else {
-		u8 *tmpbuf;
-		u32 n;
-
-		ftaddr &= ~(u16)0x3;
-		n = cnt + shift;
-		tmpbuf = rtw_malloc(n);
-		if (!tmpbuf)
-			return -1;
-		err = sd_read(intfhdl, ftaddr, 4, tmpbuf);
-		if (err) {
-			kfree(tmpbuf);
-			return err;
-		}
-		memcpy(tmpbuf + shift, buf, cnt);
-		err = sd_write(intfhdl, ftaddr, n, tmpbuf);
-		kfree(tmpbuf);
-	}
-	return err;
-}
-
-static void sdio_read_mem(
-	struct intf_hdl *intfhdl,
-	u32 addr,
-	u32 cnt,
-	u8 *rmem
-)
-{
-	sdio_readN(intfhdl, addr, cnt, rmem);
-}
-
-static void sdio_write_mem(
-	struct intf_hdl *intfhdl,
-	u32 addr,
-	u32 cnt,
-	u8 *wmem
-)
-{
-	sdio_writeN(intfhdl, addr, cnt, wmem);
 }
 
 /*
@@ -466,14 +351,10 @@ void sdio_set_intf_ops(struct adapter *adapter, struct _io_ops *ops)
 	ops->_read8 = &sdio_read8;
 	ops->_read16 = &sdio_read16;
 	ops->_read32 = &sdio_read32;
-	ops->_read_mem = &sdio_read_mem;
-	ops->_read_port = &sdio_read_port;
 
 	ops->_write8 = &sdio_write8;
 	ops->_write16 = &sdio_write16;
 	ops->_write32 = &sdio_write32;
-	ops->_writeN = &sdio_writeN;
-	ops->_write_mem = &sdio_write_mem;
 	ops->_write_port = &sdio_write_port;
 }
 
@@ -502,9 +383,9 @@ static s32 _sdio_local_read(
 		return _sd_cmd52_read(intfhdl, addr, cnt, buf);
 
 	n = round_up(cnt, 4);
-	tmpbuf = rtw_malloc(n);
+	tmpbuf = kmalloc(n, GFP_ATOMIC);
 	if (!tmpbuf)
-		return -1;
+		return -ENOMEM;
 
 	err = _sd_read(intfhdl, addr, n, tmpbuf);
 	if (!err)
@@ -543,9 +424,9 @@ s32 sdio_local_read(
 		return sd_cmd52_read(intfhdl, addr, cnt, buf);
 
 	n = round_up(cnt, 4);
-	tmpbuf = rtw_malloc(n);
+	tmpbuf = kmalloc(n, GFP_ATOMIC);
 	if (!tmpbuf)
-		return -1;
+		return -ENOMEM;
 
 	err = sd_read(intfhdl, addr, n, tmpbuf);
 	if (!err)
@@ -582,11 +463,9 @@ s32 sdio_local_write(
 	)
 		return sd_cmd52_write(intfhdl, addr, cnt, buf);
 
-	tmpbuf = rtw_malloc(cnt);
+	tmpbuf = kmemdup(buf, cnt, GFP_ATOMIC);
 	if (!tmpbuf)
-		return -1;
-
-	memcpy(tmpbuf, buf, cnt);
+		return -ENOMEM;
 
 	err = sd_write(intfhdl, addr, cnt, tmpbuf);
 
@@ -702,45 +581,22 @@ void InitInterrupt8723BSdio(struct adapter *adapter)
 				   0);
 }
 
-/*  */
-/*	Description: */
-/*		Initialize System Host Interrupt Mask configuration variables for future use. */
-/*  */
-/*	Created by Roger, 2011.08.03. */
-/*  */
-void InitSysInterrupt8723BSdio(struct adapter *adapter)
-{
-	struct hal_com_data *haldata;
-
-	haldata = GET_HAL_DATA(adapter);
-
-	haldata->SysIntrMask = (0);
-}
-
-/*  */
-/*	Description: */
-/*		Enalbe SDIO Host Interrupt Mask configuration on SDIO local domain. */
-/*  */
-/*	Assumption: */
-/*		1. Using SDIO Local register ONLY for configuration. */
-/*		2. PASSIVE LEVEL */
-/*  */
-/*	Created by Roger, 2011.02.11. */
-/*  */
-void EnableInterrupt8723BSdio(struct adapter *adapter)
+/*
+ * Enable SDIO Host Interrupt Mask configuration on SDIO local domain.
+ *
+ * Assumption:
+ *	1. Using SDIO Local register ONLY for configuration.
+ *	2. PASSIVE LEVEL
+ */
+void rtw_sdio_enable_interrupt(struct adapter *adapter)
 {
 	struct hal_com_data *haldata;
 	__le32 himr;
-	u32 tmp;
 
 	haldata = GET_HAL_DATA(adapter);
 
 	himr = cpu_to_le32(haldata->sdio_himr);
 	sdio_local_write(adapter, SDIO_REG_HIMR, 4, (u8 *)&himr);
-
-	/*  Update current system IMR settings */
-	tmp = rtw_read32(adapter, REG_HSIMR);
-	rtw_write32(adapter, REG_HSIMR, tmp | haldata->SysIntrMask);
 
 	/*  */
 	/*  <Roger_Notes> There are some C2H CMDs have been sent before system interrupt is enabled, e.g., C2H, CPWM. */
@@ -750,16 +606,13 @@ void EnableInterrupt8723BSdio(struct adapter *adapter)
 	rtw_write8(adapter, REG_C2HEVT_CLEAR, C2H_EVT_HOST_CLOSE);
 }
 
-/*  */
-/*	Description: */
-/*		Disable SDIO Host IMR configuration to mask unnecessary interrupt service. */
-/*  */
-/*	Assumption: */
-/*		Using SDIO Local register ONLY for configuration. */
-/*  */
-/*	Created by Roger, 2011.02.11. */
-/*  */
-void DisableInterrupt8723BSdio(struct adapter *adapter)
+/*
+ * Disable SDIO Host IMR configuration to mask unnecessary interrupt service.
+ *
+ * Assumption:
+ *	Using SDIO Local register ONLY for configuration.
+ */
+void rtw_sdio_disable_interrupt(struct adapter *adapter)
 {
 	__le32 himr;
 
@@ -809,7 +662,7 @@ static struct recv_buf *sd_recv_rxfifo(struct adapter *adapter, u32 size)
 		SIZE_PTR tmpaddr = 0;
 		SIZE_PTR alignment = 0;
 
-		recvbuf->pskb = rtw_skb_alloc(MAX_RECVBUF_SZ + RECVBUFF_ALIGN_SZ);
+		recvbuf->pskb = __dev_alloc_skb(MAX_RECVBUF_SZ + RECVBUFF_ALIGN_SZ, GFP_ATOMIC);
 		if (!recvbuf->pskb)
 			return NULL;
 
@@ -871,7 +724,7 @@ void sd_int_dpc(struct adapter *adapter)
 	}
 
 	if (hal->sdio_hisr & SDIO_HISR_CPWM1) {
-		del_timer_sync(&(pwrctl->pwr_rpwm_timer));
+		timer_delete_sync(&(pwrctl->pwr_rpwm_timer));
 
 		SdioLocalCmd52Read1Byte(adapter, SDIO_REG_HCPWM1_8723B);
 
@@ -882,7 +735,7 @@ void sd_int_dpc(struct adapter *adapter)
 		u8 *status;
 		u32 addr;
 
-		status = rtw_malloc(4);
+		status = kmalloc(4, GFP_ATOMIC);
 		if (status) {
 			addr = REG_TXDMA_STATUS;
 			hal_sdio_get_cmd_addr_8723b(adapter, WLAN_IOREG_DEVICE_ID, addr, &addr);
@@ -895,7 +748,7 @@ void sd_int_dpc(struct adapter *adapter)
 	if (hal->sdio_hisr & SDIO_HISR_C2HCMD) {
 		struct c2h_evt_hdr_88xx *c2h_evt;
 
-		c2h_evt = rtw_zmalloc(16);
+		c2h_evt = kzalloc(16, GFP_ATOMIC);
 		if (c2h_evt) {
 			if (c2h_evt_read_88xx(adapter, (u8 *)c2h_evt) == _SUCCESS) {
 				if (c2h_id_filter_ccx_8723b((u8 *)c2h_evt)) {
@@ -997,15 +850,10 @@ u8 HalQueryTxBufferStatus8723BSdio(struct adapter *adapter)
 	return true;
 }
 
-/*  */
-/*	Description: */
-/*		Query SDIO Local register to get the current number of TX OQT Free Space. */
-/*  */
+/* Read the TX OQT free page count from the SDIO local register. */
 void HalQueryTxOQTBufferStatus8723BSdio(struct adapter *adapter)
 {
 	struct hal_com_data *haldata = GET_HAL_DATA(adapter);
 
 	haldata->SdioTxOQTFreeSpace = SdioLocalCmd52Read1Byte(adapter, SDIO_REG_OQT_FREE_PG);
 }
-
-

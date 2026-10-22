@@ -20,6 +20,7 @@
 #include <linux/compat.h>
 #include <linux/mount.h>
 #include <linux/fs.h>
+#include <linux/filelock.h>
 #include "internal.h"
 
 #include <linux/uaccess.h>
@@ -28,8 +29,9 @@
 const struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
 	.read_iter	= generic_file_read_iter,
-	.mmap		= generic_file_readonly_mmap,
+	.mmap_prepare	= generic_file_readonly_mmap_prepare,
 	.splice_read	= filemap_splice_read,
+	.setlease	= generic_setlease,
 };
 
 EXPORT_SYMBOL(generic_ro_fops);
@@ -169,11 +171,16 @@ generic_file_llseek_size(struct file *file, loff_t offset, int whence,
 
 	if (whence == SEEK_CUR) {
 		/*
-		 * f_lock protects against read/modify/write race with
-		 * other SEEK_CURs. Note that parallel writes and reads
-		 * behave like SEEK_SET.
+		 * If the file requires locking via f_pos_lock we know
+		 * that mutual exclusion for SEEK_CUR on the same file
+		 * is guaranteed. If the file isn't locked, we take
+		 * f_lock to protect against f_pos races with other
+		 * SEEK_CURs.
 		 */
-		guard(spinlock)(&file->f_lock);
+		if (file_seek_cur_needs_f_lock(file)) {
+			guard(spinlock)(&file->f_lock);
+			return vfs_setpos(file, file->f_pos + offset, maxsize);
+		}
 		return vfs_setpos(file, file->f_pos + offset, maxsize);
 	}
 
@@ -232,7 +239,7 @@ EXPORT_SYMBOL(generic_llseek_cookie);
  * @offset:	file offset to seek to
  * @whence:	type of seek
  *
- * This is a generic implemenation of ->llseek useable for all normal local
+ * This is a generic implementation of ->llseek useable for all normal local
  * filesystems.  It just updates the file offset to the value specified by
  * @offset and @whence.
  */
@@ -327,7 +334,9 @@ loff_t default_llseek(struct file *file, loff_t offset, int whence)
 	struct inode *inode = file_inode(file);
 	loff_t retval;
 
-	inode_lock(inode);
+	retval = inode_lock_killable(inode);
+	if (retval)
+		return retval;
 	switch (whence) {
 		case SEEK_END:
 			offset += i_size_read(inode);
@@ -632,13 +641,12 @@ ssize_t __kernel_write(struct file *file, const void *buf, size_t count, loff_t 
 	return __kernel_write_iter(file, &iter, pos);
 }
 /*
- * This "EXPORT_SYMBOL_GPL()" is more of a "EXPORT_SYMBOL_DONTUSE()",
- * but autofs is one of the few internal kernel users that actually
+ * autofs is one of the few internal kernel users that actually
  * wants this _and_ can be built as a module. So we need to export
  * this symbol for autofs, even though it really isn't appropriate
  * for any other kernel modules.
  */
-EXPORT_SYMBOL_GPL(__kernel_write);
+EXPORT_SYMBOL_FOR_MODULES(__kernel_write, "autofs4");
 
 ssize_t kernel_write(struct file *file, const void *buf, size_t count,
 			    loff_t *pos)
@@ -1569,6 +1577,13 @@ ssize_t vfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	if (len == 0)
 		return 0;
 
+	/*
+	 * Make sure return value doesn't overflow in 32bit compat mode.  Also
+	 * limit the size for all cases except when calling ->copy_file_range().
+	 */
+	if (splice || !file_out->f_op->copy_file_range || in_compat_syscall())
+		len = min_t(size_t, MAX_RW_COUNT, len);
+
 	file_start_write(file_out);
 
 	/*
@@ -1582,9 +1597,7 @@ ssize_t vfs_copy_file_range(struct file *file_in, loff_t pos_in,
 						      len, flags);
 	} else if (!splice && file_in->f_op->remap_file_range && samesb) {
 		ret = file_in->f_op->remap_file_range(file_in, pos_in,
-				file_out, pos_out,
-				min_t(loff_t, MAX_RW_COUNT, len),
-				REMAP_FILE_CAN_SHORTEN);
+				file_out, pos_out, len, REMAP_FILE_CAN_SHORTEN);
 		/* fallback to splice */
 		if (ret <= 0)
 			splice = true;
@@ -1617,8 +1630,7 @@ ssize_t vfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	 * to splicing from input file, while file_start_write() is held on
 	 * the output file on a different sb.
 	 */
-	ret = do_splice_direct(file_in, &pos_in, file_out, &pos_out,
-			       min_t(size_t, len, MAX_RW_COUNT), 0);
+	ret = do_splice_direct(file_in, &pos_in, file_out, &pos_out, len, 0);
 done:
 	if (ret > 0) {
 		fsnotify_access(file_in);

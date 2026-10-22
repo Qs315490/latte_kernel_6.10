@@ -422,15 +422,14 @@ static int pctv452e_i2c_msg(struct dvb_usb_device *d, u8 addr,
 	u8 id;
 	int ret;
 
+	if (snd_len > 64 - 7 || rcv_len > 64 - 7)
+		return -EINVAL;
+
 	buf = kmalloc(64, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
 	id = state->c++;
-
-	ret = -EINVAL;
-	if (snd_len > 64 - 7 || rcv_len > 64 - 7)
-		goto failed;
 
 	buf[0] = SYNC_BYTE_OUT;
 	buf[1] = id;
@@ -906,14 +905,14 @@ static struct stb6100_config stb6100_config = {
 };
 
 
-static struct i2c_algorithm pctv452e_i2c_algo = {
+static const struct i2c_algorithm pctv452e_i2c_algo = {
 	.master_xfer   = pctv452e_i2c_xfer,
 	.functionality = pctv452e_i2c_func
 };
 
 static int pctv452e_frontend_attach(struct dvb_usb_adapter *a)
 {
-	struct usb_device_id *id;
+	const struct usb_device_id *id;
 
 	a->fe_adap[0].fe = dvb_attach(stb0899_attach, &stb0899_config,
 						&a->dev->i2c_adap);
@@ -959,7 +958,7 @@ enum {
 	TECHNOTREND_CONNECT_S2_3650_CI,
 };
 
-static struct usb_device_id pctv452e_usb_table[] = {
+static const struct usb_device_id pctv452e_usb_table[] = {
 	DVB_USB_DEV(PINNACLE, PINNACLE_PCTV_452E),
 	DVB_USB_DEV(TECHNOTREND, TECHNOTREND_CONNECT_S2_3600),
 	DVB_USB_DEV(TECHNOTREND, TECHNOTREND_CONNECT_S2_3650_CI),

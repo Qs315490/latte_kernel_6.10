@@ -88,13 +88,13 @@ static int selinux_xfrm_alloc_user(struct xfrm_sec_ctx **ctxp,
 	if (str_len >= PAGE_SIZE)
 		return -ENOMEM;
 
-	ctx = kmalloc(struct_size(ctx, ctx_str, str_len + 1), gfp);
+	ctx = kmalloc_flex(*ctx, ctx_str, str_len + 1, gfp);
 	if (!ctx)
 		return -ENOMEM;
 
 	ctx->ctx_doi = XFRM_SC_DOI_LSM;
 	ctx->ctx_alg = XFRM_SC_ALG_SELINUX;
-	ctx->ctx_len = str_len;
+	ctx->ctx_len = str_len + 1;
 	memcpy(ctx->ctx_str, &uctx[1], str_len);
 	ctx->ctx_str[str_len] = '\0';
 	rc = security_context_to_sid(ctx->ctx_str, str_len,
@@ -354,7 +354,7 @@ int selinux_xfrm_state_alloc_acquire(struct xfrm_state *x,
 	if (rc)
 		return rc;
 
-	ctx = kmalloc(struct_size(ctx, ctx_str, str_len), GFP_ATOMIC);
+	ctx = kmalloc_flex(*ctx, ctx_str, str_len, GFP_ATOMIC);
 	if (!ctx) {
 		rc = -ENOMEM;
 		goto out;

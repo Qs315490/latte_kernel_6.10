@@ -403,27 +403,6 @@ struct mv_cesa_dev_dma {
 };
 
 /**
- * struct mv_cesa_dev - CESA device
- * @caps:	device capabilities
- * @regs:	device registers
- * @sram_size:	usable SRAM size
- * @lock:	device lock
- * @engines:	array of engines
- * @dma:	dma pools
- *
- * Structure storing CESA device information.
- */
-struct mv_cesa_dev {
-	const struct mv_cesa_caps *caps;
-	void __iomem *regs;
-	struct device *dev;
-	unsigned int sram_size;
-	spinlock_t lock;
-	struct mv_cesa_engine *engines;
-	struct mv_cesa_dev_dma *dma;
-};
-
-/**
  * struct mv_cesa_engine - CESA engine
  * @id:			engine id
  * @regs:		engine registers
@@ -440,8 +419,10 @@ struct mv_cesa_dev {
  *			SRAM
  * @queue:		fifo of the pending crypto requests
  * @load:		engine load counter, useful for load balancing
- * @chain:		list of the current tdma descriptors being processed
- *			by this engine.
+ * @chain_hw:		list of the current tdma descriptors being processed
+ *			by the hardware.
+ * @chain_sw:		list of the current tdma descriptors that will be
+ *			submitted to the hardware.
  * @complete_queue:	fifo of the processed requests by the engine
  *
  * Structure storing CESA engine information.
@@ -463,9 +444,31 @@ struct mv_cesa_engine {
 	struct gen_pool *pool;
 	struct crypto_queue queue;
 	atomic_t load;
-	struct mv_cesa_tdma_chain chain;
+	struct mv_cesa_tdma_chain chain_hw;
+	struct mv_cesa_tdma_chain chain_sw;
 	struct list_head complete_queue;
 	int irq;
+};
+
+/**
+ * struct mv_cesa_dev - CESA device
+ * @caps:	device capabilities
+ * @regs:	device registers
+ * @sram_size:	usable SRAM size
+ * @lock:	device lock
+ * @dma:	dma pools
+ * @engines:	array of engines
+ *
+ * Structure storing CESA device information.
+ */
+struct mv_cesa_dev {
+	const struct mv_cesa_caps *caps;
+	void __iomem *regs;
+	struct device *dev;
+	unsigned int sram_size;
+	spinlock_t lock;
+	struct mv_cesa_dev_dma *dma;
+	struct mv_cesa_engine engines[];
 };
 
 /**

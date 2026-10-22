@@ -199,7 +199,7 @@ static blk_status_t ubiblock_read(struct request *req)
 	 * and ubi_read_sg() will check that limit.
 	 */
 	ubi_sgl_init(&pdu->usgl);
-	blk_rq_map_sg(req->q, req, pdu->usgl.sg);
+	blk_rq_map_sg(req, pdu->usgl.sg);
 
 	while (bytes_left) {
 		/*
@@ -282,12 +282,12 @@ static void ubiblock_release(struct gendisk *gd)
 	mutex_unlock(&dev->dev_mutex);
 }
 
-static int ubiblock_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+static int ubiblock_getgeo(struct gendisk *disk, struct hd_geometry *geo)
 {
 	/* Some tools might require this information */
 	geo->heads = 1;
 	geo->cylinders = 1;
-	geo->sectors = get_capacity(bdev->bd_disk);
+	geo->sectors = get_capacity(disk);
 	geo->start = 0;
 	return 0;
 }
@@ -312,7 +312,7 @@ static blk_status_t ubiblock_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 static int ubiblock_init_request(struct blk_mq_tag_set *set,
 		struct request *req, unsigned int hctx_idx,
-		unsigned int numa_node)
+		int numa_node)
 {
 	struct ubiblock_pdu *pdu = blk_mq_rq_to_pdu(req);
 
@@ -368,7 +368,7 @@ int ubiblock_create(struct ubi_volume_info *vi)
 		goto out_unlock;
 	}
 
-	dev = kzalloc(sizeof(struct ubiblock), GFP_KERNEL);
+	dev = kzalloc_obj(struct ubiblock);
 	if (!dev) {
 		ret = -ENOMEM;
 		goto out_unlock;

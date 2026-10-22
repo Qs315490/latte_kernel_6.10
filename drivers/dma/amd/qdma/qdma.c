@@ -9,7 +9,6 @@
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/amd_qdma.h>
 #include <linux/regmap.h>
@@ -769,7 +768,7 @@ qdma_prep_device_sg(struct dma_chan *chan, struct scatterlist *sgl,
 	struct dma_async_tx_descriptor *tx;
 	struct qdma_mm_vdesc *vdesc;
 
-	vdesc = kzalloc(sizeof(*vdesc), GFP_NOWAIT);
+	vdesc = kzalloc_obj(*vdesc, GFP_NOWAIT);
 	if (!vdesc)
 		return NULL;
 	vdesc->sgl = sgl;

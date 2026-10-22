@@ -18,7 +18,6 @@ mac80211-y := \
 	iface.o \
 	link.o \
 	rate.o \
-	michael.o \
 	tkip.o \
 	aes_cmac.o \
 	aes_gmac.o \
@@ -31,12 +30,12 @@ mac80211-y := \
 	key.o \
 	util.o parse.o \
 	wme.o \
-	chan.o \
+	chan.o ap.o \
 	trace.o mlme.o \
 	tdls.o \
 	ocb.o \
 	airtime.o \
-	eht.o
+	eht.o uhr.o nan.o
 
 mac80211-$(CONFIG_MAC80211_LEDS) += led.o
 mac80211-$(CONFIG_MAC80211_DEBUGFS) += \

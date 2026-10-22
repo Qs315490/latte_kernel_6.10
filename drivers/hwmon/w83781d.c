@@ -1559,10 +1559,10 @@ static struct w83781d_data *w83781d_update_device(struct device *dev)
 }
 
 static const struct i2c_device_id w83781d_ids[] = {
-	{ "w83781d", w83781d, },
-	{ "w83782d", w83782d, },
-	{ "w83783s", w83783s, },
-	{ "as99127f", as99127f },
+	{ .name = "w83781d", .driver_data = w83781d },
+	{ .name = "w83782d", .driver_data = w83782d },
+	{ .name = "w83783s", .driver_data = w83783s },
+	{ .name = "as99127f", .driver_data = as99127f },
 	{ /* LIST END */ }
 };
 MODULE_DEVICE_TABLE(i2c, w83781d_ids);
@@ -1850,10 +1850,12 @@ w83781d_isa_found(unsigned short address)
 		}
 	}
 
-#define REALLY_SLOW_IO
 	/*
 	 * We need the timeouts for at least some W83781D-like
 	 * chips. But only if we read 'undefined' registers.
+	 * There used to be a "#define REALLY_SLOW_IO" to enforce that, but
+	 * this has been without any effect since more than a decade, so it
+	 * has been dropped.
 	 */
 	val = inb_p(address + 1);
 	if (inb_p(address + 2) != val
@@ -1862,7 +1864,6 @@ w83781d_isa_found(unsigned short address)
 		pr_debug("Detection failed at step %d\n", 1);
 		goto release;
 	}
-#undef REALLY_SLOW_IO
 
 	/*
 	 * We should be able to change the 7 LSB of the address port. The

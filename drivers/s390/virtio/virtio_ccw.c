@@ -8,6 +8,7 @@
  */
 
 #include <linux/kernel_stat.h>
+#include <linux/hex.h>
 #include <linux/init.h>
 #include <linux/memblock.h>
 #include <linux/err.h>
@@ -276,7 +277,7 @@ static struct airq_info *new_airq_info(int index)
 	struct airq_info *info;
 	int rc;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return NULL;
 	rwlock_init(&info->lock);
@@ -302,10 +303,16 @@ static struct airq_info *new_airq_info(int index)
 static unsigned long *get_airq_indicator(struct virtqueue *vqs[], int nvqs,
 					 u64 *first, void **airq_info)
 {
-	int i, j;
+	int i, j, queue_idx, highest_queue_idx = -1;
 	struct airq_info *info;
 	unsigned long *indicator_addr = NULL;
 	unsigned long bit, flags;
+
+	/* Array entries without an actual queue pointer must be ignored. */
+	for (i = 0; i < nvqs; i++) {
+		if (vqs[i])
+			highest_queue_idx++;
+	}
 
 	for (i = 0; i < MAX_AIRQ_AREAS && !indicator_addr; i++) {
 		mutex_lock(&airq_areas_lock);
@@ -316,7 +323,7 @@ static unsigned long *get_airq_indicator(struct virtqueue *vqs[], int nvqs,
 		if (!info)
 			return NULL;
 		write_lock_irqsave(&info->lock, flags);
-		bit = airq_iv_alloc(info->aiv, nvqs);
+		bit = airq_iv_alloc(info->aiv, highest_queue_idx + 1);
 		if (bit == -1UL) {
 			/* Not enough vacancies. */
 			write_unlock_irqrestore(&info->lock, flags);
@@ -325,8 +332,10 @@ static unsigned long *get_airq_indicator(struct virtqueue *vqs[], int nvqs,
 		*first = bit;
 		*airq_info = info;
 		indicator_addr = info->aiv->vector;
-		for (j = 0; j < nvqs; j++) {
-			airq_iv_set_ptr(info->aiv, bit + j,
+		for (j = 0, queue_idx = 0; j < nvqs; j++) {
+			if (!vqs[j])
+				continue;
+			airq_iv_set_ptr(info->aiv, bit + queue_idx++,
 					(unsigned long)vqs[j]);
 		}
 		write_unlock_irqrestore(&info->lock, flags);
@@ -557,7 +566,7 @@ static struct virtqueue *virtio_ccw_setup_vq(struct virtio_device *vdev,
 		notify = virtio_ccw_kvm_notify;
 
 	/* Allocate queue. */
-	info = kzalloc(sizeof(struct virtio_ccw_vq_info), GFP_KERNEL);
+	info = kzalloc_obj(struct virtio_ccw_vq_info);
 	if (!info) {
 		dev_warn(&vcdev->cdev->dev, "no info\n");
 		err = -ENOMEM;
@@ -1361,7 +1370,7 @@ static int virtio_ccw_online(struct ccw_device *cdev)
 	struct virtio_ccw_device *vcdev;
 	unsigned long flags;
 
-	vcdev = kzalloc(sizeof(*vcdev), GFP_KERNEL);
+	vcdev = kzalloc_obj(*vcdev);
 	if (!vcdev) {
 		dev_warn(&cdev->dev, "Could not get memory for virtio\n");
 		ret = -ENOMEM;

@@ -9,16 +9,17 @@
 #include <asm/kvm.h>
 #include <asm/kvm_para.h>
 
+#include <arm64/gic_v3.h>
+
 #include "test_util.h"
 #include "kvm_util.h"
 #include "processor.h"
 #include "vgic.h"
+#include "gic_v3.h"
 
 #define NR_VCPUS		4
 
-#define REG_OFFSET(vcpu, offset) (((uint64_t)vcpu << 32) | offset)
-
-#define GICR_TYPER 0x8
+#define REG_OFFSET(vcpu, offset) (((u64)vcpu << 32) | offset)
 
 #define VGIC_DEV_IS_V2(_d) ((_d) == KVM_DEV_TYPE_ARM_VGIC_V2)
 #define VGIC_DEV_IS_V3(_d) ((_d) == KVM_DEV_TYPE_ARM_VGIC_V3)
@@ -26,10 +27,10 @@
 struct vm_gic {
 	struct kvm_vm *vm;
 	int gic_fd;
-	uint32_t gic_dev_type;
+	u32 gic_dev_type;
 };
 
-static uint64_t max_phys_size;
+static u64 max_phys_size;
 
 /*
  * Helpers to access a redistributor register and verify the ioctl() failed or
@@ -38,17 +39,17 @@ static uint64_t max_phys_size;
 static void v3_redist_reg_get_errno(int gicv3_fd, int vcpu, int offset,
 				    int want, const char *msg)
 {
-	uint32_t ignored_val;
+	u32 ignored_val;
 	int ret = __kvm_device_attr_get(gicv3_fd, KVM_DEV_ARM_VGIC_GRP_REDIST_REGS,
 					REG_OFFSET(vcpu, offset), &ignored_val);
 
 	TEST_ASSERT(ret && errno == want, "%s; want errno = %d", msg, want);
 }
 
-static void v3_redist_reg_get(int gicv3_fd, int vcpu, int offset, uint32_t want,
+static void v3_redist_reg_get(int gicv3_fd, int vcpu, int offset, u32 want,
 			      const char *msg)
 {
-	uint32_t val;
+	u32 val;
 
 	kvm_device_attr_get(gicv3_fd, KVM_DEV_ARM_VGIC_GRP_REDIST_REGS,
 			    REG_OFFSET(vcpu, offset), &val);
@@ -70,8 +71,8 @@ static int run_vcpu(struct kvm_vcpu *vcpu)
 	return __vcpu_run(vcpu) ? -errno : 0;
 }
 
-static struct vm_gic vm_gic_create_with_vcpus(uint32_t gic_dev_type,
-					      uint32_t nr_vcpus,
+static struct vm_gic vm_gic_create_with_vcpus(u32 gic_dev_type,
+					      u32 nr_vcpus,
 					      struct kvm_vcpu *vcpus[])
 {
 	struct vm_gic v;
@@ -83,7 +84,7 @@ static struct vm_gic vm_gic_create_with_vcpus(uint32_t gic_dev_type,
 	return v;
 }
 
-static struct vm_gic vm_gic_create_barebones(uint32_t gic_dev_type)
+static struct vm_gic vm_gic_create_barebones(u32 gic_dev_type)
 {
 	struct vm_gic v;
 
@@ -102,9 +103,9 @@ static void vm_gic_destroy(struct vm_gic *v)
 }
 
 struct vgic_region_attr {
-	uint64_t attr;
-	uint64_t size;
-	uint64_t alignment;
+	u64 attr;
+	u64 size;
+	u64 alignment;
 };
 
 struct vgic_region_attr gic_v3_dist_region = {
@@ -142,7 +143,7 @@ struct vgic_region_attr gic_v2_cpu_region = {
 static void subtest_dist_rdist(struct vm_gic *v)
 {
 	int ret;
-	uint64_t addr;
+	u64 addr;
 	struct vgic_region_attr rdist; /* CPU interface in GICv2*/
 	struct vgic_region_attr dist;
 
@@ -222,7 +223,7 @@ static void subtest_dist_rdist(struct vm_gic *v)
 /* Test the new REDIST region API */
 static void subtest_v3_redist_regions(struct vm_gic *v)
 {
-	uint64_t addr, expected_addr;
+	u64 addr, expected_addr;
 	int ret;
 
 	ret = __kvm_has_device_attr(v->gic_fd, KVM_DEV_ARM_VGIC_GRP_ADDR,
@@ -331,7 +332,7 @@ static void subtest_v3_redist_regions(struct vm_gic *v)
  * VGIC KVM device is created and initialized before the secondary CPUs
  * get created
  */
-static void test_vgic_then_vcpus(uint32_t gic_dev_type)
+static void test_vgic_then_vcpus(u32 gic_dev_type)
 {
 	struct kvm_vcpu *vcpus[NR_VCPUS];
 	struct vm_gic v;
@@ -352,7 +353,7 @@ static void test_vgic_then_vcpus(uint32_t gic_dev_type)
 }
 
 /* All the VCPUs are created before the VGIC KVM device gets initialized */
-static void test_vcpus_then_vgic(uint32_t gic_dev_type)
+static void test_vcpus_then_vgic(u32 gic_dev_type)
 {
 	struct kvm_vcpu *vcpus[NR_VCPUS];
 	struct vm_gic v;
@@ -407,7 +408,7 @@ static void test_v3_new_redist_regions(void)
 	struct kvm_vcpu *vcpus[NR_VCPUS];
 	void *dummy = NULL;
 	struct vm_gic v;
-	uint64_t addr;
+	u64 addr;
 	int ret;
 
 	v = vm_gic_create_with_vcpus(KVM_DEV_TYPE_ARM_VGIC_V3, NR_VCPUS, vcpus);
@@ -459,7 +460,7 @@ static void test_v3_new_redist_regions(void)
 static void test_v3_typer_accesses(void)
 {
 	struct vm_gic v;
-	uint64_t addr;
+	u64 addr;
 	int ret, i;
 
 	v.vm = vm_create(NR_VCPUS);
@@ -517,7 +518,7 @@ static void test_v3_typer_accesses(void)
 }
 
 static struct vm_gic vm_gic_v3_create_with_vcpuids(int nr_vcpus,
-						   uint32_t vcpuids[])
+						   u32 vcpuids[])
 {
 	struct vm_gic v;
 	int i;
@@ -543,9 +544,9 @@ static struct vm_gic vm_gic_v3_create_with_vcpuids(int nr_vcpus,
  */
 static void test_v3_last_bit_redist_regions(void)
 {
-	uint32_t vcpuids[] = { 0, 3, 5, 4, 1, 2 };
+	u32 vcpuids[] = { 0, 3, 5, 4, 1, 2 };
 	struct vm_gic v;
-	uint64_t addr;
+	u64 addr;
 
 	v = vm_gic_v3_create_with_vcpuids(ARRAY_SIZE(vcpuids), vcpuids);
 
@@ -577,9 +578,9 @@ static void test_v3_last_bit_redist_regions(void)
 /* Test last bit with legacy region */
 static void test_v3_last_bit_single_rdist(void)
 {
-	uint32_t vcpuids[] = { 0, 3, 5, 4, 1, 2 };
+	u32 vcpuids[] = { 0, 3, 5, 4, 1, 2 };
 	struct vm_gic v;
-	uint64_t addr;
+	u64 addr;
 
 	v = vm_gic_v3_create_with_vcpuids(ARRAY_SIZE(vcpuids), vcpuids);
 
@@ -605,7 +606,7 @@ static void test_v3_redist_ipa_range_check_at_vcpu_run(void)
 	struct kvm_vcpu *vcpus[NR_VCPUS];
 	struct vm_gic v;
 	int ret, i;
-	uint64_t addr;
+	u64 addr;
 
 	v = vm_gic_create_with_vcpus(KVM_DEV_TYPE_ARM_VGIC_V3, 1, vcpus);
 
@@ -637,7 +638,7 @@ static void test_v3_its_region(void)
 {
 	struct kvm_vcpu *vcpus[NR_VCPUS];
 	struct vm_gic v;
-	uint64_t addr;
+	u64 addr;
 	int its_fd, ret;
 
 	v = vm_gic_create_with_vcpus(KVM_DEV_TYPE_ARM_VGIC_V3, NR_VCPUS, vcpus);
@@ -675,14 +676,52 @@ static void test_v3_its_region(void)
 	vm_gic_destroy(&v);
 }
 
+static void test_v3_nassgicap(void)
+{
+	struct kvm_vcpu *vcpus[NR_VCPUS];
+	bool has_nassgicap;
+	struct vm_gic vm;
+	u32 typer2;
+	int ret;
+
+	vm = vm_gic_create_with_vcpus(KVM_DEV_TYPE_ARM_VGIC_V3, NR_VCPUS, vcpus);
+	kvm_device_attr_get(vm.gic_fd, KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+			    GICD_TYPER2, &typer2);
+	has_nassgicap = typer2 & GICD_TYPER2_nASSGIcap;
+
+	typer2 |= GICD_TYPER2_nASSGIcap;
+	ret = __kvm_device_attr_set(vm.gic_fd, KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+				    GICD_TYPER2, &typer2);
+	if (has_nassgicap)
+		TEST_ASSERT(!ret, KVM_IOCTL_ERROR(KVM_DEVICE_ATTR_SET, ret));
+	else
+		TEST_ASSERT(ret && errno == EINVAL,
+			    "Enabled nASSGIcap even though it's unavailable");
+
+	typer2 &= ~GICD_TYPER2_nASSGIcap;
+	kvm_device_attr_set(vm.gic_fd, KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+			    GICD_TYPER2, &typer2);
+
+	kvm_device_attr_set(vm.gic_fd, KVM_DEV_ARM_VGIC_GRP_CTRL,
+			    KVM_DEV_ARM_VGIC_CTRL_INIT, NULL);
+
+	typer2 ^= GICD_TYPER2_nASSGIcap;
+	ret = __kvm_device_attr_set(vm.gic_fd, KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+				    GICD_TYPER2, &typer2);
+	TEST_ASSERT(ret && errno == EBUSY,
+		    "Changed nASSGIcap after initializing the VGIC");
+
+	vm_gic_destroy(&vm);
+}
+
 /*
  * Returns 0 if it's possible to create GIC device of a given type (V2 or V3).
  */
-int test_kvm_device(uint32_t gic_dev_type)
+int test_kvm_device(u32 gic_dev_type)
 {
 	struct kvm_vcpu *vcpus[NR_VCPUS];
 	struct vm_gic v;
-	uint32_t other;
+	u32 other;
 	int ret;
 
 	v.vm = vm_create_with_vcpus(NR_VCPUS, guest_code, vcpus);
@@ -715,7 +754,221 @@ int test_kvm_device(uint32_t gic_dev_type)
 	return 0;
 }
 
-void run_tests(uint32_t gic_dev_type)
+struct sr_def {
+	const char	*name;
+	u32		encoding;
+};
+
+#define PACK_SR(r)						\
+	((sys_reg_Op0(r) << 14) |				\
+	 (sys_reg_Op1(r) << 11) |				\
+	 (sys_reg_CRn(r) << 7) |				\
+	 (sys_reg_CRm(r) << 3) |				\
+	 (sys_reg_Op2(r)))
+
+#define SR(r)							\
+	{							\
+		.name		= #r,				\
+		.encoding	= r,				\
+	}
+
+static const struct sr_def sysregs_el1[] = {
+	SR(SYS_ICC_PMR_EL1),
+	SR(SYS_ICC_BPR0_EL1),
+	SR(SYS_ICC_AP0R0_EL1),
+	SR(SYS_ICC_AP0R1_EL1),
+	SR(SYS_ICC_AP0R2_EL1),
+	SR(SYS_ICC_AP0R3_EL1),
+	SR(SYS_ICC_AP1R0_EL1),
+	SR(SYS_ICC_AP1R1_EL1),
+	SR(SYS_ICC_AP1R2_EL1),
+	SR(SYS_ICC_AP1R3_EL1),
+	SR(SYS_ICC_BPR1_EL1),
+	SR(SYS_ICC_CTLR_EL1),
+	SR(SYS_ICC_SRE_EL1),
+	SR(SYS_ICC_IGRPEN0_EL1),
+	SR(SYS_ICC_IGRPEN1_EL1),
+};
+
+static const struct sr_def sysregs_el2[] = {
+	SR(SYS_ICH_AP0R0_EL2),
+	SR(SYS_ICH_AP0R1_EL2),
+	SR(SYS_ICH_AP0R2_EL2),
+	SR(SYS_ICH_AP0R3_EL2),
+	SR(SYS_ICH_AP1R0_EL2),
+	SR(SYS_ICH_AP1R1_EL2),
+	SR(SYS_ICH_AP1R2_EL2),
+	SR(SYS_ICH_AP1R3_EL2),
+	SR(SYS_ICH_HCR_EL2),
+	SR(SYS_ICC_SRE_EL2),
+	SR(SYS_ICH_VTR_EL2),
+	SR(SYS_ICH_VMCR_EL2),
+	SR(SYS_ICH_LR0_EL2),
+	SR(SYS_ICH_LR1_EL2),
+	SR(SYS_ICH_LR2_EL2),
+	SR(SYS_ICH_LR3_EL2),
+	SR(SYS_ICH_LR4_EL2),
+	SR(SYS_ICH_LR5_EL2),
+	SR(SYS_ICH_LR6_EL2),
+	SR(SYS_ICH_LR7_EL2),
+	SR(SYS_ICH_LR8_EL2),
+	SR(SYS_ICH_LR9_EL2),
+	SR(SYS_ICH_LR10_EL2),
+	SR(SYS_ICH_LR11_EL2),
+	SR(SYS_ICH_LR12_EL2),
+	SR(SYS_ICH_LR13_EL2),
+	SR(SYS_ICH_LR14_EL2),
+	SR(SYS_ICH_LR15_EL2),
+};
+
+static void test_sysreg_array(int gic, const struct sr_def *sr, int nr,
+			      int (*check)(int, const struct sr_def *, const char *))
+{
+	for (int i = 0; i < nr; i++) {
+		u64 val;
+		u64 attr;
+		int ret;
+
+		/* Assume MPIDR_EL1.Aff*=0 */
+		attr = PACK_SR(sr[i].encoding);
+
+		/*
+		 * The API is braindead. A register can be advertised as
+		 * available, and yet not be readable or writable.
+		 * ICC_APnR{1,2,3}_EL1 are examples of such non-sense, and
+		 * ICH_APnR{1,2,3}_EL2 do follow suit for consistency.
+		 *
+		 * On the bright side, no known HW is implementing more than
+		 * 5 bits of priority, so we're safe. Sort of...
+		 */
+		ret = __kvm_has_device_attr(gic, KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS,
+					    attr);
+		TEST_ASSERT(ret == 0, "%s unavailable", sr[i].name);
+
+		/* Check that we can write back what we read */
+		ret = __kvm_device_attr_get(gic, KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS,
+					    attr, &val);
+		TEST_ASSERT(ret == 0 || !check(gic, &sr[i], "read"), "%s unreadable", sr[i].name);
+		ret = __kvm_device_attr_set(gic, KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS,
+					    attr, &val);
+		TEST_ASSERT(ret == 0 || !check(gic, &sr[i], "write"), "%s unwritable", sr[i].name);
+	}
+}
+
+static u8 get_ctlr_pribits(int gic)
+{
+	int ret;
+	u64 val;
+	u8 pri;
+
+	ret = __kvm_device_attr_get(gic, KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS,
+				    PACK_SR(SYS_ICC_CTLR_EL1), &val);
+	TEST_ASSERT(ret == 0, "ICC_CTLR_EL1 unreadable");
+
+	pri = FIELD_GET(ICC_CTLR_EL1_PRI_BITS_MASK, val) + 1;
+	TEST_ASSERT(pri >= 5 && pri <= 7, "Bad pribits %d", pri);
+
+	return pri;
+}
+
+static int check_unaccessible_el1_regs(int gic, const struct sr_def *sr, const char *what)
+{
+	switch (sr->encoding) {
+	case SYS_ICC_AP0R1_EL1:
+	case SYS_ICC_AP1R1_EL1:
+		if (get_ctlr_pribits(gic) >= 6)
+			return -EINVAL;
+		break;
+	case SYS_ICC_AP0R2_EL1:
+	case SYS_ICC_AP0R3_EL1:
+	case SYS_ICC_AP1R2_EL1:
+	case SYS_ICC_AP1R3_EL1:
+		if (get_ctlr_pribits(gic) == 7)
+			return 0;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	pr_info("SKIP %s for %s\n", sr->name, what);
+	return 0;
+}
+
+static u8 get_vtr_pribits(int gic)
+{
+	int ret;
+	u64 val;
+	u8 pri;
+
+	ret = __kvm_device_attr_get(gic, KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS,
+				    PACK_SR(SYS_ICH_VTR_EL2), &val);
+	TEST_ASSERT(ret == 0, "ICH_VTR_EL2 unreadable");
+
+	pri = FIELD_GET(ICH_VTR_EL2_PRIbits, val) + 1;
+	TEST_ASSERT(pri >= 5 && pri <= 7, "Bad pribits %d", pri);
+
+	return pri;
+}
+
+static int check_unaccessible_el2_regs(int gic, const struct sr_def *sr, const char *what)
+{
+	switch (sr->encoding) {
+	case SYS_ICH_AP0R1_EL2:
+	case SYS_ICH_AP1R1_EL2:
+		if (get_vtr_pribits(gic) >= 6)
+			return -EINVAL;
+		break;
+	case SYS_ICH_AP0R2_EL2:
+	case SYS_ICH_AP0R3_EL2:
+	case SYS_ICH_AP1R2_EL2:
+	case SYS_ICH_AP1R3_EL2:
+		if (get_vtr_pribits(gic) == 7)
+			return -EINVAL;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	pr_info("SKIP %s for %s\n", sr->name, what);
+	return 0;
+}
+
+static void test_v3_sysregs(void)
+{
+	struct kvm_vcpu_init init = {};
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	u32 feat = 0;
+	int gic;
+
+	if (kvm_check_cap(KVM_CAP_ARM_EL2))
+		feat |= BIT(KVM_ARM_VCPU_HAS_EL2);
+
+	vm = vm_create(1);
+
+	vm_ioctl(vm, KVM_ARM_PREFERRED_TARGET, &init);
+	init.features[0] |= feat;
+
+	vcpu = aarch64_vcpu_add(vm, 0, &init, NULL);
+	TEST_ASSERT(vcpu, "Can't create a vcpu?");
+
+	gic = kvm_create_device(vm, KVM_DEV_TYPE_ARM_VGIC_V3);
+	TEST_ASSERT(gic >= 0, "No GIC???");
+
+	kvm_device_attr_set(gic, KVM_DEV_ARM_VGIC_GRP_CTRL,
+			    KVM_DEV_ARM_VGIC_CTRL_INIT, NULL);
+
+	test_sysreg_array(gic, sysregs_el1, ARRAY_SIZE(sysregs_el1), check_unaccessible_el1_regs);
+	if (feat)
+		test_sysreg_array(gic, sysregs_el2, ARRAY_SIZE(sysregs_el2), check_unaccessible_el2_regs);
+	else
+		pr_info("SKIP EL2 registers, not available\n");
+
+	close(gic);
+	kvm_vm_free(vm);
+}
+
+void run_tests(u32 gic_dev_type)
 {
 	test_vcpus_then_vgic(gic_dev_type);
 	test_vgic_then_vcpus(gic_dev_type);
@@ -730,6 +983,8 @@ void run_tests(uint32_t gic_dev_type)
 		test_v3_last_bit_single_rdist();
 		test_v3_redist_ipa_range_check_at_vcpu_run();
 		test_v3_its_region();
+		test_v3_sysregs();
+		test_v3_nassgicap();
 	}
 }
 
@@ -738,6 +993,8 @@ int main(int ac, char **av)
 	int ret;
 	int pa_bits;
 	int cnt_impl = 0;
+
+	test_disable_default_vgic();
 
 	pa_bits = vm_guest_mode_params[VM_MODE_DEFAULT].pa_bits;
 	max_phys_size = 1ULL << pa_bits;

@@ -160,7 +160,7 @@ static int rt5033_battery_probe(struct i2c_client *client)
 	}
 
 	i2c_set_clientdata(client, battery);
-	psy_cfg.of_node = client->dev.of_node;
+	psy_cfg.fwnode = dev_fwnode(&client->dev);
 	psy_cfg.drv_data = battery;
 
 	battery->psy = devm_power_supply_register(&client->dev,
@@ -174,7 +174,7 @@ static int rt5033_battery_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id rt5033_battery_id[] = {
-	{ "rt5033-battery", },
+	{ .name = "rt5033-battery" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5033_battery_id);

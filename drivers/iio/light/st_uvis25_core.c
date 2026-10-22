@@ -117,9 +117,8 @@ static int st_uvis25_read_raw(struct iio_dev *iio_dev,
 {
 	int ret;
 
-	ret = iio_device_claim_direct_mode(iio_dev);
-	if (ret)
-		return ret;
+	if (!iio_device_claim_direct(iio_dev))
+		return -EBUSY;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_PROCESSED: {
@@ -144,7 +143,7 @@ static int st_uvis25_read_raw(struct iio_dev *iio_dev,
 		break;
 	}
 
-	iio_device_release_direct_mode(iio_dev);
+	iio_device_release_direct(iio_dev);
 
 	return ret;
 }
@@ -235,15 +234,21 @@ static irqreturn_t st_uvis25_buffer_handler_thread(int irq, void *p)
 	struct st_uvis25_hw *hw = iio_priv(iio_dev);
 	unsigned int val;
 	int err;
+	/* Ensure timestamp is naturally aligned */
+	struct {
+		u8 chan;
+		aligned_s64 ts;
+	} scan = { };
+
 
 	err = regmap_read(hw->regmap, ST_UVIS25_REG_OUT_ADDR, &val);
 	if (err < 0)
 		goto out;
 
-	hw->scan.chan = val;
+	scan.chan = val;
 
-	iio_push_to_buffers_with_timestamp(iio_dev, &hw->scan,
-					   iio_get_time_ns(iio_dev));
+	iio_push_to_buffers_with_ts(iio_dev, &scan, sizeof(scan),
+				    iio_get_time_ns(iio_dev));
 
 out:
 	iio_trigger_notify_done(hw->trig);

@@ -30,7 +30,7 @@ disabled and enabled, as well as for preemption and from a time
 a task is woken to the task is actually scheduled in.
 
 One of the most common uses of ftrace is the event tracing.
-Throughout the kernel is hundreds of static event points that
+Throughout the kernel are hundreds of static event points that
 can be enabled via the tracefs file system to see what is
 going on in certain parts of the kernel.
 
@@ -366,6 +366,14 @@ of ftrace. Here is a list of some of the key files:
 	for each function. The displayed address is the patch-site address
 	and can differ from /proc/kallsyms address.
 
+  syscall_user_buf_size:
+
+	Some system call trace events will record the data from a user
+	space address that one of the parameters point to. The amount of
+	data per event is limited. This file holds the max number of bytes
+	that will be recorded into the ring buffer to hold this data.
+	The max value is currently 165.
+
   dyn_ftrace_total_info:
 
 	This file is for debugging purposes. The number of functions that
@@ -383,7 +391,7 @@ of ftrace. Here is a list of some of the key files:
 	not be listed in this count.
 
 	If the callback registered to be traced by a function with
-	the "save regs" attribute (thus even more overhead), a 'R'
+	the "save regs" attribute (thus even more overhead), an 'R'
 	will be displayed on the same line as the function that
 	is returning registers.
 
@@ -392,7 +400,7 @@ of ftrace. Here is a list of some of the key files:
 	an 'I' will be displayed on the same line as the function that
 	can be overridden.
 
-	If a non ftrace trampoline is attached (BPF) a 'D' will be displayed.
+	If a non-ftrace trampoline is attached (BPF) a 'D' will be displayed.
 	Note, normal ftrace trampolines can also be attached, but only one
 	"direct" trampoline can be attached to a given function at a time.
 
@@ -402,7 +410,7 @@ of ftrace. Here is a list of some of the key files:
 
 	If a function had either the "ip modify" or a "direct" call attached to
 	it in the past, a 'M' will be shown. This flag is never cleared. It is
-	used to know if a function was every modified by the ftrace infrastructure,
+	used to know if a function was ever modified by the ftrace infrastructure,
 	and can be used for debugging.
 
 	If the architecture supports it, it will also show what callback
@@ -418,7 +426,7 @@ of ftrace. Here is a list of some of the key files:
 
 	This file contains all the functions that ever had a function callback
 	to it via the ftrace infrastructure. It has the same format as
-	enabled_functions but shows all functions that have every been
+	enabled_functions but shows all functions that have ever been
 	traced.
 
 	To see any function that has every been modified by "ip modify" or a
@@ -517,7 +525,7 @@ of ftrace. Here is a list of some of the key files:
 	Whenever an event is recorded into the ring buffer, a
 	"timestamp" is added. This stamp comes from a specified
 	clock. By default, ftrace uses the "local" clock. This
-	clock is very fast and strictly per cpu, but on some
+	clock is very fast and strictly per CPU, but on some
 	systems it may not be monotonic with respect to other
 	CPUs. In other words, the local clocks may not be in sync
 	with local clocks on other CPUs.
@@ -561,6 +569,10 @@ of ftrace. Here is a list of some of the key files:
 		This is in sync across CPUs and can also be used
 		to correlate events across hypervisor/guest if
 		tb_offset is known.
+
+	s390-tod:
+		This uses the s390 TOD clock value. This clock is usually in
+		sync across virtual machines and STP-enabled machines.
 
 	mono:
 		This uses the fast monotonic clock (CLOCK_MONOTONIC)
@@ -673,6 +685,22 @@ of ftrace. Here is a list of some of the key files:
   set_event:
 
 	By echoing in the event into this file, will enable that event.
+
+	See events.rst for more information.
+
+  show_event_filters:
+
+	A list of events that have filters. This shows the
+	system/event pair along with the filter that is attached to
+	the event.
+
+	See events.rst for more information.
+
+  show_event_triggers:
+
+	A list of events that have triggers. This shows the
+	system/event pair along with the trigger that is attached to
+	the event.
 
 	See events.rst for more information.
 
@@ -868,7 +896,7 @@ Here is the list of current tracers that may be configured.
 
   "mmiotrace"
 
-	A special tracer that is used to trace binary module.
+	A special tracer that is used to trace binary modules.
 	It will trace all the calls that a module makes to the
 	hardware. Everything it writes and reads from the I/O
 	as well.
@@ -1205,6 +1233,19 @@ Here are the available options:
 	default instance. The only way the top level instance has this flag
 	cleared, is by it being set in another instance.
 
+  copy_trace_marker
+	If there are applications that hard code writing into the top level
+	trace_marker file (/sys/kernel/tracing/trace_marker or trace_marker_raw),
+	and the tooling would like it to go into an instance, this option can
+	be used. Create an instance and set this option, and then all writes
+	into the top level trace_marker file will also be redirected into this
+	instance.
+
+	Note, by default this option is set for the top level instance. If it
+	is disabled, then writes to the trace_marker or trace_marker_raw files
+	will not be written into the top level file. If no instance has this
+	option set, then a write will error with the errno of ENODEV.
+
   annotate
 	It is sometimes confusing when the CPU buffers are full
 	and one CPU buffer had a lot of events recently, thus
@@ -1268,6 +1309,15 @@ Here are the available options:
         hashed pointer value instead of real address.
         This will be useful if you want to find out which hashed
         value is corresponding to the real value in trace log.
+
+  bitmask-list
+        When enabled, bitmasks are displayed as a human-readable list of
+        ranges (e.g., 0,2-5,7) using the printk "%*pbl" format specifier.
+        When disabled (the default), bitmasks are displayed in the
+        traditional hexadecimal bitmap representation. The list format is
+        particularly useful for tracing CPU masks and other large bitmasks
+        where individual bit positions are more meaningful than their
+        hexadecimal encoding.
 
   record-cmd
 	When any event or tracer is enabled, a hook is enabled
@@ -1578,7 +1628,7 @@ function-trace, we get a much larger output::
    => blk_queue_bio
    => submit_bio_noacct
    => submit_bio
-   => submit_bh
+   => bh_submit
    => __ext3_get_inode_loc
    => ext3_iget
    => ext3_lookup
@@ -1863,7 +1913,7 @@ tracers.
    => blk_queue_bio
    => submit_bio_noacct
    => submit_bio
-   => submit_bh
+   => bh_submit
    => ext3_bread
    => ext3_dir_bread
    => htree_dirblock_to_tree
@@ -3077,7 +3127,7 @@ Notice that we lost the sys_nanosleep.
   # cat set_ftrace_filter
   hrtimer_run_queues
   hrtimer_run_pending
-  hrtimer_init
+  hrtimer_setup
   hrtimer_cancel
   hrtimer_try_to_cancel
   hrtimer_forward
@@ -3115,7 +3165,7 @@ Again, now we want to append.
   # cat set_ftrace_filter
   hrtimer_run_queues
   hrtimer_run_pending
-  hrtimer_init
+  hrtimer_setup
   hrtimer_cancel
   hrtimer_try_to_cancel
   hrtimer_forward

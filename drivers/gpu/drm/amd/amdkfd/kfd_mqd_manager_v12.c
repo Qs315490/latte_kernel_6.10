@@ -77,19 +77,16 @@ static void update_cu_mask(struct mqd_manager *mm, void *mqd,
 static void set_priority(struct v12_compute_mqd *m, struct queue_properties *q)
 {
 	m->cp_hqd_pipe_priority = pipe_priority_map[q->priority];
-	m->cp_hqd_queue_priority = q->priority;
 }
 
-static struct kfd_mem_obj *allocate_mqd(struct kfd_node *node,
+static struct kfd_mem_obj *allocate_mqd(struct mqd_manager *mm,
 		struct queue_properties *q)
 {
+	u32 mqd_size = AMDGPU_MQD_SIZE_ALIGN(mm->mqd_size);
+	struct kfd_node *node = mm->dev;
 	struct kfd_mem_obj *mqd_mem_obj;
 
-	/*
-	 * Allocate one PAGE_SIZE memory for MQD as MES writes to areas beyond
-	 * struct MQD size.
-	 */
-	if (kfd_gtt_sa_allocate(node, PAGE_SIZE, &mqd_mem_obj))
+	if (kfd_gtt_sa_allocate(node, mqd_size, &mqd_mem_obj))
 		return NULL;
 
 	return mqd_mem_obj;
@@ -101,11 +98,12 @@ static void init_mqd(struct mqd_manager *mm, void **mqd,
 {
 	uint64_t addr;
 	struct v12_compute_mqd *m;
+	u32 mqd_size = AMDGPU_MQD_SIZE_ALIGN(mm->mqd_size);
 
 	m = (struct v12_compute_mqd *) mqd_mem_obj->cpu_ptr;
 	addr = mqd_mem_obj->gpu_addr;
 
-	memset(m, 0, PAGE_SIZE);
+	memset(m, 0, mqd_size);
 
 	m->header = 0xC0310800;
 	m->compute_pipelinestat_enable = 1;
@@ -140,10 +138,9 @@ static void init_mqd(struct mqd_manager *mm, void **mqd,
 	if (amdgpu_amdkfd_have_atomics_support(mm->dev->adev))
 		m->cp_hqd_hq_status0 |= 1 << 29;
 
-	if (q->format == KFD_QUEUE_FORMAT_AQL) {
+	if (q->format == KFD_QUEUE_FORMAT_AQL)
 		m->cp_hqd_aql_control =
 			1 << CP_HQD_AQL_CONTROL__CONTROL0__SHIFT;
-	}
 
 	if (mm->dev->kfd->cwsr_enabled) {
 		m->cp_hqd_persistent_state |=
@@ -157,6 +154,11 @@ static void init_mqd(struct mqd_manager *mm, void **mqd,
 		m->cp_hqd_cntl_stack_offset = q->ctl_stack_size;
 		m->cp_hqd_wg_state_offset = q->ctl_stack_size;
 	}
+
+	mutex_lock(&mm->dev->kfd->profiler_lock);
+	if (mm->dev->kfd->profiler_process != NULL)
+		m->compute_perfcount_enable = 1;
+	mutex_unlock(&mm->dev->kfd->profiler_lock);
 
 	*mqd = m;
 	if (gart_addr)
@@ -214,8 +216,8 @@ static void update_mqd(struct mqd_manager *mm, void *mqd,
 	 * more than (EOP entry count - 1) so a queue size of 0x800 dwords
 	 * is safe, giving a maximum field value of 0xA.
 	 */
-	m->cp_hqd_eop_control = min(0xA,
-		ffs(q->eop_ring_buffer_size / sizeof(unsigned int)) - 1 - 1);
+	m->cp_hqd_eop_control = q->eop_ring_buffer_size ? min(0xA,
+		ffs(q->eop_ring_buffer_size / sizeof(unsigned int)) - 1 - 1) : 0;
 	m->cp_hqd_eop_base_addr_lo =
 			lower_32_bits(q->eop_ring_buffer_address >> 8);
 	m->cp_hqd_eop_base_addr_hi =
@@ -351,6 +353,12 @@ static void update_mqd_sdma(struct mqd_manager *mm, void *mqd,
 
 	m->sdmax_rlcx_dummy_reg = SDMA_RLC_DUMMY_DEFAULT;
 
+	/* Allow context switch so we don't cross-process starve with a massive
+	* command buffer of long-running SDMA commands
+	* sdmax_rlcx_ib_cntl represent SDMA_QUEUE0_IB_CNTL register
+	*/
+	m->sdmax_rlcx_ib_cntl |= SDMA0_QUEUE0_IB_CNTL__SWITCH_INSIDE_IB_MASK;
+
 	q->is_active = QUEUE_IS_ACTIVE(*q);
 }
 
@@ -380,7 +388,7 @@ struct mqd_manager *mqd_manager_init_v12(enum KFD_MQD_TYPE type,
 	if (WARN_ON(type >= KFD_MQD_TYPE_MAX))
 		return NULL;
 
-	mqd = kzalloc(sizeof(*mqd), GFP_KERNEL);
+	mqd = kzalloc_obj(*mqd);
 	if (!mqd)
 		return NULL;
 

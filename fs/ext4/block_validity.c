@@ -217,7 +217,7 @@ int ext4_setup_system_zone(struct super_block *sb)
 	ext4_group_t i;
 	int ret;
 
-	system_blks = kzalloc(sizeof(*system_blks), GFP_KERNEL);
+	system_blks = kzalloc_obj(*system_blks);
 	if (!system_blks)
 		return -ENOMEM;
 
@@ -351,10 +351,9 @@ int ext4_check_blockref(const char *function, unsigned int line,
 {
 	__le32 *bref = p;
 	unsigned int blk;
+	journal_t *journal = EXT4_SB(inode->i_sb)->s_journal;
 
-	if (ext4_has_feature_journal(inode->i_sb) &&
-	    (inode->i_ino ==
-	     le32_to_cpu(EXT4_SB(inode->i_sb)->s_es->s_journal_inum)))
+	if (journal && inode == journal->j_inode)
 		return 0;
 
 	while (bref < p+max) {

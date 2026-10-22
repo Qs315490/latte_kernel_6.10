@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2012-2014, 2018-2022, 2024 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2022, 2024-2025 Intel Corporation
  * Copyright (C) 2017 Intel Deutschland GmbH
  */
 #ifndef __iwl_fw_api_mac_h__
@@ -57,8 +57,7 @@ enum iwl_mac_protection_flags {
  * @FW_MAC_TYPE_P2P_DEVICE: P2P Device
  * @FW_MAC_TYPE_P2P_STA: P2P client
  * @FW_MAC_TYPE_GO: P2P GO
- * @FW_MAC_TYPE_TEST: ?
- * @FW_MAC_TYPE_MAX: highest support MAC type
+ * @FW_MAC_TYPE_NAN: NAN (since version 4)
  */
 enum iwl_mac_types {
 	FW_MAC_TYPE_FIRST = 1,
@@ -70,8 +69,7 @@ enum iwl_mac_types {
 	FW_MAC_TYPE_P2P_DEVICE,
 	FW_MAC_TYPE_P2P_STA,
 	FW_MAC_TYPE_GO,
-	FW_MAC_TYPE_TEST,
-	FW_MAC_TYPE_MAX = FW_MAC_TYPE_TEST
+	FW_MAC_TYPE_NAN,
 }; /* MAC_CONTEXT_TYPE_API_E_VER_1 */
 
 /**
@@ -287,9 +285,9 @@ struct iwl_ac_qos {
 	__le16 cw_min;
 	__le16 cw_max;
 	u8 aifsn;
-	u8 fifos_mask;
+	u8 fifos_mask; /* not in use since _VER_3 */
 	__le16 edca_txop;
-} __packed; /* AC_QOS_API_S_VER_2 */
+} __packed; /* AC_QOS_API_S_VER_2, _VER_3 */
 
 /**
  * struct iwl_mac_ctx_cmd - command structure to configure MAC contexts

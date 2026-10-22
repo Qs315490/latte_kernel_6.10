@@ -9,7 +9,6 @@
 #include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/spi/spi.h>
-#include <linux/mod_devicetable.h>
 
 #include <linux/unaligned.h>
 
@@ -92,7 +91,6 @@ static int ms5611_spi_probe(struct spi_device *spi)
 
 	spi->mode = SPI_MODE_0;
 	spi->max_speed_hz = min(spi->max_speed_hz, 20000000U);
-	spi->bits_per_word = 8;
 	ret = spi_setup(spi);
 	if (ret < 0)
 		return ret;

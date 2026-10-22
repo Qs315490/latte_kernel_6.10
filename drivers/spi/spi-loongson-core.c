@@ -5,6 +5,7 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/export.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -209,7 +210,6 @@ int loongson_spi_init_controller(struct device *dev, void __iomem *regs)
 	controller->unprepare_message = loongson_spi_unprepare_message;
 	controller->set_cs = loongson_spi_set_cs;
 	controller->num_chipselect = 4;
-	device_set_node(&controller->dev, dev_fwnode(dev));
 	dev_set_drvdata(dev, controller);
 
 	spi = spi_controller_get_devdata(controller);

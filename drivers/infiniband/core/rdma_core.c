@@ -42,6 +42,40 @@
 #include "core_priv.h"
 #include "rdma_core.h"
 
+static void release_ufile_idr_uobject(struct ib_uverbs_file *ufile);
+
+void ib_uverbs_release_file(struct kref *ref)
+{
+	struct ib_uverbs_file *file =
+		container_of(ref, struct ib_uverbs_file, ref);
+	struct ib_device *ib_dev;
+	int srcu_key;
+
+	release_ufile_idr_uobject(file);
+
+	srcu_key = srcu_read_lock(&file->device->disassociate_srcu);
+	ib_dev = srcu_dereference(file->device->ib_dev,
+				  &file->device->disassociate_srcu);
+	if (ib_dev && !ib_dev->ops.disassociate_ucontext)
+		module_put(ib_dev->ops.owner);
+	srcu_read_unlock(&file->device->disassociate_srcu, srcu_key);
+
+	if (refcount_dec_and_test(&file->device->refcount))
+		ib_uverbs_comp_dev(file->device);
+
+	if (file->default_async_file)
+		uverbs_uobject_put(&file->default_async_file->uobj);
+	put_device(&file->device->dev);
+
+	if (file->disassociate_page)
+		__free_pages(file->disassociate_page, 0);
+	mutex_destroy(&file->disassociation_lock);
+	mutex_destroy(&file->umap_lock);
+	mutex_destroy(&file->ucontext_lock);
+	kfree(file);
+}
+EXPORT_SYMBOL_NS_GPL(ib_uverbs_release_file, "rdma_core");
+
 static void uverbs_uobject_free(struct kref *ref)
 {
 	kfree_rcu(container_of(ref, struct ib_uobject, ref), rcu);
@@ -214,6 +248,7 @@ out_unlock:
 	up_read(&ufile->hw_destroy_rwsem);
 	return ret;
 }
+EXPORT_SYMBOL_NS_GPL(uobj_destroy, "rdma_core");
 
 /*
  * uobj_get_destroy destroys the HW object and returns a handle to the uobj
@@ -239,6 +274,7 @@ struct ib_uobject *__uobj_get_destroy(const struct uverbs_api_object *obj,
 
 	return uobj;
 }
+EXPORT_SYMBOL_NS_GPL(__uobj_get_destroy, "rdma_core");
 
 /*
  * Does both uobj_get_destroy() and uobj_put_destroy().  Returns 0 on success
@@ -255,6 +291,7 @@ int __uobj_perform_destroy(const struct uverbs_api_object *obj, u32 id,
 	uobj_put_destroy(uobj);
 	return 0;
 }
+EXPORT_SYMBOL_NS_GPL(__uobj_perform_destroy, "rdma_core");
 
 /* alloc_uobj must be undone by uverbs_destroy_uobject() */
 static struct ib_uobject *alloc_uobj(struct uverbs_attr_bundle *attrs,
@@ -420,6 +457,7 @@ free:
 	uverbs_uobject_put(uobj);
 	return ERR_PTR(ret);
 }
+EXPORT_SYMBOL_NS_GPL(rdma_lookup_get_uobject, "rdma_core");
 
 static struct ib_uobject *
 alloc_begin_idr_uobject(const struct uverbs_api_object *obj,
@@ -465,8 +503,8 @@ alloc_begin_fd_uobject(const struct uverbs_api_object *obj,
 
 	fd_type =
 		container_of(obj->type_attrs, struct uverbs_obj_fd_type, type);
-	if (WARN_ON(fd_type->fops->release != &uverbs_uobject_fd_release &&
-		    fd_type->fops->release != &uverbs_async_event_release)) {
+	if (WARN_ON(fd_type->fops &&
+		    fd_type->fops->release != &uverbs_uobject_fd_release)) {
 		ret = ERR_PTR(-EINVAL);
 		goto err_fd;
 	}
@@ -477,14 +515,16 @@ alloc_begin_fd_uobject(const struct uverbs_api_object *obj,
 		goto err_fd;
 	}
 
-	/* Note that uverbs_uobject_fd_release() is called during abort */
-	filp = anon_inode_getfile(fd_type->name, fd_type->fops, NULL,
-				  fd_type->flags);
-	if (IS_ERR(filp)) {
-		ret = ERR_CAST(filp);
-		goto err_getfile;
+	if (fd_type->fops) {
+		/* Note that uverbs_uobject_fd_release() is called during abort */
+		filp = anon_inode_getfile(fd_type->name, fd_type->fops, NULL,
+					  fd_type->flags);
+		if (IS_ERR(filp)) {
+			ret = ERR_CAST(filp);
+			goto err_getfile;
+		}
+		uobj->object = filp;
 	}
-	uobj->object = filp;
 
 	uobj->id = new_fd;
 	return uobj;
@@ -520,6 +560,7 @@ struct ib_uobject *rdma_alloc_begin_uobject(const struct uverbs_api_object *obj,
 	}
 	return ret;
 }
+EXPORT_SYMBOL_NS_GPL(rdma_alloc_begin_uobject, "rdma_core");
 
 static void alloc_abort_idr_uobject(struct ib_uobject *uobj)
 {
@@ -561,7 +602,9 @@ static void alloc_abort_fd_uobject(struct ib_uobject *uobj)
 {
 	struct file *filp = uobj->object;
 
-	fput(filp);
+	if (filp)
+		fput(filp);
+
 	put_unused_fd(uobj->id);
 }
 
@@ -586,11 +629,11 @@ static void alloc_commit_idr_uobject(struct ib_uobject *uobj)
 	void *old;
 
 	/*
-	 * We already allocated this IDR with a NULL object, so
+	 * We already allocated this XArray entry with a NULL pointer, so
 	 * this shouldn't fail.
 	 *
 	 * NOTE: Storing the uobj transfers our kref on uobj to the XArray.
-	 * It will be put by remove_commit_idr_uobject()
+	 * It will be put by remove_handle_idr_uobject()
 	 */
 	old = xa_store(&ufile->idr, uobj->id, uobj, GFP_KERNEL);
 	WARN_ON(old != NULL);
@@ -628,11 +671,14 @@ static void alloc_commit_fd_uobject(struct ib_uobject *uobj)
 	/* This shouldn't be used anymore. Use the file object instead */
 	uobj->id = 0;
 
-	/*
-	 * NOTE: Once we install the file we loose ownership of our kref on
-	 * uobj. It will be put by uverbs_uobject_fd_release()
-	 */
-	filp->private_data = uobj;
+	if (!filp->private_data) {
+		/*
+		 * NOTE: Once we install the file we loose ownership of our kref on
+		 * uobj. It will be put by uverbs_uobject_fd_release()
+		 */
+		filp->private_data = uobj;
+	}
+
 	fd_install(fd, filp);
 }
 
@@ -661,6 +707,7 @@ void rdma_alloc_commit_uobject(struct ib_uobject *uobj,
 	/* Matches the down_read in rdma_alloc_begin_uobject */
 	up_read(&ufile->hw_destroy_rwsem);
 }
+EXPORT_SYMBOL_NS_GPL(rdma_alloc_commit_uobject, "rdma_core");
 
 /*
  * new_uobj will be assigned to the handle currently used by to_uobj, and
@@ -690,6 +737,7 @@ void rdma_assign_uobject(struct ib_uobject *to_uobj, struct ib_uobject *new_uobj
 	 */
 	uverbs_destroy_uobject(to_uobj, RDMA_REMOVE_DESTROY, attrs);
 }
+EXPORT_SYMBOL_NS_GPL(rdma_assign_uobject, "rdma_core");
 
 /*
  * This consumes the kref for uobj. It is up to the caller to unwind the HW
@@ -720,6 +768,7 @@ void rdma_alloc_abort_uobject(struct ib_uobject *uobj,
 	/* Matches the down_read in rdma_alloc_begin_uobject */
 	up_read(&ufile->hw_destroy_rwsem);
 }
+EXPORT_SYMBOL_NS_GPL(rdma_alloc_abort_uobject, "rdma_core");
 
 static void lookup_put_idr_uobject(struct ib_uobject *uobj,
 				   enum rdma_lookup_mode mode)
@@ -763,13 +812,15 @@ void rdma_lookup_put_uobject(struct ib_uobject *uobj,
 	/* Pairs with the kref obtained by type->lookup_get */
 	uverbs_uobject_put(uobj);
 }
+EXPORT_SYMBOL_NS_GPL(rdma_lookup_put_uobject, "rdma_core");
 
 void setup_ufile_idr_uobject(struct ib_uverbs_file *ufile)
 {
 	xa_init_flags(&ufile->idr, XA_FLAGS_ALLOC);
 }
+EXPORT_SYMBOL_NS_GPL(setup_ufile_idr_uobject, "rdma_core");
 
-void release_ufile_idr_uobject(struct ib_uverbs_file *ufile)
+static void release_ufile_idr_uobject(struct ib_uverbs_file *ufile)
 {
 	struct ib_uobject *entry;
 	unsigned long id;
@@ -802,21 +853,10 @@ const struct uverbs_obj_type_class uverbs_idr_class = {
 };
 EXPORT_SYMBOL(uverbs_idr_class);
 
-/*
- * Users of UVERBS_TYPE_ALLOC_FD should set this function as the struct
- * file_operations release method.
- */
-int uverbs_uobject_fd_release(struct inode *inode, struct file *filp)
+int uverbs_uobject_release(struct ib_uobject *uobj)
 {
 	struct ib_uverbs_file *ufile;
-	struct ib_uobject *uobj;
 
-	/*
-	 * This can only happen if the fput came from alloc_abort_fd_uobject()
-	 */
-	if (!filp->private_data)
-		return 0;
-	uobj = filp->private_data;
 	ufile = uobj->ufile;
 
 	if (down_read_trylock(&ufile->hw_destroy_rwsem)) {
@@ -843,43 +883,50 @@ int uverbs_uobject_fd_release(struct inode *inode, struct file *filp)
 	uverbs_uobject_put(uobj);
 	return 0;
 }
-EXPORT_SYMBOL(uverbs_uobject_fd_release);
+EXPORT_SYMBOL_NS_GPL(uverbs_uobject_release, "rdma_core");
 
 /*
- * Drop the ucontext off the ufile and completely disconnect it from the
- * ib_device
+ * Users of UVERBS_TYPE_ALLOC_FD should set this function as the struct
+ * file_operations release method.
  */
-static void ufile_destroy_ucontext(struct ib_uverbs_file *ufile,
-				   enum rdma_remove_reason reason)
+int uverbs_uobject_fd_release(struct inode *inode, struct file *filp)
 {
-	struct ib_ucontext *ucontext = ufile->ucontext;
-	struct ib_device *ib_dev = ucontext->device;
+	void (*release_cleanup)(struct ib_uobject *uobj) = NULL;
+	struct ib_uobject *uobj = filp->private_data;
+	const struct uverbs_obj_type *type_attrs;
+	int ret;
 
 	/*
-	 * If we are closing the FD then the user mmap VMAs must have
-	 * already been destroyed as they hold on to the filep, otherwise
-	 * they need to be zap'd.
+	 * This can only happen if the fput came from alloc_abort_fd_uobject()
 	 */
-	if (reason == RDMA_REMOVE_DRIVER_REMOVE) {
-		uverbs_user_mmap_disassociate(ufile);
-		if (ib_dev->ops.disassociate_ucontext)
-			ib_dev->ops.disassociate_ucontext(ucontext);
+	if (!uobj)
+		return 0;
+
+	/*
+	 * uverbs_disassociate_api() can NULL type_attrs after disassociate, but
+	 * it won't if release_cleanup is used.
+	 */
+	type_attrs = READ_ONCE(uobj->uapi_object->type_attrs);
+	if (type_attrs)
+		release_cleanup = container_of(type_attrs,
+					       struct uverbs_obj_fd_type, type)
+					  ->release_cleanup;
+	if (release_cleanup)
+		uverbs_uobject_get(uobj);
+
+	ret = uverbs_uobject_release(uobj);
+
+	if (release_cleanup) {
+		release_cleanup(uobj);
+		uverbs_uobject_put(uobj);
 	}
 
-	ib_rdmacg_uncharge(&ucontext->cg_obj, ib_dev,
-			   RDMACG_RESOURCE_HCA_HANDLE);
-
-	rdma_restrack_del(&ucontext->res);
-
-	ib_dev->ops.dealloc_ucontext(ucontext);
-	WARN_ON(!xa_empty(&ucontext->mmap_xa));
-	kfree(ucontext);
-
-	ufile->ucontext = NULL;
+	return ret;
 }
+EXPORT_SYMBOL(uverbs_uobject_fd_release);
 
-static int __uverbs_cleanup_ufile(struct ib_uverbs_file *ufile,
-				  enum rdma_remove_reason reason)
+int __uverbs_cleanup_ufile(struct ib_uverbs_file *ufile,
+			   enum rdma_remove_reason reason)
 {
 	struct uverbs_attr_bundle attrs = { .ufile = ufile };
 	struct ib_ucontext *ucontext = ufile->ucontext;
@@ -920,36 +967,7 @@ static int __uverbs_cleanup_ufile(struct ib_uverbs_file *ufile,
 	}
 	return ret;
 }
-
-/*
- * Destroy the ucontext and every uobject associated with it.
- *
- * This is internally locked and can be called in parallel from multiple
- * contexts.
- */
-void uverbs_destroy_ufile_hw(struct ib_uverbs_file *ufile,
-			     enum rdma_remove_reason reason)
-{
-	down_write(&ufile->hw_destroy_rwsem);
-
-	/*
-	 * If a ucontext was never created then we can't have any uobjects to
-	 * cleanup, nothing to do.
-	 */
-	if (!ufile->ucontext)
-		goto done;
-
-	while (!list_empty(&ufile->uobjects) &&
-	       !__uverbs_cleanup_ufile(ufile, reason)) {
-	}
-
-	if (WARN_ON(!list_empty(&ufile->uobjects)))
-		__uverbs_cleanup_ufile(ufile, RDMA_REMOVE_DRIVER_FAILURE);
-	ufile_destroy_ucontext(ufile, reason);
-
-done:
-	up_write(&ufile->hw_destroy_rwsem);
-}
+EXPORT_SYMBOL_NS_GPL(__uverbs_cleanup_ufile, "rdma_core");
 
 const struct uverbs_obj_type_class uverbs_fd_class = {
 	.alloc_begin = alloc_begin_fd_uobject,
@@ -987,6 +1005,7 @@ uverbs_get_uobject_from_file(u16 object_id, enum uverbs_obj_access access,
 		return ERR_PTR(-EOPNOTSUPP);
 	}
 }
+EXPORT_SYMBOL_NS_GPL(uverbs_get_uobject_from_file, "rdma_core");
 
 void uverbs_finalize_object(struct ib_uobject *uobj,
 			    enum uverbs_obj_access access, bool hw_obj_valid,
@@ -1019,3 +1038,36 @@ void uverbs_finalize_object(struct ib_uobject *uobj,
 		WARN_ON(true);
 	}
 }
+EXPORT_SYMBOL_NS_GPL(uverbs_finalize_object, "rdma_core");
+
+/**
+ * rdma_uattrs_has_raw_cap() - Returns whether a rdma device linked to the
+ *			       uverbs attributes file has CAP_NET_RAW
+ *			       capability or not.
+ *
+ * @attrs:       Pointer to uverbs attributes
+ *
+ * Returns true if a rdma device's owning user namespace has CAP_NET_RAW
+ * capability, otherwise false.
+ */
+bool rdma_uattrs_has_raw_cap(const struct uverbs_attr_bundle *attrs)
+{
+	struct ib_uverbs_file *ufile = attrs->ufile;
+	struct ib_ucontext *ucontext;
+	bool has_cap = false;
+	int srcu_key;
+
+	srcu_key = srcu_read_lock(&ufile->device->disassociate_srcu);
+	ucontext = ib_uverbs_get_ucontext_file(ufile);
+	if (IS_ERR(ucontext))
+		goto out;
+	has_cap = rdma_dev_has_raw_cap(ucontext->device);
+
+out:
+	srcu_read_unlock(&ufile->device->disassociate_srcu, srcu_key);
+	return has_cap;
+}
+EXPORT_SYMBOL(rdma_uattrs_has_raw_cap);
+
+MODULE_DESCRIPTION("InfiniBand uverbs objects");
+MODULE_LICENSE("Dual BSD/GPL");

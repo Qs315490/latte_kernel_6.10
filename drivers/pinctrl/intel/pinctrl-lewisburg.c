@@ -2,11 +2,10 @@
 /*
  * Intel Lewisburg pinctrl/GPIO driver
  *
- * Copyright (C) 2017, Intel Corporation
+ * Copyright (C) 2017 Intel Corporation
  * Author: Mika Westerberg <mika.westerberg@linux.intel.com>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>

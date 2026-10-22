@@ -70,8 +70,8 @@ static int tps68470_gpio_get_direction(struct gpio_chip *gc,
 						    GPIO_LINE_DIRECTION_IN;
 }
 
-static void tps68470_gpio_set(struct gpio_chip *gc, unsigned int offset,
-				int value)
+static int tps68470_gpio_set(struct gpio_chip *gc, unsigned int offset,
+			     int value)
 {
 	struct tps68470_gpio_data *tps68470_gpio = gpiochip_get_data(gc);
 	struct regmap *regmap = tps68470_gpio->tps68470_regmap;
@@ -82,7 +82,8 @@ static void tps68470_gpio_set(struct gpio_chip *gc, unsigned int offset,
 		offset -= TPS68470_N_REGULAR_GPIO;
 	}
 
-	regmap_update_bits(regmap, reg, BIT(offset), value ? BIT(offset) : 0);
+	return regmap_update_bits(regmap, reg, BIT(offset),
+				  value ? BIT(offset) : 0);
 }
 
 static int tps68470_gpio_output(struct gpio_chip *gc, unsigned int offset,
@@ -90,9 +91,12 @@ static int tps68470_gpio_output(struct gpio_chip *gc, unsigned int offset,
 {
 	struct tps68470_gpio_data *tps68470_gpio = gpiochip_get_data(gc);
 	struct regmap *regmap = tps68470_gpio->tps68470_regmap;
+	int ret;
 
 	/* Set the initial value */
-	tps68470_gpio_set(gc, offset, value);
+	ret = tps68470_gpio_set(gc, offset, value);
+	if (ret)
+		return ret;
 
 	/* rest are always outputs */
 	if (offset >= TPS68470_N_REGULAR_GPIO)
@@ -116,6 +120,17 @@ static int tps68470_gpio_input(struct gpio_chip *gc, unsigned int offset)
 				   TPS68470_GPIO_MODE_MASK, 0x00);
 }
 
+static int tps68470_enable_i2c_daisy_chain(struct gpio_chip *gc)
+{
+	int ret;
+
+	ret = tps68470_gpio_input(gc, 1);
+	if (ret)
+		return ret;
+
+	return tps68470_gpio_input(gc, 2);
+}
+
 static const char *tps68470_names[TPS68470_N_GPIO] = {
 	"gpio.0", "gpio.1", "gpio.2", "gpio.3",
 	"gpio.4", "gpio.5", "gpio.6",
@@ -125,6 +140,7 @@ static const char *tps68470_names[TPS68470_N_GPIO] = {
 static int tps68470_gpio_probe(struct platform_device *pdev)
 {
 	struct tps68470_gpio_data *tps68470_gpio;
+	int ret;
 
 	tps68470_gpio = devm_kzalloc(&pdev->dev, sizeof(*tps68470_gpio),
 				     GFP_KERNEL);
@@ -145,7 +161,14 @@ static int tps68470_gpio_probe(struct platform_device *pdev)
 	tps68470_gpio->gc.base = -1;
 	tps68470_gpio->gc.parent = &pdev->dev;
 
-	return devm_gpiochip_add_data(&pdev->dev, &tps68470_gpio->gc, tps68470_gpio);
+	ret = devm_gpiochip_add_data(&pdev->dev, &tps68470_gpio->gc, tps68470_gpio);
+	if (ret)
+		return ret;
+
+	if (device_property_present(&pdev->dev, "daisy-chain-enable"))
+		ret = tps68470_enable_i2c_daisy_chain(&tps68470_gpio->gc);
+
+	return ret;
 }
 
 static struct platform_driver tps68470_gpio_driver = {

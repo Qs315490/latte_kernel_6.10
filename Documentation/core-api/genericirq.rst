@@ -410,8 +410,6 @@ which are used in the generic IRQ layer.
 .. kernel-doc:: include/linux/interrupt.h
    :internal:
 
-.. kernel-doc:: include/linux/irqdomain.h
-
 Public Functions Provided
 =========================
 
@@ -441,6 +439,6 @@ Credits
 
 The following people have contributed to this document:
 
-1. Thomas Gleixner tglx@linutronix.de
+1. Thomas Gleixner tglx@kernel.org
 
 2. Ingo Molnar mingo@elte.hu

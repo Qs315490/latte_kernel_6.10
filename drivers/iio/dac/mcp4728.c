@@ -20,7 +20,6 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
 
@@ -286,7 +285,7 @@ static const struct iio_chan_spec_ext_info mcp4728_ext_info[] = {
 	IIO_ENUM("powerdown_mode", IIO_SEPARATE, &mcp4728_powerdown_mode_enum),
 	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE,
 			   &mcp4728_powerdown_mode_enum),
-	{},
+	{ }
 };
 
 static const struct iio_chan_spec mcp4728_channels[MCP4728_N_CHANNELS] = {
@@ -572,14 +571,14 @@ static int mcp4728_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mcp4728_id[] = {
-	{ "mcp4728" },
-	{}
+	{ .name = "mcp4728" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mcp4728_id);
 
 static const struct of_device_id mcp4728_of_match[] = {
 	{ .compatible = "microchip,mcp4728" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, mcp4728_of_match);
 

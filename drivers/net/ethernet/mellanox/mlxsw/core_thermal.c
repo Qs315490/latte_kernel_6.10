@@ -205,11 +205,11 @@ static int mlxsw_thermal_get_temp(struct thermal_zone_device *tzdev,
 	return 0;
 }
 
-static struct thermal_zone_params mlxsw_thermal_params = {
+static const struct thermal_zone_params mlxsw_thermal_params = {
 	.no_hwmon = true,
 };
 
-static struct thermal_zone_device_ops mlxsw_thermal_ops = {
+static const struct thermal_zone_device_ops mlxsw_thermal_ops = {
 	.should_bind = mlxsw_thermal_should_bind,
 	.get_temp = mlxsw_thermal_get_temp,
 };
@@ -252,7 +252,7 @@ static int mlxsw_thermal_module_temp_get(struct thermal_zone_device *tzdev,
 	return 0;
 }
 
-static struct thermal_zone_device_ops mlxsw_thermal_module_ops = {
+static const struct thermal_zone_device_ops mlxsw_thermal_module_ops = {
 	.should_bind	= mlxsw_thermal_module_should_bind,
 	.get_temp	= mlxsw_thermal_module_temp_get,
 };
@@ -280,7 +280,7 @@ static int mlxsw_thermal_gearbox_temp_get(struct thermal_zone_device *tzdev,
 	return 0;
 }
 
-static struct thermal_zone_device_ops mlxsw_thermal_gearbox_ops = {
+static const struct thermal_zone_device_ops mlxsw_thermal_gearbox_ops = {
 	.should_bind	= mlxsw_thermal_module_should_bind,
 	.get_temp	= mlxsw_thermal_gearbox_temp_get,
 };
@@ -431,9 +431,8 @@ mlxsw_thermal_modules_init(struct device *dev, struct mlxsw_core *core,
 	if (!area->tz_module_num)
 		return 0;
 
-	area->tz_module_arr = kcalloc(area->tz_module_num,
-				      sizeof(*area->tz_module_arr),
-				      GFP_KERNEL);
+	area->tz_module_arr = kzalloc_objs(*area->tz_module_arr,
+					   area->tz_module_num);
 	if (!area->tz_module_arr)
 		return -ENOMEM;
 
@@ -522,9 +521,8 @@ mlxsw_thermal_gearboxes_init(struct device *dev, struct mlxsw_core *core,
 		return 0;
 
 	area->tz_gearbox_num = gbox_num;
-	area->tz_gearbox_arr = kcalloc(area->tz_gearbox_num,
-				       sizeof(*area->tz_gearbox_arr),
-				       GFP_KERNEL);
+	area->tz_gearbox_arr = kzalloc_objs(*area->tz_gearbox_arr,
+					    area->tz_gearbox_num);
 	if (!area->tz_gearbox_arr)
 		return -ENOMEM;
 
@@ -644,8 +642,7 @@ int mlxsw_thermal_init(struct mlxsw_core *core,
 	mlxsw_reg_mgpir_unpack(mgpir_pl, NULL, NULL, NULL, NULL,
 			       &num_of_slots);
 
-	thermal = kzalloc(struct_size(thermal, line_cards, num_of_slots + 1),
-			  GFP_KERNEL);
+	thermal = kzalloc_flex(*thermal, line_cards, num_of_slots + 1);
 	if (!thermal)
 		return -ENOMEM;
 

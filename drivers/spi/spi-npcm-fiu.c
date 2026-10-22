@@ -13,6 +13,7 @@
 #include <linux/vmalloc.h>
 #include <linux/regmap.h>
 #include <linux/of.h>
+#include <linux/minmax.h>
 #include <linux/spi/spi-mem.h>
 #include <linux/mfd/syscon.h>
 
@@ -298,11 +299,11 @@ static ssize_t npcm_fiu_direct_read(struct spi_mem_dirmap_desc *desc,
 		for (i = 0 ; i < len ; i++)
 			*(buf_rx + i) = ioread8(src + i);
 	} else {
-		if (desc->info.op_tmpl.addr.buswidth != fiu->drd_op.addr.buswidth ||
-		    desc->info.op_tmpl.dummy.nbytes != fiu->drd_op.dummy.nbytes ||
-		    desc->info.op_tmpl.cmd.opcode != fiu->drd_op.cmd.opcode ||
-		    desc->info.op_tmpl.addr.nbytes != fiu->drd_op.addr.nbytes)
-			npcm_fiu_set_drd(fiu, &desc->info.op_tmpl);
+		if (desc->info.op_tmpl->addr.buswidth != fiu->drd_op.addr.buswidth ||
+		    desc->info.op_tmpl->dummy.nbytes != fiu->drd_op.dummy.nbytes ||
+		    desc->info.op_tmpl->cmd.opcode != fiu->drd_op.cmd.opcode ||
+		    desc->info.op_tmpl->addr.nbytes != fiu->drd_op.addr.nbytes)
+			npcm_fiu_set_drd(fiu, desc->info.op_tmpl);
 
 		memcpy_fromio(buf_rx, src, len);
 	}
@@ -498,10 +499,7 @@ static int npcm_fiu_read(struct spi_mem *mem, const struct spi_mem_op *op)
 
 	do {
 		addr = ((u32)op->addr.val + i);
-		if (currlen < 16)
-			readlen = currlen;
-		else
-			readlen = 16;
+		readlen = min_t(int, currlen, 16);
 
 		buf_ptr = data + i;
 		ret = npcm_fiu_uma_read(mem, op, addr, true, buf_ptr,
@@ -549,11 +547,6 @@ static int npcm_fiu_exec_op(struct spi_mem *mem, const struct spi_mem_op *op)
 	struct npcm_fiu_chip *chip = &fiu->chip[spi_get_chipselect(mem->spi, 0)];
 	int ret = 0;
 	u8 *buf;
-
-	dev_dbg(fiu->dev, "cmd:%#x mode:%d.%d.%d.%d addr:%#llx len:%#x\n",
-		op->cmd.opcode, op->cmd.buswidth, op->addr.buswidth,
-		op->dummy.buswidth, op->data.buswidth, op->addr.val,
-		op->data.nbytes);
 
 	if (fiu->spix_mode || op->addr.nbytes > 4)
 		return -EOPNOTSUPP;
@@ -616,7 +609,7 @@ static int npcm_fiu_dirmap_create(struct spi_mem_dirmap_desc *desc)
 	}
 
 	if (!fiu->spix_mode &&
-	    desc->info.op_tmpl.data.dir == SPI_MEM_DATA_OUT) {
+	    desc->info.op_tmpl->data.dir == SPI_MEM_DATA_OUT) {
 		desc->nodirmap = true;
 		return 0;
 	}
@@ -651,9 +644,9 @@ static int npcm_fiu_dirmap_create(struct spi_mem_dirmap_desc *desc)
 				   NPCM_FIU_CFG_FIU_FIX);
 	}
 
-	if (desc->info.op_tmpl.data.dir == SPI_MEM_DATA_IN) {
+	if (desc->info.op_tmpl->data.dir == SPI_MEM_DATA_IN) {
 		if (!fiu->spix_mode)
-			npcm_fiu_set_drd(fiu, &desc->info.op_tmpl);
+			npcm_fiu_set_drd(fiu, desc->info.op_tmpl);
 		else
 			npcm_fiux_set_direct_rd(fiu);
 
@@ -722,7 +715,6 @@ static int npcm_fiu_probe(struct platform_device *pdev)
 
 	fiu->info = &fiu_data_match->npcm_fiu_data_info[id];
 
-	platform_set_drvdata(pdev, fiu);
 	fiu->dev = dev;
 
 	regbase = devm_platform_ioremap_resource_byname(pdev, "control");
@@ -745,21 +737,14 @@ static int npcm_fiu_probe(struct platform_device *pdev)
 	fiu->spix_mode = of_property_read_bool(dev->of_node,
 					       "nuvoton,spix-mode");
 
-	platform_set_drvdata(pdev, fiu);
-
 	ctrl->mode_bits = SPI_RX_DUAL | SPI_RX_QUAD
 		| SPI_TX_DUAL | SPI_TX_QUAD;
 	ctrl->setup = npcm_fiu_setup;
 	ctrl->bus_num = -1;
 	ctrl->mem_ops = &npcm_fiu_mem_ops;
 	ctrl->num_chipselect = fiu->info->max_cs;
-	ctrl->dev.of_node = dev->of_node;
 
 	return devm_spi_register_controller(dev, ctrl);
-}
-
-static void npcm_fiu_remove(struct platform_device *pdev)
-{
 }
 
 MODULE_DEVICE_TABLE(of, npcm_fiu_dt_ids);
@@ -771,7 +756,6 @@ static struct platform_driver npcm_fiu_driver = {
 		.of_match_table = npcm_fiu_dt_ids,
 	},
 	.probe = npcm_fiu_probe,
-	.remove = npcm_fiu_remove,
 };
 module_platform_driver(npcm_fiu_driver);
 

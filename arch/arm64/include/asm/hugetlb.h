@@ -21,12 +21,12 @@ extern bool arch_hugetlb_migration_supported(struct hstate *h);
 
 static inline void arch_clear_hugetlb_flags(struct folio *folio)
 {
-	clear_bit(PG_dcache_clean, &folio->flags);
+	clear_bit(PG_dcache_clean, &folio->flags.f);
 
 #ifdef CONFIG_ARM64_MTE
 	if (system_supports_mte()) {
-		clear_bit(PG_mte_tagged, &folio->flags);
-		clear_bit(PG_mte_lock, &folio->flags);
+		clear_bit(PG_mte_tagged, &folio->flags.f);
+		clear_bit(PG_mte_lock, &folio->flags.f);
 	}
 #endif
 }
@@ -56,8 +56,6 @@ extern void huge_pte_clear(struct mm_struct *mm, unsigned long addr,
 #define __HAVE_ARCH_HUGE_PTEP_GET
 extern pte_t huge_ptep_get(struct mm_struct *mm, unsigned long addr, pte_t *ptep);
 
-void __init arm64_hugetlb_cma_reserve(void);
-
 #define huge_ptep_modify_prot_start huge_ptep_modify_prot_start
 extern pte_t huge_ptep_modify_prot_start(struct vm_area_struct *vma,
 					 unsigned long addr, pte_t *ptep);
@@ -69,6 +67,30 @@ extern void huge_ptep_modify_prot_commit(struct vm_area_struct *vma,
 
 #include <asm-generic/hugetlb.h>
 
+static inline void __flush_hugetlb_tlb_range(struct vm_area_struct *vma,
+					     unsigned long start,
+					     unsigned long end,
+					     unsigned long stride,
+					     tlbf_t flags)
+{
+	switch (stride) {
+#ifndef __PAGETABLE_PMD_FOLDED
+	case PUD_SIZE:
+		__flush_tlb_range(vma, start, end, PUD_SIZE, 1, flags);
+		break;
+#endif
+	case CONT_PMD_SIZE:
+	case PMD_SIZE:
+		__flush_tlb_range(vma, start, end, PMD_SIZE, 2, flags);
+		break;
+	case CONT_PTE_SIZE:
+		__flush_tlb_range(vma, start, end, PAGE_SIZE, 3, flags);
+		break;
+	default:
+		__flush_tlb_range(vma, start, end, PAGE_SIZE, TLBI_TTL_UNKNOWN, flags);
+	}
+}
+
 #define __HAVE_ARCH_FLUSH_HUGETLB_TLB_RANGE
 static inline void flush_hugetlb_tlb_range(struct vm_area_struct *vma,
 					   unsigned long start,
@@ -76,22 +98,7 @@ static inline void flush_hugetlb_tlb_range(struct vm_area_struct *vma,
 {
 	unsigned long stride = huge_page_size(hstate_vma(vma));
 
-	switch (stride) {
-#ifndef __PAGETABLE_PMD_FOLDED
-	case PUD_SIZE:
-		__flush_tlb_range(vma, start, end, PUD_SIZE, false, 1);
-		break;
-#endif
-	case CONT_PMD_SIZE:
-	case PMD_SIZE:
-		__flush_tlb_range(vma, start, end, PMD_SIZE, false, 2);
-		break;
-	case CONT_PTE_SIZE:
-		__flush_tlb_range(vma, start, end, PAGE_SIZE, false, 3);
-		break;
-	default:
-		__flush_tlb_range(vma, start, end, PAGE_SIZE, false, TLBI_TTL_UNKNOWN);
-	}
+	__flush_hugetlb_tlb_range(vma, start, end, stride, TLBF_NONE);
 }
 
 #endif /* __ASM_HUGETLB_H */

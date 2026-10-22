@@ -10,6 +10,8 @@
 #include <linux/clocksource.h>
 #include <linux/hrtimer.h>
 
+#include <linux/irqchip/arm-gic-v5.h>
+
 enum kvm_arch_timers {
 	TIMER_PTIMER,
 	TIMER_VTIMER,
@@ -47,12 +49,10 @@ struct arch_timer_vm_data {
 	u64	poffset;
 
 	/* The PPI for each timer, global to the VM */
-	u8	ppi[NR_KVM_TIMERS];
+	u32	ppi[NR_KVM_TIMERS];
 };
 
 struct arch_timer_context {
-	struct kvm_vcpu			*vcpu;
-
 	/* Emulated Timer (may be unused) */
 	struct hrtimer			hrtimer;
 	u64				ns_frac;
@@ -66,10 +66,8 @@ struct arch_timer_context {
 	 */
 	bool				loaded;
 
-	/* Output level of the timer IRQ */
-	struct {
-		bool			level;
-	} irq;
+	/* Who am I? */
+	enum kvm_arch_timers		timer_id;
 
 	/* Duplicated state from arch_timer.c for convenience */
 	u32				host_timer_irq;
@@ -101,13 +99,10 @@ void kvm_timer_vcpu_init(struct kvm_vcpu *vcpu);
 void kvm_timer_sync_nested(struct kvm_vcpu *vcpu);
 void kvm_timer_sync_user(struct kvm_vcpu *vcpu);
 bool kvm_timer_should_notify_user(struct kvm_vcpu *vcpu);
-void kvm_timer_update_run(struct kvm_vcpu *vcpu);
+bool kvm_timer_update_run(struct kvm_vcpu *vcpu);
 void kvm_timer_vcpu_terminate(struct kvm_vcpu *vcpu);
 
 void kvm_timer_init_vm(struct kvm *kvm);
-
-u64 kvm_arm_timer_get_reg(struct kvm_vcpu *, u64 regid);
-int kvm_arm_timer_set_reg(struct kvm_vcpu *, u64 regid, u64 value);
 
 int kvm_arm_timer_set_attr(struct kvm_vcpu *vcpu, struct kvm_device_attr *attr);
 int kvm_arm_timer_get_attr(struct kvm_vcpu *vcpu, struct kvm_device_attr *attr);
@@ -127,10 +122,14 @@ void kvm_timer_init_vhe(void);
 #define vcpu_hvtimer(v)	(&(v)->arch.timer_cpu.timers[TIMER_HVTIMER])
 #define vcpu_hptimer(v)	(&(v)->arch.timer_cpu.timers[TIMER_HPTIMER])
 
-#define arch_timer_ctx_index(ctx)	((ctx) - vcpu_timer((ctx)->vcpu)->timers)
-
-#define timer_vm_data(ctx)		(&(ctx)->vcpu->kvm->arch.timer_data)
+#define arch_timer_ctx_index(ctx)	((ctx)->timer_id)
+#define timer_context_to_vcpu(ctx)	container_of((ctx), struct kvm_vcpu, arch.timer_cpu.timers[(ctx)->timer_id])
+#define timer_vm_data(ctx)		(&(timer_context_to_vcpu(ctx)->kvm->arch.timer_data))
 #define timer_irq(ctx)			(timer_vm_data(ctx)->ppi[arch_timer_ctx_index(ctx)])
+
+#define get_vgic_ppi(k, i) (((k)->arch.vgic.vgic_model != KVM_DEV_TYPE_ARM_VGIC_V5) ? \
+			    (i) : (FIELD_PREP(GICV5_HWIRQ_ID, i) |	\
+				   FIELD_PREP(GICV5_HWIRQ_TYPE, GICV5_HWIRQ_TYPE_PPI)))
 
 u64 kvm_arm_timer_read_sysreg(struct kvm_vcpu *vcpu,
 			      enum kvm_arch_timers tmr,
@@ -176,6 +175,16 @@ static inline u64 timer_get_offset(struct arch_timer_context *ctxt)
 		offset += *ctxt->offset.vcpu_offset;
 
 	return offset;
+}
+
+static inline void timer_set_offset(struct arch_timer_context *ctxt, u64 offset)
+{
+	if (!ctxt->offset.vm_offset) {
+		WARN(offset, "timer %d\n", arch_timer_ctx_index(ctxt));
+		return;
+	}
+
+	WRITE_ONCE(*ctxt->offset.vm_offset, offset);
 }
 
 #endif

@@ -70,11 +70,9 @@ static struct crypto_alg *crypto_alg_match(struct crypto_user_alg *p, int exact)
 
 static int crypto_report_cipher(struct sk_buff *skb, struct crypto_alg *alg)
 {
-	struct crypto_report_cipher rcipher;
-
-	memset(&rcipher, 0, sizeof(rcipher));
-
-	strscpy(rcipher.type, "cipher", sizeof(rcipher.type));
+	struct crypto_report_cipher rcipher = {
+		.type = "cipher",
+	};
 
 	rcipher.blocksize = alg->cra_blocksize;
 	rcipher.min_keysize = alg->cra_cipher.cia_min_keysize;
@@ -82,17 +80,6 @@ static int crypto_report_cipher(struct sk_buff *skb, struct crypto_alg *alg)
 
 	return nla_put(skb, CRYPTOCFGA_REPORT_CIPHER,
 		       sizeof(rcipher), &rcipher);
-}
-
-static int crypto_report_comp(struct sk_buff *skb, struct crypto_alg *alg)
-{
-	struct crypto_report_comp rcomp;
-
-	memset(&rcomp, 0, sizeof(rcomp));
-
-	strscpy(rcomp.type, "compression", sizeof(rcomp.type));
-
-	return nla_put(skb, CRYPTOCFGA_REPORT_COMPRESS, sizeof(rcomp), &rcomp);
 }
 
 static int crypto_report_one(struct crypto_alg *alg,
@@ -114,10 +101,10 @@ static int crypto_report_one(struct crypto_alg *alg,
 	if (nla_put_u32(skb, CRYPTOCFGA_PRIORITY_VAL, alg->cra_priority))
 		goto nla_put_failure;
 	if (alg->cra_flags & CRYPTO_ALG_LARVAL) {
-		struct crypto_report_larval rl;
+		struct crypto_report_larval rl = {
+			.type = "larval",
+		};
 
-		memset(&rl, 0, sizeof(rl));
-		strscpy(rl.type, "larval", sizeof(rl.type));
 		if (nla_put(skb, CRYPTOCFGA_REPORT_LARVAL, sizeof(rl), &rl))
 			goto nla_put_failure;
 		goto out;
@@ -133,11 +120,6 @@ static int crypto_report_one(struct crypto_alg *alg,
 	switch (alg->cra_flags & (CRYPTO_ALG_TYPE_MASK | CRYPTO_ALG_LARVAL)) {
 	case CRYPTO_ALG_TYPE_CIPHER:
 		if (crypto_report_cipher(skb, alg))
-			goto nla_put_failure;
-
-		break;
-	case CRYPTO_ALG_TYPE_COMPRESS:
-		if (crypto_report_comp(skb, alg))
 			goto nla_put_failure;
 
 		break;
@@ -309,7 +291,7 @@ static int crypto_del_alg(struct sk_buff *skb, struct nlmsghdr *nlh,
 	if (!alg)
 		return -ENOENT;
 
-	/* We can not unregister core algorithms such as aes-generic.
+	/* We can not unregister core algorithms such as aes.
 	 * We would loose the reference in the crypto_alg_list to this algorithm
 	 * if we try to unregister. Unregistering such an algorithm without
 	 * removing the module is not possible, so we restrict to crypto

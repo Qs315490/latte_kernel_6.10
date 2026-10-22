@@ -79,8 +79,6 @@ extern int scsi_dev_info_list_add_keyed(int compatible, char *vendor,
 					char *model, char *strflags,
 					blist_flags_t flags,
 					enum scsi_devinfo_key key);
-extern int scsi_dev_info_list_del_keyed(char *vendor, char *model,
-					enum scsi_devinfo_key key);
 extern int scsi_dev_info_add_list(enum scsi_devinfo_key key, const char *name);
 extern int scsi_dev_info_remove_list(enum scsi_devinfo_key key);
 
@@ -93,6 +91,7 @@ extern enum blk_eh_timer_return scsi_timeout(struct request *req);
 extern int scsi_error_handler(void *host);
 extern enum scsi_disposition scsi_decide_disposition(struct scsi_cmnd *cmd);
 extern void scsi_eh_wakeup(struct Scsi_Host *shost, unsigned int busy);
+extern void scsi_rcu_eh_wakeup(struct work_struct *work);
 extern void scsi_eh_scmd_add(struct scsi_cmnd *);
 void scsi_eh_ready_devs(struct Scsi_Host *shost,
 			struct list_head *work_q,
@@ -104,7 +103,9 @@ void scsi_eh_done(struct scsi_cmnd *scmd);
 
 /* scsi_lib.c */
 extern void scsi_device_unbusy(struct scsi_device *sdev, struct scsi_cmnd *cmd);
-extern void scsi_queue_insert(struct scsi_cmnd *cmd, int reason);
+extern struct scsi_device *scsi_device_from_queue(struct request_queue *q);
+extern void scsi_queue_insert(struct scsi_cmnd *cmd,
+			      enum scsi_qc_status reason);
 extern void scsi_io_completion(struct scsi_cmnd *, unsigned int);
 extern void scsi_run_host_queues(struct Scsi_Host *shost);
 extern void scsi_requeue_run_queue(struct work_struct *work);
@@ -137,6 +138,7 @@ extern int scsi_complete_async_scans(void);
 extern int scsi_scan_host_selected(struct Scsi_Host *, unsigned int,
 				   unsigned int, u64, enum scsi_scan_mode);
 extern void scsi_forget_host(struct Scsi_Host *);
+struct scsi_device *scsi_get_pseudo_sdev(struct Scsi_Host *);
 
 /* scsi_sysctl.c */
 #ifdef CONFIG_SYSCTL

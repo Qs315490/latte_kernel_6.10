@@ -31,6 +31,7 @@
 #include <linux/bitfield.h>
 #include <linux/byteorder/generic.h>
 #include <linux/cec.h>
+#include <linux/export.h>
 #include <linux/hdmi.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
@@ -66,36 +67,61 @@ static int oui(u8 first, u8 second, u8 third)
  * on as many displays as possible).
  */
 
-/* First detailed mode wrong, use largest 60Hz mode */
-#define EDID_QUIRK_PREFER_LARGE_60		(1 << 0)
-/* Reported 135MHz pixel clock is too high, needs adjustment */
-#define EDID_QUIRK_135_CLOCK_TOO_HIGH		(1 << 1)
-/* Prefer the largest mode at 75 Hz */
-#define EDID_QUIRK_PREFER_LARGE_75		(1 << 2)
-/* Detail timing is in cm not mm */
-#define EDID_QUIRK_DETAILED_IN_CM		(1 << 3)
-/* Detailed timing descriptors have bogus size values, so just take the
- * maximum size and use that.
- */
-#define EDID_QUIRK_DETAILED_USE_MAXIMUM_SIZE	(1 << 4)
-/* use +hsync +vsync for detailed mode */
-#define EDID_QUIRK_DETAILED_SYNC_PP		(1 << 6)
-/* Force reduced-blanking timings for detailed modes */
-#define EDID_QUIRK_FORCE_REDUCED_BLANKING	(1 << 7)
-/* Force 8bpc */
-#define EDID_QUIRK_FORCE_8BPC			(1 << 8)
-/* Force 12bpc */
-#define EDID_QUIRK_FORCE_12BPC			(1 << 9)
-/* Force 6bpc */
-#define EDID_QUIRK_FORCE_6BPC			(1 << 10)
-/* Force 10bpc */
-#define EDID_QUIRK_FORCE_10BPC			(1 << 11)
-/* Non desktop display (i.e. HMD) */
-#define EDID_QUIRK_NON_DESKTOP			(1 << 12)
-/* Cap the DSC target bitrate to 15bpp */
-#define EDID_QUIRK_CAP_DSC_15BPP		(1 << 13)
+enum drm_edid_internal_quirk {
+	/* First detailed mode wrong, use largest 60Hz mode */
+	EDID_QUIRK_PREFER_LARGE_60 = DRM_EDID_QUIRK_NUM,
+	/* Reported 135MHz pixel clock is too high, needs adjustment */
+	EDID_QUIRK_135_CLOCK_TOO_HIGH,
+	/* Prefer the largest mode at 75 Hz */
+	EDID_QUIRK_PREFER_LARGE_75,
+	/* Detail timing is in cm not mm */
+	EDID_QUIRK_DETAILED_IN_CM,
+	/* Detailed timing descriptors have bogus size values, so just take the
+	 * maximum size and use that.
+	 */
+	EDID_QUIRK_DETAILED_USE_MAXIMUM_SIZE,
+	/* use +hsync +vsync for detailed mode */
+	EDID_QUIRK_DETAILED_SYNC_PP,
+	/* Force reduced-blanking timings for detailed modes */
+	EDID_QUIRK_FORCE_REDUCED_BLANKING,
+	/* Force 8bpc */
+	EDID_QUIRK_FORCE_8BPC,
+	/* Force 12bpc */
+	EDID_QUIRK_FORCE_12BPC,
+	/* Force 6bpc */
+	EDID_QUIRK_FORCE_6BPC,
+	/* Force 10bpc */
+	EDID_QUIRK_FORCE_10BPC,
+	/* Non desktop display (i.e. HMD) */
+	EDID_QUIRK_NON_DESKTOP,
+	/* Cap the DSC target bitrate to 15bpp */
+	EDID_QUIRK_CAP_DSC_15BPP,
+};
 
 #define MICROSOFT_IEEE_OUI	0xca125c
+#define AMD_IEEE_OUI        0x00001A
+
+#define AMD_VSDB_V3_PAYLOAD_MIN_LEN 15
+#define AMD_VSDB_V3_PAYLOAD_MAX_LEN 20
+
+struct amd_vsdb_v3_payload {
+	u8 oui[3];
+	u8 version;
+	u8 feature_caps;
+	u8 rsvd0[3];
+	u8 cs_eotf_support;
+	u8 lum1_max;
+	u8 lum1_min;
+	u8 lum2_max;
+	u8 lum2_min;
+	u8 rsvd1[2];
+	/*
+	 * Bytes beyond AMD_VSDB_V3_PAYLOAD_MIN_LEN are optional; a
+	 * monitor may provide a payload as short as 15 bytes.  Always
+	 * check cea_db_payload_len() before accessing extra[].
+	 */
+	u8 extra[AMD_VSDB_V3_PAYLOAD_MAX_LEN - AMD_VSDB_V3_PAYLOAD_MIN_LEN];
+} __packed;
 
 struct detailed_mode_closure {
 	struct drm_connector *connector;
@@ -128,124 +154,135 @@ static const struct edid_quirk {
 	u32 quirks;
 } edid_quirk_list[] = {
 	/* Acer AL1706 */
-	EDID_QUIRK('A', 'C', 'R', 44358, EDID_QUIRK_PREFER_LARGE_60),
+	EDID_QUIRK('A', 'C', 'R', 44358, BIT(EDID_QUIRK_PREFER_LARGE_60)),
 	/* Acer F51 */
-	EDID_QUIRK('A', 'P', 'I', 0x7602, EDID_QUIRK_PREFER_LARGE_60),
+	EDID_QUIRK('A', 'P', 'I', 0x7602, BIT(EDID_QUIRK_PREFER_LARGE_60)),
 
 	/* AEO model 0 reports 8 bpc, but is a 6 bpc panel */
-	EDID_QUIRK('A', 'E', 'O', 0, EDID_QUIRK_FORCE_6BPC),
+	EDID_QUIRK('A', 'E', 'O', 0, BIT(EDID_QUIRK_FORCE_6BPC)),
 
 	/* BenQ GW2765 */
-	EDID_QUIRK('B', 'N', 'Q', 0x78d6, EDID_QUIRK_FORCE_8BPC),
+	EDID_QUIRK('B', 'N', 'Q', 0x78d6, BIT(EDID_QUIRK_FORCE_8BPC)),
 
 	/* BOE model on HP Pavilion 15-n233sl reports 8 bpc, but is a 6 bpc panel */
-	EDID_QUIRK('B', 'O', 'E', 0x78b, EDID_QUIRK_FORCE_6BPC),
+	EDID_QUIRK('B', 'O', 'E', 0x78b, BIT(EDID_QUIRK_FORCE_6BPC)),
 
 	/* CPT panel of Asus UX303LA reports 8 bpc, but is a 6 bpc panel */
-	EDID_QUIRK('C', 'P', 'T', 0x17df, EDID_QUIRK_FORCE_6BPC),
+	EDID_QUIRK('C', 'P', 'T', 0x17df, BIT(EDID_QUIRK_FORCE_6BPC)),
 
 	/* SDC panel of Lenovo B50-80 reports 8 bpc, but is a 6 bpc panel */
-	EDID_QUIRK('S', 'D', 'C', 0x3652, EDID_QUIRK_FORCE_6BPC),
+	EDID_QUIRK('S', 'D', 'C', 0x3652, BIT(EDID_QUIRK_FORCE_6BPC)),
 
 	/* BOE model 0x0771 reports 8 bpc, but is a 6 bpc panel */
-	EDID_QUIRK('B', 'O', 'E', 0x0771, EDID_QUIRK_FORCE_6BPC),
+	EDID_QUIRK('B', 'O', 'E', 0x0771, BIT(EDID_QUIRK_FORCE_6BPC)),
 
 	/* Belinea 10 15 55 */
-	EDID_QUIRK('M', 'A', 'X', 1516, EDID_QUIRK_PREFER_LARGE_60),
-	EDID_QUIRK('M', 'A', 'X', 0x77e, EDID_QUIRK_PREFER_LARGE_60),
+	EDID_QUIRK('M', 'A', 'X', 1516, BIT(EDID_QUIRK_PREFER_LARGE_60)),
+	EDID_QUIRK('M', 'A', 'X', 0x77e, BIT(EDID_QUIRK_PREFER_LARGE_60)),
 
 	/* Envision Peripherals, Inc. EN-7100e */
-	EDID_QUIRK('E', 'P', 'I', 59264, EDID_QUIRK_135_CLOCK_TOO_HIGH),
+	EDID_QUIRK('E', 'P', 'I', 59264, BIT(EDID_QUIRK_135_CLOCK_TOO_HIGH)),
 	/* Envision EN2028 */
-	EDID_QUIRK('E', 'P', 'I', 8232, EDID_QUIRK_PREFER_LARGE_60),
+	EDID_QUIRK('E', 'P', 'I', 8232, BIT(EDID_QUIRK_PREFER_LARGE_60)),
 
 	/* Funai Electronics PM36B */
-	EDID_QUIRK('F', 'C', 'M', 13600, EDID_QUIRK_PREFER_LARGE_75 |
-				       EDID_QUIRK_DETAILED_IN_CM),
+	EDID_QUIRK('F', 'C', 'M', 13600, BIT(EDID_QUIRK_PREFER_LARGE_75) |
+					 BIT(EDID_QUIRK_DETAILED_IN_CM)),
 
 	/* LG 27GP950 */
-	EDID_QUIRK('G', 'S', 'M', 0x5bbf, EDID_QUIRK_CAP_DSC_15BPP),
+	EDID_QUIRK('G', 'S', 'M', 0x5bbf, BIT(EDID_QUIRK_CAP_DSC_15BPP)),
 
 	/* LG 27GN950 */
-	EDID_QUIRK('G', 'S', 'M', 0x5b9a, EDID_QUIRK_CAP_DSC_15BPP),
+	EDID_QUIRK('G', 'S', 'M', 0x5b9a, BIT(EDID_QUIRK_CAP_DSC_15BPP)),
 
 	/* LGD panel of HP zBook 17 G2, eDP 10 bpc, but reports unknown bpc */
-	EDID_QUIRK('L', 'G', 'D', 764, EDID_QUIRK_FORCE_10BPC),
+	EDID_QUIRK('L', 'G', 'D', 764, BIT(EDID_QUIRK_FORCE_10BPC)),
 
 	/* LG Philips LCD LP154W01-A5 */
-	EDID_QUIRK('L', 'P', 'L', 0, EDID_QUIRK_DETAILED_USE_MAXIMUM_SIZE),
-	EDID_QUIRK('L', 'P', 'L', 0x2a00, EDID_QUIRK_DETAILED_USE_MAXIMUM_SIZE),
+	EDID_QUIRK('L', 'P', 'L', 0, BIT(EDID_QUIRK_DETAILED_USE_MAXIMUM_SIZE)),
+	EDID_QUIRK('L', 'P', 'L', 0x2a00, BIT(EDID_QUIRK_DETAILED_USE_MAXIMUM_SIZE)),
 
 	/* Samsung SyncMaster 205BW.  Note: irony */
-	EDID_QUIRK('S', 'A', 'M', 541, EDID_QUIRK_DETAILED_SYNC_PP),
+	EDID_QUIRK('S', 'A', 'M', 541, BIT(EDID_QUIRK_DETAILED_SYNC_PP)),
 	/* Samsung SyncMaster 22[5-6]BW */
-	EDID_QUIRK('S', 'A', 'M', 596, EDID_QUIRK_PREFER_LARGE_60),
-	EDID_QUIRK('S', 'A', 'M', 638, EDID_QUIRK_PREFER_LARGE_60),
+	EDID_QUIRK('S', 'A', 'M', 596, BIT(EDID_QUIRK_PREFER_LARGE_60)),
+	EDID_QUIRK('S', 'A', 'M', 638, BIT(EDID_QUIRK_PREFER_LARGE_60)),
 
 	/* Sony PVM-2541A does up to 12 bpc, but only reports max 8 bpc */
-	EDID_QUIRK('S', 'N', 'Y', 0x2541, EDID_QUIRK_FORCE_12BPC),
+	EDID_QUIRK('S', 'N', 'Y', 0x2541, BIT(EDID_QUIRK_FORCE_12BPC)),
 
 	/* ViewSonic VA2026w */
-	EDID_QUIRK('V', 'S', 'C', 5020, EDID_QUIRK_FORCE_REDUCED_BLANKING),
+	EDID_QUIRK('V', 'S', 'C', 5020, BIT(EDID_QUIRK_FORCE_REDUCED_BLANKING)),
 
 	/* Medion MD 30217 PG */
-	EDID_QUIRK('M', 'E', 'D', 0x7b8, EDID_QUIRK_PREFER_LARGE_75),
+	EDID_QUIRK('M', 'E', 'D', 0x7b8, BIT(EDID_QUIRK_PREFER_LARGE_75)),
 
 	/* Lenovo G50 */
-	EDID_QUIRK('S', 'D', 'C', 18514, EDID_QUIRK_FORCE_6BPC),
+	EDID_QUIRK('S', 'D', 'C', 18514, BIT(EDID_QUIRK_FORCE_6BPC)),
 
 	/* Panel in Samsung NP700G7A-S01PL notebook reports 6bpc */
-	EDID_QUIRK('S', 'E', 'C', 0xd033, EDID_QUIRK_FORCE_8BPC),
+	EDID_QUIRK('S', 'E', 'C', 0xd033, BIT(EDID_QUIRK_FORCE_8BPC)),
 
 	/* Rotel RSX-1058 forwards sink's EDID but only does HDMI 1.1*/
-	EDID_QUIRK('E', 'T', 'R', 13896, EDID_QUIRK_FORCE_8BPC),
+	EDID_QUIRK('E', 'T', 'R', 13896, BIT(EDID_QUIRK_FORCE_8BPC)),
 
 	/* Valve Index Headset */
-	EDID_QUIRK('V', 'L', 'V', 0x91a8, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91b0, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91b1, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91b2, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91b3, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91b4, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91b5, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91b6, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91b7, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91b8, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91b9, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91ba, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91bb, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91bc, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91bd, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91be, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('V', 'L', 'V', 0x91bf, EDID_QUIRK_NON_DESKTOP),
+	EDID_QUIRK('V', 'L', 'V', 0x91a8, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91b0, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91b1, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91b2, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91b3, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91b4, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91b5, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91b6, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91b7, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91b8, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91b9, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91ba, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91bb, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91bc, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91bd, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91be, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('V', 'L', 'V', 0x91bf, BIT(EDID_QUIRK_NON_DESKTOP)),
 
 	/* HTC Vive and Vive Pro VR Headsets */
-	EDID_QUIRK('H', 'V', 'R', 0xaa01, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('H', 'V', 'R', 0xaa02, EDID_QUIRK_NON_DESKTOP),
+	EDID_QUIRK('H', 'V', 'R', 0xaa01, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('H', 'V', 'R', 0xaa02, BIT(EDID_QUIRK_NON_DESKTOP)),
 
 	/* Oculus Rift DK1, DK2, CV1 and Rift S VR Headsets */
-	EDID_QUIRK('O', 'V', 'R', 0x0001, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('O', 'V', 'R', 0x0003, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('O', 'V', 'R', 0x0004, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('O', 'V', 'R', 0x0012, EDID_QUIRK_NON_DESKTOP),
+	EDID_QUIRK('O', 'V', 'R', 0x0001, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('O', 'V', 'R', 0x0003, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('O', 'V', 'R', 0x0004, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('O', 'V', 'R', 0x0012, BIT(EDID_QUIRK_NON_DESKTOP)),
 
 	/* Windows Mixed Reality Headsets */
-	EDID_QUIRK('A', 'C', 'R', 0x7fce, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('L', 'E', 'N', 0x0408, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('F', 'U', 'J', 0x1970, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('D', 'E', 'L', 0x7fce, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('S', 'E', 'C', 0x144a, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('A', 'U', 'S', 0xc102, EDID_QUIRK_NON_DESKTOP),
+	EDID_QUIRK('A', 'C', 'R', 0x7fce, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('L', 'E', 'N', 0x0408, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('F', 'U', 'J', 0x1970, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('D', 'E', 'L', 0x7fce, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('S', 'E', 'C', 0x144a, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('A', 'U', 'S', 0xc102, BIT(EDID_QUIRK_NON_DESKTOP)),
 
 	/* Sony PlayStation VR Headset */
-	EDID_QUIRK('S', 'N', 'Y', 0x0704, EDID_QUIRK_NON_DESKTOP),
+	EDID_QUIRK('S', 'N', 'Y', 0x0704, BIT(EDID_QUIRK_NON_DESKTOP)),
 
 	/* Sensics VR Headsets */
-	EDID_QUIRK('S', 'E', 'N', 0x1019, EDID_QUIRK_NON_DESKTOP),
+	EDID_QUIRK('S', 'E', 'N', 0x1019, BIT(EDID_QUIRK_NON_DESKTOP)),
 
 	/* OSVR HDK and HDK2 VR Headsets */
-	EDID_QUIRK('S', 'V', 'R', 0x1019, EDID_QUIRK_NON_DESKTOP),
-	EDID_QUIRK('A', 'U', 'O', 0x1111, EDID_QUIRK_NON_DESKTOP),
+	EDID_QUIRK('S', 'V', 'R', 0x1019, BIT(EDID_QUIRK_NON_DESKTOP)),
+	EDID_QUIRK('A', 'U', 'O', 0x1111, BIT(EDID_QUIRK_NON_DESKTOP)),
+
+	/* LQ116M1JW10 displays noise when 8 bpc, but display fine as 6 bpc */
+	EDID_QUIRK('S', 'H', 'P', 0x154c, BIT(EDID_QUIRK_FORCE_6BPC)),
+
+	/*
+	 * @drm_edid_internal_quirk entries end here, following with the
+	 * @drm_edid_quirk entries.
+	 */
+
+	/* HP ZR24w DP AUX DPCD access requires probing to prevent corruption. */
+	EDID_QUIRK('H', 'W', 'P', 0x2869, BIT(DRM_EDID_QUIRK_DP_DPCD_PROBE)),
 };
 
 /*
@@ -2489,7 +2526,7 @@ static const struct drm_edid *_drm_edid_alloc(const void *edid, size_t size)
 	if (!edid || !size || size < EDID_LENGTH)
 		return NULL;
 
-	drm_edid = kzalloc(sizeof(*drm_edid), GFP_KERNEL);
+	drm_edid = kzalloc_obj(*drm_edid);
 	if (drm_edid) {
 		drm_edid->edid = edid;
 		drm_edid->size = size;
@@ -2951,6 +2988,18 @@ static u32 edid_get_quirks(const struct drm_edid *drm_edid)
 	return 0;
 }
 
+static bool drm_edid_has_internal_quirk(struct drm_connector *connector,
+					enum drm_edid_internal_quirk quirk)
+{
+	return connector->display_info.quirks & BIT(quirk);
+}
+
+bool drm_edid_has_quirk(struct drm_connector *connector, enum drm_edid_quirk quirk)
+{
+	return connector->display_info.quirks & BIT(quirk);
+}
+EXPORT_SYMBOL(drm_edid_has_quirk);
+
 #define MODE_SIZE(m) ((m)->hdisplay * (m)->vdisplay)
 #define MODE_REFRESH_DIFF(c,t) (abs((c) - (t)))
 
@@ -2960,7 +3009,6 @@ static u32 edid_get_quirks(const struct drm_edid *drm_edid)
  */
 static void edid_fixup_preferred(struct drm_connector *connector)
 {
-	const struct drm_display_info *info = &connector->display_info;
 	struct drm_display_mode *t, *cur_mode, *preferred_mode;
 	int target_refresh = 0;
 	int cur_vrefresh, preferred_vrefresh;
@@ -2968,9 +3016,9 @@ static void edid_fixup_preferred(struct drm_connector *connector)
 	if (list_empty(&connector->probed_modes))
 		return;
 
-	if (info->quirks & EDID_QUIRK_PREFER_LARGE_60)
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_PREFER_LARGE_60))
 		target_refresh = 60;
-	if (info->quirks & EDID_QUIRK_PREFER_LARGE_75)
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_PREFER_LARGE_75))
 		target_refresh = 75;
 
 	preferred_mode = list_first_entry(&connector->probed_modes,
@@ -3474,7 +3522,6 @@ static struct drm_display_mode *drm_mode_detailed(struct drm_connector *connecto
 						  const struct drm_edid *drm_edid,
 						  const struct detailed_timing *timing)
 {
-	const struct drm_display_info *info = &connector->display_info;
 	struct drm_device *dev = connector->dev;
 	struct drm_display_mode *mode;
 	const struct detailed_pixel_timing *pt = &timing->data.pixel_data;
@@ -3508,7 +3555,7 @@ static struct drm_display_mode *drm_mode_detailed(struct drm_connector *connecto
 		return NULL;
 	}
 
-	if (info->quirks & EDID_QUIRK_FORCE_REDUCED_BLANKING) {
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_FORCE_REDUCED_BLANKING)) {
 		mode = drm_cvt_mode(dev, hactive, vactive, 60, true, false, false);
 		if (!mode)
 			return NULL;
@@ -3520,7 +3567,7 @@ static struct drm_display_mode *drm_mode_detailed(struct drm_connector *connecto
 	if (!mode)
 		return NULL;
 
-	if (info->quirks & EDID_QUIRK_135_CLOCK_TOO_HIGH)
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_135_CLOCK_TOO_HIGH))
 		mode->clock = 1088 * 10;
 	else
 		mode->clock = le16_to_cpu(timing->pixel_clock) * 10;
@@ -3551,7 +3598,7 @@ static struct drm_display_mode *drm_mode_detailed(struct drm_connector *connecto
 
 	drm_mode_do_interlace_quirk(mode, pt);
 
-	if (info->quirks & EDID_QUIRK_DETAILED_SYNC_PP) {
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_DETAILED_SYNC_PP)) {
 		mode->flags |= DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
 	} else {
 		mode->flags |= (pt->misc & DRM_EDID_PT_HSYNC_POSITIVE) ?
@@ -3564,12 +3611,12 @@ set_size:
 	mode->width_mm = pt->width_mm_lo | (pt->width_height_mm_hi & 0xf0) << 4;
 	mode->height_mm = pt->height_mm_lo | (pt->width_height_mm_hi & 0xf) << 8;
 
-	if (info->quirks & EDID_QUIRK_DETAILED_IN_CM) {
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_DETAILED_IN_CM)) {
 		mode->width_mm *= 10;
 		mode->height_mm *= 10;
 	}
 
-	if (info->quirks & EDID_QUIRK_DETAILED_USE_MAXIMUM_SIZE) {
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_DETAILED_USE_MAXIMUM_SIZE)) {
 		mode->width_mm = drm_edid->edid->width_cm * 10;
 		mode->height_mm = drm_edid->edid->height_cm * 10;
 	}
@@ -5181,6 +5228,13 @@ static bool cea_db_is_microsoft_vsdb(const struct cea_db *db)
 		cea_db_payload_len(db) == 21;
 }
 
+static bool cea_db_is_amd_vsdb(const struct cea_db *db)
+{
+	return cea_db_is_vendor(db, AMD_IEEE_OUI) &&
+		cea_db_payload_len(db) >= AMD_VSDB_V3_PAYLOAD_MIN_LEN &&
+		cea_db_payload_len(db) <= AMD_VSDB_V3_PAYLOAD_MAX_LEN;
+}
+
 static bool cea_db_is_vcdb(const struct cea_db *db)
 {
 	return cea_db_is_extended_tag(db, CTA_EXT_DB_VIDEO_CAP) &&
@@ -5292,7 +5346,7 @@ static void parse_cta_y420cmdb(struct drm_connector *connector,
 
 out:
 	if (map)
-		info->color_formats |= DRM_COLOR_FORMAT_YCBCR420;
+		info->color_formats |= BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR420);
 
 	*y420cmdb_map = map;
 }
@@ -5373,7 +5427,8 @@ static void fixup_detailed_cea_mode_clock(struct drm_connector *connector,
 
 static void drm_calculate_luminance_range(struct drm_connector *connector)
 {
-	struct hdr_static_metadata *hdr_metadata = &connector->hdr_sink_metadata.hdmi_type1;
+	const struct hdr_static_metadata *hdr_metadata =
+		&connector->display_info.hdr_sink_metadata.hdmi_type1;
 	struct drm_luminance_range_info *luminance_range =
 		&connector->display_info.luminance_range;
 	static const u8 pre_computed_values[] = {
@@ -5434,21 +5489,21 @@ static uint8_t hdr_metadata_type(const u8 *edid_ext)
 static void
 drm_parse_hdr_metadata_block(struct drm_connector *connector, const u8 *db)
 {
+	struct hdr_static_metadata *hdr_metadata =
+		&connector->display_info.hdr_sink_metadata.hdmi_type1;
 	u16 len;
 
 	len = cea_db_payload_len(db);
 
-	connector->hdr_sink_metadata.hdmi_type1.eotf =
-						eotf_supported(db);
-	connector->hdr_sink_metadata.hdmi_type1.metadata_type =
-						hdr_metadata_type(db);
+	hdr_metadata->eotf = eotf_supported(db);
+	hdr_metadata->metadata_type = hdr_metadata_type(db);
 
 	if (len >= 4)
-		connector->hdr_sink_metadata.hdmi_type1.max_cll = db[4];
+		hdr_metadata->max_cll = db[4];
 	if (len >= 5)
-		connector->hdr_sink_metadata.hdmi_type1.max_fall = db[5];
+		hdr_metadata->max_fall = db[5];
 	if (len >= 6) {
-		connector->hdr_sink_metadata.hdmi_type1.min_cll = db[6];
+		hdr_metadata->min_cll = db[6];
 
 		/* Calculate only when all values are available */
 		drm_calculate_luminance_range(connector);
@@ -5739,7 +5794,7 @@ static int _drm_edid_to_sad(const struct drm_edid *drm_edid,
 			int i;
 
 			count = cea_db_payload_len(db) / 3; /* SAD is 3B */
-			sads = kcalloc(count, sizeof(*sads), GFP_KERNEL);
+			sads = kzalloc_objs(*sads, count);
 			*psads = sads;
 			if (!sads)
 				return -ENOMEM;
@@ -6067,7 +6122,7 @@ static void parse_cta_y420vdb(struct drm_connector *connector,
 			continue;
 
 		bitmap_set(hdmi->y420_vdb_modes, vic, 1);
-		info->color_formats |= DRM_COLOR_FORMAT_YCBCR420;
+		info->color_formats |= BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR420);
 	}
 }
 
@@ -6376,6 +6431,45 @@ static void drm_parse_microsoft_vsdb(struct drm_connector *connector,
 		    connector->base.id, connector->name, version, db[5]);
 }
 
+static void drm_parse_amd_vsdb(struct drm_connector *connector,
+			       const struct cea_db *db)
+{
+	struct drm_display_info *info = &connector->display_info;
+	const u8 *data = cea_db_data(db);
+	const struct amd_vsdb_v3_payload *p;
+
+	p = (const struct amd_vsdb_v3_payload *)data;
+
+	if (p->version != 0x03) {
+		drm_dbg_kms(connector->dev,
+			    "[CONNECTOR:%d:%s] Unsupported AMD VSDB version %u\n",
+			    connector->base.id, connector->name, p->version);
+		return;
+	}
+
+	info->amd_vsdb.version = p->version;
+	info->amd_vsdb.replay_mode = p->feature_caps & 0x40;
+	info->amd_vsdb.panel_type = (p->cs_eotf_support & 0xC0) >> 6;
+	info->amd_vsdb.luminance_range1.max_luminance = p->lum1_max;
+	info->amd_vsdb.luminance_range1.min_luminance = p->lum1_min;
+	info->amd_vsdb.luminance_range2.max_luminance = p->lum2_max;
+	info->amd_vsdb.luminance_range2.min_luminance = p->lum2_min;
+
+	/*
+	 * The AMD VSDB v3 payload length is variable (15..20 bytes).
+	 * All fields through p->rsvd1 (byte 14) are always present,
+	 * but p->extra[] (bytes 15+) may not be.  Any future access to
+	 * extra[] must be guarded with a runtime length check to avoid
+	 * out-of-bounds reads on shorter (but spec-valid) payloads.
+	 * For example:
+	 *
+	 *   int len = cea_db_payload_len(db);
+	 *
+	 *   if (len > AMD_VSDB_V3_PAYLOAD_MIN_LEN)
+	 *       info->amd_vsdb.foo = p->extra[0];
+	 */
+}
+
 static void drm_parse_cea_ext(struct drm_connector *connector,
 			      const struct drm_edid *drm_edid)
 {
@@ -6401,11 +6495,11 @@ static void drm_parse_cea_ext(struct drm_connector *connector,
 				    info->cea_rev, edid_ext[1]);
 
 		/* The existence of a CTA extension should imply RGB support */
-		info->color_formats = DRM_COLOR_FORMAT_RGB444;
+		info->color_formats = BIT(DRM_OUTPUT_COLOR_FORMAT_RGB444);
 		if (edid_ext[3] & EDID_CEA_YCRCB444)
-			info->color_formats |= DRM_COLOR_FORMAT_YCBCR444;
+			info->color_formats |= BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR444);
 		if (edid_ext[3] & EDID_CEA_YCRCB422)
-			info->color_formats |= DRM_COLOR_FORMAT_YCBCR422;
+			info->color_formats |= BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR422);
 		if (edid_ext[3] & EDID_BASIC_AUDIO)
 			info->has_audio = true;
 
@@ -6424,6 +6518,8 @@ static void drm_parse_cea_ext(struct drm_connector *connector,
 			drm_parse_hdmi_forum_scds(connector, data);
 		else if (cea_db_is_microsoft_vsdb(db))
 			drm_parse_microsoft_vsdb(connector, data);
+		else if (cea_db_is_amd_vsdb(db))
+			drm_parse_amd_vsdb(connector, db);
 		else if (cea_db_is_y420cmdb(db))
 			parse_cta_y420cmdb(connector, db, &y420cmdb_map);
 		else if (cea_db_is_y420vdb(db))
@@ -6596,6 +6692,7 @@ static void drm_reset_display_info(struct drm_connector *connector)
 	info->has_hdmi_infoframe = false;
 	info->rgb_quant_range_selectable = false;
 	memset(&info->hdmi, 0, sizeof(info->hdmi));
+	memset(&info->hdr_sink_metadata, 0, sizeof(info->hdr_sink_metadata));
 
 	info->edid_hdmi_rgb444_dc_modes = 0;
 	info->edid_hdmi_ycbcr444_dc_modes = 0;
@@ -6615,6 +6712,7 @@ static void drm_reset_display_info(struct drm_connector *connector)
 	info->quirks = 0;
 
 	info->source_physical_address = CEC_PHYS_ADDR_INVALID;
+	memset(&info->amd_vsdb, 0, sizeof(info->amd_vsdb));
 }
 
 static void update_displayid_info(struct drm_connector *connector,
@@ -6672,7 +6770,7 @@ static void update_display_info(struct drm_connector *connector,
 	if (!drm_edid_is_digital(drm_edid))
 		goto out;
 
-	info->color_formats |= DRM_COLOR_FORMAT_RGB444;
+	info->color_formats |= BIT(DRM_OUTPUT_COLOR_FORMAT_RGB444);
 	drm_parse_cea_ext(connector, drm_edid);
 
 	update_displayid_info(connector, drm_edid);
@@ -6726,33 +6824,33 @@ static void update_display_info(struct drm_connector *connector,
 		    connector->base.id, connector->name, info->bpc);
 
 	if (edid->features & DRM_EDID_FEATURE_RGB_YCRCB444)
-		info->color_formats |= DRM_COLOR_FORMAT_YCBCR444;
+		info->color_formats |= BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR444);
 	if (edid->features & DRM_EDID_FEATURE_RGB_YCRCB422)
-		info->color_formats |= DRM_COLOR_FORMAT_YCBCR422;
+		info->color_formats |= BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR422);
 
 	drm_update_mso(connector, drm_edid);
 
 out:
-	if (info->quirks & EDID_QUIRK_NON_DESKTOP) {
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_NON_DESKTOP)) {
 		drm_dbg_kms(connector->dev, "[CONNECTOR:%d:%s] Non-desktop display%s\n",
 			    connector->base.id, connector->name,
 			    info->non_desktop ? " (redundant quirk)" : "");
 		info->non_desktop = true;
 	}
 
-	if (info->quirks & EDID_QUIRK_CAP_DSC_15BPP)
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_CAP_DSC_15BPP))
 		info->max_dsc_bpp = 15;
 
-	if (info->quirks & EDID_QUIRK_FORCE_6BPC)
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_FORCE_6BPC))
 		info->bpc = 6;
 
-	if (info->quirks & EDID_QUIRK_FORCE_8BPC)
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_FORCE_8BPC))
 		info->bpc = 8;
 
-	if (info->quirks & EDID_QUIRK_FORCE_10BPC)
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_FORCE_10BPC))
 		info->bpc = 10;
 
-	if (info->quirks & EDID_QUIRK_FORCE_12BPC)
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_FORCE_12BPC))
 		info->bpc = 12;
 
 	/* Depends on info->cea_rev set by drm_parse_cea_ext() above */
@@ -6760,23 +6858,23 @@ out:
 }
 
 static struct drm_display_mode *drm_mode_displayid_detailed(struct drm_device *dev,
-							    struct displayid_detailed_timings_1 *timings,
+							    const struct displayid_detailed_timings_1 *timings,
 							    bool type_7)
 {
 	struct drm_display_mode *mode;
-	unsigned pixel_clock = (timings->pixel_clock[0] |
-				(timings->pixel_clock[1] << 8) |
-				(timings->pixel_clock[2] << 16)) + 1;
-	unsigned hactive = (timings->hactive[0] | timings->hactive[1] << 8) + 1;
-	unsigned hblank = (timings->hblank[0] | timings->hblank[1] << 8) + 1;
-	unsigned hsync = (timings->hsync[0] | (timings->hsync[1] & 0x7f) << 8) + 1;
-	unsigned hsync_width = (timings->hsw[0] | timings->hsw[1] << 8) + 1;
-	unsigned vactive = (timings->vactive[0] | timings->vactive[1] << 8) + 1;
-	unsigned vblank = (timings->vblank[0] | timings->vblank[1] << 8) + 1;
-	unsigned vsync = (timings->vsync[0] | (timings->vsync[1] & 0x7f) << 8) + 1;
-	unsigned vsync_width = (timings->vsw[0] | timings->vsw[1] << 8) + 1;
-	bool hsync_positive = (timings->hsync[1] >> 7) & 0x1;
-	bool vsync_positive = (timings->vsync[1] >> 7) & 0x1;
+	unsigned int pixel_clock = (timings->pixel_clock[0] |
+				    (timings->pixel_clock[1] << 8) |
+				    (timings->pixel_clock[2] << 16)) + 1;
+	unsigned int hactive = le16_to_cpu(timings->hactive) + 1;
+	unsigned int hblank = le16_to_cpu(timings->hblank) + 1;
+	unsigned int hsync = (le16_to_cpu(timings->hsync) & 0x7fff) + 1;
+	unsigned int hsync_width = le16_to_cpu(timings->hsw) + 1;
+	unsigned int vactive = le16_to_cpu(timings->vactive) + 1;
+	unsigned int vblank = le16_to_cpu(timings->vblank) + 1;
+	unsigned int vsync = (le16_to_cpu(timings->vsync) & 0x7fff) + 1;
+	unsigned int vsync_width = le16_to_cpu(timings->vsw) + 1;
+	bool hsync_positive = le16_to_cpu(timings->hsync) & (1 << 15);
+	bool vsync_positive = le16_to_cpu(timings->vsync) & (1 << 15);
 
 	mode = drm_mode_create(dev);
 	if (!mode)
@@ -6833,6 +6931,66 @@ static int add_displayid_detailed_1_modes(struct drm_connector *connector,
 	return num_modes;
 }
 
+static struct drm_display_mode *drm_mode_displayid_formula(struct drm_device *dev,
+							   const struct displayid_formula_timings_9 *timings,
+							   bool type_10)
+{
+	struct drm_display_mode *mode;
+	u16 hactive = le16_to_cpu(timings->hactive) + 1;
+	u16 vactive = le16_to_cpu(timings->vactive) + 1;
+	u8 timing_formula = timings->flags & 0x7;
+
+	/* TODO: support RB-v2 & RB-v3 */
+	if (timing_formula > 1)
+		return NULL;
+
+	/* TODO: support video-optimized refresh rate */
+	if (timings->flags & (1 << 4))
+		drm_dbg_kms(dev, "Fractional vrefresh is not implemented, proceeding with non-video-optimized refresh rate");
+
+	mode = drm_cvt_mode(dev, hactive, vactive, timings->vrefresh + 1, timing_formula == 1, false, false);
+	if (!mode)
+		return NULL;
+
+	/* TODO: interpret S3D flags */
+
+	mode->type = DRM_MODE_TYPE_DRIVER;
+	drm_mode_set_name(mode);
+
+	return mode;
+}
+
+static int add_displayid_formula_modes(struct drm_connector *connector,
+				       const struct displayid_block *block)
+{
+	const struct displayid_formula_timing_block *formula_block = (struct displayid_formula_timing_block *)block;
+	int num_timings;
+	struct drm_display_mode *newmode;
+	int num_modes = 0;
+	bool type_10 = block->tag == DATA_BLOCK_2_TYPE_10_FORMULA_TIMING;
+	int timing_size = 6 + ((formula_block->base.rev & 0x70) >> 4);
+
+	/* extended blocks are not supported yet */
+	if (timing_size != 6)
+		return 0;
+
+	if (block->num_bytes % timing_size)
+		return 0;
+
+	num_timings = block->num_bytes / timing_size;
+	for (int i = 0; i < num_timings; i++) {
+		const struct displayid_formula_timings_9 *timings = &formula_block->timings[i];
+
+		newmode = drm_mode_displayid_formula(connector->dev, timings, type_10);
+		if (!newmode)
+			continue;
+
+		drm_mode_probed_add(connector, newmode);
+		num_modes++;
+	}
+	return num_modes;
+}
+
 static int add_displayid_detailed_modes(struct drm_connector *connector,
 					const struct drm_edid *drm_edid)
 {
@@ -6845,6 +7003,9 @@ static int add_displayid_detailed_modes(struct drm_connector *connector,
 		if (block->tag == DATA_BLOCK_TYPE_1_DETAILED_TIMING ||
 		    block->tag == DATA_BLOCK_2_TYPE_7_DETAILED_TIMING)
 			num_modes += add_displayid_detailed_1_modes(connector, block);
+		else if (block->tag == DATA_BLOCK_2_TYPE_9_FORMULA_TIMING ||
+			 block->tag == DATA_BLOCK_2_TYPE_10_FORMULA_TIMING)
+			num_modes += add_displayid_formula_modes(connector, block);
 	}
 	displayid_iter_end(&iter);
 
@@ -6854,7 +7015,6 @@ static int add_displayid_detailed_modes(struct drm_connector *connector,
 static int _drm_edid_connector_add_modes(struct drm_connector *connector,
 					 const struct drm_edid *drm_edid)
 {
-	const struct drm_display_info *info = &connector->display_info;
 	int num_modes = 0;
 
 	if (!drm_edid)
@@ -6884,7 +7044,8 @@ static int _drm_edid_connector_add_modes(struct drm_connector *connector,
 	if (drm_edid->edid->features & DRM_EDID_FEATURE_CONTINUOUS_FREQ)
 		num_modes += add_inferred_modes(connector, drm_edid);
 
-	if (info->quirks & (EDID_QUIRK_PREFER_LARGE_60 | EDID_QUIRK_PREFER_LARGE_75))
+	if (drm_edid_has_internal_quirk(connector, EDID_QUIRK_PREFER_LARGE_60) ||
+	    drm_edid_has_internal_quirk(connector, EDID_QUIRK_PREFER_LARGE_75))
 		edid_fixup_preferred(connector);
 
 	return num_modes;
@@ -7099,17 +7260,11 @@ EXPORT_SYMBOL(drm_add_edid_modes);
  * Return: The number of modes added or 0 if we couldn't find any.
  */
 int drm_add_modes_noedid(struct drm_connector *connector,
-			int hdisplay, int vdisplay)
+			 unsigned int hdisplay, unsigned int vdisplay)
 {
-	int i, count, num_modes = 0;
+	int i, count = ARRAY_SIZE(drm_dmt_modes), num_modes = 0;
 	struct drm_display_mode *mode;
 	struct drm_device *dev = connector->dev;
-
-	count = ARRAY_SIZE(drm_dmt_modes);
-	if (hdisplay < 0)
-		hdisplay = 0;
-	if (vdisplay < 0)
-		vdisplay = 0;
 
 	for (i = 0; i < count; i++) {
 		const struct drm_display_mode *ptr = &drm_dmt_modes[i];
@@ -7146,7 +7301,7 @@ static bool is_hdmi2_sink(const struct drm_connector *connector)
 		return true;
 
 	return connector->display_info.hdmi.scdc.supported ||
-		connector->display_info.color_formats & DRM_COLOR_FORMAT_YCBCR420;
+		connector->display_info.color_formats & BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR420);
 }
 
 static u8 drm_mode_hdmi_vic(const struct drm_connector *connector,
@@ -7419,6 +7574,14 @@ static void drm_parse_tiled_block(struct drm_connector *connector,
 	u8 tile_v_loc, tile_h_loc;
 	u8 num_v_tile, num_h_tile;
 	struct drm_tile_group *tg;
+
+	/* tiled block payload per spec: cap 1 + topo 3 + size 4 + bezel 5 + id 9 = 22 */
+	if (block->num_bytes < 22) {
+		drm_dbg_kms(connector->dev,
+			    "[CONNECTOR:%d:%s] Unexpected tiled block size %u\n",
+			    connector->base.id, connector->name, block->num_bytes);
+		return;
+	}
 
 	w = tile->tile_size[0] | tile->tile_size[1] << 8;
 	h = tile->tile_size[2] | tile->tile_size[3] << 8;

@@ -88,7 +88,7 @@ komeda_wb_connector_get_modes(struct drm_connector *connector)
 
 static enum drm_mode_status
 komeda_wb_connector_mode_valid(struct drm_connector *connector,
-			       struct drm_display_mode *mode)
+			       const struct drm_display_mode *mode)
 {
 	struct drm_device *dev = connector->dev;
 	struct drm_mode_config *mode_config = &dev->mode_config;
@@ -149,7 +149,7 @@ static int komeda_wb_connector_add(struct komeda_kms_dev *kms,
 	if (!kcrtc->master->wb_layer)
 		return 0;
 
-	kwb_conn = kzalloc(sizeof(*kwb_conn), GFP_KERNEL);
+	kwb_conn = kzalloc_obj(*kwb_conn);
 	if (!kwb_conn)
 		return -ENOMEM;
 

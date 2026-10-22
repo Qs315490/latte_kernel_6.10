@@ -15,7 +15,6 @@ enum pwrtrack_method {
 };
 
 typedef void (*FuncSetPwr)(struct dm_odm_t *, enum pwrtrack_method, u8, u8);
-typedef void (*FuncIQK)(struct dm_odm_t *, u8, u8, u8);
 typedef void (*FuncLCK)(struct dm_odm_t *);
 typedef void (*FuncSwing)(struct dm_odm_t *, u8 **, u8 **, u8 **, u8 **);
 
@@ -27,13 +26,11 @@ struct txpwrtrack_cfg {
 	u8 RfPathCount;
 	u32 ThermalRegAddr;
 	FuncSetPwr ODM_TxPwrTrackSetPwr;
-	FuncIQK DoIQK;
 	FuncLCK PHY_LCCalibrate;
 	FuncSwing GetDeltaSwingTable;
 };
 
 void ConfigureTxpowerTrack(struct dm_odm_t *pDM_Odm, struct txpwrtrack_cfg *pConfig);
-
 
 void ODM_ClearTxPowerTrackingState(struct dm_odm_t *pDM_Odm);
 

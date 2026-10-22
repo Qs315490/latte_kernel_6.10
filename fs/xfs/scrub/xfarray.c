@@ -3,7 +3,7 @@
  * Copyright (C) 2021-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -487,8 +487,7 @@ xfarray_sortinfo_alloc(
 	xfarray_sortinfo_lo(si)[0] = 0;
 	xfarray_sortinfo_hi(si)[0] = array->nr - 1;
 	si->relax = INIT_XCHK_RELAX;
-	if (flags & XFARRAY_SORT_KILLABLE)
-		si->relax.interruptible = false;
+	si->relax.killable = !!(flags & XFARRAY_SORT_KILLABLE);
 
 	trace_xfarray_sort(si, nr_bytes);
 	*infop = si;
@@ -834,7 +833,7 @@ xfarray_sort_scan(
 		si->first_folio_idx = xfarray_idx(si->array,
 				folio_pos(si->folio) + si->array->obj_size - 1);
 
-		next_pos = folio_pos(si->folio) + folio_size(si->folio);
+		next_pos = folio_next_pos(si->folio);
 		si->last_folio_idx = xfarray_idx(si->array, next_pos - 1);
 		if (xfarray_pos(si->array, si->last_folio_idx + 1) > next_pos)
 			si->last_folio_idx--;

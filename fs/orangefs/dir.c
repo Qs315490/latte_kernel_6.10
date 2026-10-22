@@ -3,6 +3,7 @@
  * Copyright 2017 Omnibond Systems, L.L.C.
  */
 
+#include <linux/filelock.h>
 #include "protocol.h"
 #include "orangefs-kernel.h"
 #include "orangefs-bufmap.h"
@@ -190,7 +191,8 @@ static int fill_from_part(struct orangefs_dir_part *part,
 {
 	const int offset = sizeof(struct orangefs_readdir_response_s);
 	struct orangefs_khandle *khandle;
-	__u32 *len, padlen;
+	__u32 *len;
+	u64 padlen;
 	loff_t i;
 	char *s;
 	i = ctx->pos & ~PART_MASK;
@@ -214,8 +216,8 @@ static int fill_from_part(struct orangefs_dir_part *part,
 		 * len is the size of the string itself.  padlen is the
 		 * total size of the encoded string.
 		 */
-		padlen = (sizeof *len + *len + 1) +
-		    (8 - (sizeof *len + *len + 1)%8)%8;
+		padlen = (u64)sizeof *len + *len + 1;
+		padlen += (8 - padlen % 8) % 8;
 		if (part->len < i + padlen + sizeof *khandle)
 			goto next;
 		s = (void *)part + offset + i + sizeof *len;
@@ -362,8 +364,7 @@ static int orangefs_dir_iterate(struct file *file,
 static int orangefs_dir_open(struct inode *inode, struct file *file)
 {
 	struct orangefs_dir *od;
-	file->private_data = kmalloc(sizeof(struct orangefs_dir),
-	    GFP_KERNEL);
+	file->private_data = kmalloc_obj(struct orangefs_dir);
 	if (!file->private_data)
 		return -ENOMEM;
 	od = file->private_data;
@@ -392,5 +393,6 @@ const struct file_operations orangefs_dir_operations = {
 	.read = generic_read_dir,
 	.iterate_shared = orangefs_dir_iterate,
 	.open = orangefs_dir_open,
-	.release = orangefs_dir_release
+	.release = orangefs_dir_release,
+	.setlease = generic_setlease,
 };

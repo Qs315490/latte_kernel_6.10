@@ -9,10 +9,23 @@
 
 #include <linux/stringify.h>
 #include <asm/csr.h>
+#include <asm/vdso/processor.h>
 #include "kvm_util.h"
 
-static inline uint64_t __kvm_reg_id(uint64_t type, uint64_t subtype,
-				    uint64_t idx, uint64_t size)
+#define INSN_OPCODE_MASK	0x007c
+#define INSN_OPCODE_SHIFT	2
+#define INSN_OPCODE_SYSTEM	28
+
+#define INSN_MASK_FUNCT3	0x7000
+#define INSN_SHIFT_FUNCT3	12
+
+#define INSN_CSR_MASK		0xfff00000
+#define INSN_CSR_SHIFT		20
+
+#define GET_RM(insn)            (((insn) & INSN_MASK_FUNCT3) >> INSN_SHIFT_FUNCT3)
+#define GET_CSR_NUM(insn)       (((insn) & INSN_CSR_MASK) >> INSN_CSR_SHIFT)
+
+static inline u64 __kvm_reg_id(u64 type, u64 subtype, u64 idx, u64 size)
 {
 	return KVM_REG_RISCV | type | subtype | idx | size;
 }
@@ -48,19 +61,20 @@ static inline uint64_t __kvm_reg_id(uint64_t type, uint64_t subtype,
 						     KVM_REG_RISCV_SBI_SINGLE,		\
 						     idx, KVM_REG_SIZE_ULONG)
 
-bool __vcpu_has_ext(struct kvm_vcpu *vcpu, uint64_t ext);
+bool __vcpu_has_ext(struct kvm_vcpu *vcpu, u64 ext);
 
-static inline bool __vcpu_has_isa_ext(struct kvm_vcpu *vcpu, uint64_t isa_ext)
+static inline bool __vcpu_has_isa_ext(struct kvm_vcpu *vcpu, u64 isa_ext)
 {
 	return __vcpu_has_ext(vcpu, RISCV_ISA_EXT_REG(isa_ext));
 }
 
-static inline bool __vcpu_has_sbi_ext(struct kvm_vcpu *vcpu, uint64_t sbi_ext)
+static inline bool __vcpu_has_sbi_ext(struct kvm_vcpu *vcpu, u64 sbi_ext)
 {
 	return __vcpu_has_ext(vcpu, RISCV_SBI_EXT_REG(sbi_ext));
 }
 
-struct ex_regs {
+struct pt_regs {
+	unsigned long epc;
 	unsigned long ra;
 	unsigned long sp;
 	unsigned long gp;
@@ -92,16 +106,19 @@ struct ex_regs {
 	unsigned long t4;
 	unsigned long t5;
 	unsigned long t6;
-	unsigned long epc;
+	/* Supervisor/Machine CSRs */
 	unsigned long status;
+	unsigned long badaddr;
 	unsigned long cause;
+	/* a0 value before the syscall */
+	unsigned long orig_a0;
 };
 
 #define NR_VECTORS  2
 #define NR_EXCEPTIONS  32
 #define EC_MASK  (NR_EXCEPTIONS - 1)
 
-typedef void(*exception_handler_fn)(struct ex_regs *);
+typedef void(*exception_handler_fn)(struct pt_regs *);
 
 void vm_init_vector_tables(struct kvm_vm *vm);
 void vcpu_init_vector_tables(struct kvm_vcpu *vcpu);
@@ -173,5 +190,7 @@ static inline void local_irq_disable(void)
 {
 	csr_clear(CSR_SSTATUS, SR_SIE);
 }
+
+unsigned long riscv64_get_satp_mode(void);
 
 #endif /* SELFTEST_KVM_PROCESSOR_H */

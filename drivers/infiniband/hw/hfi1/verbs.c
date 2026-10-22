@@ -21,7 +21,6 @@
 #include "qp.h"
 #include "verbs_txreq.h"
 #include "debugfs.h"
-#include "vnic.h"
 #include "fault.h"
 #include "affinity.h"
 #include "ipoib.h"
@@ -554,7 +553,7 @@ void hfi1_16B_rcv(struct hfi1_packet *packet)
  */
 static void mem_timer(struct timer_list *t)
 {
-	struct hfi1_ibdev *dev = from_timer(dev, t, mem_timer);
+	struct hfi1_ibdev *dev = timer_container_of(dev, t, mem_timer);
 	struct list_head *list = &dev->memwait;
 	struct rvt_qp *qp = NULL;
 	struct iowait *wait;
@@ -1729,7 +1728,6 @@ static const struct ib_device_ops hfi1_dev_ops = {
 
 	.alloc_hw_device_stats = hfi1_alloc_hw_device_stats,
 	.alloc_hw_port_stats = hfi_alloc_hw_port_stats,
-	.alloc_rdma_netdev = hfi1_vnic_alloc_rn,
 	.device_group = &ib_hfi1_attr_group,
 	.get_dev_fw_str = hfi1_get_dev_fw_str,
 	.get_hw_stats = get_hw_stats,
@@ -1900,7 +1898,7 @@ void hfi1_unregister_ib_device(struct hfi1_devdata *dd)
 	if (!list_empty(&dev->memwait))
 		dd_dev_err(dd, "memwait list not empty!\n");
 
-	del_timer_sync(&dev->mem_timer);
+	timer_delete_sync(&dev->mem_timer);
 	verbs_txreq_exit(dev);
 
 	kfree(dev_cntr_descs);

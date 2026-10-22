@@ -149,6 +149,23 @@ static inline void seq_buf_commit(struct seq_buf *s, int num)
 	}
 }
 
+/**
+ * seq_buf_pop - pop off the last written character
+ * @s: the seq_buf handle
+ *
+ * Removes the last written character to the seq_buf @s.
+ *
+ * Returns the last character or -1 if it is empty.
+ */
+static inline int seq_buf_pop(struct seq_buf *s)
+{
+	if (!s->len)
+		return -1;
+
+	s->len--;
+	return (unsigned int)s->buffer[s->len];
+}
+
 extern __printf(2, 3)
 int seq_buf_printf(struct seq_buf *s, const char *fmt, ...);
 extern __printf(2, 0)
@@ -167,8 +184,8 @@ extern int seq_buf_hex_dump(struct seq_buf *s, const char *prefix_str,
 			    const void *buf, size_t len, bool ascii);
 
 #ifdef CONFIG_BINARY_PRINTF
-extern int
-seq_buf_bprintf(struct seq_buf *s, const char *fmt, const u32 *binary);
+__printf(2, 0)
+int seq_buf_bprintf(struct seq_buf *s, const char *fmt, const u32 *binary);
 #endif
 
 void seq_buf_do_printk(struct seq_buf *s, const char *lvl);

@@ -14,7 +14,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 #include "user_events_selftests.h"
 
 const char *dyn_file = "/sys/kernel/tracing/dynamic_events";
@@ -126,6 +126,8 @@ static int parse_abi(int *check, const char *value)
 	}
 
 	close(fd);
+
+	wait_for_delete();
 
 	return ret;
 }

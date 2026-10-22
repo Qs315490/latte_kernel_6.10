@@ -109,6 +109,7 @@ struct nfs_open_context {
 #define NFS_CONTEXT_BAD			(2)
 #define NFS_CONTEXT_UNLOCK	(3)
 #define NFS_CONTEXT_FILE_OPEN		(4)
+#define NFS_CONTEXT_WRITE_SYNC		(5)
 
 	struct nfs4_threshold	*mdsthreshold;
 	struct list_head list;
@@ -145,11 +146,6 @@ struct nfs4_xattr_cache;
  */
 struct nfs_inode {
 	/*
-	 * The 64bit 'inode number'
-	 */
-	__u64 fileid;
-
-	/*
 	 * NFS file handle
 	 */
 	struct nfs_fh		fh;
@@ -159,6 +155,12 @@ struct nfs_inode {
 	 */
 	unsigned long		flags;			/* atomic bit ops */
 	unsigned long		cache_validity;		/* bit mask */
+
+	/*
+	 * NFS Attributes not included in struct inode
+	 */
+
+	struct timespec64	btime;
 
 	/*
 	 * read_cache_jiffies is when we started read-caching this inode.
@@ -316,10 +318,12 @@ struct nfs4_copy_state {
 #define NFS_INO_INVALID_XATTR	BIT(15)		/* xattrs are invalid */
 #define NFS_INO_INVALID_NLINK	BIT(16)		/* cached nlinks is invalid */
 #define NFS_INO_INVALID_MODE	BIT(17)		/* cached mode is invalid */
+#define NFS_INO_INVALID_BTIME	BIT(18)		/* cached btime is invalid */
 
 #define NFS_INO_INVALID_ATTR	(NFS_INO_INVALID_CHANGE \
 		| NFS_INO_INVALID_CTIME \
 		| NFS_INO_INVALID_MTIME \
+		| NFS_INO_INVALID_BTIME \
 		| NFS_INO_INVALID_SIZE \
 		| NFS_INO_INVALID_NLINK \
 		| NFS_INO_INVALID_MODE \
@@ -336,6 +340,7 @@ struct nfs4_copy_state {
 #define NFS_INO_LAYOUTCOMMITTING (10)		/* layoutcommit inflight */
 #define NFS_INO_LAYOUTSTATS	(11)		/* layoutstats inflight */
 #define NFS_INO_ODIRECT		(12)		/* I/O setting is O_DIRECT */
+#define NFS_INO_REQ_DIR_DELEG	(13)		/* Request a directory delegation */
 
 static inline struct nfs_inode *NFS_I(const struct inode *inode)
 {
@@ -382,16 +387,6 @@ static inline unsigned NFS_MAXATTRTIMEO(const struct inode *inode)
 static inline int NFS_STALE(const struct inode *inode)
 {
 	return test_bit(NFS_INO_STALE, &NFS_I(inode)->flags);
-}
-
-static inline __u64 NFS_FILEID(const struct inode *inode)
-{
-	return NFS_I(inode)->fileid;
-}
-
-static inline void set_nfs_fileid(struct inode *inode, __u64 fileid)
-{
-	NFS_I(inode)->fileid = fileid;
 }
 
 static inline void nfs_mark_for_revalidate(struct inode *inode)
@@ -463,7 +458,6 @@ extern void nfs_file_set_open_context(struct file *filp, struct nfs_open_context
 extern void nfs_file_clear_open_context(struct file *flip);
 extern struct nfs_lock_context *nfs_get_lock_context(struct nfs_open_context *ctx);
 extern void nfs_put_lock_context(struct nfs_lock_context *l_ctx);
-extern u64 nfs_compat_user_ino64(u64 fileid);
 extern void nfs_fattr_init(struct nfs_fattr *fattr);
 extern void nfs_fattr_set_barrier(struct nfs_fattr *fattr);
 extern unsigned long nfs_inc_attr_generation_counter(void);
@@ -628,6 +622,7 @@ extern int  nfs_update_folio(struct file *file, struct folio *folio,
 extern int nfs_sync_inode(struct inode *inode);
 extern int nfs_wb_all(struct inode *inode);
 extern int nfs_wb_folio(struct inode *inode, struct folio *folio);
+extern int nfs_wb_folio_reclaim(struct inode *inode, struct folio *folio);
 int nfs_wb_folio_cancel(struct inode *inode, struct folio *folio);
 extern int  nfs_commit_inode(struct inode *, int);
 extern struct nfs_commit_data *nfs_commitdata_alloc(void);
@@ -655,15 +650,6 @@ void nfs_readahead(struct readahead_control *);
 static inline loff_t nfs_size_to_loff_t(__u64 size)
 {
 	return min_t(u64, size, OFFSET_MAX);
-}
-
-static inline ino_t
-nfs_fileid_to_ino_t(u64 fileid)
-{
-	ino_t ino = (ino_t) fileid;
-	if (sizeof(ino_t) < sizeof(u64))
-		ino ^= fileid >> (sizeof(u64)-sizeof(ino_t)) * 8;
-	return ino;
 }
 
 static inline void nfs_ooo_clear(struct nfs_inode *nfsi)

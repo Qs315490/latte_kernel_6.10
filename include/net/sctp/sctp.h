@@ -85,7 +85,7 @@ void sctp_udp_sock_stop(struct net *net);
 /*
  * sctp/socket.c
  */
-int sctp_inet_connect(struct socket *sock, struct sockaddr *uaddr,
+int sctp_inet_connect(struct socket *sock, struct sockaddr_unsized *uaddr,
 		      int addr_len, int flags);
 int sctp_backlog_rcv(struct sock *sk, struct sk_buff *skb);
 int sctp_inet_listen(struct socket *sock, int backlog);
@@ -94,8 +94,7 @@ void sctp_data_ready(struct sock *sk);
 __poll_t sctp_poll(struct file *file, struct socket *sock,
 		poll_table *wait);
 void sctp_sock_rfree(struct sk_buff *skb);
-void sctp_copy_sock(struct sock *newsk, struct sock *sk,
-		    struct sctp_association *asoc);
+
 extern struct percpu_counter sctp_sockets_allocated;
 int sctp_asconf_mgmt(struct sctp_sock *, struct sctp_sockaddr_entry *);
 struct sk_buff *sctp_skb_recv_datagram(struct sock *, int, int *);
@@ -112,7 +111,8 @@ int sctp_transport_lookup_process(sctp_callback_t cb, struct net *net,
 				  const union sctp_addr *paddr, void *p, int dif);
 int sctp_transport_traverse_process(sctp_callback_t cb, sctp_callback_t cb_done,
 				    struct net *net, int *pos, void *p);
-int sctp_for_each_endpoint(int (*cb)(struct sctp_endpoint *, void *), void *p);
+int sctp_for_each_endpoint(int (*cb)(struct sctp_endpoint *, void *),
+			   struct net *net, int *pos, void *p);
 int sctp_get_sctp_info(struct sock *sk, struct sctp_association *asoc,
 		       struct sctp_info *info);
 
@@ -304,7 +304,7 @@ void sctp_dbg_objcnt_init(struct net *);
 
 static inline void sctp_dbg_objcnt_init(struct net *net) { return; }
 
-#endif /* CONFIG_SCTP_DBG_OBJCOUNT */
+#endif /* CONFIG_SCTP_DBG_OBJCNT */
 
 #if defined CONFIG_SYSCTL
 void sctp_sysctl_register(void);
@@ -363,8 +363,6 @@ sctp_assoc_to_state(const struct sctp_association *asoc)
 
 /* Look up the association by its id.  */
 struct sctp_association *sctp_id2assoc(struct sock *sk, sctp_assoc_t id);
-
-int sctp_do_peeloff(struct sock *sk, sctp_assoc_t id, struct socket **sockp);
 
 /* A macro to walk a list of skbs.  */
 #define sctp_skb_for_each(pos, head, tmp) \
@@ -636,7 +634,7 @@ static inline void sctp_transport_pl_reset(struct sctp_transport *t)
 		}
 	} else {
 		if (t->pl.state != SCTP_PL_DISABLED) {
-			if (del_timer(&t->probe_timer))
+			if (timer_delete(&t->probe_timer))
 				sctp_transport_put(t);
 			t->pl.state = SCTP_PL_DISABLED;
 		}

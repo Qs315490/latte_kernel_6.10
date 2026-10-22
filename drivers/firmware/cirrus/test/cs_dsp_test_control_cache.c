@@ -776,7 +776,6 @@ static void cs_dsp_ctl_cache_init_multiple_offsets(struct kunit *test)
 					      "dummyalg", NULL);
 
 	/* Create controls identical except for offset */
-	def.length_bytes = 8;
 	def.offset_dsp_words = 0;
 	def.shortname = "CtlA";
 	cs_dsp_mock_wmfw_add_coeff_desc(local->wmfw_builder, &def);
@@ -3249,30 +3248,35 @@ static struct kunit_suite cs_dsp_ctl_cache_test_halo = {
 	.name = "cs_dsp_ctl_cache_wmfwV3_halo",
 	.init = cs_dsp_ctl_cache_test_halo_init,
 	.test_cases = cs_dsp_ctl_cache_test_cases_v3,
+	.attr.speed = KUNIT_SPEED_SLOW,
 };
 
 static struct kunit_suite cs_dsp_ctl_cache_test_adsp2_32bit_wmfw1 = {
 	.name = "cs_dsp_ctl_cache_wmfwV1_adsp2_32bit",
 	.init = cs_dsp_ctl_cache_test_adsp2_32bit_wmfw1_init,
 	.test_cases = cs_dsp_ctl_cache_test_cases_v1,
+	.attr.speed = KUNIT_SPEED_SLOW,
 };
 
 static struct kunit_suite cs_dsp_ctl_cache_test_adsp2_32bit_wmfw2 = {
 	.name = "cs_dsp_ctl_cache_wmfwV2_adsp2_32bit",
 	.init = cs_dsp_ctl_cache_test_adsp2_32bit_wmfw2_init,
 	.test_cases = cs_dsp_ctl_cache_test_cases_v2,
+	.attr.speed = KUNIT_SPEED_SLOW,
 };
 
 static struct kunit_suite cs_dsp_ctl_cache_test_adsp2_16bit_wmfw1 = {
 	.name = "cs_dsp_ctl_cache_wmfwV1_adsp2_16bit",
 	.init = cs_dsp_ctl_cache_test_adsp2_16bit_wmfw1_init,
 	.test_cases = cs_dsp_ctl_cache_test_cases_v1,
+	.attr.speed = KUNIT_SPEED_SLOW,
 };
 
 static struct kunit_suite cs_dsp_ctl_cache_test_adsp2_16bit_wmfw2 = {
 	.name = "cs_dsp_ctl_cache_wmfwV2_adsp2_16bit",
 	.init = cs_dsp_ctl_cache_test_adsp2_16bit_wmfw2_init,
 	.test_cases = cs_dsp_ctl_cache_test_cases_v2,
+	.attr.speed = KUNIT_SPEED_SLOW,
 };
 
 kunit_test_suites(&cs_dsp_ctl_cache_test_halo,

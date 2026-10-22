@@ -7,7 +7,7 @@
 #include "hard-interface.h"
 #include "main.h"
 
-#include <linux/atomic.h>
+#include <linux/bug.h>
 #include <linux/byteorder/generic.h>
 #include <linux/compiler.h>
 #include <linux/container_of.h>
@@ -22,8 +22,11 @@
 #include <linux/minmax.h>
 #include <linux/mutex.h>
 #include <linux/netdevice.h>
+#include <linux/notifier.h>
 #include <linux/printk.h>
 #include <linux/rculist.h>
+#include <linux/rhashtable-types.h>
+#include <linux/rhashtable.h>
 #include <linux/rtnetlink.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -36,10 +39,19 @@
 #include "distributed-arp-table.h"
 #include "gateway_client.h"
 #include "log.h"
+#include "mesh-interface.h"
 #include "originator.h"
 #include "send.h"
-#include "soft-interface.h"
 #include "translation-table.h"
+
+static const struct rhashtable_params batadv_wifi_net_devices_params = {
+	.key_len		= sizeof(struct net_device *),
+	.key_offset		= offsetof(struct batadv_wifi_net_device_state, netdev),
+	.head_offset		= offsetof(struct batadv_wifi_net_device_state, l),
+	.automatic_shrinking	= true,
+};
+
+static struct rhashtable batadv_wifi_net_devices;
 
 /**
  * batadv_hardif_release() - release hard interface from lists and queue for
@@ -51,7 +63,7 @@ void batadv_hardif_release(struct kref *ref)
 	struct batadv_hard_iface *hard_iface;
 
 	hard_iface = container_of(ref, struct batadv_hard_iface, refcount);
-	dev_put(hard_iface->net_dev);
+	netdev_put(hard_iface->net_dev, &hard_iface->dev_tracker);
 
 	kfree_rcu(hard_iface, rcu);
 }
@@ -141,7 +153,7 @@ static bool batadv_mutual_parents(const struct net_device *dev1,
  * is important to prevent this new interface from being used to create a new
  * mesh network (this behaviour would lead to a batman-over-batman
  * configuration). This function recursively checks all the fathers of the
- * device passed as argument looking for a batman-adv soft interface.
+ * device passed as argument looking for a batman-adv mesh interface.
  *
  * Return: true if the device is descendant of a batman-adv mesh interface (or
  * if it is a batman-adv interface itself), false otherwise
@@ -155,7 +167,7 @@ static bool batadv_is_on_batman_iface(const struct net_device *net_dev)
 	bool ret;
 
 	/* check if this is a batman-adv mesh interface */
-	if (batadv_softif_is_valid(net_dev))
+	if (batadv_meshif_is_valid(net_dev))
 		return true;
 
 	iflink = dev_get_iflink(net_dev);
@@ -203,7 +215,7 @@ static bool batadv_is_valid_iface(const struct net_device *net_dev)
 }
 
 /**
- * batadv_get_real_netdevice() - check if the given netdev struct is a virtual
+ * __batadv_get_real_netdev() - check if the given netdev struct is a virtual
  *  interface on top of another 'real' interface
  * @netdev: the device to check
  *
@@ -213,7 +225,7 @@ static bool batadv_is_valid_iface(const struct net_device *net_dev)
  * Return: the 'real' net device or the original net device and NULL in case
  *  of an error.
  */
-static struct net_device *batadv_get_real_netdevice(struct net_device *netdev)
+struct net_device *__batadv_get_real_netdev(struct net_device *netdev)
 {
 	struct batadv_hard_iface *hard_iface = NULL;
 	struct net_device *real_netdev = NULL;
@@ -233,10 +245,10 @@ static struct net_device *batadv_get_real_netdevice(struct net_device *netdev)
 	}
 
 	hard_iface = batadv_hardif_get_by_netdev(netdev);
-	if (!hard_iface || !hard_iface->soft_iface)
+	if (!hard_iface || !hard_iface->mesh_iface)
 		goto out;
 
-	net = dev_net(hard_iface->soft_iface);
+	net = dev_net(hard_iface->mesh_iface);
 	real_net = batadv_getlink_net(netdev, net);
 
 	/* iflink to itself, most likely physical device */
@@ -266,7 +278,7 @@ struct net_device *batadv_get_real_netdev(struct net_device *net_device)
 	struct net_device *real_netdev;
 
 	rtnl_lock();
-	real_netdev = batadv_get_real_netdevice(net_device);
+	real_netdev = __batadv_get_real_netdev(net_device);
 	rtnl_unlock();
 
 	return real_netdev;
@@ -335,7 +347,7 @@ static u32 batadv_wifi_flags_evaluate(struct net_device *net_device)
 	if (batadv_is_cfg80211_netdev(net_device))
 		wifi_flags |= BATADV_HARDIF_WIFI_CFG80211_DIRECT;
 
-	real_netdev = batadv_get_real_netdevice(net_device);
+	real_netdev = __batadv_get_real_netdev(net_device);
 	if (!real_netdev)
 		return wifi_flags;
 
@@ -354,21 +366,39 @@ out:
 }
 
 /**
- * batadv_is_cfg80211_hardif() - check if the given hardif is a cfg80211 wifi
- *  interface
+ * batadv_netdev_get_wifi_flags() - retrieve wifi flags for net_device
+ * @net_dev: the device to check
+ *
+ * Return: batadv_hard_iface_wifi_flags flags of the device
+ */
+u32 batadv_netdev_get_wifi_flags(struct net_device *net_dev)
+{
+	struct batadv_wifi_net_device_state *device_state;
+	u32 wifi_flags = 0;
+
+	rcu_read_lock();
+	device_state = rhashtable_lookup_fast(&batadv_wifi_net_devices,
+					      &net_dev,
+					      batadv_wifi_net_devices_params);
+	if (device_state)
+		wifi_flags = READ_ONCE(device_state->wifi_flags);
+	rcu_read_unlock();
+
+	return wifi_flags;
+}
+
+/**
+ * batadv_hardif_get_wifi_flags() - retrieve wifi flags for hard_iface
  * @hard_iface: the device to check
  *
- * Return: true if the net device is a cfg80211 wireless device, false
- *  otherwise.
+ * Return: batadv_hard_iface_wifi_flags flags of the device
  */
-bool batadv_is_cfg80211_hardif(struct batadv_hard_iface *hard_iface)
+u32 batadv_hardif_get_wifi_flags(struct batadv_hard_iface *hard_iface)
 {
-	u32 allowed_flags = 0;
+	if (!hard_iface)
+		return 0;
 
-	allowed_flags |= BATADV_HARDIF_WIFI_CFG80211_DIRECT;
-	allowed_flags |= BATADV_HARDIF_WIFI_CFG80211_INDIRECT;
-
-	return !!(hard_iface->wifi_flags & allowed_flags);
+	return batadv_netdev_get_wifi_flags(hard_iface->net_dev);
 }
 
 /**
@@ -379,10 +409,9 @@ bool batadv_is_cfg80211_hardif(struct batadv_hard_iface *hard_iface)
  */
 bool batadv_is_wifi_hardif(struct batadv_hard_iface *hard_iface)
 {
-	if (!hard_iface)
-		return false;
+	u32 wifi_flags = batadv_hardif_get_wifi_flags(hard_iface);
 
-	return hard_iface->wifi_flags != 0;
+	return batadv_is_wifi(wifi_flags);
 }
 
 /**
@@ -438,15 +467,13 @@ out:
 }
 
 static struct batadv_hard_iface *
-batadv_hardif_get_active(const struct net_device *soft_iface)
+batadv_hardif_get_active(struct net_device *mesh_iface)
 {
 	struct batadv_hard_iface *hard_iface;
+	struct list_head *iter;
 
 	rcu_read_lock();
-	list_for_each_entry_rcu(hard_iface, &batadv_hardif_list, list) {
-		if (hard_iface->soft_iface != soft_iface)
-			continue;
-
+	netdev_for_each_lower_private_rcu(mesh_iface, hard_iface, iter) {
 		if (hard_iface->if_status == BATADV_IF_ACTIVE &&
 		    kref_get_unless_zero(&hard_iface->refcount))
 			goto out;
@@ -506,48 +533,48 @@ batadv_hardif_is_iface_up(const struct batadv_hard_iface *hard_iface)
 	return false;
 }
 
-static void batadv_check_known_mac_addr(const struct net_device *net_dev)
+static void batadv_check_known_mac_addr(const struct batadv_hard_iface *hard_iface)
 {
-	const struct batadv_hard_iface *hard_iface;
+	struct net_device *mesh_iface = hard_iface->mesh_iface;
+	const struct batadv_hard_iface *tmp_hard_iface;
+	struct list_head *iter;
 
-	rcu_read_lock();
-	list_for_each_entry_rcu(hard_iface, &batadv_hardif_list, list) {
-		if (hard_iface->if_status != BATADV_IF_ACTIVE &&
-		    hard_iface->if_status != BATADV_IF_TO_BE_ACTIVATED)
+	if (!mesh_iface)
+		return;
+
+	netdev_for_each_lower_private(mesh_iface, tmp_hard_iface, iter) {
+		if (tmp_hard_iface == hard_iface)
 			continue;
 
-		if (hard_iface->net_dev == net_dev)
+		if (tmp_hard_iface->if_status == BATADV_IF_NOT_IN_USE)
 			continue;
 
-		if (!batadv_compare_eth(hard_iface->net_dev->dev_addr,
-					net_dev->dev_addr))
+		if (!batadv_compare_eth(tmp_hard_iface->net_dev->dev_addr,
+					hard_iface->net_dev->dev_addr))
 			continue;
 
 		pr_warn("The newly added mac address (%pM) already exists on: %s\n",
-			net_dev->dev_addr, hard_iface->net_dev->name);
+			hard_iface->net_dev->dev_addr, tmp_hard_iface->net_dev->name);
 		pr_warn("It is strongly recommended to keep mac addresses unique to avoid problems!\n");
 	}
-	rcu_read_unlock();
 }
 
 /**
  * batadv_hardif_recalc_extra_skbroom() - Recalculate skbuff extra head/tailroom
- * @soft_iface: netdev struct of the mesh interface
+ * @mesh_iface: netdev struct of the mesh interface
  */
-static void batadv_hardif_recalc_extra_skbroom(struct net_device *soft_iface)
+static void batadv_hardif_recalc_extra_skbroom(struct net_device *mesh_iface)
 {
 	const struct batadv_hard_iface *hard_iface;
 	unsigned short lower_header_len = ETH_HLEN;
 	unsigned short lower_headroom = 0;
 	unsigned short lower_tailroom = 0;
 	unsigned short needed_headroom;
+	struct list_head *iter;
 
 	rcu_read_lock();
-	list_for_each_entry_rcu(hard_iface, &batadv_hardif_list, list) {
+	netdev_for_each_lower_private_rcu(mesh_iface, hard_iface, iter) {
 		if (hard_iface->if_status == BATADV_IF_NOT_IN_USE)
-			continue;
-
-		if (hard_iface->soft_iface != soft_iface)
 			continue;
 
 		lower_header_len = max_t(unsigned short, lower_header_len,
@@ -567,37 +594,35 @@ static void batadv_hardif_recalc_extra_skbroom(struct net_device *soft_iface)
 	/* fragmentation headers don't strip the unicast/... header */
 	needed_headroom += sizeof(struct batadv_frag_packet);
 
-	soft_iface->needed_headroom = needed_headroom;
-	soft_iface->needed_tailroom = lower_tailroom;
+	mesh_iface->needed_headroom = needed_headroom;
+	mesh_iface->needed_tailroom = lower_tailroom;
 }
 
 /**
- * batadv_hardif_min_mtu() - Calculate maximum MTU for soft interface
- * @soft_iface: netdev struct of the soft interface
+ * batadv_hardif_min_mtu() - Calculate maximum MTU for mesh interface
+ * @mesh_iface: netdev struct of the mesh interface
  *
- * Return: MTU for the soft-interface (limited by the minimal MTU of all active
+ * Return: MTU for the mesh-interface (limited by the minimal MTU of all active
  *  slave interfaces)
  */
-int batadv_hardif_min_mtu(struct net_device *soft_iface)
+int batadv_hardif_min_mtu(struct net_device *mesh_iface)
 {
-	struct batadv_priv *bat_priv = netdev_priv(soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(mesh_iface);
 	const struct batadv_hard_iface *hard_iface;
+	struct list_head *iter;
 	int min_mtu = INT_MAX;
 
 	rcu_read_lock();
-	list_for_each_entry_rcu(hard_iface, &batadv_hardif_list, list) {
+	netdev_for_each_lower_private_rcu(mesh_iface, hard_iface, iter) {
 		if (hard_iface->if_status != BATADV_IF_ACTIVE &&
 		    hard_iface->if_status != BATADV_IF_TO_BE_ACTIVATED)
-			continue;
-
-		if (hard_iface->soft_iface != soft_iface)
 			continue;
 
 		min_mtu = min_t(int, hard_iface->net_dev->mtu, min_mtu);
 	}
 	rcu_read_unlock();
 
-	if (atomic_read(&bat_priv->fragmentation) == 0)
+	if (READ_ONCE(bat_priv->fragmentation) == 0)
 		goto out;
 
 	/* with fragmentation enabled the maximum size of internally generated
@@ -614,28 +639,26 @@ out:
 	 * overhead). For example, this value is used by TT to compute the
 	 * maximum local table size
 	 */
-	atomic_set(&bat_priv->packet_size_max, min_mtu);
+	WRITE_ONCE(bat_priv->packet_size_max, min_mtu);
 
-	/* the real soft-interface MTU is computed by removing the payload
+	/* the real mesh-interface MTU is computed by removing the payload
 	 * overhead from the maximum amount of bytes that was just computed.
-	 *
-	 * However batman-adv does not support MTUs bigger than ETH_DATA_LEN
 	 */
-	return min_t(int, min_mtu - batadv_max_header_len(), ETH_DATA_LEN);
+	return min_t(int, min_mtu - batadv_max_header_len(), BATADV_MAX_MTU);
 }
 
 /**
  * batadv_update_min_mtu() - Adjusts the MTU if a new interface with a smaller
  *  MTU appeared
- * @soft_iface: netdev struct of the soft interface
+ * @mesh_iface: netdev struct of the mesh interface
  */
-void batadv_update_min_mtu(struct net_device *soft_iface)
+void batadv_update_min_mtu(struct net_device *mesh_iface)
 {
-	struct batadv_priv *bat_priv = netdev_priv(soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(mesh_iface);
 	int limit_mtu;
 	int mtu;
 
-	mtu = batadv_hardif_min_mtu(soft_iface);
+	mtu = batadv_hardif_min_mtu(mesh_iface);
 
 	if (bat_priv->mtu_set_by_user)
 		limit_mtu = bat_priv->mtu_set_by_user;
@@ -643,12 +666,12 @@ void batadv_update_min_mtu(struct net_device *soft_iface)
 		limit_mtu = ETH_DATA_LEN;
 
 	mtu = min(mtu, limit_mtu);
-	dev_set_mtu(soft_iface, mtu);
+	dev_set_mtu(mesh_iface, mtu);
 
 	/* Check if the local translate table should be cleaned up to match a
 	 * new (and smaller) MTU.
 	 */
-	batadv_tt_local_resize_to_mtu(soft_iface);
+	batadv_tt_local_resize_to_mtu(mesh_iface);
 }
 
 static void
@@ -660,7 +683,7 @@ batadv_hardif_activate_interface(struct batadv_hard_iface *hard_iface)
 	if (hard_iface->if_status != BATADV_IF_INACTIVE)
 		goto out;
 
-	bat_priv = netdev_priv(hard_iface->soft_iface);
+	bat_priv = netdev_priv(hard_iface->mesh_iface);
 
 	bat_priv->algo_ops->iface.update_mac(hard_iface);
 	hard_iface->if_status = BATADV_IF_TO_BE_ACTIVATED;
@@ -672,10 +695,10 @@ batadv_hardif_activate_interface(struct batadv_hard_iface *hard_iface)
 	if (!primary_if)
 		batadv_primary_if_select(bat_priv, hard_iface);
 
-	batadv_info(hard_iface->soft_iface, "Interface activated: %s\n",
+	batadv_info(hard_iface->mesh_iface, "Interface activated: %s\n",
 		    hard_iface->net_dev->name);
 
-	batadv_update_min_mtu(hard_iface->soft_iface);
+	batadv_update_min_mtu(hard_iface->mesh_iface);
 
 	if (bat_priv->algo_ops->iface.activate)
 		bat_priv->algo_ops->iface.activate(hard_iface);
@@ -693,31 +716,32 @@ batadv_hardif_deactivate_interface(struct batadv_hard_iface *hard_iface)
 
 	hard_iface->if_status = BATADV_IF_INACTIVE;
 
-	batadv_info(hard_iface->soft_iface, "Interface deactivated: %s\n",
+	batadv_info(hard_iface->mesh_iface, "Interface deactivated: %s\n",
 		    hard_iface->net_dev->name);
 
-	batadv_update_min_mtu(hard_iface->soft_iface);
+	batadv_update_min_mtu(hard_iface->mesh_iface);
 }
 
 /**
- * batadv_hardif_enable_interface() - Enslave hard interface to soft interface
- * @hard_iface: hard interface to add to soft interface
- * @soft_iface: netdev struct of the mesh interface
+ * batadv_hardif_enable_interface() - Enslave hard interface to mesh interface
+ * @hard_iface: hard interface to add to mesh interface
+ * @mesh_iface: netdev struct of the mesh interface
  *
  * Return: 0 on success or negative error number in case of failure
  */
 int batadv_hardif_enable_interface(struct batadv_hard_iface *hard_iface,
-				   struct net_device *soft_iface)
+				   struct net_device *mesh_iface)
 {
 	struct batadv_priv *bat_priv;
 	__be16 ethertype = htons(ETH_P_BATMAN);
 	int max_header_len = batadv_max_header_len();
 	unsigned int required_mtu;
 	unsigned int hardif_mtu;
+	bool fragmentation;
 	int ret;
 
 	hardif_mtu = READ_ONCE(hard_iface->net_dev->mtu);
-	required_mtu = READ_ONCE(soft_iface->mtu) + max_header_len;
+	required_mtu = READ_ONCE(mesh_iface->mtu) + max_header_len;
 
 	if (hardif_mtu < ETH_MIN_MTU + max_header_len)
 		return -EINVAL;
@@ -727,12 +751,12 @@ int batadv_hardif_enable_interface(struct batadv_hard_iface *hard_iface,
 
 	kref_get(&hard_iface->refcount);
 
-	dev_hold(soft_iface);
-	hard_iface->soft_iface = soft_iface;
-	bat_priv = netdev_priv(hard_iface->soft_iface);
+	netdev_hold(mesh_iface, &hard_iface->meshif_dev_tracker, GFP_ATOMIC);
+	hard_iface->mesh_iface = mesh_iface;
+	bat_priv = netdev_priv(hard_iface->mesh_iface);
 
 	ret = netdev_master_upper_dev_link(hard_iface->net_dev,
-					   soft_iface, NULL, NULL, NULL);
+					   mesh_iface, hard_iface, NULL, NULL);
 	if (ret)
 		goto err_dev;
 
@@ -748,31 +772,32 @@ int batadv_hardif_enable_interface(struct batadv_hard_iface *hard_iface,
 	hard_iface->batman_adv_ptype.dev = hard_iface->net_dev;
 	dev_add_pack(&hard_iface->batman_adv_ptype);
 
-	batadv_info(hard_iface->soft_iface, "Adding interface: %s\n",
+	batadv_info(hard_iface->mesh_iface, "Adding interface: %s\n",
 		    hard_iface->net_dev->name);
 
-	if (atomic_read(&bat_priv->fragmentation) &&
-	    hardif_mtu < required_mtu)
-		batadv_info(hard_iface->soft_iface,
+	fragmentation = READ_ONCE(bat_priv->fragmentation);
+	if (fragmentation && hardif_mtu < required_mtu)
+		batadv_info(hard_iface->mesh_iface,
 			    "The MTU of interface %s is too small (%i) to handle the transport of batman-adv packets. Packets going over this interface will be fragmented on layer2 which could impact the performance. Setting the MTU to %i would solve the problem.\n",
 			    hard_iface->net_dev->name, hardif_mtu,
 			    required_mtu);
 
-	if (!atomic_read(&bat_priv->fragmentation) &&
-	    hardif_mtu < required_mtu)
-		batadv_info(hard_iface->soft_iface,
+	if (!fragmentation && hardif_mtu < required_mtu)
+		batadv_info(hard_iface->mesh_iface,
 			    "The MTU of interface %s is too small (%i) to handle the transport of batman-adv packets. If you experience problems getting traffic through try increasing the MTU to %i.\n",
 			    hard_iface->net_dev->name, hardif_mtu,
 			    required_mtu);
 
+	batadv_check_known_mac_addr(hard_iface);
+
 	if (batadv_hardif_is_iface_up(hard_iface))
 		batadv_hardif_activate_interface(hard_iface);
 	else
-		batadv_err(hard_iface->soft_iface,
+		batadv_err(hard_iface->mesh_iface,
 			   "Not using interface %s (retrying later): interface not active\n",
 			   hard_iface->net_dev->name);
 
-	batadv_hardif_recalc_extra_skbroom(soft_iface);
+	batadv_hardif_recalc_extra_skbroom(mesh_iface);
 
 	if (bat_priv->algo_ops->iface.enabled)
 		bat_priv->algo_ops->iface.enabled(hard_iface);
@@ -781,48 +806,21 @@ out:
 	return 0;
 
 err_upper:
-	netdev_upper_dev_unlink(hard_iface->net_dev, soft_iface);
+	netdev_upper_dev_unlink(hard_iface->net_dev, mesh_iface);
 err_dev:
-	hard_iface->soft_iface = NULL;
-	dev_put(soft_iface);
+	hard_iface->mesh_iface = NULL;
+	netdev_put(mesh_iface, &hard_iface->meshif_dev_tracker);
 	batadv_hardif_put(hard_iface);
 	return ret;
 }
 
 /**
- * batadv_hardif_cnt() - get number of interfaces enslaved to soft interface
- * @soft_iface: soft interface to check
- *
- * This function is only using RCU for locking - the result can therefore be
- * off when another function is modifying the list at the same time. The
- * caller can use the rtnl_lock to make sure that the count is accurate.
- *
- * Return: number of connected/enslaved hard interfaces
- */
-static size_t batadv_hardif_cnt(const struct net_device *soft_iface)
-{
-	struct batadv_hard_iface *hard_iface;
-	size_t count = 0;
-
-	rcu_read_lock();
-	list_for_each_entry_rcu(hard_iface, &batadv_hardif_list, list) {
-		if (hard_iface->soft_iface != soft_iface)
-			continue;
-
-		count++;
-	}
-	rcu_read_unlock();
-
-	return count;
-}
-
-/**
- * batadv_hardif_disable_interface() - Remove hard interface from soft interface
+ * batadv_hardif_disable_interface() - Remove hard interface from mesh interface
  * @hard_iface: hard interface to be removed
  */
 void batadv_hardif_disable_interface(struct batadv_hard_iface *hard_iface)
 {
-	struct batadv_priv *bat_priv = netdev_priv(hard_iface->soft_iface);
+	struct batadv_priv *bat_priv = netdev_priv(hard_iface->mesh_iface);
 	struct batadv_hard_iface *primary_if = NULL;
 
 	batadv_hardif_deactivate_interface(hard_iface);
@@ -830,7 +828,7 @@ void batadv_hardif_disable_interface(struct batadv_hard_iface *hard_iface)
 	if (hard_iface->if_status != BATADV_IF_INACTIVE)
 		goto out;
 
-	batadv_info(hard_iface->soft_iface, "Removing interface: %s\n",
+	batadv_info(hard_iface->mesh_iface, "Removing interface: %s\n",
 		    hard_iface->net_dev->name);
 	dev_remove_pack(&hard_iface->batman_adv_ptype);
 	batadv_hardif_put(hard_iface);
@@ -839,7 +837,7 @@ void batadv_hardif_disable_interface(struct batadv_hard_iface *hard_iface)
 	if (hard_iface == primary_if) {
 		struct batadv_hard_iface *new_if;
 
-		new_if = batadv_hardif_get_active(hard_iface->soft_iface);
+		new_if = batadv_hardif_get_active(hard_iface->mesh_iface);
 		batadv_primary_if_select(bat_priv, new_if);
 
 		batadv_hardif_put(new_if);
@@ -851,16 +849,16 @@ void batadv_hardif_disable_interface(struct batadv_hard_iface *hard_iface)
 	/* delete all references to this hard_iface */
 	batadv_purge_orig_ref(bat_priv);
 	batadv_purge_outstanding_packets(bat_priv, hard_iface);
-	dev_put(hard_iface->soft_iface);
+	netdev_put(hard_iface->mesh_iface, &hard_iface->meshif_dev_tracker);
 
-	netdev_upper_dev_unlink(hard_iface->net_dev, hard_iface->soft_iface);
-	batadv_hardif_recalc_extra_skbroom(hard_iface->soft_iface);
+	netdev_upper_dev_unlink(hard_iface->net_dev, hard_iface->mesh_iface);
+	batadv_hardif_recalc_extra_skbroom(hard_iface->mesh_iface);
 
-	/* nobody uses this interface anymore */
-	if (batadv_hardif_cnt(hard_iface->soft_iface) <= 1)
+	/* nobody uses this mesh interface anymore */
+	if (list_empty(&hard_iface->mesh_iface->adj_list.lower))
 		batadv_gw_check_client_stop(bat_priv);
 
-	hard_iface->soft_iface = NULL;
+	hard_iface->mesh_iface = NULL;
 	batadv_hardif_put(hard_iface);
 
 out:
@@ -875,16 +873,16 @@ batadv_hardif_add_interface(struct net_device *net_dev)
 	ASSERT_RTNL();
 
 	if (!batadv_is_valid_iface(net_dev))
-		goto out;
+		return NULL;
 
-	dev_hold(net_dev);
-
-	hard_iface = kzalloc(sizeof(*hard_iface), GFP_ATOMIC);
+	hard_iface = kzalloc_obj(*hard_iface, GFP_ATOMIC);
 	if (!hard_iface)
-		goto release_dev;
+		return NULL;
 
+	netdev_hold(net_dev, &hard_iface->dev_tracker, GFP_ATOMIC);
 	hard_iface->net_dev = net_dev;
-	hard_iface->soft_iface = NULL;
+
+	hard_iface->mesh_iface = NULL;
 	hard_iface->if_status = BATADV_IF_NOT_IN_USE;
 
 	INIT_LIST_HEAD(&hard_iface->list);
@@ -895,25 +893,18 @@ batadv_hardif_add_interface(struct net_device *net_dev)
 	kref_init(&hard_iface->refcount);
 
 	hard_iface->num_bcasts = BATADV_NUM_BCASTS_DEFAULT;
-	hard_iface->wifi_flags = batadv_wifi_flags_evaluate(net_dev);
 	if (batadv_is_wifi_hardif(hard_iface))
 		hard_iface->num_bcasts = BATADV_NUM_BCASTS_WIRELESS;
 
-	atomic_set(&hard_iface->hop_penalty, 0);
+	WRITE_ONCE(hard_iface->hop_penalty, 0);
 
 	batadv_v_hardif_init(hard_iface);
 
-	batadv_check_known_mac_addr(hard_iface->net_dev);
 	kref_get(&hard_iface->refcount);
 	list_add_tail_rcu(&hard_iface->list, &batadv_hardif_list);
 	batadv_hardif_generation++;
 
 	return hard_iface;
-
-release_dev:
-	dev_put(net_dev);
-out:
-	return NULL;
 }
 
 static void batadv_hardif_remove_interface(struct batadv_hard_iface *hard_iface)
@@ -932,13 +923,13 @@ static void batadv_hardif_remove_interface(struct batadv_hard_iface *hard_iface)
 }
 
 /**
- * batadv_hard_if_event_softif() - Handle events for soft interfaces
+ * batadv_hard_if_event_meshif() - Handle events for mesh interfaces
  * @event: NETDEV_* event to handle
  * @net_dev: net_device which generated an event
  *
  * Return: NOTIFY_* result
  */
-static int batadv_hard_if_event_softif(unsigned long event,
+static int batadv_hard_if_event_meshif(unsigned long event,
 				       struct net_device *net_dev)
 {
 	struct batadv_priv *bat_priv;
@@ -946,11 +937,135 @@ static int batadv_hard_if_event_softif(unsigned long event,
 	switch (event) {
 	case NETDEV_REGISTER:
 		bat_priv = netdev_priv(net_dev);
-		batadv_softif_create_vlan(bat_priv, BATADV_NO_FLAGS);
+		batadv_meshif_create_vlan(bat_priv, BATADV_NO_FLAGS);
 		break;
 	}
 
 	return NOTIFY_DONE;
+}
+
+/**
+ * batadv_wifi_net_device_insert() - save information about wifi net_device
+ * @net_dev: net_device to add to batadv_wifi_net_devices
+ * @wifi_flags: extracted batadv_hard_iface_wifi_flags of a net_device
+ *
+ * Return: 0 on success, negative value on error
+ */
+static int
+batadv_wifi_net_device_insert(struct net_device *net_dev, u32 wifi_flags)
+{
+	struct batadv_wifi_net_device_state *device_state;
+	int ret;
+
+	ASSERT_RTNL();
+
+	device_state = kzalloc_obj(*device_state, GFP_KERNEL);
+	if (!device_state)
+		return -ENOMEM;
+
+	netdev_hold(net_dev, &device_state->dev_tracker, GFP_KERNEL);
+	device_state->netdev = net_dev;
+	WRITE_ONCE(device_state->wifi_flags, wifi_flags);
+
+	ret = rhashtable_insert_fast(&batadv_wifi_net_devices, &device_state->l,
+				     batadv_wifi_net_devices_params);
+	if (ret < 0)
+		goto err_free;
+
+	return 0;
+
+err_free:
+	netdev_put(device_state->netdev, &device_state->dev_tracker);
+	kfree(device_state);
+	return ret;
+}
+
+/**
+ * batadv_wifi_net_device_remove() - remove information about wifi net_device
+ * @device_state: wifi net_device state to remove from batadv_wifi_net_devices
+ */
+static void
+batadv_wifi_net_device_remove(struct batadv_wifi_net_device_state *device_state)
+{
+	ASSERT_RTNL();
+
+	rhashtable_remove_fast(&batadv_wifi_net_devices, &device_state->l,
+			       batadv_wifi_net_devices_params);
+	netdev_put(device_state->netdev, &device_state->dev_tracker);
+	kfree_rcu(device_state, rcu);
+}
+
+/**
+ * batadv_wifi_net_device_update() - update wifi state of net_device
+ * @net_dev: net_device to update in batadv_wifi_net_devices
+ *
+ * The device will only be stored in batadv_wifi_net_devices when
+ * it could be identified as wifi device. If the net_device is no
+ * longer a wifi device, it is automatically removed from
+ * batadv_wifi_net_devices.
+ */
+static void
+batadv_wifi_net_device_update(struct net_device *net_dev)
+{
+	struct batadv_wifi_net_device_state *device_state;
+	u32 wifi_flags;
+
+	ASSERT_RTNL();
+
+	wifi_flags = batadv_wifi_flags_evaluate(net_dev);
+	device_state = rhashtable_lookup_fast(&batadv_wifi_net_devices,
+					      &net_dev,
+					      batadv_wifi_net_devices_params);
+
+	if (device_state) {
+		if (batadv_is_wifi(wifi_flags))
+			WRITE_ONCE(device_state->wifi_flags, wifi_flags);
+		else
+			batadv_wifi_net_device_remove(device_state);
+	} else if (batadv_is_wifi(wifi_flags)) {
+		batadv_wifi_net_device_insert(net_dev, wifi_flags);
+	}
+}
+
+/**
+ * batadv_wifi_net_device_unregister() - remove wifi state of net_device
+ * @net_dev: net_device to remove from batadv_wifi_net_devices
+ */
+static void
+batadv_wifi_net_device_unregister(struct net_device *net_dev)
+{
+	struct batadv_wifi_net_device_state *device_state;
+
+	ASSERT_RTNL();
+
+	device_state = rhashtable_lookup_fast(&batadv_wifi_net_devices,
+					      &net_dev,
+					      batadv_wifi_net_devices_params);
+	if (!device_state)
+		return;
+
+	batadv_wifi_net_device_remove(device_state);
+}
+
+/**
+ * batadv_wifi_net_device_event() - handle network events for batadv_wifi_net_devices
+ * @event: enum netdev_cmd event to handle
+ * @net_dev: net_device to update in batadv_wifi_net_devices
+ */
+static void batadv_wifi_net_device_event(unsigned long event,
+					 struct net_device *net_dev)
+{
+	switch (event) {
+	case NETDEV_REGISTER:
+	case NETDEV_POST_TYPE_CHANGE:
+	case NETDEV_CHANGEUPPER:
+		batadv_wifi_net_device_update(net_dev);
+		break;
+	case NETDEV_UNREGISTER:
+	case NETDEV_PRE_TYPE_CHANGE:
+		batadv_wifi_net_device_unregister(net_dev);
+		break;
+	}
 }
 
 static int batadv_hard_if_event(struct notifier_block *this,
@@ -961,8 +1076,10 @@ static int batadv_hard_if_event(struct notifier_block *this,
 	struct batadv_hard_iface *primary_if = NULL;
 	struct batadv_priv *bat_priv;
 
-	if (batadv_softif_is_valid(net_dev))
-		return batadv_hard_if_event_softif(event, net_dev);
+	if (batadv_meshif_is_valid(net_dev))
+		return batadv_hard_if_event_meshif(event, net_dev);
+
+	batadv_wifi_net_device_event(event, net_dev);
 
 	hard_iface = batadv_hardif_get_by_netdev(net_dev);
 	if (!hard_iface && (event == NETDEV_REGISTER ||
@@ -988,16 +1105,16 @@ static int batadv_hard_if_event(struct notifier_block *this,
 		batadv_hardif_remove_interface(hard_iface);
 		break;
 	case NETDEV_CHANGEMTU:
-		if (hard_iface->soft_iface)
-			batadv_update_min_mtu(hard_iface->soft_iface);
+		if (hard_iface->mesh_iface)
+			batadv_update_min_mtu(hard_iface->mesh_iface);
 		break;
 	case NETDEV_CHANGEADDR:
 		if (hard_iface->if_status == BATADV_IF_NOT_IN_USE)
 			goto hardif_put;
 
-		batadv_check_known_mac_addr(hard_iface->net_dev);
+		batadv_check_known_mac_addr(hard_iface);
 
-		bat_priv = netdev_priv(hard_iface->soft_iface);
+		bat_priv = netdev_priv(hard_iface->mesh_iface);
 		bat_priv->algo_ops->iface.update_mac(hard_iface);
 
 		primary_if = batadv_primary_if_get_selected(bat_priv);
@@ -1007,8 +1124,9 @@ static int batadv_hard_if_event(struct notifier_block *this,
 		if (hard_iface == primary_if)
 			batadv_primary_if_update_addr(bat_priv, NULL);
 		break;
+	case NETDEV_REGISTER:
+	case NETDEV_POST_TYPE_CHANGE:
 	case NETDEV_CHANGEUPPER:
-		hard_iface->wifi_flags = batadv_wifi_flags_evaluate(net_dev);
 		if (batadv_is_wifi_hardif(hard_iface))
 			hard_iface->num_bcasts = BATADV_NUM_BCASTS_WIRELESS;
 		break;
@@ -1026,3 +1144,26 @@ out:
 struct notifier_block batadv_hard_if_notifier = {
 	.notifier_call = batadv_hard_if_event,
 };
+
+/**
+ * batadv_wifi_net_devices_init() - Initialize wifi devices cache
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+int __init batadv_wifi_net_devices_init(void)
+{
+	return rhashtable_init(&batadv_wifi_net_devices,
+			       &batadv_wifi_net_devices_params);
+}
+
+/**
+ * batadv_wifi_net_devices_deinit() - Deinitialize wifi devices cache
+ */
+void batadv_wifi_net_devices_deinit(void)
+{
+	/* just destroy table. entries should have been removed by
+	 * unregister_netdevice_notifier() and the corresponding
+	 * NETDEV_UNREGISTER events
+	 */
+	rhashtable_destroy(&batadv_wifi_net_devices);
+}

@@ -19,7 +19,7 @@
  *
  * @fw_status: FW status
  * @quirk_probe: device exclusion quirk
- * @kind: MEI head kind
+ * @get_kind: MEI head kind helper
  * @dma_size: device DMA buffers size
  * @fw_ver_supported: is fw version retrievable from FW
  * @hw_trc_supported: does the hw support trc register
@@ -27,17 +27,11 @@
 struct mei_cfg {
 	const struct mei_fw_status fw_status;
 	bool (*quirk_probe)(const struct pci_dev *pdev);
-	const char *kind;
+	enum mei_dev_kind (*get_kind)(const struct device *parent);
 	size_t dma_size[DMA_DSCR_NUM];
 	u32 fw_ver_supported:1;
 	u32 hw_trc_supported:1;
 };
-
-
-#define MEI_PCI_DEVICE(dev, cfg) \
-	.vendor = PCI_VENDOR_ID_INTEL, .device = (dev), \
-	.subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID, \
-	.driver_data = (kernel_ulong_t)(cfg),
 
 #define MEI_ME_RPM_TIMEOUT    500 /* ms */
 
@@ -62,7 +56,7 @@ struct mei_me_hw {
 	enum mei_pg_state pg_state;
 	bool d0i3_supported;
 	u8 hbuf_depth;
-	int (*read_fws)(const struct mei_device *dev, int where, u32 *val);
+	int (*read_fws)(const struct mei_device *dev, int where, const char *name, u32 *val);
 	/* polling */
 	struct task_struct *polling_thread;
 	wait_queue_head_t wait_active;
@@ -110,6 +104,8 @@ static inline bool mei_me_hw_use_polling(const struct mei_me_hw *hw)
  *                         SPS firmware exclusion.
  * @MEI_ME_GSC_CFG:        Graphics System Controller
  * @MEI_ME_GSCFI_CFG:      Graphics System Controller Firmware Interface
+ * @MEI_ME_CSC_CFG:        Chassis System Controller Firmware Interface
+ * @MEI_ME_PCH22_IOE_CFG:  Platform Controller Hub Gen22 and newer with IOE detection
  * @MEI_ME_NUM_CFG:        Upper Sentinel.
  */
 enum mei_cfg_idx {
@@ -130,7 +126,9 @@ enum mei_cfg_idx {
 	MEI_ME_PCH15_SPS_CFG,
 	MEI_ME_GSC_CFG,
 	MEI_ME_GSCFI_CFG,
-	MEI_ME_NUM_CFG,
+	MEI_ME_CSC_CFG,
+	MEI_ME_PCH22_IOE_CFG,
+	MEI_ME_NUM_CFG
 };
 
 const struct mei_cfg *mei_me_get_cfg(kernel_ulong_t idx);

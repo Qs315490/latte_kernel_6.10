@@ -8,7 +8,23 @@
 #include "ivpu_hw_btrs.h"
 #include "ivpu_hw_ip.h"
 
+#include <asm/msr-index.h>
+#include <asm/msr.h>
 #include <linux/dmi.h>
+#include <linux/fault-inject.h>
+#include <linux/pm_runtime.h>
+
+#ifdef CONFIG_FAULT_INJECTION
+DECLARE_FAULT_ATTR(ivpu_hw_failure);
+
+static char *ivpu_fail_hw;
+module_param_named_unsafe(fail_hw, ivpu_fail_hw, charp, 0444);
+MODULE_PARM_DESC(fail_hw, "<interval>,<probability>,<space>,<times>");
+#endif
+
+#define FW_SHARED_MEM_ALIGNMENT	SZ_512K /* VPU MTRR limitation */
+
+#define ECC_MCA_SIGNAL_ENABLE_MASK	0xff
 
 static char *platform_to_str(u32 platform)
 {
@@ -19,60 +35,65 @@ static char *platform_to_str(u32 platform)
 		return "SIMICS";
 	case IVPU_PLATFORM_FPGA:
 		return "FPGA";
+	case IVPU_PLATFORM_HSLE:
+		return "HSLE";
 	default:
 		return "Invalid platform";
 	}
 }
 
-static const struct dmi_system_id dmi_platform_simulation[] = {
-	{
-		.ident = "Intel Simics",
-		.matches = {
-			DMI_MATCH(DMI_BOARD_NAME, "lnlrvp"),
-			DMI_MATCH(DMI_BOARD_VERSION, "1.0"),
-			DMI_MATCH(DMI_BOARD_SERIAL, "123456789"),
-		},
-	},
-	{
-		.ident = "Intel Simics",
-		.matches = {
-			DMI_MATCH(DMI_BOARD_NAME, "Simics"),
-		},
-	},
-	{ }
-};
-
 static void platform_init(struct ivpu_device *vdev)
 {
-	if (dmi_check_system(dmi_platform_simulation))
-		vdev->platform = IVPU_PLATFORM_SIMICS;
-	else
-		vdev->platform = IVPU_PLATFORM_SILICON;
+	int platform = ivpu_hw_btrs_platform_read(vdev);
 
-	ivpu_dbg(vdev, MISC, "Platform type: %s (%d)\n",
-		 platform_to_str(vdev->platform), vdev->platform);
+	ivpu_dbg(vdev, MISC, "Platform type: %s (%d)\n", platform_to_str(platform), platform);
+
+	switch (platform) {
+	case IVPU_PLATFORM_SILICON:
+	case IVPU_PLATFORM_SIMICS:
+	case IVPU_PLATFORM_FPGA:
+	case IVPU_PLATFORM_HSLE:
+		vdev->platform = platform;
+		break;
+
+	default:
+		ivpu_err(vdev, "Invalid platform type: %d\n", platform);
+		break;
+	}
 }
 
 static void wa_init(struct ivpu_device *vdev)
 {
-	vdev->wa.punit_disabled = ivpu_is_fpga(vdev);
+	vdev->wa.punit_disabled = false;
 	vdev->wa.clear_runtime_mem = false;
 
 	if (ivpu_hw_btrs_gen(vdev) == IVPU_HW_BTRS_MTL)
 		vdev->wa.interrupt_clear_with_0 = ivpu_hw_btrs_irqs_clear_with_0_mtl(vdev);
 
-	if (ivpu_device_id(vdev) == PCI_DEVICE_ID_LNL &&
-	    ivpu_revision(vdev) < IVPU_HW_IP_REV_LNL_B0)
+	if ((ivpu_device_id(vdev) == PCI_DEVICE_ID_LNL &&
+	     ivpu_revision(vdev) < IVPU_HW_IP_REV_LNL_B0) ||
+	    (ivpu_device_id(vdev) == PCI_DEVICE_ID_NVL &&
+	     ivpu_revision(vdev) == IVPU_HW_IP_REV_NVL_A0))
+		vdev->wa.disable_clock_relinquish = true;
+
+	if (ivpu_test_mode & IVPU_TEST_MODE_CLK_RELINQ_ENABLE)
+		vdev->wa.disable_clock_relinquish = false;
+
+	if (ivpu_test_mode & IVPU_TEST_MODE_CLK_RELINQ_DISABLE)
 		vdev->wa.disable_clock_relinquish = true;
 
 	if (ivpu_hw_ip_gen(vdev) == IVPU_HW_IP_37XX)
 		vdev->wa.wp0_during_power_up = true;
+
+	if (ivpu_test_mode & IVPU_TEST_MODE_D0I2_DISABLE)
+		vdev->wa.disable_d0i2 = true;
 
 	IVPU_PRINT_WA(punit_disabled);
 	IVPU_PRINT_WA(clear_runtime_mem);
 	IVPU_PRINT_WA(interrupt_clear_with_0);
 	IVPU_PRINT_WA(disable_clock_relinquish);
 	IVPU_PRINT_WA(wp0_during_power_up);
+	IVPU_PRINT_WA(disable_d0i2);
 }
 
 static void timeouts_init(struct ivpu_device *vdev)
@@ -81,19 +102,22 @@ static void timeouts_init(struct ivpu_device *vdev)
 		vdev->timeout.boot = -1;
 		vdev->timeout.jsm = -1;
 		vdev->timeout.tdr = -1;
+		vdev->timeout.inference = -1;
 		vdev->timeout.autosuspend = -1;
 		vdev->timeout.d0i3_entry_msg = -1;
 	} else if (ivpu_is_fpga(vdev)) {
-		vdev->timeout.boot = 100000;
-		vdev->timeout.jsm = 50000;
-		vdev->timeout.tdr = 2000000;
+		vdev->timeout.boot = 50;
+		vdev->timeout.jsm = 15000;
+		vdev->timeout.tdr = 30000;
+		vdev->timeout.inference = 900000;
 		vdev->timeout.autosuspend = -1;
 		vdev->timeout.d0i3_entry_msg = 500;
-		vdev->timeout.state_dump_msg = 10;
+		vdev->timeout.state_dump_msg = 10000;
 	} else if (ivpu_is_simics(vdev)) {
 		vdev->timeout.boot = 50;
 		vdev->timeout.jsm = 500;
 		vdev->timeout.tdr = 10000;
+		vdev->timeout.inference = 300000;
 		vdev->timeout.autosuspend = 100;
 		vdev->timeout.d0i3_entry_msg = 100;
 		vdev->timeout.state_dump_msg = 10;
@@ -101,28 +125,69 @@ static void timeouts_init(struct ivpu_device *vdev)
 		vdev->timeout.boot = 1000;
 		vdev->timeout.jsm = 500;
 		vdev->timeout.tdr = 2000;
+		vdev->timeout.inference = 60000;
 		if (ivpu_hw_ip_gen(vdev) == IVPU_HW_IP_37XX)
 			vdev->timeout.autosuspend = 10;
 		else
 			vdev->timeout.autosuspend = 100;
 		vdev->timeout.d0i3_entry_msg = 5;
-		vdev->timeout.state_dump_msg = 10;
+		vdev->timeout.state_dump_msg = 100;
 	}
+}
+
+static void priority_bands_init(struct ivpu_device *vdev)
+{
+	/* Idle */
+	vdev->hw->hws.grace_period[VPU_JOB_SCHEDULING_PRIORITY_BAND_IDLE] = 0;
+	vdev->hw->hws.process_grace_period[VPU_JOB_SCHEDULING_PRIORITY_BAND_IDLE] = 50000;
+	vdev->hw->hws.process_quantum[VPU_JOB_SCHEDULING_PRIORITY_BAND_IDLE] = 160000;
+	/* Normal */
+	vdev->hw->hws.grace_period[VPU_JOB_SCHEDULING_PRIORITY_BAND_NORMAL] = 50000;
+	vdev->hw->hws.process_grace_period[VPU_JOB_SCHEDULING_PRIORITY_BAND_NORMAL] = 50000;
+	vdev->hw->hws.process_quantum[VPU_JOB_SCHEDULING_PRIORITY_BAND_NORMAL] = 300000;
+	/* Focus */
+	vdev->hw->hws.grace_period[VPU_JOB_SCHEDULING_PRIORITY_BAND_FOCUS] = 50000;
+	vdev->hw->hws.process_grace_period[VPU_JOB_SCHEDULING_PRIORITY_BAND_FOCUS] = 50000;
+	vdev->hw->hws.process_quantum[VPU_JOB_SCHEDULING_PRIORITY_BAND_FOCUS] = 200000;
+	/* Realtime */
+	vdev->hw->hws.grace_period[VPU_JOB_SCHEDULING_PRIORITY_BAND_REALTIME] = 0;
+	vdev->hw->hws.process_grace_period[VPU_JOB_SCHEDULING_PRIORITY_BAND_REALTIME] = 50000;
+	vdev->hw->hws.process_quantum[VPU_JOB_SCHEDULING_PRIORITY_BAND_REALTIME] = 200000;
+}
+
+int ivpu_hw_range_init(struct ivpu_device *vdev, struct ivpu_addr_range *range, u64 start, u64 size)
+{
+	u64 end;
+
+	if (!range || check_add_overflow(start, size, &end)) {
+		ivpu_err(vdev, "Invalid range: start 0x%llx size %llu\n", start, size);
+		return -EINVAL;
+	}
+
+	range->start = start;
+	range->end = end;
+
+	return 0;
 }
 
 static void memory_ranges_init(struct ivpu_device *vdev)
 {
 	if (ivpu_hw_ip_gen(vdev) == IVPU_HW_IP_37XX) {
-		ivpu_hw_range_init(&vdev->hw->ranges.global, 0x80000000, SZ_512M);
-		ivpu_hw_range_init(&vdev->hw->ranges.user,   0x88000000, 511 * SZ_1M);
-		ivpu_hw_range_init(&vdev->hw->ranges.shave, 0x180000000, SZ_2G);
-		ivpu_hw_range_init(&vdev->hw->ranges.dma,   0x200000000, SZ_128G);
+		ivpu_hw_range_init(vdev, &vdev->hw->ranges.runtime, 0x84800000, SZ_64M);
+		ivpu_hw_range_init(vdev, &vdev->hw->ranges.global,  0x90000000, SZ_256M);
+		ivpu_hw_range_init(vdev, &vdev->hw->ranges.user,    0xa0000000, 511 * SZ_1M);
+		ivpu_hw_range_init(vdev, &vdev->hw->ranges.shave,  0x180000000, SZ_2G);
+		ivpu_hw_range_init(vdev, &vdev->hw->ranges.dma,    0x200000000, SZ_128G);
 	} else {
-		ivpu_hw_range_init(&vdev->hw->ranges.global, 0x80000000, SZ_512M);
-		ivpu_hw_range_init(&vdev->hw->ranges.shave,  0x80000000, SZ_2G);
-		ivpu_hw_range_init(&vdev->hw->ranges.user,  0x100000000, SZ_256G);
+		ivpu_hw_range_init(vdev, &vdev->hw->ranges.runtime, 0x80000000, SZ_64M);
+		ivpu_hw_range_init(vdev, &vdev->hw->ranges.global,  0x90000000, SZ_256M);
+		ivpu_hw_range_init(vdev, &vdev->hw->ranges.shave,   0x80000000, SZ_2G);
+		ivpu_hw_range_init(vdev, &vdev->hw->ranges.user,   0x100000000, SZ_256G);
 		vdev->hw->ranges.dma = vdev->hw->ranges.user;
 	}
+
+	drm_WARN_ON(&vdev->drm, !IS_ALIGNED(vdev->hw->ranges.global.start,
+					    FW_SHARED_MEM_ALIGNMENT));
 }
 
 static int wp_enable(struct ivpu_device *vdev)
@@ -248,11 +313,17 @@ int ivpu_hw_init(struct ivpu_device *vdev)
 {
 	ivpu_hw_btrs_info_init(vdev);
 	ivpu_hw_btrs_freq_ratios_init(vdev);
+	priority_bands_init(vdev);
 	memory_ranges_init(vdev);
 	platform_init(vdev);
 	wa_init(vdev);
 	timeouts_init(vdev);
 	atomic_set(&vdev->hw->firewall_irq_counter, 0);
+
+#ifdef CONFIG_FAULT_INJECTION
+	if (ivpu_fail_hw)
+		setup_fault_attr(&ivpu_hw_failure, ivpu_fail_hw);
+#endif
 
 	return 0;
 }
@@ -285,8 +356,6 @@ void ivpu_hw_profiling_freq_drive(struct ivpu_device *vdev, bool enable)
 
 void ivpu_irq_handlers_init(struct ivpu_device *vdev)
 {
-	INIT_KFIFO(vdev->hw->irq.fifo);
-
 	if (ivpu_hw_ip_gen(vdev) == IVPU_HW_IP_37XX)
 		vdev->hw->irq.ip_irq_handler = ivpu_hw_ip_irq_handler_37xx;
 	else
@@ -300,7 +369,6 @@ void ivpu_irq_handlers_init(struct ivpu_device *vdev)
 
 void ivpu_hw_irq_enable(struct ivpu_device *vdev)
 {
-	kfifo_reset(&vdev->hw->irq.fifo);
 	ivpu_hw_ip_irq_enable(vdev);
 	ivpu_hw_btrs_irq_enable(vdev);
 }
@@ -327,9 +395,28 @@ irqreturn_t ivpu_hw_irq_handler(int irq, void *ptr)
 	/* Re-enable global interrupts to re-trigger MSI for pending interrupts */
 	ivpu_hw_btrs_global_int_enable(vdev);
 
-	if (!kfifo_is_empty(&vdev->hw->irq.fifo))
-		return IRQ_WAKE_THREAD;
-	if (ip_handled || btrs_handled)
-		return IRQ_HANDLED;
-	return IRQ_NONE;
+	if (!ip_handled && !btrs_handled)
+		return IRQ_NONE;
+
+	pm_runtime_mark_last_busy(vdev->drm.dev);
+	return IRQ_HANDLED;
+}
+
+bool ivpu_hw_uses_ecc_mca_signal(struct ivpu_device *vdev)
+{
+	unsigned long long msr_integrity_caps;
+	int ret;
+
+	if (ivpu_hw_ip_gen(vdev) < IVPU_HW_IP_50XX)
+		return false;
+
+	ret = rdmsrq_safe(MSR_INTEGRITY_CAPS, &msr_integrity_caps);
+	if (ret) {
+		ivpu_warn(vdev, "Error reading MSR_INTEGRITY_CAPS: %d", ret);
+		return false;
+	}
+
+	ivpu_dbg(vdev, MISC, "MSR_INTEGRITY_CAPS: 0x%llx\n", msr_integrity_caps);
+
+	return msr_integrity_caps & ECC_MCA_SIGNAL_ENABLE_MASK;
 }

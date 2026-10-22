@@ -76,20 +76,20 @@ enum qede_pci_private {
 };
 
 static const struct pci_device_id qede_pci_tbl[] = {
-	{PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_40), QEDE_PRIVATE_PF},
-	{PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_10), QEDE_PRIVATE_PF},
-	{PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_MF), QEDE_PRIVATE_PF},
-	{PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_100), QEDE_PRIVATE_PF},
-	{PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_50), QEDE_PRIVATE_PF},
-	{PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_25), QEDE_PRIVATE_PF},
+	{ PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_40), .driver_data = QEDE_PRIVATE_PF },
+	{ PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_10), .driver_data = QEDE_PRIVATE_PF },
+	{ PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_MF), .driver_data = QEDE_PRIVATE_PF },
+	{ PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_100), .driver_data = QEDE_PRIVATE_PF },
+	{ PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_50), .driver_data = QEDE_PRIVATE_PF },
+	{ PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_25), .driver_data = QEDE_PRIVATE_PF },
 #ifdef CONFIG_QED_SRIOV
-	{PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_IOV), QEDE_PRIVATE_VF},
+	{ PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_57980S_IOV), .driver_data = QEDE_PRIVATE_VF },
 #endif
-	{PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_AH), QEDE_PRIVATE_PF},
+	{ PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_AH), .driver_data = QEDE_PRIVATE_PF },
 #ifdef CONFIG_QED_SRIOV
-	{PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_AH_IOV), QEDE_PRIVATE_VF},
+	{ PCI_VDEVICE(QLOGIC, PCI_DEVICE_ID_AH_IOV), .driver_data = QEDE_PRIVATE_VF },
 #endif
-	{ 0 }
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, qede_pci_tbl);
@@ -107,7 +107,7 @@ static void qede_remove(struct pci_dev *pdev);
 static void qede_shutdown(struct pci_dev *pdev);
 static void qede_link_update(void *dev, struct qed_link_output *link);
 static void qede_schedule_recovery_handler(void *dev);
-static void qede_recovery_handler(struct qede_dev *edev);
+static bool qede_recovery_handler(struct qede_dev *edev);
 static void qede_schedule_hw_err_handler(void *dev,
 					 enum qed_hw_err_type err_type);
 static void qede_get_eth_tlv_data(void *edev, void *data);
@@ -203,7 +203,7 @@ static struct pci_driver qede_pci_driver = {
 };
 
 static struct qed_eth_cb_ops qede_ll_ops = {
-	{
+	.common = {
 #ifdef CONFIG_RFS_ACCEL
 		.arfs_filter_op = qede_arfs_filter_op,
 #endif
@@ -506,25 +506,6 @@ static int qede_set_vf_trust(struct net_device *dev, int vfidx, bool setting)
 }
 #endif
 
-static int qede_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
-{
-	struct qede_dev *edev = netdev_priv(dev);
-
-	if (!netif_running(dev))
-		return -EAGAIN;
-
-	switch (cmd) {
-	case SIOCSHWTSTAMP:
-		return qede_ptp_hw_ts(edev, ifr);
-	default:
-		DP_VERBOSE(edev, QED_MSG_DEBUG,
-			   "default IOCTL cmd 0x%x\n", cmd);
-		return -EOPNOTSUPP;
-	}
-
-	return 0;
-}
-
 static void qede_fp_sb_dump(struct qede_dev *edev, struct qede_fastpath *fp)
 {
 	char *p_sb = (char *)fp->sb_info->sb_virt;
@@ -717,7 +698,6 @@ static const struct net_device_ops qede_netdev_ops = {
 	.ndo_set_mac_address	= qede_set_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_change_mtu		= qede_change_mtu,
-	.ndo_eth_ioctl		= qede_ioctl,
 	.ndo_tx_timeout		= qede_tx_timeout,
 #ifdef CONFIG_QED_SRIOV
 	.ndo_set_vf_mac		= qede_set_vf_mac,
@@ -742,6 +722,8 @@ static const struct net_device_ops qede_netdev_ops = {
 #endif
 	.ndo_xdp_xmit		= qede_xdp_transmit,
 	.ndo_setup_tc		= qede_setup_tc_offload,
+	.ndo_hwtstamp_get	= qede_hwtstamp_get,
+	.ndo_hwtstamp_set	= qede_hwtstamp_set,
 };
 
 static const struct net_device_ops qede_netdev_vf_ops = {
@@ -981,17 +963,15 @@ static int qede_alloc_fp_array(struct qede_dev *edev)
 	struct qede_fastpath *fp;
 	int i;
 
-	edev->fp_array = kcalloc(QEDE_QUEUE_CNT(edev),
-				 sizeof(*edev->fp_array), GFP_KERNEL);
+	edev->fp_array = kzalloc_objs(*edev->fp_array, QEDE_QUEUE_CNT(edev));
 	if (!edev->fp_array) {
 		DP_NOTICE(edev, "fp array allocation failed\n");
 		goto err;
 	}
 
 	if (!edev->coal_entry) {
-		edev->coal_entry = kcalloc(QEDE_MAX_RSS_CNT(edev),
-					   sizeof(*edev->coal_entry),
-					   GFP_KERNEL);
+		edev->coal_entry = kzalloc_objs(*edev->coal_entry,
+						QEDE_MAX_RSS_CNT(edev));
 		if (!edev->coal_entry) {
 			DP_ERR(edev, "coalesce entry allocation failed\n");
 			goto err;
@@ -1008,7 +988,7 @@ static int qede_alloc_fp_array(struct qede_dev *edev)
 	for_each_queue(i) {
 		fp = &edev->fp_array[i];
 
-		fp->sb_info = kzalloc(sizeof(*fp->sb_info), GFP_KERNEL);
+		fp->sb_info = kzalloc_obj(*fp->sb_info);
 		if (!fp->sb_info) {
 			DP_NOTICE(edev, "sb info struct allocation failed\n");
 			goto err;
@@ -1025,20 +1005,18 @@ static int qede_alloc_fp_array(struct qede_dev *edev)
 		}
 
 		if (fp->type & QEDE_FASTPATH_TX) {
-			fp->txq = kcalloc(edev->dev_info.num_tc,
-					  sizeof(*fp->txq), GFP_KERNEL);
+			fp->txq = kzalloc_objs(*fp->txq, edev->dev_info.num_tc);
 			if (!fp->txq)
 				goto err;
 		}
 
 		if (fp->type & QEDE_FASTPATH_RX) {
-			fp->rxq = kzalloc(sizeof(*fp->rxq), GFP_KERNEL);
+			fp->rxq = kzalloc_obj(*fp->rxq);
 			if (!fp->rxq)
 				goto err;
 
 			if (edev->xdp_prog) {
-				fp->xdp_tx = kzalloc(sizeof(*fp->xdp_tx),
-						     GFP_KERNEL);
+				fp->xdp_tx = kzalloc_obj(*fp->xdp_tx);
 				if (!fp->xdp_tx)
 					goto err;
 				fp->type |= QEDE_FASTPATH_XDP;
@@ -1063,21 +1041,6 @@ void __qede_lock(struct qede_dev *edev)
 void __qede_unlock(struct qede_dev *edev)
 {
 	mutex_unlock(&edev->qede_lock);
-}
-
-/* This version of the lock should be used when acquiring the RTNL lock is also
- * needed in addition to the internal qede lock.
- */
-static void qede_lock(struct qede_dev *edev)
-{
-	rtnl_lock();
-	__qede_lock(edev);
-}
-
-static void qede_unlock(struct qede_dev *edev)
-{
-	__qede_unlock(edev);
-	rtnl_unlock();
 }
 
 static void qede_periodic_task(struct work_struct *work)
@@ -1116,6 +1079,8 @@ static void qede_sp_task(struct work_struct *work)
 	 */
 
 	if (test_and_clear_bit(QEDE_SP_RECOVERY, &edev->sp_flags)) {
+		bool reloaded;
+
 		cancel_delayed_work_sync(&edev->periodic_task);
 #ifdef CONFIG_QED_SRIOV
 		/* SRIOV must be disabled outside the lock to avoid a deadlock.
@@ -1124,9 +1089,17 @@ static void qede_sp_task(struct work_struct *work)
 		if (pci_num_vf(edev->pdev))
 			qede_sriov_configure(edev->pdev, 0);
 #endif
-		qede_lock(edev);
-		qede_recovery_handler(edev);
-		qede_unlock(edev);
+		rtnl_lock();
+		__qede_lock(edev);
+		reloaded = qede_recovery_handler(edev);
+		__qede_unlock(edev);
+
+		/* The udp_tunnel core synchronously calls back into
+		 * qede_udp_tunnel_sync(), which takes the qede lock.
+		 */
+		if (reloaded)
+			udp_tunnel_nic_reset_ntf(edev->ndev);
+		rtnl_unlock();
 	}
 
 	__qede_lock(edev);
@@ -2667,9 +2640,13 @@ static void qede_recovery_failed(struct qede_dev *edev)
 		edev->ops->common->set_power_state(edev->cdev, PCI_D3hot);
 }
 
-static void qede_recovery_handler(struct qede_dev *edev)
+/* Returns true if an open device was successfully reloaded and its
+ * udp_tunnel ports need to be re-synced by the caller.
+ */
+static bool qede_recovery_handler(struct qede_dev *edev)
 {
 	u32 curr_state = edev->state;
+	bool reloaded = false;
 	int rc;
 
 	DP_NOTICE(edev, "Starting a recovery process\n");
@@ -2699,17 +2676,18 @@ static void qede_recovery_handler(struct qede_dev *edev)
 			goto err;
 
 		qede_config_rx_mode(edev->ndev);
-		udp_tunnel_nic_reset_ntf(edev->ndev);
+		reloaded = true;
 	}
 
 	edev->state = curr_state;
 
 	DP_NOTICE(edev, "Recovery handling is done\n");
 
-	return;
+	return reloaded;
 
 err:
 	qede_recovery_failed(edev);
+	return false;
 }
 
 static void qede_atomic_hw_err_handler(struct qede_dev *edev)

@@ -1,6 +1,5 @@
+// SPDX-License-Identifier: MIT
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2008-2015 Intel Corporation
  */
 
@@ -12,6 +11,8 @@
 #include <linux/pci.h>
 #include <linux/dma-buf.h>
 #include <linux/vmalloc.h>
+
+#include <drm/drm_print.h>
 
 #include "gt/intel_gt_requests.h"
 #include "gt/intel_gt.h"
@@ -25,7 +26,7 @@ static bool swap_available(void)
 
 static bool can_release_pages(struct drm_i915_gem_object *obj)
 {
-	/* Consider only shrinkable ojects. */
+	/* Consider only shrinkable objects. */
 	if (!i915_gem_object_is_shrinkable(obj))
 		return false;
 
@@ -171,7 +172,7 @@ i915_gem_shrink(struct i915_gem_ww_ctx *ww,
 	 * Also note that although these lists do not hold a reference to
 	 * the object we can safely grab one here: The final object
 	 * unreferencing and the bound_list are both protected by the
-	 * dev->struct_mutex and so we won't ever be able to observe an
+	 * i915->mm.obj_lock and so we won't ever be able to observe an
 	 * object on the bound_list with a reference count equals 0.
 	 */
 	for (phase = phases; phase->list; phase++) {
@@ -186,7 +187,7 @@ i915_gem_shrink(struct i915_gem_ww_ctx *ww,
 
 		/*
 		 * We serialize our access to unreferenced objects through
-		 * the use of the struct_mutex. While the objects are not
+		 * the use of the obj_lock. While the objects are not
 		 * yet freed (due to RCU then a workqueue) we still want
 		 * to be able to shrink their pages, so they remain on
 		 * the unbound/bound list until actually freed.
@@ -261,7 +262,7 @@ skip:
  * i915_gem_shrink_all - Shrink buffer object caches completely
  * @i915: i915 device
  *
- * This is a simple wraper around i915_gem_shrink() to aggressively shrink all
+ * This is a simple wrapper around i915_gem_shrink() to aggressively shrink all
  * caches completely. It also first waits for and retires all outstanding
  * requests to also be able to release backing storage for active objects.
  *

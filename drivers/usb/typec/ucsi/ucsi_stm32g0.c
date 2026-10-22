@@ -10,6 +10,7 @@
 #include <linux/firmware.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/unaligned.h>
@@ -523,11 +524,7 @@ static void ucsi_stm32g0_fw_cb(const struct firmware *fw, void *context)
 	data = fw->data;
 	end = fw->data + fw->size;
 	while (data < end) {
-		if ((end - data) < STM32G0_I2C_BL_SZ)
-			size = end - data;
-		else
-			size = STM32G0_I2C_BL_SZ;
-
+		size = min(end - data, STM32G0_I2C_BL_SZ);
 		ret = ucsi_stm32g0_bl_write(g0->ucsi, addr, data, size);
 		if (ret) {
 			dev_err(g0->dev, "Write failed %d\n", ret);
@@ -740,8 +737,8 @@ static const struct of_device_id __maybe_unused ucsi_stm32g0_typec_of_match[] = 
 MODULE_DEVICE_TABLE(of, ucsi_stm32g0_typec_of_match);
 
 static const struct i2c_device_id ucsi_stm32g0_typec_i2c_devid[] = {
-	{ "stm32g0-typec" },
-	{}
+	{ .name = "stm32g0-typec" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ucsi_stm32g0_typec_i2c_devid);
 

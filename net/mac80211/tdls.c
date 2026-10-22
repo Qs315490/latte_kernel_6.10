@@ -6,7 +6,7 @@
  * Copyright 2014, Intel Corporation
  * Copyright 2014  Intel Mobile Communications GmbH
  * Copyright 2015 - 2016 Intel Deutschland GmbH
- * Copyright (C) 2019, 2021-2024 Intel Corporation
+ * Copyright (C) 2019, 2021-2026 Intel Corporation
  */
 
 #include <linux/ieee80211.h>
@@ -311,17 +311,21 @@ ieee80211_tdls_chandef_vht_upgrade(struct ieee80211_sub_if_data *sdata,
 	/* IEEE802.11ac-2013 Table E-4 */
 	static const u16 centers_80mhz[] = { 5210, 5290, 5530, 5610, 5690, 5775 };
 	struct cfg80211_chan_def uc = sta->tdls_chandef;
-	enum nl80211_chan_width max_width =
-		ieee80211_sta_cap_chan_bw(&sta->deflink);
+	enum nl80211_chan_width max_width;
 	int i;
 
-	/* only support upgrading non-narrow channels up to 80Mhz */
-	if (max_width == NL80211_CHAN_WIDTH_5 ||
-	    max_width == NL80211_CHAN_WIDTH_10)
-		return;
-
-	if (max_width > NL80211_CHAN_WIDTH_80)
+	switch (ieee80211_sta_current_bw(&sta->deflink, &uc,
+					 IEEE80211_STA_BW_RX_FROM_STA)) {
+	case IEEE80211_STA_RX_BW_20:
+		max_width = NL80211_CHAN_WIDTH_20;
+		break;
+	case IEEE80211_STA_RX_BW_40:
+		max_width = NL80211_CHAN_WIDTH_40;
+		break;
+	default: /* 80 or higher, only support upgrade to 80 */
 		max_width = NL80211_CHAN_WIDTH_80;
+		break;
+	}
 
 	if (uc.width >= max_width)
 		return;
@@ -382,8 +386,8 @@ ieee80211_tdls_add_setup_start_ies(struct ieee80211_link_data *link,
 	if (WARN_ON_ONCE(!sband))
 		return;
 
-	ieee80211_put_srates_elem(skb, sband, 0, 0, 0, WLAN_EID_SUPP_RATES);
-	ieee80211_put_srates_elem(skb, sband, 0, 0, 0, WLAN_EID_EXT_SUPP_RATES);
+	ieee80211_put_srates_elem(skb, sband, 0, 0, WLAN_EID_SUPP_RATES);
+	ieee80211_put_srates_elem(skb, sband, 0, 0, WLAN_EID_EXT_SUPP_RATES);
 	ieee80211_tdls_add_supp_channels(sdata, skb);
 
 	/* add any custom IEs that go before Extended Capabilities */
@@ -879,28 +883,23 @@ ieee80211_prep_tdls_direct(struct wiphy *wiphy, struct net_device *dev,
 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
 	struct ieee80211_mgmt *mgmt;
 
-	mgmt = skb_put_zero(skb, 24);
+	if (action_code != WLAN_PUB_ACTION_TDLS_DISCOVER_RES)
+		return -EINVAL;
+
+	mgmt = skb_put_zero(skb, IEEE80211_MIN_ACTION_SIZE(tdls_discover_resp));
 	memcpy(mgmt->da, peer, ETH_ALEN);
 	memcpy(mgmt->sa, sdata->vif.addr, ETH_ALEN);
 	memcpy(mgmt->bssid, link->u.mgd.bssid, ETH_ALEN);
 	mgmt->frame_control = cpu_to_le16(IEEE80211_FTYPE_MGMT |
 					  IEEE80211_STYPE_ACTION);
 
-	switch (action_code) {
-	case WLAN_PUB_ACTION_TDLS_DISCOVER_RES:
-		skb_put(skb, 1 + sizeof(mgmt->u.action.u.tdls_discover_resp));
-		mgmt->u.action.category = WLAN_CATEGORY_PUBLIC;
-		mgmt->u.action.u.tdls_discover_resp.action_code =
-			WLAN_PUB_ACTION_TDLS_DISCOVER_RES;
-		mgmt->u.action.u.tdls_discover_resp.dialog_token =
-			dialog_token;
-		mgmt->u.action.u.tdls_discover_resp.capability =
-			cpu_to_le16(ieee80211_get_tdls_sta_capab(link,
-								 status_code));
-		break;
-	default:
-		return -EINVAL;
-	}
+	mgmt->u.action.category = WLAN_CATEGORY_PUBLIC;
+	mgmt->u.action.action_code = WLAN_PUB_ACTION_TDLS_DISCOVER_RES;
+
+	mgmt->u.action.tdls_discover_resp.dialog_token = dialog_token;
+	mgmt->u.action.tdls_discover_resp.capability =
+		cpu_to_le16(ieee80211_get_tdls_sta_capab(link,
+							 status_code));
 
 	return 0;
 }
@@ -1339,7 +1338,9 @@ static void iee80211_tdls_recalc_chanctx(struct ieee80211_sub_if_data *sdata,
 			enum ieee80211_sta_rx_bandwidth bw;
 
 			bw = ieee80211_chan_width_to_rx_bw(conf->def.width);
-			bw = min(bw, ieee80211_sta_cap_rx_bw(&sta->deflink));
+			bw = min(bw, ieee80211_sta_current_bw(&sta->deflink,
+							      &conf->def,
+							      IEEE80211_STA_BW_RX_FROM_STA));
 			if (bw != sta->sta.deflink.bandwidth) {
 				sta->sta.deflink.bandwidth = bw;
 				rate_control_rate_update(local, sband,
@@ -1422,7 +1423,7 @@ int ieee80211_tdls_oper(struct wiphy *wiphy, struct net_device *dev,
 	if (!(wiphy->flags & WIPHY_FLAG_SUPPORTS_TDLS))
 		return -EOPNOTSUPP;
 
-	if (sdata->vif.type != NL80211_IFTYPE_STATION)
+	if (sdata->vif.type != NL80211_IFTYPE_STATION || !sdata->vif.cfg.assoc)
 		return -EINVAL;
 
 	switch (oper) {
@@ -1449,7 +1450,7 @@ int ieee80211_tdls_oper(struct wiphy *wiphy, struct net_device *dev,
 		}
 
 		sta = sta_info_get(sdata, peer);
-		if (!sta)
+		if (!sta || !sta->sta.tdls)
 			return -ENOLINK;
 
 		iee80211_tdls_recalc_chanctx(sdata, sta);
@@ -1783,7 +1784,10 @@ ieee80211_process_tdls_channel_switch_resp(struct ieee80211_sub_if_data *sdata,
 	}
 
 	elems = ieee802_11_parse_elems(tf->u.chan_switch_resp.variable,
-				       skb->len - baselen, false, NULL);
+				       skb->len - baselen,
+				       IEEE80211_FTYPE_MGMT |
+				       IEEE80211_STYPE_ACTION,
+				       NULL);
 	if (!elems) {
 		ret = -ENOMEM;
 		goto out;
@@ -1902,7 +1906,10 @@ ieee80211_process_tdls_channel_switch_req(struct ieee80211_sub_if_data *sdata,
 	}
 
 	elems = ieee802_11_parse_elems(tf->u.chan_switch_req.variable,
-				       skb->len - baselen, false, NULL);
+				       skb->len - baselen,
+				       IEEE80211_FTYPE_MGMT |
+				       IEEE80211_STYPE_ACTION,
+				       NULL);
 	if (!elems)
 		return -ENOMEM;
 

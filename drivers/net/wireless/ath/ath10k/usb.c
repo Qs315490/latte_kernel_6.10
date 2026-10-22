@@ -131,7 +131,7 @@ static void ath10k_usb_recv_complete(struct urb *urb)
 	int status = 0;
 
 	ath10k_dbg(ar, ATH10K_DBG_USB_BULK,
-		   "usb recv pipe %d stat %d len %d urb 0x%pK\n",
+		   "usb recv pipe %d stat %d len %d urb 0x%p\n",
 		   pipe->logical_pipe_num, urb->status, urb->actual_length,
 		   urb);
 
@@ -230,7 +230,7 @@ static void ath10k_usb_post_recv_transfers(struct ath10k *ar,
 				  ath10k_usb_recv_complete, urb_context);
 
 		ath10k_dbg(ar, ATH10K_DBG_USB_BULK,
-			   "usb bulk recv submit %d 0x%x ep 0x%2.2x len %d buf 0x%pK\n",
+			   "usb bulk recv submit %d 0x%x ep 0x%2.2x len %d buf 0x%p\n",
 			   recv_pipe->logical_pipe_num,
 			   recv_pipe->usb_pipe_handle, recv_pipe->ep_address,
 			   ATH10K_USB_RX_BUFFER_SIZE, urb_context->skb);
@@ -799,7 +799,7 @@ static int ath10k_usb_alloc_pipe_resources(struct ath10k *ar,
 	init_usb_anchor(&pipe->urb_submitted);
 
 	for (i = 0; i < urb_cnt; i++) {
-		urb_context = kzalloc(sizeof(*urb_context), GFP_KERNEL);
+		urb_context = kzalloc_obj(*urb_context);
 		if (!urb_context)
 			return -ENOMEM;
 
@@ -1016,7 +1016,6 @@ static int ath10k_usb_probe(struct usb_interface *interface,
 
 	netif_napi_add(ar->napi_dev, &ar->napi, ath10k_usb_napi_poll);
 
-	usb_get_dev(dev);
 	vendor_id = le16_to_cpu(dev->descriptor.idVendor);
 	product_id = le16_to_cpu(dev->descriptor.idProduct);
 
@@ -1055,12 +1054,10 @@ err_usb_destroy:
 err:
 	ath10k_core_destroy(ar);
 
-	usb_put_dev(dev);
-
 	return ret;
 }
 
-static void ath10k_usb_remove(struct usb_interface *interface)
+static void ath10k_usb_disconnect(struct usb_interface *interface)
 {
 	struct ath10k_usb *ar_usb;
 
@@ -1071,7 +1068,6 @@ static void ath10k_usb_remove(struct usb_interface *interface)
 	ath10k_core_unregister(ar_usb->ar);
 	netif_napi_del(&ar_usb->ar->napi);
 	ath10k_usb_destroy(ar_usb->ar);
-	usb_put_dev(interface_to_usbdev(interface));
 	ath10k_core_destroy(ar_usb->ar);
 }
 
@@ -1117,7 +1113,7 @@ static struct usb_driver ath10k_usb_driver = {
 	.probe = ath10k_usb_probe,
 	.suspend = ath10k_usb_pm_suspend,
 	.resume = ath10k_usb_pm_resume,
-	.disconnect = ath10k_usb_remove,
+	.disconnect = ath10k_usb_disconnect,
 	.id_table = ath10k_usb_ids,
 	.supports_autosuspend = true,
 	.disable_hub_initiated_lpm = 1,

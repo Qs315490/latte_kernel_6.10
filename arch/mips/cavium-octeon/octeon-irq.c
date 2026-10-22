@@ -100,7 +100,7 @@ static int octeon_irq_set_ciu_mapping(int irq, int line, int bit, int gpio_line,
 {
 	struct octeon_ciu_chip_data *cd;
 
-	cd = kzalloc(sizeof(*cd), GFP_KERNEL);
+	cd = kzalloc_obj(*cd);
 	if (!cd)
 		return -ENOMEM;
 
@@ -1462,7 +1462,7 @@ static int __init octeon_irq_init_ciu(
 	struct irq_domain *ciu_domain = NULL;
 	struct octeon_irq_ciu_domain_data *dd;
 
-	dd = kzalloc(sizeof(*dd), GFP_KERNEL);
+	dd = kzalloc_obj(*dd);
 	if (!dd)
 		return -ENOMEM;
 
@@ -1503,9 +1503,9 @@ static int __init octeon_irq_init_ciu(
 	/* Mips internal */
 	octeon_irq_init_core();
 
-	ciu_domain = irq_domain_add_tree(
-		ciu_node, &octeon_irq_domain_ciu_ops, dd);
-	irq_set_default_host(ciu_domain);
+	ciu_domain = irq_domain_create_tree(of_fwnode_handle(ciu_node), &octeon_irq_domain_ciu_ops,
+					    dd);
+	irq_set_default_domain(ciu_domain);
 
 	/* CIU_0 */
 	for (i = 0; i < 16; i++) {
@@ -1633,12 +1633,12 @@ static int __init octeon_irq_init_gpio(
 		return -EINVAL;
 	}
 
-	gpiod = kzalloc(sizeof(*gpiod), GFP_KERNEL);
+	gpiod = kzalloc_obj(*gpiod);
 	if (gpiod) {
 		/* gpio domain host_data is the base hwirq number. */
 		gpiod->base_hwirq = base_hwirq;
-		irq_domain_add_linear(
-			gpio_node, 16, &octeon_irq_domain_gpio_ops, gpiod);
+		irq_domain_create_linear(of_fwnode_handle(gpio_node), 16,
+					 &octeon_irq_domain_gpio_ops, gpiod);
 	} else {
 		pr_warn("Cannot allocate memory for GPIO irq_domain.\n");
 		return -ENOMEM;
@@ -2074,9 +2074,9 @@ static int __init octeon_irq_init_ciu2(
 	/* Mips internal */
 	octeon_irq_init_core();
 
-	ciu_domain = irq_domain_add_tree(
-		ciu_node, &octeon_irq_domain_ciu2_ops, NULL);
-	irq_set_default_host(ciu_domain);
+	ciu_domain = irq_domain_create_tree(of_fwnode_handle(ciu_node), &octeon_irq_domain_ciu2_ops,
+					    NULL);
+	irq_set_default_domain(ciu_domain);
 
 	/* CUI2 */
 	for (i = 0; i < 64; i++) {
@@ -2223,7 +2223,7 @@ static int octeon_irq_cib_map(struct irq_domain *d,
 		return -EINVAL;
 	}
 
-	cd = kzalloc(sizeof(*cd), GFP_KERNEL);
+	cd = kzalloc_obj(*cd);
 	if (!cd)
 		return -ENOMEM;
 
@@ -2304,7 +2304,7 @@ static int __init octeon_irq_init_cib(struct device_node *ciu_node,
 		return -EINVAL;
 	}
 
-	host_data = kzalloc(sizeof(*host_data), GFP_KERNEL);
+	host_data = kzalloc_obj(*host_data);
 	if (!host_data)
 		return -ENOMEM;
 	raw_spin_lock_init(&host_data->lock);
@@ -2331,11 +2331,12 @@ static int __init octeon_irq_init_cib(struct device_node *ciu_node,
 	}
 	host_data->max_bits = val;
 
-	cib_domain = irq_domain_add_linear(ciu_node, host_data->max_bits,
-					   &octeon_irq_domain_cib_ops,
-					   host_data);
+	cib_domain = irq_domain_create_linear(of_fwnode_handle(ciu_node),
+					      host_data->max_bits,
+					      &octeon_irq_domain_cib_ops,
+					      host_data);
 	if (!cib_domain) {
-		pr_err("ERROR: Couldn't irq_domain_add_linear()\n");
+		pr_err("ERROR: Couldn't irq_domain_create_linear()\n");
 		return -ENOMEM;
 	}
 
@@ -2918,8 +2919,8 @@ static int __init octeon_irq_init_ciu3(struct device_node *ciu_node,
 	 * Initialize all domains to use the default domain. Specific major
 	 * blocks will overwrite the default domain as needed.
 	 */
-	domain = irq_domain_add_tree(ciu_node, &octeon_dflt_domain_ciu3_ops,
-				     ciu3_info);
+	domain = irq_domain_create_tree(of_fwnode_handle(ciu_node), &octeon_dflt_domain_ciu3_ops,
+					ciu3_info);
 	for (i = 0; i < MAX_CIU3_DOMAINS; i++)
 		ciu3_info->domain[i] = domain;
 
@@ -2929,7 +2930,7 @@ static int __init octeon_irq_init_ciu3(struct device_node *ciu_node,
 		/* Only do per CPU things if it is the CIU of the boot node. */
 		octeon_irq_ciu3_alloc_resources(ciu3_info);
 		if (node == 0)
-			irq_set_default_host(domain);
+			irq_set_default_domain(domain);
 
 		octeon_irq_use_ip4 = false;
 		/* Enable the CIU lines */

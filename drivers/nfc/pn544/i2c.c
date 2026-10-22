@@ -44,8 +44,8 @@
 					 PN544_HCI_I2C_LLC_MAX_PAYLOAD)
 
 static const struct i2c_device_id pn544_hci_i2c_id_table[] = {
-	{ "pn544" },
-	{}
+	{ .name = "pn544" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, pn544_hci_i2c_id_table);
@@ -526,7 +526,7 @@ static int pn544_hci_i2c_fw_download(void *phy_id, const char *firmware_name,
 
 	pr_info("Starting Firmware Download (%s)\n", firmware_name);
 
-	strcpy(phy->firmware_name, firmware_name);
+	strscpy(phy->firmware_name, firmware_name);
 
 	phy->hw_variant = hw_variant;
 	phy->fw_work_state = FW_WORK_STATE_START;

@@ -23,7 +23,7 @@ struct rxrpc_txbuf *rxrpc_alloc_data_txbuf(struct rxrpc_call *call, size_t data_
 	size_t total, doff, jsize = sizeof(struct rxrpc_jumbo_header);
 	void *buf;
 
-	txb = kzalloc(sizeof(*txb), gfp);
+	txb = kzalloc_obj(*txb, gfp);
 	if (!txb)
 		return NULL;
 
@@ -58,14 +58,6 @@ struct rxrpc_txbuf *rxrpc_alloc_data_txbuf(struct rxrpc_call *call, size_t data_
 
 	atomic_inc(&rxrpc_nr_txbuf);
 	return txb;
-}
-
-void rxrpc_get_txbuf(struct rxrpc_txbuf *txb, enum rxrpc_txbuf_trace what)
-{
-	int r;
-
-	__refcount_inc(&txb->ref, &r);
-	trace_rxrpc_txbuf(txb->debug_id, txb->call_debug_id, txb->seq, r + 1, what);
 }
 
 void rxrpc_see_txbuf(struct rxrpc_txbuf *txb, enum rxrpc_txbuf_trace what)

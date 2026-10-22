@@ -52,18 +52,19 @@ static int bind_socket(int opt, const char *addr)
 		err = setsockopt(sock_fd, SOL_SOCKET, opt, &reuse, sizeof(reuse));
 		if (err) {
 			perror("setsockopt failed");
-			goto cleanup;
+			goto err_free_info;
 		}
 	}
 
 	err = bind(sock_fd, res->ai_addr, res->ai_addrlen);
 	if (err) {
 		perror("failed to bind to port");
-		goto cleanup;
+		goto err_free_info;
 	}
-
+	freeaddrinfo(res);
 	return sock_fd;
-
+err_free_info:
+	freeaddrinfo(res);
 cleanup:
 	close(sock_fd);
 	return err;
@@ -75,7 +76,7 @@ static void *setup(void *arg)
 	int *array = (int *)arg;
 
 	for (i = 0; i < MAX_CONNECTIONS; i++) {
-		sock_fd = bind_socket(SO_REUSEADDR | SO_REUSEPORT, setup_addr);
+		sock_fd = bind_socket(SO_REUSEPORT, setup_addr);
 		if (sock_fd < 0) {
 			ret = sock_fd;
 			pthread_exit(&ret);
@@ -103,7 +104,7 @@ int main(int argc, const char *argv[])
 
 	setup_addr = use_v6 ? setup_addr_v6 : setup_addr_v4;
 
-	listener_fd = bind_socket(SO_REUSEADDR | SO_REUSEPORT, setup_addr);
+	listener_fd = bind_socket(SO_REUSEPORT, setup_addr);
 	if (listen(listener_fd, 100) < 0) {
 		perror("listen failed");
 		return -1;

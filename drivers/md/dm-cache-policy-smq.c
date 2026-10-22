@@ -22,6 +22,16 @@
 /*----------------------------------------------------------------*/
 
 /*
+ * Maximum number of concurrent background work items (promotions,
+ * demotions, writebacks) that can be queued in the background tracker.
+ * Tuneable via the module parameter smq_max_background_work.
+ * Only affects newly created cache devices.
+ */
+static unsigned int smq_max_background_work = 4096;
+module_param(smq_max_background_work, uint, 0644);
+MODULE_PARM_DESC(smq_max_background_work, "Max concurrent background work items");
+
+/*
  * Safe division functions that return zero on divide by zero.
  */
 static unsigned int safe_div(unsigned int n, unsigned int d)
@@ -590,7 +600,7 @@ static int h_init(struct smq_hash_table *ht, struct entry_space *es, unsigned in
 	nr_buckets = roundup_pow_of_two(max(nr_entries / 4u, 16u));
 	ht->hash_bits = __ffs(nr_buckets);
 
-	ht->buckets = vmalloc(array_size(nr_buckets, sizeof(*ht->buckets)));
+	ht->buckets = vmalloc_array(nr_buckets, sizeof(*ht->buckets));
 	if (!ht->buckets)
 		return -ENOMEM;
 
@@ -1589,15 +1599,23 @@ static int smq_invalidate_mapping(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
 	struct smq_policy *mq = to_smq_policy(p);
 	struct entry *e = get_entry(&mq->cache_alloc, from_cblock(cblock));
+	unsigned long flags;
+	int r = 0;
 
-	if (!e->allocated)
-		return -ENODATA;
-
+	spin_lock_irqsave(&mq->lock, flags);
+	if (!e->allocated) {
+		r = -ENODATA;
+		goto out;
+	}
 	// FIXME: what if this block has pending background work?
 	del_queue(mq, e);
 	h_remove(&mq->table, e);
 	free_entry(&mq->cache_alloc, e);
-	return 0;
+
+out:
+	spin_unlock_irqrestore(&mq->lock, flags);
+
+	return r;
 }
 
 static uint32_t smq_get_hint(struct dm_cache_policy *p, dm_cblock_t cblock)
@@ -1735,7 +1753,7 @@ __smq_create(dm_cblock_t cache_size, sector_t origin_size, sector_t cache_block_
 	unsigned int i;
 	unsigned int nr_sentinels_per_queue = 2u * NR_CACHE_LEVELS;
 	unsigned int total_sentinels = 2u * nr_sentinels_per_queue;
-	struct smq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);
+	struct smq_policy *mq = kzalloc_obj(*mq);
 
 	if (!mq)
 		return NULL;
@@ -1812,7 +1830,7 @@ __smq_create(dm_cblock_t cache_size, sector_t origin_size, sector_t cache_block_
 	mq->next_hotspot_period = jiffies;
 	mq->next_cache_period = jiffies;
 
-	mq->bg_work = btracker_create(4096); /* FIXME: hard coded value */
+	mq->bg_work = btracker_create(max(1u, smq_max_background_work));
 	if (!mq->bg_work)
 		goto bad_btracker;
 

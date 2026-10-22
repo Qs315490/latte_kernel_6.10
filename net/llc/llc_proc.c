@@ -1,15 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * proc_llc.c - proc interface for LLC
  *
  * Copyright (c) 2001 by Jay Schulist <jschlst@samba.org>
  *		 2002-2003 by Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- * This program can be redistributed or modified under the terms of the
- * GNU General Public License as published by the Free Software Foundation.
- * This program is distributed without any warranty or implied warranty
- * of merchantability or fitness for a particular purpose.
- *
- * See the GNU General Public License for more details.
  */
 
 #include <linux/init.h>
@@ -151,7 +145,7 @@ static int llc_seq_socket_show(struct seq_file *seq, void *v)
 		   sk_wmem_alloc_get(sk),
 		   sk_rmem_alloc_get(sk) - llc->copied_seq,
 		   sk->sk_state,
-		   from_kuid_munged(seq_user_ns(seq), sock_i_uid(sk)),
+		   from_kuid_munged(seq_user_ns(seq), sk_uid(sk)),
 		   llc->link);
 out:
 	return 0;

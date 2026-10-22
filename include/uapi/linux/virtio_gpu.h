@@ -64,6 +64,14 @@
  * context_init and multiple timelines
  */
 #define VIRTIO_GPU_F_CONTEXT_INIT        4
+/*
+ * The device provides a valid blob_alignment
+ * field in its configuration and both
+ * VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB and
+ * VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB requests
+ * must be aligned to that value.
+ */
+#define VIRTIO_GPU_F_BLOB_ALIGNMENT      5
 
 enum virtio_gpu_ctrl_type {
 	VIRTIO_GPU_UNDEFINED = 0,
@@ -309,8 +317,9 @@ struct virtio_gpu_cmd_submit {
 
 #define VIRTIO_GPU_CAPSET_VIRGL 1
 #define VIRTIO_GPU_CAPSET_VIRGL2 2
-/* 3 is reserved for gfxstream */
+#define VIRTIO_GPU_CAPSET_GFXSTREAM_VULKAN 3
 #define VIRTIO_GPU_CAPSET_VENUS 4
+#define VIRTIO_GPU_CAPSET_CROSS_DOMAIN 5
 #define VIRTIO_GPU_CAPSET_DRM 6
 
 /* VIRTIO_GPU_CMD_GET_CAPSET_INFO */
@@ -364,6 +373,7 @@ struct virtio_gpu_config {
 	__le32 events_clear;
 	__le32 num_scanouts;
 	__le32 num_capsets;
+	__le32 blob_alignment;
 };
 
 /* simple formats for fbcon/X use */

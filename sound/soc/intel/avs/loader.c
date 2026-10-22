@@ -9,6 +9,7 @@
 #include <linux/firmware.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <sound/hdaudio.h>
 #include <sound/hdaudio_ext.h>
 #include "avs.h"
@@ -310,7 +311,7 @@ avs_hda_init_rom(struct avs_dev *adev, unsigned int dma_id, bool purge)
 	}
 
 	/* await ROM init */
-	ret = snd_hdac_adsp_readl_poll(adev, spec->sram->rom_status_offset, reg,
+	ret = snd_hdac_adsp_readl_poll(adev, spec->hipc->sts_offset, reg,
 				       (reg & 0xF) == AVS_ROM_INIT_DONE ||
 				       (reg & 0xF) == APL_ROM_FW_ENTERED,
 				       AVS_ROM_INIT_POLLING_US, APL_ROM_INIT_TIMEOUT_US);
@@ -603,7 +604,7 @@ release_fw:
 	return ret;
 }
 
-int avs_dsp_boot_firmware(struct avs_dev *adev, bool purge)
+static int avs_load_firmware(struct avs_dev *adev, bool purge)
 {
 	struct avs_soc_component *acomp;
 	int ret, i;
@@ -657,9 +658,74 @@ reenable_gating:
 	return 0;
 }
 
+static int avs_config_basefw(struct avs_dev *adev)
+{
+	int ret;
+
+	if (adev->spec->dsp_ops->config_basefw) {
+		ret = avs_dsp_op(adev, config_basefw);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+int avs_dsp_boot_firmware(struct avs_dev *adev, bool purge)
+{
+	int ret;
+
+	ret = avs_load_firmware(adev, purge);
+	if (ret)
+		return ret;
+
+	return avs_config_basefw(adev);
+}
+
+static int avs_dsp_alloc_resources(struct avs_dev *adev)
+{
+	struct hdac_ext_link *link;
+	int ret, i;
+
+	ret = avs_ipc_get_hw_config(adev, &adev->hw_cfg);
+	if (ret)
+		return AVS_IPC_RET(ret);
+
+	ret = avs_ipc_get_fw_config(adev, &adev->fw_cfg);
+	if (ret)
+		return AVS_IPC_RET(ret);
+
+	/* If hw allows, read capabilities directly from it. */
+	if (avs_platattr_test(adev, ALTHDA)) {
+		link = snd_hdac_ext_bus_get_hlink_by_id(&adev->base.core,
+							AZX_REG_ML_LEPTR_ID_INTEL_SSP);
+		if (link)
+			adev->hw_cfg.i2s_caps.ctrl_count = link->slcount;
+	}
+
+	adev->core_refs = devm_kcalloc(adev->dev, adev->hw_cfg.dsp_cores,
+				       sizeof(*adev->core_refs), GFP_KERNEL);
+	adev->lib_names = devm_kcalloc(adev->dev, adev->fw_cfg.max_libs_count,
+				       sizeof(*adev->lib_names), GFP_KERNEL);
+	if (!adev->core_refs || !adev->lib_names)
+		return -ENOMEM;
+
+	for (i = 0; i < adev->fw_cfg.max_libs_count; i++) {
+		adev->lib_names[i] = devm_kzalloc(adev->dev, AVS_LIB_NAME_SIZE, GFP_KERNEL);
+		if (!adev->lib_names[i])
+			return -ENOMEM;
+	}
+
+	/* basefw always occupies slot 0 */
+	strscpy(adev->lib_names[0], "BASEFW", AVS_LIB_NAME_SIZE);
+
+	ida_init(&adev->ppl_ida);
+	return 0;
+}
+
 int avs_dsp_first_boot_firmware(struct avs_dev *adev)
 {
-	int ret, i;
+	int ret;
 
 	if (avs_platattr_test(adev, CLDMA)) {
 		ret = hda_cldma_init(&code_loader, &adev->base.core,
@@ -680,31 +746,5 @@ int avs_dsp_first_boot_firmware(struct avs_dev *adev)
 		return ret;
 	}
 
-	ret = avs_ipc_get_hw_config(adev, &adev->hw_cfg);
-	if (ret)
-		return AVS_IPC_RET(ret);
-
-	ret = avs_ipc_get_fw_config(adev, &adev->fw_cfg);
-	if (ret)
-		return AVS_IPC_RET(ret);
-
-	adev->core_refs = devm_kcalloc(adev->dev, adev->hw_cfg.dsp_cores,
-				       sizeof(*adev->core_refs), GFP_KERNEL);
-	adev->lib_names = devm_kcalloc(adev->dev, adev->fw_cfg.max_libs_count,
-				       sizeof(*adev->lib_names), GFP_KERNEL);
-	if (!adev->core_refs || !adev->lib_names)
-		return -ENOMEM;
-
-	for (i = 0; i < adev->fw_cfg.max_libs_count; i++) {
-		adev->lib_names[i] = devm_kzalloc(adev->dev, AVS_LIB_NAME_SIZE, GFP_KERNEL);
-		if (!adev->lib_names[i])
-			return -ENOMEM;
-	}
-
-	/* basefw always occupies slot 0 */
-	strscpy(adev->lib_names[0], "BASEFW", AVS_LIB_NAME_SIZE);
-
-	ida_init(&adev->ppl_ida);
-
-	return 0;
+	return avs_dsp_alloc_resources(adev);
 }

@@ -11,11 +11,14 @@
 # This work is licensed under the terms of the GNU GPL version 2.
 #
 
+import atexit
 import gdb
 import os
 import re
+import struct
 
-from linux import modules, utils, constants
+from itertools import count
+from linux import bpf, constants, modules, utils
 
 
 if hasattr(gdb, 'Breakpoint'):
@@ -36,21 +39,74 @@ if hasattr(gdb, 'Breakpoint'):
             # Disable pagination while reporting symbol (re-)loading.
             # The console input is blocked in this context so that we would
             # get stuck waiting for the user to acknowledge paged output.
-            show_pagination = gdb.execute("show pagination", to_string=True)
-            pagination = show_pagination.endswith("on.\n")
-            gdb.execute("set pagination off")
-
-            if module_name in cmd.loaded_modules:
-                gdb.write("refreshing all symbols to reload module "
-                          "'{0}'\n".format(module_name))
-                cmd.load_all_symbols()
-            else:
-                cmd.load_module_symbols(module)
-
-            # restore pagination state
-            gdb.execute("set pagination %s" % ("on" if pagination else "off"))
+            with utils.pagination_off():
+                if module_name in cmd.loaded_modules:
+                    gdb.write("refreshing all symbols to reload module "
+                              "'{0}'\n".format(module_name))
+                    cmd.load_all_symbols()
+                else:
+                    cmd.load_module_symbols(module)
 
             return False
+
+
+def get_vmcore_s390():
+    with utils.qemu_phy_mem_mode():
+        vmcore_info = 0x0e0c
+        paddr_vmcoreinfo_note = gdb.parse_and_eval("*(unsigned long long *)" +
+                                                   hex(vmcore_info))
+        if paddr_vmcoreinfo_note == 0 or paddr_vmcoreinfo_note & 1:
+            # In the early boot case, extract vm_layout.kaslr_offset from the
+            # vmlinux image in physical memory.
+            if paddr_vmcoreinfo_note == 0:
+                kaslr_offset_phys = 0
+            else:
+                kaslr_offset_phys = paddr_vmcoreinfo_note - 1
+            with utils.pagination_off():
+                gdb.execute("symbol-file {0} -o {1}".format(
+                    utils.get_vmlinux(), hex(kaslr_offset_phys)))
+            kaslr_offset = gdb.parse_and_eval("vm_layout.kaslr_offset")
+            return "KERNELOFFSET=" + hex(kaslr_offset)[2:]
+        inferior = gdb.selected_inferior()
+        elf_note = inferior.read_memory(paddr_vmcoreinfo_note, 12)
+        n_namesz, n_descsz, n_type = struct.unpack(">III", elf_note)
+        desc_paddr = paddr_vmcoreinfo_note + len(elf_note) + n_namesz + 1
+        return gdb.parse_and_eval("(char *)" + hex(desc_paddr)).string()
+
+
+def get_kerneloffset():
+    if utils.is_target_arch('s390'):
+        try:
+            vmcore_str = get_vmcore_s390()
+        except gdb.error as e:
+            gdb.write("{}\n".format(e))
+            return None
+        return utils.parse_vmcore(vmcore_str).kerneloffset
+    return None
+
+
+def is_in_s390_decompressor():
+    # DAT is always off in decompressor. Use this as an indicator.
+    # Note that in the kernel, DAT can be off during kexec() or restart.
+    # Accept this imprecision in order to avoid complicating things.
+    # It is unlikely that someone will run lx-symbols at these points.
+    pswm = int(gdb.parse_and_eval("$pswm"))
+    return (pswm & 0x0400000000000000) == 0
+
+
+def skip_decompressor():
+    if utils.is_target_arch("s390"):
+        if is_in_s390_decompressor():
+            # The address of the jump_to_kernel function is statically placed
+            # into svc_old_psw.addr (see ipl_data.c); read it from there. DAT
+            # is off, so we do not need to care about lowcore relocation.
+            svc_old_pswa = 0x148
+            jump_to_kernel = int(gdb.parse_and_eval("*(unsigned long long *)" +
+                                                    hex(svc_old_pswa)))
+            gdb.execute("tbreak *" + hex(jump_to_kernel))
+            gdb.execute("continue")
+            while is_in_s390_decompressor():
+                gdb.execute("stepi")
 
 
 class LxSymbols(gdb.Command):
@@ -59,17 +115,27 @@ class LxSymbols(gdb.Command):
 The kernel (vmlinux) is taken from the current working directly. Modules (.ko)
 are scanned recursively, starting in the same directory. Optionally, the module
 search path can be extended by a space separated list of paths passed to the
-lx-symbols command."""
+lx-symbols command.
+
+When the -bpf flag is specified, symbols from the currently loaded BPF programs
+are loaded as well."""
 
     module_paths = []
     module_files = []
     module_files_updated = False
     loaded_modules = []
     breakpoint = None
+    bpf_prog_monitor = None
+    bpf_ksym_monitor = None
+    bpf_progs = {}
+    # The remove-symbol-file command, even when invoked with -a, requires the
+    # respective object file to exist, so keep them around.
+    bpf_debug_objs = {}
 
     def __init__(self):
         super(LxSymbols, self).__init__("lx-symbols", gdb.COMMAND_FILES,
                                         gdb.COMPLETE_FILENAME)
+        atexit.register(self.cleanup_bpf)
 
     def _update_module_files(self):
         self.module_files = []
@@ -95,10 +161,14 @@ lx-symbols command."""
         except gdb.error:
             return str(module_addr)
 
-        attrs = sect_attrs['attrs']
-        section_name_to_address = {
-            attrs[n]['battr']['attr']['name'].string(): attrs[n]['address']
-            for n in range(int(sect_attrs['nsections']))}
+        section_name_to_address = {}
+        for i in count():
+            # this is a NULL terminated array
+            if sect_attrs['grp']['bin_attrs'][i] == 0x0:
+                break
+
+            attr = sect_attrs['grp']['bin_attrs'][i].dereference()
+            section_name_to_address[attr['attr']['name'].string()] = attr['private']
 
         textaddr = section_name_to_address.get(".text", module_addr)
         args = []
@@ -138,6 +208,51 @@ lx-symbols command."""
         else:
             gdb.write("no module object found for '{0}'\n".format(module_name))
 
+    def add_bpf_prog(self, prog):
+        if prog["jited"]:
+            self.bpf_progs[int(prog["bpf_func"])] = prog
+
+    def remove_bpf_prog(self, prog):
+        self.bpf_progs.pop(int(prog["bpf_func"]), None)
+
+    def add_bpf_ksym(self, ksym):
+        addr = int(ksym["start"])
+        name = bpf.get_ksym_name(ksym)
+        with utils.pagination_off():
+            gdb.write("loading @{addr}: {name}\n".format(
+                addr=hex(addr), name=name))
+            debug_obj = bpf.generate_debug_obj(ksym, self.bpf_progs.get(addr))
+            if debug_obj is None:
+                return
+            try:
+                cmdline = "add-symbol-file {obj} {addr}".format(
+                    obj=debug_obj.name, addr=hex(addr))
+                gdb.execute(cmdline, to_string=True)
+            except:
+                debug_obj.close()
+                raise
+            self.bpf_debug_objs[addr] = debug_obj
+
+    def remove_bpf_ksym(self, ksym):
+        addr = int(ksym["start"])
+        debug_obj = self.bpf_debug_objs.pop(addr, None)
+        if debug_obj is None:
+            return
+        try:
+            name = bpf.get_ksym_name(ksym)
+            gdb.write("unloading @{addr}: {name}\n".format(
+                addr=hex(addr), name=name))
+            cmdline = "remove-symbol-file {path}".format(path=debug_obj.name)
+            gdb.execute(cmdline, to_string=True)
+        finally:
+            debug_obj.close()
+
+    def cleanup_bpf(self):
+        self.bpf_progs = {}
+        while len(self.bpf_debug_objs) > 0:
+            self.bpf_debug_objs.popitem()[1].close()
+
+
     def load_all_symbols(self):
         gdb.write("loading vmlinux\n")
 
@@ -149,13 +264,14 @@ lx-symbols command."""
                 saved_states.append({'breakpoint': bp, 'enabled': bp.enabled})
 
         # drop all current symbols and reload vmlinux
-        orig_vmlinux = 'vmlinux'
-        for obj in gdb.objfiles():
-            if (obj.filename.endswith('vmlinux') or
-                obj.filename.endswith('vmlinux.debug')):
-                orig_vmlinux = obj.filename
+        orig_vmlinux = utils.get_vmlinux()
         gdb.execute("symbol-file", to_string=True)
-        gdb.execute("symbol-file {0}".format(orig_vmlinux))
+        kerneloffset = get_kerneloffset()
+        if kerneloffset is None:
+            offset_arg = ""
+        else:
+            offset_arg = " -o " + hex(kerneloffset)
+        gdb.execute("symbol-file {0}{1}".format(orig_vmlinux, offset_arg))
 
         self.loaded_modules = []
         module_list = modules.module_list()
@@ -164,13 +280,36 @@ lx-symbols command."""
         else:
             [self.load_module_symbols(module) for module in module_list]
 
+        self.cleanup_bpf()
+        if self.bpf_prog_monitor is not None:
+            self.bpf_prog_monitor.notify_initial()
+        if self.bpf_ksym_monitor is not None:
+            self.bpf_ksym_monitor.notify_initial()
+
         for saved_state in saved_states:
             saved_state['breakpoint'].enabled = saved_state['enabled']
 
     def invoke(self, arg, from_tty):
-        self.module_paths = [os.path.abspath(os.path.expanduser(p))
-                             for p in arg.split()]
+        skip_decompressor()
+
+        monitor_bpf = False
+        self.module_paths = []
+        for p in arg.split():
+            if p == "-bpf":
+                monitor_bpf = True
+            else:
+                self.module_paths.append(os.path.abspath(os.path.expanduser(p)))
         self.module_paths.append(os.getcwd())
+
+        if self.breakpoint is not None:
+            self.breakpoint.delete()
+            self.breakpoint = None
+        if self.bpf_prog_monitor is not None:
+            self.bpf_prog_monitor.delete()
+            self.bpf_prog_monitor = None
+        if self.bpf_ksym_monitor is not None:
+            self.bpf_ksym_monitor.delete()
+            self.bpf_ksym_monitor = None
 
         # enforce update
         self.module_files = []
@@ -178,18 +317,22 @@ lx-symbols command."""
 
         self.load_all_symbols()
 
-        if not modules.has_modules():
+        if not hasattr(gdb, 'Breakpoint'):
+            gdb.write("Note: symbol update on module and BPF loading not "
+                      "supported with this gdb version\n")
             return
 
-        if hasattr(gdb, 'Breakpoint'):
-            if self.breakpoint is not None:
-                self.breakpoint.delete()
-                self.breakpoint = None
+        if modules.has_modules():
             self.breakpoint = LoadModuleBreakpoint(
                 "kernel/module/main.c:do_init_module", self)
-        else:
-            gdb.write("Note: symbol update on module loading not supported "
-                      "with this gdb version\n")
+
+        if monitor_bpf:
+            if constants.LX_CONFIG_BPF_SYSCALL:
+                self.bpf_prog_monitor = bpf.ProgMonitor(self.add_bpf_prog,
+                                                        self.remove_bpf_prog)
+            if constants.LX_CONFIG_BPF and constants.LX_CONFIG_BPF_JIT:
+                self.bpf_ksym_monitor = bpf.KsymMonitor(self.add_bpf_ksym,
+                                                        self.remove_bpf_ksym)
 
 
 LxSymbols()

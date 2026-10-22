@@ -97,7 +97,8 @@ static void mmc_should_fail_request(struct mmc_host *host,
 		return;
 
 	data->error = data_errors[get_random_u32_below(ARRAY_SIZE(data_errors))];
-	data->bytes_xfered = get_random_u32_below(data->bytes_xfered >> 9) << 9;
+	data->bytes_xfered = get_random_u32_below(data->bytes_xfered >> SECTOR_SHIFT)
+						  << SECTOR_SHIFT;
 }
 
 #else /* CONFIG_FAIL_MMC_REQUEST */
@@ -335,7 +336,7 @@ int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 {
 	int err;
 
-	if (mrq->cmd && mrq->cmd->has_ext_addr)
+	if (mrq->cmd->has_ext_addr)
 		mmc_send_ext_addr(host, mrq->cmd->ext_addr);
 
 	init_completion(&mrq->cmd_completion);
@@ -882,7 +883,6 @@ void mmc_put_card(struct mmc_card *card, struct mmc_ctx *ctx)
 	WARN_ON(ctx && host->claimer != ctx);
 
 	mmc_release_host(host);
-	pm_runtime_mark_last_busy(&card->dev);
 	pm_runtime_put_autosuspend(&card->dev);
 }
 EXPORT_SYMBOL(mmc_put_card);
@@ -1399,6 +1399,29 @@ void mmc_power_cycle(struct mmc_host *host, u32 ocr)
 	mmc_power_up(host, ocr);
 }
 
+/**
+ * mmc_handle_undervoltage - Handle an undervoltage event on the MMC bus
+ * @host: The MMC host that detected the undervoltage condition
+ *
+ * This function is called when an undervoltage event is detected on one of
+ * the MMC regulators.
+ *
+ * Returns: 0 on success or a negative error code on failure.
+ */
+int mmc_handle_undervoltage(struct mmc_host *host)
+{
+	/* Stop the host to prevent races with card removal */
+	__mmc_stop_host(host);
+
+	if (!host->bus_ops || !host->bus_ops->handle_undervoltage)
+		return 0;
+
+	dev_warn(mmc_dev(host), "%s: Undervoltage detected, initiating emergency stop\n",
+		 mmc_hostname(host));
+
+	return host->bus_ops->handle_undervoltage(host);
+}
+
 /*
  * Assign a mmc bus handler to a host. Only one bus handler may control a
  * host at any given time.
@@ -1837,52 +1860,53 @@ int mmc_erase(struct mmc_card *card, sector_t from, unsigned int nr,
 }
 EXPORT_SYMBOL(mmc_erase);
 
-int mmc_can_erase(struct mmc_card *card)
+bool mmc_card_can_erase(struct mmc_card *card)
 {
-	if (card->csd.cmdclass & CCC_ERASE && card->erase_size)
-		return 1;
-	return 0;
+	return (card->csd.cmdclass & CCC_ERASE && card->erase_size);
 }
-EXPORT_SYMBOL(mmc_can_erase);
+EXPORT_SYMBOL(mmc_card_can_erase);
 
-int mmc_can_trim(struct mmc_card *card)
+bool mmc_card_can_trim(struct mmc_card *card)
 {
-	if ((card->ext_csd.sec_feature_support & EXT_CSD_SEC_GB_CL_EN) &&
-	    (!(card->quirks & MMC_QUIRK_TRIM_BROKEN)))
-		return 1;
-	return 0;
+	return ((card->ext_csd.sec_feature_support & EXT_CSD_SEC_GB_CL_EN) &&
+		(!(card->quirks & MMC_QUIRK_TRIM_BROKEN)));
 }
-EXPORT_SYMBOL(mmc_can_trim);
+EXPORT_SYMBOL(mmc_card_can_trim);
 
-int mmc_can_discard(struct mmc_card *card)
+bool mmc_card_can_discard(struct mmc_card *card)
 {
 	/*
 	 * As there's no way to detect the discard support bit at v4.5
 	 * use the s/w feature support filed.
 	 */
-	if (card->ext_csd.feature_support & MMC_DISCARD_FEATURE)
-		return 1;
-	return 0;
+	return (card->ext_csd.feature_support & MMC_DISCARD_FEATURE);
 }
-EXPORT_SYMBOL(mmc_can_discard);
+EXPORT_SYMBOL(mmc_card_can_discard);
 
-int mmc_can_sanitize(struct mmc_card *card)
+bool mmc_card_can_sanitize(struct mmc_card *card)
 {
-	if (!mmc_can_trim(card) && !mmc_can_erase(card))
-		return 0;
+	if (!mmc_card_can_trim(card) && !mmc_card_can_erase(card))
+		return false;
 	if (card->ext_csd.sec_feature_support & EXT_CSD_SEC_SANITIZE)
-		return 1;
-	return 0;
+		return true;
+	return false;
 }
 
-int mmc_can_secure_erase_trim(struct mmc_card *card)
+bool mmc_card_can_secure_erase_trim(struct mmc_card *card)
 {
-	if ((card->ext_csd.sec_feature_support & EXT_CSD_SEC_ER_EN) &&
-	    !(card->quirks & MMC_QUIRK_SEC_ERASE_TRIM_BROKEN))
-		return 1;
-	return 0;
+	return ((card->ext_csd.sec_feature_support & EXT_CSD_SEC_ER_EN) &&
+		!(card->quirks & MMC_QUIRK_SEC_ERASE_TRIM_BROKEN));
 }
-EXPORT_SYMBOL(mmc_can_secure_erase_trim);
+EXPORT_SYMBOL(mmc_card_can_secure_erase_trim);
+
+bool mmc_card_can_cmd23(struct mmc_card *card)
+{
+	return ((mmc_card_mmc(card) &&
+		 card->csd.mmca_vsn >= CSD_SPEC_VER_3) ||
+		(mmc_card_sd(card) && !mmc_card_ult_capacity(card) &&
+		 card->scr.cmds & SD_SCR_CMD23_SUPPORT));
+}
+EXPORT_SYMBOL(mmc_card_can_cmd23);
 
 int mmc_erase_group_aligned(struct mmc_card *card, sector_t from,
 			    unsigned int nr)
@@ -1987,7 +2011,7 @@ unsigned int mmc_calc_max_discard(struct mmc_card *card)
 		return card->pref_erase;
 
 	max_discard = mmc_do_calc_max_discard(card, MMC_ERASE_ARG);
-	if (mmc_can_trim(card)) {
+	if (mmc_card_can_trim(card)) {
 		max_trim = mmc_do_calc_max_discard(card, MMC_TRIM_ARG);
 		if (max_trim < max_discard || max_discard == 0)
 			max_discard = max_trim;

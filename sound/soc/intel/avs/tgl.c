@@ -6,7 +6,11 @@
 //          Amadeusz Slawinski <amadeuszx.slawinski@linux.intel.com>
 //
 
+#include <linux/pci.h>
+#include <asm/cpuid/api.h>
 #include "avs.h"
+#include "debug.h"
+#include "messages.h"
 
 static int avs_tgl_dsp_core_power(struct avs_dev *adev, u32 core_mask, bool power)
 {
@@ -35,6 +39,49 @@ static int avs_tgl_dsp_core_stall(struct avs_dev *adev, u32 core_mask, bool stal
 	return avs_dsp_core_stall(adev, core_mask, stall);
 }
 
+/*
+ * Succeed if CPUID(0x15) is not available, or if the nominal core crystal clock
+ * frequency cannot be enumerated from it.  There is nothing to do in both cases.
+ */
+static int avs_tgl_set_xtal_freq(struct avs_dev *adev)
+{
+	unsigned int freq;
+	int ret;
+
+	if (boot_cpu_data.cpuid_level < CPUID_LEAF_TSC)
+		return 0;
+
+	freq = cpuid_ecx(CPUID_LEAF_TSC);
+	if (freq) {
+		ret = avs_ipc_set_fw_config(adev, 1, AVS_FW_CFG_XTAL_FREQ_HZ, sizeof(freq), &freq);
+		if (ret)
+			return AVS_IPC_RET(ret);
+	}
+
+	return 0;
+}
+
+static int avs_tgl_config_basefw(struct avs_dev *adev)
+{
+	struct pci_dev *pci = adev->base.pci;
+	struct avs_bus_hwid hwid;
+	int ret;
+
+	ret = avs_tgl_set_xtal_freq(adev);
+	if (ret)
+		return ret;
+
+	hwid.device = pci->device;
+	hwid.subsystem = pci->subsystem_vendor | (pci->subsystem_device << 16);
+	hwid.revision = pci->revision;
+
+	ret = avs_ipc_set_fw_config(adev, 1, AVS_FW_CFG_BUS_HARDWARE_ID, sizeof(hwid), &hwid);
+	if (ret)
+		return AVS_IPC_RET(ret);
+
+	return 0;
+}
+
 const struct avs_dsp_ops avs_tgl_dsp_ops = {
 	.power = avs_tgl_dsp_core_power,
 	.reset = avs_tgl_dsp_core_reset,
@@ -44,6 +91,7 @@ const struct avs_dsp_ops avs_tgl_dsp_ops = {
 	.load_basefw = avs_icl_load_basefw,
 	.load_lib = avs_hda_load_library,
 	.transfer_mods = avs_hda_transfer_modules,
+	.config_basefw = avs_tgl_config_basefw,
 	.log_buffer_offset = avs_icl_log_buffer_offset,
 	.log_buffer_status = avs_apl_log_buffer_status,
 	.coredump = avs_apl_coredump,

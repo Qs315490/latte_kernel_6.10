@@ -8,9 +8,9 @@
 #include <net/netdev_rx_queue.h>
 #include <net/page_pool/helpers.h>
 #include <net/page_pool/types.h>
+#include <net/page_pool/memory_provider.h>
 #include <net/sock.h>
 
-#include "devmem.h"
 #include "page_pool_priv.h"
 #include "netdev-genl-gen.h"
 
@@ -79,7 +79,7 @@ struct page_pool_dump_cb {
 
 static int
 netdev_nl_page_pool_get_dump(struct sk_buff *skb, struct netlink_callback *cb,
-			     pp_nl_fill_cb fill)
+			     pp_nl_fill_cb fill, struct nlattr *ifindex_attr)
 {
 	struct page_pool_dump_cb *state = (void *)cb->ctx;
 	const struct genl_info *info = genl_info_dump(cb);
@@ -88,9 +88,17 @@ netdev_nl_page_pool_get_dump(struct sk_buff *skb, struct netlink_callback *cb,
 	struct page_pool *pool;
 	int err = 0;
 
+	if (ifindex_attr)
+		state->ifindex = nla_get_u32(ifindex_attr);
+
 	rtnl_lock();
 	mutex_lock(&page_pools_lock);
 	for_each_netdev_dump(net, netdev, state->ifindex) {
+		/* Either the provided ifindex doesn't exist or done dumping */
+		if (ifindex_attr &&
+		    netdev->ifindex != nla_get_u32(ifindex_attr))
+			break;
+
 		hlist_for_each_entry(pool, &netdev->page_pools, user.list) {
 			if (state->pp_id && state->pp_id < pool->user.id)
 				continue;
@@ -119,14 +127,15 @@ page_pool_nl_stats_fill(struct sk_buff *rsp, const struct page_pool *pool,
 	struct nlattr *nest;
 	void *hdr;
 
-	if (!page_pool_get_stats(pool, &stats))
-		return 0;
+	page_pool_get_stats(pool, &stats);
 
 	hdr = genlmsg_iput(rsp, info);
 	if (!hdr)
 		return -EMSGSIZE;
 
 	nest = nla_nest_start(rsp, NETDEV_A_PAGE_POOL_STATS_INFO);
+	if (!nest)
+		goto err_cancel_msg;
 
 	if (nla_put_uint(rsp, NETDEV_A_PAGE_POOL_ID, pool->user.id) ||
 	    (pool->slow.netdev->ifindex != LOOPBACK_IFINDEX &&
@@ -206,17 +215,46 @@ int netdev_nl_page_pool_stats_get_doit(struct sk_buff *skb,
 	return netdev_nl_page_pool_get_do(info, id, page_pool_nl_stats_fill);
 }
 
+static const struct netlink_range_validation page_pool_ifindex_range = {
+	.min	= 1ULL,
+	.max	= S32_MAX,
+};
+
+static const struct nla_policy
+page_pool_stat_info_policy[NETDEV_A_PAGE_POOL_IFINDEX + 1] = {
+	[NETDEV_A_PAGE_POOL_IFINDEX] =
+		NLA_POLICY_FULL_RANGE(NLA_U32, &page_pool_ifindex_range),
+};
+
 int netdev_nl_page_pool_stats_get_dumpit(struct sk_buff *skb,
 					 struct netlink_callback *cb)
 {
-	return netdev_nl_page_pool_get_dump(skb, cb, page_pool_nl_stats_fill);
+	struct nlattr *tb[ARRAY_SIZE(page_pool_stat_info_policy)];
+	const struct genl_info *info = genl_info_dump(cb);
+	struct nlattr *ifindex_attr = NULL;
+
+	if (info->attrs[NETDEV_A_PAGE_POOL_STATS_INFO]) {
+		struct nlattr *nest;
+		int err;
+
+		nest = info->attrs[NETDEV_A_PAGE_POOL_STATS_INFO];
+		err = nla_parse_nested(tb, ARRAY_SIZE(tb) - 1, nest,
+				       page_pool_stat_info_policy,
+				       info->extack);
+		if (err)
+			return err;
+
+		ifindex_attr = tb[NETDEV_A_PAGE_POOL_IFINDEX];
+	}
+
+	return netdev_nl_page_pool_get_dump(skb, cb, page_pool_nl_stats_fill,
+					    ifindex_attr);
 }
 
 static int
 page_pool_nl_fill(struct sk_buff *rsp, const struct page_pool *pool,
 		  const struct genl_info *info)
 {
-	struct net_devmem_dmabuf_binding *binding = pool->mp_priv;
 	size_t inflight, refsz;
 	unsigned int napi_id;
 	void *hdr;
@@ -234,7 +272,7 @@ page_pool_nl_fill(struct sk_buff *rsp, const struct page_pool *pool,
 		goto err_cancel;
 
 	napi_id = pool->p.napi ? READ_ONCE(pool->p.napi->napi_id) : 0;
-	if (napi_id >= MIN_NAPI_ID &&
+	if (napi_id_valid(napi_id) &&
 	    nla_put_uint(rsp, NETDEV_A_PAGE_POOL_NAPI_ID, napi_id))
 		goto err_cancel;
 
@@ -246,10 +284,10 @@ page_pool_nl_fill(struct sk_buff *rsp, const struct page_pool *pool,
 		goto err_cancel;
 	if (pool->user.detach_time &&
 	    nla_put_uint(rsp, NETDEV_A_PAGE_POOL_DETACH_TIME,
-			 pool->user.detach_time))
+			 ktime_divns(pool->user.detach_time, NSEC_PER_SEC)))
 		goto err_cancel;
 
-	if (binding && nla_put_u32(rsp, NETDEV_A_PAGE_POOL_DMABUF, binding->id))
+	if (pool->mp_ops && pool->mp_ops->nl_fill(pool->mp_priv, rsp, NULL))
 		goto err_cancel;
 
 	genlmsg_end(rsp, hdr);
@@ -306,7 +344,10 @@ int netdev_nl_page_pool_get_doit(struct sk_buff *skb, struct genl_info *info)
 int netdev_nl_page_pool_get_dumpit(struct sk_buff *skb,
 				   struct netlink_callback *cb)
 {
-	return netdev_nl_page_pool_get_dump(skb, cb, page_pool_nl_fill);
+	const struct genl_info *info = genl_info_dump(cb);
+
+	return netdev_nl_page_pool_get_dump(skb, cb, page_pool_nl_fill,
+					    info->attrs[NETDEV_A_PAGE_POOL_IFINDEX]);
 }
 
 int page_pool_list(struct page_pool *pool)
@@ -338,7 +379,7 @@ err_unlock:
 void page_pool_detached(struct page_pool *pool)
 {
 	mutex_lock(&page_pools_lock);
-	pool->user.detach_time = ktime_get_boottime_seconds();
+	pool->user.detach_time = ktime_get_boottime();
 	netdev_nl_page_pool_event(pool, NETDEV_CMD_PAGE_POOL_CHANGE_NTF);
 	mutex_unlock(&page_pools_lock);
 }
@@ -356,7 +397,7 @@ void page_pool_unlist(struct page_pool *pool)
 int page_pool_check_memory_provider(struct net_device *dev,
 				    struct netdev_rx_queue *rxq)
 {
-	struct net_devmem_dmabuf_binding *binding = rxq->mp_params.mp_priv;
+	void *binding = rxq->mp_params.mp_priv;
 	struct page_pool *pool;
 	struct hlist_node *n;
 

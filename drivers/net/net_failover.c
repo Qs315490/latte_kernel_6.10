@@ -502,7 +502,7 @@ static int net_failover_slave_register(struct net_device *slave_dev,
 
 	/* Align MTU of slave with failover dev */
 	orig_mtu = slave_dev->mtu;
-	err = dev_set_mtu(slave_dev, failover_dev->mtu);
+	err = netif_set_mtu(slave_dev, failover_dev->mtu);
 	if (err) {
 		netdev_err(failover_dev, "unable to change mtu of %s to %u register failed\n",
 			   slave_dev->name, failover_dev->mtu);
@@ -512,11 +512,11 @@ static int net_failover_slave_register(struct net_device *slave_dev,
 	dev_hold(slave_dev);
 
 	if (netif_running(failover_dev)) {
-		err = dev_open(slave_dev, NULL);
+		err = netif_open(slave_dev, NULL);
 		if (err && (err != -EBUSY)) {
 			netdev_err(failover_dev, "Opening slave %s failed err:%d\n",
 				   slave_dev->name, err);
-			goto err_dev_open;
+			goto err_netif_open;
 		}
 	}
 
@@ -562,10 +562,10 @@ static int net_failover_slave_register(struct net_device *slave_dev,
 err_vlan_add:
 	dev_uc_unsync(slave_dev, failover_dev);
 	dev_mc_unsync(slave_dev, failover_dev);
-	dev_close(slave_dev);
-err_dev_open:
+	netif_close(slave_dev);
+err_netif_open:
 	dev_put(slave_dev);
-	dev_set_mtu(slave_dev, orig_mtu);
+	netif_set_mtu(slave_dev, orig_mtu);
 done:
 	return err;
 }
@@ -734,7 +734,7 @@ struct failover *net_failover_create(struct net_device *standby_dev)
 	failover_dev->lltx = true;
 
 	/* Don't allow failover devices to change network namespaces. */
-	failover_dev->netns_local = true;
+	failover_dev->netns_immutable = true;
 
 	failover_dev->hw_features = FAILOVER_VLAN_FEATURES |
 				    NETIF_F_HW_VLAN_CTAG_TX |
@@ -818,19 +818,6 @@ void net_failover_destroy(struct failover *failover)
 	free_netdev(failover_dev);
 }
 EXPORT_SYMBOL_GPL(net_failover_destroy);
-
-static __init int
-net_failover_init(void)
-{
-	return 0;
-}
-module_init(net_failover_init);
-
-static __exit
-void net_failover_exit(void)
-{
-}
-module_exit(net_failover_exit);
 
 MODULE_DESCRIPTION("Failover driver for Paravirtual drivers");
 MODULE_LICENSE("GPL v2");

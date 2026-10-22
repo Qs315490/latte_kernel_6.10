@@ -17,9 +17,10 @@
 
 static int cs35l56_i2c_probe(struct i2c_client *client)
 {
+	unsigned int id = (u32)(uintptr_t)i2c_get_match_data(client);
 	struct cs35l56_private *cs35l56;
 	struct device *dev = &client->dev;
-	const struct regmap_config *regmap_config = &cs35l56_regmap_i2c;
+	const struct regmap_config *regmap_config;
 	int ret;
 
 	cs35l56 = devm_kzalloc(dev, sizeof(struct cs35l56_private), GFP_KERNEL);
@@ -30,6 +31,20 @@ static int cs35l56_i2c_probe(struct i2c_client *client)
 	cs35l56->base.can_hibernate = true;
 
 	i2c_set_clientdata(client, cs35l56);
+
+	switch (id) {
+	case 0x3556:
+		regmap_config = &cs35l56_regmap_i2c;
+		cs35l56->base.type = 0x56;
+		break;
+	case 0x3563:
+		regmap_config = &cs35l63_regmap_i2c;
+		cs35l56->base.type = 0x63;
+		break;
+	default:
+		return -ENODEV;
+	}
+
 	cs35l56->base.regmap = devm_regmap_init_i2c(client, regmap_config);
 	if (IS_ERR(cs35l56->base.regmap)) {
 		ret = PTR_ERR(cs35l56->base.regmap);
@@ -40,9 +55,7 @@ static int cs35l56_i2c_probe(struct i2c_client *client)
 	if (ret != 0)
 		return ret;
 
-	ret = cs35l56_init(cs35l56);
-	if (ret == 0)
-		ret = cs35l56_irq_request(&cs35l56->base, client->irq);
+	ret = cs35l56_irq_request(&cs35l56->base, client->irq);
 	if (ret < 0)
 		cs35l56_remove(cs35l56);
 
@@ -57,14 +70,16 @@ static void cs35l56_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id cs35l56_id_i2c[] = {
-	{ "cs35l56" },
-	{}
+	{ .name = "cs35l56", .driver_data = 0x3556 },
+	{ .name = "cs35l63", .driver_data = 0x3563 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cs35l56_id_i2c);
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id cs35l56_asoc_acpi_match[] = {
-	{ "CSC355C", 0 },
+	{ "CSC355C", 0x3556 },
+	{ "CSC356C", 0x3563 },
 	{},
 };
 MODULE_DEVICE_TABLE(acpi, cs35l56_asoc_acpi_match);

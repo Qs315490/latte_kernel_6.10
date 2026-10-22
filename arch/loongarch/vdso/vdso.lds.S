@@ -5,18 +5,14 @@
  */
 #include <asm/page.h>
 #include <generated/asm-offsets.h>
-
-OUTPUT_FORMAT("elf64-loongarch", "elf64-loongarch", "elf64-loongarch")
+#include <vdso/datapage.h>
 
 OUTPUT_ARCH(loongarch)
 
 SECTIONS
 {
-	PROVIDE(_vdso_data = . - __VVAR_PAGES * PAGE_SIZE);
-#ifdef CONFIG_TIME_NS
-	PROVIDE(_timens_data = _vdso_data + PAGE_SIZE);
-#endif
-	PROVIDE(_loongarch_data = _vdso_data + 2 * PAGE_SIZE);
+	VDSO_VVAR_SYMS
+
 	. = SIZEOF_HEADERS;
 
 	.hash		: { *(.hash) }			:text
@@ -65,9 +61,11 @@ VERSION
 	LINUX_5.10 {
 	global:
 		__vdso_getcpu;
+#ifdef CONFIG_GENERIC_GETTIMEOFDAY
 		__vdso_clock_getres;
 		__vdso_clock_gettime;
 		__vdso_gettimeofday;
+#endif
 		__vdso_getrandom;
 		__vdso_rt_sigreturn;
 	local: *;

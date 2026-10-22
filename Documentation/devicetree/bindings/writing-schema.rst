@@ -53,7 +53,7 @@ description
   The default without any indicators is flowed, plain scalar style where single
   line breaks and leading whitespace are stripped. Paragraphs are delimited by
   blank lines (i.e. double line break). This style cannot contain ": " in it as
-  it will be interpretted as a key. Any " #" sequence will be interpretted as
+  it will be interpreted as a key. Any " #" sequence will be interpreted as
   a comment. There's other restrictions on characters as well. Most
   restrictions are on what the first character can be.
 
@@ -117,9 +117,14 @@ additionalProperties / unevaluatedProperties
       should be allowed.
 
   * additionalProperties: true
-      Rare case, used for schemas implementing common set of properties. Such
-      schemas are supposed to be referenced by other schemas, which then use
-      'unevaluatedProperties: false'.  Typically bus or common-part schemas.
+      - Top-level part:
+        Rare case, used for schemas implementing common set of properties. Such
+        schemas are supposed to be referenced by other schemas, which then use
+        'unevaluatedProperties: false'.  Typically bus or common-part schemas.
+      - Nested node:
+        When listing only the expected compatible of the nested node and there
+        is an another schema matching that compatible which ends with one of
+        two above cases ('false').
 
 examples
   Optional. A list of one or more DTS hunks implementing this binding only.
@@ -127,7 +132,7 @@ examples
   provider binding, other nodes referenced by phandle.
   Note: YAML doesn't allow leading tabs, so spaces must be used instead.
 
-Unless noted otherwise, all properties are required.
+Unless noted otherwise, all above schema properties are required.
 
 Property Schema
 ---------------
@@ -160,11 +165,22 @@ The YAML Devicetree format also makes all string values an array and scalar
 values a matrix (in order to define groupings) even when only a single value
 is present. Single entries in schemas are fixed up to match this encoding.
 
+When bindings cover multiple similar devices that differ in some properties,
+those properties should be constrained for each device. This usually means:
+
+ * In top level 'properties' define the property with the broadest constraints.
+ * In 'if:then:' blocks, further narrow the constraints for those properties.
+ * Do not define the properties within an 'if:then:' block (note that
+   'additionalItems' also won't allow that).
+
 Coding style
 ------------
 
 Use YAML coding style (two-space indentation). For DTS examples in the schema,
 preferred is four-space indentation.
+
+Place entries in 'properties' and 'required' sections in the same order, using
+style from Documentation/devicetree/bindings/dts-coding-style.rst.
 
 Testing
 -------
@@ -198,6 +214,10 @@ binding schema. All of the DT binding documents can be validated using the
 
     make dt_binding_check
 
+Or to validate a single schema and its example::
+
+    make sram/sram.yaml
+
 In order to perform validation of DT source files, use the ``dtbs_check`` target::
 
     make dtbs_check
@@ -210,10 +230,10 @@ It is possible to run both in a single command::
 
     make dt_binding_check dtbs_check
 
-It is also possible to run checks with a subset of matching schema files by
-setting the ``DT_SCHEMA_FILES`` variable to 1 or more specific schema files or
-patterns (partial match of a fixed string). Each file or pattern should be
-separated by ':'.
+It is also possible to combine running the above commands with a subset of
+matching schema files by setting the ``DT_SCHEMA_FILES`` variable to 1 or more
+specific schema files or patterns (partial match of a fixed string). Each file
+or pattern should be separated by ':'.
 
 ::
 

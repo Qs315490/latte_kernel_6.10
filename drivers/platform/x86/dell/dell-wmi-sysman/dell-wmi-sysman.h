@@ -89,6 +89,11 @@ extern struct wmi_sysman_priv wmi_priv;
 
 enum { ENUM, INT, STR, PO };
 
+#define ENUM_MIN_ELEMENTS		8
+#define INT_MIN_ELEMENTS		9
+#define STR_MIN_ELEMENTS		8
+#define PO_MIN_ELEMENTS			4
+
 enum {
 	ATTR_NAME,
 	DISPL_NAME_LANG_CODE,
@@ -184,9 +189,9 @@ void exit_bios_attr_set_interface(void);
 int init_bios_attr_set_interface(void);
 int map_wmi_error(int error_code);
 size_t calculate_string_buffer(const char *str);
-size_t calculate_security_buffer(char *authentication);
-void populate_security_buffer(char *buffer, char *authentication);
-ssize_t populate_string_buffer(char *buffer, size_t buffer_len, const char *str);
+size_t calculate_security_buffer(const char *authentication);
+void populate_security_buffer(u8 *buffer, const char *authentication);
+ssize_t populate_string_buffer(u8 *buffer, size_t buffer_len, const char *str);
 int set_new_password(const char *password_type, const char *new);
 int init_bios_attr_pass_interface(void);
 void exit_bios_attr_pass_interface(void);

@@ -113,7 +113,7 @@ static const struct scsi_host_template jmicron_sht = {
 
 static struct ata_port_operations jmicron_ops = {
 	.inherits		= &ata_bmdma_port_ops,
-	.prereset		= jmicron_pre_reset,
+	.reset.prereset		= jmicron_pre_reset,
 };
 
 
@@ -148,8 +148,11 @@ static int jmicron_init_one (struct pci_dev *pdev, const struct pci_device_id *i
 }
 
 static const struct pci_device_id jmicron_pci_tbl[] = {
-	{ PCI_VENDOR_ID_JMICRON, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
-	  PCI_CLASS_STORAGE_IDE << 8, 0xffff00, 0 },
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_JMICRON, PCI_ANY_ID),
+		.class = PCI_CLASS_STORAGE_IDE << 8,
+		.class_mask = 0xffff00
+	},
 	{ }	/* terminate list */
 };
 

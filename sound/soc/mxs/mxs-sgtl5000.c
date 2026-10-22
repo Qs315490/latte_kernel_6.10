@@ -59,7 +59,7 @@ static const struct snd_soc_ops mxs_sgtl5000_hifi_ops = {
 };
 
 #define MXS_SGTL5000_DAI_FMT (SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF | \
-	SND_SOC_DAIFMT_CBS_CFS)
+	SND_SOC_DAIFMT_CBC_CFC)
 
 
 SND_SOC_DAILINK_DEFS(hifi_tx,
@@ -157,13 +157,16 @@ static int mxs_sgtl5000_probe(struct platform_device *pdev)
 		if (ret) {
 			dev_err(&pdev->dev, "failed to parse audio-routing (%d)\n",
 				ret);
+			mxs_saif_put_mclk(0);
 			return ret;
 		}
 	}
 
 	ret = devm_snd_soc_register_card(&pdev->dev, card);
-	if (ret)
+	if (ret) {
+		mxs_saif_put_mclk(0);
 		return dev_err_probe(&pdev->dev, ret, "snd_soc_register_card failed\n");
+	}
 
 	return 0;
 }

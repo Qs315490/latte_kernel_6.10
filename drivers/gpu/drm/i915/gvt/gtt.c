@@ -33,13 +33,16 @@
  *
  */
 
-#include "i915_drv.h"
-#include "gvt.h"
-#include "i915_pvinfo.h"
-#include "trace.h"
+#include <linux/vmalloc.h>
+
+#include <drm/drm_print.h>
 
 #include "gt/intel_gt_regs.h"
-#include <linux/vmalloc.h>
+
+#include "gvt.h"
+#include "i915_drv.h"
+#include "i915_pvinfo.h"
+#include "trace.h"
 
 #if defined(VERBOSE_DEBUG)
 #define gvt_vdbg_mm(fmt, args...) gvt_dbg_mm(fmt, ##args)
@@ -69,72 +72,6 @@ bool intel_gvt_ggtt_validate_range(struct intel_vgpu *vgpu, u64 addr, u32 size)
 	gvt_dbg_mm("Invalid ggtt range at 0x%llx, size: 0x%x\n",
 		     addr, size);
 	return false;
-}
-
-/* translate a guest gmadr to host gmadr */
-int intel_gvt_ggtt_gmadr_g2h(struct intel_vgpu *vgpu, u64 g_addr, u64 *h_addr)
-{
-	struct drm_i915_private *i915 = vgpu->gvt->gt->i915;
-
-	if (drm_WARN(&i915->drm, !vgpu_gmadr_is_valid(vgpu, g_addr),
-		     "invalid guest gmadr %llx\n", g_addr))
-		return -EACCES;
-
-	if (vgpu_gmadr_is_aperture(vgpu, g_addr))
-		*h_addr = vgpu_aperture_gmadr_base(vgpu)
-			  + (g_addr - vgpu_aperture_offset(vgpu));
-	else
-		*h_addr = vgpu_hidden_gmadr_base(vgpu)
-			  + (g_addr - vgpu_hidden_offset(vgpu));
-	return 0;
-}
-
-/* translate a host gmadr to guest gmadr */
-int intel_gvt_ggtt_gmadr_h2g(struct intel_vgpu *vgpu, u64 h_addr, u64 *g_addr)
-{
-	struct drm_i915_private *i915 = vgpu->gvt->gt->i915;
-
-	if (drm_WARN(&i915->drm, !gvt_gmadr_is_valid(vgpu->gvt, h_addr),
-		     "invalid host gmadr %llx\n", h_addr))
-		return -EACCES;
-
-	if (gvt_gmadr_is_aperture(vgpu->gvt, h_addr))
-		*g_addr = vgpu_aperture_gmadr_base(vgpu)
-			+ (h_addr - gvt_aperture_gmadr_base(vgpu->gvt));
-	else
-		*g_addr = vgpu_hidden_gmadr_base(vgpu)
-			+ (h_addr - gvt_hidden_gmadr_base(vgpu->gvt));
-	return 0;
-}
-
-int intel_gvt_ggtt_index_g2h(struct intel_vgpu *vgpu, unsigned long g_index,
-			     unsigned long *h_index)
-{
-	u64 h_addr;
-	int ret;
-
-	ret = intel_gvt_ggtt_gmadr_g2h(vgpu, g_index << I915_GTT_PAGE_SHIFT,
-				       &h_addr);
-	if (ret)
-		return ret;
-
-	*h_index = h_addr >> I915_GTT_PAGE_SHIFT;
-	return 0;
-}
-
-int intel_gvt_ggtt_h2g_index(struct intel_vgpu *vgpu, unsigned long h_index,
-			     unsigned long *g_index)
-{
-	u64 g_addr;
-	int ret;
-
-	ret = intel_gvt_ggtt_gmadr_h2g(vgpu, h_index << I915_GTT_PAGE_SHIFT,
-				       &g_addr);
-	if (ret)
-		return ret;
-
-	*g_index = g_addr >> I915_GTT_PAGE_SHIFT;
-	return 0;
 }
 
 #define gtt_type_is_entry(type) \
@@ -286,9 +223,11 @@ static u64 read_pte64(struct i915_ggtt *ggtt, unsigned long index)
 
 static void ggtt_invalidate(struct intel_gt *gt)
 {
-	mmio_hw_access_pre(gt);
+	intel_wakeref_t wakeref;
+
+	wakeref = mmio_hw_access_pre(gt);
 	intel_uncore_write(gt->uncore, GFX_FLSH_CNTL_GEN6, GFX_FLSH_CNTL_EN);
-	mmio_hw_access_post(gt);
+	mmio_hw_access_post(gt, wakeref);
 }
 
 static void write_pte64(struct i915_ggtt *ggtt, unsigned long index, u64 pte)
@@ -715,7 +654,7 @@ static void *alloc_spt(gfp_t gfp_mask)
 {
 	struct intel_vgpu_ppgtt_spt *spt;
 
-	spt = kzalloc(sizeof(*spt), gfp_mask);
+	spt = kzalloc_obj(*spt, gfp_mask);
 	if (!spt)
 		return NULL;
 
@@ -1259,7 +1198,7 @@ static int ppgtt_populate_shadow_entry(struct intel_vgpu *vgpu,
 		gvt_vdbg_mm("shadow 64K gtt entry\n");
 		/*
 		 * The layout of 64K page is special, the page size is
-		 * controlled by uper PDE. To be simple, we always split
+		 * controlled by upper PDE. To be simple, we always split
 		 * 64K page to smaller 4K pages in shadow PT.
 		 */
 		return split_64KB_gtt_entry(vgpu, spt, index, &se);
@@ -1831,7 +1770,7 @@ static struct intel_vgpu_mm *vgpu_alloc_mm(struct intel_vgpu *vgpu)
 {
 	struct intel_vgpu_mm *mm;
 
-	mm = kzalloc(sizeof(*mm), GFP_KERNEL);
+	mm = kzalloc_obj(*mm);
 	if (!mm)
 		return NULL;
 
@@ -2267,7 +2206,7 @@ static int emulate_ggtt_mmio_write(struct intel_vgpu *vgpu, unsigned int off,
 
 		if (!found) {
 			/* the first partial part */
-			partial_pte = kzalloc(sizeof(*partial_pte), GFP_KERNEL);
+			partial_pte = kzalloc_obj(*partial_pte);
 			if (!partial_pte)
 				return -ENOMEM;
 			partial_pte->offset = off;
@@ -2563,7 +2502,7 @@ static int setup_spt_oos(struct intel_gvt *gvt)
 	INIT_LIST_HEAD(&gtt->oos_page_use_list_head);
 
 	for (i = 0; i < preallocated_oos_pages; i++) {
-		oos_page = kzalloc(sizeof(*oos_page), GFP_KERNEL);
+		oos_page = kzalloc_obj(*oos_page);
 		if (!oos_page) {
 			ret = -ENOMEM;
 			goto fail;

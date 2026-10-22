@@ -3,6 +3,7 @@
  * Copyright 2018 Noralf Trønnes
  */
 
+#include <linux/export.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/seq_file.h>
@@ -38,16 +39,40 @@ void drm_client_dev_unregister(struct drm_device *dev)
 	mutex_lock(&dev->clientlist_mutex);
 	list_for_each_entry_safe(client, tmp, &dev->clientlist, list) {
 		list_del(&client->list);
-		if (client->funcs && client->funcs->unregister) {
+		/*
+		 * Unregistering consumes and frees the client.
+		 */
+		if (client->funcs && client->funcs->unregister)
 			client->funcs->unregister(client);
-		} else {
+		else
 			drm_client_release(client);
-			kfree(client);
-		}
 	}
 	mutex_unlock(&dev->clientlist_mutex);
 }
 EXPORT_SYMBOL(drm_client_dev_unregister);
+
+static void drm_client_hotplug(struct drm_client_dev *client)
+{
+	struct drm_device *dev = client->dev;
+	int ret;
+
+	if (!client->funcs || !client->funcs->hotplug)
+		return;
+
+	if (client->hotplug_failed)
+		return;
+
+	if (client->suspended) {
+		client->hotplug_pending = true;
+		return;
+	}
+
+	client->hotplug_pending = false;
+	ret = client->funcs->hotplug(client);
+	drm_dbg_kms(dev, "%s: ret=%d\n", client->name, ret);
+	if (ret)
+		client->hotplug_failed = true;
+}
 
 /**
  * drm_client_dev_hotplug - Send hotplug event to clients
@@ -61,7 +86,6 @@ EXPORT_SYMBOL(drm_client_dev_unregister);
 void drm_client_dev_hotplug(struct drm_device *dev)
 {
 	struct drm_client_dev *client;
-	int ret;
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
 		return;
@@ -72,23 +96,13 @@ void drm_client_dev_hotplug(struct drm_device *dev)
 	}
 
 	mutex_lock(&dev->clientlist_mutex);
-	list_for_each_entry(client, &dev->clientlist, list) {
-		if (!client->funcs || !client->funcs->hotplug)
-			continue;
-
-		if (client->hotplug_failed)
-			continue;
-
-		ret = client->funcs->hotplug(client);
-		drm_dbg_kms(dev, "%s: ret=%d\n", client->name, ret);
-		if (ret)
-			client->hotplug_failed = true;
-	}
+	list_for_each_entry(client, &dev->clientlist, list)
+		drm_client_hotplug(client);
 	mutex_unlock(&dev->clientlist_mutex);
 }
 EXPORT_SYMBOL(drm_client_dev_hotplug);
 
-void drm_client_dev_restore(struct drm_device *dev)
+void drm_client_dev_restore(struct drm_device *dev, bool force)
 {
 	struct drm_client_dev *client;
 	int ret;
@@ -101,7 +115,7 @@ void drm_client_dev_restore(struct drm_device *dev)
 		if (!client->funcs || !client->funcs->restore)
 			continue;
 
-		ret = client->funcs->restore(client);
+		ret = client->funcs->restore(client, force);
 		drm_dbg_kms(dev, "%s: ret=%d\n", client->name, ret);
 		if (!ret) /* The first one to return zero gets the privilege to restore */
 			break;
@@ -109,7 +123,7 @@ void drm_client_dev_restore(struct drm_device *dev)
 	mutex_unlock(&dev->clientlist_mutex);
 }
 
-static int drm_client_suspend(struct drm_client_dev *client, bool holds_console_lock)
+static int drm_client_suspend(struct drm_client_dev *client)
 {
 	struct drm_device *dev = client->dev;
 	int ret = 0;
@@ -118,7 +132,7 @@ static int drm_client_suspend(struct drm_client_dev *client, bool holds_console_
 		return 0;
 
 	if (client->funcs && client->funcs->suspend)
-		ret = client->funcs->suspend(client, holds_console_lock);
+		ret = client->funcs->suspend(client);
 	drm_dbg_kms(dev, "%s: ret=%d\n", client->name, ret);
 
 	client->suspended = true;
@@ -126,20 +140,20 @@ static int drm_client_suspend(struct drm_client_dev *client, bool holds_console_
 	return ret;
 }
 
-void drm_client_dev_suspend(struct drm_device *dev, bool holds_console_lock)
+void drm_client_dev_suspend(struct drm_device *dev)
 {
 	struct drm_client_dev *client;
 
 	mutex_lock(&dev->clientlist_mutex);
 	list_for_each_entry(client, &dev->clientlist, list) {
 		if (!client->suspended)
-			drm_client_suspend(client, holds_console_lock);
+			drm_client_suspend(client);
 	}
 	mutex_unlock(&dev->clientlist_mutex);
 }
 EXPORT_SYMBOL(drm_client_dev_suspend);
 
-static int drm_client_resume(struct drm_client_dev *client, bool holds_console_lock)
+static int drm_client_resume(struct drm_client_dev *client)
 {
 	struct drm_device *dev = client->dev;
 	int ret = 0;
@@ -148,22 +162,25 @@ static int drm_client_resume(struct drm_client_dev *client, bool holds_console_l
 		return 0;
 
 	if (client->funcs && client->funcs->resume)
-		ret = client->funcs->resume(client, holds_console_lock);
+		ret = client->funcs->resume(client);
 	drm_dbg_kms(dev, "%s: ret=%d\n", client->name, ret);
 
 	client->suspended = false;
 
+	if (client->hotplug_pending)
+		drm_client_hotplug(client);
+
 	return ret;
 }
 
-void drm_client_dev_resume(struct drm_device *dev, bool holds_console_lock)
+void drm_client_dev_resume(struct drm_device *dev)
 {
 	struct drm_client_dev *client;
 
 	mutex_lock(&dev->clientlist_mutex);
 	list_for_each_entry(client, &dev->clientlist, list) {
 		if  (client->suspended)
-			drm_client_resume(client, holds_console_lock);
+			drm_client_resume(client);
 	}
 	mutex_unlock(&dev->clientlist_mutex);
 }

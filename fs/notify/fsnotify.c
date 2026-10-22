@@ -14,6 +14,9 @@
 #include <linux/fsnotify_backend.h>
 #include "fsnotify.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/fsnotify.h>
+
 /*
  * Clear all of the marks on an inode when it is being evicted from core
  */
@@ -28,63 +31,9 @@ void __fsnotify_vfsmount_delete(struct vfsmount *mnt)
 	fsnotify_clear_marks_by_mount(mnt);
 }
 
-/**
- * fsnotify_unmount_inodes - an sb is unmounting.  handle any watched inodes.
- * @sb: superblock being unmounted.
- *
- * Called during unmount with no locks held, so needs to be safe against
- * concurrent modifiers. We temporarily drop sb->s_inode_list_lock and CAN block.
- */
-static void fsnotify_unmount_inodes(struct super_block *sb)
+void __fsnotify_mntns_delete(struct mnt_namespace *mntns)
 {
-	struct inode *inode, *iput_inode = NULL;
-
-	spin_lock(&sb->s_inode_list_lock);
-	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
-		/*
-		 * We cannot __iget() an inode in state I_FREEING,
-		 * I_WILL_FREE, or I_NEW which is fine because by that point
-		 * the inode cannot have any associated watches.
-		 */
-		spin_lock(&inode->i_lock);
-		if (inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW)) {
-			spin_unlock(&inode->i_lock);
-			continue;
-		}
-
-		/*
-		 * If i_count is zero, the inode cannot have any watches and
-		 * doing an __iget/iput with SB_ACTIVE clear would actually
-		 * evict all inodes with zero i_count from icache which is
-		 * unnecessarily violent and may in fact be illegal to do.
-		 * However, we should have been called /after/ evict_inodes
-		 * removed all zero refcount inodes, in any case.  Test to
-		 * be sure.
-		 */
-		if (!atomic_read(&inode->i_count)) {
-			spin_unlock(&inode->i_lock);
-			continue;
-		}
-
-		__iget(inode);
-		spin_unlock(&inode->i_lock);
-		spin_unlock(&sb->s_inode_list_lock);
-
-		iput(iput_inode);
-
-		/* for each watch, send FS_UNMOUNT and then remove it */
-		fsnotify_inode(inode, FS_UNMOUNT);
-
-		fsnotify_inode_delete(inode);
-
-		iput_inode = inode;
-
-		cond_resched();
-		spin_lock(&sb->s_inode_list_lock);
-	}
-	spin_unlock(&sb->s_inode_list_lock);
-
-	iput(iput_inode);
+	fsnotify_clear_marks_by_mntns(mntns);
 }
 
 void fsnotify_sb_delete(struct super_block *sb)
@@ -95,7 +44,7 @@ void fsnotify_sb_delete(struct super_block *sb)
 	if (!sbinfo)
 		return;
 
-	fsnotify_unmount_inodes(sb);
+	fsnotify_unmount_inodes(sbinfo);
 	fsnotify_clear_marks_by_sb(sb);
 	/* Wait for outstanding object references from connectors */
 	wait_var_event(fsnotify_sb_watched_objects(sb),
@@ -107,7 +56,10 @@ void fsnotify_sb_delete(struct super_block *sb)
 
 void fsnotify_sb_free(struct super_block *sb)
 {
-	kfree(sb->s_fsnotify_info);
+	if (sb->s_fsnotify_info) {
+		WARN_ON_ONCE(!list_empty(&sb->s_fsnotify_info->inode_conn_list));
+		kfree(sb->s_fsnotify_info);
+	}
 }
 
 /*
@@ -127,7 +79,7 @@ void fsnotify_set_children_dentry_flags(struct inode *inode)
 	spin_lock(&inode->i_lock);
 	/* run all of the dentries associated with this inode.  Since this is a
 	 * directory, there damn well better only be one item on this list */
-	hlist_for_each_entry(alias, &inode->i_dentry, d_u.d_alias) {
+	for_each_alias(alias, inode) {
 		struct dentry *child;
 
 		/* run all of the children of the original inode and fix their
@@ -194,8 +146,8 @@ static bool fsnotify_event_needs_parent(struct inode *inode, __u32 mnt_mask,
 }
 
 /* Are there any inode/mount/sb objects that watch for these events? */
-static inline bool fsnotify_object_watched(struct inode *inode, __u32 mnt_mask,
-					   __u32 mask)
+static inline __u32 fsnotify_object_watched(struct inode *inode, __u32 mnt_mask,
+					    __u32 mask)
 {
 	__u32 marks_mask = READ_ONCE(inode->i_fsnotify_mask) | mnt_mask |
 			   READ_ONCE(inode->i_sb->s_fsnotify_mask);
@@ -265,8 +217,15 @@ int __fsnotify_parent(struct dentry *dentry, __u32 mask, const void *data,
 	/*
 	 * Include parent/name in notification either if some notification
 	 * groups require parent info or the parent is interested in this event.
+	 * The parent interest in ACCESS/MODIFY events does not apply to special
+	 * files, where read/write are not on the filesystem of the parent and
+	 * events can provide an undesirable side-channel for information
+	 * exfiltration.
 	 */
-	parent_interested = mask & p_mask & ALL_FSNOTIFY_EVENTS;
+	parent_interested = mask & p_mask & ALL_FSNOTIFY_EVENTS &&
+			    !(data_type == FSNOTIFY_EVENT_PATH &&
+			      d_is_special(dentry) &&
+			      (mask & (FS_ACCESS | FS_MODIFY)));
 	if (parent_needed || parent_interested) {
 		/* When notifying parent, child should be passed as data */
 		WARN_ON_ONCE(inode != fsnotify_data_inode(data, data_type));
@@ -420,7 +379,7 @@ static int send_to_group(__u32 mask, const void *data, int data_type,
 				     file_name, cookie, iter_info);
 }
 
-static struct fsnotify_mark *fsnotify_first_mark(struct fsnotify_mark_connector **connp)
+static struct fsnotify_mark *fsnotify_first_mark(struct fsnotify_mark_connector *const *connp)
 {
 	struct fsnotify_mark_connector *conn;
 	struct hlist_node *node = NULL;
@@ -432,7 +391,7 @@ static struct fsnotify_mark *fsnotify_first_mark(struct fsnotify_mark_connector 
 	return hlist_entry_safe(node, struct fsnotify_mark, obj_list);
 }
 
-static struct fsnotify_mark *fsnotify_next_mark(struct fsnotify_mark *mark)
+struct fsnotify_mark *fsnotify_next_mark(struct fsnotify_mark *mark)
 {
 	struct hlist_node *node = NULL;
 
@@ -538,14 +497,17 @@ int fsnotify(__u32 mask, const void *data, int data_type, struct inode *dir,
 {
 	const struct path *path = fsnotify_data_path(data, data_type);
 	struct super_block *sb = fsnotify_data_sb(data, data_type);
-	struct fsnotify_sb_info *sbinfo = fsnotify_sb_info(sb);
+	const struct fsnotify_mnt *mnt_data = fsnotify_data_mnt(data, data_type);
+	struct fsnotify_sb_info *sbinfo = sb ? fsnotify_sb_info(sb) : NULL;
 	struct fsnotify_iter_info iter_info = {};
 	struct mount *mnt = NULL;
 	struct inode *inode2 = NULL;
 	struct dentry *moved;
 	int inode2_type;
 	int ret = 0;
-	__u32 test_mask, marks_mask;
+	__u32 test_mask, marks_mask = 0;
+
+	trace_fsnotify(mask, data, data_type, dir, file_name, inode, cookie);
 
 	if (path)
 		mnt = real_mount(path->mnt);
@@ -578,17 +540,20 @@ int fsnotify(__u32 mask, const void *data, int data_type, struct inode *dir,
 	if ((!sbinfo || !sbinfo->sb_marks) &&
 	    (!mnt || !mnt->mnt_fsnotify_marks) &&
 	    (!inode || !inode->i_fsnotify_marks) &&
-	    (!inode2 || !inode2->i_fsnotify_marks))
+	    (!inode2 || !inode2->i_fsnotify_marks) &&
+	    (!mnt_data || !mnt_data->ns->n_fsnotify_marks))
 		return 0;
 
-	marks_mask = READ_ONCE(sb->s_fsnotify_mask);
+	if (sb)
+		marks_mask |= READ_ONCE(sb->s_fsnotify_mask);
 	if (mnt)
 		marks_mask |= READ_ONCE(mnt->mnt_fsnotify_mask);
 	if (inode)
 		marks_mask |= READ_ONCE(inode->i_fsnotify_mask);
 	if (inode2)
 		marks_mask |= READ_ONCE(inode2->i_fsnotify_mask);
-
+	if (mnt_data)
+		marks_mask |= READ_ONCE(mnt_data->ns->n_fsnotify_mask);
 
 	/*
 	 * If this is a modify event we may need to clear some ignore masks.
@@ -618,6 +583,10 @@ int fsnotify(__u32 mask, const void *data, int data_type, struct inode *dir,
 		iter_info.marks[inode2_type] =
 			fsnotify_first_mark(&inode2->i_fsnotify_marks);
 	}
+	if (mnt_data) {
+		iter_info.marks[FSNOTIFY_ITER_TYPE_MNTNS] =
+			fsnotify_first_mark(&mnt_data->ns->n_fsnotify_marks);
+	}
 
 	/*
 	 * We need to merge inode/vfsmount/sb mark lists so that e.g. inode mark
@@ -643,20 +612,20 @@ EXPORT_SYMBOL_GPL(fsnotify);
 
 #ifdef CONFIG_FANOTIFY_ACCESS_PERMISSIONS
 /*
- * At open time we check fsnotify_sb_has_priority_watchers() and set the
- * FMODE_NONOTIFY_ mode bits accordignly.
+ * At open time we check fsnotify_sb_has_priority_watchers(), call the open perm
+ * hook and set the FMODE_NONOTIFY_ mode bits accordignly.
  * Later, fsnotify permission hooks do not check if there are permission event
  * watches, but that there were permission event watches at open time.
  */
-void file_set_fsnotify_mode_from_watchers(struct file *file)
+int fsnotify_open_perm_and_set_mode(struct file *file)
 {
 	struct dentry *dentry = file->f_path.dentry, *parent;
 	struct super_block *sb = dentry->d_sb;
-	__u32 mnt_mask, p_mask;
+	__u32 mnt_mask, p_mask = 0;
 
 	/* Is it a file opened by fanotify? */
 	if (FMODE_FSNOTIFY_NONE(file->f_mode))
-		return;
+		return 0;
 
 	/*
 	 * Permission events is a super set of pre-content events, so if there
@@ -666,60 +635,98 @@ void file_set_fsnotify_mode_from_watchers(struct file *file)
 	if (likely(!fsnotify_sb_has_priority_watchers(sb,
 						FSNOTIFY_PRIO_CONTENT))) {
 		file_set_fsnotify_mode(file, FMODE_NONOTIFY_PERM);
-		return;
+		return 0;
 	}
 
 	/*
-	 * If there are permission event watchers but no pre-content event
-	 * watchers, set FMODE_NONOTIFY | FMODE_NONOTIFY_PERM to indicate that.
-	 */
-	if ((!d_is_dir(dentry) && !d_is_reg(dentry)) ||
-	    likely(!fsnotify_sb_has_priority_watchers(sb,
-						FSNOTIFY_PRIO_PRE_CONTENT))) {
-		file_set_fsnotify_mode(file, FMODE_NONOTIFY | FMODE_NONOTIFY_PERM);
-		return;
-	}
-
-	/*
-	 * OK, there are some pre-content watchers. Check if anybody is
-	 * watching for pre-content events on *this* file.
+	 * OK, there are some permission event watchers. Check if anybody is
+	 * watching for permission events on *this* file.
 	 */
 	mnt_mask = READ_ONCE(real_mount(file->f_path.mnt)->mnt_fsnotify_mask);
-	if (unlikely(fsnotify_object_watched(d_inode(dentry), mnt_mask,
-				     FSNOTIFY_PRE_CONTENT_EVENTS))) {
-		/* Enable pre-content events */
-		file_set_fsnotify_mode(file, 0);
-		return;
-	}
-
-	/* Is parent watching for pre-content events on this file? */
+	p_mask = fsnotify_object_watched(d_inode(dentry), mnt_mask,
+					 ALL_FSNOTIFY_PERM_EVENTS);
 	if (dentry->d_flags & DCACHE_FSNOTIFY_PARENT_WATCHED) {
 		parent = dget_parent(dentry);
-		p_mask = fsnotify_inode_watches_children(d_inode(parent));
+		p_mask |= fsnotify_inode_watches_children(d_inode(parent));
 		dput(parent);
-		if (p_mask & FSNOTIFY_PRE_CONTENT_EVENTS) {
-			/* Enable pre-content events */
-			file_set_fsnotify_mode(file, 0);
-			return;
-		}
 	}
-	/* Nobody watching for pre-content events from this file */
-	file_set_fsnotify_mode(file, FMODE_NONOTIFY | FMODE_NONOTIFY_PERM);
+
+	/*
+	 * Legacy FAN_ACCESS_PERM events have very high performance overhead,
+	 * so unlikely to be used in the wild. If they are used there will be
+	 * no optimizations at all.
+	 */
+	if (unlikely(p_mask & FS_ACCESS_PERM)) {
+		/* Enable all permission and pre-content events */
+		file_set_fsnotify_mode(file, 0);
+		goto open_perm;
+	}
+
+	/*
+	 * Pre-content events are only supported on regular files.
+	 * If there are pre-content event watchers and no permission access
+	 * watchers, set FMODE_NONOTIFY | FMODE_NONOTIFY_PERM to indicate that.
+	 * That is the common case with HSM service.
+	 */
+	if (d_is_reg(dentry) && (p_mask & FSNOTIFY_PRE_CONTENT_EVENTS)) {
+		file_set_fsnotify_mode(file, FMODE_NONOTIFY |
+					     FMODE_NONOTIFY_PERM);
+		goto open_perm;
+	}
+
+	/* Nobody watching permission and pre-content events on this file */
+	file_set_fsnotify_mode(file, FMODE_NONOTIFY_PERM);
+
+open_perm:
+	/*
+	 * Send open perm events depending on object masks and regardless of
+	 * FMODE_NONOTIFY_PERM.
+	 */
+	if (file->f_flags & __FMODE_EXEC && p_mask & FS_OPEN_EXEC_PERM) {
+		int ret = fsnotify_path(&file->f_path, FS_OPEN_EXEC_PERM);
+
+		if (ret)
+			return ret;
+	}
+
+	if (p_mask & FS_OPEN_PERM)
+		return fsnotify_path(&file->f_path, FS_OPEN_PERM);
+
+	return 0;
 }
 #endif
+
+void fsnotify_mnt(__u32 mask, struct mnt_namespace *ns, struct vfsmount *mnt)
+{
+	struct fsnotify_mnt data = {
+		.ns = ns,
+		.mnt_id = real_mount(mnt)->mnt_id_unique,
+	};
+
+	if (WARN_ON_ONCE(!ns))
+		return;
+
+	/*
+	 * This is an optimization as well as making sure fsnotify_init() has
+	 * been called.
+	 */
+	if (!ns->n_fsnotify_marks)
+		return;
+
+	fsnotify(mask, &data, FSNOTIFY_EVENT_MNT, NULL, NULL, NULL, 0);
+}
 
 static __init int fsnotify_init(void)
 {
 	int ret;
 
-	BUILD_BUG_ON(HWEIGHT32(ALL_FSNOTIFY_BITS) != 24);
+	BUILD_BUG_ON(HWEIGHT32(ALL_FSNOTIFY_BITS) != 26);
 
 	ret = init_srcu_struct(&fsnotify_mark_srcu);
 	if (ret)
 		panic("initializing fsnotify_mark_srcu");
 
-	fsnotify_mark_connector_cachep = KMEM_CACHE(fsnotify_mark_connector,
-						    SLAB_PANIC);
+	fsnotify_init_connector_caches();
 
 	return 0;
 }

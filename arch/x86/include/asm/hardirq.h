@@ -3,50 +3,65 @@
 #define _ASM_X86_HARDIRQ_H
 
 #include <linux/threads.h>
-#include <asm/current.h>
 
-typedef struct {
-#if IS_ENABLED(CONFIG_KVM_INTEL)
-	u8	     kvm_cpu_l1tf_flush_l1d;
-#endif
-	unsigned int __nmi_count;	/* arch dependent */
+enum irq_stat_counts {
+	IRQ_COUNT_NMI,
 #ifdef CONFIG_X86_LOCAL_APIC
-	unsigned int apic_timer_irqs;	/* arch dependent */
-	unsigned int irq_spurious_count;
-	unsigned int icr_read_retry_count;
+	IRQ_COUNT_APIC_TIMER,
+	IRQ_COUNT_SPURIOUS,
+	IRQ_COUNT_APIC_PERF,
+	IRQ_COUNT_IRQ_WORK,
+	IRQ_COUNT_ICR_READ_RETRY,
+	IRQ_COUNT_X86_PLATFORM_IPI,
 #endif
-#if IS_ENABLED(CONFIG_KVM)
-	unsigned int kvm_posted_intr_ipis;
-	unsigned int kvm_posted_intr_wakeup_ipis;
-	unsigned int kvm_posted_intr_nested_ipis;
-#endif
-	unsigned int x86_platform_ipis;	/* arch dependent */
-	unsigned int apic_perf_irqs;
-	unsigned int apic_irq_work_irqs;
 #ifdef CONFIG_SMP
-	unsigned int irq_resched_count;
-	unsigned int irq_call_count;
+	IRQ_COUNT_RESCHEDULE,
+	IRQ_COUNT_CALL_FUNCTION,
 #endif
-	unsigned int irq_tlb_count;
+	IRQ_COUNT_TLB,
 #ifdef CONFIG_X86_THERMAL_VECTOR
-	unsigned int irq_thermal_count;
+	IRQ_COUNT_THERMAL_APIC,
 #endif
 #ifdef CONFIG_X86_MCE_THRESHOLD
-	unsigned int irq_threshold_count;
+	IRQ_COUNT_THRESHOLD_APIC,
 #endif
 #ifdef CONFIG_X86_MCE_AMD
-	unsigned int irq_deferred_error_count;
+	IRQ_COUNT_DEFERRED_ERROR,
+#endif
+#ifdef CONFIG_X86_MCE
+	IRQ_COUNT_MCE_EXCEPTION,
+	IRQ_COUNT_MCE_POLL,
 #endif
 #ifdef CONFIG_X86_HV_CALLBACK_VECTOR
-	unsigned int irq_hv_callback_count;
+	IRQ_COUNT_HYPERVISOR_CALLBACK,
 #endif
 #if IS_ENABLED(CONFIG_HYPERV)
-	unsigned int irq_hv_reenlightenment_count;
-	unsigned int hyperv_stimer0_count;
+	IRQ_COUNT_HYPERV_REENLIGHTENMENT,
+	IRQ_COUNT_HYPERV_STIMER0,
+#endif
+#if IS_ENABLED(CONFIG_KVM)
+	IRQ_COUNT_POSTED_INTR,
+	IRQ_COUNT_POSTED_INTR_NESTED,
+	IRQ_COUNT_POSTED_INTR_WAKEUP,
+#endif
+#ifdef CONFIG_GUEST_PERF_EVENTS
+	IRQ_COUNT_PERF_GUEST_MEDIATED_PMI,
 #endif
 #ifdef CONFIG_X86_POSTED_MSI
-	unsigned int posted_msi_notification_count;
+	IRQ_COUNT_POSTED_MSI_NOTIFICATION,
 #endif
+	IRQ_COUNT_PIC_APIC_ERROR,
+#ifdef CONFIG_X86_IO_APIC
+	IRQ_COUNT_IOAPIC_MISROUTED,
+#endif
+	IRQ_COUNT_MAX,
+};
+
+typedef struct {
+#if IS_ENABLED(CONFIG_CPU_MITIGATIONS) && IS_ENABLED(CONFIG_KVM_INTEL)
+	u8	     kvm_cpu_l1tf_flush_l1d;
+#endif
+	unsigned int counts[IRQ_COUNT_MAX];
 } ____cacheline_aligned irq_cpustat_t;
 
 DECLARE_PER_CPU_SHARED_ALIGNED(irq_cpustat_t, irq_stat);
@@ -56,19 +71,26 @@ DECLARE_PER_CPU_ALIGNED(struct pi_desc, posted_msi_pi_desc);
 #endif
 #define __ARCH_IRQ_STAT
 
-#define inc_irq_stat(member)	this_cpu_inc(irq_stat.member)
+#define inc_irq_stat(index)	this_cpu_inc(irq_stat.counts[IRQ_COUNT_##index])
+void irq_stat_inc_and_enable(enum irq_stat_counts which);
+
+#ifdef CONFIG_X86_LOCAL_APIC
+#define inc_perf_irq_stat()	inc_irq_stat(APIC_PERF)
+#else
+#define inc_perf_irq_stat()	do { } while (0)
+#endif
 
 extern void ack_bad_irq(unsigned int irq);
 
+#ifdef CONFIG_PROC_FS
 extern u64 arch_irq_stat_cpu(unsigned int cpu);
 #define arch_irq_stat_cpu	arch_irq_stat_cpu
+#endif
 
-extern u64 arch_irq_stat(void);
-#define arch_irq_stat		arch_irq_stat
+DECLARE_PER_CPU_CACHE_HOT(u16, __softirq_pending);
+#define local_softirq_pending_ref       __softirq_pending
 
-#define local_softirq_pending_ref       pcpu_hot.softirq_pending
-
-#if IS_ENABLED(CONFIG_KVM_INTEL)
+#if IS_ENABLED(CONFIG_CPU_MITIGATIONS) && IS_ENABLED(CONFIG_KVM_INTEL)
 /*
  * This function is called from noinstr interrupt contexts
  * and must be inlined to not get instrumentation.

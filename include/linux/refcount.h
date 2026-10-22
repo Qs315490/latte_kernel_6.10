@@ -87,6 +87,15 @@
  * The decrements dec_and_test() and sub_and_test() also provide acquire
  * ordering on success.
  *
+ * refcount_{add|inc}_not_zero_acquire() and refcount_set_release() provide
+ * acquire and release ordering for cases when the memory occupied by the
+ * object might be reused to store another object. This is important for the
+ * cases where secondary validation is required to detect such reuse, e.g.
+ * SLAB_TYPESAFE_BY_RCU. The secondary validation checks have to happen after
+ * the refcount is taken, hence acquire order is necessary. Similarly, when the
+ * object is initialized, all stores to its attributes should be visible before
+ * the refcount is set, otherwise a stale attribute value might be used by
+ * another task which succeeds in taking a refcount to the new object.
  */
 
 #ifndef _LINUX_REFCOUNT_H
@@ -126,6 +135,31 @@ static inline void refcount_set(refcount_t *r, int n)
 }
 
 /**
+ * refcount_set_release - set a refcount's value with release ordering
+ * @r: the refcount
+ * @n: value to which the refcount will be set
+ *
+ * This function should be used when memory occupied by the object might be
+ * reused to store another object -- consider SLAB_TYPESAFE_BY_RCU.
+ *
+ * Provides release memory ordering which will order previous memory operations
+ * against this store. This ensures all updates to this object are visible
+ * once the refcount is set and stale values from the object previously
+ * occupying this memory are overwritten with new ones.
+ *
+ * This function should be called only after new object is fully initialized.
+ * After this call the object should be considered visible to other tasks even
+ * if it was not yet added into an object collection normally used to discover
+ * it. This is because other tasks might have discovered the object previously
+ * occupying the same memory and after memory reuse they can succeed in taking
+ * refcount to the new object and start using it.
+ */
+static inline void refcount_set_release(refcount_t *r, int n)
+{
+	atomic_set_release(&r->refs, n);
+}
+
+/**
  * refcount_read - get a refcount's value
  * @r: the refcount
  *
@@ -136,7 +170,7 @@ static inline unsigned int refcount_read(const refcount_t *r)
 	return atomic_read(&r->refs);
 }
 
-static inline __must_check __signed_wrap
+static inline __must_check
 bool __refcount_add_not_zero(int i, refcount_t *r, int *oldp)
 {
 	int old = refcount_read(r);
@@ -178,7 +212,72 @@ static inline __must_check bool refcount_add_not_zero(int i, refcount_t *r)
 	return __refcount_add_not_zero(i, r, NULL);
 }
 
-static inline __signed_wrap
+static inline __must_check
+bool __refcount_add_not_zero_limited_acquire(int i, refcount_t *r, int *oldp,
+					     int limit)
+{
+	int old = refcount_read(r);
+
+	do {
+		if (!old)
+			break;
+
+		if (i > limit - old) {
+			if (oldp)
+				*oldp = old;
+			return false;
+		}
+	} while (!atomic_try_cmpxchg_acquire(&r->refs, &old, old + i));
+
+	if (oldp)
+		*oldp = old;
+
+	if (unlikely(old < 0 || old + i < 0))
+		refcount_warn_saturate(r, REFCOUNT_ADD_NOT_ZERO_OVF);
+
+	return old;
+}
+
+static inline __must_check bool
+__refcount_inc_not_zero_limited_acquire(refcount_t *r, int *oldp, int limit)
+{
+	return __refcount_add_not_zero_limited_acquire(1, r, oldp, limit);
+}
+
+static inline __must_check
+bool __refcount_add_not_zero_acquire(int i, refcount_t *r, int *oldp)
+{
+	return __refcount_add_not_zero_limited_acquire(i, r, oldp, INT_MAX);
+}
+
+/**
+ * refcount_add_not_zero_acquire - add a value to a refcount with acquire ordering unless it is 0
+ *
+ * @i: the value to add to the refcount
+ * @r: the refcount
+ *
+ * Will saturate at REFCOUNT_SATURATED and WARN.
+ *
+ * This function should be used when memory occupied by the object might be
+ * reused to store another object -- consider SLAB_TYPESAFE_BY_RCU.
+ *
+ * Provides acquire memory ordering on success, it is assumed the caller has
+ * guaranteed the object memory to be stable (RCU, etc.). It does provide a
+ * control dependency and thereby orders future stores. See the comment on top.
+ *
+ * Use of this function is not recommended for the normal reference counting
+ * use case in which references are taken and released one at a time.  In these
+ * cases, refcount_inc_not_zero_acquire() should instead be used to increment a
+ * reference count.
+ *
+ * Return: false if the passed refcount is 0, true otherwise
+ */
+static inline __must_check bool refcount_add_not_zero_acquire(int i, refcount_t *r)
+{
+	return __refcount_add_not_zero_acquire(i, r, NULL);
+}
+
+static inline
 void __refcount_add(int i, refcount_t *r, int *oldp)
 {
 	int old = atomic_fetch_add_relaxed(i, &r->refs);
@@ -236,6 +335,32 @@ static inline __must_check bool refcount_inc_not_zero(refcount_t *r)
 	return __refcount_inc_not_zero(r, NULL);
 }
 
+static inline __must_check bool __refcount_inc_not_zero_acquire(refcount_t *r, int *oldp)
+{
+	return __refcount_add_not_zero_acquire(1, r, oldp);
+}
+
+/**
+ * refcount_inc_not_zero_acquire - increment a refcount with acquire ordering unless it is 0
+ * @r: the refcount to increment
+ *
+ * Similar to refcount_inc_not_zero(), but provides acquire memory ordering on
+ * success.
+ *
+ * This function should be used when memory occupied by the object might be
+ * reused to store another object -- consider SLAB_TYPESAFE_BY_RCU.
+ *
+ * Provides acquire memory ordering on success, it is assumed the caller has
+ * guaranteed the object memory to be stable (RCU, etc.). It does provide a
+ * control dependency and thereby orders future stores. See the comment on top.
+ *
+ * Return: true if the increment was successful, false otherwise
+ */
+static inline __must_check bool refcount_inc_not_zero_acquire(refcount_t *r)
+{
+	return __refcount_inc_not_zero_acquire(r, NULL);
+}
+
 static inline void __refcount_inc(refcount_t *r, int *oldp)
 {
 	__refcount_add(1, r, oldp);
@@ -258,7 +383,7 @@ static inline void refcount_inc(refcount_t *r)
 	__refcount_inc(r, NULL);
 }
 
-static inline __must_check __signed_wrap
+static inline __must_check
 bool __refcount_sub_and_test(int i, refcount_t *r, int *oldp)
 {
 	int old = atomic_fetch_sub_release(i, &r->refs);
@@ -353,9 +478,9 @@ static inline void refcount_dec(refcount_t *r)
 
 extern __must_check bool refcount_dec_if_one(refcount_t *r);
 extern __must_check bool refcount_dec_not_one(refcount_t *r);
-extern __must_check bool refcount_dec_and_mutex_lock(refcount_t *r, struct mutex *lock) __cond_acquires(lock);
-extern __must_check bool refcount_dec_and_lock(refcount_t *r, spinlock_t *lock) __cond_acquires(lock);
+extern __must_check bool refcount_dec_and_mutex_lock(refcount_t *r, struct mutex *lock) __cond_acquires(true, lock);
+extern __must_check bool refcount_dec_and_lock(refcount_t *r, spinlock_t *lock) __cond_acquires(true, lock);
 extern __must_check bool refcount_dec_and_lock_irqsave(refcount_t *r,
 						       spinlock_t *lock,
-						       unsigned long *flags) __cond_acquires(lock);
+						       unsigned long *flags) __cond_acquires(true, lock);
 #endif /* _LINUX_REFCOUNT_H */

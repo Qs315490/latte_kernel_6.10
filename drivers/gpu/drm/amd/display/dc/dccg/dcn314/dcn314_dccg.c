@@ -29,6 +29,7 @@
 
 #include "dcn31/dcn31_dccg.h"
 #include "dcn314_dccg.h"
+#include "dcn20/dcn20_dccg.h"
 
 #define TO_DCN_DCCG(dccg)\
 	container_of(dccg, struct dcn_dccg, base)
@@ -285,6 +286,28 @@ void dccg314_set_dpstreamclk(
 	}
 }
 
+static void dccg314_set_hdmistreamclk(
+		struct dccg *dccg,
+		enum streamclk_source src,
+		uint32_t otg_inst)
+{
+	struct dcn_dccg *dccg_dcn = TO_DCN_DCCG(dccg);
+
+	/* set the dtbclk_p source */
+	dccg314_set_dtbclk_p_src(dccg, src, otg_inst);
+
+	if (src == REFCLK) {
+		REG_UPDATE_2(HDMISTREAMCLK_CNTL,
+				HDMISTREAMCLK0_EN, 0,             /* SEL_REFCLK */
+				HDMISTREAMCLK0_DTO_FORCE_DIS, 1); /* DTO_FORCE_BYPASS */
+	} else {
+		REG_UPDATE_3(HDMISTREAMCLK_CNTL,
+				HDMISTREAMCLK0_EN, 1,             /* selects one of the dtbclk_p as per HDMISTREAMCLK0_SRC_SEL */
+				HDMISTREAMCLK0_SRC_SEL, otg_inst, /* Selects dtbclk_p as source for hdmistreamclk */
+				HDMISTREAMCLK0_DTO_FORCE_DIS, 1); /* DTO_FORCE_BYPASS */
+	}
+}
+
 static void dccg314_init(struct dccg *dccg)
 {
 	int otg_inst;
@@ -354,6 +377,9 @@ static void dccg314_dpp_root_clock_control(
 }
 
 static const struct dccg_funcs dccg314_funcs = {
+	.enable_hdmicharclk = dccg31_enable_hdmicharclk,
+	.disable_hdmicharclk = dccg31_disable_hdmicharclk,
+	.set_hdmistreamclk = dccg314_set_hdmistreamclk,
 	.update_dpp_dto = dccg31_update_dpp_dto,
 	.dpp_root_clock_control = dccg314_dpp_root_clock_control,
 	.get_dccg_ref_freq = dccg31_get_dccg_ref_freq,
@@ -377,7 +403,12 @@ static const struct dccg_funcs dccg314_funcs = {
 	.get_pixel_rate_div = dccg314_get_pixel_rate_div,
 	.trigger_dio_fifo_resync = dccg314_trigger_dio_fifo_resync,
 	.set_valid_pixel_rate = dccg314_set_valid_pixel_rate,
-	.set_dtbclk_p_src = dccg314_set_dtbclk_p_src
+	.set_dtbclk_p_src = dccg314_set_dtbclk_p_src,
+	.dccg_read_reg_state = dccg31_read_reg_state,
+	.refclk_setup = dccg2_refclk_setup, /* Deprecated - for backward compatibility only */
+	.allow_clock_gating = dccg2_allow_clock_gating,
+	.enable_memory_low_power = dccg2_enable_memory_low_power,
+	.is_s0i3_golden_init_wa_done = dccg2_is_s0i3_golden_init_wa_done /* Deprecated - for backward compatibility only */
 };
 
 struct dccg *dccg314_create(
@@ -386,7 +417,7 @@ struct dccg *dccg314_create(
 	const struct dccg_shift *dccg_shift,
 	const struct dccg_mask *dccg_mask)
 {
-	struct dcn_dccg *dccg_dcn = kzalloc(sizeof(*dccg_dcn), GFP_KERNEL);
+	struct dcn_dccg *dccg_dcn = kzalloc_obj(*dccg_dcn);
 	struct dccg *base;
 
 	if (dccg_dcn == NULL) {

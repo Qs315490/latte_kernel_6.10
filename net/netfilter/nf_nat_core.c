@@ -68,8 +68,6 @@ static void nf_nat_ipv4_decode_session(struct sk_buff *skb,
 		fl4->daddr = t->dst.u3.ip;
 		if (t->dst.protonum == IPPROTO_TCP ||
 		    t->dst.protonum == IPPROTO_UDP ||
-		    t->dst.protonum == IPPROTO_UDPLITE ||
-		    t->dst.protonum == IPPROTO_DCCP ||
 		    t->dst.protonum == IPPROTO_SCTP)
 			fl4->fl4_dport = t->dst.u.all;
 	}
@@ -80,8 +78,6 @@ static void nf_nat_ipv4_decode_session(struct sk_buff *skb,
 		fl4->saddr = t->src.u3.ip;
 		if (t->dst.protonum == IPPROTO_TCP ||
 		    t->dst.protonum == IPPROTO_UDP ||
-		    t->dst.protonum == IPPROTO_UDPLITE ||
-		    t->dst.protonum == IPPROTO_DCCP ||
 		    t->dst.protonum == IPPROTO_SCTP)
 			fl4->fl4_sport = t->src.u.all;
 	}
@@ -101,8 +97,6 @@ static void nf_nat_ipv6_decode_session(struct sk_buff *skb,
 		fl6->daddr = t->dst.u3.in6;
 		if (t->dst.protonum == IPPROTO_TCP ||
 		    t->dst.protonum == IPPROTO_UDP ||
-		    t->dst.protonum == IPPROTO_UDPLITE ||
-		    t->dst.protonum == IPPROTO_DCCP ||
 		    t->dst.protonum == IPPROTO_SCTP)
 			fl6->fl6_dport = t->dst.u.all;
 	}
@@ -113,8 +107,6 @@ static void nf_nat_ipv6_decode_session(struct sk_buff *skb,
 		fl6->saddr = t->src.u3.in6;
 		if (t->dst.protonum == IPPROTO_TCP ||
 		    t->dst.protonum == IPPROTO_UDP ||
-		    t->dst.protonum == IPPROTO_UDPLITE ||
-		    t->dst.protonum == IPPROTO_DCCP ||
 		    t->dst.protonum == IPPROTO_SCTP)
 			fl6->fl6_sport = t->src.u.all;
 	}
@@ -248,7 +240,7 @@ static noinline bool
 nf_nat_used_tuple_new(const struct nf_conntrack_tuple *tuple,
 		      const struct nf_conn *ignored_ct)
 {
-	static const unsigned long uses_nat = IPS_NAT_MASK | IPS_SEQ_ADJUST_BIT;
+	static const unsigned long uses_nat = IPS_NAT_MASK | IPS_SEQ_ADJUST;
 	const struct nf_conntrack_tuple_hash *thash;
 	const struct nf_conntrack_zone *zone;
 	struct nf_conn *ct;
@@ -287,30 +279,24 @@ nf_nat_used_tuple_new(const struct nf_conntrack_tuple *tuple,
 	zone = nf_ct_zone(ignored_ct);
 
 	thash = nf_conntrack_find_get(net, zone, tuple);
-	if (unlikely(!thash)) /* clashing entry went away */
-		return false;
+	if (unlikely(!thash)) {
+		struct nf_conntrack_tuple reply;
+
+		nf_ct_invert_tuple(&reply, tuple);
+		thash = nf_conntrack_find_get(net, zone, &reply);
+		if (!thash) /* clashing entry went away */
+			return false;
+	}
 
 	ct = nf_ct_tuplehash_to_ctrack(thash);
-
-	/* NB: IP_CT_DIR_ORIGINAL should be impossible because
-	 * nf_nat_used_tuple() handles origin collisions.
-	 *
-	 * Handle remote chance other CPU confirmed its ct right after.
-	 */
-	if (thash->tuple.dst.dir != IP_CT_DIR_REPLY)
-		goto out;
 
 	/* clashing connection subject to NAT? Retry with new tuple. */
 	if (READ_ONCE(ct->status) & uses_nat)
 		goto out;
 
 	if (nf_ct_tuple_equal(&ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple,
-			      &ignored_ct->tuplehash[IP_CT_DIR_REPLY].tuple) &&
-	    nf_ct_tuple_equal(&ct->tuplehash[IP_CT_DIR_REPLY].tuple,
-			      &ignored_ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple)) {
+			      &ignored_ct->tuplehash[IP_CT_DIR_REPLY].tuple))
 		taken = false;
-		goto out;
-	}
 out:
 	nf_ct_put(ct);
 	return taken;
@@ -425,8 +411,6 @@ static bool l4proto_in_range(const struct nf_conntrack_tuple *tuple,
 	case IPPROTO_GRE: /* all fall though */
 	case IPPROTO_TCP:
 	case IPPROTO_UDP:
-	case IPPROTO_UDPLITE:
-	case IPPROTO_DCCP:
 	case IPPROTO_SCTP:
 		if (maniptype == NF_NAT_MANIP_SRC)
 			port = tuple->src.u.all;
@@ -623,10 +607,8 @@ static void nf_nat_l4proto_unique_tuple(struct nf_conntrack_tuple *tuple,
 		goto find_free_id;
 #endif
 	case IPPROTO_UDP:
-	case IPPROTO_UDPLITE:
 	case IPPROTO_TCP:
 	case IPPROTO_SCTP:
-	case IPPROTO_DCCP:
 		if (maniptype == NF_NAT_MANIP_SRC)
 			keyptr = &tuple->src.u.all;
 		else
@@ -1199,6 +1181,16 @@ int nf_nat_register_fn(struct net *net, u8 pf, const struct nf_hook_ops *ops,
 	struct nf_hook_ops *nat_ops;
 	int i, ret;
 
+#ifndef MODULE
+	/* If nf_nat_core is built-in and nf_nat_init() fails, dependent
+	 * modules like nft_chain_nat.ko may still call this function.
+	 * However, nat_net would be invalid, likely pointing to some other
+	 * per-net structure.
+	 */
+	if (WARN_ON_ONCE(!nf_nat_hook))
+		return -EOPNOTSUPP;
+#endif
+
 	if (WARN_ON_ONCE(pf >= ARRAY_SIZE(nat_net->nat_proto_net)))
 		return -EINVAL;
 
@@ -1225,7 +1217,7 @@ int nf_nat_register_fn(struct net *net, u8 pf, const struct nf_hook_ops *ops,
 		}
 
 		for (i = 0; i < ops_count; i++) {
-			priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+			priv = kzalloc_obj(*priv);
 			if (priv) {
 				nat_ops[i].priv = priv;
 				continue;
@@ -1240,9 +1232,11 @@ int nf_nat_register_fn(struct net *net, u8 pf, const struct nf_hook_ops *ops,
 		ret = nf_register_net_hooks(net, nat_ops, ops_count);
 		if (ret < 0) {
 			mutex_unlock(&nf_nat_proto_mutex);
-			for (i = 0; i < ops_count; i++)
-				kfree(nat_ops[i].priv);
-			kfree(nat_ops);
+			for (i = 0; i < ops_count; i++) {
+				priv = nat_ops[i].priv;
+				kfree_rcu(priv, rcu_head);
+			}
+			kfree_rcu(nat_ops, rcu);
 			return ret;
 		}
 
@@ -1306,7 +1300,7 @@ void nf_nat_unregister_fn(struct net *net, u8 pf, const struct nf_hook_ops *ops,
 		}
 
 		nat_proto_net->nat_hook_ops = NULL;
-		kfree(nat_ops);
+		kfree_rcu(nat_ops, rcu);
 	}
 unlock:
 	mutex_unlock(&nf_nat_proto_mutex);
@@ -1357,6 +1351,7 @@ static int __init nf_nat_init(void)
 		RCU_INIT_POINTER(nf_nat_hook, NULL);
 		nf_ct_helper_expectfn_unregister(&follow_master_nat);
 		synchronize_net();
+		nf_ct_helper_expectfn_destroy(&follow_master_nat);
 		unregister_pernet_subsys(&nat_net_ops);
 		kvfree(nf_nat_bysource);
 	}
@@ -1374,6 +1369,7 @@ static void __exit nf_nat_cleanup(void)
 	RCU_INIT_POINTER(nf_nat_hook, NULL);
 
 	synchronize_net();
+	nf_ct_helper_expectfn_destroy(&follow_master_nat);
 	kvfree(nf_nat_bysource);
 	unregister_pernet_subsys(&nat_net_ops);
 }

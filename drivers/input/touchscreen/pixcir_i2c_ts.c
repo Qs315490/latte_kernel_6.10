@@ -410,26 +410,25 @@ static int pixcir_i2c_ts_suspend(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	struct pixcir_i2c_ts_data *ts = i2c_get_clientdata(client);
 	struct input_dev *input = ts->input;
-	int ret = 0;
+	int error;
 
-	mutex_lock(&input->mutex);
+	guard(mutex)(&input->mutex);
 
 	if (device_may_wakeup(&client->dev)) {
 		if (!input_device_enabled(input)) {
-			ret = pixcir_start(ts);
-			if (ret) {
+			error = pixcir_start(ts);
+			if (error) {
 				dev_err(dev, "Failed to start\n");
-				goto unlock;
+				return error;
 			}
 		}
 	} else if (input_device_enabled(input)) {
-		ret = pixcir_stop(ts);
+		error = pixcir_stop(ts);
+		if (error)
+			return error;
 	}
 
-unlock:
-	mutex_unlock(&input->mutex);
-
-	return ret;
+	return 0;
 }
 
 static int pixcir_i2c_ts_resume(struct device *dev)
@@ -437,26 +436,25 @@ static int pixcir_i2c_ts_resume(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	struct pixcir_i2c_ts_data *ts = i2c_get_clientdata(client);
 	struct input_dev *input = ts->input;
-	int ret = 0;
+	int error;
 
-	mutex_lock(&input->mutex);
+	guard(mutex)(&input->mutex);
 
 	if (device_may_wakeup(&client->dev)) {
 		if (!input_device_enabled(input)) {
-			ret = pixcir_stop(ts);
-			if (ret) {
+			error = pixcir_stop(ts);
+			if (error) {
 				dev_err(dev, "Failed to stop\n");
-				goto unlock;
+				return error;
 			}
 		}
 	} else if (input_device_enabled(input)) {
-		ret = pixcir_start(ts);
+		error = pixcir_start(ts);
+		if (error)
+			return error;
 	}
 
-unlock:
-	mutex_unlock(&input->mutex);
-
-	return ret;
+	return 0;
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(pixcir_dev_pm_ops,
@@ -582,8 +580,8 @@ static const struct pixcir_i2c_chip_data pixcir_tangoc_data = {
 };
 
 static const struct i2c_device_id pixcir_i2c_ts_id[] = {
-	{ "pixcir_ts", (unsigned long) &pixcir_ts_data },
-	{ "pixcir_tangoc", (unsigned long) &pixcir_tangoc_data },
+	{ .name = "pixcir_ts", .driver_data = (unsigned long)&pixcir_ts_data },
+	{ .name = "pixcir_tangoc", .driver_data = (unsigned long)&pixcir_tangoc_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pixcir_i2c_ts_id);

@@ -197,7 +197,7 @@ static void __init of_unittest_dynamic(void)
 	}
 
 	/* Array of 4 properties for the purpose of testing */
-	prop = kcalloc(4, sizeof(*prop), GFP_KERNEL);
+	prop = kzalloc_objs(*prop, 4);
 	if (!prop) {
 		unittest(0, "kzalloc() failed\n");
 		return;
@@ -379,7 +379,7 @@ static void __init of_unittest_check_phandles(void)
 			}
 		}
 
-		nh = kzalloc(sizeof(*nh), GFP_KERNEL);
+		nh = kzalloc_obj(*nh);
 		if (!nh)
 			return;
 
@@ -713,6 +713,7 @@ static void __init of_unittest_parse_phandle_with_args_map(void)
 static void __init of_unittest_property_string(void)
 {
 	const char *strings[4];
+	const struct property *prop;
 	struct device_node *np;
 	int rc;
 
@@ -789,6 +790,37 @@ static void __init of_unittest_property_string(void)
 	strings[1] = NULL;
 	rc = of_property_read_string_array(np, "phandle-list-names", strings, 1);
 	unittest(rc == 1 && strings[1] == NULL, "Overwrote end of string array; rc=%i, str='%s'\n", rc, strings[1]);
+
+	/* of_prop_next_string() tests */
+	prop = of_find_property(np, "phandle-list-names", NULL);
+	strings[0] = of_prop_next_string(prop, NULL);
+	unittest(strings[0] && !strcmp(strings[0], "first"),
+		 "of_prop_next_string() failure; got '%s'\n", strings[0]);
+	strings[0] = of_prop_next_string(prop, strings[0]);
+	unittest(strings[0] && !strcmp(strings[0], "second"),
+		 "of_prop_next_string() failure; got '%s'\n", strings[0]);
+	strings[0] = of_prop_next_string(prop, strings[0]);
+	unittest(strings[0] && !strcmp(strings[0], "third"),
+		 "of_prop_next_string() failure; got '%s'\n", strings[0]);
+	strings[0] = of_prop_next_string(prop, strings[0]);
+	unittest(!strings[0],
+		 "of_prop_next_string() should return NULL at end of list\n");
+
+	prop = of_find_property(np, "unterminated-string", NULL);
+	strings[0] = of_prop_next_string(prop, NULL);
+	unittest(!strings[0],
+		 "of_prop_next_string() should reject unterminated first string\n");
+
+	prop = of_find_property(np, "unterminated-string-list", NULL);
+	strings[0] = of_prop_next_string(prop, NULL);
+	unittest(strings[0] && !strcmp(strings[0], "first"),
+		 "of_prop_next_string() failure; got '%s'\n", strings[0]);
+	strings[0] = of_prop_next_string(prop, strings[0]);
+	unittest(strings[0] && !strcmp(strings[0], "second"),
+		 "of_prop_next_string() failure; got '%s'\n", strings[0]);
+	strings[0] = of_prop_next_string(prop, strings[0]);
+	unittest(!strings[0],
+		 "of_prop_next_string() should reject unterminated trailing string\n");
 }
 
 #define propcmp(p1, p2) (((p1)->length == (p2)->length) && \
@@ -804,11 +836,13 @@ static void __init of_unittest_property_copy(void)
 
 	new = __of_prop_dup(&p1, GFP_KERNEL);
 	unittest(new && propcmp(&p1, new), "empty property didn't copy correctly\n");
-	__of_prop_free(new);
+	if (new)
+		__of_prop_free(new);
 
 	new = __of_prop_dup(&p2, GFP_KERNEL);
 	unittest(new && propcmp(&p2, new), "non-empty property didn't copy correctly\n");
-	__of_prop_free(new);
+	if (new)
+		__of_prop_free(new);
 #endif
 }
 
@@ -894,8 +928,6 @@ static void __init of_unittest_changeset(void)
 
 	unittest(!of_changeset_apply(&chgset), "apply failed\n");
 
-	of_node_put(nchangeset);
-
 	/* Make sure node names are constructed correctly */
 	unittest((np = of_find_node_by_path("/testcase-data/changeset/n2/n21")),
 		 "'%pOF' not added\n", n21);
@@ -917,6 +949,7 @@ static void __init of_unittest_changeset(void)
 	if (!ret)
 		unittest(strcmp(propstr, "hello") == 0, "original value not in updated property after revert");
 
+	of_node_put(nchangeset);
 	of_changeset_destroy(&chgset);
 
 	of_node_put(n1);
@@ -1134,7 +1167,7 @@ static void __init of_unittest_dma_ranges_one(const char *path,
 		dma_addr_t	dma_addr;
 		struct device	*dev_bogus;
 
-		dev_bogus = kzalloc(sizeof(struct device), GFP_KERNEL);
+		dev_bogus = kzalloc_obj(struct device);
 		if (!dev_bogus) {
 			unittest(0, "kzalloc() failed\n");
 			kfree(map);
@@ -1654,6 +1687,187 @@ static void __init of_unittest_parse_interrupts_extended(void)
 	of_node_put(np);
 }
 
+struct of_unittest_expected_imap_item {
+	u32 child_imap_count;
+	u32 child_imap[2];
+	const char *parent_path;
+	int parent_args_count;
+	u32 parent_args[3];
+};
+
+static const struct of_unittest_expected_imap_item of_unittest_expected_imap_items[] = {
+	{
+		.child_imap_count = 2,
+		.child_imap = {1, 11},
+		.parent_path = "/testcase-data/interrupts/intc0",
+		.parent_args_count = 1,
+		.parent_args = {100},
+	}, {
+		.child_imap_count = 2,
+		.child_imap = {2, 22},
+		.parent_path = "/testcase-data/interrupts/intc1",
+		.parent_args_count = 3,
+		.parent_args = {200, 201, 202},
+	}, {
+		.child_imap_count = 2,
+		.child_imap = {3, 33},
+		.parent_path = "/testcase-data/interrupts/intc2",
+		.parent_args_count = 2,
+		.parent_args = {300, 301},
+	}, {
+		.child_imap_count = 2,
+		.child_imap = {4, 44},
+		.parent_path = "/testcase-data/interrupts/intc2",
+		.parent_args_count = 2,
+		.parent_args = {400, 401},
+	}
+};
+
+static void __init of_unittest_parse_interrupt_map(void)
+{
+	const struct of_unittest_expected_imap_item *expected_item;
+	struct device_node *imap_np, *expected_parent_np;
+	struct of_imap_parser imap_parser;
+	struct of_imap_item imap_item;
+	int count, ret, i;
+
+	if (of_irq_workarounds & (OF_IMAP_NO_PHANDLE | OF_IMAP_OLDWORLD_MAC))
+		return;
+
+	imap_np = of_find_node_by_path("/testcase-data/interrupts/intmap2");
+	if (!imap_np) {
+		pr_err("missing testcase data\n");
+		return;
+	}
+
+	ret = of_imap_parser_init(&imap_parser, imap_np, &imap_item);
+	if (unittest(!ret, "of_imap_parser_init(%pOF) returned error %d\n",
+		     imap_np, ret))
+		goto end;
+
+	expected_item = of_unittest_expected_imap_items;
+	count = 0;
+
+	for_each_of_imap_item(&imap_parser, &imap_item) {
+		if (unittest(count < ARRAY_SIZE(of_unittest_expected_imap_items),
+			     "imap item number %d not expected. Max number %zu\n",
+			     count, ARRAY_SIZE(of_unittest_expected_imap_items) - 1)) {
+			of_node_put(imap_item.parent_args.np);
+			goto end;
+		}
+
+		expected_parent_np = of_find_node_by_path(expected_item->parent_path);
+		if (unittest(expected_parent_np,
+			     "missing dependent testcase data (%s)\n",
+			     expected_item->parent_path)) {
+			of_node_put(imap_item.parent_args.np);
+			goto end;
+		}
+
+		unittest(imap_item.child_imap_count == expected_item->child_imap_count,
+			 "imap[%d] child_imap_count = %u, expected %u\n",
+			 count, imap_item.child_imap_count,
+			 expected_item->child_imap_count);
+
+		for (i = 0; i < expected_item->child_imap_count; i++)
+			unittest(imap_item.child_imap[i] == expected_item->child_imap[i],
+				 "imap[%d] child_imap[%d] = %u, expected %u\n",
+				 count, i, imap_item.child_imap[i],
+				 expected_item->child_imap[i]);
+
+		unittest(imap_item.parent_args.np == expected_parent_np,
+			 "imap[%d] parent np = %pOF, expected %pOF\n",
+			 count, imap_item.parent_args.np, expected_parent_np);
+
+		unittest(imap_item.parent_args.args_count == expected_item->parent_args_count,
+			 "imap[%d] parent param_count = %d, expected %d\n",
+			 count, imap_item.parent_args.args_count,
+			 expected_item->parent_args_count);
+
+		for (i = 0; i < expected_item->parent_args_count; i++)
+			unittest(imap_item.parent_args.args[i] == expected_item->parent_args[i],
+				 "imap[%d] parent param[%d] = %u, expected %u\n",
+				 count, i, imap_item.parent_args.args[i],
+				 expected_item->parent_args[i]);
+
+		of_node_put(expected_parent_np);
+		count++;
+		expected_item++;
+	}
+
+	unittest(count == ARRAY_SIZE(of_unittest_expected_imap_items),
+		 "Missing items. %d parsed, expected %zu\n",
+		 count, ARRAY_SIZE(of_unittest_expected_imap_items));
+end:
+	of_node_put(imap_np);
+}
+
+#if IS_ENABLED(CONFIG_OF_DYNAMIC)
+static void __init of_unittest_irq_refcount(void)
+{
+	struct of_phandle_args args;
+	struct device_node *intc0, *int_ext0;
+	struct device_node *int2, *intc_intmap0;
+	unsigned int ref_c0, ref_c1, ref_c2;
+	int rc;
+	bool passed;
+
+	if (of_irq_workarounds & OF_IMAP_OLDWORLD_MAC)
+		return;
+
+	intc0 = of_find_node_by_path("/testcase-data/interrupts/intc0");
+	int_ext0 = of_find_node_by_path("/testcase-data/interrupts/interrupts-extended0");
+	intc_intmap0 = of_find_node_by_path("/testcase-data/interrupts/intc-intmap0");
+	int2 = of_find_node_by_path("/testcase-data/interrupts/interrupts2");
+	if (!intc0 || !int_ext0 || !intc_intmap0 || !int2) {
+		pr_err("missing testcase data\n");
+		goto out;
+	}
+
+	/* Test refcount for API of_irq_parse_one() */
+	passed = true;
+	ref_c0 = OF_KREF_READ(intc0);
+	ref_c1 = ref_c0 + 1;
+	memset(&args, 0, sizeof(args));
+	rc = of_irq_parse_one(int_ext0, 0, &args);
+	ref_c2 = OF_KREF_READ(intc0);
+	of_node_put(args.np);
+
+	passed &= !rc;
+	passed &= (args.np == intc0);
+	passed &= (args.args_count == 1);
+	passed &= (args.args[0] == 1);
+	passed &= (ref_c1 == ref_c2);
+	unittest(passed, "IRQ refcount case #1 failed, original(%u) expected(%u) got(%u)\n",
+		 ref_c0, ref_c1, ref_c2);
+
+	/* Test refcount for API of_irq_parse_raw() */
+	passed = true;
+	ref_c0 = OF_KREF_READ(intc_intmap0);
+	ref_c1 = ref_c0 + 1;
+	memset(&args, 0, sizeof(args));
+	rc = of_irq_parse_one(int2, 0, &args);
+	ref_c2 = OF_KREF_READ(intc_intmap0);
+	of_node_put(args.np);
+
+	passed &= !rc;
+	passed &= (args.np == intc_intmap0);
+	passed &= (args.args_count == 1);
+	passed &= (args.args[0] == 2);
+	passed &= (ref_c1 == ref_c2);
+	unittest(passed, "IRQ refcount case #2 failed, original(%u) expected(%u) got(%u)\n",
+		 ref_c0, ref_c1, ref_c2);
+
+out:
+	of_node_put(int2);
+	of_node_put(intc_intmap0);
+	of_node_put(int_ext0);
+	of_node_put(intc0);
+}
+#else
+static inline void __init of_unittest_irq_refcount(void) { }
+#endif
+
 static const struct of_device_id match_node_table[] = {
 	{ .data = "A", .name = "name0", }, /* Name alone is lowest priority */
 	{ .data = "B", .type = "type1", }, /* followed by type alone */
@@ -1790,6 +2004,8 @@ static void __init of_unittest_platform_populate(void)
 	of_platform_populate(np, match, NULL, &test_bus->dev);
 	for_each_child_of_node(np, child) {
 		for_each_child_of_node(child, grandchild) {
+			if (!of_property_present(grandchild, "compatible"))
+				continue;
 			pdev = of_find_device_by_node(grandchild);
 			unittest(pdev,
 				 "Could not create device for node '%pOFn'\n",
@@ -1917,7 +2133,6 @@ static void attach_node_and_children(struct device_node *np)
  */
 static int __init unittest_data_add(void)
 {
-	void *unittest_data;
 	void *unittest_data_align;
 	struct device_node *unittest_data_node = NULL, *np;
 	/*
@@ -1936,7 +2151,7 @@ static int __init unittest_data_add(void)
 	}
 
 	/* creating copy */
-	unittest_data = kmalloc(size + FDT_ALIGN_SIZE, GFP_KERNEL);
+	void *unittest_data __free(kfree) = kmalloc(size + FDT_ALIGN_SIZE, GFP_KERNEL);
 	if (!unittest_data)
 		return -ENOMEM;
 
@@ -1946,12 +2161,10 @@ static int __init unittest_data_add(void)
 	ret = of_fdt_unflatten_tree(unittest_data_align, NULL, &unittest_data_node);
 	if (!ret) {
 		pr_warn("%s: unflatten testcases tree failed\n", __func__);
-		kfree(unittest_data);
 		return -ENODATA;
 	}
 	if (!unittest_data_node) {
 		pr_warn("%s: testcases tree is empty\n", __func__);
-		kfree(unittest_data);
 		return -ENODATA;
 	}
 
@@ -1963,15 +2176,15 @@ static int __init unittest_data_add(void)
 	rc = of_resolve_phandles(unittest_data_node);
 	if (rc) {
 		pr_err("%s: Failed to resolve phandles (rc=%i)\n", __func__, rc);
-		of_overlay_mutex_unlock();
-		return -EINVAL;
+		rc = -EINVAL;
+		goto unlock;
 	}
 
 	/* attach the sub-tree to live tree */
 	if (!of_root) {
 		pr_warn("%s: no live tree to attach sub-tree\n", __func__);
-		kfree(unittest_data);
-		return -ENODEV;
+		rc = -ENODEV;
+		goto unlock;
 	}
 
 	EXPECT_BEGIN(KERN_INFO,
@@ -1990,9 +2203,12 @@ static int __init unittest_data_add(void)
 	EXPECT_END(KERN_INFO,
 		   "Duplicate name in testcase-data, renamed to \"duplicate-name#1\"");
 
+	retain_and_null_ptr(unittest_data);
+
+unlock:
 	of_overlay_mutex_unlock();
 
-	return 0;
+	return rc;
 }
 
 #ifdef CONFIG_OF_OVERLAY
@@ -2090,7 +2306,7 @@ static int unittest_gpio_probe(struct platform_device *pdev)
 
 	unittest_gpio_probe_count++;
 
-	devptr = kzalloc(sizeof(*devptr), GFP_KERNEL);
+	devptr = kzalloc_obj(*devptr);
 	if (!devptr)
 		return -ENOMEM;
 
@@ -4133,7 +4349,6 @@ static int testdrv_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	size = info->dtbo_end - info->dtbo_begin;
 	ret = of_overlay_fdt_apply(info->dtbo_begin, size, &ovcs_id, dn);
-	of_node_put(dn);
 	if (ret)
 		return ret;
 
@@ -4230,6 +4445,7 @@ static int of_unittest_pci_node_verify(struct pci_dev *pdev, bool add)
 		unittest(!np, "Child device tree node is not removed\n");
 		child_dev = device_find_any_child(&pdev->dev);
 		unittest(!child_dev, "Child device is not removed\n");
+		put_device(child_dev);
 	}
 
 failed:
@@ -4324,6 +4540,8 @@ static int __init of_unittest(void)
 	of_unittest_changeset_prop();
 	of_unittest_parse_interrupts();
 	of_unittest_parse_interrupts_extended();
+	of_unittest_parse_interrupt_map();
+	of_unittest_irq_refcount();
 	of_unittest_dma_get_max_cpu_address();
 	of_unittest_parse_dma_ranges();
 	of_unittest_pci_dma_ranges();

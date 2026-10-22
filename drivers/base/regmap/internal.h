@@ -73,17 +73,18 @@ struct regmap {
 	void *bus_context;
 	const char *name;
 
-	bool async;
 	spinlock_t async_lock;
 	wait_queue_head_t async_waitq;
 	struct list_head async_list;
 	struct list_head async_free;
 	int async_ret;
+	bool async;
 
 #ifdef CONFIG_DEBUG_FS
 	bool debugfs_disable;
 	struct dentry *debugfs;
 	const char *debugfs_name;
+	int debugfs_dummy_id;
 
 	unsigned int debugfs_reg_len;
 	unsigned int debugfs_val_len;
@@ -117,7 +118,8 @@ struct regmap {
 		    void *val_buf, size_t val_size);
 	int (*write)(void *context, const void *data, size_t count);
 
-	bool defer_caching;
+	int (*reg_default_cb)(struct device *dev, unsigned int reg,
+			      unsigned int *val);
 
 	unsigned long read_flag_mask;
 	unsigned long write_flag_mask;
@@ -126,6 +128,8 @@ struct regmap {
 	int reg_shift;
 	int reg_stride;
 	int reg_stride_order;
+
+	bool defer_caching;
 
 	/* If set, will always write field to HW. */
 	bool force_write_field;
@@ -159,7 +163,10 @@ struct regmap {
 	bool no_sync_defaults;
 
 	struct reg_sequence *patch;
-	int patch_regs;
+	unsigned int patch_regs;
+
+	/* if set, the regmap core can sleep */
+	bool can_sleep;
 
 	/* if set, converts bulk read to single read */
 	bool use_single_read;
@@ -176,9 +183,6 @@ struct regmap {
 	void *selector_work_buf;	/* Scratch buffer used for selector */
 
 	struct hwspinlock *hwlock;
-
-	/* if set, the regmap core can sleep */
-	bool can_sleep;
 };
 
 struct regcache_ops {
@@ -186,6 +190,7 @@ struct regcache_ops {
 	enum regcache_type type;
 	int (*init)(struct regmap *map);
 	int (*exit)(struct regmap *map);
+	int (*populate)(struct regmap *map);
 #ifdef CONFIG_DEBUG_FS
 	void (*debugfs_init)(struct regmap *map);
 #endif
@@ -288,6 +293,7 @@ enum regmap_endian regmap_get_val_endian(struct device *dev,
 					 const struct regmap_bus *bus,
 					 const struct regmap_config *config);
 
+extern struct regcache_ops regcache_flat_sparse_ops;
 extern struct regcache_ops regcache_rbtree_ops;
 extern struct regcache_ops regcache_maple_ops;
 extern struct regcache_ops regcache_flat_ops;

@@ -18,7 +18,7 @@ void __cmpxchg_called_with_bad_pointer(void);
 static __always_inline u32 __cs_asm(u64 ptr, u32 old, u32 new)
 {
 	asm volatile(
-		"	cs	%[old],%[new],%[ptr]\n"
+		"	cs	%[old],%[new],%[ptr]"
 		: [old] "+d" (old), [ptr] "+Q" (*(u32 *)ptr)
 		: [new] "d" (new)
 		: "memory", "cc");
@@ -28,14 +28,14 @@ static __always_inline u32 __cs_asm(u64 ptr, u32 old, u32 new)
 static __always_inline u64 __csg_asm(u64 ptr, u64 old, u64 new)
 {
 	asm volatile(
-		"	csg	%[old],%[new],%[ptr]\n"
+		"	csg	%[old],%[new],%[ptr]"
 		: [old] "+d" (old), [ptr] "+QS" (*(u64 *)ptr)
 		: [new] "d" (new)
 		: "memory", "cc");
 	return old;
 }
 
-static inline u8 __arch_cmpxchg1(u64 ptr, u8 old, u8 new)
+static __no_sanitize_or_inline u8 __arch_cmpxchg1(u64 ptr, u8 old, u8 new)
 {
 	union {
 		u8 b[4];
@@ -58,7 +58,7 @@ static inline u8 __arch_cmpxchg1(u64 ptr, u8 old, u8 new)
 	return old;
 }
 
-static inline u16 __arch_cmpxchg2(u64 ptr, u16 old, u16 new)
+static __no_sanitize_or_inline u16 __arch_cmpxchg2(u64 ptr, u16 old, u16 new)
 {
 	union {
 		u16 b[2];
@@ -126,7 +126,7 @@ static __always_inline u64 __arch_cmpxchg(u64 ptr, u64 old, u64 new, int size)
 	}								\
 	case 4:	{							\
 		asm volatile(						\
-			"	cs	%[__old],%[__new],%[__ptr]\n"	\
+			"	cs	%[__old],%[__new],%[__ptr]"	\
 			: [__old] "+d" (*__oldp),			\
 			  [__ptr] "+Q" (*(ptr)),			\
 			  "=@cc" (__cc)					\
@@ -136,7 +136,7 @@ static __always_inline u64 __arch_cmpxchg(u64 ptr, u64 old, u64 new, int size)
 	}								\
 	case 8:	{							\
 		 asm volatile(						\
-			 "	csg	%[__old],%[__new],%[__ptr]\n"	\
+			 "	csg	%[__old],%[__new],%[__ptr]"	\
 			 : [__old] "+d" (*__oldp),			\
 			   [__ptr] "+QS" (*(ptr)),			\
 			   "=@cc" (__cc)				\
@@ -173,7 +173,7 @@ static __always_inline u64 __arch_cmpxchg(u64 ptr, u64 old, u64 new, int size)
 
 void __xchg_called_with_bad_pointer(void);
 
-static inline u8 __arch_xchg1(u64 ptr, u8 x)
+static __no_sanitize_or_inline u8 __arch_xchg1(u64 ptr, u8 x)
 {
 	int shift = (3 ^ (ptr & 3)) << 3;
 	u32 mask, old, new;
@@ -188,7 +188,7 @@ static inline u8 __arch_xchg1(u64 ptr, u8 x)
 	return old >> shift;
 }
 
-static inline u16 __arch_xchg2(u64 ptr, u16 x)
+static __no_sanitize_or_inline u16 __arch_xchg2(u64 ptr, u16 x)
 {
 	int shift = (2 ^ (ptr & 2)) << 3;
 	u32 mask, old, new;
@@ -241,7 +241,7 @@ static __always_inline u64 __arch_xchg(u64 ptr, u64 x, int size)
 static __always_inline u128 arch_cmpxchg128(volatile u128 *ptr, u128 old, u128 new)
 {
 	asm volatile(
-		"	cdsg	%[old],%[new],%[ptr]\n"
+		"	cdsg	%[old],%[new],%[ptr]"
 		: [old] "+d" (old), [ptr] "+QS" (*ptr)
 		: [new] "d" (new)
 		: "memory", "cc");
@@ -258,7 +258,7 @@ static __always_inline bool arch_try_cmpxchg128(volatile u128 *ptr, u128 *oldp, 
 	int cc;
 
 	asm volatile(
-		"	cdsg	%[old],%[new],%[ptr]\n"
+		"	cdsg	%[old],%[new],%[ptr]"
 		: [old] "+d" (*oldp), [ptr] "+QS" (*ptr), "=@cc" (cc)
 		: [new] "d" (new)
 		: "memory");

@@ -718,9 +718,10 @@ static int ov9640_probe(struct i2c_client *client)
 
 	priv->subdev.ctrl_handler = &priv->hdl;
 
-	priv->clk = devm_clk_get(&client->dev, "mclk");
+	priv->clk = devm_v4l2_sensor_clk_get(&client->dev, "mclk");
 	if (IS_ERR(priv->clk)) {
-		ret = PTR_ERR(priv->clk);
+		ret = dev_err_probe(&client->dev, PTR_ERR(priv->clk),
+				    "failed to get mclk\n");
 		goto ectrlinit;
 	}
 
@@ -751,7 +752,7 @@ static void ov9640_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ov9640_id[] = {
-	{ "ov9640" },
+	{ .name = "ov9640" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ov9640_id);

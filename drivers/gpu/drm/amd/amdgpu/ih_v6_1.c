@@ -562,8 +562,7 @@ static int ih_v6_1_sw_init(struct amdgpu_ip_block *ip_block)
 	/* use gpu virtual address for ih ring
 	 * until ih_checken is programmed to allow
 	 * use bus address for ih ring by psp bl */
-	use_bus_addr =
-		(adev->firmware.load_type == AMDGPU_FW_LOAD_PSP) ? false : true;
+	use_bus_addr = adev->firmware.load_type != AMDGPU_FW_LOAD_PSP;
 	r = amdgpu_ih_ring_init(adev, &adev->irq.ih, 256 * 1024, use_bus_addr);
 	if (r)
 		return r;
@@ -631,7 +630,7 @@ static int ih_v6_1_resume(struct amdgpu_ip_block *ip_block)
 	return ih_v6_1_hw_init(ip_block);
 }
 
-static bool ih_v6_1_is_idle(void *handle)
+static bool ih_v6_1_is_idle(struct amdgpu_ip_block *ip_block)
 {
 	/* todo */
 	return true;
@@ -749,9 +748,9 @@ static int ih_v6_1_set_powergating_state(struct amdgpu_ip_block *ip_block,
 	return 0;
 }
 
-static void ih_v6_1_get_clockgating_state(void *handle, u64 *flags)
+static void ih_v6_1_get_clockgating_state(struct amdgpu_ip_block *ip_block, u64 *flags)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 
 	if (!RREG32_SOC15(OSSSYS, 0, regIH_CLK_CTRL))
 		*flags |= AMD_CG_SUPPORT_IH_CG;
@@ -791,7 +790,7 @@ static void ih_v6_1_set_interrupt_funcs(struct amdgpu_device *adev)
 const struct amdgpu_ip_block_version ih_v6_1_ip_block = {
 	.type = AMD_IP_BLOCK_TYPE_IH,
 	.major = 6,
-	.minor = 0,
+	.minor = 1,
 	.rev = 0,
 	.funcs = &ih_v6_1_ip_funcs,
 };

@@ -1669,6 +1669,10 @@ static bool usb3_std_req_get_status(struct renesas_usb3 *usb3,
 		break;
 	case USB_RECIP_ENDPOINT:
 		num = le16_to_cpu(ctrl->wIndex) & USB_ENDPOINT_NUMBER_MASK;
+		if (num >= usb3->num_usb3_eps) {
+			stall = true;
+			break;
+		}
 		usb3_ep = usb3_get_ep(usb3, num);
 		if (usb3_ep->halt)
 			status |= 1 << USB_ENDPOINT_HALT;
@@ -1781,7 +1785,8 @@ static bool usb3_std_req_feature_endpoint(struct renesas_usb3 *usb3,
 	struct renesas_usb3_ep *usb3_ep;
 	struct renesas_usb3_request *usb3_req;
 
-	if (le16_to_cpu(ctrl->wValue) != USB_ENDPOINT_HALT)
+	if ((le16_to_cpu(ctrl->wValue) != USB_ENDPOINT_HALT) ||
+	    (num >= usb3->num_usb3_eps))
 		return true;	/* stall */
 
 	usb3_ep = usb3_get_ep(usb3, num);
@@ -2265,7 +2270,7 @@ static struct usb_request *__renesas_usb3_ep_alloc_request(gfp_t gfp_flags)
 {
 	struct renesas_usb3_request *usb3_req;
 
-	usb3_req = kzalloc(sizeof(struct renesas_usb3_request), gfp_flags);
+	usb3_req = kzalloc_obj(struct renesas_usb3_request, gfp_flags);
 	if (!usb3_req)
 		return NULL;
 
@@ -2397,8 +2402,7 @@ static int renesas_usb3_stop(struct usb_gadget *gadget)
 		rzv2m_usb3drd_reset(usb3_to_dev(usb3)->parent, false);
 
 	renesas_usb3_stop_controller(usb3);
-	if (usb3->phy)
-		phy_exit(usb3->phy);
+	phy_exit(usb3->phy);
 
 	pm_runtime_put(usb3_to_dev(usb3));
 
@@ -2658,6 +2662,7 @@ static void renesas_usb3_remove(struct platform_device *pdev)
 	struct renesas_usb3 *usb3 = platform_get_drvdata(pdev);
 
 	debugfs_remove_recursive(usb3->dentry);
+	put_device(usb3->host_dev);
 	device_remove_file(&pdev->dev, &dev_attr_role);
 
 	cancel_work_sync(&usb3->role_work);
@@ -2974,7 +2979,6 @@ err_alloc_prd:
 	return ret;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int renesas_usb3_suspend(struct device *dev)
 {
 	struct renesas_usb3 *usb3 = dev_get_drvdata(dev);
@@ -2984,8 +2988,7 @@ static int renesas_usb3_suspend(struct device *dev)
 		return 0;
 
 	renesas_usb3_stop_controller(usb3);
-	if (usb3->phy)
-		phy_exit(usb3->phy);
+	phy_exit(usb3->phy);
 	pm_runtime_put(dev);
 
 	return 0;
@@ -3006,17 +3009,16 @@ static int renesas_usb3_resume(struct device *dev)
 
 	return 0;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(renesas_usb3_pm_ops, renesas_usb3_suspend,
-			renesas_usb3_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(renesas_usb3_pm_ops, renesas_usb3_suspend,
+				renesas_usb3_resume);
 
 static struct platform_driver renesas_usb3_driver = {
 	.probe		= renesas_usb3_probe,
 	.remove		= renesas_usb3_remove,
 	.driver		= {
 		.name =	udc_name,
-		.pm		= &renesas_usb3_pm_ops,
+		.pm		= pm_sleep_ptr(&renesas_usb3_pm_ops),
 		.of_match_table = usb3_of_match,
 	},
 };
@@ -3025,4 +3027,3 @@ module_platform_driver(renesas_usb3_driver);
 MODULE_DESCRIPTION("Renesas USB3.0 Peripheral driver");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Yoshihiro Shimoda <yoshihiro.shimoda.uh@renesas.com>");
-MODULE_ALIAS("platform:renesas_usb3");

@@ -179,7 +179,7 @@ static int __cpuidle_cooling_register(struct device_node *np,
 	char *name;
 	int ret;
 
-	idle_cdev = kzalloc(sizeof(*idle_cdev), GFP_KERNEL);
+	idle_cdev = kzalloc_obj(*idle_cdev);
 	if (!idle_cdev) {
 		ret = -ENOMEM;
 		goto out;
@@ -207,7 +207,7 @@ static int __cpuidle_cooling_register(struct device_node *np,
 		goto out_unregister;
 	}
 
-	cdev = thermal_of_cooling_device_register(np, name, idle_cdev,
+	cdev = thermal_of_cooling_device_register(np, 0, name, idle_cdev,
 						  &cpuidle_cooling_ops);
 	if (IS_ERR(cdev)) {
 		ret = PTR_ERR(cdev);

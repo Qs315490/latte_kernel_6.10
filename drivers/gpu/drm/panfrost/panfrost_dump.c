@@ -163,7 +163,7 @@ void panfrost_core_dump(struct panfrost_job *job)
 	iter.start = __vmalloc(file_size, GFP_KERNEL | __GFP_NOWARN |
 			__GFP_NORETRY);
 	if (!iter.start) {
-		dev_warn(pfdev->dev, "failed to allocate devcoredump file\n");
+		dev_warn(pfdev->base.dev, "failed to allocate devcoredump file\n");
 		return;
 	}
 
@@ -204,14 +204,14 @@ void panfrost_core_dump(struct panfrost_job *job)
 		mapping = job->mappings[i];
 
 		if (!bo->base.sgt) {
-			dev_err(pfdev->dev, "Panfrost Dump: BO has no sgt, cannot dump\n");
+			dev_err(pfdev->base.dev, "Panfrost Dump: BO has no sgt, cannot dump\n");
 			iter.hdr->bomap.valid = 0;
 			goto dump_header;
 		}
 
-		ret = drm_gem_vmap_unlocked(&bo->base.base, &map);
+		ret = drm_gem_vmap(&bo->base.base, &map);
 		if (ret) {
-			dev_err(pfdev->dev, "Panfrost Dump: couldn't map Buffer Object\n");
+			dev_err(pfdev->base.dev, "Panfrost Dump: couldn't map Buffer Object\n");
 			iter.hdr->bomap.valid = 0;
 			goto dump_header;
 		}
@@ -228,7 +228,7 @@ void panfrost_core_dump(struct panfrost_job *job)
 		vaddr = map.vaddr;
 		memcpy(iter.data, vaddr, bo->base.base.size);
 
-		drm_gem_vunmap_unlocked(&bo->base.base, &map);
+		drm_gem_vunmap(&bo->base.base, &map);
 
 		iter.hdr->bomap.valid = 1;
 
@@ -237,5 +237,5 @@ dump_header:	panfrost_core_dump_header(&iter, PANFROSTDUMP_BUF_BO, iter.data +
 	}
 	panfrost_core_dump_header(&iter, PANFROSTDUMP_BUF_TRAILER, iter.data);
 
-	dev_coredumpv(pfdev->dev, iter.start, iter.data - iter.start, GFP_KERNEL);
+	dev_coredumpv(pfdev->base.dev, iter.start, iter.data - iter.start, GFP_KERNEL);
 }

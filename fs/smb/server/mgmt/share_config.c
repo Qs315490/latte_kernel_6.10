@@ -19,7 +19,7 @@
 #include "../transport_ipc.h"
 #include "../misc.h"
 
-#define SHARE_HASH_BITS		3
+#define SHARE_HASH_BITS		12
 static DEFINE_HASHTABLE(shares_table, SHARE_HASH_BITS);
 static DECLARE_RWSEM(shares_table_lock);
 
@@ -102,7 +102,7 @@ static int parse_veto_list(struct ksmbd_share_config *share,
 		if (!sz)
 			break;
 
-		p = kzalloc(sizeof(struct ksmbd_veto_pattern), KSMBD_DEFAULT_GFP);
+		p = kzalloc_obj(struct ksmbd_veto_pattern, KSMBD_DEFAULT_GFP);
 		if (!p)
 			return -ENOMEM;
 
@@ -150,7 +150,7 @@ static struct ksmbd_share_config *share_config_request(struct ksmbd_work *work,
 			goto out;
 	}
 
-	share = kzalloc(sizeof(struct ksmbd_share_config), KSMBD_DEFAULT_GFP);
+	share = kzalloc_obj(struct ksmbd_share_config, KSMBD_DEFAULT_GFP);
 	if (!share)
 		goto out;
 
@@ -167,7 +167,10 @@ static struct ksmbd_share_config *share_config_request(struct ksmbd_work *work,
 
 		share->path = kstrndup(ksmbd_share_config_path(resp), path_len,
 				      KSMBD_DEFAULT_GFP);
-		if (share->path) {
+		if (!share->path) {
+			ret = -ENOMEM;
+		} else {
+			ret = 0;
 			share->path_sz = strlen(share->path);
 			while (share->path_sz > 1 &&
 			       share->path[share->path_sz - 1] == '/')
@@ -179,9 +182,10 @@ static struct ksmbd_share_config *share_config_request(struct ksmbd_work *work,
 		share->force_directory_mode = resp->force_directory_mode;
 		share->force_uid = resp->force_uid;
 		share->force_gid = resp->force_gid;
-		ret = parse_veto_list(share,
-				      KSMBD_SHARE_CONFIG_VETO_LIST(resp),
-				      resp->veto_list_sz);
+		if (!ret)
+			ret = parse_veto_list(share,
+					      KSMBD_SHARE_CONFIG_VETO_LIST(resp),
+					      resp->veto_list_sz);
 		if (!ret && share->path) {
 			if (__ksmbd_override_fsids(work, share)) {
 				kill_share(share);

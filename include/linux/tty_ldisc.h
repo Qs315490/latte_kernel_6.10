@@ -39,7 +39,6 @@ do {								\
 int ldsem_down_read(struct ld_semaphore *sem, long timeout);
 int ldsem_down_read_trylock(struct ld_semaphore *sem);
 int ldsem_down_write(struct ld_semaphore *sem, long timeout);
-int ldsem_down_write_trylock(struct ld_semaphore *sem);
 void ldsem_up_read(struct ld_semaphore *sem);
 void ldsem_up_write(struct ld_semaphore *sem);
 
@@ -267,7 +266,7 @@ struct tty_ldisc_ops {
 };
 
 struct tty_ldisc {
-	struct tty_ldisc_ops *ops;
+	const struct tty_ldisc_ops *ops;
 	struct tty_struct *tty;
 };
 
@@ -282,8 +281,8 @@ struct tty_ldisc *tty_ldisc_ref_wait(struct tty_struct *);
 
 void tty_ldisc_flush(struct tty_struct *tty);
 
-int tty_register_ldisc(struct tty_ldisc_ops *new_ldisc);
-void tty_unregister_ldisc(struct tty_ldisc_ops *ldisc);
+int tty_register_ldisc(const struct tty_ldisc_ops *new_ldisc);
+void tty_unregister_ldisc(const struct tty_ldisc_ops *ldisc);
 int tty_set_ldisc(struct tty_struct *tty, int disc);
 
 #endif /* _LINUX_TTY_LDISC_H */

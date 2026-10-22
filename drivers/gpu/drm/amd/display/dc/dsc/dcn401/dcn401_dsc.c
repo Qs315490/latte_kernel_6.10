@@ -9,26 +9,14 @@
 #include "dsc/dscc_types.h"
 #include "dsc/rc_calc.h"
 
-#define MAX_THROUGHPUT_PER_DSC_100HZ 20000000
-#define MAX_DSC_UNIT_COMBINE 4
-
 static void dsc_write_to_registers(struct display_stream_compressor *dsc, const struct dsc_reg_values *reg_vals);
 
 /* Object I/F functions */
 //static void dsc401_get_enc_caps(struct dsc_enc_caps *dsc_enc_caps, int pixel_clock_100Hz);
-static void dsc401_read_state(struct display_stream_compressor *dsc, struct dcn_dsc_state *s);
-static bool dsc401_validate_stream(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg);
-static void dsc401_set_config(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg,
-		struct dsc_optc_config *dsc_optc_cfg);
 //static bool dsc401_get_packed_pps(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg, uint8_t *dsc_packed_pps);
-static void dsc401_enable(struct display_stream_compressor *dsc, int opp_pipe);
-static void dsc401_disable(struct display_stream_compressor *dsc);
-static void dsc401_disconnect(struct display_stream_compressor *dsc);
-static void dsc401_wait_disconnect_pending_clear(struct display_stream_compressor *dsc);
-static void dsc401_get_enc_caps(struct dsc_enc_caps *dsc_enc_caps, int pixel_clock_100Hz);
+static void dsc401_get_single_enc_caps(struct dsc_enc_caps *dsc_enc_caps, unsigned int max_dscclk_khz);
 
 static const struct dsc_funcs dcn401_dsc_funcs = {
-	.dsc_get_enc_caps = dsc401_get_enc_caps,
 	.dsc_read_state = dsc401_read_state,
 	.dsc_validate_stream = dsc401_validate_stream,
 	.dsc_set_config = dsc401_set_config,
@@ -37,6 +25,8 @@ static const struct dsc_funcs dcn401_dsc_funcs = {
 	.dsc_disable = dsc401_disable,
 	.dsc_disconnect = dsc401_disconnect,
 	.dsc_wait_disconnect_pending_clear = dsc401_wait_disconnect_pending_clear,
+	.dsc_get_single_enc_caps = dsc401_get_single_enc_caps,
+	.dsc_read_reg_state = dsc2_read_reg_state
 };
 
 /* Macro definitios for REG_SET macros*/
@@ -52,12 +42,6 @@ static const struct dsc_funcs dcn401_dsc_funcs = {
 #define DC_LOGGER \
 	dsc->ctx->logger
 
-enum dsc_bits_per_comp {
-	DSC_BPC_8 = 8,
-	DSC_BPC_10 = 10,
-	DSC_BPC_12 = 12,
-	DSC_BPC_UNKNOWN
-};
 
 /* API functions (external or via structure->function_pointer) */
 
@@ -79,22 +63,14 @@ void dsc401_construct(struct dcn401_dsc *dsc,
 	dsc->max_image_width = 5184;
 }
 
-static void dsc401_get_enc_caps(struct dsc_enc_caps *dsc_enc_caps, int pixel_clock_100Hz)
+static void dsc401_get_single_enc_caps(struct dsc_enc_caps *dsc_enc_caps, unsigned int max_dscclk_khz)
 {
-	int min_dsc_unit_required = (pixel_clock_100Hz + MAX_THROUGHPUT_PER_DSC_100HZ - 1) / MAX_THROUGHPUT_PER_DSC_100HZ;
-
 	dsc_enc_caps->dsc_version = 0x21; /* v1.2 - DP spec defined it in reverse order and we kept it */
 
-	/* 1 slice is only supported with 1 DSC unit */
-	dsc_enc_caps->slice_caps.bits.NUM_SLICES_1 = min_dsc_unit_required == 1 ? 1 : 0;
-	/* 2 slice is only supported with 1 or 2 DSC units */
-	dsc_enc_caps->slice_caps.bits.NUM_SLICES_2 = (min_dsc_unit_required == 1 || min_dsc_unit_required == 2) ? 1 : 0;
-	/* 3 slice is only supported with 1 DSC unit */
-	dsc_enc_caps->slice_caps.bits.NUM_SLICES_3 = min_dsc_unit_required == 1 ? 1 : 0;
+	dsc_enc_caps->slice_caps.bits.NUM_SLICES_1 = 1;
+	dsc_enc_caps->slice_caps.bits.NUM_SLICES_2 = 1;
+	dsc_enc_caps->slice_caps.bits.NUM_SLICES_3 = 1;
 	dsc_enc_caps->slice_caps.bits.NUM_SLICES_4 = 1;
-	dsc_enc_caps->slice_caps.bits.NUM_SLICES_8 = 1;
-	dsc_enc_caps->slice_caps.bits.NUM_SLICES_12 = 1;
-	dsc_enc_caps->slice_caps.bits.NUM_SLICES_16 = 1;
 
 	dsc_enc_caps->lb_bit_depth = 13;
 	dsc_enc_caps->is_block_pred_supported = true;
@@ -102,13 +78,13 @@ static void dsc401_get_enc_caps(struct dsc_enc_caps *dsc_enc_caps, int pixel_clo
 	dsc_enc_caps->color_formats.bits.RGB = 1;
 	dsc_enc_caps->color_formats.bits.YCBCR_444 = 1;
 	dsc_enc_caps->color_formats.bits.YCBCR_SIMPLE_422 = 1;
-	dsc_enc_caps->color_formats.bits.YCBCR_NATIVE_422 = 0;
+	dsc_enc_caps->color_formats.bits.YCBCR_NATIVE_422 = 1;
 	dsc_enc_caps->color_formats.bits.YCBCR_NATIVE_420 = 1;
 
 	dsc_enc_caps->color_depth.bits.COLOR_DEPTH_8_BPC = 1;
 	dsc_enc_caps->color_depth.bits.COLOR_DEPTH_10_BPC = 1;
 	dsc_enc_caps->color_depth.bits.COLOR_DEPTH_12_BPC = 1;
-	dsc_enc_caps->max_total_throughput_mps = MAX_THROUGHPUT_PER_DSC_100HZ * MAX_DSC_UNIT_COMBINE;
+	dsc_enc_caps->max_total_throughput_mps = max_dscclk_khz * 3 / 1000;
 
 	dsc_enc_caps->max_slice_width = 5184; /* (including 64 overlap pixels for eDP MSO mode) */
 	dsc_enc_caps->bpp_increment_div = 16; /* 1/16th of a bit */
@@ -117,7 +93,7 @@ static void dsc401_get_enc_caps(struct dsc_enc_caps *dsc_enc_caps, int pixel_clo
 /* this function read dsc related register fields to be logged later in dcn10_log_hw_state
  * into a dcn_dsc_state struct.
  */
-static void dsc401_read_state(struct display_stream_compressor *dsc, struct dcn_dsc_state *s)
+void dsc401_read_state(struct display_stream_compressor *dsc, struct dcn_dsc_state *s)
 {
 	struct dcn401_dsc *dsc401 = TO_DCN401_DSC(dsc);
 
@@ -131,21 +107,27 @@ static void dsc401_read_state(struct display_stream_compressor *dsc, struct dcn_
 	REG_GET(DSCC_PPS_CONFIG7, SLICE_BPG_OFFSET, &s->dsc_slice_bpg_offset);
 	REG_GET_2(DSCRM_DSC_FORWARD_CONFIG, DSCRM_DSC_FORWARD_EN, &s->dsc_fw_en,
 		DSCRM_DSC_OPP_PIPE_SOURCE, &s->dsc_opp_source);
+	REG_GET(DSCC_PPS_CONFIG1, BLOCK_PRED_ENABLE, &s->dsc_block_pred_enable);
+	REG_GET(DSCC_PPS_CONFIG0, LINEBUF_DEPTH, &s->dsc_line_buf_depth);
+	REG_GET(DSCC_PPS_CONFIG0, DSC_VERSION_MINOR, &s->dsc_version_minor);
+	REG_GET(DSCC_CONFIG1, DSCC_RATE_CONTROL_BUFFER_MODEL_SIZE, &s->dsc_rc_buffer_size);
+	REG_GET(DSCC_PPS_CONFIG0, SIMPLE_422, &s->dsc_simple_422);
 }
 
 
-static bool dsc401_validate_stream(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg)
+bool dsc401_validate_stream(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg)
 {
 	struct dsc_optc_config dsc_optc_cfg;
 	struct dcn401_dsc *dsc401 = TO_DCN401_DSC(dsc);
+	uint32_t max_image_width = (uint32_t)dsc401->max_image_width;
 
-	if (dsc_cfg->pic_width > dsc401->max_image_width)
+	if (dsc_cfg->pic_width > max_image_width)
 		return false;
 
 	return dsc_prepare_config(dsc_cfg, &dsc401->reg_vals, &dsc_optc_cfg);
 }
 
-static void dsc401_set_config(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg,
+void dsc401_set_config(struct display_stream_compressor *dsc, const struct dsc_config *dsc_cfg,
 		struct dsc_optc_config *dsc_optc_cfg)
 {
 	bool is_config_ok;
@@ -160,19 +142,19 @@ static void dsc401_set_config(struct display_stream_compressor *dsc, const struc
 	dsc_write_to_registers(dsc, &dsc401->reg_vals);
 }
 
-static void dsc401_enable(struct display_stream_compressor *dsc, int opp_pipe)
+void dsc401_enable(struct display_stream_compressor *dsc, int opp_pipe)
 {
 	struct dcn401_dsc *dsc401 = TO_DCN401_DSC(dsc);
-	int dsc_clock_en;
-	int dsc_fw_config;
-	int enabled_opp_pipe;
+	uint32_t dsc_clock_en;
+	uint32_t dsc_fw_config;
+	uint32_t enabled_opp_pipe;
 
 	DC_LOG_DSC("enable DSC %d at opp pipe %d", dsc->inst, opp_pipe);
 
 	REG_GET(DSC_TOP_CONTROL, DSC_CLOCK_EN, &dsc_clock_en);
 	REG_GET_2(DSCRM_DSC_FORWARD_CONFIG, DSCRM_DSC_FORWARD_EN, &dsc_fw_config, DSCRM_DSC_OPP_PIPE_SOURCE, &enabled_opp_pipe);
 	if ((dsc_clock_en || dsc_fw_config) && enabled_opp_pipe != opp_pipe) {
-		DC_LOG_DSC("ERROR: DSC %d at opp pipe %d already enabled!", dsc->inst, enabled_opp_pipe);
+		DC_LOG_DSC("ERROR: DSC %d at opp pipe %u already enabled!", dsc->inst, enabled_opp_pipe);
 		ASSERT(0);
 	}
 
@@ -185,10 +167,10 @@ static void dsc401_enable(struct display_stream_compressor *dsc, int opp_pipe)
 }
 
 
-static void dsc401_disable(struct display_stream_compressor *dsc)
+void dsc401_disable(struct display_stream_compressor *dsc)
 {
 	struct dcn401_dsc *dsc401 = TO_DCN401_DSC(dsc);
-	int dsc_clock_en;
+	uint32_t dsc_clock_en;
 
 	DC_LOG_DSC("disable DSC %d", dsc->inst);
 
@@ -204,14 +186,14 @@ static void dsc401_disable(struct display_stream_compressor *dsc)
 		DSC_CLOCK_EN, 0);
 }
 
-static void dsc401_wait_disconnect_pending_clear(struct display_stream_compressor *dsc)
+void dsc401_wait_disconnect_pending_clear(struct display_stream_compressor *dsc)
 {
 	struct dcn401_dsc *dsc401 = TO_DCN401_DSC(dsc);
 
 	REG_WAIT(DSCRM_DSC_FORWARD_CONFIG, DSCRM_DSC_FORWARD_EN_STATUS, 0, 2, 50000);
 }
 
-static void dsc401_disconnect(struct display_stream_compressor *dsc)
+void dsc401_disconnect(struct display_stream_compressor *dsc)
 {
 	struct dcn401_dsc *dsc401 = TO_DCN401_DSC(dsc);
 

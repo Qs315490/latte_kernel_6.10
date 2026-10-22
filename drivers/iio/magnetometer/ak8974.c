@@ -12,7 +12,6 @@
  * Author: Linus Walleij <linus.walleij@linaro.org>
  */
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/kernel.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
@@ -535,8 +534,8 @@ static int ak8974_detect(struct ak8974 *ak8974)
 				       fab_data2, sizeof(fab_data2));
 
 		for (i = 0; i < 3; ++i) {
-			static const char axis[3] = "XYZ";
-			static const char pgaxis[6] = "ZYZXYX";
+			static const char axis[] = "XYZ";
+			static const char pgaxis[] = "ZYZXYX";
 			unsigned offz = le16_to_cpu(fab_data2[i]) & 0x7F;
 			unsigned fine = le16_to_cpu(fab_data1[i]);
 			unsigned sens = le16_to_cpu(fab_data1[i + 3]);
@@ -577,13 +576,12 @@ static int ak8974_measure_channel(struct ak8974 *ak8974, unsigned long address,
 	/*
 	 * This explicit cast to (s16) is necessary as the measurement
 	 * is done in 2's complement with positive and negative values.
-	 * The follwing assignment to *val will then convert the signed
+	 * The following assignment to *val will then convert the signed
 	 * s16 value to a signed int value.
 	 */
 	*val = (s16)le16_to_cpu(hw_values[address]);
 out_unlock:
 	mutex_unlock(&ak8974->lock);
-	pm_runtime_mark_last_busy(&ak8974->i2c->dev);
 	pm_runtime_put_autosuspend(&ak8974->i2c->dev);
 
 	return ret;
@@ -673,12 +671,11 @@ static void ak8974_fill_buffer(struct iio_dev *indio_dev)
 		goto out_unlock;
 	}
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &ak8974->scan,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &ak8974->scan, sizeof(ak8974->scan),
+				    iio_get_time_ns(indio_dev));
 
  out_unlock:
 	mutex_unlock(&ak8974->lock);
-	pm_runtime_mark_last_busy(&ak8974->i2c->dev);
 	pm_runtime_put_autosuspend(&ak8974->i2c->dev);
 }
 
@@ -704,7 +701,7 @@ ak8974_get_mount_matrix(const struct iio_dev *indio_dev,
 
 static const struct iio_chan_spec_ext_info ak8974_ext_info[] = {
 	IIO_MOUNT_MATRIX(IIO_SHARED_BY_DIR, ak8974_get_mount_matrix),
-	{ },
+	{ }
 };
 
 #define AK8974_AXIS_CHANNEL(axis, index, bits)				\
@@ -1019,18 +1016,18 @@ static DEFINE_RUNTIME_DEV_PM_OPS(ak8974_dev_pm_ops, ak8974_runtime_suspend,
 				 ak8974_runtime_resume, NULL);
 
 static const struct i2c_device_id ak8974_id[] = {
-	{ "ami305" },
-	{ "ami306" },
-	{ "ak8974" },
-	{ "hscdtd008a" },
-	{}
+	{ .name = "ami305" },
+	{ .name = "ami306" },
+	{ .name = "ak8974" },
+	{ .name = "hscdtd008a" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ak8974_id);
 
 static const struct of_device_id ak8974_of_match[] = {
 	{ .compatible = "asahi-kasei,ak8974", },
 	{ .compatible = "alps,hscdtd008a", },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ak8974_of_match);
 

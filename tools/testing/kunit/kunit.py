@@ -21,6 +21,7 @@ from enum import Enum, auto
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import kunit_json
+import kunit_junit
 import kunit_kernel
 import kunit_parser
 from kunit_printer import stdout, null_printer
@@ -49,6 +50,7 @@ class KunitBuildRequest(KunitConfigRequest):
 class KunitParseRequest:
 	raw_output: Optional[str]
 	json: Optional[str]
+	junit: Optional[str]
 	summary: bool
 	failed: bool
 
@@ -63,6 +65,7 @@ class KunitExecRequest(KunitParseRequest):
 	run_isolated: Optional[str]
 	list_tests: bool
 	list_tests_attr: bool
+	list_suites: bool
 
 @dataclass
 class KunitRequest(KunitExecRequest, KunitBuildRequest):
@@ -168,6 +171,12 @@ def exec_tests(linux: kunit_kernel.LinuxSourceTree, request: KunitExecRequest) -
 		for line in attr_output:
 			print(line.rstrip())
 		return KunitResult(status=KunitStatus.SUCCESS, elapsed_time=0.0)
+	if request.list_suites:
+		tests = _list_tests(linux, request)
+		output = _suites_from_test_list(tests)
+		for line in output:
+			print(line.rstrip())
+		return KunitResult(status=KunitStatus.SUCCESS, elapsed_time=0.0)
 	if request.run_isolated:
 		tests = _list_tests(linux, request)
 		if request.run_isolated == 'test':
@@ -228,7 +237,7 @@ def parse_tests(request: KunitParseRequest, metadata: kunit_json.Metadata, input
 		fake_test.counts.passed = 1
 
 		output: Iterable[str] = input_data
-		if request.raw_output == 'all':
+		if request.raw_output == 'all' or request.raw_output == 'full':
 			pass
 		elif request.raw_output == 'kunit':
 			output = kunit_parser.extract_tap_lines(output)
@@ -260,6 +269,13 @@ def parse_tests(request: KunitParseRequest, metadata: kunit_json.Metadata, input
 				f.write(json_str)
 			stdout.print_with_timestamp("Test results stored in %s" %
 				os.path.abspath(request.json))
+
+	if request.junit:
+		if request.junit == 'stdout':
+			kunit_junit.print_junit_result(test=test)
+		else:
+			kunit_junit.write_junit_result(test=test,filename=request.junit)
+			stdout.print_with_timestamp(f"Test results stored in {os.path.abspath(request.junit)}")
 
 	if test.status != kunit_parser.TestStatus.SUCCESS:
 		return KunitResult(KunitStatus.TEST_FAILURE, parse_time), test
@@ -302,6 +318,7 @@ def run_tests(linux: kunit_kernel.LinuxSourceTree,
 # So we hackily automatically rewrite --json => --json=stdout
 pseudo_bool_flag_defaults = {
 		'--json': 'stdout',
+		'--junit': 'stdout',
 		'--raw_output': 'kunit',
 }
 def massage_argv(argv: Sequence[str]) -> Sequence[str]:
@@ -323,11 +340,27 @@ def get_default_jobs() -> int:
 		return ncpu
 	raise RuntimeError("os.cpu_count() returned None")
 
+def get_default_build_dir() -> str:
+	if 'KBUILD_OUTPUT' in os.environ:
+		return os.path.join(os.environ['KBUILD_OUTPUT'], '.kunit')
+	return '.kunit'
+
+def add_completion_opts(parser: argparse.ArgumentParser) -> None:
+	parser.add_argument('--list-opts',
+			    help=argparse.SUPPRESS,
+			    action='store_true')
+
+def add_root_opts(parser: argparse.ArgumentParser) -> None:
+	parser.add_argument('--list-cmds',
+			    help=argparse.SUPPRESS,
+			    action='store_true')
+	add_completion_opts(parser)
+
 def add_common_opts(parser: argparse.ArgumentParser) -> None:
 	parser.add_argument('--build_dir',
 			    help='As in the make command, it specifies the build '
 			    'directory.',
-			    type=str, default='.kunit', metavar='DIR')
+			    type=str, default=get_default_build_dir(), metavar='DIR')
 	parser.add_argument('--make_options',
 			    help='X=Y make option, can be repeated.',
 			    action='append', metavar='X=Y')
@@ -373,6 +406,8 @@ def add_common_opts(parser: argparse.ArgumentParser) -> None:
 	parser.add_argument('--qemu_args',
 			    help='Additional QEMU arguments, e.g. "-smp 8"',
 			    action='append', metavar='')
+
+	add_completion_opts(parser)
 
 def add_build_opts(parser: argparse.ArgumentParser) -> None:
 	parser.add_argument('--jobs',
@@ -420,15 +455,23 @@ def add_exec_opts(parser: argparse.ArgumentParser) -> None:
 	parser.add_argument('--list_tests_attr', help='If set, list all tests and test '
 			    'attributes.',
 			    action='store_true')
+	parser.add_argument('--list_suites', help='If set, list all suites that will be '
+			    'run.',
+			    action='store_true')
 
 def add_parse_opts(parser: argparse.ArgumentParser) -> None:
 	parser.add_argument('--raw_output', help='If set don\'t parse output from kernel. '
 			    'By default, filters to just KUnit output. Use '
 			    '--raw_output=all to show everything',
-			     type=str, nargs='?', const='all', default=None, choices=['all', 'kunit'])
+			     type=str, nargs='?', const='all', default=None, choices=['all', 'full', 'kunit'])
 	parser.add_argument('--json',
 			    nargs='?',
 			    help='Prints parsed test results as JSON to stdout or a file if '
+			    'a filename is specified. Does nothing if --raw_output is set.',
+			    type=str, const='stdout', default=None, metavar='FILE')
+	parser.add_argument('--junit',
+			    nargs='?',
+			    help='Prints parsed test results as JUnit XML to stdout or a file if '
 			    'a filename is specified. Does nothing if --raw_output is set.',
 			    type=str, const='stdout', default=None, metavar='FILE')
 	parser.add_argument('--summary',
@@ -474,6 +517,7 @@ def run_handler(cli_args: argparse.Namespace) -> None:
 					jobs=cli_args.jobs,
 					raw_output=cli_args.raw_output,
 					json=cli_args.json,
+					junit=cli_args.junit,
 					summary=cli_args.summary,
 					failed=cli_args.failed,
 					timeout=cli_args.timeout,
@@ -483,7 +527,8 @@ def run_handler(cli_args: argparse.Namespace) -> None:
 					kernel_args=cli_args.kernel_args,
 					run_isolated=cli_args.run_isolated,
 					list_tests=cli_args.list_tests,
-					list_tests_attr=cli_args.list_tests_attr)
+					list_tests_attr=cli_args.list_tests_attr,
+					list_suites=cli_args.list_suites)
 	result = run_tests(linux, request)
 	if result.status != KunitStatus.SUCCESS:
 		sys.exit(1)
@@ -523,6 +568,7 @@ def exec_handler(cli_args: argparse.Namespace) -> None:
 	exec_request = KunitExecRequest(raw_output=cli_args.raw_output,
 					build_dir=cli_args.build_dir,
 					json=cli_args.json,
+					junit=cli_args.junit,
 					summary=cli_args.summary,
 					failed=cli_args.failed,
 					timeout=cli_args.timeout,
@@ -532,7 +578,8 @@ def exec_handler(cli_args: argparse.Namespace) -> None:
 					kernel_args=cli_args.kernel_args,
 					run_isolated=cli_args.run_isolated,
 					list_tests=cli_args.list_tests,
-					list_tests_attr=cli_args.list_tests_attr)
+					list_tests_attr=cli_args.list_tests_attr,
+					list_suites=cli_args.list_suites)
 	result = exec_tests(linux, exec_request)
 	stdout.print_with_timestamp((
 		'Elapsed time: %.3fs\n') % (result.elapsed_time))
@@ -550,7 +597,9 @@ def parse_handler(cli_args: argparse.Namespace) -> None:
 	# We know nothing about how the result was created!
 	metadata = kunit_json.Metadata()
 	request = KunitParseRequest(raw_output=cli_args.raw_output,
-					json=cli_args.json, summary=cli_args.summary,
+					json=cli_args.json,
+					junit=cli_args.junit,
+					summary=cli_args.summary,
 					failed=cli_args.failed)
 	result, _ = parse_tests(request, metadata, kunit_output)
 	if result.status != KunitStatus.SUCCESS:
@@ -569,6 +618,7 @@ subcommand_handlers_map = {
 def main(argv: Sequence[str]) -> None:
 	parser = argparse.ArgumentParser(
 			description='Helps writing and running KUnit tests.')
+	add_root_opts(parser)
 	subparser = parser.add_subparsers(dest='subcommand')
 
 	# The 'run' command will config, build, exec, and parse in one go.
@@ -603,11 +653,27 @@ def main(argv: Sequence[str]) -> None:
 	parse_parser.add_argument('file',
 				  help='Specifies the file to read results from.',
 				  type=str, nargs='?', metavar='input_file')
+	add_completion_opts(parse_parser)
 
 	cli_args = parser.parse_args(massage_argv(argv))
 
 	if get_kernel_root_path():
 		os.chdir(get_kernel_root_path())
+
+	if cli_args.list_cmds:
+		print(" ".join(subparser.choices.keys()))
+		return
+
+	if cli_args.list_opts:
+		target_parser = subparser.choices.get(cli_args.subcommand)
+		if not target_parser:
+			target_parser = parser
+
+		# Accessing private attribute _option_string_actions to get
+		# the list of options. This is not a public API, but argparse
+		# does not provide a way to inspect options programmatically.
+		print(' '.join(target_parser._option_string_actions.keys()))
+		return
 
 	subcomand_handler = subcommand_handlers_map.get(cli_args.subcommand, None)
 

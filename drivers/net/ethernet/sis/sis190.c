@@ -331,9 +331,9 @@ static const struct {
 };
 
 static const struct pci_device_id sis190_pci_tbl[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_SI, 0x0190), 0, 0, 0 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_SI, 0x0191), 0, 0, 1 },
-	{ 0, },
+	{ PCI_VDEVICE(SI, 0x0190), .driver_data = 0 },
+	{ PCI_VDEVICE(SI, 0x0191), .driver_data = 1 },
+	{ },
 };
 
 MODULE_DEVICE_TABLE(pci, sis190_pci_tbl);
@@ -758,7 +758,7 @@ static irqreturn_t sis190_irq(int irq, void *__dev)
 
 	if (status & LinkChange) {
 		netif_info(tp, intr, dev, "link change\n");
-		del_timer(&tp->timer);
+		timer_delete(&tp->timer);
 		schedule_work(&tp->phy_task);
 	}
 
@@ -1023,7 +1023,7 @@ out_unlock:
 
 static void sis190_phy_timer(struct timer_list *t)
 {
-	struct sis190_private *tp = from_timer(tp, t, timer);
+	struct sis190_private *tp = timer_container_of(tp, t, timer);
 	struct net_device *dev = tp->dev;
 
 	if (likely(netif_running(dev)))
@@ -1034,7 +1034,7 @@ static inline void sis190_delete_timer(struct net_device *dev)
 {
 	struct sis190_private *tp = netdev_priv(dev);
 
-	del_timer_sync(&tp->timer);
+	timer_delete_sync(&tp->timer);
 }
 
 static inline void sis190_request_timer(struct net_device *dev)
@@ -1407,7 +1407,7 @@ static int sis190_mii_probe(struct net_device *dev)
 		if (status == 0xffff || status == 0x0000)
 			continue;
 
-		phy = kmalloc(sizeof(*phy), GFP_KERNEL);
+		phy = kmalloc_obj(*phy);
 		if (!phy) {
 			sis190_free_phy(&tp->first_phy);
 			rc = -ENOMEM;

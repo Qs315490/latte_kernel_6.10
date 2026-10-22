@@ -214,7 +214,7 @@ static int kgd_hqd_dump(struct amdgpu_device *adev,
 		(*dump)[i++][1] = RREG32(addr);		\
 	} while (0)
 
-	*dump = kmalloc_array(HQD_N_REGS, sizeof(**dump), GFP_KERNEL);
+	*dump = kmalloc_objs(**dump, HQD_N_REGS);
 	if (*dump == NULL)
 		return -ENOMEM;
 
@@ -301,7 +301,7 @@ static int kgd_hqd_sdma_dump(struct amdgpu_device *adev,
 #undef HQD_N_REGS
 #define HQD_N_REGS (19+4)
 
-	*dump = kmalloc_array(HQD_N_REGS, sizeof(**dump), GFP_KERNEL);
+	*dump = kmalloc_objs(**dump, HQD_N_REGS);
 	if (*dump == NULL)
 		return -ENOMEM;
 
@@ -561,6 +561,13 @@ static uint32_t read_vmid_from_vmfault_reg(struct amdgpu_device *adev)
 	return REG_GET_FIELD(status, VM_CONTEXT1_PROTECTION_FAULT_STATUS, VMID);
 }
 
+static uint32_t kgd_hqd_sdma_get_doorbell(struct amdgpu_device *adev,
+					  int engine, int queue)
+
+{
+	return 0;
+}
+
 const struct kfd2kgd_calls gfx_v7_kfd2kgd = {
 	.program_sh_mem_settings = kgd_program_sh_mem_settings,
 	.set_pasid_vmid_mapping = kgd_set_pasid_vmid_mapping,
@@ -578,4 +585,5 @@ const struct kfd2kgd_calls gfx_v7_kfd2kgd = {
 	.set_scratch_backing_va = set_scratch_backing_va,
 	.set_vm_context_page_table_base = set_vm_context_page_table_base,
 	.read_vmid_from_vmfault_reg = read_vmid_from_vmfault_reg,
+	.hqd_sdma_get_doorbell = kgd_hqd_sdma_get_doorbell,
 };

@@ -112,7 +112,7 @@ CFS usa una granularidad de nanosegundos y no depende de ningún
 jiffy o detalles como HZ. De este modo, el gestor de tareas CFS no tiene
 noción de "ventanas de tiempo" de la forma en que tenía el gestor de
 tareas previo, y tampoco tiene heurísticos. Únicamente hay un parámetro
-central ajustable (se ha de cambiar en CONFIG_SCHED_DEBUG):
+central ajustable:
 
    /sys/kernel/debug/sched/base_slice_ns
 
@@ -198,9 +198,9 @@ Esta es la lista parcial de llamadas:
 
  - yield_task(...)
 
-   Esta función es básicamente desencolar, seguido por encolar, a menos que
-   sysctl compat_yield esté activado; en ese caso, sitúa la entidad a gestionar
-   en la parte más hacia la derecha del árbol rojo-negro.
+   Esta función cede la CPU desplazando la posición de la tarea actualmente
+   en ejecución hacia atrás en la cola de ejecución, para que otras tareas
+   ejecutables sean planificadas primero.
 
  - check_preempt_curr(...)
 

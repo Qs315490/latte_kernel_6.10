@@ -231,32 +231,14 @@ static int test_by_type(const struct path *path, void *p)
  */
 static int autofs_dev_ioctl_open_mountpoint(const char *name, dev_t devid)
 {
-	int err, fd;
+	struct path path __free(path_put) = {};
+	int err;
 
-	fd = get_unused_fd_flags(O_CLOEXEC);
-	if (likely(fd >= 0)) {
-		struct file *filp;
-		struct path path;
+	err = find_autofs_mount(name, &path, test_by_dev, &devid);
+	if (err)
+		return err;
 
-		err = find_autofs_mount(name, &path, test_by_dev, &devid);
-		if (err)
-			goto out;
-
-		filp = dentry_open(&path, O_RDONLY, current_cred());
-		path_put(&path);
-		if (IS_ERR(filp)) {
-			err = PTR_ERR(filp);
-			goto out;
-		}
-
-		fd_install(fd, filp);
-	}
-
-	return fd;
-
-out:
-	put_unused_fd(fd);
-	return err;
+	return FD_ADD(O_CLOEXEC, dentry_open(&path, O_RDONLY, current_cred()));
 }
 
 /* Open a file descriptor on an autofs mount point */
@@ -381,6 +363,7 @@ static int autofs_dev_ioctl_setpipefd(struct file *fp,
 		swap(sbi->oz_pgrp, new_pid);
 		sbi->pipefd = pipefd;
 		sbi->pipe = pipe;
+		sbi->mnt_ns_id = to_ns_common(current->nsproxy->mnt_ns)->ns_id;
 		sbi->flags &= ~AUTOFS_SBI_CATATONIC;
 	}
 out:
@@ -442,7 +425,6 @@ static int autofs_dev_ioctl_timeout(struct file *fp,
 		sbi->exp_timeout = timeout * HZ;
 	} else {
 		struct dentry *base = fp->f_path.dentry;
-		struct inode *inode = base->d_inode;
 		int path_len = param->size - AUTOFS_DEV_IOCTL_SIZE - 1;
 		struct dentry *dentry;
 		struct autofs_info *ino;
@@ -450,19 +432,8 @@ static int autofs_dev_ioctl_timeout(struct file *fp,
 		if (!autofs_type_indirect(sbi->type))
 			return -EINVAL;
 
-		/* An expire timeout greater than the superblock timeout
-		 * could be a problem at shutdown but the super block
-		 * timeout itself can change so all we can really do is
-		 * warn the user.
-		 */
-		if (timeout >= sbi->exp_timeout)
-			pr_warn("per-mount expire timeout is greater than "
-				"the parent autofs mount timeout which could "
-				"prevent shutdown\n");
-
-		inode_lock_shared(inode);
-		dentry = try_lookup_one_len(param->path, base, path_len);
-		inode_unlock_shared(inode);
+		dentry = try_lookup_noperm(&QSTR_LEN(param->path, path_len),
+					   base);
 		if (IS_ERR_OR_NULL(dentry))
 			return dentry ? PTR_ERR(dentry) : -ENOENT;
 		ino = autofs_dentry_ino(dentry);
@@ -489,6 +460,18 @@ static int autofs_dev_ioctl_timeout(struct file *fp,
 			ino->flags |= AUTOFS_INF_EXPIRE_SET;
 			ino->exp_timeout = timeout * HZ;
 		}
+
+		/* An expire timeout greater than the superblock timeout
+		 * could be a problem at shutdown but the super block
+		 * timeout itself can change so all we can really do is
+		 * warn the user.
+		 */
+		if (ino->flags & AUTOFS_INF_EXPIRE_SET &&
+		    ino->exp_timeout > sbi->exp_timeout)
+			pr_warn("per-mount expire timeout is greater than "
+				"the parent autofs mount timeout which could "
+				"prevent shutdown\n");
+
 		dput(dentry);
 	}
 

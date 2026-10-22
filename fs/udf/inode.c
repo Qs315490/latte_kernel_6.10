@@ -147,14 +147,16 @@ void udf_evict_inode(struct inode *inode)
 		if (iinfo->i_alloc_type != ICBTAG_FLAG_AD_IN_ICB &&
 		    inode->i_size != iinfo->i_lenExtents) {
 			udf_warn(inode->i_sb,
-				 "Inode %lu (mode %o) has inode size %llu different from extent length %llu. Filesystem need not be standards compliant.\n",
+				 "Inode %llu (mode %o) has inode size %llu different from extent length %llu. Filesystem need not be standards compliant.\n",
 				 inode->i_ino, inode->i_mode,
 				 (unsigned long long)inode->i_size,
 				 (unsigned long long)iinfo->i_lenExtents);
 		}
 	}
 	truncate_inode_pages_final(&inode->i_data);
-	invalidate_inode_buffers(inode);
+	if (!want_delete)
+		mmb_sync(&iinfo->i_metadata_bhs);
+	mmb_invalidate(&iinfo->i_metadata_bhs);
 	clear_inode(inode);
 	kfree(iinfo->i_data);
 	iinfo->i_data = NULL;
@@ -181,31 +183,32 @@ static void udf_write_failed(struct address_space *mapping, loff_t to)
 	}
 }
 
-static int udf_adinicb_writepage(struct folio *folio,
-				 struct writeback_control *wbc, void *data)
+static int udf_handle_page_wb(struct folio *folio,
+			      struct writeback_control *wbc)
 {
 	struct inode *inode = folio->mapping->host;
 	struct udf_inode_info *iinfo = UDF_I(inode);
 
-	BUG_ON(!folio_test_locked(folio));
-	BUG_ON(folio->index != 0);
-	memcpy_from_file_folio(iinfo->i_data + iinfo->i_lenEAttr, folio, 0,
-		       i_size_read(inode));
+	/*
+	 * Inodes in the normal format are handled by the generic code. This
+	 * check is race-free as the folio lock protects us from inode type
+	 * conversion.
+	 */
+	if (iinfo->i_alloc_type != ICBTAG_FLAG_AD_IN_ICB)
+		return 1;
+
+	memcpy_from_file_folio(iinfo->i_data + iinfo->i_lenEAttr, folio,
+				0, i_size_read(inode));
 	folio_unlock(folio);
 	mark_inode_dirty(inode);
-
 	return 0;
 }
 
 static int udf_writepages(struct address_space *mapping,
 			  struct writeback_control *wbc)
 {
-	struct inode *inode = mapping->host;
-	struct udf_inode_info *iinfo = UDF_I(inode);
-
-	if (iinfo->i_alloc_type != ICBTAG_FLAG_AD_IN_ICB)
-		return mpage_writepages(mapping, wbc, udf_get_block_wb);
-	return write_cache_pages(mapping, wbc, udf_adinicb_writepage, NULL);
+	return __mpage_writepages(mapping, wbc, udf_get_block_wb,
+				  udf_handle_page_wb);
 }
 
 static void udf_adinicb_read_folio(struct folio *folio)
@@ -244,10 +247,12 @@ static void udf_readahead(struct readahead_control *rac)
 	mpage_readahead(rac, udf_get_block);
 }
 
-static int udf_write_begin(struct file *file, struct address_space *mapping,
+static int udf_write_begin(const struct kiocb *iocb,
+			   struct address_space *mapping,
 			   loff_t pos, unsigned len,
 			   struct folio **foliop, void **fsdata)
 {
+	struct file *file = iocb->ki_filp;
 	struct udf_inode_info *iinfo = UDF_I(file_inode(file));
 	struct folio *folio;
 	int ret;
@@ -271,15 +276,16 @@ static int udf_write_begin(struct file *file, struct address_space *mapping,
 	return 0;
 }
 
-static int udf_write_end(struct file *file, struct address_space *mapping,
+static int udf_write_end(const struct kiocb *iocb,
+			 struct address_space *mapping,
 			 loff_t pos, unsigned len, unsigned copied,
 			 struct folio *folio, void *fsdata)
 {
-	struct inode *inode = file_inode(file);
+	struct inode *inode = file_inode(iocb->ki_filp);
 	loff_t last_pos;
 
 	if (UDF_I(inode)->i_alloc_type != ICBTAG_FLAG_AD_IN_ICB)
-		return generic_write_end(file, mapping, pos, len, copied, folio,
+		return generic_write_end(iocb, mapping, pos, len, copied, folio,
 					 fsdata);
 	last_pos = pos + copied;
 	if (last_pos > inode->i_size)
@@ -727,7 +733,7 @@ static int inode_getblk(struct inode *inode, struct udf_map_rq *map)
 	sector_t offset = 0;
 	int8_t etype, tmpetype;
 	struct udf_inode_info *iinfo = UDF_I(inode);
-	udf_pblk_t goal = 0, pgoal = iinfo->i_location.logicalBlockNum;
+	udf_pblk_t goal = 0, pgoal = 0;
 	int lastblock = 0;
 	bool isBeyondEOF = false;
 	int ret = 0;
@@ -810,6 +816,7 @@ static int inode_getblk(struct inode *inode, struct udf_map_rq *map)
 		}
 		map->oflags = UDF_BLK_MAPPED;
 		map->pblk = udf_get_lb_pblock(inode->i_sb, &eloc, offset);
+		ret = 0;
 		goto out_free;
 	}
 
@@ -885,11 +892,10 @@ static int inode_getblk(struct inode *inode, struct udf_map_rq *map)
 	else { /* otherwise, allocate a new block */
 		if (iinfo->i_next_alloc_block == map->lblk)
 			goal = iinfo->i_next_alloc_goal;
-
-		if (!goal) {
-			if (!(goal = pgoal)) /* XXX: what was intended here? */
-				goal = iinfo->i_location.logicalBlockNum + 1;
-		}
+		if (!goal)
+			goal = pgoal;
+		if (!goal)
+			goal = iinfo->i_location.logicalBlockNum + 1;
 
 		newblocknum = udf_new_block(inode->i_sb, inode,
 				iinfo->i_location.partitionReferenceNum,
@@ -1253,7 +1259,7 @@ struct buffer_head *udf_bread(struct inode *inode, udf_pblk_t block,
 		memset(bh->b_data, 0x00, inode->i_sb->s_blocksize);
 		set_buffer_uptodate(bh);
 		unlock_buffer(bh);
-		mark_buffer_dirty_inode(bh, inode);
+		mmb_mark_buffer_dirty(bh, &UDF_I(inode)->i_metadata_bhs);
 		return bh;
 	}
 
@@ -1378,13 +1384,13 @@ reread:
 	 */
 	bh = udf_read_ptagged(inode->i_sb, iloc, 0, &ident);
 	if (!bh) {
-		udf_err(inode->i_sb, "(ino %lu) failed !bh\n", inode->i_ino);
+		udf_err(inode->i_sb, "(ino %llu) failed !bh\n", inode->i_ino);
 		return -EIO;
 	}
 
 	if (ident != TAG_IDENT_FE && ident != TAG_IDENT_EFE &&
 	    ident != TAG_IDENT_USE) {
-		udf_err(inode->i_sb, "(ino %lu) failed ident=%u\n",
+		udf_err(inode->i_sb, "(ino %llu) failed ident=%u\n",
 			inode->i_ino, ident);
 		goto out;
 	}
@@ -1633,7 +1639,7 @@ reread:
 		udf_debug("METADATA BITMAP FILE-----\n");
 		break;
 	default:
-		udf_err(inode->i_sb, "(ino %lu) failed unknown file type=%u\n",
+		udf_err(inode->i_sb, "(ino %llu) failed unknown file type=%u\n",
 			inode->i_ino, fe->icbTag.fileType);
 		goto out;
 	}
@@ -1934,7 +1940,7 @@ finish:
 	if (do_sync) {
 		sync_dirty_buffer(bh);
 		if (buffer_write_io_error(bh)) {
-			udf_warn(inode->i_sb, "IO error syncing udf inode [%08lx]\n",
+			udf_warn(inode->i_sb, "IO error syncing udf inode [%08llx]\n",
 				 inode->i_ino);
 			err = -EIO;
 		}
@@ -1954,7 +1960,7 @@ struct inode *__udf_iget(struct super_block *sb, struct kernel_lb_addr *ino,
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 
-	if (!(inode->i_state & I_NEW)) {
+	if (!(inode_state_read_once(inode) & I_NEW)) {
 		if (UDF_I(inode)->i_hidden != hidden_inode) {
 			iput(inode);
 			return ERR_PTR(-EFSCORRUPTED);
@@ -2001,7 +2007,7 @@ int udf_setup_indirect_aext(struct inode *inode, udf_pblk_t block,
 	memset(bh->b_data, 0x00, sb->s_blocksize);
 	set_buffer_uptodate(bh);
 	unlock_buffer(bh);
-	mark_buffer_dirty_inode(bh, inode);
+	mmb_mark_buffer_dirty(bh, &UDF_I(inode)->i_metadata_bhs);
 
 	aed = (struct allocExtDesc *)(bh->b_data);
 	if (!UDF_QUERY_FLAG(sb, UDF_FLAG_STRICT)) {
@@ -2096,7 +2102,7 @@ int __udf_add_aext(struct inode *inode, struct extent_position *epos,
 		else
 			udf_update_tag(epos->bh->b_data,
 					sizeof(struct allocExtDesc));
-		mark_buffer_dirty_inode(epos->bh, inode);
+		mmb_mark_buffer_dirty(epos->bh, &iinfo->i_metadata_bhs);
 	}
 
 	return 0;
@@ -2180,7 +2186,7 @@ void udf_write_aext(struct inode *inode, struct extent_position *epos,
 				       le32_to_cpu(aed->lengthAllocDescs) +
 				       sizeof(struct allocExtDesc));
 		}
-		mark_buffer_dirty_inode(epos->bh, inode);
+		mmb_mark_buffer_dirty(epos->bh, &iinfo->i_metadata_bhs);
 	} else {
 		mark_inode_dirty(inode);
 	}
@@ -2216,7 +2222,7 @@ int udf_next_aext(struct inode *inode, struct extent_position *epos,
 
 		if (++indirections > UDF_MAX_INDIR_EXTS) {
 			udf_err(inode->i_sb,
-				"too many indirect extents in inode %lu\n",
+				"too many indirect extents in inode %llu\n",
 				inode->i_ino);
 			return -EFSCORRUPTED;
 		}
@@ -2263,6 +2269,9 @@ int udf_current_aext(struct inode *inode, struct extent_position *epos,
 		ptr = epos->bh->b_data + epos->offset;
 		if (check_add_overflow(sizeof(struct allocExtDesc),
 				le32_to_cpu(header->lengthAllocDescs), &alen))
+			return -1;
+
+		if (alen > epos->bh->b_size)
 			return -1;
 	}
 
@@ -2385,7 +2394,7 @@ int8_t udf_delete_aext(struct inode *inode, struct extent_position epos)
 			else
 				udf_update_tag(oepos.bh->b_data,
 						sizeof(struct allocExtDesc));
-			mark_buffer_dirty_inode(oepos.bh, inode);
+			mmb_mark_buffer_dirty(oepos.bh, &iinfo->i_metadata_bhs);
 		}
 	} else {
 		udf_write_aext(inode, &oepos, &eloc, elen, 1);
@@ -2402,7 +2411,7 @@ int8_t udf_delete_aext(struct inode *inode, struct extent_position epos)
 			else
 				udf_update_tag(oepos.bh->b_data,
 						sizeof(struct allocExtDesc));
-			mark_buffer_dirty_inode(oepos.bh, inode);
+			mmb_mark_buffer_dirty(oepos.bh, &iinfo->i_metadata_bhs);
 		}
 	}
 

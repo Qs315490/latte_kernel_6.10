@@ -16,7 +16,7 @@
 #define SIZE_SEI	(8 * SZ_1K)
 
 /*
- * Offset added by the firmware which must be substracted
+ * Offset added by the firmware which must be subtracted
  * from the workspace phyaddr
  */
 #define WORKSPACE_BUF_OFFSET	0x1000000
@@ -233,7 +233,7 @@ static int codec_h264_load_extended_firmware(struct amvdec_session *sess,
 	if (len < SIZE_EXT_FW)
 		return -EINVAL;
 
-	h264 = kzalloc(sizeof(*h264), GFP_KERNEL);
+	h264 = kzalloc_obj(*h264);
 	if (!h264)
 		return -ENOMEM;
 

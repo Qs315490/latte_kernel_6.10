@@ -219,7 +219,7 @@ static int bsg_map_buffer(struct bsg_buffer *buf, struct request *req)
 	if (!buf->sg_list)
 		return -ENOMEM;
 	sg_init_table(buf->sg_list, req->nr_phys_segments);
-	buf->sg_cnt = blk_rq_map_sg(req->q, req, buf->sg_list);
+	buf->sg_cnt = blk_rq_map_sg(req, buf->sg_list);
 	buf->payload_len = blk_rq_bytes(req);
 	return 0;
 }
@@ -299,7 +299,7 @@ out:
 
 /* called right after the request is allocated for the request_queue */
 static int bsg_init_rq(struct blk_mq_tag_set *set, struct request *req,
-		       unsigned int hctx_idx, unsigned int numa_node)
+		       unsigned int hctx_idx, int numa_node)
 {
 	struct bsg_job *job = blk_mq_rq_to_pdu(req);
 
@@ -368,7 +368,7 @@ struct request_queue *bsg_setup_queue(struct device *dev, const char *name,
 	struct request_queue *q;
 	int ret = -ENOMEM;
 
-	bset = kzalloc(sizeof(*bset), GFP_KERNEL);
+	bset = kzalloc_obj(*bset);
 	if (!bset)
 		return ERR_PTR(-ENOMEM);
 
@@ -393,7 +393,7 @@ struct request_queue *bsg_setup_queue(struct device *dev, const char *name,
 
 	blk_queue_rq_timeout(q, BLK_DEFAULT_SG_TIMEOUT);
 
-	bset->bd = bsg_register_queue(q, dev, name, bsg_transport_sg_io_fn);
+	bset->bd = bsg_register_queue(q, dev, name, bsg_transport_sg_io_fn, NULL);
 	if (IS_ERR(bset->bd)) {
 		ret = PTR_ERR(bset->bd);
 		goto out_cleanup_queue;

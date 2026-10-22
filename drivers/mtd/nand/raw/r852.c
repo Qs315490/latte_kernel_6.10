@@ -387,6 +387,9 @@ static int r852_wait(struct nand_chip *chip)
 static int r852_ready(struct nand_chip *chip)
 {
 	struct r852_device *dev = r852_get_dev(nand_to_mtd(chip));
+	if (dev->card_unstable)
+		return 0;
+
 	return !(r852_read_reg(dev, R852_CARD_STA) & R852_CARD_STA_BUSY);
 }
 
@@ -864,7 +867,7 @@ static int  r852_probe(struct pci_dev *pci_dev, const struct pci_device_id *id)
 	error = -ENOMEM;
 
 	/* init nand chip, but register it only on card insert */
-	chip = kzalloc(sizeof(struct nand_chip), GFP_KERNEL);
+	chip = kzalloc_obj(struct nand_chip);
 
 	if (!chip)
 		goto error4;
@@ -880,7 +883,7 @@ static int  r852_probe(struct pci_dev *pci_dev, const struct pci_device_id *id)
 	chip->legacy.write_buf = r852_write_buf;
 
 	/* init our device structure */
-	dev = kzalloc(sizeof(struct r852_device), GFP_KERNEL);
+	dev = kzalloc_obj(struct r852_device);
 
 	if (!dev)
 		goto error5;
@@ -1067,8 +1070,8 @@ static int r852_resume(struct device *device)
 
 static const struct pci_device_id r852_pci_id_tbl[] = {
 
-	{ PCI_VDEVICE(RICOH, 0x0852), },
-	{ },
+	{ PCI_VDEVICE(RICOH, 0x0852) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, r852_pci_id_tbl);

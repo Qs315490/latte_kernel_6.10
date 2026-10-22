@@ -4,6 +4,8 @@
  * Copyright (C) 2015 Rob Clark
  */
 
+#include <linux/string_choices.h>
+
 #include <drm/display/drm_dp_helper.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_print.h>
@@ -251,73 +253,6 @@ int drm_dp_link_probe(struct drm_dp_aux *aux, struct drm_dp_link *link)
 			drm_dp_link_add_rate(link, rate * 200);
 		}
 	}
-
-	return 0;
-}
-
-/**
- * drm_dp_link_power_up() - power up a DisplayPort link
- * @aux: DisplayPort AUX channel
- * @link: pointer to a structure containing the link configuration
- *
- * Returns 0 on success or a negative error code on failure.
- */
-int drm_dp_link_power_up(struct drm_dp_aux *aux, struct drm_dp_link *link)
-{
-	u8 value;
-	int err;
-
-	/* DP_SET_POWER register is only available on DPCD v1.1 and later */
-	if (link->revision < 0x11)
-		return 0;
-
-	err = drm_dp_dpcd_readb(aux, DP_SET_POWER, &value);
-	if (err < 0)
-		return err;
-
-	value &= ~DP_SET_POWER_MASK;
-	value |= DP_SET_POWER_D0;
-
-	err = drm_dp_dpcd_writeb(aux, DP_SET_POWER, value);
-	if (err < 0)
-		return err;
-
-	/*
-	 * According to the DP 1.1 specification, a "Sink Device must exit the
-	 * power saving state within 1 ms" (Section 2.5.3.1, Table 5-52, "Sink
-	 * Control Field" (register 0x600).
-	 */
-	usleep_range(1000, 2000);
-
-	return 0;
-}
-
-/**
- * drm_dp_link_power_down() - power down a DisplayPort link
- * @aux: DisplayPort AUX channel
- * @link: pointer to a structure containing the link configuration
- *
- * Returns 0 on success or a negative error code on failure.
- */
-int drm_dp_link_power_down(struct drm_dp_aux *aux, struct drm_dp_link *link)
-{
-	u8 value;
-	int err;
-
-	/* DP_SET_POWER register is only available on DPCD v1.1 and later */
-	if (link->revision < 0x11)
-		return 0;
-
-	err = drm_dp_dpcd_readb(aux, DP_SET_POWER, &value);
-	if (err < 0)
-		return err;
-
-	value &= ~DP_SET_POWER_MASK;
-	value |= DP_SET_POWER_D3;
-
-	err = drm_dp_dpcd_writeb(aux, DP_SET_POWER, value);
-	if (err < 0)
-		return err;
 
 	return 0;
 }
@@ -735,7 +670,7 @@ static int drm_dp_link_train_full(struct drm_dp_link *link)
 
 retry:
 	DRM_DEBUG_KMS("full-training link: %u lane%s at %u MHz\n",
-		      link->lanes, (link->lanes > 1) ? "s" : "",
+		      link->lanes, str_plural(link->lanes),
 		      link->rate / 100);
 
 	err = drm_dp_link_configure(link->aux, link);
@@ -791,7 +726,7 @@ static int drm_dp_link_train_fast(struct drm_dp_link *link)
 	int err;
 
 	DRM_DEBUG_KMS("fast-training link: %u lane%s at %u MHz\n",
-		      link->lanes, (link->lanes > 1) ? "s" : "",
+		      link->lanes, str_plural(link->lanes),
 		      link->rate / 100);
 
 	err = drm_dp_link_configure(link->aux, link);

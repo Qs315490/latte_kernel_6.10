@@ -170,10 +170,13 @@ extern void __iomem *ioremap_uc(resource_size_t offset, unsigned long size);
 #define ioremap_uc ioremap_uc
 extern void __iomem *ioremap_cache(resource_size_t offset, unsigned long size);
 #define ioremap_cache ioremap_cache
-extern void __iomem *ioremap_prot(resource_size_t offset, unsigned long size, unsigned long prot_val);
+extern void __iomem *ioremap_prot(resource_size_t offset, unsigned long size,  pgprot_t prot);
 #define ioremap_prot ioremap_prot
 extern void __iomem *ioremap_encrypted(resource_size_t phys_addr, unsigned long size);
 #define ioremap_encrypted ioremap_encrypted
+
+void *arch_memremap_wb(phys_addr_t phys_addr, size_t size, unsigned long flags);
+#define arch_memremap_wb arch_memremap_wb
 
 /**
  * ioremap     -   map bus memory into CPU space
@@ -214,10 +217,9 @@ void memset_io(volatile void __iomem *, int, size_t);
 static inline void __iowrite32_copy(void __iomem *to, const void *from,
 				    size_t count)
 {
-	asm volatile("rep ; movsl"
-		     : "=&c"(count), "=&D"(to), "=&S"(from)
-		     : "0"(count), "1"(to), "2"(from)
-		     : "memory");
+	asm volatile("rep movsl"
+		     : "+D"(to), "+S"(from), "+c"(count)
+		     : : "memory");
 }
 #define __iowrite32_copy __iowrite32_copy
 #endif
@@ -240,20 +242,18 @@ extern int io_delay_type;
 extern void io_delay_init(void);
 
 #if defined(CONFIG_PARAVIRT)
-#include <asm/paravirt.h>
+#include <asm/paravirt-base.h>
 #else
+#define call_io_delay() true
+#endif
 
 static inline void slow_down_io(void)
 {
-	native_io_delay();
-#ifdef REALLY_SLOW_IO
-	native_io_delay();
-	native_io_delay();
-	native_io_delay();
-#endif
-}
+	if (!call_io_delay())
+		return;
 
-#endif
+	native_io_delay();
+}
 
 #define BUILDIO(bwl, type)						\
 static inline void out##bwl##_p(type value, u16 port)			\
@@ -279,7 +279,7 @@ static inline void outs##bwl(u16 port, const void *addr, unsigned long count) \
 			count--;					\
 		}							\
 	} else {							\
-		asm volatile("rep; outs" #bwl				\
+		asm volatile("rep outs" #bwl				\
 			     : "+S"(addr), "+c"(count)			\
 			     : "d"(port) : "memory");			\
 	}								\
@@ -295,7 +295,7 @@ static inline void ins##bwl(u16 port, void *addr, unsigned long count)	\
 			count--;					\
 		}							\
 	} else {							\
-		asm volatile("rep; ins" #bwl				\
+		asm volatile("rep ins" #bwl				\
 			     : "+D"(addr), "+c"(count)			\
 			     : "d"(port) : "memory");			\
 	}								\

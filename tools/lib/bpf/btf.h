@@ -94,6 +94,7 @@ LIBBPF_API struct btf *btf__new_empty(void);
  * @brief **btf__new_empty_split()** creates an unpopulated BTF object from an
  * ELF BTF section except with a base BTF on top of which split BTF should be
  * based
+ * @param base_btf base BTF object
  * @return new BTF object instance which has to be eventually freed with
  * **btf__free()**
  *
@@ -108,6 +109,26 @@ LIBBPF_API struct btf *btf__new_empty(void);
  */
 LIBBPF_API struct btf *btf__new_empty_split(struct btf *base_btf);
 
+struct btf_new_opts {
+	size_t sz;
+	struct btf *base_btf;	/* optional base BTF */
+	bool add_layout;	/* add BTF layout information */
+	size_t:0;
+};
+#define btf_new_opts__last_field add_layout
+
+/**
+ * @brief **btf__new_empty_opts()** creates an unpopulated BTF object with
+ * optional *base_btf* and BTF kind layout description if *add_layout*
+ * is set
+ * @return new BTF object instance which has to be eventually freed with
+ * **btf__free()**
+ *
+ * On error, NULL is returned and the thread-local `errno` variable is
+ * set to the error code.
+ */
+LIBBPF_API struct btf *btf__new_empty_opts(struct btf_new_opts *opts);
+
 /**
  * @brief **btf__distill_base()** creates new versions of the split BTF
  * *src_btf* and its base BTF. The new base BTF will only contain the types
@@ -115,6 +136,10 @@ LIBBPF_API struct btf *btf__new_empty_split(struct btf *base_btf);
  * When that split BTF is loaded against a (possibly changed) base, this
  * distilled base BTF will help update references to that (possibly changed)
  * base BTF.
+ * @param src_btf source split BTF object
+ * @param new_base_btf pointer to where the new base BTF object pointer will be stored
+ * @param new_split_btf pointer to where the new split BTF object pointer will be stored
+ * @return 0 on success; negative error code, otherwise
  *
  * Both the new split and its associated new base BTF must be freed by
  * the caller.
@@ -227,6 +252,7 @@ LIBBPF_API int btf__add_volatile(struct btf *btf, int ref_type_id);
 LIBBPF_API int btf__add_const(struct btf *btf, int ref_type_id);
 LIBBPF_API int btf__add_restrict(struct btf *btf, int ref_type_id);
 LIBBPF_API int btf__add_type_tag(struct btf *btf, const char *value, int ref_type_id);
+LIBBPF_API int btf__add_type_attr(struct btf *btf, const char *value, int ref_type_id);
 
 /* func and func_proto construction APIs */
 LIBBPF_API int btf__add_func(struct btf *btf, const char *name,
@@ -243,6 +269,8 @@ LIBBPF_API int btf__add_datasec_var_info(struct btf *btf, int var_type_id,
 /* tag construction API */
 LIBBPF_API int btf__add_decl_tag(struct btf *btf, const char *value, int ref_type_id,
 			    int component_idx);
+LIBBPF_API int btf__add_decl_attr(struct btf *btf, const char *value, int ref_type_id,
+				  int component_idx);
 
 struct btf_dedup_opts {
 	size_t sz;
@@ -261,6 +289,9 @@ LIBBPF_API int btf__dedup(struct btf *btf, const struct btf_dedup_opts *opts);
  * to base BTF kinds, and verify those references are compatible with
  * *base_btf*; if they are, *btf* is adjusted such that is re-parented to
  * *base_btf* and type ids and strings are adjusted to accommodate this.
+ * @param btf split BTF object to relocate
+ * @param base_btf base BTF object
+ * @return 0 on success; negative error code, otherwise
  *
  * If successful, 0 is returned and **btf** now has **base_btf** as its
  * base.
@@ -269,6 +300,48 @@ LIBBPF_API int btf__dedup(struct btf *btf, const struct btf_dedup_opts *opts);
  * is set to the error code as well.
  */
 LIBBPF_API int btf__relocate(struct btf *btf, const struct btf *base_btf);
+
+struct btf_permute_opts {
+	size_t sz;
+	/* optional .BTF.ext info along the main BTF info */
+	struct btf_ext *btf_ext;
+	size_t :0;
+};
+#define btf_permute_opts__last_field btf_ext
+
+/**
+ * @brief **btf__permute()** rearranges BTF types in-place according to a specified ID mapping
+ * @param btf BTF object to permute
+ * @param id_map Array mapping original type IDs to new IDs
+ * @param id_map_cnt Number of elements in @id_map
+ * @param opts Optional parameters, including BTF extension data for reference updates
+ * @return 0 on success, negative error code on failure
+ *
+ * **btf__permute()** reorders BTF types based on the provided @id_map array,
+ * updating all internal type references to maintain consistency. The function
+ * operates in-place, modifying the BTF object directly.
+ *
+ * For **base BTF**:
+ * - @id_map must include all types from ID 0 to `btf__type_cnt(btf) - 1`
+ * - @id_map_cnt must be `btf__type_cnt(btf)`
+ * - Mapping is defined as `id_map[original_id] = new_id`
+ * - `id_map[0]` must be 0 (void type cannot be moved)
+ *
+ * For **split BTF**:
+ * - @id_map must include only split types (types added on top of the base BTF)
+ * - @id_map_cnt must be `btf__type_cnt(btf) - btf__type_cnt(btf__base_btf(btf))`
+ * - Mapping is defined as `id_map[original_id - start_id] = new_id`
+ * - `start_id` equals `btf__type_cnt(btf__base_btf(btf))`
+ *
+ * After permutation, all type references within the BTF data and optional
+ * BTF extension (if provided via @opts) are updated automatically.
+ *
+ * On error, returns a negative error code and sets errno:
+ *   - `-EINVAL`: Invalid parameters or invalid ID mapping
+ *   - `-ENOMEM`: Memory allocation failure
+ */
+LIBBPF_API int btf__permute(struct btf *btf, __u32 *id_map, __u32 id_map_cnt,
+			    const struct btf_permute_opts *opts);
 
 struct btf_dump;
 
@@ -323,9 +396,10 @@ struct btf_dump_type_data_opts {
 	bool compact;		/* no newlines/indentation */
 	bool skip_names;	/* skip member/type names */
 	bool emit_zeroes;	/* show 0-valued fields */
+	bool emit_strings;	/* print char arrays as strings */
 	size_t :0;
 };
-#define btf_dump_type_data_opts__last_field emit_zeroes
+#define btf_dump_type_data_opts__last_field emit_strings
 
 LIBBPF_API int
 btf_dump__dump_type_data(struct btf_dump *d, __u32 id,
@@ -361,7 +435,7 @@ static inline __u16 btf_kind(const struct btf_type *t)
 	return BTF_INFO_KIND(t->info);
 }
 
-static inline __u16 btf_vlen(const struct btf_type *t)
+static inline __u32 btf_vlen(const struct btf_type *t)
 {
 	return BTF_INFO_VLEN(t->info);
 }

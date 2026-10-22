@@ -10,6 +10,7 @@ Type                                Name                        fastpath_tx_acce
 =================================== =========================== =================== =================== ===================================================================================
 unsigned_long:32                    priv_flags                  read_mostly                             __dev_queue_xmit(tx)
 unsigned_long:1                     lltx                        read_mostly                             HARD_TX_LOCK,HARD_TX_TRYLOCK,HARD_TX_UNLOCK(tx)
+unsigned_long:2                     netmem_tx:2;                read_mostly
 char                                name[16]
 struct netdev_name_node*            name_node
 struct dev_ifalias*                 ifalias
@@ -67,6 +68,7 @@ unsigned_char                       addr_assign_type
 unsigned_char                       addr_len
 unsigned_char                       upper_level
 unsigned_char                       lower_level
+u8                                  threaded                                                            napi_poll(napi_enable,netif_set_threaded)
 unsigned_short                      neigh_priv_len
 unsigned_short                      padded
 unsigned_short                      dev_id
@@ -88,8 +90,6 @@ struct inet6_dev*                   ip6_ptr                     read_mostly     
 struct vlan_info*                   vlan_info
 struct dsa_port*                    dsa_ptr
 struct tipc_bearer*                 tipc_ptr
-void*                               atalk_ptr
-void*                               ax25_ptr
 struct wireless_dev*                ieee80211_ptr
 struct wpan_dev*                    ieee802154_ptr
 struct mpls_dev*                    mpls_ptr
@@ -131,7 +131,7 @@ struct ref_tracker_dir              refcnt_tracker
 struct list_head                    link_watch_list
 enum:8                              reg_state
 bool                                dismantle
-enum:16                             rtnl_link_state
+bool                                rtnl_link_initilizing
 bool                                needs_free_netdev
 void*priv_destructor                struct net_device
 struct netpoll_info*                npinfo                                          read_mostly         napi_poll/napi_poll_lock
@@ -164,10 +164,9 @@ struct sfp_bus*                     sfp_bus
 struct lock_class_key*              qdisc_tx_busylock
 bool                                proto_down
 unsigned:1                          wol_enabled
-unsigned:1                          threaded                                                            napi_poll(napi_enable,dev_set_threaded)
 unsigned_long:1                     see_all_hwtstamp_requests
 unsigned_long:1                     change_proto_down
-unsigned_long:1                     netns_local
+unsigned_long:1                     netns_immutable
 unsigned_long:1                     fcoe_mtu
 struct list_head                    net_notifier_list
 struct macsec_ops*                  macsec_ops

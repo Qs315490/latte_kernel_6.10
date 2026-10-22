@@ -81,7 +81,7 @@ bool kernel_initiated;
 
 static struct opalcore * __init get_new_element(void)
 {
-	return kzalloc(sizeof(struct opalcore), GFP_KERNEL);
+	return kzalloc_obj(struct opalcore);
 }
 
 static inline int is_opalcore_usable(void)
@@ -149,7 +149,7 @@ static Elf64_Word *__init auxv_to_elf64_notes(Elf64_Word *buf,
 	/* end of vector */
 	bufp[idx++] = cpu_to_be64(AT_NULL);
 
-	buf = append_elf64_note(buf, CRASH_CORE_NOTE_NAME, NT_AUXV,
+	buf = append_elf64_note(buf, NN_AUXV, NT_AUXV,
 				oc_conf->auxv_buf, AUXV_DESC_SZ);
 	return buf;
 }
@@ -159,7 +159,7 @@ static Elf64_Word *__init auxv_to_elf64_notes(Elf64_Word *buf,
  * Returns number of bytes read on success, -errno on failure.
  */
 static ssize_t read_opalcore(struct file *file, struct kobject *kobj,
-			     struct bin_attribute *bin_attr, char *to,
+			     const struct bin_attribute *bin_attr, char *to,
 			     loff_t pos, size_t count)
 {
 	struct opalcore *m;
@@ -206,7 +206,7 @@ static ssize_t read_opalcore(struct file *file, struct kobject *kobj,
 	return (tpos - pos);
 }
 
-static struct bin_attribute opal_core_attr = {
+static struct bin_attribute opal_core_attr __ro_after_init = {
 	.attr = {.name = "core", .mode = 0400},
 	.read = read_opalcore
 };
@@ -252,7 +252,7 @@ static Elf64_Word * __init opalcore_append_cpu_notes(Elf64_Word *buf)
 	 * crashing CPU's prstatus.
 	 */
 	first_cpu_note = buf;
-	buf = append_elf64_note(buf, CRASH_CORE_NOTE_NAME, NT_PRSTATUS,
+	buf = append_elf64_note(buf, NN_PRSTATUS, NT_PRSTATUS,
 				&prstatus, sizeof(prstatus));
 
 	for (i = 0; i < oc_conf->num_cpus; i++, bufp += size_per_thread) {
@@ -279,7 +279,7 @@ static Elf64_Word * __init opalcore_append_cpu_notes(Elf64_Word *buf)
 		fill_prstatus(&prstatus, thread_pir, &regs);
 
 		if (thread_pir != oc_conf->crashing_cpu) {
-			buf = append_elf64_note(buf, CRASH_CORE_NOTE_NAME,
+			buf = append_elf64_note(buf, NN_PRSTATUS,
 						NT_PRSTATUS, &prstatus,
 						sizeof(prstatus));
 		} else {
@@ -287,7 +287,7 @@ static Elf64_Word * __init opalcore_append_cpu_notes(Elf64_Word *buf)
 			 * Add crashing CPU as the first NT_PRSTATUS note for
 			 * GDB to process the core file appropriately.
 			 */
-			append_elf64_note(first_cpu_note, CRASH_CORE_NOTE_NAME,
+			append_elf64_note(first_cpu_note, NN_PRSTATUS,
 					  NT_PRSTATUS, &prstatus,
 					  sizeof(prstatus));
 		}
@@ -303,7 +303,6 @@ static int __init create_opalcore(void)
 	struct device_node *dn;
 	struct opalcore *new;
 	loff_t opalcore_off;
-	struct page *page;
 	Elf64_Phdr *phdr;
 	Elf64_Ehdr *elf;
 	int i, ret;
@@ -328,11 +327,6 @@ static int __init create_opalcore(void)
 		oc_conf->opalcorebuf_sz = 0;
 		return -ENOMEM;
 	}
-	count = oc_conf->opalcorebuf_sz / PAGE_SIZE;
-	page = virt_to_page(oc_conf->opalcorebuf);
-	for (i = 0; i < count; i++)
-		mark_page_reserved(page + i);
-
 	pr_debug("opalcorebuf = 0x%llx\n", (u64)oc_conf->opalcorebuf);
 
 	/* Read OPAL related device-tree entries */
@@ -437,10 +431,7 @@ static void opalcore_cleanup(void)
 
 	/* free the buffer used for setting up OPAL core */
 	if (oc_conf->opalcorebuf) {
-		void *end = (void *)((u64)oc_conf->opalcorebuf +
-				     oc_conf->opalcorebuf_sz);
-
-		free_reserved_area(oc_conf->opalcorebuf, end, -1, NULL);
+		free_pages_exact(oc_conf->opalcorebuf, oc_conf->opalcorebuf_sz);
 		oc_conf->opalcorebuf = NULL;
 		oc_conf->opalcorebuf_sz = 0;
 	}
@@ -497,7 +488,7 @@ static void __init opalcore_config_init(void)
 	opalc_cpu_metadata = __va(addr);
 
 	/* Allocate memory for config buffer */
-	oc_conf = kzalloc(sizeof(struct opalcore_config), GFP_KERNEL);
+	oc_conf = kzalloc_obj(struct opalcore_config);
 	if (oc_conf == NULL)
 		goto error_out;
 
@@ -599,7 +590,7 @@ static struct attribute *mpipl_attr[] = {
 	NULL,
 };
 
-static struct bin_attribute *mpipl_bin_attr[] = {
+static const struct bin_attribute *const mpipl_bin_attr[] = {
 	&opal_core_attr,
 	NULL,
 

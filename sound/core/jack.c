@@ -34,6 +34,7 @@ static const int jack_switch_types[SND_JACK_SWITCH_TYPES] = {
 	SW_JACK_PHYSICAL_INSERT,
 	SW_VIDEOOUT_INSERT,
 	SW_LINEIN_INSERT,
+	SW_USB_INSERT,
 };
 #endif /* CONFIG_SND_JACK_INPUT_DEV */
 
@@ -241,25 +242,23 @@ static ssize_t jack_kctl_id_read(struct file *file,
 static const char * const jack_events_name[] = {
 	"HEADPHONE(0x0001)", "MICROPHONE(0x0002)", "LINEOUT(0x0004)",
 	"MECHANICAL(0x0008)", "VIDEOOUT(0x0010)", "LINEIN(0x0020)",
-	"", "", "", "BTN_5(0x0200)", "BTN_4(0x0400)", "BTN_3(0x0800)",
-	"BTN_2(0x1000)", "BTN_1(0x2000)", "BTN_0(0x4000)", "",
+	"USB(0x0040)", "", "", "BTN_5(0x0200)", "BTN_4(0x0400)",
+	"BTN_3(0x0800)", "BTN_2(0x1000)", "BTN_1(0x2000)", "BTN_0(0x4000)",
+	"",
 };
 
 /* the recommended buffer size is 256 */
 static int parse_mask_bits(unsigned int mask_bits, char *buf, size_t buf_size)
 {
+	int len = scnprintf(buf, buf_size, "0x%04x", mask_bits);
 	int i;
 
-	scnprintf(buf, buf_size, "0x%04x", mask_bits);
-
 	for (i = 0; i < ARRAY_SIZE(jack_events_name); i++)
-		if (mask_bits & (1 << i)) {
-			strlcat(buf, " ", buf_size);
-			strlcat(buf, jack_events_name[i], buf_size);
-		}
-	strlcat(buf, "\n", buf_size);
+		if (mask_bits & (1 << i))
+			len += scnprintf(buf + len, buf_size - len, " %s", jack_events_name[i]);
+	len += scnprintf(buf + len, buf_size - len, "\n");
 
-	return strlen(buf);
+	return len;
 }
 
 static ssize_t jack_kctl_mask_bits_read(struct file *file,
@@ -438,7 +437,7 @@ static struct snd_jack_kctl * snd_jack_kctl_new(struct snd_card *card, const cha
 	if (err < 0)
 		return NULL;
 
-	jack_kctl = kzalloc(sizeof(*jack_kctl), GFP_KERNEL);
+	jack_kctl = kzalloc_obj(*jack_kctl);
 
 	if (!jack_kctl)
 		goto error;
@@ -514,7 +513,7 @@ int snd_jack_new(struct snd_card *card, const char *id, int type,
 			return -ENOMEM;
 	}
 
-	jack = kzalloc(sizeof(struct snd_jack), GFP_KERNEL);
+	jack = kzalloc_obj(struct snd_jack);
 	if (jack == NULL)
 		return -ENOMEM;
 
@@ -574,25 +573,6 @@ fail_input:
 EXPORT_SYMBOL(snd_jack_new);
 
 #ifdef CONFIG_SND_JACK_INPUT_DEV
-/**
- * snd_jack_set_parent - Set the parent device for a jack
- *
- * @jack:   The jack to configure
- * @parent: The device to set as parent for the jack.
- *
- * Set the parent for the jack devices in the device tree.  This
- * function is only valid prior to registration of the jack.  If no
- * parent is configured then the parent device will be the sound card.
- */
-void snd_jack_set_parent(struct snd_jack *jack, struct device *parent)
-{
-	WARN_ON(jack->registered);
-	guard(mutex)(&jack->input_dev_lock);
-	if (jack->input_dev)
-		jack->input_dev->dev.parent = parent;
-}
-EXPORT_SYMBOL(snd_jack_set_parent);
-
 /**
  * snd_jack_set_key - Set a key mapping on a jack
  *

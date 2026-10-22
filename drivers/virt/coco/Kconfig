@@ -3,10 +3,7 @@
 # Confidential computing related collateral
 #
 
-config TSM_REPORTS
-	select CONFIGFS_FS
-	tristate
-
+if VIRT_DRIVERS
 source "drivers/virt/coco/efi_secret/Kconfig"
 
 source "drivers/virt/coco/pkvm-guest/Kconfig"
@@ -16,3 +13,11 @@ source "drivers/virt/coco/sev-guest/Kconfig"
 source "drivers/virt/coco/tdx-guest/Kconfig"
 
 source "drivers/virt/coco/arm-cca-guest/Kconfig"
+
+source "drivers/virt/coco/guest/Kconfig"
+endif
+
+source "drivers/virt/coco/tdx-host/Kconfig"
+
+config TSM
+	bool

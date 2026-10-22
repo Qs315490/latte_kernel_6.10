@@ -714,7 +714,7 @@ static const char * const ebi2_groups[] = {
 };
 
 static const struct pinfunction msm8660_functions[] = {
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(cam_mclk),
 	MSM_PIN_FUNCTION(dsub),
 	MSM_PIN_FUNCTION(ext_gps),
@@ -974,6 +974,7 @@ static const struct of_device_id msm8660_pinctrl_of_match[] = {
 	{ .compatible = "qcom,msm8660-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, msm8660_pinctrl_of_match);
 
 static struct platform_driver msm8660_pinctrl_driver = {
 	.driver = {
@@ -981,7 +982,6 @@ static struct platform_driver msm8660_pinctrl_driver = {
 		.of_match_table = msm8660_pinctrl_of_match,
 	},
 	.probe = msm8660_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init msm8660_pinctrl_init(void)
@@ -999,4 +999,3 @@ module_exit(msm8660_pinctrl_exit);
 MODULE_AUTHOR("Bjorn Andersson <bjorn.andersson@sonymobile.com>");
 MODULE_DESCRIPTION("Qualcomm MSM8660 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, msm8660_pinctrl_of_match);

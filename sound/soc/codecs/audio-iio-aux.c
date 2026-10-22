@@ -9,7 +9,6 @@
 #include <linux/cleanup.h>
 #include <linux/iio/consumer.h>
 #include <linux/minmax.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/string_helpers.h>
@@ -131,7 +130,7 @@ static_assert(ARRAY_SIZE(routes) >= 2, "2 routes are needed");
 static int audio_iio_aux_add_dapms(struct snd_soc_component *component,
 				   struct audio_iio_aux_chan *chan)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
 	/* Allocated names are not needed afterwards (duplicated in ASoC internals) */

@@ -24,8 +24,7 @@
 #include <net/ping.h>
 
 /* Compatibility glue so we can support IPv6 when it's compiled as a module */
-static int dummy_ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len,
-				 int *addr_len)
+static int dummy_ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 {
 	return -EAFNOSUPPORT;
 }
@@ -45,7 +44,7 @@ static int dummy_ipv6_chk_addr(struct net *net, const struct in6_addr *addr,
 	return 0;
 }
 
-static int ping_v6_pre_connect(struct sock *sk, struct sockaddr *uaddr,
+static int ping_v6_pre_connect(struct sock *sk, struct sockaddr_unsized *uaddr,
 			       int addr_len)
 {
 	/* This check is replicated from __ip6_datagram_connect() and
@@ -119,9 +118,6 @@ static int ping_v6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		return -EINVAL;
 
 	ipcm6_init_sk(&ipc6, sk);
-	ipc6.sockc.priority = READ_ONCE(sk->sk_priority);
-	ipc6.sockc.tsflags = READ_ONCE(sk->sk_tsflags);
-	ipc6.sockc.mark = READ_ONCE(sk->sk_mark);
 
 	fl6.flowi6_oif = oif;
 
@@ -145,7 +141,7 @@ static int ping_v6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	fl6.saddr = np->saddr;
 	fl6.daddr = *daddr;
 	fl6.flowi6_mark = ipc6.sockc.mark;
-	fl6.flowi6_uid = sk->sk_uid;
+	fl6.flowi6_uid = sk_uid(sk);
 	fl6.fl6_icmp_type = user_icmph.icmp6_type;
 	fl6.fl6_icmp_code = user_icmph.icmp6_code;
 	security_sk_classify_flow(sk, flowi6_to_flowi_common(&fl6));
@@ -211,7 +207,6 @@ struct proto pingv6_prot = {
 	.recvmsg =	ping_recvmsg,
 	.bind =		ping_bind,
 	.backlog_rcv =	ping_queue_rcv_skb,
-	.hash =		ping_hash,
 	.unhash =	ping_unhash,
 	.get_port =	ping_get_port,
 	.put_port =	ping_unhash,

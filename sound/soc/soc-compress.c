@@ -69,10 +69,10 @@ static int soc_compr_clean(struct snd_compr_stream *cstream, int rollback)
 	snd_soc_dai_digital_mute(codec_dai, 1, stream);
 
 	if (!snd_soc_dai_active(cpu_dai))
-		cpu_dai->symmetric_rate = 0;
+		soc_pcm_set_dai_params(cpu_dai, NULL);
 
 	if (!snd_soc_dai_active(codec_dai))
-		codec_dai->symmetric_rate = 0;
+		soc_pcm_set_dai_params(codec_dai, NULL);
 
 	snd_soc_link_compr_shutdown(cstream, rollback);
 
@@ -148,7 +148,7 @@ static int soc_compr_open_fe(struct snd_compr_stream *cstream)
 	snd_soc_dpcm_mutex_lock(fe);
 
 	/* calculate valid and active FE <-> BE dpcms */
-	dpcm_process_paths(fe, stream, &list, 1);
+	dpcm_add_paths(fe, stream, &list);
 
 	fe->dpcm[stream].runtime_update = SND_SOC_DPCM_UPDATE_FE;
 
@@ -457,7 +457,7 @@ err:
 }
 
 static int soc_compr_pointer(struct snd_compr_stream *cstream,
-			     struct snd_compr_tstamp *tstamp)
+			     struct snd_compr_tstamp64 *tstamp)
 {
 	struct snd_soc_pcm_runtime *rtd = cstream->private_data;
 	int ret;

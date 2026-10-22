@@ -21,7 +21,7 @@ int hns_roce_db_map_user(struct hns_roce_ucontext *context, unsigned long virt,
 		if (page->user_virt == page_addr)
 			goto found;
 
-	page = kmalloc(sizeof(*page), GFP_KERNEL);
+	page = kmalloc_obj(*page);
 	if (!page) {
 		ret = -ENOMEM;
 		goto out;
@@ -29,8 +29,8 @@ int hns_roce_db_map_user(struct hns_roce_ucontext *context, unsigned long virt,
 
 	refcount_set(&page->refcount, 1);
 	page->user_virt = page_addr;
-	page->umem = ib_umem_get(context->ibucontext.device, page_addr,
-				 PAGE_SIZE, 0);
+	page->umem = ib_umem_get_va(context->ibucontext.device, page_addr,
+				    PAGE_SIZE, 0);
 	if (IS_ERR(page->umem)) {
 		ret = PTR_ERR(page->umem);
 		kfree(page);
@@ -72,7 +72,7 @@ static struct hns_roce_db_pgdir *hns_roce_alloc_db_pgdir(
 {
 	struct hns_roce_db_pgdir *pgdir;
 
-	pgdir = kzalloc(sizeof(*pgdir), GFP_KERNEL);
+	pgdir = kzalloc_obj(*pgdir);
 	if (!pgdir)
 		return NULL;
 

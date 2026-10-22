@@ -23,6 +23,7 @@
 #include <linux/skbuff.h>
 #include <net/route.h>
 #include <net/ip6_route.h>
+#include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv6.h>
 
 #include <net/netfilter/nf_conntrack.h>
@@ -74,6 +75,9 @@ static int get_tpkt_data(struct sk_buff *skb, unsigned int protoff,
 	unsigned char *tpkt;
 	int tpktlen;
 	int tpktoff;
+
+	if (!info)
+		return 0;
 
 	/* Get TCP header */
 	th = skb_header_pointer(skb, protoff, sizeof(_tcph), &_tcph);
@@ -576,14 +580,8 @@ static const struct nf_conntrack_expect_policy h245_exp_policy = {
 	.timeout	= 240,
 };
 
-static struct nf_conntrack_helper nf_conntrack_helper_h245 __read_mostly = {
-	.name			= "H.245",
-	.me			= THIS_MODULE,
-	.tuple.src.l3num	= AF_UNSPEC,
-	.tuple.dst.protonum	= IPPROTO_UDP,
-	.help			= h245_help,
-	.expect_policy		= &h245_exp_policy,
-};
+static struct nf_conntrack_helper nf_conntrack_helper_h245 __read_mostly;
+static struct nf_conntrack_helper *nf_conntrack_helper_h245_ptr __read_mostly;
 
 int get_h225_addr(struct nf_conn *ct, unsigned char *data,
 		  TransportAddress *taddr,
@@ -642,7 +640,7 @@ static int expect_h245(struct sk_buff *skb, struct nf_conn *ct,
 			  &ct->tuplehash[!dir].tuple.src.u3,
 			  &ct->tuplehash[!dir].tuple.dst.u3,
 			  IPPROTO_TCP, NULL, &port);
-	exp->helper = &nf_conntrack_helper_h245;
+	rcu_assign_pointer(exp->assign_helper, nf_conntrack_helper_h245_ptr);
 
 	nathook = rcu_dereference(nfct_h323_nat_hook);
 	if (memcmp(&ct->tuplehash[dir].tuple.src.u3,
@@ -731,6 +729,9 @@ static int callforward_do_filter(struct net *net,
 
 }
 
+static struct nf_conntrack_helper nf_conntrack_helper_q931[2] __read_mostly;
+static struct nf_conntrack_helper *nf_conntrack_helper_q931_ptr[2] __read_mostly;
+
 static int expect_callforwarding(struct sk_buff *skb,
 				 struct nf_conn *ct,
 				 enum ip_conntrack_info ctinfo,
@@ -766,7 +767,7 @@ static int expect_callforwarding(struct sk_buff *skb,
 	nf_ct_expect_init(exp, NF_CT_EXPECT_CLASS_DEFAULT, nf_ct_l3num(ct),
 			  &ct->tuplehash[!dir].tuple.src.u3, &addr,
 			  IPPROTO_TCP, NULL, &port);
-	exp->helper = nf_conntrack_helper_q931;
+	rcu_assign_pointer(exp->assign_helper, nf_conntrack_helper_q931_ptr[0]);
 
 	nathook = rcu_dereference(nfct_h323_nat_hook);
 	if (memcmp(&ct->tuplehash[dir].tuple.src.u3,
@@ -1139,27 +1140,6 @@ static const struct nf_conntrack_expect_policy q931_exp_policy = {
 	.timeout		= 240,
 };
 
-static struct nf_conntrack_helper nf_conntrack_helper_q931[] __read_mostly = {
-	{
-		.name			= "Q.931",
-		.me			= THIS_MODULE,
-		.tuple.src.l3num	= AF_INET,
-		.tuple.src.u.tcp.port	= cpu_to_be16(Q931_PORT),
-		.tuple.dst.protonum	= IPPROTO_TCP,
-		.help			= q931_help,
-		.expect_policy		= &q931_exp_policy,
-	},
-	{
-		.name			= "Q.931",
-		.me			= THIS_MODULE,
-		.tuple.src.l3num	= AF_INET6,
-		.tuple.src.u.tcp.port	= cpu_to_be16(Q931_PORT),
-		.tuple.dst.protonum	= IPPROTO_TCP,
-		.help			= q931_help,
-		.expect_policy		= &q931_exp_policy,
-	},
-};
-
 static unsigned char *get_udp_data(struct sk_buff *skb, unsigned int protoff,
 				   int *datalen)
 {
@@ -1186,13 +1166,13 @@ static struct nf_conntrack_expect *find_expect(struct nf_conn *ct,
 {
 	struct net *net = nf_ct_net(ct);
 	struct nf_conntrack_expect *exp;
-	struct nf_conntrack_tuple tuple;
+	struct nf_conntrack_tuple tuple = {
+		.src.l3num = nf_ct_l3num(ct),
+		.dst.protonum = IPPROTO_TCP,
+		.dst.u.tcp.port = port,
+	};
 
-	memset(&tuple.src.u3, 0, sizeof(tuple.src.u3));
-	tuple.src.u.tcp.port = 0;
 	memcpy(&tuple.dst.u3, addr, sizeof(tuple.dst.u3));
-	tuple.dst.u.tcp.port = port;
-	tuple.dst.protonum = IPPROTO_TCP;
 
 	exp = __nf_ct_expect_find(net, nf_ct_zone(ct), &tuple);
 	if (exp && exp->master == ct)
@@ -1214,6 +1194,9 @@ static int expect_q931(struct sk_buff *skb, struct nf_conn *ct,
 	union nf_inet_addr addr;
 	struct nf_conntrack_expect *exp;
 
+	if (!info)
+		return -1;
+
 	/* Look for the first related address */
 	for (i = 0; i < count; i++) {
 		if (get_h225_addr(ct, *data, &taddr[i], &addr, &port) &&
@@ -1233,7 +1216,7 @@ static int expect_q931(struct sk_buff *skb, struct nf_conn *ct,
 				&ct->tuplehash[!dir].tuple.src.u3 : NULL,
 			  &ct->tuplehash[!dir].tuple.dst.u3,
 			  IPPROTO_TCP, NULL, &port);
-	exp->helper = nf_conntrack_helper_q931;
+	rcu_assign_pointer(exp->assign_helper, nf_conntrack_helper_q931_ptr[0]);
 	exp->flags = NF_CT_EXPECT_PERMANENT;	/* Accept multiple calls */
 
 	nathook = rcu_dereference(nfct_h323_nat_hook);
@@ -1274,6 +1257,9 @@ static int process_grq(struct sk_buff *skb, struct nf_conn *ct,
 	return 0;
 }
 
+static struct nf_conntrack_helper nf_conntrack_helper_ras[2] __read_mostly;
+static struct nf_conntrack_helper *nf_conntrack_helper_ras_ptr[2] __read_mostly;
+
 static int process_gcf(struct sk_buff *skb, struct nf_conn *ct,
 		       enum ip_conntrack_info ctinfo,
 		       unsigned int protoff,
@@ -1305,7 +1291,7 @@ static int process_gcf(struct sk_buff *skb, struct nf_conn *ct,
 	nf_ct_expect_init(exp, NF_CT_EXPECT_CLASS_DEFAULT, nf_ct_l3num(ct),
 			  &ct->tuplehash[!dir].tuple.src.u3, &addr,
 			  IPPROTO_UDP, NULL, &port);
-	exp->helper = nf_conntrack_helper_ras;
+	rcu_assign_pointer(exp->assign_helper, nf_conntrack_helper_ras_ptr[0]);
 
 	if (nf_ct_expect_related(exp, 0) == 0) {
 		pr_debug("nf_ct_ras: expect RAS ");
@@ -1326,6 +1312,9 @@ static int process_rrq(struct sk_buff *skb, struct nf_conn *ct,
 	struct nf_ct_h323_master *info = nfct_help_data(ct);
 	const struct nfct_h323_nat_hooks *nathook;
 	int ret;
+
+	if (!info)
+		return -1;
 
 	pr_debug("nf_ct_ras: RRQ\n");
 
@@ -1365,6 +1354,9 @@ static int process_rcf(struct sk_buff *skb, struct nf_conn *ct,
 	int ret;
 	struct nf_conntrack_expect *exp;
 
+	if (!info)
+		return -1;
+
 	pr_debug("nf_ct_ras: RCF\n");
 
 	nathook = rcu_dereference(nfct_h323_nat_hook);
@@ -1396,8 +1388,8 @@ static int process_rcf(struct sk_buff *skb, struct nf_conn *ct,
 				 "timeout to %u seconds for",
 				 info->timeout);
 			nf_ct_dump_tuple(&exp->tuple);
-			mod_timer_pending(&exp->timeout,
-					  jiffies + info->timeout * HZ);
+			WRITE_ONCE(exp->timeout,
+				   nfct_time_stamp + (info->timeout * HZ));
 		}
 		spin_unlock_bh(&nf_conntrack_expect_lock);
 	}
@@ -1414,6 +1406,9 @@ static int process_urq(struct sk_buff *skb, struct nf_conn *ct,
 	const struct nfct_h323_nat_hooks *nathook;
 	int dir = CTINFO2DIR(ctinfo);
 	int ret;
+
+	if (!info)
+		return -1;
 
 	pr_debug("nf_ct_ras: URQ\n");
 
@@ -1448,6 +1443,9 @@ static int process_arq(struct sk_buff *skb, struct nf_conn *ct,
 	int dir = CTINFO2DIR(ctinfo);
 	__be16 port;
 	union nf_inet_addr addr;
+
+	if (!info)
+		return 0;
 
 	pr_debug("nf_ct_ras: ARQ\n");
 
@@ -1522,7 +1520,7 @@ static int process_acf(struct sk_buff *skb, struct nf_conn *ct,
 			  &ct->tuplehash[!dir].tuple.src.u3, &addr,
 			  IPPROTO_TCP, NULL, &port);
 	exp->flags = NF_CT_EXPECT_PERMANENT;
-	exp->helper = nf_conntrack_helper_q931;
+	rcu_assign_pointer(exp->assign_helper, nf_conntrack_helper_q931_ptr[0]);
 
 	if (nf_ct_expect_related(exp, 0) == 0) {
 		pr_debug("nf_ct_ras: expect Q.931 ");
@@ -1576,7 +1574,7 @@ static int process_lcf(struct sk_buff *skb, struct nf_conn *ct,
 			  &ct->tuplehash[!dir].tuple.src.u3, &addr,
 			  IPPROTO_TCP, NULL, &port);
 	exp->flags = NF_CT_EXPECT_PERMANENT;
-	exp->helper = nf_conntrack_helper_q931;
+	rcu_assign_pointer(exp->assign_helper, nf_conntrack_helper_q931_ptr[0]);
 
 	if (nf_ct_expect_related(exp, 0) == 0) {
 		pr_debug("nf_ct_ras: expect Q.931 ");
@@ -1710,59 +1708,57 @@ static const struct nf_conntrack_expect_policy ras_exp_policy = {
 	.timeout		= 240,
 };
 
-static struct nf_conntrack_helper nf_conntrack_helper_ras[] __read_mostly = {
-	{
-		.name			= "RAS",
-		.me			= THIS_MODULE,
-		.tuple.src.l3num	= AF_INET,
-		.tuple.src.u.udp.port	= cpu_to_be16(RAS_PORT),
-		.tuple.dst.protonum	= IPPROTO_UDP,
-		.help			= ras_help,
-		.expect_policy		= &ras_exp_policy,
-	},
-	{
-		.name			= "RAS",
-		.me			= THIS_MODULE,
-		.tuple.src.l3num	= AF_INET6,
-		.tuple.src.u.udp.port	= cpu_to_be16(RAS_PORT),
-		.tuple.dst.protonum	= IPPROTO_UDP,
-		.help			= ras_help,
-		.expect_policy		= &ras_exp_policy,
-	},
-};
-
 static int __init h323_helper_init(void)
 {
 	int ret;
 
-	ret = nf_conntrack_helper_register(&nf_conntrack_helper_h245);
+	nf_ct_helper_init(&nf_conntrack_helper_ras[0], AF_INET, IPPROTO_UDP,
+			  "RAS", RAS_PORT, RAS_PORT, RAS_PORT,
+			  &ras_exp_policy, 0, ras_help, NULL, THIS_MODULE);
+	nf_ct_helper_init(&nf_conntrack_helper_ras[1], AF_INET6, IPPROTO_UDP,
+			  "RAS", RAS_PORT, RAS_PORT, RAS_PORT,
+			  &ras_exp_policy, 0, ras_help, NULL, THIS_MODULE);
+	nf_ct_helper_init(&nf_conntrack_helper_h245, AF_UNSPEC, IPPROTO_UDP,
+			  "H.245", 0, 0, 0,
+			  &h245_exp_policy, 0, h245_help, NULL, THIS_MODULE);
+	nf_ct_helper_init(&nf_conntrack_helper_q931[0], AF_INET, IPPROTO_TCP,
+			  "Q.931", Q931_PORT, Q931_PORT, Q931_PORT,
+			  &q931_exp_policy, 0, q931_help, NULL, THIS_MODULE);
+	nf_ct_helper_init(&nf_conntrack_helper_q931[1], AF_INET6, IPPROTO_TCP,
+			  "Q.931", Q931_PORT, Q931_PORT, Q931_PORT,
+			  &q931_exp_policy, 0, q931_help, NULL, THIS_MODULE);
+
+	ret = nf_conntrack_helper_register(&nf_conntrack_helper_h245,
+					   &nf_conntrack_helper_h245_ptr);
 	if (ret < 0)
 		return ret;
 	ret = nf_conntrack_helpers_register(nf_conntrack_helper_q931,
-					ARRAY_SIZE(nf_conntrack_helper_q931));
+					    ARRAY_SIZE(nf_conntrack_helper_q931),
+					    nf_conntrack_helper_q931_ptr);
 	if (ret < 0)
 		goto err1;
 	ret = nf_conntrack_helpers_register(nf_conntrack_helper_ras,
-					ARRAY_SIZE(nf_conntrack_helper_ras));
+					    ARRAY_SIZE(nf_conntrack_helper_ras),
+					    nf_conntrack_helper_ras_ptr);
 	if (ret < 0)
 		goto err2;
 
 	return 0;
 err2:
-	nf_conntrack_helpers_unregister(nf_conntrack_helper_q931,
-					ARRAY_SIZE(nf_conntrack_helper_q931));
+	nf_conntrack_helpers_unregister(nf_conntrack_helper_q931_ptr,
+					ARRAY_SIZE(nf_conntrack_helper_q931_ptr));
 err1:
-	nf_conntrack_helper_unregister(&nf_conntrack_helper_h245);
+	nf_conntrack_helper_unregister(nf_conntrack_helper_h245_ptr);
 	return ret;
 }
 
 static void __exit h323_helper_exit(void)
 {
-	nf_conntrack_helpers_unregister(nf_conntrack_helper_ras,
+	nf_conntrack_helpers_unregister(nf_conntrack_helper_ras_ptr,
 					ARRAY_SIZE(nf_conntrack_helper_ras));
-	nf_conntrack_helpers_unregister(nf_conntrack_helper_q931,
+	nf_conntrack_helpers_unregister(nf_conntrack_helper_q931_ptr,
 					ARRAY_SIZE(nf_conntrack_helper_q931));
-	nf_conntrack_helper_unregister(&nf_conntrack_helper_h245);
+	nf_conntrack_helper_unregister(nf_conntrack_helper_h245_ptr);
 }
 
 static void __exit nf_conntrack_h323_fini(void)

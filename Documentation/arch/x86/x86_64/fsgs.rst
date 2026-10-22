@@ -130,7 +130,7 @@ instructions. Clang 5 supports them as well.
 
   =================== ===========================
   _readfsbase_u64()   Read the FS base register
-  _readfsbase_u64()   Read the GS base register
+  _readgsbase_u64()   Read the GS base register
   _writefsbase_u64()  Write the FS base register
   _writegsbase_u64()  Write the GS base register
   =================== ===========================
@@ -182,8 +182,8 @@ address spaces via an attribute based mechanism in Clang 2.6 and newer
 versions:
 
  ==================================== =====================================
-  __attribute__((address_space(256))  Variable is addressed relative to GS
-  __attribute__((address_space(257))  Variable is addressed relative to FS
+  __attribute__(address_space(256))   Variable is addressed relative to GS
+  __attribute__(address_space(257))   Variable is addressed relative to FS
  ==================================== =====================================
 
 FS/GS based addressing with inline assembly

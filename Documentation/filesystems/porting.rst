@@ -211,7 +211,7 @@ test and set for you.
 e.g.::
 
 	inode = iget_locked(sb, ino);
-	if (inode->i_state & I_NEW) {
+	if (inode_state_read_once(inode) & I_NEW) {
 		err = read_inode_from_disk(inode);
 		if (err < 0) {
 			iget_failed(inode);
@@ -340,8 +340,8 @@ of those. Caller makes sure async writeback cannot be running for the inode whil
 
 ->drop_inode() returns int now; it's called on final iput() with
 inode->i_lock held and it returns true if filesystems wants the inode to be
-dropped.  As before, generic_drop_inode() is still the default and it's been
-updated appropriately.  generic_delete_inode() is also alive and it consists
+dropped.  As before, inode_generic_drop() is still the default and it's been
+updated appropriately.  inode_just_drop() is also alive and it consists
 simply of return 1.  Note that all actual eviction work is done by caller after
 ->drop_inode() returns.
 
@@ -448,11 +448,8 @@ a file off.
 
 **mandatory**
 
-->get_sb() is gone.  Switch to use of ->mount().  Typically it's just
-a matter of switching from calling ``get_sb_``... to ``mount_``... and changing
-the function type.  If you were doing it manually, just switch from setting
-->mnt_root to some pointer to returning that pointer.  On errors return
-ERR_PTR(...).
+->get_sb() and ->mount() are gone. Switch to using the new mount API. See
+Documentation/filesystems/mount_api.rst for more details.
 
 ---
 
@@ -1144,7 +1141,7 @@ and it *must* be opened exclusive.
 
 ---
 
-** mandatory**
+**mandatory**
 
 ->d_revalidate() gets two extra arguments - inode of parent directory and
 name our dentry is expected to have.  Both are stable (dir is pinned in
@@ -1157,3 +1154,250 @@ in normal case it points into the pathname being looked up.
 NOTE: if you need something like full path from the root of filesystem,
 you are still on your own - this assists with simple cases, but it's not
 magic.
+
+---
+
+**recommended**
+
+kern_path_locked() and user_path_locked() no longer return a negative
+dentry so this doesn't need to be checked.  If the name cannot be found,
+ERR_PTR(-ENOENT) is returned.
+
+---
+
+**recommended**
+
+lookup_one_qstr_excl() is changed to return errors in more cases, so
+these conditions don't require explicit checks:
+
+ - if LOOKUP_CREATE is NOT given, then the dentry won't be negative,
+   ERR_PTR(-ENOENT) is returned instead
+ - if LOOKUP_EXCL IS given, then the dentry won't be positive,
+   ERR_PTR(-EEXIST) is rreturned instread
+
+LOOKUP_EXCL now means "target must not exist".  It can be combined with
+LOOK_CREATE or LOOKUP_RENAME_TARGET.
+
+---
+
+**mandatory**
+invalidate_inodes() is gone use evict_inodes() instead.
+
+---
+
+**mandatory**
+
+->mkdir() now returns a dentry.  If the created inode is found to
+already be in cache and have a dentry (often IS_ROOT()), it will need to
+be spliced into the given name in place of the given dentry. That dentry
+now needs to be returned.  If the original dentry is used, NULL should
+be returned.  Any error should be returned with ERR_PTR().
+
+In general, filesystems which use d_instantiate_new() to install the new
+inode can safely return NULL.  Filesystems which may not have an I_NEW inode
+should use d_drop();d_splice_alias() and return the result of the latter.
+
+If a positive dentry cannot be returned for some reason, in-kernel
+clients such as cachefiles, nfsd, smb/server may not perform ideally but
+will fail-safe.
+
+---
+
+** mandatory**
+
+lookup_one(), lookup_one_unlocked(), lookup_one_positive_unlocked() now
+take a qstr instead of a name and len.  These, not the "one_len"
+versions, should be used whenever accessing a filesystem from outside
+that filesysmtem, through a mount point - which will have a mnt_idmap.
+
+---
+
+** mandatory**
+
+Functions try_lookup_one_len(), lookup_one_len(),
+lookup_one_len_unlocked() and lookup_positive_unlocked() have been
+renamed to try_lookup_noperm(), lookup_noperm(),
+lookup_noperm_unlocked(), lookup_noperm_positive_unlocked().  They now
+take a qstr instead of separate name and length.  QSTR() can be used
+when strlen() is needed for the length.
+
+These function no longer do any permission checking - they previously
+checked that the caller has 'X' permission on the parent.  They must
+ONLY be used internally by a filesystem on itself when it knows that
+permissions are irrelevant or in a context where permission checks have
+already been performed such as after vfs_path_parent_lookup()
+
+---
+
+** mandatory**
+
+d_hash_and_lookup() is no longer exported or available outside the VFS.
+Use try_lookup_noperm() instead.  This adds name validation and takes
+arguments in the opposite order but is otherwise identical.
+
+Using try_lookup_noperm() will require linux/namei.h to be included.
+
+---
+
+**mandatory**
+
+Calling conventions for ->d_automount() have changed; we should *not* grab
+an extra reference to new mount - it should be returned with refcount 1.
+
+---
+
+collect_mounts()/drop_collected_mounts()/iterate_mounts() are gone now.
+Replacement is collect_paths()/drop_collected_path(), with no special
+iterator needed.  Instead of a cloned mount tree, the new interface returns
+an array of struct path, one for each mount collect_mounts() would've
+created.  These struct path point to locations in the caller's namespace
+that would be roots of the cloned mounts.
+
+---
+
+**mandatory**
+
+If your filesystem sets the default dentry_operations, use set_default_d_op()
+rather than manually setting sb->s_d_op.
+
+---
+
+**mandatory**
+
+d_set_d_op() is no longer exported (or public, for that matter); _if_
+your filesystem really needed that, make use of d_splice_alias_ops()
+to have them set.  Better yet, think hard whether you need different
+->d_op for different dentries - if not, just use set_default_d_op()
+at mount time and be done with that.  Currently procfs is the only
+thing that really needs ->d_op varying between dentries.
+
+---
+
+**highly recommended**
+
+The file operations mmap() callback is deprecated in favour of
+mmap_prepare(). This passes a pointer to a vm_area_desc to the callback
+rather than a VMA, as the VMA at this stage is not yet valid.
+
+The vm_area_desc provides the minimum required information for a filesystem
+to initialise state upon memory mapping of a file-backed region, and output
+parameters for the file system to set this state.
+
+In nearly all cases, this is all that is required for a filesystem. However, if
+a filesystem needs to perform an operation such a pre-population of page tables,
+then that action can be specified in the vm_area_desc->action field, which can
+be configured using the mmap_action_*() helpers.
+
+---
+
+**mandatory**
+
+Several functions are renamed:
+
+-  kern_path_locked -> start_removing_path
+-  kern_path_create -> start_creating_path
+-  user_path_create -> start_creating_user_path
+-  done_path_create -> end_creating_path
+
+---
+
+**mandatory**
+
+Calling conventions for vfs_parse_fs_string() have changed; it does *not*
+take length anymore (value ? strlen(value) : 0 is used).  If you want
+a different length, use
+
+	vfs_parse_fs_qstr(fc, key, &QSTR_LEN(value, len))
+
+instead.
+
+---
+
+**mandatory**
+
+vfs_mkdir() now returns a dentry - the one returned by ->mkdir().  If
+that dentry is different from the dentry passed in, including if it is
+an IS_ERR() dentry pointer, the original dentry is dput().
+
+When vfs_mkdir() returns an error, and so both dputs() the original
+dentry and doesn't provide a replacement, it also unlocks the parent.
+Consequently the return value from vfs_mkdir() can be passed to
+end_creating() and the parent will be unlocked precisely when necessary.
+
+---
+
+**mandatory**
+
+kill_litter_super() is gone; convert to DCACHE_PERSISTENT use (as all
+in-tree filesystems have done).
+
+---
+
+**mandatory**
+
+The ->setlease() file_operation must now be explicitly set in order to provide
+support for leases. When set to NULL, the kernel will now return -EINVAL to
+attempts to set a lease. Filesystems that wish to use the kernel-internal lease
+implementation should set it to generic_setlease().
+
+---
+
+**mandatory**
+
+fs/namei.c primitives that consume filesystem references (do_renameat2(),
+do_linkat(), do_symlinkat(), do_mkdirat(), do_mknodat(), do_unlinkat()
+and do_rmdir()) are gone; they are replaced with non-consuming analogues
+(filename_renameat2(), etc.)
+Callers are adjusted - responsibility for dropping the filenames belongs
+to them now.
+
+---
+
+**mandatory**
+
+readlink_copy() now requires link length as the 4th argument. Said length needs
+to match what strlen() would return if it was ran on the string.
+
+However, if the string is freely accessible for the duration of inode's
+lifetime, consider using inode_set_cached_link() instead.
+
+---
+
+**mandatory**
+
+lookup_one_qstr_excl() is no longer exported - use start_creating() or
+similar.
+
+---
+
+** mandatory**
+
+lock_rename(), lock_rename_child(), unlock_rename() are no
+longer available.  Use start_renaming() or similar.
+
+---
+
+**recommended**
+
+If you really need to iterate through dentries for given inode, use
+for_each_alias(dentry, inode) instead of hlist_for_each_entry; better
+yet, see if any of the exported primitives could be used instead of
+the entire loop.  You still need to hold ->i_lock of the inode over
+either form of manual loop.
+
+---
+
+**mandatory**
+
+d_alloc_parallel() no longer requires a waitqueue_head.
+
+---
+
+**mandatory**
+
+d_dispose_if_unused() is gone; use __move_to_shrink_list() if you really
+need that functionality, but watch out for memory safety issues - just
+as with d_dispose_if_unused() these are not trivial; with this variant
+of API it's more explicit, since grabbing ->d_lock is caller-side, but
+d_dispose_if_unused() had all the same issues.  It's a low-level primitive;
+use only if you have no alternative.

@@ -410,12 +410,12 @@ static ssize_t lp5569_selftest(struct device *dev,
 	/* Test LED Open */
 	pos = lp5569_led_open_test(led, buf);
 	if (pos < 0)
-		return sprintf(buf, "FAIL\n");
+		return sysfs_emit(buf, "FAIL\n");
 
 	/* Test LED Shorted */
 	pos += lp5569_led_short_test(led, buf);
 	if (pos < 0)
-		return sprintf(buf, "FAIL\n");
+		return sysfs_emit(buf, "FAIL\n");
 
 	for (i = 0; i < chip->pdata->num_channels; i++) {
 		/* Restore current */
@@ -514,7 +514,7 @@ static struct lp55xx_device_config lp5569_cfg = {
 };
 
 static const struct i2c_device_id lp5569_id[] = {
-	{ "lp5569",  .driver_data = (kernel_ulong_t)&lp5569_cfg, },
+	{ .name = "lp5569", .driver_data = (kernel_ulong_t)&lp5569_cfg },
 	{ }
 };
 

@@ -21,20 +21,18 @@
  */
 
 #include <sys/types.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <getopt.h>
-#include <elf.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
 
-#include <tools/be_byteshift.h>
-#include <tools/le_byteshift.h>
+#include "elf-parse.h"
 
 #ifndef EM_ARCOMPACT
 #define EM_ARCOMPACT	93
@@ -64,282 +62,7 @@
 #define EM_LOONGARCH	258
 #endif
 
-typedef union {
-	Elf32_Ehdr	e32;
-	Elf64_Ehdr	e64;
-} Elf_Ehdr;
-
-typedef union {
-	Elf32_Shdr	e32;
-	Elf64_Shdr	e64;
-} Elf_Shdr;
-
-typedef union {
-	Elf32_Sym	e32;
-	Elf64_Sym	e64;
-} Elf_Sym;
-
-static uint32_t (*r)(const uint32_t *);
-static uint16_t (*r2)(const uint16_t *);
-static uint64_t (*r8)(const uint64_t *);
-static void (*w)(uint32_t, uint32_t *);
 typedef void (*table_sort_t)(char *, int);
-
-static struct elf_funcs {
-	int (*compare_extable)(const void *a, const void *b);
-	uint64_t (*ehdr_shoff)(Elf_Ehdr *ehdr);
-	uint16_t (*ehdr_shstrndx)(Elf_Ehdr *ehdr);
-	uint16_t (*ehdr_shentsize)(Elf_Ehdr *ehdr);
-	uint16_t (*ehdr_shnum)(Elf_Ehdr *ehdr);
-	uint64_t (*shdr_addr)(Elf_Shdr *shdr);
-	uint64_t (*shdr_offset)(Elf_Shdr *shdr);
-	uint64_t (*shdr_size)(Elf_Shdr *shdr);
-	uint64_t (*shdr_entsize)(Elf_Shdr *shdr);
-	uint32_t (*shdr_link)(Elf_Shdr *shdr);
-	uint32_t (*shdr_name)(Elf_Shdr *shdr);
-	uint32_t (*shdr_type)(Elf_Shdr *shdr);
-	uint8_t (*sym_type)(Elf_Sym *sym);
-	uint32_t (*sym_name)(Elf_Sym *sym);
-	uint64_t (*sym_value)(Elf_Sym *sym);
-	uint16_t (*sym_shndx)(Elf_Sym *sym);
-} e;
-
-static uint64_t ehdr64_shoff(Elf_Ehdr *ehdr)
-{
-	return r8(&ehdr->e64.e_shoff);
-}
-
-static uint64_t ehdr32_shoff(Elf_Ehdr *ehdr)
-{
-	return r(&ehdr->e32.e_shoff);
-}
-
-static uint64_t ehdr_shoff(Elf_Ehdr *ehdr)
-{
-	return e.ehdr_shoff(ehdr);
-}
-
-#define EHDR_HALF(fn_name)				\
-static uint16_t ehdr64_##fn_name(Elf_Ehdr *ehdr)	\
-{							\
-	return r2(&ehdr->e64.e_##fn_name);		\
-}							\
-							\
-static uint16_t ehdr32_##fn_name(Elf_Ehdr *ehdr)	\
-{							\
-	return r2(&ehdr->e32.e_##fn_name);		\
-}							\
-							\
-static uint16_t ehdr_##fn_name(Elf_Ehdr *ehdr)		\
-{							\
-	return e.ehdr_##fn_name(ehdr);			\
-}
-
-EHDR_HALF(shentsize)
-EHDR_HALF(shstrndx)
-EHDR_HALF(shnum)
-
-#define SHDR_WORD(fn_name)				\
-static uint32_t shdr64_##fn_name(Elf_Shdr *shdr)	\
-{							\
-	return r(&shdr->e64.sh_##fn_name);		\
-}							\
-							\
-static uint32_t shdr32_##fn_name(Elf_Shdr *shdr)	\
-{							\
-	return r(&shdr->e32.sh_##fn_name);		\
-}							\
-							\
-static uint32_t shdr_##fn_name(Elf_Shdr *shdr)		\
-{							\
-	return e.shdr_##fn_name(shdr);			\
-}
-
-#define SHDR_ADDR(fn_name)				\
-static uint64_t shdr64_##fn_name(Elf_Shdr *shdr)	\
-{							\
-	return r8(&shdr->e64.sh_##fn_name);		\
-}							\
-							\
-static uint64_t shdr32_##fn_name(Elf_Shdr *shdr)	\
-{							\
-	return r(&shdr->e32.sh_##fn_name);		\
-}							\
-							\
-static uint64_t shdr_##fn_name(Elf_Shdr *shdr)		\
-{							\
-	return e.shdr_##fn_name(shdr);			\
-}
-
-#define SHDR_WORD(fn_name)				\
-static uint32_t shdr64_##fn_name(Elf_Shdr *shdr)	\
-{							\
-	return r(&shdr->e64.sh_##fn_name);		\
-}							\
-							\
-static uint32_t shdr32_##fn_name(Elf_Shdr *shdr)	\
-{							\
-	return r(&shdr->e32.sh_##fn_name);		\
-}							\
-static uint32_t shdr_##fn_name(Elf_Shdr *shdr)		\
-{							\
-	return e.shdr_##fn_name(shdr);			\
-}
-
-SHDR_ADDR(addr)
-SHDR_ADDR(offset)
-SHDR_ADDR(size)
-SHDR_ADDR(entsize)
-
-SHDR_WORD(link)
-SHDR_WORD(name)
-SHDR_WORD(type)
-
-#define SYM_ADDR(fn_name)			\
-static uint64_t sym64_##fn_name(Elf_Sym *sym)	\
-{						\
-	return r8(&sym->e64.st_##fn_name);	\
-}						\
-						\
-static uint64_t sym32_##fn_name(Elf_Sym *sym)	\
-{						\
-	return r(&sym->e32.st_##fn_name);	\
-}						\
-						\
-static uint64_t sym_##fn_name(Elf_Sym *sym)	\
-{						\
-	return e.sym_##fn_name(sym);		\
-}
-
-#define SYM_WORD(fn_name)			\
-static uint32_t sym64_##fn_name(Elf_Sym *sym)	\
-{						\
-	return r(&sym->e64.st_##fn_name);	\
-}						\
-						\
-static uint32_t sym32_##fn_name(Elf_Sym *sym)	\
-{						\
-	return r(&sym->e32.st_##fn_name);	\
-}						\
-						\
-static uint32_t sym_##fn_name(Elf_Sym *sym)	\
-{						\
-	return e.sym_##fn_name(sym);		\
-}
-
-#define SYM_HALF(fn_name)			\
-static uint16_t sym64_##fn_name(Elf_Sym *sym)	\
-{						\
-	return r2(&sym->e64.st_##fn_name);	\
-}						\
-						\
-static uint16_t sym32_##fn_name(Elf_Sym *sym)	\
-{						\
-	return r2(&sym->e32.st_##fn_name);	\
-}						\
-						\
-static uint16_t sym_##fn_name(Elf_Sym *sym)	\
-{						\
-	return e.sym_##fn_name(sym);		\
-}
-
-static uint8_t sym64_type(Elf_Sym *sym)
-{
-	return ELF64_ST_TYPE(sym->e64.st_info);
-}
-
-static uint8_t sym32_type(Elf_Sym *sym)
-{
-	return ELF32_ST_TYPE(sym->e32.st_info);
-}
-
-static uint8_t sym_type(Elf_Sym *sym)
-{
-	return e.sym_type(sym);
-}
-
-SYM_ADDR(value)
-SYM_WORD(name)
-SYM_HALF(shndx)
-
-/*
- * Get the whole file as a programming convenience in order to avoid
- * malloc+lseek+read+free of many pieces.  If successful, then mmap
- * avoids copying unused pieces; else just read the whole file.
- * Open for both read and write.
- */
-static void *mmap_file(char const *fname, size_t *size)
-{
-	int fd;
-	struct stat sb;
-	void *addr = NULL;
-
-	fd = open(fname, O_RDWR);
-	if (fd < 0) {
-		perror(fname);
-		return NULL;
-	}
-	if (fstat(fd, &sb) < 0) {
-		perror(fname);
-		goto out;
-	}
-	if (!S_ISREG(sb.st_mode)) {
-		fprintf(stderr, "not a regular file: %s\n", fname);
-		goto out;
-	}
-
-	addr = mmap(0, sb.st_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
-	if (addr == MAP_FAILED) {
-		fprintf(stderr, "Could not mmap file: %s\n", fname);
-		goto out;
-	}
-
-	*size = sb.st_size;
-
-out:
-	close(fd);
-	return addr;
-}
-
-static uint32_t rbe(const uint32_t *x)
-{
-	return get_unaligned_be32(x);
-}
-
-static uint16_t r2be(const uint16_t *x)
-{
-	return get_unaligned_be16(x);
-}
-
-static uint64_t r8be(const uint64_t *x)
-{
-	return get_unaligned_be64(x);
-}
-
-static uint32_t rle(const uint32_t *x)
-{
-	return get_unaligned_le32(x);
-}
-
-static uint16_t r2le(const uint16_t *x)
-{
-	return get_unaligned_le16(x);
-}
-
-static uint64_t r8le(const uint64_t *x)
-{
-	return get_unaligned_le64(x);
-}
-
-static void wbe(uint32_t val, uint32_t *x)
-{
-	put_unaligned_be32(val, x);
-}
-
-static void wle(uint32_t val, uint32_t *x)
-{
-	put_unaligned_le32(val, x);
-}
 
 /*
  * Move reserved section indices SHN_LORESERVE..SHN_HIRESERVE out of
@@ -362,13 +85,13 @@ static inline unsigned int get_secindex(unsigned int shndx,
 		return SPECIAL(shndx);
 	if (shndx != SHN_XINDEX)
 		return shndx;
-	return r(&symtab_shndx_start[sym_offs]);
+	return elf_parser.r(&symtab_shndx_start[sym_offs]);
 }
 
 static int compare_extable_32(const void *a, const void *b)
 {
-	Elf32_Addr av = r(a);
-	Elf32_Addr bv = r(b);
+	Elf32_Addr av = elf_parser.r(a);
+	Elf32_Addr bv = elf_parser.r(b);
 
 	if (av < bv)
 		return -1;
@@ -377,18 +100,15 @@ static int compare_extable_32(const void *a, const void *b)
 
 static int compare_extable_64(const void *a, const void *b)
 {
-	Elf64_Addr av = r8(a);
-	Elf64_Addr bv = r8(b);
+	Elf64_Addr av = elf_parser.r8(a);
+	Elf64_Addr bv = elf_parser.r8(b);
 
 	if (av < bv)
 		return -1;
 	return av > bv;
 }
 
-static int compare_extable(const void *a, const void *b)
-{
-	return e.compare_extable(a, b);
-}
+static int (*compare_extable)(const void *a, const void *b);
 
 static inline void *get_index(void *start, int entsize, int index)
 {
@@ -398,12 +118,11 @@ static inline void *get_index(void *start, int entsize, int index)
 static int extable_ent_size;
 static int long_size;
 
+#define ERRSTR_MAXSZ	256
 
 #ifdef UNWINDER_ORC_ENABLED
 /* ORC unwinder only support X86_64 */
 #include <asm/orc_types.h>
-
-#define ERRSTR_MAXSZ	256
 
 static char g_err[ERRSTR_MAXSZ];
 static int *g_orc_ip_table;
@@ -499,7 +218,136 @@ static void *sort_orctable(void *arg)
 #endif
 
 #ifdef MCOUNT_SORT_ENABLED
+
+static int compare_values_64(const void *a, const void *b)
+{
+	uint64_t av = *(uint64_t *)a;
+	uint64_t bv = *(uint64_t *)b;
+
+	if (av < bv)
+		return -1;
+	return av > bv;
+}
+
+static int compare_values_32(const void *a, const void *b)
+{
+	uint32_t av = *(uint32_t *)a;
+	uint32_t bv = *(uint32_t *)b;
+
+	if (av < bv)
+		return -1;
+	return av > bv;
+}
+
+static int (*compare_values)(const void *a, const void *b);
+
+/* Only used for sorting mcount table */
+static void rela_write_addend(Elf_Rela *rela, uint64_t val)
+{
+	elf_parser.rela_write_addend(rela, val);
+}
+
+struct func_info {
+	uint64_t	addr;
+	uint64_t	size;
+};
+
+/* List of functions created by: nm -S vmlinux */
+static struct func_info *function_list;
+static int function_list_size;
+
+/* Allocate functions in 1k blocks */
+#define FUNC_BLK_SIZE	1024
+#define FUNC_BLK_MASK	(FUNC_BLK_SIZE - 1)
+
+static int add_field(uint64_t addr, uint64_t size)
+{
+	struct func_info *fi;
+	int fsize = function_list_size;
+
+	if (!(fsize & FUNC_BLK_MASK)) {
+		fsize += FUNC_BLK_SIZE;
+		fi = realloc(function_list, fsize * sizeof(struct func_info));
+		if (!fi)
+			return -1;
+		function_list = fi;
+	}
+	fi = &function_list[function_list_size++];
+	fi->addr = addr;
+	fi->size = size;
+	return 0;
+}
+
+/* Used for when mcount/fentry is before the function entry */
+static int before_func;
+
+/* Only return match if the address lies inside the function size */
+static int cmp_func_addr(const void *K, const void *A)
+{
+	uint64_t key = *(const uint64_t *)K;
+	const struct func_info *a = A;
+
+	if (key + before_func < a->addr)
+		return -1;
+	return key >= a->addr + a->size;
+}
+
+/* Find the function in function list that is bounded by the function size */
+static int find_func(uint64_t key)
+{
+	return bsearch(&key, function_list, function_list_size,
+		       sizeof(struct func_info), cmp_func_addr) != NULL;
+}
+
+static int cmp_funcs(const void *A, const void *B)
+{
+	const struct func_info *a = A;
+	const struct func_info *b = B;
+
+	if (a->addr < b->addr)
+		return -1;
+	return a->addr > b->addr;
+}
+
+static int parse_symbols(const char *fname)
+{
+	FILE *fp;
+	char addr_str[20]; /* Only need 17, but round up to next int size */
+	char size_str[20];
+	char type;
+
+	fp = fopen(fname, "r");
+	if (!fp) {
+		perror(fname);
+		return -1;
+	}
+
+	while (fscanf(fp, "%16s %16s %c %*s\n", addr_str, size_str, &type) == 3) {
+		uint64_t addr;
+		uint64_t size;
+
+		/* Only care about functions */
+		if (type != 't' && type != 'T' && type != 'W')
+			continue;
+
+		addr = strtoull(addr_str, NULL, 16);
+		size = strtoull(size_str, NULL, 16);
+		if (add_field(addr, size) < 0)
+			return -1;
+	}
+	fclose(fp);
+
+	qsort(function_list, function_list_size, sizeof(struct func_info), cmp_funcs);
+
+	return 0;
+}
+
 static pthread_t mcount_sort_thread;
+static bool sort_reloc;
+
+static long rela_type;
+
+static char m_err[ERRSTR_MAXSZ];
 
 struct elf_mcount_loc {
 	Elf_Ehdr *ehdr;
@@ -508,17 +356,197 @@ struct elf_mcount_loc {
 	uint64_t stop_mcount_loc;
 };
 
+/* Fill the array with the content of the relocs */
+static int fill_relocs(void *ptr, uint64_t size, Elf_Ehdr *ehdr, uint64_t start_loc)
+{
+	Elf_Shdr *shdr_start;
+	Elf_Rela *rel;
+	unsigned int shnum;
+	unsigned int count = 0;
+	int shentsize;
+	void *array_end = ptr + size;
+
+	shdr_start = (Elf_Shdr *)((char *)ehdr + ehdr_shoff(ehdr));
+	shentsize = ehdr_shentsize(ehdr);
+
+	shnum = ehdr_shnum(ehdr);
+	if (shnum == SHN_UNDEF)
+		shnum = shdr_size(shdr_start);
+
+	for (int i = 0; i < shnum; i++) {
+		Elf_Shdr *shdr = get_index(shdr_start, shentsize, i);
+		void *end;
+
+		if (shdr_type(shdr) != SHT_RELA)
+			continue;
+
+		rel = (void *)ehdr + shdr_offset(shdr);
+		end = (void *)rel + shdr_size(shdr);
+
+		for (; (void *)rel < end; rel = (void *)rel + shdr_entsize(shdr)) {
+			uint64_t offset = rela_offset(rel);
+
+			if (offset >= start_loc && offset < start_loc + size) {
+				if (ptr + long_size > array_end) {
+					snprintf(m_err, ERRSTR_MAXSZ,
+						 "Too many relocations");
+					return -1;
+				}
+
+				/* Make sure this has the correct type */
+				if (rela_info(rel) != rela_type) {
+					snprintf(m_err, ERRSTR_MAXSZ,
+						"rela has type %lx but expected %lx\n",
+						(long)rela_info(rel), rela_type);
+					return -1;
+				}
+
+				if (long_size == 4)
+					*(uint32_t *)ptr = rela_addend(rel);
+				else
+					*(uint64_t *)ptr = rela_addend(rel);
+				ptr += long_size;
+				count++;
+			}
+		}
+	}
+	return count;
+}
+
+/* Put the sorted vals back into the relocation elements */
+static void replace_relocs(void *ptr, uint64_t size, Elf_Ehdr *ehdr, uint64_t start_loc)
+{
+	Elf_Shdr *shdr_start;
+	Elf_Rela *rel;
+	unsigned int shnum;
+	int shentsize;
+
+	shdr_start = (Elf_Shdr *)((char *)ehdr + ehdr_shoff(ehdr));
+	shentsize = ehdr_shentsize(ehdr);
+
+	shnum = ehdr_shnum(ehdr);
+	if (shnum == SHN_UNDEF)
+		shnum = shdr_size(shdr_start);
+
+	for (int i = 0; i < shnum; i++) {
+		Elf_Shdr *shdr = get_index(shdr_start, shentsize, i);
+		void *end;
+
+		if (shdr_type(shdr) != SHT_RELA)
+			continue;
+
+		rel = (void *)ehdr + shdr_offset(shdr);
+		end = (void *)rel + shdr_size(shdr);
+
+		for (; (void *)rel < end; rel = (void *)rel + shdr_entsize(shdr)) {
+			uint64_t offset = rela_offset(rel);
+
+			if (offset >= start_loc && offset < start_loc + size) {
+				if (long_size == 4)
+					rela_write_addend(rel, *(uint32_t *)ptr);
+				else
+					rela_write_addend(rel, *(uint64_t *)ptr);
+				ptr += long_size;
+			}
+		}
+	}
+}
+
+static int fill_addrs(void *ptr, uint64_t size, void *addrs)
+{
+	void *end = ptr + size;
+	int count = 0;
+
+	for (; ptr < end; ptr += long_size, addrs += long_size, count++) {
+		if (long_size == 4)
+			*(uint32_t *)ptr = elf_parser.r(addrs);
+		else
+			*(uint64_t *)ptr = elf_parser.r8(addrs);
+	}
+	return count;
+}
+
+static void replace_addrs(void *ptr, uint64_t size, void *addrs)
+{
+	void *end = ptr + size;
+
+	for (; ptr < end; ptr += long_size, addrs += long_size) {
+		if (long_size == 4)
+			elf_parser.w(*(uint32_t *)ptr, addrs);
+		else
+			elf_parser.w8(*(uint64_t *)ptr, addrs);
+	}
+}
+
 /* Sort the addresses stored between __start_mcount_loc to __stop_mcount_loc in vmlinux */
 static void *sort_mcount_loc(void *arg)
 {
 	struct elf_mcount_loc *emloc = (struct elf_mcount_loc *)arg;
 	uint64_t offset = emloc->start_mcount_loc - shdr_addr(emloc->init_data_sec)
 					+ shdr_offset(emloc->init_data_sec);
-	uint64_t count = emloc->stop_mcount_loc - emloc->start_mcount_loc;
+	uint64_t size = emloc->stop_mcount_loc - emloc->start_mcount_loc;
 	unsigned char *start_loc = (void *)emloc->ehdr + offset;
+	Elf_Ehdr *ehdr = emloc->ehdr;
+	void *e_msg = NULL;
+	void *vals;
+	int count;
 
-	qsort(start_loc, count/long_size, long_size, compare_extable);
-	return NULL;
+	vals = malloc(long_size * size);
+	if (!vals) {
+		snprintf(m_err, ERRSTR_MAXSZ, "Failed to allocate sort array");
+		pthread_exit(m_err);
+	}
+
+	if (sort_reloc) {
+		count = fill_relocs(vals, size, ehdr, emloc->start_mcount_loc);
+		/* gcc may use relocs to save the addresses, but clang does not. */
+		if (!count) {
+			count = fill_addrs(vals, size, start_loc);
+			sort_reloc = 0;
+		}
+	} else
+		count = fill_addrs(vals, size, start_loc);
+
+	if (count < 0) {
+		e_msg = m_err;
+		goto out;
+	}
+
+	if (count != size / long_size) {
+		snprintf(m_err, ERRSTR_MAXSZ, "Expected %u mcount elements but found %u\n",
+			(int)(size / long_size), count);
+		e_msg = m_err;
+		goto out;
+	}
+
+	/* zero out any locations not found by function list */
+	if (function_list_size) {
+		for (void *ptr = vals; ptr < vals + size; ptr += long_size) {
+			uint64_t key;
+
+			key = long_size == 4 ? *(uint32_t *)ptr : *(uint64_t *)ptr;
+			if (!find_func(key)) {
+				if (long_size == 4)
+					*(uint32_t *)ptr = 0;
+				else
+					*(uint64_t *)ptr = 0;
+			}
+		}
+	}
+
+	compare_values = long_size == 4 ? compare_values_32 : compare_values_64;
+
+	qsort(vals, count, long_size, compare_values);
+
+	if (sort_reloc)
+		replace_relocs(vals, size, ehdr, emloc->start_mcount_loc);
+	else
+		replace_addrs(vals, size, start_loc);
+
+out:
+	free(vals);
+
+	pthread_exit(e_msg);
 }
 
 /* Get the address of __start_mcount_loc and __stop_mcount_loc in System.map */
@@ -555,6 +583,8 @@ static void get_mcount_loc(struct elf_mcount_loc *emloc, Elf_Shdr *symtab_sec,
 		return;
 	}
 }
+#else /* MCOUNT_SORT_ENABLED */
+static inline int parse_symbols(const char *fname) { return 0; }
 #endif
 
 static int do_sort(Elf_Ehdr *ehdr,
@@ -748,7 +778,7 @@ static int do_sort(Elf_Ehdr *ehdr,
 		sym_value(sort_needed_sym) - shdr_addr(sort_needed_sec);
 
 	/* extable has been sorted, clear the flag */
-	w(0, sort_needed_loc);
+	elf_parser.w(0, sort_needed_loc);
 	rc = 0;
 
 out:
@@ -792,8 +822,8 @@ out:
 
 static int compare_relative_table(const void *a, const void *b)
 {
-	int32_t av = (int32_t)r(a);
-	int32_t bv = (int32_t)r(b);
+	int32_t av = (int32_t)elf_parser.r(a);
+	int32_t bv = (int32_t)elf_parser.r(b);
 
 	if (av < bv)
 		return -1;
@@ -812,7 +842,7 @@ static void sort_relative_table(char *extab_image, int image_size)
 	 */
 	while (i < image_size) {
 		uint32_t *loc = (uint32_t *)(extab_image + i);
-		w(r(loc) + i, loc);
+		elf_parser.w(elf_parser.r(loc) + i, loc);
 		i += 4;
 	}
 
@@ -822,7 +852,7 @@ static void sort_relative_table(char *extab_image, int image_size)
 	i = 0;
 	while (i < image_size) {
 		uint32_t *loc = (uint32_t *)(extab_image + i);
-		w(r(loc) - i, loc);
+		elf_parser.w(elf_parser.r(loc) - i, loc);
 		i += 4;
 	}
 }
@@ -834,8 +864,8 @@ static void sort_relative_table_with_data(char *extab_image, int image_size)
 	while (i < image_size) {
 		uint32_t *loc = (uint32_t *)(extab_image + i);
 
-		w(r(loc) + i, loc);
-		w(r(loc + 1) + i + 4, loc + 1);
+		elf_parser.w(elf_parser.r(loc) + i, loc);
+		elf_parser.w(elf_parser.r(loc + 1) + i + 4, loc + 1);
 		/* Don't touch the fixup type or data */
 
 		i += sizeof(uint32_t) * 3;
@@ -847,8 +877,8 @@ static void sort_relative_table_with_data(char *extab_image, int image_size)
 	while (i < image_size) {
 		uint32_t *loc = (uint32_t *)(extab_image + i);
 
-		w(r(loc) - i, loc);
-		w(r(loc + 1) - (i + 4), loc + 1);
+		elf_parser.w(elf_parser.r(loc) - i, loc);
+		elf_parser.w(elf_parser.r(loc + 1) - (i + 4), loc + 1);
 		/* Don't touch the fixup type or data */
 
 		i += sizeof(uint32_t) * 3;
@@ -860,37 +890,23 @@ static int do_file(char const *const fname, void *addr)
 	Elf_Ehdr *ehdr = addr;
 	table_sort_t custom_sort = NULL;
 
-	switch (ehdr->e32.e_ident[EI_DATA]) {
-	case ELFDATA2LSB:
-		r	= rle;
-		r2	= r2le;
-		r8	= r8le;
-		w	= wle;
-		break;
-	case ELFDATA2MSB:
-		r	= rbe;
-		r2	= r2be;
-		r8	= r8be;
-		w	= wbe;
-		break;
-	default:
-		fprintf(stderr, "unrecognized ELF data encoding %d: %s\n",
-			ehdr->e32.e_ident[EI_DATA], fname);
-		return -1;
-	}
-
-	if (memcmp(ELFMAG, ehdr->e32.e_ident, SELFMAG) != 0 ||
-	    (r2(&ehdr->e32.e_type) != ET_EXEC && r2(&ehdr->e32.e_type) != ET_DYN) ||
-	    ehdr->e32.e_ident[EI_VERSION] != EV_CURRENT) {
-		fprintf(stderr, "unrecognized ET_EXEC/ET_DYN file %s\n", fname);
-		return -1;
-	}
-
-	switch (r2(&ehdr->e32.e_machine)) {
-	case EM_386:
+	switch (elf_map_machine(ehdr)) {
+#ifdef MCOUNT_SORT_ENABLED
 	case EM_AARCH64:
-	case EM_LOONGARCH:
+		/* arm64 also needs RELA-based weak-function fixups. */
+		sort_reloc = true;
+		rela_type = 0x403;
+		/* fallthrough */
 	case EM_RISCV:
+		/* arm64 and RISC-V place patchable entries before the function. */
+		before_func = 8;
+#else
+	case EM_AARCH64:
+	case EM_RISCV:
+#endif
+		/* fallthrough */
+	case EM_386:
+	case EM_LOONGARCH:
 	case EM_S390:
 	case EM_X86_64:
 		custom_sort = sort_relative_table_with_data;
@@ -909,77 +925,37 @@ static int do_file(char const *const fname, void *addr)
 		break;
 	default:
 		fprintf(stderr, "unrecognized e_machine %d %s\n",
-			r2(&ehdr->e32.e_machine), fname);
+			elf_parser.r2(&ehdr->e32.e_machine), fname);
 		return -1;
 	}
 
-	switch (ehdr->e32.e_ident[EI_CLASS]) {
-	case ELFCLASS32: {
-		struct elf_funcs efuncs = {
-			.compare_extable	= compare_extable_32,
-			.ehdr_shoff		= ehdr32_shoff,
-			.ehdr_shentsize		= ehdr32_shentsize,
-			.ehdr_shstrndx		= ehdr32_shstrndx,
-			.ehdr_shnum		= ehdr32_shnum,
-			.shdr_addr		= shdr32_addr,
-			.shdr_offset		= shdr32_offset,
-			.shdr_link		= shdr32_link,
-			.shdr_size		= shdr32_size,
-			.shdr_name		= shdr32_name,
-			.shdr_type		= shdr32_type,
-			.shdr_entsize		= shdr32_entsize,
-			.sym_type		= sym32_type,
-			.sym_name		= sym32_name,
-			.sym_value		= sym32_value,
-			.sym_shndx		= sym32_shndx,
-		};
-
-		e = efuncs;
+	switch (elf_map_long_size(addr)) {
+	case 4:
+		compare_extable	= compare_extable_32,
 		long_size		= 4;
 		extable_ent_size	= 8;
 
-		if (r2(&ehdr->e32.e_ehsize) != sizeof(Elf32_Ehdr) ||
-		    r2(&ehdr->e32.e_shentsize) != sizeof(Elf32_Shdr)) {
+		if (elf_parser.r2(&ehdr->e32.e_ehsize) != sizeof(Elf32_Ehdr) ||
+		    elf_parser.r2(&ehdr->e32.e_shentsize) != sizeof(Elf32_Shdr)) {
 			fprintf(stderr,
 				"unrecognized ET_EXEC/ET_DYN file: %s\n", fname);
 			return -1;
 		}
 
-		}
 		break;
-	case ELFCLASS64: {
-		struct elf_funcs efuncs = {
-			.compare_extable	= compare_extable_64,
-			.ehdr_shoff		= ehdr64_shoff,
-			.ehdr_shentsize		= ehdr64_shentsize,
-			.ehdr_shstrndx		= ehdr64_shstrndx,
-			.ehdr_shnum		= ehdr64_shnum,
-			.shdr_addr		= shdr64_addr,
-			.shdr_offset		= shdr64_offset,
-			.shdr_link		= shdr64_link,
-			.shdr_size		= shdr64_size,
-			.shdr_name		= shdr64_name,
-			.shdr_type		= shdr64_type,
-			.shdr_entsize		= shdr64_entsize,
-			.sym_type		= sym64_type,
-			.sym_name		= sym64_name,
-			.sym_value		= sym64_value,
-			.sym_shndx		= sym64_shndx,
-		};
-
-		e = efuncs;
+	case 8:
+		compare_extable	= compare_extable_64,
 		long_size		= 8;
 		extable_ent_size	= 16;
 
-		if (r2(&ehdr->e64.e_ehsize) != sizeof(Elf64_Ehdr) ||
-		    r2(&ehdr->e64.e_shentsize) != sizeof(Elf64_Shdr)) {
+		if (elf_parser.r2(&ehdr->e64.e_ehsize) != sizeof(Elf64_Ehdr) ||
+		    elf_parser.r2(&ehdr->e64.e_shentsize) != sizeof(Elf64_Shdr)) {
 			fprintf(stderr,
 				"unrecognized ET_EXEC/ET_DYN file: %s\n",
 				fname);
 			return -1;
 		}
 
-		}
 		break;
 	default:
 		fprintf(stderr, "unrecognized ELF class %d %s\n",
@@ -995,15 +971,30 @@ int main(int argc, char *argv[])
 	int i, n_error = 0;  /* gcc-4.3.0 false positive complaint */
 	size_t size = 0;
 	void *addr = NULL;
+	int c;
 
-	if (argc < 2) {
+	while ((c = getopt(argc, argv, "s:")) >= 0) {
+		switch (c) {
+		case 's':
+			if (parse_symbols(optarg) < 0) {
+				fprintf(stderr, "Could not parse %s\n", optarg);
+				return -1;
+			}
+			break;
+		default:
+			fprintf(stderr, "usage: sorttable [-s nm-file] vmlinux...\n");
+			return 0;
+		}
+	}
+
+	if ((argc - optind) < 1) {
 		fprintf(stderr, "usage: sorttable vmlinux...\n");
 		return 0;
 	}
 
 	/* Process each file in turn, allowing deep failure. */
-	for (i = 1; i < argc; i++) {
-		addr = mmap_file(argv[i], &size);
+	for (i = optind; i < argc; i++) {
+		addr = elf_map(argv[i], &size, (1 << ET_EXEC) | (1 << ET_DYN));
 		if (!addr) {
 			++n_error;
 			continue;
@@ -1012,7 +1003,7 @@ int main(int argc, char *argv[])
 		if (do_file(argv[i], addr))
 			++n_error;
 
-		munmap(addr, size);
+		elf_unmap(addr, size);
 	}
 
 	return !!n_error;

@@ -22,6 +22,7 @@
  * Authors: AMD
  *
  */
+#include "dc_types.h"
 #include "core_types.h"
 #include "core_status.h"
 #include "dc_state.h"
@@ -34,8 +35,8 @@
 #include "link_enc_cfg.h"
 
 #if defined(CONFIG_DRM_AMD_DC_FP)
-#include "dml2/dml2_wrapper.h"
-#include "dml2/dml2_internal_types.h"
+#include "dml2_0/dml2_wrapper.h"
+#include "dml2_0/dml2_internal_types.h"
 #endif
 
 #define DC_LOGGER \
@@ -193,13 +194,8 @@ static void init_state(struct dc *dc, struct dc_state *state)
 struct dc_state *dc_state_create(struct dc *dc, struct dc_state_create_params *params)
 {
 	struct dc_state *state;
-#ifdef CONFIG_DRM_AMD_DC_FP
-	struct dml2_configuration_options *dml2_opt = &dc->dml2_tmp;
 
-	memcpy(dml2_opt, &dc->dml2_options, sizeof(dc->dml2_options));
-#endif
-
-	state = kvzalloc(sizeof(struct dc_state), GFP_KERNEL);
+	state = kvzalloc_obj(struct dc_state);
 
 	if (!state)
 		return NULL;
@@ -209,21 +205,33 @@ struct dc_state *dc_state_create(struct dc *dc, struct dc_state_create_params *p
 	state->power_source = params ? params->power_source : DC_POWER_SOURCE_AC;
 
 #ifdef CONFIG_DRM_AMD_DC_FP
+	bool status;
+
 	if (dc->debug.using_dml2) {
-		dml2_opt->use_clock_dc_limits = false;
-		if (!dml2_create(dc, dml2_opt, &state->bw_ctx.dml2)) {
+		DC_FP_START();
+		status = dml2_create(dc, &dc->dml2_options, &state->bw_ctx.dml2);
+		DC_FP_END();
+
+		if (!status) {
 			dc_state_release(state);
 			return NULL;
 		}
 
-		dml2_opt->use_clock_dc_limits = true;
-		if (!dml2_create(dc, dml2_opt, &state->bw_ctx.dml2_dc_power_source)) {
-			dc_state_release(state);
-			return NULL;
+		if (dc->caps.dcmode_power_limits_present) {
+			bool dc_power_status;
+
+			DC_FP_START();
+			dc_power_status = dml2_create(dc, &dc->dml2_dc_power_options, &state->bw_ctx.dml2_dc_power_source);
+			DC_FP_END();
+
+			if (!dc_power_status) {
+				dc_state_release(state);
+				return NULL;
+			}
 		}
+
 	}
-#endif
-
+#endif // CONFIG_DRM_AMD_DC_FP
 	kref_init(&state->refcount);
 
 	return state;
@@ -241,14 +249,20 @@ void dc_state_copy(struct dc_state *dst_state, struct dc_state *src_state)
 
 #ifdef CONFIG_DRM_AMD_DC_FP
 	dst_state->bw_ctx.dml2 = dst_dml2;
-	if (src_state->bw_ctx.dml2)
+	if (src_state->bw_ctx.dml2) {
+		DC_FP_START();
 		dml2_copy(dst_state->bw_ctx.dml2, src_state->bw_ctx.dml2);
+		DC_FP_END();
+	}
 
 	dst_state->bw_ctx.dml2_dc_power_source = dst_dml2_dc_power_source;
-	if (src_state->bw_ctx.dml2_dc_power_source)
-		dml2_copy(dst_state->bw_ctx.dml2_dc_power_source, src_state->bw_ctx.dml2_dc_power_source);
-#endif
 
+	if (src_state->bw_ctx.dml2_dc_power_source) {
+		DC_FP_START();
+		dml2_copy(dst_state->bw_ctx.dml2_dc_power_source, src_state->bw_ctx.dml2_dc_power_source);
+		DC_FP_END();
+	}
+#endif // CONFIG_DRM_AMD_DC_FP
 	/* context refcount should not be overridden */
 	dst_state->refcount = refcount;
 }
@@ -257,30 +271,42 @@ struct dc_state *dc_state_create_copy(struct dc_state *src_state)
 {
 	struct dc_state *new_state;
 
-	new_state = kvmalloc(sizeof(struct dc_state),
-			GFP_KERNEL);
+	new_state = kvmalloc_obj(struct dc_state);
 	if (!new_state)
 		return NULL;
 
 	dc_state_copy_internal(new_state, src_state);
 
 #ifdef CONFIG_DRM_AMD_DC_FP
+	bool status;
+
 	new_state->bw_ctx.dml2 = NULL;
 	new_state->bw_ctx.dml2_dc_power_source = NULL;
 
-	if (src_state->bw_ctx.dml2 &&
-			!dml2_create_copy(&new_state->bw_ctx.dml2, src_state->bw_ctx.dml2)) {
-		dc_state_release(new_state);
-		return NULL;
+	if (src_state->bw_ctx.dml2) {
+		DC_FP_START();
+		status = dml2_create_copy(&new_state->bw_ctx.dml2, src_state->bw_ctx.dml2);
+		DC_FP_END();
+
+		if (!status) {
+			dc_state_release(new_state);
+			return NULL;
+		}
 	}
 
-	if (src_state->bw_ctx.dml2_dc_power_source &&
-			!dml2_create_copy(&new_state->bw_ctx.dml2_dc_power_source, src_state->bw_ctx.dml2_dc_power_source)) {
-		dc_state_release(new_state);
-		return NULL;
-	}
-#endif
 
+	if (src_state->bw_ctx.dml2_dc_power_source) {
+		DC_FP_START();
+		status = dml2_create_copy(&new_state->bw_ctx.dml2_dc_power_source,
+					  src_state->bw_ctx.dml2_dc_power_source);
+		DC_FP_END();
+
+		if (!status) {
+			dc_state_release(new_state);
+			return NULL;
+		}
+	}
+#endif // CONFIG_DRM_AMD_DC_FP
 	kref_init(&new_state->refcount);
 
 	return new_state;
@@ -358,11 +384,13 @@ static void dc_state_free(struct kref *kref)
 	dc_state_destruct(state);
 
 #ifdef CONFIG_DRM_AMD_DC_FP
+	DC_FP_START();
 	dml2_destroy(state->bw_ctx.dml2);
 	state->bw_ctx.dml2 = 0;
 
 	dml2_destroy(state->bw_ctx.dml2_dc_power_source);
 	state->bw_ctx.dml2_dc_power_source = 0;
+	DC_FP_END();
 #endif
 
 	kvfree(state);
@@ -381,6 +409,7 @@ enum dc_status dc_state_add_stream(
 		struct dc_state *state,
 		struct dc_stream_state *stream)
 {
+	(void)dc;
 	enum dc_status res;
 
 	DC_LOGGER_INIT(dc->ctx->logger);
@@ -432,6 +461,8 @@ enum dc_status dc_state_remove_stream(
 		dm_error("Context doesn't have stream %p !\n", stream);
 		return DC_ERROR_UNEXPECTED;
 	}
+
+	dc_stream_release_3dlut_for_stream(dc, stream);
 
 	dc_stream_release(state->streams[i]);
 	state->stream_count--;
@@ -754,6 +785,7 @@ struct dc_plane_state *dc_state_create_phantom_plane(const struct dc *dc,
 		struct dc_state *state,
 		struct dc_plane_state *main_plane)
 {
+	(void)main_plane;
 	struct dc_plane_state *phantom_plane = dc_create_plane_state(dc);
 
 	DC_LOGGER_INIT(dc->ctx->logger);
@@ -812,7 +844,11 @@ enum dc_status dc_state_add_phantom_stream(const struct dc *dc,
 	if (phantom_stream_status) {
 		phantom_stream_status->mall_stream_config.type = SUBVP_PHANTOM;
 		phantom_stream_status->mall_stream_config.paired_stream = main_stream;
+		phantom_stream_status->mall_stream_config.subvp_limit_cursor_size = false;
+		phantom_stream_status->mall_stream_config.cursor_size_limit_subvp = false;
 	}
+
+	dc_state_set_stream_subvp_cursor_limit(main_stream, state, true);
 
 	return res;
 }
@@ -917,7 +953,7 @@ bool dc_state_remove_phantom_streams_and_planes(
 	const struct dc *dc,
 	struct dc_state *state)
 {
-	int i;
+	unsigned int i;
 	bool removed_phantom = false;
 	struct dc_stream_state *phantom_stream = NULL;
 
@@ -939,13 +975,20 @@ void dc_state_release_phantom_streams_and_planes(
 		const struct dc *dc,
 		struct dc_state *state)
 {
-	int i;
+	unsigned int phantom_count;
+	struct dc_stream_state *phantom_streams[MAX_PHANTOM_PIPES];
+	struct dc_plane_state *phantom_planes[MAX_PHANTOM_PIPES];
+	unsigned int i;
 
-	for (i = 0; i < state->phantom_stream_count; i++)
-		dc_state_release_phantom_stream(dc, state, state->phantom_streams[i]);
+	phantom_count = state->phantom_stream_count;
+	memcpy(phantom_streams, state->phantom_streams, sizeof(struct dc_stream_state *) * MAX_PHANTOM_PIPES);
+	for (i = 0; i < phantom_count; i++)
+		dc_state_release_phantom_stream(dc, state, phantom_streams[i]);
 
-	for (i = 0; i < state->phantom_plane_count; i++)
-		dc_state_release_phantom_plane(dc, state, state->phantom_planes[i]);
+	phantom_count = state->phantom_plane_count;
+	memcpy(phantom_planes, state->phantom_planes, sizeof(struct dc_plane_state *) * MAX_PHANTOM_PIPES);
+	for (i = 0; i < phantom_count; i++)
+		dc_state_release_phantom_plane(dc, state, phantom_planes[i]);
 }
 
 struct dc_stream_state *dc_state_get_stream_from_id(const struct dc_state *state, unsigned int id)
@@ -976,4 +1019,95 @@ bool dc_state_is_fams2_in_use(
 		is_fams2_in_use |= dc->current_state->bw_ctx.bw.dcn.fams2_global_config.features.bits.enable;
 
 	return is_fams2_in_use;
+}
+
+void dc_state_set_stream_subvp_cursor_limit(const struct dc_stream_state *stream,
+		struct dc_state *state,
+		bool limit)
+{
+	struct dc_stream_status *stream_status;
+
+	stream_status = dc_state_get_stream_status(state, stream);
+
+	if (stream_status) {
+		stream_status->mall_stream_config.subvp_limit_cursor_size = limit;
+	}
+}
+
+bool dc_state_get_stream_subvp_cursor_limit(const struct dc_stream_state *stream,
+		struct dc_state *state)
+{
+	bool limit = false;
+
+	struct dc_stream_status *stream_status;
+
+	stream_status = dc_state_get_stream_status(state, stream);
+
+	if (stream_status) {
+		limit = stream_status->mall_stream_config.subvp_limit_cursor_size;
+	}
+
+	return limit;
+}
+
+void dc_state_set_stream_cursor_subvp_limit(const struct dc_stream_state *stream,
+		struct dc_state *state,
+		bool limit)
+{
+	struct dc_stream_status *stream_status;
+
+	stream_status = dc_state_get_stream_status(state, stream);
+
+	if (stream_status) {
+		stream_status->mall_stream_config.cursor_size_limit_subvp = limit;
+	}
+}
+
+bool dc_state_get_stream_cursor_subvp_limit(const struct dc_stream_state *stream,
+		struct dc_state *state)
+{
+	bool limit = false;
+
+	struct dc_stream_status *stream_status;
+
+	stream_status = dc_state_get_stream_status(state, stream);
+
+	if (stream_status) {
+		limit = stream_status->mall_stream_config.cursor_size_limit_subvp;
+	}
+
+	return limit;
+}
+
+bool dc_state_can_clear_stream_cursor_subvp_limit(const struct dc_stream_state *stream,
+		struct dc_state *state)
+{
+	bool can_clear_limit = false;
+
+	struct dc_stream_status *stream_status;
+
+	stream_status = dc_state_get_stream_status(state, stream);
+
+	if (stream_status) {
+		can_clear_limit = dc_state_get_stream_cursor_subvp_limit(stream, state) &&
+				(stream_status->mall_stream_config.type == SUBVP_PHANTOM ||
+				stream->hw_cursor_req ||
+				!stream_status->mall_stream_config.subvp_limit_cursor_size ||
+				!stream->cursor_position.enable ||
+				dc_stream_check_cursor_attributes(stream, state, &stream->cursor_attributes));
+	}
+
+	return can_clear_limit;
+}
+
+bool dc_state_is_subvp_in_use(struct dc_state *state)
+{
+	uint32_t i;
+
+	for (i = 0; i < state->stream_count; i++) {
+		if (dc_state_get_stream_subvp_type(state, state->streams[i]) != SUBVP_NONE)
+			return true;
+	}
+
+	return false;
 }

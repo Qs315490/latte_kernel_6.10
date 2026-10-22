@@ -10,7 +10,7 @@
  * 2001-2005 (c) MontaVista Software, Inc.
  * Daniel Walker <dwalker@mvista.com>
  *
- * (C) 2005 Thomas Gleixner <tglx@linutronix.de>
+ * (C) 2005 Linutronix GmbH, Thomas Gleixner <tglx@kernel.org>
  *
  * Simplifications of the original code by
  * Oleg Nesterov <oleg@tv-sign.ru>
@@ -47,8 +47,8 @@ static void plist_check_list(struct list_head *top)
 
 	plist_check_prev_next(top, prev, next);
 	while (next != top) {
-		WRITE_ONCE(prev, next);
-		WRITE_ONCE(next, prev->next);
+		prev = next;
+		next = prev->next;
 		plist_check_prev_next(top, prev, next);
 	}
 }
@@ -171,12 +171,24 @@ void plist_requeue(struct plist_node *node, struct plist_head *head)
 
 	plist_del(node, head);
 
+	/*
+	 * After plist_del(), iter is the replacement of the node.  If the node
+	 * was on prio_list, take shortcut to find node_next instead of looping.
+	 */
+	if (!list_empty(&iter->prio_list)) {
+		iter = list_entry(iter->prio_list.next, struct plist_node,
+				  prio_list);
+		node_next = &iter->node_list;
+		goto queue;
+	}
+
 	plist_for_each_continue(iter, head) {
 		if (node->prio != iter->prio) {
 			node_next = &iter->node_list;
 			break;
 		}
 	}
+queue:
 	list_add_tail(&node->node_list, node_next);
 
 	plist_check_head(head);

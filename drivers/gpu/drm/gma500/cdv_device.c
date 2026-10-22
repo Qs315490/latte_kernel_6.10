@@ -9,6 +9,7 @@
 
 #include <drm/drm.h>
 #include <drm/drm_crtc_helper.h>
+#include <drm/drm_print.h>
 
 #include "cdv_device.h"
 #include "gma_device.h"
@@ -215,7 +216,7 @@ static void cdv_errata(struct drm_device *dev)
 	 *	Bonus Launch to work around the issue, by degrading
 	 *	performance.
 	 */
-	 CDV_MSG_WRITE32(pci_domain_nr(pdev->bus), 3, 0x30, 0x08027108);
+	CDV_MSG_WRITE32(pci_domain_nr(pdev->bus), 3, 0x30, 0x08027108);
 }
 
 /**

@@ -10,7 +10,6 @@
 #include <linux/counter.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -106,6 +105,15 @@
 #define QCLR_PHE		BIT(2)
 #define QCLR_PCE		BIT(1)
 #define QCLR_INT		BIT(0)
+
+#define QEPSTS_UPEVNT		BIT(7)
+#define QEPSTS_FDF		BIT(6)
+#define QEPSTS_QDF		BIT(5)
+#define QEPSTS_QDLF		BIT(4)
+#define QEPSTS_COEF		BIT(3)
+#define QEPSTS_CDEF		BIT(2)
+#define QEPSTS_FIMF		BIT(1)
+#define QEPSTS_PCEF		BIT(0)
 
 /* EQEP Inputs */
 enum {
@@ -286,6 +294,9 @@ static int ti_eqep_events_configure(struct counter_device *counter)
 		case COUNTER_EVENT_UNDERFLOW:
 			qeint |= QEINT_PCU;
 			break;
+		case COUNTER_EVENT_DIRECTION_CHANGE:
+			qeint |= QEINT_QDC;
+			break;
 		}
 	}
 
@@ -298,6 +309,7 @@ static int ti_eqep_watch_validate(struct counter_device *counter,
 	switch (watch->event) {
 	case COUNTER_EVENT_OVERFLOW:
 	case COUNTER_EVENT_UNDERFLOW:
+	case COUNTER_EVENT_DIRECTION_CHANGE:
 		if (watch->channel != 0)
 			return -EINVAL;
 
@@ -368,11 +380,27 @@ static int ti_eqep_position_enable_write(struct counter_device *counter,
 	return 0;
 }
 
+static int ti_eqep_direction_read(struct counter_device *counter,
+				  struct counter_count *count,
+				  enum counter_count_direction *direction)
+{
+	struct ti_eqep_cnt *priv = counter_priv(counter);
+	u32 qepsts;
+
+	regmap_read(priv->regmap16, QEPSTS, &qepsts);
+
+	*direction = (qepsts & QEPSTS_QDF) ? COUNTER_COUNT_DIRECTION_FORWARD
+					   : COUNTER_COUNT_DIRECTION_BACKWARD;
+
+	return 0;
+}
+
 static struct counter_comp ti_eqep_position_ext[] = {
 	COUNTER_COMP_CEILING(ti_eqep_position_ceiling_read,
 			     ti_eqep_position_ceiling_write),
 	COUNTER_COMP_ENABLE(ti_eqep_position_enable_read,
 			    ti_eqep_position_enable_write),
+	COUNTER_COMP_DIRECTION(ti_eqep_direction_read),
 };
 
 static struct counter_signal ti_eqep_signals[] = {
@@ -438,6 +466,9 @@ static irqreturn_t ti_eqep_irq_handler(int irq, void *dev_id)
 
 	if (qflg & QFLG_PCU)
 		counter_push_event(counter, COUNTER_EVENT_UNDERFLOW, 0);
+
+	if (qflg & QFLG_QDC)
+		counter_push_event(counter, COUNTER_EVENT_DIRECTION_CHANGE, 0);
 
 	regmap_write(priv->regmap16, QCLR, qflg);
 

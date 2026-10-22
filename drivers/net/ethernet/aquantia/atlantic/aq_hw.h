@@ -15,9 +15,13 @@
 #include "aq_common.h"
 #include "aq_rss.h"
 #include "hw_atl/hw_atl_utils.h"
+#include "hw_atl2/hw_atl2.h"
 
 #define AQ_HW_MAC_COUNTER_HZ   312500000ll
 #define AQ_HW_PHY_COUNTER_HZ   160000000ll
+
+#define AQ_HW_TXD_CTL_TS_EN       0x40000000U
+#define AQ_HW_TXD_CTL_TS_TSG0     0x80000000U
 
 enum aq_tc_mode {
 	AQ_TC_MODE_INVALID = -1,
@@ -37,6 +41,8 @@ enum aq_tc_mode {
 #define AQ_RX_QUEUE_NOT_ASSIGNED   0xFFU
 
 #define AQ_FRAC_PER_NS 0x100000000LL
+
+#define AQ2_HW_PTP_COUNTER_HZ   156250000ll
 
 /* Used for rate to Mbps conversion */
 #define AQ_MBPS_DIVISOR         125000 /* 1000000 / 8 */
@@ -109,9 +115,12 @@ struct aq_stats_s {
 #define AQ_HW_IRQ_MSIX    3U
 
 #define AQ_HW_SERVICE_IRQS   1U
+#define AQ_HW_PTP_IRQS       1U
 
 #define AQ_HW_POWER_STATE_D0   0U
 #define AQ_HW_POWER_STATE_D3   3U
+
+#define	AQ_FW_WAKE_ON_LINK_RTPM BIT(10)
 
 #define AQ_HW_FLAG_STARTED     0x00000004U
 #define AQ_HW_FLAG_STOPPING    0x00000008U
@@ -155,6 +164,15 @@ enum aq_priv_flags {
 	AQ_HW_LOOPBACK_PHYEXT_SYS,
 };
 
+enum {
+	AQ_HW_PTP_DISABLE = 0,
+	AQ_HW_PTP_L2_ENABLE = BIT(1),
+	AQ_HW_PTP_L4_ENABLE = BIT(2),
+};
+
+#define ATL_TSG_CLOCK_SEL_0 0
+#define ATL_TSG_CLOCK_SEL_1 1
+
 #define AQ_HW_LOOPBACK_MASK	(BIT(AQ_HW_LOOPBACK_DMA_SYS) |\
 				 BIT(AQ_HW_LOOPBACK_PKT_SYS) |\
 				 BIT(AQ_HW_LOOPBACK_DMA_NET) |\
@@ -196,6 +214,7 @@ struct aq_hw_s {
 	u32 rpc_tid;
 	struct hw_atl_utils_fw_rpc rpc;
 	s64 ptp_clk_offset;
+	s8 clk_select;
 	u16 phy_id;
 	void *priv;
 };
@@ -321,11 +340,15 @@ struct aq_hw_ops {
 
 	int (*hw_ts_to_sys_clock)(struct aq_hw_s *self, u64 ts, u64 *time);
 
-	int (*hw_gpio_pulse)(struct aq_hw_s *self, u32 index, u64 start,
-			     u32 period);
+	int (*hw_gpio_pulse)(struct aq_hw_s *self, u32 index,
+			     u32 clk_sel, u64 start,
+			     u32 period, u32 hightime);
 
 	int (*hw_extts_gpio_enable)(struct aq_hw_s *self, u32 index,
-				    u32 enable);
+				    u32 channel, int enable);
+
+	void (*enable_ptp)(struct aq_hw_s *self, unsigned int param,
+			   int enable);
 
 	int (*hw_get_sync_ts)(struct aq_hw_s *self, u64 *ts);
 
@@ -334,6 +357,14 @@ struct aq_hw_ops {
 
 	int (*extract_hwts)(struct aq_hw_s *self, u8 *p, unsigned int len,
 			    u64 *timestamp);
+
+	u64 (*hw_ring_tx_ptp_get_ts)(struct aq_ring_s *ring);
+
+	int (*hw_tx_ptp_ring_init)(struct aq_hw_s *self,
+				   struct aq_ring_s *aq_ring);
+	int (*hw_rx_ptp_ring_init)(struct aq_hw_s *self,
+				   struct aq_ring_s *aq_ring);
+	u32 (*hw_get_clk_sel)(struct aq_hw_s *self);
 
 	int (*hw_set_fc)(struct aq_hw_s *self, u32 fc, u32 tc);
 
@@ -402,6 +433,9 @@ struct aq_fw_ops {
 	int (*send_macsec_req)(struct aq_hw_s *self,
 			       struct macsec_msg_fw_request *msg,
 			       struct macsec_msg_fw_response *resp);
+
+	int (*read_module_eeprom)(struct aq_hw_s *self, u8 dev_addr,
+				  u8 reg_start_addr, int len, u8 *data);
 };
 
 #endif /* AQ_HW_H */

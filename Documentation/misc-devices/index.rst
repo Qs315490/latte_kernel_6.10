@@ -12,7 +12,7 @@ fit into other categories.
    :maxdepth: 2
 
    ad525x_dpot
-   apds990x
+   amd-sbi
    bh1770glc
    c2port
    dw-xdata-pcie

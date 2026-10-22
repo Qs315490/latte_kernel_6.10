@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * Copyright (C) 2015-2020 Advanced Micro Devices, Inc. All rights reserved.
  *
@@ -44,20 +45,25 @@
  * in amdgpu_dm_kms.h file
  */
 
-#define AMDGPU_DM_MAX_DISPLAY_INDEX 31
-
 #define AMDGPU_DM_MAX_CRTC 6
 
 #define AMDGPU_DM_MAX_NUM_EDP 2
 
-#define AMDGPU_DMUB_NOTIFICATION_MAX 7
+#define AMDGPU_DMUB_NOTIFICATION_MAX 8
 
-#define HDMI_AMD_VENDOR_SPECIFIC_DATA_BLOCK_IEEE_REGISTRATION_ID 0x00001A
-#define AMD_VSDB_VERSION_3_FEATURECAP_REPLAYMODE 0x40
-#define HDMI_AMD_VENDOR_SPECIFIC_DATA_BLOCK_VERSION_3 0x3
+enum amd_vsdb_panel_type {
+	AMD_VSDB_PANEL_TYPE_DEFAULT = 0,
+	AMD_VSDB_PANEL_TYPE_MINILED,
+	AMD_VSDB_PANEL_TYPE_OLED,
+	AMD_VSDB_PANEL_TYPE_RESERVED,
+};
 
 #define AMDGPU_HDR_MULT_DEFAULT (0x100000000LL)
 
+/*
+ * Maximum HDMI HPD debounce delay in milliseconds
+ */
+#define AMDGPU_DM_MAX_HDMI_HPD_DEBOUNCE_MS 5000
 /*
 #include "include/amdgpu_dal_power_if.h"
 #include "amdgpu_dm_irq.h"
@@ -81,12 +87,7 @@ struct amdgpu_bo;
 struct dmub_srv;
 struct dc_plane_state;
 struct dmub_notification;
-
-struct amd_vsdb_block {
-	unsigned char ieee_id[3];
-	unsigned char version;
-	unsigned char feature_caps;
-};
+struct dmub_cmd_fused_request;
 
 struct common_irq_params {
 	struct amdgpu_device *adev;
@@ -104,6 +105,20 @@ struct dm_compressor_info {
 	void *cpu_addr;
 	struct amdgpu_bo *bo_ptr;
 	uint64_t gpu_addr;
+};
+
+/**
+ * struct dm_boot_time_crc_info - Buffer info used by boot time CRC
+ * @cpu_addr: MMIO cpu addr
+ * @bo_ptr: Pointer to the buffer object
+ * @gpu_addr: MMIO gpu addr
+ * @size: Size of the buffer
+ */
+struct dm_boot_time_crc_info {
+	void *cpu_addr;
+	struct amdgpu_bo *bo_ptr;
+	uint64_t gpu_addr;
+	uint32_t size;
 };
 
 typedef void (*dmub_notify_interrupt_callback_t)(struct amdgpu_device *adev, struct dmub_notification *notify);
@@ -152,6 +167,32 @@ struct idle_workqueue {
 };
 
 /**
+ * struct vupdate_offload_work - Work data for offloading task from vupdate handler
+ * @work: Kernel work data for the work event
+ * @adev: amdgpu_device back pointer
+ * @stream: DC stream associated with the crtc
+ * @adjust: DC CRTC timing adjust to be applied to the crtc
+ */
+struct vupdate_offload_work {
+	struct work_struct work;
+	struct amdgpu_device *adev;
+	struct dc_stream_state *stream;
+	struct dc_crtc_timing_adjust *adjust;
+};
+
+#define MAX_LUMINANCE_DATA_POINTS 99
+
+/**
+ * struct amdgpu_dm_luminance_data - Custom luminance data
+ * @luminance: Luminance in percent
+ * @input_signal: Input signal in range 0-255
+ */
+struct amdgpu_dm_luminance_data {
+	u8 luminance;
+	u8 input_signal;
+} __packed;
+
+/**
  * struct amdgpu_dm_backlight_caps - Information about backlight
  *
  * Describe the backlight support for ACPI or eDP AUX.
@@ -188,6 +229,11 @@ struct amdgpu_dm_backlight_caps {
 	 */
 	bool aux_support;
 	/**
+	 * @brightness_mask: After deriving brightness, OR it with this mask.
+	 * Workaround for panels with issues with certain brightness values.
+	 */
+	u32 brightness_mask;
+	/**
 	 * @ac_level: the default brightness if booted on AC
 	 */
 	u8 ac_level;
@@ -195,6 +241,14 @@ struct amdgpu_dm_backlight_caps {
 	 * @dc_level: the default brightness if booted on DC
 	 */
 	u8 dc_level;
+	/**
+	 * @data_points: the number of custom luminance data points
+	 */
+	u8 data_points;
+	/**
+	 * @luminance_data: custom luminance data
+	 */
+	struct amdgpu_dm_luminance_data luminance_data[MAX_LUMINANCE_DATA_POINTS];
 };
 
 /**
@@ -256,6 +310,10 @@ struct hpd_rx_irq_offload_work {
 	 * @offload_wq: offload work queue that this work is queued to
 	 */
 	struct hpd_rx_irq_offload_work_queue *offload_wq;
+	/**
+	 * @adev: amdgpu_device pointer
+	 */
+	struct amdgpu_device *adev;
 };
 
 /**
@@ -368,6 +426,13 @@ struct amdgpu_display_manager {
 	uint32_t dmcub_fw_version;
 
 	/**
+	 * @fw_inst_size:
+	 *
+	 * Size of the firmware instruction buffer.
+	 */
+	uint32_t fw_inst_size;
+
+	/**
 	 * @cgs_device:
 	 *
 	 * The Common Graphics Services device. It provides an interface for
@@ -395,6 +460,13 @@ struct amdgpu_display_manager {
 	 * sequences.
 	 */
 	struct mutex dc_lock;
+
+	/**
+	 * @dmub_lock:
+	 *
+	 * Guards access to DMUB command submission.
+	 */
+	spinlock_t dmub_lock;
 
 	/**
 	 * @audio_lock:
@@ -501,6 +573,7 @@ struct amdgpu_display_manager {
 	struct amdgpu_dm_backlight_caps backlight_caps[AMDGPU_DM_MAX_NUM_EDP];
 
 	struct mod_freesync *freesync_module;
+	struct mod_power *power_module;
 	struct hdcp_workqueue *hdcp_workqueue;
 
 	/**
@@ -517,7 +590,7 @@ struct amdgpu_display_manager {
 	 */
 	struct idle_workqueue *idle_workqueue;
 
-	struct drm_atomic_state *cached_state;
+	struct drm_atomic_commit *cached_state;
 	struct dc_state *cached_dc_state;
 
 	struct dm_compressor_info compressor;
@@ -594,6 +667,13 @@ struct amdgpu_display_manager {
 	bool aux_hpd_discon_quirk;
 
 	/**
+	 * @edp0_on_dp1_quirk:
+	 *
+	 * quirk for platforms that put edp0 on DP1.
+	 */
+	bool edp0_on_dp1_quirk;
+
+	/**
 	 * @dpia_aux_lock:
 	 *
 	 * Guards access to DPIA AUX
@@ -604,8 +684,41 @@ struct amdgpu_display_manager {
 	 * @bb_from_dmub:
 	 *
 	 * Bounding box data read from dmub during early initialization for DCN4+
+	 * Data is stored as a byte array that should be casted to the appropriate bb struct
 	 */
-	struct dml2_soc_bb *bb_from_dmub;
+	void *bb_from_dmub;
+
+	/**
+	 * @oem_i2c:
+	 *
+	 * OEM i2c bus
+	 */
+	struct amdgpu_i2c_adapter *oem_i2c;
+
+	/**
+	 * @fused_io:
+	 *
+	 * dmub fused io interface
+	 */
+	struct fused_io_sync {
+		struct completion replied;
+		char reply_data[0x40];  // Cannot include dmub_cmd here
+	} fused_io[8];
+	/**
+	 * @hdmi_frl_status_polling_work:
+	 *
+	 * workqueue for 200ms frl status polling
+	 */
+	struct workqueue_struct *hdmi_frl_status_polling_wq;
+	struct delayed_work hdmi_frl_status_polling_work;
+	unsigned int hdmi_frl_status_polling_delay_ms;
+
+	/**
+	 * @dm_boot_time_crc_info:
+	 *
+	 * Buffer info for the boot time crc.
+	 */
+	struct dm_boot_time_crc_info boot_time_crc_info;
 };
 
 enum dsc_clock_force_state {
@@ -660,6 +773,11 @@ struct amdgpu_hdmi_vsdb_info {
 	unsigned int max_refresh_rate_hz;
 
 	/**
+	 * @freesync_mccs_vcp_code: MCCS VCP code for freesync state
+	 */
+	unsigned int freesync_mccs_vcp_code;
+
+	/**
 	 * @replay_mode: Replay supported
 	 */
 	bool replay_mode;
@@ -703,6 +821,9 @@ struct amdgpu_dm_connector {
 	uint16_t vc_full_pbn;
 	struct mutex handle_mst_msg_ready;
 
+	/* branch device specific data */
+	uint32_t branch_ieee_oui;
+
 	/* TODO see if we can merge with ddc_bus or make a dm_connector */
 	struct amdgpu_i2c_adapter *i2c;
 
@@ -726,13 +847,19 @@ struct amdgpu_dm_connector {
 
 	bool fake_enable;
 	bool force_yuv420_output;
+	bool force_yuv422_output;
+	uint8_t force_yuv_pixel_format;
 	struct dsc_preferred_settings dsc_settings;
+	struct psr_caps psr_caps;
 	union dp_downstream_port_present mst_downstream_port_present;
 	/* Cached display modes */
 	struct drm_display_mode freesync_vid_base;
 
 	int sr_skip_count;
 	bool disallow_edp_enter_psr;
+	bool disallow_edp_enter_replay;
+
+	union dwnstream_portxcaps mst_downstream_port_caps;
 
 	/* Record progress status of mst*/
 	uint8_t mst_status;
@@ -745,6 +872,11 @@ struct amdgpu_dm_connector {
 	bool pack_sdp_v1_3;
 	enum adaptive_sync_type as_type;
 	struct amdgpu_hdmi_vsdb_info vsdb_info;
+
+	/* HDMI HPD debounce support */
+	unsigned int hdmi_hpd_debounce_delay_ms;
+	struct delayed_work hdmi_hpd_debounce_work;
+	struct dc_sink *hdmi_prev_sink;
 };
 
 static inline void amdgpu_dm_set_mst_status(uint8_t *status,
@@ -882,6 +1014,7 @@ struct dm_crtc_state {
 
 	bool freesync_vrr_info_changed;
 
+	bool mode_changed_independent_from_dsc;
 	bool dsc_force_changed;
 	bool vrr_supported;
 	struct mod_freesync_config freesync_config;
@@ -919,6 +1052,7 @@ struct dm_connector_state {
 	bool underscan_enable;
 	bool freesync_capable;
 	bool update_hdcp;
+	bool abm_sysfs_forbidden;
 	uint8_t abm_level;
 	int vcpi_slots;
 	uint64_t pbn;
@@ -949,13 +1083,13 @@ void amdgpu_dm_connector_init_helper(struct amdgpu_display_manager *dm,
 				     int link_index);
 
 enum drm_mode_status amdgpu_dm_connector_mode_valid(struct drm_connector *connector,
-				   struct drm_display_mode *mode);
+				   const struct drm_display_mode *mode);
 
 void dm_restore_drm_connector_state(struct drm_device *dev,
 				    struct drm_connector *connector);
 
 void amdgpu_dm_update_freesync_caps(struct drm_connector *connector,
-				    const struct drm_edid *drm_edid);
+				    const struct drm_edid *drm_edid, bool do_mccs);
 
 void amdgpu_dm_trigger_timing_sync(struct drm_device *dev);
 
@@ -973,6 +1107,8 @@ void amdgpu_dm_init_color_mod(void);
 int amdgpu_dm_create_color_properties(struct amdgpu_device *adev);
 int amdgpu_dm_verify_lut_sizes(const struct drm_crtc_state *crtc_state);
 int amdgpu_dm_update_crtc_color_mgmt(struct dm_crtc_state *crtc);
+int amdgpu_dm_check_crtc_color_mgmt(struct dm_crtc_state *crtc,
+				    bool check_only);
 int amdgpu_dm_update_plane_color_mgmt(struct dm_crtc_state *crtc,
 				      struct drm_plane_state *plane_state,
 				      struct dc_plane_state *dc_plane_state);
@@ -980,25 +1116,36 @@ int amdgpu_dm_update_plane_color_mgmt(struct dm_crtc_state *crtc,
 void amdgpu_dm_update_connector_after_detect(
 		struct amdgpu_dm_connector *aconnector);
 
+void populate_hdmi_info_from_connector(bool enable_frl, struct drm_hdmi_info *info,
+				      struct dc_edid_caps *edid_caps);
+
 extern const struct drm_encoder_helper_funcs amdgpu_dm_encoder_helper_funcs;
 
 int amdgpu_dm_process_dmub_aux_transfer_sync(struct dc_context *ctx, unsigned int link_index,
 					struct aux_payload *payload, enum aux_return_code_type *operation_result);
 
+bool amdgpu_dm_execute_fused_io(
+		struct amdgpu_device *dev,
+		struct dc_link *link,
+		union dmub_rb_cmd *commands,
+		uint8_t count,
+		uint32_t timeout_us
+);
+
 int amdgpu_dm_process_dmub_set_config_sync(struct dc_context *ctx, unsigned int link_index,
 					struct set_config_cmd_payload *payload, enum set_config_status *operation_result);
 
 struct dc_stream_state *
-	create_validate_stream_for_sink(struct amdgpu_dm_connector *aconnector,
+	create_validate_stream_for_sink(struct drm_connector *connector,
 					const struct drm_display_mode *drm_mode,
 					const struct dm_connector_state *dm_state,
 					const struct dc_stream_state *old_stream);
 
-int dm_atomic_get_state(struct drm_atomic_state *state,
+int dm_atomic_get_state(struct drm_atomic_commit *state,
 			struct dm_atomic_state **dm_state);
 
 struct drm_connector *
-amdgpu_dm_find_first_crtc_matching_connector(struct drm_atomic_state *state,
+amdgpu_dm_find_first_crtc_matching_connector(struct drm_atomic_commit *state,
 					     struct drm_crtc *crtc);
 
 int convert_dc_color_depth_into_bpc(enum dc_color_depth display_color_depth);
@@ -1018,4 +1165,7 @@ void hdmi_cec_set_edid(struct amdgpu_dm_connector *aconnector);
 void hdmi_cec_unset_edid(struct amdgpu_dm_connector *aconnector);
 int amdgpu_dm_initialize_hdmi_connector(struct amdgpu_dm_connector *aconnector);
 
+void retrieve_dmi_info(struct amdgpu_display_manager *dm);
+
+void amdgpu_dm_update_backlight_caps(struct amdgpu_display_manager *dm, int bl_idx);
 #endif /* __AMDGPU_DM_H__ */

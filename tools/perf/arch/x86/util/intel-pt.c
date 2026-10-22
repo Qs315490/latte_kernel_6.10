@@ -3,36 +3,40 @@
  * intel_pt.c: Intel Processor Trace support
  * Copyright (c) 2013-2015, Intel Corporation.
  */
+#include "../../../util/intel-pt.h"
 
 #include <errno.h>
 #include <stdbool.h>
-#include <linux/kernel.h>
-#include <linux/types.h>
-#include <linux/bitops.h>
-#include <linux/log2.h>
-#include <linux/zalloc.h>
-#include <linux/err.h>
-#include <cpuid.h>
 
-#include "../../../util/session.h"
+#include <linux/bitops.h>
+#include <linux/err.h>
+#include <linux/kernel.h>
+#include <linux/log2.h>
+#include <linux/types.h>
+#include <linux/zalloc.h>
+
+#include <api/fs/fs.h>
+#include <internal/lib.h> // page_size
+#include <subcmd/parse-options.h>
+
+#include "../../../util/auxtrace.h"
+#include "../../../util/config.h"
+#include "../../../util/cpumap.h"
+#include "../../../util/debug.h"
 #include "../../../util/event.h"
 #include "../../../util/evlist.h"
 #include "../../../util/evsel.h"
 #include "../../../util/evsel_config.h"
-#include "../../../util/cpumap.h"
 #include "../../../util/mmap.h"
-#include <subcmd/parse-options.h>
 #include "../../../util/parse-events.h"
-#include "../../../util/pmus.h"
-#include "../../../util/debug.h"
-#include "../../../util/auxtrace.h"
 #include "../../../util/perf_api_probe.h"
+#include "../../../util/pmu.h"
+#include "../../../util/pmus.h"
 #include "../../../util/record.h"
+#include "../../../util/session.h"
 #include "../../../util/target.h"
 #include "../../../util/tsc.h"
-#include <internal/lib.h> // page_size
-#include "../../../util/intel-pt.h"
-#include <api/fs/fs.h>
+#include "cpuid.h"
 
 #define KiB(x) ((x) * 1024)
 #define MiB(x) ((x) * 1024 * 1024)
@@ -52,6 +56,7 @@ struct intel_pt_recording {
 	struct perf_pmu			*intel_pt_pmu;
 	int				have_sched_switch;
 	struct evlist		*evlist;
+	bool				all_switch_events;
 	bool				snapshot_mode;
 	bool				snapshot_init_done;
 	size_t				snapshot_size;
@@ -70,7 +75,7 @@ static int intel_pt_parse_terms_with_default(const struct perf_pmu *pmu,
 	int err;
 
 	parse_events_terms__init(&terms);
-	err = parse_events_terms(&terms, str, /*input=*/ NULL);
+	err = parse_events_terms(&terms, str);
 	if (err)
 		goto out_free;
 
@@ -309,7 +314,7 @@ static void intel_pt_tsc_ctc_ratio(u32 *n, u32 *d)
 {
 	unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
 
-	__get_cpuid(0x15, &eax, &ebx, &ecx, &edx);
+	cpuid(0x15, 0, &eax, &ebx, &ecx, &edx);
 	*n = ebx;
 	*d = eax;
 }
@@ -662,8 +667,7 @@ static int intel_pt_recording_options(struct auxtrace_record *itr,
 		return 0;
 
 	if (opts->auxtrace_sample_mode)
-		evsel__set_config_if_unset(intel_pt_pmu, intel_pt_evsel,
-					   "psb_period", 0);
+		evsel__set_config_if_unset(intel_pt_evsel, "psb_period", 0);
 
 	err = intel_pt_validate_config(intel_pt_pmu, intel_pt_evsel);
 	if (err)
@@ -794,7 +798,7 @@ static int intel_pt_recording_options(struct auxtrace_record *itr,
 			bool cpu_wide = !target__none(&opts->target) &&
 					!target__has_task(&opts->target);
 
-			if (!cpu_wide && perf_can_record_cpu_wide()) {
+			if (ptr->all_switch_events && !cpu_wide && perf_can_record_cpu_wide()) {
 				struct evsel *switch_evsel;
 
 				switch_evsel = evlist__add_dummy_on_all_cpus(evlist);
@@ -1178,6 +1182,16 @@ static u64 intel_pt_reference(struct auxtrace_record *itr __maybe_unused)
 	return rdtsc();
 }
 
+static int intel_pt_perf_config(const char *var, const char *value, void *data)
+{
+	struct intel_pt_recording *ptr = data;
+
+	if (!strcmp(var, "intel-pt.all-switch-events"))
+		ptr->all_switch_events = perf_config_bool(var, value);
+
+	return 0;
+}
+
 struct auxtrace_record *intel_pt_recording_init(int *err)
 {
 	struct perf_pmu *intel_pt_pmu = perf_pmus__find(INTEL_PT_PMU_NAME);
@@ -1196,6 +1210,8 @@ struct auxtrace_record *intel_pt_recording_init(int *err)
 		*err = -ENOMEM;
 		return NULL;
 	}
+
+	perf_config(intel_pt_perf_config, ptr);
 
 	ptr->intel_pt_pmu = intel_pt_pmu;
 	ptr->itr.recording_options = intel_pt_recording_options;

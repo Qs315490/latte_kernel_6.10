@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2014, 2018-2024 Intel Corporation
+ * Copyright (C) 2014, 2018-2026 Intel Corporation
  * Copyright (C) 2014-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -266,18 +266,6 @@ struct iwl_fw_ini_error_dump_data {
 } __packed;
 
 /**
- * struct iwl_fw_ini_dump_entry
- * @list: list of dump entries
- * @size: size of the data
- * @data: entry data
- */
-struct iwl_fw_ini_dump_entry {
-	struct list_head list;
-	u32 size;
-	u8 data[];
-} __packed;
-
-/**
  * struct iwl_fw_ini_dump_file_hdr - header of dump file
  * @barker: must be %IWL_FW_INI_ERROR_DUMP_BARKER
  * @file_len: the length of all the file including the header
@@ -305,7 +293,7 @@ struct iwl_fw_ini_fifo_hdr {
  * @dram_base_addr: base address of dram monitor range
  * @page_num: page number of memory range
  * @fifo_hdr: fifo header of memory range
- * @fw_pkt: FW packet header of memory range
+ * @fw_pkt_hdr: FW packet header of memory range
  * @data: the actual memory
  */
 struct iwl_fw_ini_error_dump_range {
@@ -372,10 +360,8 @@ struct iwl_fw_ini_dump_cfg_name {
 	u8 cfg_name[IWL_FW_INI_MAX_CFG_NAME];
 } __packed;
 
-/* AX210's HW type */
-#define IWL_AX210_HW_TYPE 0x42
-/* How many bits to roll when adding to the HW type of AX210 HW */
-#define IWL_AX210_HW_TYPE_ADDITION_SHIFT 12
+#define IWL_CDB_MASK(val) val << 13
+
 
 /* struct iwl_fw_ini_dump_info - ini dump information
  * @version: dump version

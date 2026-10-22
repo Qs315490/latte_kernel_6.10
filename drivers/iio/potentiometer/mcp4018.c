@@ -16,7 +16,6 @@
 #include <linux/i2c.h>
 #include <linux/iio/iio.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 
 #define MCP4018_WIPER_MAX 127
@@ -117,7 +116,7 @@ static const struct i2c_device_id mcp4018_id[] = {
 	MCP4018_ID_TABLE("mcp4019-103", MCP4018_103),
 	MCP4018_ID_TABLE("mcp4019-503", MCP4018_503),
 	MCP4018_ID_TABLE("mcp4019-104", MCP4018_104),
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mcp4018_id);
 
@@ -139,7 +138,7 @@ static const struct of_device_id mcp4018_of_match[] = {
 	MCP4018_COMPATIBLE("microchip,mcp4019-103", MCP4018_103),
 	MCP4018_COMPATIBLE("microchip,mcp4019-503", MCP4018_503),
 	MCP4018_COMPATIBLE("microchip,mcp4019-104", MCP4018_104),
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(of, mcp4018_of_match);
 

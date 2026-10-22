@@ -467,7 +467,8 @@ static void sdma_err_progress_check_schedule(struct sdma_engine *sde)
 static void sdma_err_progress_check(struct timer_list *t)
 {
 	unsigned index;
-	struct sdma_engine *sde = from_timer(sde, t, err_progress_check_timer);
+	struct sdma_engine *sde = timer_container_of(sde, t,
+						     err_progress_check_timer);
 
 	dd_dev_err(sde->dd, "SDE progress check event\n");
 	for (index = 0; index < sde->dd->num_sdma; index++) {
@@ -936,7 +937,7 @@ ssize_t sdma_set_cpu_to_sde_map(struct sdma_engine *sde, const char *buf,
 		rht_node = rhashtable_lookup_fast(dd->sdma_rht, &cpu,
 						  sdma_rht_params);
 		if (!rht_node) {
-			rht_node = kzalloc(sizeof(*rht_node), GFP_KERNEL);
+			rht_node = kzalloc_obj(*rht_node);
 			if (!rht_node) {
 				ret = -ENOMEM;
 				goto out;
@@ -989,7 +990,7 @@ ssize_t sdma_set_cpu_to_sde_map(struct sdma_engine *sde, const char *buf,
 	}
 
 	/* Clean up old mappings */
-	for_each_cpu(cpu, cpu_online_mask) {
+	for_each_online_cpu(cpu) {
 		struct sdma_rht_node *rht_node;
 
 		/* Don't cleanup sdes that are set in the new mask */
@@ -1254,6 +1255,7 @@ void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
 {
 	size_t i;
 	struct sdma_engine *sde;
+	struct sdma_vl_map *map;
 
 	if (dd->sdma_pad_dma) {
 		dma_free_coherent(&dd->pcidev->dev, SDMA_PAD,
@@ -1290,10 +1292,11 @@ void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
 	}
 	if (rcu_access_pointer(dd->sdma_map)) {
 		spin_lock_irq(&dd->sde_map_lock);
-		sdma_map_free(rcu_access_pointer(dd->sdma_map));
+		map = rcu_access_pointer(dd->sdma_map);
 		RCU_INIT_POINTER(dd->sdma_map, NULL);
 		spin_unlock_irq(&dd->sde_map_lock);
 		synchronize_rcu();
+		sdma_map_free(map);
 	}
 	kfree(dd->per_sdma);
 	dd->per_sdma = NULL;
@@ -1480,7 +1483,7 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 	if (ret < 0)
 		goto bail;
 
-	tmp_sdma_rht = kzalloc(sizeof(*tmp_sdma_rht), GFP_KERNEL);
+	tmp_sdma_rht = kzalloc_obj(*tmp_sdma_rht);
 	if (!tmp_sdma_rht) {
 		ret = -ENOMEM;
 		goto bail;
@@ -1521,24 +1524,6 @@ void sdma_all_running(struct hfi1_devdata *dd)
 }
 
 /**
- * sdma_all_idle() - called when the link goes down
- * @dd: hfi1_devdata
- *
- * This routine moves all engines to the idle state.
- */
-void sdma_all_idle(struct hfi1_devdata *dd)
-{
-	struct sdma_engine *sde;
-	unsigned int i;
-
-	/* idle all engines */
-	for (i = 0; i < dd->num_sdma; ++i) {
-		sde = &dd->per_sdma[i];
-		sdma_process_event(sde, sdma_event_e70_go_idle);
-	}
-}
-
-/**
  * sdma_start() - called to kick off state processing for all engines
  * @dd: hfi1_devdata
  *
@@ -1575,7 +1560,7 @@ void sdma_exit(struct hfi1_devdata *dd)
 				   sde->this_idx);
 		sdma_process_event(sde, sdma_event_e00_go_hw_down);
 
-		del_timer_sync(&sde->err_progress_check_timer);
+		timer_delete_sync(&sde->err_progress_check_timer);
 
 		/*
 		 * This waits for the state machine to exit so it is not
@@ -3034,7 +3019,7 @@ static int _extend_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx)
 	if (unlikely(tx->num_desc == MAX_DESC))
 		goto enomem;
 
-	descp = kmalloc_array(MAX_DESC, sizeof(struct sdma_desc), GFP_ATOMIC);
+	descp = kmalloc_objs(struct sdma_desc, MAX_DESC, GFP_ATOMIC);
 	if (!descp)
 		goto enomem;
 	tx->descp = descp;

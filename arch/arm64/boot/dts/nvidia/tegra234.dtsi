@@ -9,12 +9,25 @@
 #include <dt-bindings/power/tegra234-powergate.h>
 #include <dt-bindings/reset/tegra234-reset.h>
 #include <dt-bindings/thermal/tegra234-bpmp-thermal.h>
+#include <dt-bindings/pinctrl/pinctrl-tegra.h>
 
 / {
 	compatible = "nvidia,tegra234";
 	interrupt-parent = <&gic>;
 	#address-cells = <2>;
 	#size-cells = <2>;
+
+	aliases {
+		i2c0 = &gen1_i2c;
+		i2c1 = &gen2_i2c;
+		i2c2 = &cam_i2c;
+		i2c3 = &dp_aux_ch1_i2c;
+		i2c4 = &bpmp_i2c;
+		i2c5 = &dp_aux_ch0_i2c;
+		i2c6 = &dp_aux_ch2_i2c;
+		i2c7 = &gen8_i2c;
+		i2c8 = &dp_aux_ch3_i2c;
+	};
 
 	bus@0 {
 		compatible = "simple-bus";
@@ -27,7 +40,6 @@
 			compatible = "nvidia,tegra234-misc";
 			reg = <0x0 0x00100000 0x0 0xf000>,
 			      <0x0 0x0010f000 0x0 0x1000>;
-			status = "okay";
 		};
 
 		timer@2080000 {
@@ -49,7 +61,6 @@
 				     <GIC_SPI 259 IRQ_TYPE_LEVEL_HIGH>,
 				     <GIC_SPI 260 IRQ_TYPE_LEVEL_HIGH>,
 				     <GIC_SPI 261 IRQ_TYPE_LEVEL_HIGH>;
-			status = "okay";
 		};
 
 		gpio: gpio@2200000 {
@@ -115,6 +126,56 @@
 		pinmux: pinmux@2430000 {
 			compatible = "nvidia,tegra234-pinmux";
 			reg = <0x0 0x2430000 0x0 0x19100>;
+
+			pex_rst_c4_in_state: pinmux-pex-rst-c4-in {
+				pex_rst {
+					nvidia,pins = "pex_l4_rst_n_pl1";
+					nvidia,function = "rsvd1";
+					nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+					nvidia,tristate = <TEGRA_PIN_ENABLE>;
+					nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+				};
+			};
+
+			pex_rst_c5_in_state: pinmux-pex-rst-c5-in {
+				pex_rst {
+					nvidia,pins = "pex_l5_rst_n_paf1";
+					nvidia,function = "rsvd1";
+					nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+					nvidia,tristate = <TEGRA_PIN_ENABLE>;
+					nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+				};
+			};
+
+			pex_rst_c6_in_state: pinmux-pex-rst-c6-in {
+				pex_rst {
+					nvidia,pins = "pex_l6_rst_n_paf3";
+					nvidia,function = "rsvd1";
+					nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+					nvidia,tristate = <TEGRA_PIN_ENABLE>;
+					nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+				};
+			};
+
+			pex_rst_c7_in_state: pinmux-pex-rst-c7-in {
+				pex_rst {
+					nvidia,pins = "pex_l7_rst_n_pag1";
+					nvidia,function = "rsvd1";
+					nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+					nvidia,tristate = <TEGRA_PIN_ENABLE>;
+					nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+				};
+			};
+
+			pex_rst_c10_in_state: pinmux-pex-rst-c10-in {
+				pex_rst {
+					nvidia,pins = "pex_l10_rst_n_pag7";
+					nvidia,function = "rsvd1";
+					nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+					nvidia,tristate = <TEGRA_PIN_ENABLE>;
+					nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+				};
+			};
 		};
 
 		gpcdma: dma-controller@2600000 {
@@ -2717,7 +2778,6 @@
 				    "ch11", "ch12", "ch13", "ch14", "ch15";
 			interrupts = <GIC_SPI 223 IRQ_TYPE_LEVEL_HIGH>;
 			#interconnect-cells = <1>;
-			status = "okay";
 
 			#address-cells = <2>;
 			#size-cells = <2>;
@@ -2749,7 +2809,6 @@
 				interrupts = <GIC_SPI 224 IRQ_TYPE_LEVEL_HIGH>;
 				clocks = <&bpmp TEGRA234_CLK_EMC>;
 				clock-names = "emc";
-				status = "okay";
 
 				#interconnect-cells = <0>;
 
@@ -2948,6 +3007,11 @@
 				 <&bpmp TEGRA234_CLK_QSPI0_PM>;
 			clock-names = "qspi", "qspi_out";
 			resets = <&bpmp TEGRA234_RESET_QSPI0>;
+			iommus = <&smmu_niso1 TEGRA234_SID_QSPI0>;
+			assigned-clocks = <&bpmp TEGRA234_CLK_QSPI0_2X_PM>,
+					  <&bpmp TEGRA234_CLK_QSPI0_PM>;
+			assigned-clock-rates = <199999999 99999999>;
+			assigned-clock-parents = <&bpmp TEGRA234_CLK_PLLC>;
 			status = "disabled";
 		};
 
@@ -3031,6 +3095,11 @@
 				 <&bpmp TEGRA234_CLK_QSPI1_PM>;
 			clock-names = "qspi", "qspi_out";
 			resets = <&bpmp TEGRA234_RESET_QSPI1>;
+			iommus = <&smmu_niso1 TEGRA234_SID_QSPI1>;
+			assigned-clocks = <&bpmp TEGRA234_CLK_QSPI1_2X_PM>,
+					  <&bpmp TEGRA234_CLK_QSPI1_PM>;
+			assigned-clock-rates = <199999999 99999999>;
+			assigned-clock-parents = <&bpmp TEGRA234_CLK_PLLC>;
 			status = "disabled";
 		};
 
@@ -3254,8 +3323,15 @@
 			      <0x0 0x03650000 0x0 0x10000>;
 			reg-names = "hcd", "fpci", "bar2";
 
-			interrupts = <GIC_SPI 163 IRQ_TYPE_LEVEL_HIGH>,
-				     <GIC_SPI 164 IRQ_TYPE_LEVEL_HIGH>;
+			interrupts-extended = <&gic GIC_SPI 163 IRQ_TYPE_LEVEL_HIGH>,
+					      <&gic GIC_SPI 164 IRQ_TYPE_LEVEL_HIGH>,
+					      <&pmc 76 IRQ_TYPE_LEVEL_HIGH>,
+					      <&pmc 77 IRQ_TYPE_LEVEL_HIGH>,
+					      <&pmc 78 IRQ_TYPE_LEVEL_HIGH>,
+					      <&pmc 79 IRQ_TYPE_LEVEL_HIGH>,
+					      <&pmc 80 IRQ_TYPE_LEVEL_HIGH>,
+					      <&pmc 81 IRQ_TYPE_LEVEL_HIGH>,
+					      <&pmc 82 IRQ_TYPE_LEVEL_HIGH>;
 
 			clocks = <&bpmp TEGRA234_CLK_XUSB_CORE_HOST>,
 				 <&bpmp TEGRA234_CLK_XUSB_FALCON>,
@@ -3529,7 +3605,7 @@
 				 <&bpmp TEGRA234_CLK_MGBE0_RX_PCS_M>,
 				 <&bpmp TEGRA234_CLK_MGBE0_RX_PCS>,
 				 <&bpmp TEGRA234_CLK_MGBE0_TX_PCS>;
-			clock-names = "mgbe", "mac", "mac-divider", "ptp-ref", "rx-input-m",
+			clock-names = "mgbe", "mac", "mac-divider", "ptp_ref", "rx-input-m",
 				      "rx-input", "tx", "eee-pcs", "rx-pcs-input", "rx-pcs-m",
 				      "rx-pcs", "tx-pcs";
 			resets = <&bpmp TEGRA234_RESET_MGBE0_MAC>,
@@ -3545,7 +3621,7 @@
 			snps,axi-config = <&mgbe0_axi_setup>;
 
 			mgbe0_axi_setup: stmmac-axi-config {
-				snps,blen = <256 128 64 32>;
+				snps,blen = <256 128 64 32 0 0 0>;
 				snps,rd_osr_lmt = <63>;
 				snps,wr_osr_lmt = <63>;
 			};
@@ -3571,7 +3647,7 @@
 				 <&bpmp TEGRA234_CLK_MGBE1_RX_PCS_M>,
 				 <&bpmp TEGRA234_CLK_MGBE1_RX_PCS>,
 				 <&bpmp TEGRA234_CLK_MGBE1_TX_PCS>;
-			clock-names = "mgbe", "mac", "mac-divider", "ptp-ref", "rx-input-m",
+			clock-names = "mgbe", "mac", "mac-divider", "ptp_ref", "rx-input-m",
 				      "rx-input", "tx", "eee-pcs", "rx-pcs-input", "rx-pcs-m",
 				      "rx-pcs", "tx-pcs";
 			resets = <&bpmp TEGRA234_RESET_MGBE1_MAC>,
@@ -3587,7 +3663,7 @@
 			snps,axi-config = <&mgbe1_axi_setup>;
 
 			mgbe1_axi_setup: stmmac-axi-config {
-				snps,blen = <256 128 64 32>;
+				snps,blen = <256 128 64 32 0 0 0>;
 				snps,rd_osr_lmt = <63>;
 				snps,wr_osr_lmt = <63>;
 			};
@@ -3613,7 +3689,7 @@
 				 <&bpmp TEGRA234_CLK_MGBE2_RX_PCS_M>,
 				 <&bpmp TEGRA234_CLK_MGBE2_RX_PCS>,
 				 <&bpmp TEGRA234_CLK_MGBE2_TX_PCS>;
-			clock-names = "mgbe", "mac", "mac-divider", "ptp-ref", "rx-input-m",
+			clock-names = "mgbe", "mac", "mac-divider", "ptp_ref", "rx-input-m",
 				      "rx-input", "tx", "eee-pcs", "rx-pcs-input", "rx-pcs-m",
 				      "rx-pcs", "tx-pcs";
 			resets = <&bpmp TEGRA234_RESET_MGBE2_MAC>,
@@ -3629,7 +3705,7 @@
 			snps,axi-config = <&mgbe2_axi_setup>;
 
 			mgbe2_axi_setup: stmmac-axi-config {
-				snps,blen = <256 128 64 32>;
+				snps,blen = <256 128 64 32 0 0 0>;
 				snps,rd_osr_lmt = <63>;
 				snps,wr_osr_lmt = <63>;
 			};
@@ -3655,7 +3731,7 @@
 				 <&bpmp TEGRA234_CLK_MGBE3_RX_PCS_M>,
 				 <&bpmp TEGRA234_CLK_MGBE3_RX_PCS>,
 				 <&bpmp TEGRA234_CLK_MGBE3_TX_PCS>;
-			clock-names = "mgbe", "mac", "mac-divider", "ptp-ref", "rx-input-m",
+			clock-names = "mgbe", "mac", "mac-divider", "ptp_ref", "rx-input-m",
 				      "rx-input", "tx", "eee-pcs", "rx-pcs-input", "rx-pcs-m",
 				      "rx-pcs", "tx-pcs";
 			resets = <&bpmp TEGRA234_RESET_MGBE3_MAC>,
@@ -3808,7 +3884,6 @@
 			#iommu-cells = <1>;
 
 			nvidia,memory-controller = <&mc>;
-			status = "okay";
 		};
 
 		sce-fabric@b600000 {
@@ -3822,7 +3897,6 @@
 			compatible = "nvidia,tegra234-rce-fabric";
 			reg = <0x0 0xbe00000 0x0 0x40000>;
 			interrupts = <GIC_SPI 175 IRQ_TYPE_LEVEL_HIGH>;
-			status = "okay";
 		};
 
 		hsp_aon: hsp@c150000 {
@@ -3984,28 +4058,24 @@
 			compatible = "nvidia,tegra234-aon-fabric";
 			reg = <0x0 0xc600000 0x0 0x40000>;
 			interrupts = <GIC_SPI 172 IRQ_TYPE_LEVEL_HIGH>;
-			status = "okay";
 		};
 
 		bpmp-fabric@d600000 {
 			compatible = "nvidia,tegra234-bpmp-fabric";
 			reg = <0x0 0xd600000 0x0 0x40000>;
 			interrupts = <GIC_SPI 174 IRQ_TYPE_LEVEL_HIGH>;
-			status = "okay";
 		};
 
 		dce-fabric@de00000 {
 			compatible = "nvidia,tegra234-dce-fabric";
 			reg = <0x0 0xde00000 0x0 0x40000>;
 			interrupts = <GIC_SPI 381 IRQ_TYPE_LEVEL_HIGH>;
-			status = "okay";
 		};
 
 		ccplex@e000000 {
 			compatible = "nvidia,tegra234-ccplex-cluster";
 			reg = <0x0 0x0e000000 0x0 0x5ffff>;
 			nvidia,bpmp = <&bpmp>;
-			status = "okay";
 		};
 
 		gic: interrupt-controller@f400000 {
@@ -4159,7 +4229,6 @@
 			#iommu-cells = <1>;
 
 			nvidia,memory-controller = <&mc>;
-			status = "okay";
 		};
 
 		smmu_niso0: iommu@12000000 {
@@ -4301,14 +4370,12 @@
 			#iommu-cells = <1>;
 
 			nvidia,memory-controller = <&mc>;
-			status = "okay";
 		};
 
 		cbb-fabric@13a00000 {
 			compatible = "nvidia,tegra234-cbb-fabric";
 			reg = <0x0 0x13a00000 0x0 0x400000>;
 			interrupts = <GIC_SPI 231 IRQ_TYPE_LEVEL_HIGH>;
-			status = "okay";
 		};
 
 		host1x@13e00000 {
@@ -4465,6 +4532,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -4519,6 +4587,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -4573,6 +4642,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -4608,6 +4678,8 @@
 				 <&bpmp TEGRA234_RESET_PEX2_CORE_10>;
 			reset-names = "apb", "core";
 
+			pinctrl-names = "default";
+			pinctrl-0 = <&pex_rst_c10_in_state>;
 			interrupts = <GIC_SPI 360 IRQ_TYPE_LEVEL_HIGH>;	/* controller interrupt */
 			interrupt-names = "intr";
 
@@ -4617,6 +4689,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <32000>;
 
 			interconnects = <&mc TEGRA234_MEMORY_CLIENT_PCIE10AR &emc>,
 					<&mc TEGRA234_MEMORY_CLIENT_PCIE10AW &emc>;
@@ -4665,6 +4738,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -4719,6 +4793,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -4773,6 +4848,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -4827,6 +4903,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -4859,6 +4936,8 @@
 			       <&bpmp TEGRA234_RESET_PEX0_CORE_4>;
 			reset-names = "apb", "core";
 
+			pinctrl-names = "default";
+			pinctrl-0 = <&pex_rst_c4_in_state>;
 			interrupts = <GIC_SPI 51 IRQ_TYPE_LEVEL_HIGH>;  /* controller interrupt */
 			interrupt-names = "intr";
 			nvidia,bpmp = <&bpmp 4>;
@@ -4866,6 +4945,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <32000>;
 
 			interconnects = <&mc TEGRA234_MEMORY_CLIENT_PCIE4R &emc>,
 				      <&mc TEGRA234_MEMORY_CLIENT_PCIE4W &emc>;
@@ -4912,6 +4992,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -4966,6 +5047,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -5001,6 +5083,8 @@
 				 <&bpmp TEGRA234_RESET_PEX1_CORE_5>;
 			reset-names = "apb", "core";
 
+			pinctrl-names = "default";
+			pinctrl-0 = <&pex_rst_c5_in_state>;
 			interrupts = <GIC_SPI 53 IRQ_TYPE_LEVEL_HIGH>;	/* controller interrupt */
 			interrupt-names = "intr";
 
@@ -5010,6 +5094,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <32000>;
 
 			interconnects = <&mc TEGRA234_MEMORY_CLIENT_PCIE5R &emc>,
 					<&mc TEGRA234_MEMORY_CLIENT_PCIE5W &emc>;
@@ -5058,6 +5143,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -5093,6 +5179,8 @@
 				 <&bpmp TEGRA234_RESET_PEX1_CORE_6>;
 			reset-names = "apb", "core";
 
+			pinctrl-names = "default";
+			pinctrl-0 = <&pex_rst_c6_in_state>;
 			interrupts = <GIC_SPI 352 IRQ_TYPE_LEVEL_HIGH>;	/* controller interrupt */
 			interrupt-names = "intr";
 
@@ -5102,6 +5190,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <32000>;
 
 			interconnects = <&mc TEGRA234_MEMORY_CLIENT_PCIE6AR &emc>,
 					<&mc TEGRA234_MEMORY_CLIENT_PCIE6AW &emc>;
@@ -5150,6 +5239,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <16000>;
 
 			bus-range = <0x0 0xff>;
 
@@ -5185,6 +5275,8 @@
 				 <&bpmp TEGRA234_RESET_PEX2_CORE_7>;
 			reset-names = "apb", "core";
 
+			pinctrl-names = "default";
+			pinctrl-0 = <&pex_rst_c7_in_state>;
 			interrupts = <GIC_SPI 354 IRQ_TYPE_LEVEL_HIGH>;	/* controller interrupt */
 			interrupt-names = "intr";
 
@@ -5194,6 +5286,7 @@
 			nvidia,aspm-cmrt-us = <60>;
 			nvidia,aspm-pwr-on-t-us = <20>;
 			nvidia,aspm-l0s-entrance-latency-us = <3>;
+			aspm-l1-entry-delay-ns = <32000>;
 
 			interconnects = <&mc TEGRA234_MEMORY_CLIENT_PCIE7AR &emc>,
 					<&mc TEGRA234_MEMORY_CLIENT_PCIE7AW &emc>;
@@ -5262,7 +5355,7 @@
 		#size-cells = <0>;
 
 		cpu0_0: cpu@0 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x00000>;
 
@@ -5281,7 +5374,7 @@
 		};
 
 		cpu0_1: cpu@100 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x00100>;
 
@@ -5300,7 +5393,7 @@
 		};
 
 		cpu0_2: cpu@200 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x00200>;
 
@@ -5319,7 +5412,7 @@
 		};
 
 		cpu0_3: cpu@300 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x00300>;
 
@@ -5338,7 +5431,7 @@
 		};
 
 		cpu1_0: cpu@10000 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x10000>;
 
@@ -5357,7 +5450,7 @@
 		};
 
 		cpu1_1: cpu@10100 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x10100>;
 
@@ -5376,7 +5469,7 @@
 		};
 
 		cpu1_2: cpu@10200 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x10200>;
 
@@ -5395,7 +5488,7 @@
 		};
 
 		cpu1_3: cpu@10300 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x10300>;
 
@@ -5414,7 +5507,7 @@
 		};
 
 		cpu2_0: cpu@20000 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x20000>;
 
@@ -5433,7 +5526,7 @@
 		};
 
 		cpu2_1: cpu@20100 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x20100>;
 
@@ -5452,7 +5545,7 @@
 		};
 
 		cpu2_2: cpu@20200 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x20200>;
 
@@ -5471,7 +5564,7 @@
 		};
 
 		cpu2_3: cpu@20300 {
-			compatible = "arm,cortex-a78";
+			compatible = "arm,cortex-a78ae";
 			device_type = "cpu";
 			reg = <0x20300>;
 
@@ -5714,12 +5807,10 @@
 	pmu {
 		compatible = "arm,cortex-a78-pmu";
 		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_HIGH>;
-		status = "okay";
 	};
 
 	psci {
 		compatible = "arm,psci-1.0";
-		status = "okay";
 		method = "smc";
 	};
 

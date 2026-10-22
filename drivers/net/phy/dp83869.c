@@ -31,6 +31,7 @@
 #define DP83869_RGMIICTL	0x0032
 #define DP83869_STRAP_STS1	0x006e
 #define DP83869_RGMIIDCTL	0x0086
+#define DP83869_ANA_PLL_PROG_PI	0x00c6
 #define DP83869_RXFCFG		0x0134
 #define DP83869_RXFPMD1		0x0136
 #define DP83869_RXFPMD2		0x0137
@@ -84,7 +85,7 @@
 #define DP83869_CLK_DELAY_DEF			7
 
 /* STRAP_STS1 bits */
-#define DP83869_STRAP_OP_MODE_MASK		GENMASK(2, 0)
+#define DP83869_STRAP_OP_MODE_MASK		GENMASK(11, 9)
 #define DP83869_STRAP_STS1_RESERVED		BIT(11)
 #define DP83869_STRAP_MIRROR_ENABLED           BIT(12)
 
@@ -528,7 +529,7 @@ static int dp83869_set_strapped_mode(struct phy_device *phydev)
 	if (val < 0)
 		return val;
 
-	dp83869->mode = val & DP83869_STRAP_OP_MODE_MASK;
+	dp83869->mode = FIELD_GET(DP83869_STRAP_OP_MODE_MASK, val);
 
 	return 0;
 }
@@ -540,9 +541,8 @@ static const int dp83869_internal_delay[] = {250, 500, 750, 1000, 1250, 1500,
 
 static int dp83869_of_init(struct phy_device *phydev)
 {
+	struct device_node *of_node = phydev->mdio.dev.of_node;
 	struct dp83869_private *dp83869 = phydev->priv;
-	struct device *dev = &phydev->mdio.dev;
-	struct device_node *of_node = dev->of_node;
 	int delay_size = ARRAY_SIZE(dp83869_internal_delay);
 	int ret;
 
@@ -597,13 +597,13 @@ static int dp83869_of_init(struct phy_device *phydev)
 				 &dp83869->tx_fifo_depth))
 		dp83869->tx_fifo_depth = DP83869_PHYCR_FIFO_DEPTH_4_B_NIB;
 
-	dp83869->rx_int_delay = phy_get_internal_delay(phydev, dev,
+	dp83869->rx_int_delay = phy_get_internal_delay(phydev,
 						       &dp83869_internal_delay[0],
 						       delay_size, true);
 	if (dp83869->rx_int_delay < 0)
 		dp83869->rx_int_delay = DP83869_CLK_DELAY_DEF;
 
-	dp83869->tx_int_delay = phy_get_internal_delay(phydev, dev,
+	dp83869->tx_int_delay = phy_get_internal_delay(phydev,
 						       &dp83869_internal_delay[0],
 						       delay_size, false);
 	if (dp83869->tx_int_delay < 0)
@@ -827,12 +827,22 @@ static int dp83869_config_init(struct phy_device *phydev)
 		dp83869_config_port_mirroring(phydev);
 
 	/* Clock output selection if muxing property is set */
-	if (dp83869->clk_output_sel != DP83869_CLK_O_SEL_REF_CLK)
+	if (dp83869->clk_output_sel != DP83869_CLK_O_SEL_REF_CLK) {
+		/*
+		 * Table 7-121 in datasheet says we have to set register 0xc6
+		 * to value 0x10 before CLK_O_SEL can be modified.
+		 */
+		ret = phy_write_mmd(phydev, DP83869_DEVADDR,
+				    DP83869_ANA_PLL_PROG_PI, 0x10);
+		if (ret)
+			return ret;
+
 		ret = phy_modify_mmd(phydev,
 				     DP83869_DEVADDR, DP83869_IO_MUX_CFG,
 				     DP83869_IO_MUX_CFG_CLK_O_SEL_MASK,
 				     dp83869->clk_output_sel <<
 				     DP83869_IO_MUX_CFG_CLK_O_SEL_SHIFT);
+	}
 
 	if (phy_interface_is_rgmii(phydev)) {
 		ret = phy_write_mmd(phydev, DP83869_DEVADDR, DP83869_RGMIIDCTL,

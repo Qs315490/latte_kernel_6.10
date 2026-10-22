@@ -37,12 +37,25 @@
 #include "vi.h"
 #include "soc15.h"
 #include "nv.h"
+#include "amdgpu_virt_ras_cmd.h"
 
 #define POPULATE_UCODE_INFO(vf2pf_info, ucode, ver) \
 	do { \
 		vf2pf_info->ucode_info[ucode].id = ucode; \
 		vf2pf_info->ucode_info[ucode].version = ver; \
 	} while (0)
+
+#define mmRCC_CONFIG_MEMSIZE    0xde3
+
+const char *amdgpu_virt_dynamic_crit_table_name[] = {
+	"IP DISCOVERY",
+	"VBIOS IMG",
+	"RAS TELEMETRY",
+	"DATA EXCHANGE",
+	"BAD PAGE INFO",
+	"INIT HEADER",
+	"LAST",
+};
 
 bool amdgpu_virt_mmio_blocked(struct amdgpu_device *adev)
 {
@@ -150,9 +163,10 @@ void amdgpu_virt_request_init_data(struct amdgpu_device *adev)
 		virt->ops->req_init_data(adev);
 
 	if (adev->virt.req_init_data_ver > 0)
-		DRM_INFO("host supports REQ_INIT_DATA handshake\n");
+		dev_info(adev->dev, "host supports REQ_INIT_DATA handshake of critical_region_version %d\n",
+				 adev->virt.req_init_data_ver);
 	else
-		DRM_WARN("host doesn't support REQ_INIT_DATA handshake\n");
+		dev_warn(adev->dev, "host doesn't support REQ_INIT_DATA handshake\n");
 }
 
 /**
@@ -205,12 +219,12 @@ int amdgpu_virt_alloc_mm_table(struct amdgpu_device *adev)
 				    &adev->virt.mm_table.gpu_addr,
 				    (void *)&adev->virt.mm_table.cpu_addr);
 	if (r) {
-		DRM_ERROR("failed to alloc mm table and error = %d.\n", r);
+		dev_err(adev->dev, "failed to alloc mm table and error = %d.\n", r);
 		return r;
 	}
 
 	memset((void *)adev->virt.mm_table.cpu_addr, 0, PAGE_SIZE);
-	DRM_INFO("MM table gpu addr = 0x%llx, cpu addr = %p.\n",
+	dev_info(adev->dev, "MM table gpu addr = 0x%llx, cpu addr = %p.\n",
 		 adev->virt.mm_table.gpu_addr,
 		 adev->virt.mm_table.cpu_addr);
 	return 0;
@@ -269,31 +283,84 @@ unsigned int amd_sriov_msg_checksum(void *obj,
 	return ret;
 }
 
+#define AMDGPU_VIRT_RAS_BAD_PAGE_TABLE_INIT_CAPACITY	512
+/* Max bad page slots allowed for SRIOV*/
+#define AMDGPU_VIRT_RAS_BAD_PAGE_TABLE_MAX_CAPACITY	10665U
+
+/**
+ * amdgpu_virt_ras_realloc_eh_data_space - alloc/realloc VF bad-page @data->bps and @data->bps_bo
+ * @adev: amdgpu device
+ * @data: VF RAS error-handler data
+ * @pages: minimum number of new slots to add beyond @data->capacity
+ *
+ * Return: 0 on success, %-ENOMEM on failure.
+ */
+static int amdgpu_virt_ras_realloc_eh_data_space(struct amdgpu_device *adev,
+		struct amdgpu_virt_ras_err_handler_data *data,
+		int pages)
+{
+	struct eeprom_table_record *new_bps;
+	struct amdgpu_bo **new_bo;
+	unsigned int old_space;
+	unsigned int new_space;
+	unsigned int align_space;
+
+	old_space = (unsigned int)data->capacity;
+	new_space = old_space + max_t(unsigned int, (unsigned int)pages,
+				      (unsigned int)AMDGPU_VIRT_RAS_BAD_PAGE_TABLE_INIT_CAPACITY);
+	if (new_space < old_space || new_space > AMDGPU_VIRT_RAS_BAD_PAGE_TABLE_MAX_CAPACITY)
+		return -ENOMEM;
+
+	align_space = ALIGN(new_space, AMDGPU_VIRT_RAS_BAD_PAGE_TABLE_INIT_CAPACITY);
+	if (align_space > AMDGPU_VIRT_RAS_BAD_PAGE_TABLE_MAX_CAPACITY)
+		return -ENOMEM;
+
+	new_bps = kmalloc_array(align_space, sizeof(*data->bps), GFP_KERNEL);
+	new_bo = kcalloc(align_space, sizeof(*data->bps_bo), GFP_KERNEL);
+	if (!new_bps || !new_bo) {
+		kfree(new_bps);
+		kfree(new_bo);
+		dev_warn_ratelimited(adev->dev,
+				     "RAS WARN: failed to grow bad page table to %u slots\n",
+				     align_space);
+		return -ENOMEM;
+	}
+
+	memcpy(new_bps, data->bps, data->count * sizeof(*data->bps));
+	memcpy(new_bo, data->bps_bo, data->count * sizeof(*data->bps_bo));
+
+	kfree(data->bps);
+	kfree(data->bps_bo);
+	data->bps = new_bps;
+	data->bps_bo = new_bo;
+	data->capacity = (int)align_space;
+
+	return 0;
+}
+
 static int amdgpu_virt_init_ras_err_handler_data(struct amdgpu_device *adev)
 {
 	struct amdgpu_virt *virt = &adev->virt;
 	struct amdgpu_virt_ras_err_handler_data **data = &virt->virt_eh_data;
-	/* GPU will be marked bad on host if bp count more then 10,
-	 * so alloc 512 is enough.
-	 */
-	unsigned int align_space = 512;
+	unsigned int align_space = AMDGPU_VIRT_RAS_BAD_PAGE_TABLE_INIT_CAPACITY;
 	void *bps = NULL;
 	struct amdgpu_bo **bps_bo = NULL;
 
-	*data = kmalloc(sizeof(struct amdgpu_virt_ras_err_handler_data), GFP_KERNEL);
+	*data = kmalloc_obj(struct amdgpu_virt_ras_err_handler_data);
 	if (!*data)
 		goto data_failure;
 
-	bps = kmalloc_array(align_space, sizeof(*(*data)->bps), GFP_KERNEL);
+	bps = kmalloc_objs(*(*data)->bps, align_space);
 	if (!bps)
 		goto bps_failure;
 
-	bps_bo = kmalloc_array(align_space, sizeof(*(*data)->bps_bo), GFP_KERNEL);
+	bps_bo = kcalloc(align_space, sizeof(*(*data)->bps_bo), GFP_KERNEL);
 	if (!bps_bo)
 		goto bps_bo_failure;
 
 	(*data)->bps = bps;
 	(*data)->bps_bo = bps_bo;
+	(*data)->capacity = align_space;
 	(*data)->count = 0;
 	(*data)->last_reserved = 0;
 
@@ -347,17 +414,33 @@ void amdgpu_virt_release_ras_err_handler_data(struct amdgpu_device *adev)
 	virt->virt_eh_data = NULL;
 }
 
-static void amdgpu_virt_ras_add_bps(struct amdgpu_device *adev,
-		struct eeprom_table_record *bps, int pages)
+static bool amdgpu_virt_ras_add_bps(struct amdgpu_device *adev,
+		const struct eeprom_table_record *bps, int pages)
 {
 	struct amdgpu_virt *virt = &adev->virt;
 	struct amdgpu_virt_ras_err_handler_data *data = virt->virt_eh_data;
+	int need;
 
-	if (!data)
-		return;
+	if (!data || pages <= 0)
+		return false;
+
+	if (pages > AMDGPU_VIRT_RAS_BAD_PAGE_TABLE_MAX_CAPACITY - data->count) {
+		dev_warn_ratelimited(adev->dev,
+				     "RAS WARN: bad page table at capacity (count=%d pages=%d max=%u)\n",
+				     data->count, pages,
+				     AMDGPU_VIRT_RAS_BAD_PAGE_TABLE_MAX_CAPACITY);
+		return false;
+	}
+
+	need = data->count + pages;
+	if (need > data->capacity &&
+	    amdgpu_virt_ras_realloc_eh_data_space(adev, data, need - data->capacity))
+		return false;
 
 	memcpy(&data->bps[data->count], bps, pages * sizeof(*data->bps));
 	data->count += pages;
+
+	return true;
 }
 
 static void amdgpu_virt_ras_reserve_bps(struct amdgpu_device *adev)
@@ -390,7 +473,9 @@ static void amdgpu_virt_ras_reserve_bps(struct amdgpu_device *adev)
 			if (amdgpu_bo_create_kernel_at(adev, bp << AMDGPU_GPU_PAGE_SHIFT,
 							AMDGPU_GPU_PAGE_SIZE,
 							&bo, NULL))
-				DRM_DEBUG("RAS WARN: reserve vram for retired page %llx fail\n", bp);
+				dev_dbg(adev->dev,
+						"RAS WARN: reserve vram for retired page %llx fail\n",
+						bp);
 			data->bps_bo[i] = bo;
 		}
 		data->last_reserved = i + 1;
@@ -421,35 +506,37 @@ static void amdgpu_virt_add_bad_page(struct amdgpu_device *adev,
 	struct eeprom_table_record bp;
 	uint64_t retired_page;
 	uint32_t bp_idx, bp_cnt;
-	void *vram_usage_va = NULL;
-
-	if (adev->mman.fw_vram_usage_va)
-		vram_usage_va = adev->mman.fw_vram_usage_va;
-	else
-		vram_usage_va = adev->mman.drv_vram_usage_va;
+	void *fw_va = adev->mman.resv_region[AMDGPU_RESV_FW_VRAM_USAGE].cpu_ptr;
+	void *drv_va = adev->mman.resv_region[AMDGPU_RESV_DRV_VRAM_USAGE].cpu_ptr;
+	void *vram_usage_va = fw_va ? fw_va : drv_va;
 
 	memset(&bp, 0, sizeof(bp));
 
-	if (bp_block_size) {
-		bp_cnt = bp_block_size / sizeof(uint64_t);
-		for (bp_idx = 0; bp_idx < bp_cnt; bp_idx++) {
-			retired_page = *(uint64_t *)(vram_usage_va +
-					bp_block_offset + bp_idx * sizeof(uint64_t));
-			bp.retired_page = retired_page;
+	if (!bp_block_size)
+		return;
 
-			if (amdgpu_virt_ras_check_bad_page(adev, retired_page))
-				continue;
+	bp_cnt = bp_block_size / sizeof(uint64_t);
+	for (bp_idx = 0; bp_idx < bp_cnt; bp_idx++) {
+		retired_page = *(uint64_t *)(vram_usage_va +
+				bp_block_offset + bp_idx * sizeof(uint64_t));
+		bp.retired_page = retired_page;
 
-			amdgpu_virt_ras_add_bps(adev, &bp, 1);
+		if (amdgpu_virt_ras_check_bad_page(adev, retired_page))
+			continue;
 
-			amdgpu_virt_ras_reserve_bps(adev);
-		}
+		if (!amdgpu_virt_ras_add_bps(adev, &bp, 1))
+			break;
+
+		amdgpu_virt_ras_reserve_bps(adev);
 	}
 }
 
 static int amdgpu_virt_read_pf2vf_data(struct amdgpu_device *adev)
 {
 	struct amd_sriov_msg_pf2vf_info_header *pf2vf_info = adev->virt.fw_reserve.p_pf2vf;
+	struct amdgim_pf2vf_info_v1 *pf2vf_v1;
+	struct amd_sriov_msg_pf2vf_info *pf2vf;
+
 	uint32_t checksum;
 	uint32_t checkval;
 
@@ -466,7 +553,8 @@ static int amdgpu_virt_read_pf2vf_data(struct amdgpu_device *adev)
 
 	switch (pf2vf_info->version) {
 	case 1:
-		checksum = ((struct amdgim_pf2vf_info_v1 *)pf2vf_info)->checksum;
+		pf2vf_v1 = (struct amdgim_pf2vf_info_v1 *)pf2vf_info;
+		checksum = pf2vf_v1->checksum;
 		checkval = amd_sriov_msg_checksum(
 			adev->virt.fw_reserve.p_pf2vf, pf2vf_info->size,
 			adev->virt.fw_reserve.checksum_key, checksum);
@@ -477,12 +565,12 @@ static int amdgpu_virt_read_pf2vf_data(struct amdgpu_device *adev)
 			return -EINVAL;
 		}
 
-		adev->virt.gim_feature =
-			((struct amdgim_pf2vf_info_v1 *)pf2vf_info)->feature_flags;
+		adev->virt.gim_feature = pf2vf_v1->feature_flags;
 		break;
 	case 2:
 		/* TODO: missing key, need to add it later */
-		checksum = ((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->checksum;
+		pf2vf = (struct amd_sriov_msg_pf2vf_info *)pf2vf_info;
+		checksum = pf2vf->checksum;
 		checkval = amd_sriov_msg_checksum(
 			adev->virt.fw_reserve.p_pf2vf, pf2vf_info->size,
 			0, checksum);
@@ -494,11 +582,9 @@ static int amdgpu_virt_read_pf2vf_data(struct amdgpu_device *adev)
 		}
 
 		adev->virt.vf2pf_update_interval_ms =
-			((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->vf2pf_update_interval_ms;
-		adev->virt.gim_feature =
-			((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->feature_flags.all;
-		adev->virt.reg_access =
-			((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->reg_access_flags.all;
+			pf2vf->vf2pf_update_interval_ms;
+		adev->virt.gim_feature = pf2vf->feature_flags.all;
+		adev->virt.reg_access = pf2vf->reg_access_flags.all;
 
 		adev->virt.decode_max_dimension_pixels = 0;
 		adev->virt.decode_max_frame_pixels = 0;
@@ -506,26 +592,30 @@ static int amdgpu_virt_read_pf2vf_data(struct amdgpu_device *adev)
 		adev->virt.encode_max_frame_pixels = 0;
 		adev->virt.is_mm_bw_enabled = false;
 		for (i = 0; i < AMD_SRIOV_MSG_RESERVE_VCN_INST; i++) {
-			tmp = ((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->mm_bw_management[i].decode_max_dimension_pixels;
+			tmp = pf2vf->mm_bw_management[i].decode_max_dimension_pixels;
 			adev->virt.decode_max_dimension_pixels = max(tmp, adev->virt.decode_max_dimension_pixels);
 
-			tmp = ((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->mm_bw_management[i].decode_max_frame_pixels;
+			tmp = pf2vf->mm_bw_management[i].decode_max_frame_pixels;
 			adev->virt.decode_max_frame_pixels = max(tmp, adev->virt.decode_max_frame_pixels);
 
-			tmp = ((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->mm_bw_management[i].encode_max_dimension_pixels;
+			tmp = pf2vf->mm_bw_management[i].encode_max_dimension_pixels;
 			adev->virt.encode_max_dimension_pixels = max(tmp, adev->virt.encode_max_dimension_pixels);
 
-			tmp = ((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->mm_bw_management[i].encode_max_frame_pixels;
+			tmp = pf2vf->mm_bw_management[i].encode_max_frame_pixels;
 			adev->virt.encode_max_frame_pixels = max(tmp, adev->virt.encode_max_frame_pixels);
 		}
 		if ((adev->virt.decode_max_dimension_pixels > 0) || (adev->virt.encode_max_dimension_pixels > 0))
 			adev->virt.is_mm_bw_enabled = true;
 
-		adev->unique_id =
-			((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->uuid;
-		adev->virt.ras_en_caps.all = ((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->ras_en_caps.all;
+		adev->unique_id = pf2vf->uuid;
+
+		adev->unitid = 0;
+		if (amdgpu_sriov_is_unitid_support(adev))
+			adev->unitid = pf2vf->unitid;
+
+		adev->virt.ras_en_caps.all = pf2vf->ras_en_caps.all;
 		adev->virt.ras_telemetry_en_caps.all =
-			((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->ras_telemetry_en_caps.all;
+			pf2vf->ras_telemetry_en_caps.all;
 		break;
 	default:
 		dev_err(adev->dev, "invalid pf2vf version: 0x%x\n", pf2vf_info->version);
@@ -589,17 +679,17 @@ static int amdgpu_virt_write_vf2pf_data(struct amdgpu_device *adev)
 
 #ifdef MODULE
 	if (THIS_MODULE->version != NULL)
-		strcpy(vf2pf_info->driver_version, THIS_MODULE->version);
+		strscpy(vf2pf_info->driver_version, THIS_MODULE->version);
 	else
 #endif
-		strcpy(vf2pf_info->driver_version, "N/A");
+		strscpy(vf2pf_info->driver_version, "N/A");
 
 	vf2pf_info->pf2vf_version_required = 0; // no requirement, guest understands all
 	vf2pf_info->driver_cert = 0;
 	vf2pf_info->os_info.all = 0;
 
-	vf2pf_info->fb_usage =
-		ttm_resource_manager_usage(&adev->mman.vram_mgr.manager) >> 20;
+	vf2pf_info->fb_usage = ttm_resource_manager_used(&adev->mman.vram_mgr.manager) ?
+		 ttm_resource_manager_usage(&adev->mman.vram_mgr.manager) >> 20 : 0;
 	vf2pf_info->fb_vis_usage =
 		amdgpu_vram_mgr_vis_usage(&adev->mman.vram_mgr) >> 20;
 	vf2pf_info->fb_size = adev->gmc.real_vram_size >> 20;
@@ -614,10 +704,11 @@ static int amdgpu_virt_write_vf2pf_data(struct amdgpu_device *adev)
 	vf2pf_info->decode_usage = 0;
 
 	vf2pf_info->dummy_page_addr = (uint64_t)adev->dummy_page_addr;
-	vf2pf_info->mes_info_addr = (uint64_t)adev->mes.resource_1_gpu_addr;
-
-	if (adev->mes.resource_1) {
-		vf2pf_info->mes_info_size = adev->mes.resource_1->tbo.base.size;
+	if (amdgpu_sriov_is_mes_info_enable(adev)) {
+		vf2pf_info->mes_info_addr =
+			(uint64_t)(adev->mes.resource_1_gpu_addr[0] + AMDGPU_GPU_PAGE_SIZE);
+		vf2pf_info->mes_info_size =
+			adev->mes.resource_1[0]->tbo.base.size - AMDGPU_GPU_PAGE_SIZE;
 	}
 	vf2pf_info->checksum =
 		amd_sriov_msg_checksum(
@@ -657,10 +748,34 @@ out:
 	schedule_delayed_work(&(adev->virt.vf2pf_work), adev->virt.vf2pf_update_interval_ms);
 }
 
+static int amdgpu_virt_read_exchange_data_from_mem(struct amdgpu_device *adev, uint32_t *pfvf_data)
+{
+	uint32_t dataexchange_offset =
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_DATAEXCHANGE_TABLE_ID].offset;
+	uint32_t dataexchange_size =
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_DATAEXCHANGE_TABLE_ID].size_kb << 10;
+	uint64_t pos = 0;
+
+	dev_info(adev->dev,
+			"Got data exchange info from dynamic crit_region_table at offset 0x%x with size of 0x%x bytes.\n",
+			dataexchange_offset, dataexchange_size);
+
+	if (!IS_ALIGNED(dataexchange_offset, 4) || !IS_ALIGNED(dataexchange_size, 4)) {
+		dev_err(adev->dev, "Data exchange data not aligned to 4 bytes\n");
+		return -EINVAL;
+	}
+
+	pos = (uint64_t)dataexchange_offset;
+	amdgpu_device_vram_access(adev, pos, pfvf_data,
+			dataexchange_size, false);
+
+	return 0;
+}
+
 void amdgpu_virt_fini_data_exchange(struct amdgpu_device *adev)
 {
 	if (adev->virt.vf2pf_update_interval_ms != 0) {
-		DRM_INFO("clean up the vf2pf work item\n");
+		dev_info(adev->dev, "clean up the vf2pf work item\n");
 		cancel_delayed_work_sync(&adev->virt.vf2pf_work);
 		adev->virt.vf2pf_update_interval_ms = 0;
 	}
@@ -668,14 +783,18 @@ void amdgpu_virt_fini_data_exchange(struct amdgpu_device *adev)
 
 void amdgpu_virt_init_data_exchange(struct amdgpu_device *adev)
 {
+	uint32_t *pfvf_data = NULL;
+	void *fw_va = adev->mman.resv_region[AMDGPU_RESV_FW_VRAM_USAGE].cpu_ptr;
+	void *drv_va = adev->mman.resv_region[AMDGPU_RESV_DRV_VRAM_USAGE].cpu_ptr;
+
 	adev->virt.fw_reserve.p_pf2vf = NULL;
 	adev->virt.fw_reserve.p_vf2pf = NULL;
 	adev->virt.vf2pf_update_interval_ms = 0;
 	adev->virt.vf2pf_update_retry_cnt = 0;
 
-	if (adev->mman.fw_vram_usage_va && adev->mman.drv_vram_usage_va) {
-		DRM_WARN("Currently fw_vram and drv_vram should not have values at the same time!");
-	} else if (adev->mman.fw_vram_usage_va || adev->mman.drv_vram_usage_va) {
+	if (fw_va && drv_va) {
+		dev_warn(adev->dev, "Currently fw_vram and drv_vram should not have values at the same time!");
+	} else if (fw_va || drv_va) {
 		/* go through this logic in ip_init and reset to init workqueue*/
 		amdgpu_virt_exchange_data(adev);
 
@@ -683,11 +802,34 @@ void amdgpu_virt_init_data_exchange(struct amdgpu_device *adev)
 		schedule_delayed_work(&(adev->virt.vf2pf_work), msecs_to_jiffies(adev->virt.vf2pf_update_interval_ms));
 	} else if (adev->bios != NULL) {
 		/* got through this logic in early init stage to get necessary flags, e.g. rlcg_acc related*/
-		adev->virt.fw_reserve.p_pf2vf =
-			(struct amd_sriov_msg_pf2vf_info_header *)
-			(adev->bios + (AMD_SRIOV_MSG_PF2VF_OFFSET_KB << 10));
+		if (adev->virt.req_init_data_ver == GPU_CRIT_REGION_V2) {
+			pfvf_data =
+				kzalloc(adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_DATAEXCHANGE_TABLE_ID].size_kb << 10,
+					GFP_KERNEL);
+			if (!pfvf_data) {
+				dev_err(adev->dev, "Failed to allocate memory for pfvf_data\n");
+				return;
+			}
 
-		amdgpu_virt_read_pf2vf_data(adev);
+			if (amdgpu_virt_read_exchange_data_from_mem(adev, pfvf_data))
+				goto free_pfvf_data;
+
+			adev->virt.fw_reserve.p_pf2vf =
+				(struct amd_sriov_msg_pf2vf_info_header *)pfvf_data;
+
+			amdgpu_virt_read_pf2vf_data(adev);
+
+free_pfvf_data:
+			kfree(pfvf_data);
+			pfvf_data = NULL;
+			adev->virt.fw_reserve.p_pf2vf = NULL;
+		} else {
+			adev->virt.fw_reserve.p_pf2vf =
+				(struct amd_sriov_msg_pf2vf_info_header *)
+				(adev->bios + (AMD_SRIOV_MSG_PF2VF_OFFSET_KB_V1 << 10));
+
+			amdgpu_virt_read_pf2vf_data(adev);
+		}
 	}
 }
 
@@ -697,26 +839,43 @@ void amdgpu_virt_exchange_data(struct amdgpu_device *adev)
 	uint64_t bp_block_offset = 0;
 	uint32_t bp_block_size = 0;
 	struct amd_sriov_msg_pf2vf_info *pf2vf_v2 = NULL;
+	void *fw_va = adev->mman.resv_region[AMDGPU_RESV_FW_VRAM_USAGE].cpu_ptr;
+	void *drv_va = adev->mman.resv_region[AMDGPU_RESV_DRV_VRAM_USAGE].cpu_ptr;
 
-	if (adev->mman.fw_vram_usage_va || adev->mman.drv_vram_usage_va) {
-		if (adev->mman.fw_vram_usage_va) {
+	if (fw_va || drv_va) {
+		if (fw_va) {
+			if (adev->virt.req_init_data_ver == GPU_CRIT_REGION_V2) {
+				adev->virt.fw_reserve.p_pf2vf =
+					(struct amd_sriov_msg_pf2vf_info_header *)
+					(fw_va +
+					adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_DATAEXCHANGE_TABLE_ID].offset);
+				adev->virt.fw_reserve.p_vf2pf =
+					(struct amd_sriov_msg_vf2pf_info_header *)
+					(fw_va +
+					adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_DATAEXCHANGE_TABLE_ID].offset +
+					(AMD_SRIOV_MSG_SIZE_KB << 10));
+				adev->virt.fw_reserve.ras_telemetry =
+					(fw_va +
+					adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_RAS_TELEMETRY_TABLE_ID].offset);
+			} else {
+				adev->virt.fw_reserve.p_pf2vf =
+					(struct amd_sriov_msg_pf2vf_info_header *)
+					(fw_va + (AMD_SRIOV_MSG_PF2VF_OFFSET_KB_V1 << 10));
+				adev->virt.fw_reserve.p_vf2pf =
+					(struct amd_sriov_msg_vf2pf_info_header *)
+					(fw_va + (AMD_SRIOV_MSG_VF2PF_OFFSET_KB_V1 << 10));
+				adev->virt.fw_reserve.ras_telemetry =
+					(fw_va + (AMD_SRIOV_MSG_RAS_TELEMETRY_OFFSET_KB_V1 << 10));
+			}
+		} else if (drv_va) {
 			adev->virt.fw_reserve.p_pf2vf =
 				(struct amd_sriov_msg_pf2vf_info_header *)
-				(adev->mman.fw_vram_usage_va + (AMD_SRIOV_MSG_PF2VF_OFFSET_KB << 10));
+				(drv_va + (AMD_SRIOV_MSG_PF2VF_OFFSET_KB_V1 << 10));
 			adev->virt.fw_reserve.p_vf2pf =
 				(struct amd_sriov_msg_vf2pf_info_header *)
-				(adev->mman.fw_vram_usage_va + (AMD_SRIOV_MSG_VF2PF_OFFSET_KB << 10));
+				(drv_va + (AMD_SRIOV_MSG_VF2PF_OFFSET_KB_V1 << 10));
 			adev->virt.fw_reserve.ras_telemetry =
-				(adev->mman.fw_vram_usage_va + (AMD_SRIOV_MSG_RAS_TELEMETRY_OFFSET_KB << 10));
-		} else if (adev->mman.drv_vram_usage_va) {
-			adev->virt.fw_reserve.p_pf2vf =
-				(struct amd_sriov_msg_pf2vf_info_header *)
-				(adev->mman.drv_vram_usage_va + (AMD_SRIOV_MSG_PF2VF_OFFSET_KB << 10));
-			adev->virt.fw_reserve.p_vf2pf =
-				(struct amd_sriov_msg_vf2pf_info_header *)
-				(adev->mman.drv_vram_usage_va + (AMD_SRIOV_MSG_VF2PF_OFFSET_KB << 10));
-			adev->virt.fw_reserve.ras_telemetry =
-				(adev->mman.drv_vram_usage_va + (AMD_SRIOV_MSG_RAS_TELEMETRY_OFFSET_KB << 10));
+				(drv_va + (AMD_SRIOV_MSG_RAS_TELEMETRY_OFFSET_KB_V1 << 10));
 		}
 
 		amdgpu_virt_read_pf2vf_data(adev);
@@ -739,7 +898,7 @@ void amdgpu_virt_exchange_data(struct amdgpu_device *adev)
 	}
 }
 
-void amdgpu_detect_virtualization(struct amdgpu_device *adev)
+static u32 amdgpu_virt_init_detect_asic(struct amdgpu_device *adev)
 {
 	uint32_t reg;
 
@@ -775,8 +934,17 @@ void amdgpu_detect_virtualization(struct amdgpu_device *adev)
 			adev->virt.caps |= AMDGPU_PASSTHROUGH_MODE;
 	}
 
+	return reg;
+}
+
+static bool amdgpu_virt_init_req_data(struct amdgpu_device *adev, u32 reg)
+{
+	bool is_sriov = false;
+
 	/* we have the ability to check now */
 	if (amdgpu_sriov_vf(adev)) {
+		is_sriov = true;
+
 		switch (adev->asic_type) {
 		case CHIP_TONGA:
 		case CHIP_FIJI:
@@ -805,10 +973,248 @@ void amdgpu_detect_virtualization(struct amdgpu_device *adev)
 			amdgpu_virt_request_init_data(adev);
 			break;
 		default: /* other chip doesn't support SRIOV */
-			DRM_ERROR("Unknown asic type: %d!\n", adev->asic_type);
+			is_sriov = false;
+			dev_err(adev->dev, "Unknown asic type: %d!\n", adev->asic_type);
 			break;
 		}
 	}
+
+	return is_sriov;
+}
+
+static void amdgpu_virt_init_ras(struct amdgpu_device *adev)
+{
+	ratelimit_state_init(&adev->virt.ras.ras_error_cnt_rs, 5 * HZ, 1);
+	ratelimit_state_init(&adev->virt.ras.ras_cper_dump_rs, 5 * HZ, 1);
+	ratelimit_state_init(&adev->virt.ras.ras_chk_criti_rs, 5 * HZ, 1);
+
+	ratelimit_set_flags(&adev->virt.ras.ras_error_cnt_rs,
+			    RATELIMIT_MSG_ON_RELEASE);
+	ratelimit_set_flags(&adev->virt.ras.ras_cper_dump_rs,
+			    RATELIMIT_MSG_ON_RELEASE);
+	ratelimit_set_flags(&adev->virt.ras.ras_chk_criti_rs,
+			    RATELIMIT_MSG_ON_RELEASE);
+
+	mutex_init(&adev->virt.ras.ras_telemetry_mutex);
+	mutex_init(&adev->virt.access_req_mutex);
+
+	adev->virt.ras.cper_rptr = 0;
+}
+
+static uint8_t amdgpu_virt_crit_region_calc_checksum(uint8_t *buf_start, uint8_t *buf_end)
+{
+	uint32_t sum = 0;
+
+	if (buf_start >= buf_end)
+		return 0;
+
+	for (; buf_start < buf_end; buf_start++)
+		sum += buf_start[0];
+
+	return 0xffffffff - sum;
+}
+
+int amdgpu_virt_init_critical_region(struct amdgpu_device *adev)
+{
+	struct amd_sriov_msg_init_data_header *init_data_hdr = NULL;
+	u64 init_hdr_offset = adev->virt.init_data_header.offset;
+	u64 init_hdr_size = (u64)adev->virt.init_data_header.size_kb << 10; /* KB → bytes */
+	u64 vram_size;
+	u64 end;
+	int r = 0;
+	uint8_t checksum = 0;
+
+	/* Skip below init if critical region version != v2 */
+	if (adev->virt.req_init_data_ver != GPU_CRIT_REGION_V2)
+		return 0;
+
+	vram_size = RREG32(mmRCC_CONFIG_MEMSIZE);
+	if (!vram_size || vram_size == U32_MAX)
+		return -EINVAL;
+	vram_size <<= 20;
+
+	if (check_add_overflow(init_hdr_offset, init_hdr_size, &end) || end > vram_size) {
+		dev_err(adev->dev, "init_data_header exceeds VRAM size, exiting\n");
+		return -EINVAL;
+	}
+
+	/* Allocate for init_data_hdr */
+	init_data_hdr = kzalloc_obj(struct amd_sriov_msg_init_data_header);
+	if (!init_data_hdr)
+		return -ENOMEM;
+
+	amdgpu_device_vram_access(adev, (uint64_t)init_hdr_offset, (uint32_t *)init_data_hdr,
+					sizeof(struct amd_sriov_msg_init_data_header), false);
+
+	/* Table validation */
+	if (strncmp(init_data_hdr->signature,
+				AMDGPU_SRIOV_CRIT_DATA_SIGNATURE,
+				AMDGPU_SRIOV_CRIT_DATA_SIG_LEN) != 0) {
+		dev_err(adev->dev, "Invalid init data signature: %.4s\n",
+			init_data_hdr->signature);
+		r = -EINVAL;
+		goto out;
+	}
+
+	checksum = amdgpu_virt_crit_region_calc_checksum(
+			(uint8_t *)&init_data_hdr->initdata_offset,
+			(uint8_t *)init_data_hdr +
+			sizeof(struct amd_sriov_msg_init_data_header));
+	if (checksum != init_data_hdr->checksum) {
+		dev_err(adev->dev, "Found unmatching checksum from calculation 0x%x and init_data 0x%x\n",
+				checksum, init_data_hdr->checksum);
+		r = -EINVAL;
+		goto out;
+	}
+
+	memset(&adev->virt.crit_regn, 0, sizeof(adev->virt.crit_regn));
+	memset(adev->virt.crit_regn_tbl, 0, sizeof(adev->virt.crit_regn_tbl));
+
+	adev->virt.crit_regn.offset = init_data_hdr->initdata_offset;
+	adev->virt.crit_regn.size_kb = init_data_hdr->initdata_size_in_kb;
+
+	/* Validation and initialization for each table entry */
+	if (IS_SRIOV_CRIT_REGN_ENTRY_VALID(init_data_hdr, AMD_SRIOV_MSG_IPD_TABLE_ID)) {
+		if (!init_data_hdr->ip_discovery_size_in_kb ||
+				init_data_hdr->ip_discovery_size_in_kb > DISCOVERY_TMR_SIZE) {
+			dev_err(adev->dev, "Invalid %s size: 0x%x\n",
+				amdgpu_virt_dynamic_crit_table_name[AMD_SRIOV_MSG_IPD_TABLE_ID],
+				init_data_hdr->ip_discovery_size_in_kb);
+			r = -EINVAL;
+			goto out;
+		}
+
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_IPD_TABLE_ID].offset =
+			init_data_hdr->ip_discovery_offset;
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_IPD_TABLE_ID].size_kb =
+			init_data_hdr->ip_discovery_size_in_kb;
+	}
+
+	if (IS_SRIOV_CRIT_REGN_ENTRY_VALID(init_data_hdr, AMD_SRIOV_MSG_VBIOS_IMG_TABLE_ID)) {
+		if (!init_data_hdr->vbios_img_size_in_kb) {
+			dev_err(adev->dev, "Invalid %s size: 0x%x\n",
+				amdgpu_virt_dynamic_crit_table_name[AMD_SRIOV_MSG_VBIOS_IMG_TABLE_ID],
+				init_data_hdr->vbios_img_size_in_kb);
+			r = -EINVAL;
+			goto out;
+		}
+
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_VBIOS_IMG_TABLE_ID].offset =
+			init_data_hdr->vbios_img_offset;
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_VBIOS_IMG_TABLE_ID].size_kb =
+			init_data_hdr->vbios_img_size_in_kb;
+	}
+
+	if (IS_SRIOV_CRIT_REGN_ENTRY_VALID(init_data_hdr, AMD_SRIOV_MSG_RAS_TELEMETRY_TABLE_ID)) {
+		if (!init_data_hdr->ras_tele_info_size_in_kb) {
+			dev_err(adev->dev, "Invalid %s size: 0x%x\n",
+				amdgpu_virt_dynamic_crit_table_name[AMD_SRIOV_MSG_RAS_TELEMETRY_TABLE_ID],
+				init_data_hdr->ras_tele_info_size_in_kb);
+			r = -EINVAL;
+			goto out;
+		}
+
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_RAS_TELEMETRY_TABLE_ID].offset =
+			init_data_hdr->ras_tele_info_offset;
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_RAS_TELEMETRY_TABLE_ID].size_kb =
+			init_data_hdr->ras_tele_info_size_in_kb;
+	}
+
+	if (IS_SRIOV_CRIT_REGN_ENTRY_VALID(init_data_hdr, AMD_SRIOV_MSG_DATAEXCHANGE_TABLE_ID)) {
+		if (!init_data_hdr->dataexchange_size_in_kb) {
+			dev_err(adev->dev, "Invalid %s size: 0x%x\n",
+				amdgpu_virt_dynamic_crit_table_name[AMD_SRIOV_MSG_DATAEXCHANGE_TABLE_ID],
+				init_data_hdr->dataexchange_size_in_kb);
+			r = -EINVAL;
+			goto out;
+		}
+
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_DATAEXCHANGE_TABLE_ID].offset =
+			init_data_hdr->dataexchange_offset;
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_DATAEXCHANGE_TABLE_ID].size_kb =
+			init_data_hdr->dataexchange_size_in_kb;
+	}
+
+	if (IS_SRIOV_CRIT_REGN_ENTRY_VALID(init_data_hdr, AMD_SRIOV_MSG_BAD_PAGE_INFO_TABLE_ID)) {
+		if (!init_data_hdr->bad_page_size_in_kb) {
+			dev_err(adev->dev, "Invalid %s size: 0x%x\n",
+				amdgpu_virt_dynamic_crit_table_name[AMD_SRIOV_MSG_BAD_PAGE_INFO_TABLE_ID],
+				init_data_hdr->bad_page_size_in_kb);
+			r = -EINVAL;
+			goto out;
+		}
+
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_BAD_PAGE_INFO_TABLE_ID].offset =
+			init_data_hdr->bad_page_info_offset;
+		adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_BAD_PAGE_INFO_TABLE_ID].size_kb =
+			init_data_hdr->bad_page_size_in_kb;
+	}
+
+	/* Validation for critical region info */
+	if (adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_IPD_TABLE_ID].size_kb > DISCOVERY_TMR_SIZE) {
+		dev_err(adev->dev, "Invalid IP discovery size: 0x%x\n",
+				adev->virt.crit_regn_tbl[AMD_SRIOV_MSG_IPD_TABLE_ID].size_kb);
+		r = -EINVAL;
+		goto out;
+	}
+
+	/* reserved memory starts from crit region base offset with the size of 5MB */
+	amdgpu_ttm_init_vram_resv(adev, AMDGPU_RESV_FW_VRAM_USAGE,
+				  adev->virt.crit_regn.offset,
+				  adev->virt.crit_regn.size_kb << 10, true);
+	dev_info(adev->dev,
+		"critical region v%d requested to reserve memory start at %08llx with %llu KB.\n",
+			init_data_hdr->version,
+			adev->mman.resv_region[AMDGPU_RESV_FW_VRAM_USAGE].offset,
+			adev->mman.resv_region[AMDGPU_RESV_FW_VRAM_USAGE].size >> 10);
+
+	adev->virt.is_dynamic_crit_regn_enabled = true;
+
+out:
+	kfree(init_data_hdr);
+	init_data_hdr = NULL;
+
+	return r;
+}
+
+int amdgpu_virt_get_dynamic_data_info(struct amdgpu_device *adev,
+	int data_id, uint8_t *binary, u32 *size)
+{
+	uint32_t data_offset = 0;
+	uint32_t data_size = 0;
+	enum amd_sriov_msg_table_id_enum data_table_id = data_id;
+
+	if (data_table_id >= AMD_SRIOV_MSG_MAX_TABLE_ID)
+		return -EINVAL;
+
+	data_offset = adev->virt.crit_regn_tbl[data_table_id].offset;
+	data_size = adev->virt.crit_regn_tbl[data_table_id].size_kb << 10;
+
+	/* Validate on input params */
+	if (!binary || !size || *size < (uint64_t)data_size)
+		return -EINVAL;
+
+	/* Proceed to copy the dynamic content */
+	amdgpu_device_vram_access(adev,
+			(uint64_t)data_offset, (uint32_t *)binary, data_size, false);
+	*size = (uint64_t)data_size;
+
+	dev_dbg(adev->dev,
+		"Got %s info from dynamic crit_region_table at offset 0x%x with size of 0x%x bytes.\n",
+		amdgpu_virt_dynamic_crit_table_name[data_id], data_offset, data_size);
+
+	return 0;
+}
+
+void amdgpu_virt_init(struct amdgpu_device *adev)
+{
+	bool is_sriov = false;
+	uint32_t reg = amdgpu_virt_init_detect_asic(adev);
+
+	is_sriov = amdgpu_virt_init_req_data(adev, reg);
+
+	if (is_sriov)
+		amdgpu_virt_init_ras(adev);
 }
 
 static bool amdgpu_virt_access_debugfs_is_mmio(struct amdgpu_device *adev)
@@ -930,6 +1336,7 @@ bool amdgpu_virt_fw_load_skip_check(struct amdgpu_device *adev, uint32_t ucode_i
 		    || ucode_id == AMDGPU_UCODE_ID_SDMA5
 		    || ucode_id == AMDGPU_UCODE_ID_SDMA6
 		    || ucode_id == AMDGPU_UCODE_ID_SDMA7
+		    || ucode_id == AMDGPU_UCODE_ID_SDMA_RS64
 		    || ucode_id == AMDGPU_UCODE_ID_RLC_G
 		    || ucode_id == AMDGPU_UCODE_ID_RLC_RESTORE_LIST_CNTL
 		    || ucode_id == AMDGPU_UCODE_ID_RLC_RESTORE_LIST_GPM_MEM
@@ -1006,6 +1413,133 @@ bool amdgpu_virt_get_rlcg_reg_access_flag(struct amdgpu_device *adev,
 	return ret;
 }
 
+static u32 amdgpu_virt_rlcg_vfi_reg_rw(struct amdgpu_device *adev, u32 offset, u32 v, u32 flag, u32 xcc_id)
+{
+	uint32_t timeout = 100;
+	uint32_t i;
+
+	struct amdgpu_rlcg_reg_access_ctrl *reg_access_ctrl;
+	void *vfi_cmd;
+	void *vfi_stat;
+	void *vfi_addr;
+	void *vfi_data;
+	void *vfi_grbm_cntl;
+	void *vfi_grbm_idx;
+	uint32_t cmd;
+	uint32_t stat;
+	uint32_t addr = offset;
+	uint32_t data;
+	uint32_t grbm_cntl_data;
+	uint32_t grbm_idx_data;
+
+	unsigned long flags;
+	bool is_err = true;
+
+	if (!adev->gfx.rlc.rlcg_reg_access_supported) {
+		dev_err(adev->dev, "VFi interface is not available\n");
+		return 0;
+	}
+
+	if (adev->gfx.xcc_mask && (((1 << xcc_id) & adev->gfx.xcc_mask) == 0)) {
+		dev_err(adev->dev, "VFi invalid XCC, xcc_id=0x%x\n", xcc_id);
+		return 0;
+	}
+
+	if (amdgpu_device_skip_hw_access(adev))
+		return 0;
+
+	reg_access_ctrl = &adev->gfx.rlc.reg_access_ctrl[xcc_id];
+	vfi_cmd  = (void __iomem *)adev->rmmio + 4 * reg_access_ctrl->vfi_cmd;
+	vfi_stat = (void __iomem *)adev->rmmio + 4 * reg_access_ctrl->vfi_stat;
+	vfi_addr = (void __iomem *)adev->rmmio + 4 * reg_access_ctrl->vfi_addr;
+	vfi_data = (void __iomem *)adev->rmmio + 4 * reg_access_ctrl->vfi_data;
+	vfi_grbm_cntl = (void __iomem *)adev->rmmio + 4 * reg_access_ctrl->vfi_grbm_cntl;
+	vfi_grbm_idx  = (void __iomem *)adev->rmmio + 4 * reg_access_ctrl->vfi_grbm_idx;
+	grbm_cntl_data = reg_access_ctrl->vfi_grbm_cntl_data;
+	grbm_idx_data  = reg_access_ctrl->vfi_grbm_idx_data;
+
+	if (flag == AMDGPU_RLCG_GC_WRITE) {
+		data = v;
+		cmd = AMDGPU_RLCG_VFI_CMD__WR;
+
+		// the GRBM_GFX_CNTL and GRBM_GFX_INDEX are protected by mutex outside this call
+		if (addr == reg_access_ctrl->grbm_cntl) {
+			reg_access_ctrl->vfi_grbm_cntl_data = data;
+			return 0;
+		} else if (addr == reg_access_ctrl->grbm_idx) {
+			reg_access_ctrl->vfi_grbm_idx_data = data;
+			return 0;
+		}
+
+	} else if (flag == AMDGPU_RLCG_GC_READ) {
+		data = 0;
+		cmd = AMDGPU_RLCG_VFI_CMD__RD;
+
+		// the GRBM_GFX_CNTL and GRBM_GFX_INDEX are protected by mutex outside this call
+		if (addr == reg_access_ctrl->grbm_cntl)
+			return grbm_cntl_data;
+		else if (addr == reg_access_ctrl->grbm_idx)
+			return grbm_idx_data;
+
+	} else {
+		dev_err(adev->dev, "VFi invalid access, flag=0x%x\n", flag);
+		return 0;
+	}
+
+	spin_lock_irqsave(&adev->virt.rlcg_reg_lock, flags);
+
+	writel(addr, vfi_addr);
+	writel(data, vfi_data);
+	writel(grbm_cntl_data, vfi_grbm_cntl);
+	writel(grbm_idx_data,  vfi_grbm_idx);
+
+	writel(AMDGPU_RLCG_VFI_STAT__BUSY, vfi_stat);
+	writel(cmd, vfi_cmd);
+
+	for (i = 0; i < timeout; i++) {
+		stat = readl(vfi_stat);
+		if (stat != AMDGPU_RLCG_VFI_STAT__BUSY)
+			break;
+		udelay(10);
+	}
+
+	switch (stat) {
+	case AMDGPU_RLCG_VFI_STAT__DONE:
+		is_err = false;
+		if (cmd == AMDGPU_RLCG_VFI_CMD__RD)
+			data = readl(vfi_data);
+		break;
+	case AMDGPU_RLCG_VFI_STAT__BUSY:
+		dev_err(adev->dev, "VFi access timeout\n");
+		break;
+	case AMDGPU_RLCG_VFI_STAT__INV_CMD:
+		dev_err(adev->dev, "VFi invalid command\n");
+		break;
+	case AMDGPU_RLCG_VFI_STAT__INV_ADDR:
+		dev_err(adev->dev, "VFi invalid address\n");
+		break;
+	case AMDGPU_RLCG_VFI_STAT__ERR:
+		dev_err(adev->dev, "VFi unknown error\n");
+		break;
+	default:
+		dev_err(adev->dev, "VFi unknown status code\n");
+		break;
+	}
+
+	spin_unlock_irqrestore(&adev->virt.rlcg_reg_lock, flags);
+
+	if (is_err)
+		dev_err(adev->dev, "VFi: [grbm_cntl=0x%x grbm_idx=0x%x] addr=0x%x (byte addr 0x%x), data=0x%x, cmd=0x%x\n",
+			grbm_cntl_data, grbm_idx_data,
+			addr, addr * 4, data, cmd);
+	else
+		dev_dbg(adev->dev, "VFi: [grbm_cntl=0x%x grbm_idx=0x%x] addr=0x%x (byte addr 0x%x), data=0x%x, cmd=0x%x\n",
+			grbm_cntl_data, grbm_idx_data,
+			addr, addr * 4, data, cmd);
+
+	return data;
+}
+
 u32 amdgpu_virt_rlcg_reg_rw(struct amdgpu_device *adev, u32 offset, u32 v, u32 flag, u32 xcc_id)
 {
 	struct amdgpu_rlcg_reg_access_ctrl *reg_access_ctrl;
@@ -1017,6 +1551,10 @@ u32 amdgpu_virt_rlcg_reg_rw(struct amdgpu_device *adev, u32 offset, u32 v, u32 f
 	void *scratch_reg2;
 	void *scratch_reg3;
 	void *spare_int;
+	unsigned long flags;
+
+	if (amdgpu_ip_version(adev, GC_HWIP, 0) >= IP_VERSION(12, 1, 0))
+		return amdgpu_virt_rlcg_vfi_reg_rw(adev, offset, v, flag, xcc_id);
 
 	if (!adev->gfx.rlc.rlcg_reg_access_supported) {
 		dev_err(adev->dev,
@@ -1038,7 +1576,7 @@ u32 amdgpu_virt_rlcg_reg_rw(struct amdgpu_device *adev, u32 offset, u32 v, u32 f
 	scratch_reg2 = (void __iomem *)adev->rmmio + 4 * reg_access_ctrl->scratch_reg2;
 	scratch_reg3 = (void __iomem *)adev->rmmio + 4 * reg_access_ctrl->scratch_reg3;
 
-	mutex_lock(&adev->virt.rlcg_reg_lock);
+	spin_lock_irqsave(&adev->virt.rlcg_reg_lock, flags);
 
 	if (reg_access_ctrl->spare_int)
 		spare_int = (void __iomem *)adev->rmmio + 4 * reg_access_ctrl->spare_int;
@@ -1097,7 +1635,7 @@ u32 amdgpu_virt_rlcg_reg_rw(struct amdgpu_device *adev, u32 offset, u32 v, u32 f
 
 	ret = readl(scratch_reg0);
 
-	mutex_unlock(&adev->virt.rlcg_reg_lock);
+	spin_unlock_irqrestore(&adev->virt.rlcg_reg_lock, flags);
 
 	return ret;
 }
@@ -1201,6 +1739,9 @@ bool amdgpu_virt_get_ras_capability(struct amdgpu_device *adev)
 	if (adev->virt.ras_en_caps.bits.poison_propogation_mode)
 		con->poison_supported = true; /* Poison is handled by host */
 
+	if (adev->virt.ras_en_caps.bits.uniras_supported)
+		amdgpu_virt_ras_set_remote_uniras(adev, true);
+
 	return true;
 }
 
@@ -1246,7 +1787,8 @@ amdgpu_ras_block_to_sriov(struct amdgpu_device *adev, enum amdgpu_ras_block bloc
 	case AMDGPU_RAS_BLOCK__MPIO:
 		return RAS_TELEMETRY_GPU_BLOCK_MPIO;
 	default:
-		dev_err(adev->dev, "Unsupported SRIOV RAS telemetry block 0x%x\n", block);
+		dev_warn(adev->dev, "Unsupported SRIOV RAS telemetry block 0x%x\n",
+			      block);
 		return RAS_TELEMETRY_GPU_BLOCK_COUNT;
 	}
 }
@@ -1260,7 +1802,7 @@ static int amdgpu_virt_cache_host_error_counts(struct amdgpu_device *adev,
 	checksum = host_telemetry->header.checksum;
 	used_size = host_telemetry->header.used_size;
 
-	if (used_size > (AMD_SRIOV_RAS_TELEMETRY_SIZE_KB << 10))
+	if (used_size > (AMD_SRIOV_MSG_RAS_TELEMETRY_SIZE_KB_V1 << 10))
 		return 0;
 
 	tmp = kmemdup(&host_telemetry->body.error_count, used_size, GFP_KERNEL);
@@ -1282,14 +1824,19 @@ static int amdgpu_virt_req_ras_err_count_internal(struct amdgpu_device *adev, bo
 {
 	struct amdgpu_virt *virt = &adev->virt;
 
+	if (!virt->ops || !virt->ops->req_ras_err_count)
+		return -EOPNOTSUPP;
+
 	/* Host allows 15 ras telemetry requests per 60 seconds. Afterwhich, the Host
 	 * will ignore incoming guest messages. Ratelimit the guest messages to
 	 * prevent guest self DOS.
 	 */
-	if (__ratelimit(&adev->virt.ras_telemetry_rs) || force_update) {
+	if (__ratelimit(&virt->ras.ras_error_cnt_rs) || force_update) {
+		mutex_lock(&virt->ras.ras_telemetry_mutex);
 		if (!virt->ops->req_ras_err_count(adev))
 			amdgpu_virt_cache_host_error_counts(adev,
-				adev->virt.fw_reserve.ras_telemetry);
+				virt->fw_reserve.ras_telemetry);
+		mutex_unlock(&virt->ras.ras_telemetry_mutex);
 	}
 
 	return 0;
@@ -1320,6 +1867,113 @@ int amdgpu_virt_req_ras_err_count(struct amdgpu_device *adev, enum amdgpu_ras_bl
 	return 0;
 }
 
+static int
+amdgpu_virt_write_cpers_to_ring(struct amdgpu_device *adev,
+				struct amdsriov_ras_telemetry *host_telemetry,
+				u32 *more)
+{
+	struct amd_sriov_ras_cper_dump *cper_dump = NULL;
+	struct cper_hdr *entry = NULL;
+	struct amdgpu_ring *ring = &adev->cper.ring_buf;
+	uint32_t checksum, used_size;
+	u64 remaining, cnt, i;
+	int ret = 0;
+
+	checksum = host_telemetry->header.checksum;
+	used_size = host_telemetry->header.used_size;
+
+	if (used_size < offsetof(struct amd_sriov_ras_cper_dump, buf) ||
+	    used_size > (AMD_SRIOV_MSG_RAS_TELEMETRY_SIZE_KB_V1 << 10))
+		return -EINVAL;
+
+	cper_dump = kmemdup(&host_telemetry->body.cper_dump, used_size, GFP_KERNEL);
+	if (!cper_dump)
+		return -ENOMEM;
+
+	if (checksum != amd_sriov_msg_checksum(cper_dump, used_size, 0, 0)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	*more = cper_dump->more;
+
+	if (cper_dump->wptr < adev->virt.ras.cper_rptr) {
+		dev_warn(
+			adev->dev,
+			"guest specified rptr that was too high! guest rptr: 0x%llx, host rptr: 0x%llx\n",
+			adev->virt.ras.cper_rptr, cper_dump->wptr);
+
+		adev->virt.ras.cper_rptr = cper_dump->wptr;
+		goto out;
+	}
+
+	entry = (struct cper_hdr *)&cper_dump->buf[0];
+	remaining = (u64)used_size - offsetof(struct amd_sriov_ras_cper_dump, buf);
+	cnt = min_t(u64, cper_dump->count, CPER_MAX_ALLOWED_COUNT);
+
+	for (i = 0; i < cnt; i++) {
+		if (entry->record_length < sizeof(struct cper_hdr) ||
+		    entry->record_length > remaining) {
+			ret = -EINVAL;
+			goto out;
+		}
+
+		amdgpu_cper_ring_write(ring, entry, entry->record_length);
+		remaining -= entry->record_length;
+		entry = (struct cper_hdr *)((char *)entry + entry->record_length);
+	}
+
+	if (cper_dump->overflow_count)
+		dev_warn(adev->dev,
+			 "host reported CPER overflow of 0x%llx entries!\n",
+			 cper_dump->overflow_count);
+
+	adev->virt.ras.cper_rptr = cper_dump->wptr;
+out:
+	kfree(cper_dump);
+
+	return ret;
+}
+
+static int amdgpu_virt_req_ras_cper_dump_internal(struct amdgpu_device *adev)
+{
+	struct amdgpu_virt *virt = &adev->virt;
+	int ret = 0;
+	uint32_t more = 0;
+
+	if (!virt->ops || !virt->ops->req_ras_cper_dump)
+		return -EOPNOTSUPP;
+
+	do {
+		if (!virt->ops->req_ras_cper_dump(adev, virt->ras.cper_rptr))
+			ret = amdgpu_virt_write_cpers_to_ring(
+				adev, virt->fw_reserve.ras_telemetry, &more);
+		else
+			ret = 0;
+	} while (more && !ret);
+
+	return ret;
+}
+
+int amdgpu_virt_req_ras_cper_dump(struct amdgpu_device *adev, bool force_update)
+{
+	struct amdgpu_virt *virt = &adev->virt;
+	int ret = 0;
+
+	if (!amdgpu_sriov_ras_cper_en(adev))
+		return -EOPNOTSUPP;
+
+	if ((__ratelimit(&virt->ras.ras_cper_dump_rs) || force_update) &&
+	    down_read_trylock(&adev->reset_domain->sem)) {
+		mutex_lock(&virt->ras.ras_telemetry_mutex);
+		ret = amdgpu_virt_req_ras_cper_dump_internal(adev);
+		mutex_unlock(&virt->ras.ras_telemetry_mutex);
+		up_read(&adev->reset_domain->sem);
+	}
+
+	return ret;
+}
+
 int amdgpu_virt_ras_telemetry_post_reset(struct amdgpu_device *adev)
 {
 	unsigned long ue_count, ce_count;
@@ -1330,4 +1984,108 @@ int amdgpu_virt_ras_telemetry_post_reset(struct amdgpu_device *adev)
 	}
 
 	return 0;
+}
+
+bool amdgpu_virt_ras_telemetry_block_en(struct amdgpu_device *adev,
+					enum amdgpu_ras_block block)
+{
+	enum amd_sriov_ras_telemetry_gpu_block sriov_block;
+
+	sriov_block = amdgpu_ras_block_to_sriov(adev, block);
+
+	if (sriov_block >= RAS_TELEMETRY_GPU_BLOCK_COUNT ||
+	    !amdgpu_sriov_ras_telemetry_block_en(adev, sriov_block))
+		return false;
+
+	return true;
+}
+
+/*
+ * amdgpu_virt_request_bad_pages() - request bad pages
+ * @adev: amdgpu device.
+ * Send command to GPU hypervisor to write new bad pages into the shared PF2VF region
+ */
+void amdgpu_virt_request_bad_pages(struct amdgpu_device *adev)
+{
+	struct amdgpu_virt *virt = &adev->virt;
+
+	if (virt->ops && virt->ops->req_bad_pages)
+		virt->ops->req_bad_pages(adev);
+}
+
+static int amdgpu_virt_cache_chk_criti_hit(struct amdgpu_device *adev,
+					   struct amdsriov_ras_telemetry *host_telemetry,
+					   bool *hit)
+{
+	struct amd_sriov_ras_chk_criti *tmp = NULL;
+	uint32_t checksum, used_size;
+
+	checksum = host_telemetry->header.checksum;
+	used_size = host_telemetry->header.used_size;
+
+	if (used_size > (AMD_SRIOV_MSG_RAS_TELEMETRY_SIZE_KB_V1 << 10))
+		return 0;
+
+	tmp = kmemdup(&host_telemetry->body.chk_criti, used_size, GFP_KERNEL);
+	if (!tmp)
+		return -ENOMEM;
+
+	if (checksum != amd_sriov_msg_checksum(tmp, used_size, 0, 0))
+		goto out;
+
+	if (hit)
+		*hit = tmp->hit ? true : false;
+
+out:
+	kfree(tmp);
+
+	return 0;
+}
+
+int amdgpu_virt_check_vf_critical_region(struct amdgpu_device *adev, u64 addr, bool *hit)
+{
+	struct amdgpu_virt *virt = &adev->virt;
+	int r = -EPERM;
+
+	if (!virt->ops || !virt->ops->req_ras_chk_criti)
+		return -EOPNOTSUPP;
+
+	/* Host allows 15 ras telemetry requests per 60 seconds. Afterwhich, the Host
+	 * will ignore incoming guest messages. Ratelimit the guest messages to
+	 * prevent guest self DOS.
+	 */
+	if (__ratelimit(&virt->ras.ras_chk_criti_rs)) {
+		mutex_lock(&virt->ras.ras_telemetry_mutex);
+		if (!virt->ops->req_ras_chk_criti(adev, addr))
+			r = amdgpu_virt_cache_chk_criti_hit(
+				adev, virt->fw_reserve.ras_telemetry, hit);
+		mutex_unlock(&virt->ras.ras_telemetry_mutex);
+	}
+
+	return r;
+}
+
+static int req_remote_ras_cmd(struct amdgpu_device *adev,
+			u32 param1, u32 param2, u32 param3)
+{
+	struct amdgpu_virt *virt = &adev->virt;
+
+	if (virt->ops && virt->ops->req_remote_ras_cmd)
+		return virt->ops->req_remote_ras_cmd(adev, param1, param2, param3);
+	return -ENOENT;
+}
+
+int amdgpu_virt_send_remote_ras_cmd(struct amdgpu_device *adev,
+		uint64_t buf, uint32_t buf_len)
+{
+	uint64_t gpa = buf;
+	int ret = -EIO;
+
+	if (down_read_trylock(&adev->reset_domain->sem)) {
+		ret = req_remote_ras_cmd(adev,
+			lower_32_bits(gpa), upper_32_bits(gpa), buf_len);
+		up_read(&adev->reset_domain->sem);
+	}
+
+	return ret;
 }

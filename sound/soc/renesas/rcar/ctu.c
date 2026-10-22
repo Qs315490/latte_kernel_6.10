@@ -6,7 +6,6 @@
 
 #include "rsnd.h"
 
-#define CTU_NAME_SIZE	16
 #define CTU_NAME "ctu"
 
 /*
@@ -316,11 +315,9 @@ struct rsnd_mod *rsnd_ctu_mod_get(struct rsnd_priv *priv, int id)
 int rsnd_ctu_probe(struct rsnd_priv *priv)
 {
 	struct device_node *node;
-	struct device_node *np;
 	struct device *dev = rsnd_priv_to_dev(priv);
 	struct rsnd_ctu *ctu;
 	struct clk *clk;
-	char name[CTU_NAME_SIZE];
 	int i, nr, ret;
 
 	node = rsnd_ctu_of_node(priv);
@@ -344,29 +341,23 @@ int rsnd_ctu_probe(struct rsnd_priv *priv)
 
 	i = 0;
 	ret = 0;
-	for_each_child_of_node(node, np) {
+	for_each_child_of_node_scoped(node, np) {
 		ctu = rsnd_ctu_get(priv, i);
 
 		/*
 		 * CTU00, CTU01, CTU02, CTU03 => CTU0
 		 * CTU10, CTU11, CTU12, CTU13 => CTU1
 		 */
-		snprintf(name, CTU_NAME_SIZE, "%s.%d",
-			 CTU_NAME, i / 4);
-
-		clk = devm_clk_get(dev, name);
+		clk = rsnd_devm_clk_get_indexed(dev, CTU_NAME, i / 4);
 		if (IS_ERR(clk)) {
 			ret = PTR_ERR(clk);
-			of_node_put(np);
 			goto rsnd_ctu_probe_done;
 		}
 
 		ret = rsnd_mod_init(priv, rsnd_mod_get(ctu), &rsnd_ctu_ops,
-				    clk, RSND_MOD_CTU, i);
-		if (ret) {
-			of_node_put(np);
+				    clk, NULL, RSND_MOD_CTU, i);
+		if (ret)
 			goto rsnd_ctu_probe_done;
-		}
 
 		i++;
 	}
@@ -386,4 +377,24 @@ void rsnd_ctu_remove(struct rsnd_priv *priv)
 	for_each_rsnd_ctu(ctu, priv, i) {
 		rsnd_mod_quit(rsnd_mod_get(ctu));
 	}
+}
+
+void rsnd_ctu_suspend(struct rsnd_priv *priv)
+{
+	struct rsnd_ctu *ctu;
+	int i;
+
+	for_each_rsnd_ctu(ctu, priv, i)
+		rsnd_suspend_clk_reset(rsnd_mod_get(ctu)->clk,
+				       rsnd_mod_get(ctu)->rstc);
+}
+
+void rsnd_ctu_resume(struct rsnd_priv *priv)
+{
+	struct rsnd_ctu *ctu;
+	int i;
+
+	for_each_rsnd_ctu(ctu, priv, i)
+		rsnd_resume_clk_reset(rsnd_mod_get(ctu)->clk,
+				      rsnd_mod_get(ctu)->rstc);
 }

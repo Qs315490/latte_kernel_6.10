@@ -31,6 +31,8 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/mm.h>
 
+#include <drm/drm_print.h>
+
 #include "gem/i915_gem_context.h"
 #include "gt/intel_breadcrumbs.h"
 #include "gt/intel_context.h"
@@ -293,8 +295,7 @@ static void __rq_init_watchdog(struct i915_request *rq)
 {
 	struct i915_request_watchdog *wdg = &rq->watchdog;
 
-	hrtimer_init(&wdg->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	wdg->timer.function = __rq_watchdog_expired;
+	hrtimer_setup(&wdg->timer, __rq_watchdog_expired, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 }
 
 static void __rq_arm_watchdog(struct i915_request *rq)
@@ -473,7 +474,7 @@ static bool __request_in_flight(const struct i915_request *signal)
 	 * to avoid tearing.]
 	 *
 	 * Note that the read of *execlists->active may race with the promotion
-	 * of execlists->pending[] to execlists->inflight[], overwritting
+	 * of execlists->pending[] to execlists->inflight[], overwriting
 	 * the value at *execlists->active. This is fine. The promotion implies
 	 * that we received an ACK from the HW, and so the context is not
 	 * stuck -- if we do not see ourselves in *active, the inflight status
@@ -1350,8 +1351,7 @@ __i915_request_await_external(struct i915_request *rq, struct dma_fence *fence)
 {
 	mark_external(rq);
 	return i915_sw_fence_await_dma_fence(&rq->submit, fence,
-					     i915_fence_context_timeout(rq->i915,
-									fence->context),
+					     i915_fence_context_timeout(fence->context),
 					     I915_FENCE_GFP);
 }
 
@@ -2185,7 +2185,7 @@ void i915_request_show(struct drm_printer *m,
 		       const char *prefix,
 		       int indent)
 {
-	const char *name = rq->fence.ops->get_timeline_name((struct dma_fence *)&rq->fence);
+	const char __rcu *timeline;
 	char buf[80] = "";
 	int x = 0;
 
@@ -2221,6 +2221,8 @@ void i915_request_show(struct drm_printer *m,
 
 	x = print_sched_attr(&rq->sched.attr, buf, x, sizeof(buf));
 
+	rcu_read_lock();
+	timeline = dma_fence_timeline_name((struct dma_fence *)&rq->fence);
 	drm_printf(m, "%s%.*s%c %llx:%lld%s%s %s @ %dms: %s\n",
 		   prefix, indent, "                ",
 		   queue_status(rq),
@@ -2229,7 +2231,8 @@ void i915_request_show(struct drm_printer *m,
 		   fence_status(rq),
 		   buf,
 		   jiffies_to_msecs(jiffies - rq->emitted_jiffies),
-		   name);
+		   rcu_dereference(timeline));
+	rcu_read_unlock();
 }
 
 static bool engine_match_ring(struct intel_engine_cs *engine, struct i915_request *rq)

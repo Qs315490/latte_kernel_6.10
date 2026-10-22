@@ -90,6 +90,7 @@ static int amdgpu_reset_xgmi_reset_on_init_restore_hwctxt(
 			kgd2kfd_init_zone_device(tmp_adev);
 			amdgpu_amdkfd_device_init(tmp_adev);
 			amdgpu_amdkfd_drm_client_create(tmp_adev);
+			amdgpu_ptl_sysfs_init(tmp_adev);
 		}
 	}
 
@@ -116,7 +117,7 @@ static int amdgpu_reset_xgmi_reset_on_init_perform_reset(
 	/* Mode1 reset needs to be triggered on all devices together */
 	list_for_each_entry(tmp_adev, reset_device_list, reset_list) {
 		/* For XGMI run all resets in parallel to speed up the process */
-		if (!queue_work(system_unbound_wq, &tmp_adev->xgmi_reset_work))
+		if (!queue_work(system_dfl_wq, &tmp_adev->xgmi_reset_work))
 			r = -EALREADY;
 		if (r) {
 			dev_err(tmp_adev->dev,
@@ -276,7 +277,7 @@ struct amdgpu_reset_domain *amdgpu_reset_create_reset_domain(enum amdgpu_reset_d
 {
 	struct amdgpu_reset_domain *reset_domain;
 
-	reset_domain = kvzalloc(sizeof(struct amdgpu_reset_domain), GFP_KERNEL);
+	reset_domain = kvzalloc_obj(struct amdgpu_reset_domain);
 	if (!reset_domain) {
 		DRM_ERROR("Failed to allocate amdgpu_reset_domain!");
 		return NULL;
@@ -339,6 +340,9 @@ void amdgpu_reset_get_desc(struct amdgpu_reset_context *rst_ctxt, char *buf,
 		break;
 	case AMDGPU_RESET_SRC_USER:
 		strscpy(buf, "user trigger", len);
+		break;
+	case AMDGPU_RESET_SRC_USERQ:
+		strscpy(buf, "user queue trigger", len);
 		break;
 	default:
 		strscpy(buf, "unknown", len);

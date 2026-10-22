@@ -1302,7 +1302,7 @@ static int saa7134_g_pixelaspect(struct file *file, void *priv,
 	return 0;
 }
 
-static int saa7134_g_selection(struct file *file, void *f, struct v4l2_selection *sel)
+static int saa7134_g_selection(struct file *file, void *priv, struct v4l2_selection *sel)
 {
 	struct saa7134_dev *dev = video_drvdata(file);
 
@@ -1325,7 +1325,7 @@ static int saa7134_g_selection(struct file *file, void *f, struct v4l2_selection
 	return 0;
 }
 
-static int saa7134_s_selection(struct file *file, void *f, struct v4l2_selection *sel)
+static int saa7134_s_selection(struct file *file, void *priv, struct v4l2_selection *sel)
 {
 	struct saa7134_dev *dev = video_drvdata(file);
 	struct v4l2_rect *b = &dev->crop_bounds;
@@ -1714,8 +1714,10 @@ int saa7134_video_init1(struct saa7134_dev *dev)
 	q->dev = &dev->pci->dev;
 	ret = vb2_queue_init(q);
 	if (ret)
-		return ret;
-	saa7134_pgtable_alloc(dev->pci, &dev->video_q.pt);
+		goto err_free_ctrl;
+	ret = saa7134_pgtable_alloc(dev->pci, &dev->video_q.pt);
+	if (ret)
+		goto err_free_ctrl;
 
 	q = &dev->vbi_vbq;
 	q->type = V4L2_BUF_TYPE_VBI_CAPTURE;
@@ -1732,16 +1734,29 @@ int saa7134_video_init1(struct saa7134_dev *dev)
 	q->lock = &dev->lock;
 	q->dev = &dev->pci->dev;
 	ret = vb2_queue_init(q);
-	if (ret)
-		return ret;
-	saa7134_pgtable_alloc(dev->pci, &dev->vbi_q.pt);
+	if (ret) {
+		saa7134_pgtable_free(dev->pci, &dev->video_q.pt);
+		goto err_free_ctrl;
+	}
+
+	ret = saa7134_pgtable_alloc(dev->pci, &dev->vbi_q.pt);
+	if (ret) {
+		saa7134_pgtable_free(dev->pci, &dev->video_q.pt);
+		goto err_free_ctrl;
+	}
 
 	return 0;
+
+err_free_ctrl:
+	v4l2_ctrl_handler_free(&dev->ctrl_handler);
+	if (card_has_radio(dev))
+		v4l2_ctrl_handler_free(&dev->radio_ctrl_handler);
+	return ret;
 }
 
 void saa7134_video_fini(struct saa7134_dev *dev)
 {
-	del_timer_sync(&dev->video_q.timeout);
+	timer_delete_sync(&dev->video_q.timeout);
 	/* free stuff */
 	saa7134_pgtable_free(dev->pci, &dev->video_q.pt);
 	saa7134_pgtable_free(dev->pci, &dev->vbi_q.pt);

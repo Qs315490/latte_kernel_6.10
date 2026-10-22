@@ -8,7 +8,7 @@ title: Qualcomm SM8550 PCI Express Root Complex
 
 maintainers:
   - Bjorn Andersson <andersson@kernel.org>
-  - Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>
+  - Manivannan Sadhasivam <mani@kernel.org>
 
 description:
   Qualcomm SM8550 SoC (and compatible) PCIe root complex controller is based on
@@ -20,8 +20,11 @@ properties:
       - const: qcom,pcie-sm8550
       - items:
           - enum:
+              - qcom,eliza-pcie
+              - qcom,kaanapali-pcie
               - qcom,sar2130p-pcie
               - qcom,pcie-sm8650
+              - qcom,pcie-sm8750
           - const: qcom,pcie-sm8550
 
   reg:
@@ -82,8 +85,62 @@ properties:
       - const: pci # PCIe core reset
       - const: link_down # PCIe link down reset
 
+required:
+  - power-domains
+  - resets
+  - reset-names
+
 allOf:
   - $ref: qcom,pcie-common.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,eliza-pcie
+    then:
+      properties:
+        reg:
+          minItems: 6
+        reg-names:
+          minItems: 6
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,eliza-pcie
+    then:
+      properties:
+        clocks:
+          minItems: 8
+          maxItems: 8
+        clock-names:
+          minItems: 8
+          maxItems: 8
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,eliza-pcie
+    then:
+      properties:
+        interrupts:
+          minItems: 9
+        interrupt-names:
+          minItems: 9
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,eliza-pcie
+    then:
+      properties:
+        resets:
+          minItems: 2
+        reset-names:
+          minItems: 2
 
 unevaluatedProperties: false
 

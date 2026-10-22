@@ -285,7 +285,7 @@ bnad_get_drvinfo(struct net_device *netdev, struct ethtool_drvinfo *drvinfo)
 
 	strscpy(drvinfo->driver, BNAD_NAME, sizeof(drvinfo->driver));
 
-	ioc_attr = kzalloc(sizeof(*ioc_attr), GFP_KERNEL);
+	ioc_attr = kzalloc_obj(*ioc_attr);
 	if (ioc_attr) {
 		spin_lock_irqsave(&bnad->bna_lock, flags);
 		bfa_nw_ioc_get_attr(&bnad->bna.ioceth.ioc, ioc_attr);
@@ -373,7 +373,7 @@ static int bnad_set_coalesce(struct net_device *netdev,
 			}
 			spin_unlock_irqrestore(&bnad->bna_lock, flags);
 			if (to_del)
-				del_timer_sync(&bnad->dim_timer);
+				timer_delete_sync(&bnad->dim_timer);
 			spin_lock_irqsave(&bnad->bna_lock, flags);
 			bnad_rx_coalescing_timeo_set(bnad);
 		}
@@ -900,7 +900,7 @@ bnad_get_flash_partition_by_offset(struct bnad *bnad, u32 offset,
 	u32 i, flash_part = 0, ret;
 	unsigned long flags = 0;
 
-	flash_attr = kzalloc(sizeof(struct bfa_flash_attr), GFP_KERNEL);
+	flash_attr = kzalloc_obj(struct bfa_flash_attr);
 	if (!flash_attr)
 		return 0;
 

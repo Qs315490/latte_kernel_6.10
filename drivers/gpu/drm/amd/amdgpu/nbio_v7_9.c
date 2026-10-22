@@ -21,7 +21,6 @@
  *
  */
 #include "amdgpu.h"
-#include "amdgpu_atombios.h"
 #include "nbio_v7_9.h"
 #include "amdgpu_ras.h"
 
@@ -31,9 +30,6 @@
 #include <uapi/linux/kfd_ioctl.h>
 
 #define NPS_MODE_MASK 0x000000FFL
-
-/* Core 0 Port 0 counter */
-#define smnPCIEP_NAK_COUNTER 0x1A340218
 
 static void nbio_v7_9_remap_hdp_registers(struct amdgpu_device *adev)
 {
@@ -45,19 +41,21 @@ static void nbio_v7_9_remap_hdp_registers(struct amdgpu_device *adev)
 
 static u32 nbio_v7_9_get_rev_id(struct amdgpu_device *adev)
 {
-	u32 tmp;
+	u32 rev_id;
 
-	tmp = IP_VERSION_SUBREV(amdgpu_ip_version_full(adev, NBIO_HWIP, 0));
-	/* If it is VF or subrevision holds a non-zero value, that should be used */
-	if (tmp || amdgpu_sriov_vf(adev))
-		return tmp;
+	/*
+	 * fetch the sub-revision field from the IP-discovery table
+	 * (returns zero if the table entry is not populated).
+	 */
+	if (amdgpu_sriov_vf(adev)) {
+		rev_id = IP_VERSION_SUBREV(amdgpu_ip_version_full(adev, NBIO_HWIP, 0));
+	} else {
+		rev_id = RREG32_SOC15(NBIO, 0, regRCC_STRAP0_RCC_DEV0_EPF0_STRAP0);
+		rev_id = REG_GET_FIELD(rev_id, RCC_STRAP0_RCC_DEV0_EPF0_STRAP0,
+				STRAP_ATI_REV_ID_DEV0_F0);
+	}
 
-	/* If discovery subrev is not updated, use register version */
-	tmp = RREG32_SOC15(NBIO, 0, regRCC_STRAP0_RCC_DEV0_EPF0_STRAP0);
-	tmp = REG_GET_FIELD(tmp, RCC_STRAP0_RCC_DEV0_EPF0_STRAP0,
-			    STRAP_ATI_REV_ID_DEV0_F0);
-
-	return tmp;
+	return rev_id;
 }
 
 static void nbio_v7_9_mc_access_enable(struct amdgpu_device *adev, bool enable)
@@ -178,8 +176,12 @@ static void nbio_v7_9_vcn_doorbell_range(struct amdgpu_device *adev, bool use_do
 {
 	u32 doorbell_range = 0, doorbell_ctrl = 0;
 	u32 aid_id = instance;
+	u32 range_size;
 
 	if (use_doorbell) {
+		range_size = (amdgpu_ip_version(adev, GC_HWIP, 0) ==
+						IP_VERSION(9, 5, 0)) ?
+						0xb : 0x9;
 		doorbell_range = REG_SET_FIELD(doorbell_range,
 				DOORBELL0_CTRL_ENTRY_0,
 				BIF_DOORBELL0_RANGE_OFFSET_ENTRY,
@@ -187,7 +189,7 @@ static void nbio_v7_9_vcn_doorbell_range(struct amdgpu_device *adev, bool use_do
 		doorbell_range = REG_SET_FIELD(doorbell_range,
 				DOORBELL0_CTRL_ENTRY_0,
 				BIF_DOORBELL0_RANGE_SIZE_ENTRY,
-				0x9);
+				range_size);
 		if (aid_id)
 			doorbell_range = REG_SET_FIELD(doorbell_range,
 					DOORBELL0_CTRL_ENTRY_0,
@@ -205,7 +207,7 @@ static void nbio_v7_9_vcn_doorbell_range(struct amdgpu_device *adev, bool use_do
 				S2A_DOORBELL_PORT1_RANGE_OFFSET, 0x4);
 		doorbell_ctrl = REG_SET_FIELD(doorbell_ctrl,
 				S2A_DOORBELL_ENTRY_1_CTRL,
-				S2A_DOORBELL_PORT1_RANGE_SIZE, 0x9);
+				S2A_DOORBELL_PORT1_RANGE_SIZE, range_size);
 		doorbell_ctrl = REG_SET_FIELD(doorbell_ctrl,
 				S2A_DOORBELL_ENTRY_1_CTRL,
 				S2A_DOORBELL_PORT1_AWADDR_31_28_VALUE, 0x4);
@@ -464,22 +466,6 @@ static void nbio_v7_9_init_registers(struct amdgpu_device *adev)
 	}
 }
 
-static u64 nbio_v7_9_get_pcie_replay_count(struct amdgpu_device *adev)
-{
-	u32 val, nak_r, nak_g;
-
-	if (adev->flags & AMD_IS_APU)
-		return 0;
-
-	/* Get the number of NAKs received and generated */
-	val = RREG32_PCIE(smnPCIEP_NAK_COUNTER);
-	nak_r = val & 0xFFFF;
-	nak_g = val >> 16;
-
-	/* Add the total number of NAKs, i.e the number of replays */
-	return (nak_r + nak_g);
-}
-
 #define MMIO_REG_HOLE_OFFSET 0x1A000
 
 static void nbio_v7_9_set_reg_remap(struct amdgpu_device *adev)
@@ -521,7 +507,6 @@ const struct amdgpu_nbio_funcs nbio_v7_9_funcs = {
 	.get_memory_partition_mode = nbio_v7_9_get_memory_partition_mode,
 	.is_nps_switch_requested = nbio_v7_9_is_nps_switch_requested,
 	.init_registers = nbio_v7_9_init_registers,
-	.get_pcie_replay_count = nbio_v7_9_get_pcie_replay_count,
 	.set_reg_remap = nbio_v7_9_set_reg_remap,
 };
 

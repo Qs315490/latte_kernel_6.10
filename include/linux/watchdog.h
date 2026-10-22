@@ -9,20 +9,25 @@
 #ifndef _LINUX_WATCHDOG_H
 #define _LINUX_WATCHDOG_H
 
-
 #include <linux/bitops.h>
-#include <linux/cdev.h>
-#include <linux/device.h>
-#include <linux/kernel.h>
+#include <linux/limits.h>
 #include <linux/notifier.h>
+#include <linux/printk.h>
+#include <linux/types.h>
+
 #include <uapi/linux/watchdog.h>
+
+struct attribute_group;
+struct device;
+struct module;
 
 struct watchdog_ops;
 struct watchdog_device;
 struct watchdog_core_data;
 struct watchdog_governor;
 
-/** struct watchdog_ops - The watchdog-devices operations
+/**
+ * struct watchdog_ops - The watchdog-devices operations
  *
  * @owner:	The module owner.
  * @start:	The routine for starting the watchdog device.
@@ -55,7 +60,8 @@ struct watchdog_ops {
 	long (*ioctl)(struct watchdog_device *, unsigned int, unsigned long);
 };
 
-/** struct watchdog_device - The structure that defines a watchdog device
+/**
+ * struct watchdog_device - The structure that defines a watchdog device
  *
  * @id:		The watchdog's ID. (Allocated by watchdog_register_device)
  * @parent:	The parent bus device
@@ -79,6 +85,8 @@ struct watchdog_ops {
  *		Replaces max_timeout if specified.
  * @reboot_nb:	The notifier block to stop watchdog on reboot.
  * @restart_nb:	The notifier block to register a restart function.
+ * @pm_nb:	The notifier block to stop watchdog on suspend and restart it
+ *		on resume.
  * @driver_data:Pointer to the drivers private data.
  * @wd_data:	Pointer to watchdog core internal data.
  * @status:	Field that contains the devices internal status bits.
@@ -125,7 +133,7 @@ struct watchdog_device {
 #define WATCHDOG_NOWAYOUT_INIT_STATUS	(WATCHDOG_NOWAYOUT << WDOG_NO_WAY_OUT)
 
 /* Use the following function to check whether or not the watchdog is active */
-static inline bool watchdog_active(struct watchdog_device *wdd)
+static inline bool watchdog_active(const struct watchdog_device *wdd)
 {
 	return test_bit(WDOG_ACTIVE, &wdd->status);
 }
@@ -134,7 +142,7 @@ static inline bool watchdog_active(struct watchdog_device *wdd)
  * Use the following function to check whether or not the hardware watchdog
  * is running
  */
-static inline bool watchdog_hw_running(struct watchdog_device *wdd)
+static inline bool watchdog_hw_running(const struct watchdog_device *wdd)
 {
 	return test_bit(WDOG_HW_RUNNING, &wdd->status);
 }
@@ -165,7 +173,8 @@ static inline void watchdog_stop_ping_on_suspend(struct watchdog_device *wdd)
 }
 
 /* Use the following function to check if a timeout value is invalid */
-static inline bool watchdog_timeout_invalid(struct watchdog_device *wdd, unsigned int t)
+static inline bool watchdog_timeout_invalid(const struct watchdog_device *wdd,
+					    unsigned int t)
 {
 	/*
 	 * The timeout is invalid if
@@ -184,7 +193,7 @@ static inline bool watchdog_timeout_invalid(struct watchdog_device *wdd, unsigne
 }
 
 /* Use the following function to check if a pretimeout value is invalid */
-static inline bool watchdog_pretimeout_invalid(struct watchdog_device *wdd,
+static inline bool watchdog_pretimeout_invalid(const struct watchdog_device *wdd,
 					       unsigned int t)
 {
 	return t && wdd->timeout && t >= wdd->timeout;
@@ -214,7 +223,8 @@ static inline void watchdog_notify_pretimeout(struct watchdog_device *wdd)
 /* drivers/watchdog/watchdog_core.c */
 void watchdog_set_restart_priority(struct watchdog_device *wdd, int priority);
 extern int watchdog_init_timeout(struct watchdog_device *wdd,
-				  unsigned int timeout_parm, struct device *dev);
+				 unsigned int timeout_parm,
+				 const struct device *dev);
 extern int watchdog_register_device(struct watchdog_device *);
 extern void watchdog_unregister_device(struct watchdog_device *);
 int watchdog_dev_suspend(struct watchdog_device *wdd);

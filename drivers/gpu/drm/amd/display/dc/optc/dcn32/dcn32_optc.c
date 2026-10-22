@@ -45,6 +45,7 @@
 static void optc32_set_odm_combine(struct timing_generator *optc, int *opp_id, int opp_cnt,
 		int segment_width, int last_segment_width)
 {
+	(void)last_segment_width;
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 	uint32_t memory_mask = 0;
 	int h_active = segment_width * opp_cnt;
@@ -100,7 +101,7 @@ static void optc32_set_odm_combine(struct timing_generator *optc, int *opp_id, i
 void optc32_get_odm_combine_segments(struct timing_generator *tg, int *odm_combine_segments)
 {
 	struct optc *optc1 = DCN10TG_FROM_TG(tg);
-	int segments;
+	uint32_t segments;
 
 	REG_GET(OPTC_DATA_SOURCE_SELECT, OPTC_NUM_OF_INPUT_SEGMENT, &segments);
 
@@ -297,7 +298,7 @@ static void optc32_set_drr(
 	optc32_setup_manual_trigger(optc);
 }
 
-static struct timing_generator_funcs dcn32_tg_funcs = {
+static const struct timing_generator_funcs dcn32_tg_funcs = {
 		.validate_timing = optc1_validate_timing,
 		.program_timing = optc1_program_timing,
 		.setup_vertical_interrupt0 = optc1_setup_vertical_interrupt0,
@@ -364,6 +365,8 @@ static struct timing_generator_funcs dcn32_tg_funcs = {
 		.get_optc_double_buffer_pending = optc3_get_optc_double_buffer_pending,
 		.get_otg_double_buffer_pending = optc3_get_otg_update_pending,
 		.get_pipe_update_pending = optc3_get_pipe_update_pending,
+		.read_otg_state = optc31_read_otg_state,
+		.optc_read_reg_state = optc31_read_reg_state,
 };
 
 void dcn32_timing_generator_init(struct optc *optc1)

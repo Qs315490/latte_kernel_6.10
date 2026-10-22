@@ -13,125 +13,79 @@
 /*
  * User space memory access functions
  */
+#include <linux/pgtable.h>
 #include <asm/asm-extable.h>
 #include <asm/processor.h>
 #include <asm/extable.h>
 #include <asm/facility.h>
 #include <asm-generic/access_ok.h>
+#include <asm/asce.h>
 #include <linux/instrumented.h>
 
 void debug_user_asce(int exit);
 
-union oac {
-	unsigned int val;
-	struct {
-		struct {
-			unsigned short key : 4;
-			unsigned short	   : 4;
-			unsigned short as  : 2;
-			unsigned short	   : 4;
-			unsigned short k   : 1;
-			unsigned short a   : 1;
-		} oac1;
-		struct {
-			unsigned short key : 4;
-			unsigned short	   : 4;
-			unsigned short as  : 2;
-			unsigned short	   : 4;
-			unsigned short k   : 1;
-			unsigned short a   : 1;
-		} oac2;
-	};
-};
+#ifdef CONFIG_KMSAN
+#define uaccess_kmsan_or_inline noinline __maybe_unused __no_sanitize_memory
+#else
+#define uaccess_kmsan_or_inline __always_inline
+#endif
 
-static __always_inline __must_check unsigned long
-raw_copy_from_user_key(void *to, const void __user *from, unsigned long size, unsigned long key)
+#define INLINE_COPY_USER
+
+static uaccess_kmsan_or_inline __must_check unsigned long
+raw_copy_from_user(void *to, const void __user *from, unsigned long size)
 {
-	unsigned long rem;
-	union oac spec = {
-		.oac2.key = key,
-		.oac2.as = PSW_BITS_AS_SECONDARY,
-		.oac2.k = 1,
-		.oac2.a = 1,
-	};
+	unsigned long osize;
+	int cc;
 
-	asm_inline volatile(
-		"	lr	%%r0,%[spec]\n"
-		"0:	mvcos	0(%[to]),0(%[from]),%[size]\n"
-		"1:	jz	5f\n"
-		"	algr	%[size],%[val]\n"
-		"	slgr	%[from],%[val]\n"
-		"	slgr	%[to],%[val]\n"
-		"	j	0b\n"
-		"2:	la	%[rem],4095(%[from])\n" /* rem = from + 4095 */
-		"	nr	%[rem],%[val]\n"	/* rem = (from + 4095) & -4096 */
-		"	slgr	%[rem],%[from]\n"
-		"	clgr	%[size],%[rem]\n"	/* copy crosses next page boundary? */
-		"	jnh	6f\n"
-		"3:	mvcos	0(%[to]),0(%[from]),%[rem]\n"
-		"4:	slgr	%[size],%[rem]\n"
-		"	j	6f\n"
-		"5:	lghi	%[size],0\n"
-		"6:\n"
-		EX_TABLE(0b, 2b)
-		EX_TABLE(1b, 2b)
-		EX_TABLE(3b, 6b)
-		EX_TABLE(4b, 6b)
-		: [size] "+&a" (size), [from] "+&a" (from), [to] "+&a" (to), [rem] "=&a" (rem)
-		: [val] "a" (-4096UL), [spec] "d" (spec.val)
-		: "cc", "memory", "0");
-	return size;
+	while (1) {
+		osize = size;
+		asm_inline volatile(
+			"	lhi	%%r0,%[spec]\n"
+			"0:	mvcos	%[to],%[from],%[size]\n"
+			"1:	nopr	%%r7\n"
+			CC_IPM(cc)
+			EX_TABLE_UA_MVCOS_FROM(0b, 0b)
+			EX_TABLE_UA_MVCOS_FROM(1b, 0b)
+			: CC_OUT(cc, cc), [size] "+d" (size), [to] "=Q" (*(char *)to)
+			: [spec] "I" (0x81), [from] "Q" (*(const char __user *)from)
+			: CC_CLOBBER_LIST("memory", "0"));
+		if (__builtin_constant_p(osize) && osize <= 4096)
+			return osize - size;
+		if (likely(CC_TRANSFORM(cc) == 0))
+			return osize - size;
+		size -= 4096;
+		to += 4096;
+		from += 4096;
+	}
 }
 
-static __always_inline __must_check unsigned long
-raw_copy_from_user(void *to, const void __user *from, unsigned long n)
+static uaccess_kmsan_or_inline __must_check unsigned long
+raw_copy_to_user(void __user *to, const void *from, unsigned long size)
 {
-	return raw_copy_from_user_key(to, from, n, 0);
-}
+	unsigned long osize;
+	int cc;
 
-static __always_inline __must_check unsigned long
-raw_copy_to_user_key(void __user *to, const void *from, unsigned long size, unsigned long key)
-{
-	unsigned long rem;
-	union oac spec = {
-		.oac1.key = key,
-		.oac1.as = PSW_BITS_AS_SECONDARY,
-		.oac1.k = 1,
-		.oac1.a = 1,
-	};
-
-	asm_inline volatile(
-		"	lr	%%r0,%[spec]\n"
-		"0:	mvcos	0(%[to]),0(%[from]),%[size]\n"
-		"1:	jz	5f\n"
-		"	algr	%[size],%[val]\n"
-		"	slgr	%[to],%[val]\n"
-		"	slgr	%[from],%[val]\n"
-		"	j	0b\n"
-		"2:	la	%[rem],4095(%[to])\n"	/* rem = to + 4095 */
-		"	nr	%[rem],%[val]\n"	/* rem = (to + 4095) & -4096 */
-		"	slgr	%[rem],%[to]\n"
-		"	clgr	%[size],%[rem]\n"	/* copy crosses next page boundary? */
-		"	jnh	6f\n"
-		"3:	mvcos	0(%[to]),0(%[from]),%[rem]\n"
-		"4:	slgr	%[size],%[rem]\n"
-		"	j	6f\n"
-		"5:	lghi	%[size],0\n"
-		"6:\n"
-		EX_TABLE(0b, 2b)
-		EX_TABLE(1b, 2b)
-		EX_TABLE(3b, 6b)
-		EX_TABLE(4b, 6b)
-		: [size] "+&a" (size), [to] "+&a" (to), [from] "+&a" (from), [rem] "=&a" (rem)
-		: [val] "a" (-4096UL), [spec] "d" (spec.val)
-		: "cc", "memory", "0");
-	return size;
-}
-
-static __always_inline __must_check unsigned long
-raw_copy_to_user(void __user *to, const void *from, unsigned long n)
-{
-	return raw_copy_to_user_key(to, from, n, 0);
+	while (1) {
+		osize = size;
+		asm_inline volatile(
+			"	llilh	%%r0,%[spec]\n"
+			"0:	mvcos	%[to],%[from],%[size]\n"
+			"1:	nopr	%%r7\n"
+			CC_IPM(cc)
+			EX_TABLE_UA_MVCOS_TO(0b, 0b)
+			EX_TABLE_UA_MVCOS_TO(1b, 0b)
+			: CC_OUT(cc, cc), [size] "+d" (size), [to] "=Q" (*(char __user *)to)
+			: [spec] "I" (0x81), [from] "Q" (*(const char *)from)
+			: CC_CLOBBER_LIST("memory", "0"));
+		if (__builtin_constant_p(osize) && osize <= 4096)
+			return osize - size;
+		if (likely(CC_TRANSFORM(cc) == 0))
+			return osize - size;
+		size -= 4096;
+		to += 4096;
+		from += 4096;
+	}
 }
 
 unsigned long __must_check
@@ -157,12 +111,6 @@ copy_to_user_key(void __user *to, const void *from, unsigned long n, unsigned lo
 }
 
 int __noreturn __put_user_bad(void);
-
-#ifdef CONFIG_KMSAN
-#define uaccess_kmsan_or_inline noinline __maybe_unused __no_sanitize_memory
-#else
-#define uaccess_kmsan_or_inline __always_inline
-#endif
 
 #ifdef CONFIG_CC_HAS_ASM_GOTO_OUTPUT
 
@@ -199,7 +147,7 @@ __put_user_##type##_noinstr(unsigned type __user *to,			\
 {									\
 	int rc;								\
 									\
-	asm volatile(							\
+	asm_inline volatile(						\
 		"	llilh	%%r0,%[spec]\n"				\
 		"0:	mvcos	%[to],%[from],%[size]\n"		\
 		"1:	lhi	%[rc],0\n"				\
@@ -315,7 +263,7 @@ __get_user_##type##_noinstr(unsigned type *to,				\
 {									\
 	int rc;								\
 									\
-	asm volatile(							\
+	asm_inline volatile(						\
 		"	lhi	%%r0,%[spec]\n"				\
 		"0:	mvcos	%[to],%[from],%[size]\n"		\
 		"1:	lhi	%[rc],0\n"				\
@@ -415,12 +363,34 @@ long __must_check strncpy_from_user(char *dst, const char __user *src, long coun
 
 long __must_check strnlen_user(const char __user *src, long count);
 
-/*
- * Zero Userspace
- */
-unsigned long __must_check __clear_user(void __user *to, unsigned long size);
+static uaccess_kmsan_or_inline __must_check unsigned long
+__clear_user(void __user *to, unsigned long size)
+{
+	unsigned long osize;
+	int cc;
 
-static inline unsigned long __must_check clear_user(void __user *to, unsigned long n)
+	while (1) {
+		osize = size;
+		asm_inline volatile(
+			"	llilh	%%r0,%[spec]\n"
+			"0:	mvcos	%[to],%[from],%[size]\n"
+			"1:	nopr	%%r7\n"
+			CC_IPM(cc)
+			EX_TABLE_UA_MVCOS_TO(0b, 0b)
+			EX_TABLE_UA_MVCOS_TO(1b, 0b)
+			: CC_OUT(cc, cc), [size] "+d" (size), [to] "=Q" (*(char __user *)to)
+			: [spec] "I" (0x81), [from] "Q" (*(const char *)empty_zero_page)
+			: CC_CLOBBER_LIST("memory", "0"));
+		if (__builtin_constant_p(osize) && osize <= 4096)
+			return osize - size;
+		if (CC_TRANSFORM(cc) == 0)
+			return osize - size;
+		size -= 4096;
+		to += 4096;
+	}
+}
+
+static __always_inline unsigned long __must_check clear_user(void __user *to, unsigned long n)
 {
 	might_fault();
 	return __clear_user(to, n);
@@ -497,215 +467,18 @@ do {									\
 
 #endif /* CONFIG_CC_HAS_ASM_GOTO_OUTPUT && CONFIG_CC_HAS_ASM_AOR_FORMAT_FLAGS */
 
-#define __get_kernel_nofault __mvc_kernel_nofault
-#define __put_kernel_nofault __mvc_kernel_nofault
+#define arch_get_kernel_nofault __mvc_kernel_nofault
+#define arch_put_kernel_nofault __mvc_kernel_nofault
 
-void __cmpxchg_user_key_called_with_bad_pointer(void);
-
-#define CMPXCHG_USER_KEY_MAX_LOOPS 128
-
-static __always_inline int __cmpxchg_user_key(unsigned long address, void *uval,
-					      __uint128_t old, __uint128_t new,
-					      unsigned long key, int size)
-{
-	int rc = 0;
-
-	switch (size) {
-	case 1: {
-		unsigned int prev, shift, mask, _old, _new;
-		unsigned long count;
-
-		shift = (3 ^ (address & 3)) << 3;
-		address ^= address & 3;
-		_old = ((unsigned int)old & 0xff) << shift;
-		_new = ((unsigned int)new & 0xff) << shift;
-		mask = ~(0xff << shift);
-		asm volatile(
-			"	spka	0(%[key])\n"
-			"	sacf	256\n"
-			"	llill	%[count],%[max_loops]\n"
-			"0:	l	%[prev],%[address]\n"
-			"1:	nr	%[prev],%[mask]\n"
-			"	xilf	%[mask],0xffffffff\n"
-			"	or	%[new],%[prev]\n"
-			"	or	%[prev],%[tmp]\n"
-			"2:	lr	%[tmp],%[prev]\n"
-			"3:	cs	%[prev],%[new],%[address]\n"
-			"4:	jnl	5f\n"
-			"	xr	%[tmp],%[prev]\n"
-			"	xr	%[new],%[tmp]\n"
-			"	nr	%[tmp],%[mask]\n"
-			"	jnz	5f\n"
-			"	brct	%[count],2b\n"
-			"5:	sacf	768\n"
-			"	spka	%[default_key]\n"
-			EX_TABLE_UA_LOAD_REG(0b, 5b, %[rc], %[prev])
-			EX_TABLE_UA_LOAD_REG(1b, 5b, %[rc], %[prev])
-			EX_TABLE_UA_LOAD_REG(3b, 5b, %[rc], %[prev])
-			EX_TABLE_UA_LOAD_REG(4b, 5b, %[rc], %[prev])
-			: [rc] "+&d" (rc),
-			  [prev] "=&d" (prev),
-			  [address] "+Q" (*(int *)address),
-			  [tmp] "+&d" (_old),
-			  [new] "+&d" (_new),
-			  [mask] "+&d" (mask),
-			  [count] "=a" (count)
-			: [key] "%[count]" (key << 4),
-			  [default_key] "J" (PAGE_DEFAULT_KEY),
-			  [max_loops] "J" (CMPXCHG_USER_KEY_MAX_LOOPS)
-			: "memory", "cc");
-		*(unsigned char *)uval = prev >> shift;
-		if (!count)
-			rc = -EAGAIN;
-		return rc;
-	}
-	case 2: {
-		unsigned int prev, shift, mask, _old, _new;
-		unsigned long count;
-
-		shift = (2 ^ (address & 2)) << 3;
-		address ^= address & 2;
-		_old = ((unsigned int)old & 0xffff) << shift;
-		_new = ((unsigned int)new & 0xffff) << shift;
-		mask = ~(0xffff << shift);
-		asm volatile(
-			"	spka	0(%[key])\n"
-			"	sacf	256\n"
-			"	llill	%[count],%[max_loops]\n"
-			"0:	l	%[prev],%[address]\n"
-			"1:	nr	%[prev],%[mask]\n"
-			"	xilf	%[mask],0xffffffff\n"
-			"	or	%[new],%[prev]\n"
-			"	or	%[prev],%[tmp]\n"
-			"2:	lr	%[tmp],%[prev]\n"
-			"3:	cs	%[prev],%[new],%[address]\n"
-			"4:	jnl	5f\n"
-			"	xr	%[tmp],%[prev]\n"
-			"	xr	%[new],%[tmp]\n"
-			"	nr	%[tmp],%[mask]\n"
-			"	jnz	5f\n"
-			"	brct	%[count],2b\n"
-			"5:	sacf	768\n"
-			"	spka	%[default_key]\n"
-			EX_TABLE_UA_LOAD_REG(0b, 5b, %[rc], %[prev])
-			EX_TABLE_UA_LOAD_REG(1b, 5b, %[rc], %[prev])
-			EX_TABLE_UA_LOAD_REG(3b, 5b, %[rc], %[prev])
-			EX_TABLE_UA_LOAD_REG(4b, 5b, %[rc], %[prev])
-			: [rc] "+&d" (rc),
-			  [prev] "=&d" (prev),
-			  [address] "+Q" (*(int *)address),
-			  [tmp] "+&d" (_old),
-			  [new] "+&d" (_new),
-			  [mask] "+&d" (mask),
-			  [count] "=a" (count)
-			: [key] "%[count]" (key << 4),
-			  [default_key] "J" (PAGE_DEFAULT_KEY),
-			  [max_loops] "J" (CMPXCHG_USER_KEY_MAX_LOOPS)
-			: "memory", "cc");
-		*(unsigned short *)uval = prev >> shift;
-		if (!count)
-			rc = -EAGAIN;
-		return rc;
-	}
-	case 4:	{
-		unsigned int prev = old;
-
-		asm volatile(
-			"	spka	0(%[key])\n"
-			"	sacf	256\n"
-			"0:	cs	%[prev],%[new],%[address]\n"
-			"1:	sacf	768\n"
-			"	spka	%[default_key]\n"
-			EX_TABLE_UA_LOAD_REG(0b, 1b, %[rc], %[prev])
-			EX_TABLE_UA_LOAD_REG(1b, 1b, %[rc], %[prev])
-			: [rc] "+&d" (rc),
-			  [prev] "+&d" (prev),
-			  [address] "+Q" (*(int *)address)
-			: [new] "d" ((unsigned int)new),
-			  [key] "a" (key << 4),
-			  [default_key] "J" (PAGE_DEFAULT_KEY)
-			: "memory", "cc");
-		*(unsigned int *)uval = prev;
-		return rc;
-	}
-	case 8: {
-		unsigned long prev = old;
-
-		asm volatile(
-			"	spka	0(%[key])\n"
-			"	sacf	256\n"
-			"0:	csg	%[prev],%[new],%[address]\n"
-			"1:	sacf	768\n"
-			"	spka	%[default_key]\n"
-			EX_TABLE_UA_LOAD_REG(0b, 1b, %[rc], %[prev])
-			EX_TABLE_UA_LOAD_REG(1b, 1b, %[rc], %[prev])
-			: [rc] "+&d" (rc),
-			  [prev] "+&d" (prev),
-			  [address] "+QS" (*(long *)address)
-			: [new] "d" ((unsigned long)new),
-			  [key] "a" (key << 4),
-			  [default_key] "J" (PAGE_DEFAULT_KEY)
-			: "memory", "cc");
-		*(unsigned long *)uval = prev;
-		return rc;
-	}
-	case 16: {
-		__uint128_t prev = old;
-
-		asm volatile(
-			"	spka	0(%[key])\n"
-			"	sacf	256\n"
-			"0:	cdsg	%[prev],%[new],%[address]\n"
-			"1:	sacf	768\n"
-			"	spka	%[default_key]\n"
-			EX_TABLE_UA_LOAD_REGPAIR(0b, 1b, %[rc], %[prev])
-			EX_TABLE_UA_LOAD_REGPAIR(1b, 1b, %[rc], %[prev])
-			: [rc] "+&d" (rc),
-			  [prev] "+&d" (prev),
-			  [address] "+QS" (*(__int128_t *)address)
-			: [new] "d" (new),
-			  [key] "a" (key << 4),
-			  [default_key] "J" (PAGE_DEFAULT_KEY)
-			: "memory", "cc");
-		*(__uint128_t *)uval = prev;
-		return rc;
-	}
-	}
-	__cmpxchg_user_key_called_with_bad_pointer();
-	return rc;
-}
-
-/**
- * cmpxchg_user_key() - cmpxchg with user space target, honoring storage keys
- * @ptr: User space address of value to compare to @old and exchange with
- *	 @new. Must be aligned to sizeof(*@ptr).
- * @uval: Address where the old value of *@ptr is written to.
- * @old: Old value. Compared to the content pointed to by @ptr in order to
- *	 determine if the exchange occurs. The old value read from *@ptr is
- *	 written to *@uval.
- * @new: New value to place at *@ptr.
- * @key: Access key to use for checking storage key protection.
- *
- * Perform a cmpxchg on a user space target, honoring storage key protection.
- * @key alone determines how key checking is performed, neither
- * storage-protection-override nor fetch-protection-override apply.
- * The caller must compare *@uval and @old to determine if values have been
- * exchanged. In case of an exception *@uval is set to zero.
- *
- * Return:     0: cmpxchg executed
- *	       -EFAULT: an exception happened when trying to access *@ptr
- *	       -EAGAIN: maxed out number of retries (byte and short only)
- */
-#define cmpxchg_user_key(ptr, uval, old, new, key)			\
-({									\
-	__typeof__(ptr) __ptr = (ptr);					\
-	__typeof__(uval) __uval = (uval);				\
-									\
-	BUILD_BUG_ON(sizeof(*(__ptr)) != sizeof(*(__uval)));		\
-	might_fault();							\
-	__chk_user_ptr(__ptr);						\
-	__cmpxchg_user_key((unsigned long)(__ptr), (void *)(__uval),	\
-			   (old), (new), (key), sizeof(*(__ptr)));	\
-})
+int __cmpxchg_key1(void *address, unsigned char *uval, unsigned char old,
+		   unsigned char new, unsigned long key);
+int __cmpxchg_key2(void *address, unsigned short *uval, unsigned short old,
+		   unsigned short new, unsigned long key);
+int __cmpxchg_key4(void *address, unsigned int *uval, unsigned int old,
+		   unsigned int new, unsigned long key);
+int __cmpxchg_key8(void *address, unsigned long *uval, unsigned long old,
+		   unsigned long new, unsigned long key);
+int __cmpxchg_key16(void *address, __uint128_t *uval, __uint128_t old,
+		    __uint128_t new, unsigned long key);
 
 #endif /* __S390_UACCESS_H */

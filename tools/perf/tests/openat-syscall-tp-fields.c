@@ -28,7 +28,6 @@ static int test__syscall_openat_tp_fields(struct test_suite *test __maybe_unused
 {
 	struct record_opts opts = {
 		.target = {
-			.uid = UINT_MAX,
 			.uses_mmap = true,
 		},
 		.no_buffering = true,
@@ -111,15 +110,20 @@ static int test__syscall_openat_tp_fields(struct test_suite *test __maybe_unused
 					continue;
 				}
 
+				perf_sample__init(&sample, /*all=*/false);
 				err = evsel__parse_sample(evsel, event, &sample);
 				if (err) {
 					pr_debug("Can't parse sample, err = %d\n", err);
+					perf_sample__exit(&sample);
 					goto out_delete_evlist;
 				}
 
-				tp_flags = evsel__intval(evsel, &sample, "flags");
-
-				if (flags != tp_flags) {
+				tp_flags = perf_sample__intval(&sample, "flags");
+				perf_sample__exit(&sample);
+				/* C library wrapper may set additional flags,
+				   access mode must be unchanged */
+				if ((tp_flags & O_ACCMODE) != (flags & O_ACCMODE) ||
+				    (tp_flags & flags) != flags) {
 					pr_debug("%s: Expected flags=%#x, got %#x\n",
 						 __func__, flags, tp_flags);
 					goto out_delete_evlist;

@@ -810,7 +810,7 @@ static int mt6360_charger_probe(struct platform_device *pdev)
 	memcpy(&mci->psy_desc, &mt6360_charger_desc, sizeof(mci->psy_desc));
 	mci->psy_desc.name = dev_name(&pdev->dev);
 	charger_cfg.drv_data = mci;
-	charger_cfg.of_node = pdev->dev.of_node;
+	charger_cfg.fwnode = dev_fwnode(&pdev->dev);
 	mci->psy = devm_power_supply_register(&pdev->dev,
 					      &mci->psy_desc, &charger_cfg);
 	if (IS_ERR(mci->psy))
@@ -841,15 +841,15 @@ static const struct of_device_id __maybe_unused mt6360_charger_of_id[] = {
 MODULE_DEVICE_TABLE(of, mt6360_charger_of_id);
 
 static const struct platform_device_id mt6360_charger_id[] = {
-	{ "mt6360-chg", 0 },
-	{},
+	{ .name = "mt6360-chg" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, mt6360_charger_id);
 
 static struct platform_driver mt6360_charger_driver = {
 	.driver = {
 		.name = "mt6360-chg",
-		.of_match_table = of_match_ptr(mt6360_charger_of_id),
+		.of_match_table = mt6360_charger_of_id,
 	},
 	.probe = mt6360_charger_probe,
 	.id_table = mt6360_charger_id,

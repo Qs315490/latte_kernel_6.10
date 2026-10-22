@@ -1,9 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * FUSE: Filesystem in Userspace
  * Copyright (C) 2016 Canonical Ltd. <seth.forshee@canonical.com>
- *
- * This program can be distributed under the terms of the GNU GPL.
- * See the file COPYING.
  */
 
 #include "fuse_i.h"
@@ -122,20 +120,16 @@ int fuse_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 		 * them to be refreshed the next time they are used,
 		 * and it also updates i_ctime.
 		 */
-		size_t size = posix_acl_xattr_size(acl->a_count);
+		size_t size;
 		void *value;
 
-		if (size > PAGE_SIZE)
-			return -E2BIG;
-
-		value = kmalloc(size, GFP_KERNEL);
+		value = posix_acl_to_xattr(fc->user_ns, acl, &size, GFP_KERNEL);
 		if (!value)
 			return -ENOMEM;
 
-		ret = posix_acl_to_xattr(fc->user_ns, acl, value, size);
-		if (ret < 0) {
+		if (size > PAGE_SIZE) {
 			kfree(value);
-			return ret;
+			return -E2BIG;
 		}
 
 		/*

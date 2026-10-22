@@ -97,7 +97,8 @@ static int xdp_umem_pin_pages(struct xdp_umem *umem, unsigned long address)
 	long npgs;
 	int err;
 
-	umem->pgs = kvcalloc(umem->npgs, sizeof(*umem->pgs), GFP_KERNEL | __GFP_NOWARN);
+	umem->pgs = kvzalloc_objs(*umem->pgs, umem->npgs,
+				  GFP_KERNEL | __GFP_NOWARN);
 	if (!umem->pgs)
 		return -ENOMEM;
 
@@ -202,11 +203,14 @@ static int xdp_umem_reg(struct xdp_umem *umem, struct xdp_umem_reg *mr)
 	if (!unaligned_chunks && chunks_rem)
 		return -EINVAL;
 
-	if (headroom >= chunk_size - XDP_PACKET_HEADROOM)
+	if (headroom > chunk_size - XDP_PACKET_HEADROOM -
+		       SKB_DATA_ALIGN(sizeof(struct skb_shared_info)) - 128)
 		return -EINVAL;
 
 	if (mr->flags & XDP_UMEM_TX_METADATA_LEN) {
 		if (mr->tx_metadata_len >= 256 || mr->tx_metadata_len % 8)
+			return -EINVAL;
+		if (mr->tx_metadata_len < 16)
 			return -EINVAL;
 		umem->tx_metadata_len = mr->tx_metadata_len;
 	}
@@ -249,7 +253,7 @@ struct xdp_umem *xdp_umem_create(struct xdp_umem_reg *mr)
 	struct xdp_umem *umem;
 	int err;
 
-	umem = kzalloc(sizeof(*umem), GFP_KERNEL);
+	umem = kzalloc_obj(*umem);
 	if (!umem)
 		return ERR_PTR(-ENOMEM);
 

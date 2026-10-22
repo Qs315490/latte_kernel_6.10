@@ -43,7 +43,6 @@ static const char * const qcs615_tiles[] = {
 		.io_reg = 0x1000 * id + 0x4,		\
 		.intr_cfg_reg = 0x1000 * id + 0x8,	\
 		.intr_status_reg = 0x1000 * id + 0xc,	\
-		.intr_target_reg = 0x1000 * id + 0x8,	\
 		.tile = _tile,			\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
@@ -70,7 +69,6 @@ static const char * const qcs615_tiles[] = {
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = _tile,				\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
@@ -96,7 +94,6 @@ static const char * const qcs615_tiles[] = {
 		.io_reg = offset + 0x4,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = WEST,				\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
@@ -819,7 +816,7 @@ static const char *const wsa_data_groups[] = {
 };
 
 static const struct pinfunction qcs615_functions[] = {
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(adsp_ext),
 	MSM_PIN_FUNCTION(agera_pll),
 	MSM_PIN_FUNCTION(aoss_cti),
@@ -1043,11 +1040,11 @@ static const struct msm_pingroup qcs615_groups[] = {
 static const struct msm_gpio_wakeirq_map qcs615_pdc_map[] = {
 	{ 1, 45 },    { 3, 31 },    { 7, 55 },    { 9, 110 },   { 11, 34 },
 	{ 13, 33 },   { 14, 35 },   { 17, 46 },   { 19, 48 },   { 21, 83 },
-	{ 22, 36 },   { 26, 38 },   { 35, 37 },   { 39, 125 },  { 41, 47 },
-	{ 47, 49 },   { 48, 51 },   { 50, 52 },   { 51, 123 },  { 55, 56 },
+	{ 22, 36 },   { 26, 38 },   { 35, 37 },   { 39, 118 },  { 41, 47 },
+	{ 47, 49 },   { 48, 51 },   { 50, 52 },   { 51, 116 },  { 55, 56 },
 	{ 56, 57 },   { 57, 58 },   { 60, 60 },   { 71, 54 },   { 80, 73 },
 	{ 81, 64 },   { 82, 50 },   { 83, 65 },   { 84, 92 },   { 85, 99 },
-	{ 86, 67 },   { 87, 84 },   { 88, 124 },  { 89, 122 },  { 90, 69 },
+	{ 86, 67 },   { 87, 84 },   { 88, 117 },  { 89, 115 },  { 90, 69 },
 	{ 92, 88 },   { 93, 75 },   { 94, 91 },   { 95, 72 },   { 96, 82 },
 	{ 97, 74 },   { 98, 95 },   { 99, 94 },   { 100, 100 }, { 101, 40 },
 	{ 102, 93 },  { 103, 77 },  { 104, 78 },  { 105, 96 },  { 107, 97 },
@@ -1062,11 +1059,12 @@ static const struct msm_pinctrl_soc_data qcs615_tlmm = {
 	.nfunctions = ARRAY_SIZE(qcs615_functions),
 	.groups = qcs615_groups,
 	.ngroups = ARRAY_SIZE(qcs615_groups),
-	.ngpios = 123,
+	.ngpios = 124,
 	.tiles = qcs615_tiles,
 	.ntiles = ARRAY_SIZE(qcs615_tiles),
 	.wakeirq_map = qcs615_pdc_map,
 	.nwakeirq_map = ARRAY_SIZE(qcs615_pdc_map),
+	.wakeirq_dual_edge_errata = true,
 };
 
 static const struct of_device_id qcs615_tlmm_of_match[] = {
@@ -1075,6 +1073,7 @@ static const struct of_device_id qcs615_tlmm_of_match[] = {
 	},
 	{},
 };
+MODULE_DEVICE_TABLE(of, qcs615_tlmm_of_match);
 
 static int qcs615_tlmm_probe(struct platform_device *pdev)
 {
@@ -1087,7 +1086,6 @@ static struct platform_driver qcs615_tlmm_driver = {
 		.of_match_table = qcs615_tlmm_of_match,
 	},
 	.probe = qcs615_tlmm_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init qcs615_tlmm_init(void)
@@ -1104,4 +1102,3 @@ module_exit(qcs615_tlmm_exit);
 
 MODULE_DESCRIPTION("QTI QCS615 TLMM driver");
 MODULE_LICENSE("GPL");
-MODULE_DEVICE_TABLE(of, qcs615_tlmm_of_match);

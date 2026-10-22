@@ -19,6 +19,7 @@
 #include <linux/pm.h>
 #include <linux/i2c.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -108,6 +109,10 @@ static const struct reg_default nau8822_reg_defaults[] = {
 	{ NAU8822_REG_OUTPUT_TIEOFF, 0x0000 },
 };
 
+static const char * const nau8822_supply_names[NAU8822_NUM_SUPPLIES] = {
+	"vdda", "vddb", "vddc", "vddspk",
+};
+
 static bool nau8822_readable_reg(struct device *dev, unsigned int reg)
 {
 	switch (reg) {
@@ -180,8 +185,7 @@ static bool nau8822_volatile(struct device *dev, unsigned int reg)
 static int nau8822_eq_get(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-			snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct soc_bytes_ext *params = (void *)kcontrol->private_value;
 	int i, reg;
 	u16 reg_val, *val;
@@ -212,8 +216,7 @@ static int nau8822_eq_get(struct snd_kcontrol *kcontrol,
 static int nau8822_eq_put(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-			snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct soc_bytes_ext *params = (void *)kcontrol->private_value;
 	void *data;
 	u16 *val, value;
@@ -806,10 +809,10 @@ static int nau8822_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	dev_dbg(component->dev, "%s\n", __func__);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		ctrl2_val |= 1;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		ctrl2_val &= ~1;
 		break;
 	default:
@@ -959,6 +962,7 @@ static int nau8822_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	struct nau8822 *nau8822 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	switch (level) {
 	case SND_SOC_BIAS_ON:
@@ -966,7 +970,7 @@ static int nau8822_set_bias_level(struct snd_soc_component *component,
 
 	case SND_SOC_BIAS_PREPARE:
 		if (nau8822->mclk &&
-			snd_soc_component_get_bias_level(component) != SND_SOC_BIAS_ON) {
+			snd_soc_dapm_get_bias_level(dapm) != SND_SOC_BIAS_ON) {
 			int ret = clk_prepare_enable(nau8822->mclk);
 
 			if (ret) {
@@ -983,7 +987,7 @@ static int nau8822_set_bias_level(struct snd_soc_component *component,
 
 	case SND_SOC_BIAS_STANDBY:
 		if (nau8822->mclk &&
-			snd_soc_component_get_bias_level(component) != SND_SOC_BIAS_OFF)
+			snd_soc_dapm_get_bias_level(dapm) != SND_SOC_BIAS_OFF)
 			clk_disable_unprepare(nau8822->mclk);
 
 		snd_soc_component_update_bits(component,
@@ -991,8 +995,7 @@ static int nau8822_set_bias_level(struct snd_soc_component *component,
 			NAU8822_IOBUF_EN | NAU8822_ABIAS_EN,
 			NAU8822_IOBUF_EN | NAU8822_ABIAS_EN);
 
-		if (snd_soc_component_get_bias_level(component) ==
-			SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			snd_soc_component_update_bits(component,
 				NAU8822_REG_POWER_MANAGEMENT_1,
 				NAU8822_REFIMP_MASK, NAU8822_REFIMP_3K);
@@ -1055,8 +1058,10 @@ static struct snd_soc_dai_driver nau8822_dai = {
 static int nau8822_suspend(struct snd_soc_component *component)
 {
 	struct nau8822 *nau8822 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
-	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_OFF);
+	snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_OFF);
+	regulator_bulk_disable(NAU8822_NUM_SUPPLIES, nau8822->supplies);
 
 	regcache_mark_dirty(nau8822->regmap);
 
@@ -1066,10 +1071,20 @@ static int nau8822_suspend(struct snd_soc_component *component)
 static int nau8822_resume(struct snd_soc_component *component)
 {
 	struct nau8822 *nau8822 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+	int ret = regulator_bulk_enable(NAU8822_NUM_SUPPLIES, nau8822->supplies);
+
+	if (ret) {
+		dev_err(component->dev,
+			"Failed to enable regulators: %d\n", ret);
+		return ret;
+	}
+
+	fsleep(100);
 
 	regcache_sync(nau8822->regmap);
 
-	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_STANDBY);
+	snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_STANDBY);
 
 	return 0;
 }
@@ -1153,7 +1168,7 @@ static int nau8822_i2c_probe(struct i2c_client *i2c)
 {
 	struct device *dev = &i2c->dev;
 	struct nau8822 *nau8822 = dev_get_platdata(dev);
-	int ret;
+	int ret, i;
 
 	if (!nau8822) {
 		nau8822 = devm_kzalloc(dev, sizeof(*nau8822), GFP_KERNEL);
@@ -1167,6 +1182,13 @@ static int nau8822_i2c_probe(struct i2c_client *i2c)
 		return dev_err_probe(&i2c->dev, PTR_ERR(nau8822->mclk),
 			"Error getting mclk\n");
 
+	for (i = 0; i < NAU8822_NUM_SUPPLIES; i++)
+		nau8822->supplies[i].supply = nau8822_supply_names[i];
+
+	ret = devm_regulator_bulk_get(dev, NAU8822_NUM_SUPPLIES, nau8822->supplies);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to get regulators\n");
+
 	nau8822->regmap = devm_regmap_init_i2c(i2c, &nau8822_regmap_config);
 	if (IS_ERR(nau8822->regmap)) {
 		ret = PTR_ERR(nau8822->regmap);
@@ -1175,25 +1197,42 @@ static int nau8822_i2c_probe(struct i2c_client *i2c)
 	}
 	nau8822->dev = dev;
 
+	ret = regulator_bulk_enable(NAU8822_NUM_SUPPLIES, nau8822->supplies);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to enable regulators\n");
+
+	fsleep(100);
+
 	/* Reset the codec */
 	ret = regmap_write(nau8822->regmap, NAU8822_REG_RESET, 0x00);
 	if (ret != 0) {
 		dev_err(&i2c->dev, "Failed to issue reset: %d\n", ret);
-		return ret;
+		goto err_reg;
 	}
 
 	ret = devm_snd_soc_register_component(dev, &soc_component_dev_nau8822,
 						&nau8822_dai, 1);
 	if (ret != 0) {
 		dev_err(&i2c->dev, "Failed to register CODEC: %d\n", ret);
-		return ret;
+		goto err_reg;
 	}
 
 	return 0;
+
+err_reg:
+	regulator_bulk_disable(NAU8822_NUM_SUPPLIES, nau8822->supplies);
+	return ret;
+}
+
+static void nau8822_i2c_remove(struct i2c_client *i2c)
+{
+	struct nau8822 *nau8822 = i2c_get_clientdata(i2c);
+
+	regulator_bulk_disable(NAU8822_NUM_SUPPLIES, nau8822->supplies);
 }
 
 static const struct i2c_device_id nau8822_i2c_id[] = {
-	{ "nau8822" },
+	{ .name = "nau8822" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, nau8822_i2c_id);
@@ -1212,6 +1251,7 @@ static struct i2c_driver nau8822_i2c_driver = {
 		.of_match_table = of_match_ptr(nau8822_of_match),
 	},
 	.probe = nau8822_i2c_probe,
+	.remove = nau8822_i2c_remove,
 	.id_table = nau8822_i2c_id,
 };
 module_i2c_driver(nau8822_i2c_driver);

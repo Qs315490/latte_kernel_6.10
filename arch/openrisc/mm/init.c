@@ -35,19 +35,16 @@
 #include <asm/fixmap.h>
 #include <asm/tlbflush.h>
 #include <asm/sections.h>
+#include <asm/cacheflush.h>
 
 int mem_init_done;
 
-static void __init zone_sizes_init(void)
+void __init arch_zone_limits_init(unsigned long *max_zone_pfns)
 {
-	unsigned long max_zone_pfn[MAX_NR_ZONES] = { 0 };
-
 	/*
 	 * We use only ZONE_NORMAL
 	 */
-	max_zone_pfn[ZONE_NORMAL] = max_low_pfn;
-
-	free_area_init(max_zone_pfn);
+	max_zone_pfns[ZONE_NORMAL] = max_low_pfn;
 }
 
 extern const char _s_kernel_ro[], _e_kernel_ro[];
@@ -140,8 +137,6 @@ void __init paging_init(void)
 
 	map_ram();
 
-	zone_sizes_init();
-
 	/* self modifying code ;) */
 	/* Since the old TLB miss handler has been running up until now,
 	 * the kernel pages are still all RW, so we can still modify the
@@ -176,8 +171,8 @@ void __init paging_init(void)
 	barrier();
 
 	/* Invalidate instruction caches after code modification */
-	mtspr(SPR_ICBIR, 0x900);
-	mtspr(SPR_ICBIR, 0xa00);
+	local_icache_block_inv(0x900);
+	local_icache_block_inv(0xa00);
 
 	/* New TLB miss handlers and kernel page tables are in now place.
 	 * Make sure that page flags get updated for all pages in TLB by
@@ -193,21 +188,12 @@ void __init mem_init(void)
 {
 	BUG_ON(!mem_map);
 
-	max_mapnr = max_low_pfn;
-	high_memory = (void *)__va(max_low_pfn * PAGE_SIZE);
-
-	/* clear the zero-page */
-	memset((void *)empty_zero_page, 0, PAGE_SIZE);
-
-	/* this will put all low memory onto the freelists */
-	memblock_free_all();
-
 	printk("mem_init_done ...........................................\n");
 	mem_init_done = 1;
 	return;
 }
 
-static int __init map_page(unsigned long va, phys_addr_t pa, pgprot_t prot)
+static int map_page(unsigned long va, phys_addr_t pa, pgprot_t prot)
 {
 	p4d_t *p4d;
 	pud_t *pud;
@@ -231,7 +217,11 @@ static int __init map_page(unsigned long va, phys_addr_t pa, pgprot_t prot)
 	return 0;
 }
 
-void __init __set_fixmap(enum fixed_addresses idx,
+/*
+ * __set_fix must now support both EARLYCON and TEXT_POKE mappings,
+ * which are used at different stages of kernel execution.
+ */
+void __set_fixmap(enum fixed_addresses idx,
 			 phys_addr_t phys, pgprot_t prot)
 {
 	unsigned long address = __fix_to_virt(idx);

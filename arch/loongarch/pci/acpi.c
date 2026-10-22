@@ -61,11 +61,18 @@ static void acpi_release_root_info(struct acpi_pci_root_info *ci)
 static int acpi_prepare_root_resources(struct acpi_pci_root_info *ci)
 {
 	int status;
+	unsigned long long pci_h = 0;
 	struct resource_entry *entry, *tmp;
 	struct acpi_device *device = ci->bridge;
 
+	acpi_remove_early_pio();
+
 	status = acpi_pci_probe_root_resources(ci);
 	if (status > 0) {
+		acpi_evaluate_integer(device->handle, "PCIH", NULL, &pci_h);
+		if (pci_h)
+			return status;
+
 		resource_list_for_each_entry_safe(entry, tmp, &ci->resources) {
 			if (entry->res->flags & IORESOURCE_MEM) {
 				entry->offset = ci->root->mcfg_addr & GENMASK_ULL(63, 40);
@@ -101,7 +108,7 @@ static struct pci_config_window *arch_pci_ecam_create(struct device *dev,
 	if (busr->start > busr->end)
 		return ERR_PTR(-EINVAL);
 
-	cfg = kzalloc(sizeof(*cfg), GFP_KERNEL);
+	cfg = kzalloc_obj(*cfg);
 	if (!cfg)
 		return ERR_PTR(-ENOMEM);
 
@@ -194,17 +201,18 @@ struct pci_bus *pci_acpi_scan_root(struct acpi_pci_root *root)
 {
 	struct pci_bus *bus;
 	struct pci_root_info *info;
+	struct pci_host_bridge *host;
 	struct acpi_pci_root_ops *root_ops;
 	int domain = root->segment;
 	int busnum = root->secondary.start;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info) {
 		pr_warn("pci_bus %04x:%02x: ignored (out of memory)\n", domain, busnum);
 		return NULL;
 	}
 
-	root_ops = kzalloc(sizeof(*root_ops), GFP_KERNEL);
+	root_ops = kzalloc_obj(*root_ops);
 	if (!root_ops) {
 		kfree(info);
 		return NULL;
@@ -237,8 +245,17 @@ struct pci_bus *pci_acpi_scan_root(struct acpi_pci_root *root)
 			return NULL;
 		}
 
-		pci_bus_size_bridges(bus);
-		pci_bus_assign_resources(bus);
+		/* If we must preserve the resource configuration, claim now */
+		host = pci_find_host_bridge(bus);
+		if (host->preserve_config)
+			pci_bus_claim_resources(bus);
+
+		/*
+		 * Assign whatever was left unassigned. If we didn't claim above,
+		 * this will reassign everything.
+		 */
+		pci_assign_unassigned_root_bus_resources(bus);
+
 		list_for_each_entry(child, &bus->children, node)
 			pcie_bus_configure_settings(child);
 	}

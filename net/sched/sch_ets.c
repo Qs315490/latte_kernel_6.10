@@ -74,6 +74,11 @@ static const struct nla_policy ets_class_policy[TCA_ETS_MAX + 1] = {
 	[TCA_ETS_QUANTA_BAND] = { .type = NLA_U32 },
 };
 
+static bool cl_is_active(struct ets_class *cl)
+{
+	return !list_empty(&cl->alist);
+}
+
 static int ets_quantum_parse(struct Qdisc *sch, const struct nlattr *attr,
 			     unsigned int *quantum,
 			     struct netlink_ext_ack *extack)
@@ -110,12 +115,12 @@ static void ets_offload_change(struct Qdisc *sch)
 	struct ets_sched *q = qdisc_priv(sch);
 	struct tc_ets_qopt_offload qopt;
 	unsigned int w_psum_prev = 0;
-	unsigned int q_psum = 0;
-	unsigned int q_sum = 0;
 	unsigned int quantum;
 	unsigned int w_psum;
 	unsigned int weight;
 	unsigned int i;
+	u64 q_psum = 0;
+	u64 q_sum = 0;
 
 	if (!tc_can_offload(dev) || !dev->netdev_ops->ndo_setup_tc)
 		return;
@@ -133,8 +138,12 @@ static void ets_offload_change(struct Qdisc *sch)
 
 	for (i = 0; i < q->nbands; i++) {
 		quantum = q->classes[i].quantum;
-		q_psum += quantum;
-		w_psum = quantum ? q_psum * 100 / q_sum : 0;
+		if (quantum) {
+			q_psum += quantum;
+			w_psum = div64_u64(q_psum * 100, q_sum);
+		} else {
+			w_psum = 0;
+		}
 		weight = w_psum - w_psum_prev;
 		w_psum_prev = w_psum;
 
@@ -238,9 +247,7 @@ static int ets_class_change(struct Qdisc *sch, u32 classid, u32 parentid,
 	if (err)
 		return err;
 
-	sch_tree_lock(sch);
-	cl->quantum = quantum;
-	sch_tree_unlock(sch);
+	WRITE_ONCE(cl->quantum, quantum);
 
 	ets_offload_change(sch);
 	return 0;
@@ -293,7 +300,7 @@ static void ets_class_qlen_notify(struct Qdisc *sch, unsigned long arg)
 	 * to remove them.
 	 */
 	if (!ets_class_is_strict(q, cl) && sch->q.qlen)
-		list_del(&cl->alist);
+		list_del_init(&cl->alist);
 }
 
 static int ets_class_dump(struct Qdisc *sch, unsigned long arg,
@@ -311,7 +318,7 @@ static int ets_class_dump(struct Qdisc *sch, unsigned long arg,
 	if (!nest)
 		goto nla_put_failure;
 	if (!ets_class_is_strict(q, cl)) {
-		if (nla_put_u32(skb, TCA_ETS_QUANTA_BAND, cl->quantum))
+		if (nla_put_u32(skb, TCA_ETS_QUANTA_BAND, READ_ONCE(cl->quantum)))
 			goto nla_put_failure;
 	}
 	return nla_nest_end(skb, nest);
@@ -384,7 +391,7 @@ static struct ets_class *ets_classify(struct sk_buff *skb, struct Qdisc *sch,
 	*qerr = NET_XMIT_SUCCESS | __NET_XMIT_BYPASS;
 	if (TC_H_MAJ(skb->priority) != sch->handle) {
 		fl = rcu_dereference_bh(q->filter_list);
-		err = tcf_classify(skb, NULL, fl, &res, false);
+		err = tcf_classify_qdisc(skb, fl, &res, false);
 #ifdef CONFIG_NET_CLS_ACT
 		switch (err) {
 		case TC_ACT_STOLEN:
@@ -416,7 +423,6 @@ static int ets_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	struct ets_sched *q = qdisc_priv(sch);
 	struct ets_class *cl;
 	int err = 0;
-	bool first;
 
 	cl = ets_classify(skb, sch, &err);
 	if (!cl) {
@@ -426,7 +432,6 @@ static int ets_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		return err;
 	}
 
-	first = !cl->qdisc->q.qlen;
 	err = qdisc_enqueue(skb, cl->qdisc, to_free);
 	if (unlikely(err != NET_XMIT_SUCCESS)) {
 		if (net_xmit_drop_count(err)) {
@@ -436,13 +441,13 @@ static int ets_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		return err;
 	}
 
-	if (first && !ets_class_is_strict(q, cl)) {
+	if (!cl_is_active(cl) && !ets_class_is_strict(q, cl)) {
 		list_add_tail(&cl->alist, &q->active);
-		cl->deficit = cl->quantum;
+		cl->deficit = READ_ONCE(cl->quantum);
 	}
 
-	sch->qstats.backlog += len;
-	sch->q.qlen++;
+	qstats_backlog_add(sch, len);
+	qdisc_qlen_inc(sch);
 	return err;
 }
 
@@ -451,7 +456,7 @@ ets_qdisc_dequeue_skb(struct Qdisc *sch, struct sk_buff *skb)
 {
 	qdisc_bstats_update(sch, skb);
 	qdisc_qstats_backlog_dec(sch, skb);
-	sch->q.qlen--;
+	qdisc_qlen_dec(sch);
 	return skb;
 }
 
@@ -488,11 +493,11 @@ static struct sk_buff *ets_qdisc_dequeue(struct Qdisc *sch)
 			if (unlikely(!skb))
 				goto out;
 			if (cl->qdisc->q.qlen == 0)
-				list_del(&cl->alist);
+				list_del_init(&cl->alist);
 			return ets_qdisc_dequeue_skb(sch, skb);
 		}
 
-		cl->deficit += cl->quantum;
+		cl->deficit += READ_ONCE(cl->quantum);
 		list_move_tail(&cl->alist, &q->active);
 	}
 out:
@@ -648,6 +653,12 @@ static int ets_qdisc_change(struct Qdisc *sch, struct nlattr *opt,
 
 	sch_tree_lock(sch);
 
+	for (i = nbands; i < oldbands; i++) {
+		if (cl_is_active(&q->classes[i]))
+			list_del_init(&q->classes[i].alist);
+		qdisc_purge_queue(q->classes[i].qdisc);
+	}
+
 	WRITE_ONCE(q->nbands, nbands);
 	for (i = nstrict; i < q->nstrict; i++) {
 		if (q->classes[i].qdisc->q.qlen) {
@@ -655,10 +666,9 @@ static int ets_qdisc_change(struct Qdisc *sch, struct nlattr *opt,
 			q->classes[i].deficit = quanta[i];
 		}
 	}
-	for (i = q->nbands; i < oldbands; i++) {
-		if (i >= q->nstrict && q->classes[i].qdisc->q.qlen)
-			list_del(&q->classes[i].alist);
-		qdisc_tree_flush_backlog(q->classes[i].qdisc);
+	for (i = q->nstrict; i < nstrict; i++) {
+		if (cl_is_active(&q->classes[i]))
+			list_del_init(&q->classes[i].alist);
 	}
 	WRITE_ONCE(q->nstrict, nstrict);
 	memcpy(q->prio2band, priomap, sizeof(priomap));
@@ -713,7 +723,7 @@ static void ets_qdisc_reset(struct Qdisc *sch)
 
 	for (band = q->nstrict; band < q->nbands; band++) {
 		if (q->classes[band].qdisc->q.qlen)
-			list_del(&q->classes[band].alist);
+			list_del_init(&q->classes[band].alist);
 	}
 	for (band = 0; band < q->nbands; band++)
 		qdisc_reset(q->classes[band].qdisc);

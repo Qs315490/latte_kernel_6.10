@@ -66,7 +66,6 @@ static void esw_destroy_legacy_fdb_table(struct mlx5_eswitch *esw)
 	esw->fdb_table.legacy.addr_grp = NULL;
 	esw->fdb_table.legacy.allmulti_grp = NULL;
 	esw->fdb_table.legacy.promisc_grp = NULL;
-	atomic64_set(&esw->user_count, 0);
 }
 
 static int esw_create_legacy_fdb_table(struct mlx5_eswitch *esw)
@@ -96,7 +95,7 @@ static int esw_create_legacy_fdb_table(struct mlx5_eswitch *esw)
 	if (!flow_group_in)
 		return -ENOMEM;
 
-	ft_attr.max_fte = POOL_NEXT_SIZE;
+	ft_attr.max_fte = MLX5_FS_MAX_POOL_SIZE;
 	ft_attr.prio = LEGACY_FDB_PRIO;
 	fdb = mlx5_create_flow_table(root_ns, &ft_attr);
 	if (IS_ERR(fdb)) {
@@ -260,7 +259,7 @@ static int _mlx5_eswitch_set_vepa_locked(struct mlx5_eswitch *esw,
 	if (err)
 		return err;
 
-	spec = kvzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kvzalloc_obj(*spec);
 	if (!spec) {
 		err = -ENOMEM;
 		goto out;

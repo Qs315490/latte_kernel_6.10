@@ -26,6 +26,7 @@ struct env {
 	bool list;
 	bool affinity;
 	bool quiet;
+	bool stacktrace;
 	int consumer_cnt;
 	int producer_cnt;
 	int nr_cpus;
@@ -46,6 +47,7 @@ struct bench_res {
 	unsigned long gp_ns;
 	unsigned long gp_ct;
 	unsigned int stime;
+	unsigned long duration_ns;
 };
 
 struct bench {
@@ -68,6 +70,7 @@ extern struct env env;
 extern const struct bench *bench;
 
 void setup_libbpf(void);
+void bench_force_done(void);
 void hits_drops_report_progress(int iter, struct bench_res *res, long delta_ns);
 void hits_drops_report_final(struct bench_res res[], int res_cnt);
 void false_hits_report_progress(int iter, struct bench_res *res, long delta_ns);

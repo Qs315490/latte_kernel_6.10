@@ -83,8 +83,8 @@ static inline int bpf_prog_get_map_ids(int prog_fd, __u32 *nr_map_ids, __u32 *ma
 	int err;
 
 	memset(&info, 0, len);
-	info.nr_map_ids = *nr_map_ids,
-	info.map_ids = ptr_to_u64(map_ids),
+	info.nr_map_ids = *nr_map_ids;
+	info.map_ids = ptr_to_u64(map_ids);
 
 	err = bpf_prog_get_info_by_fd(prog_fd, &info, &len);
 	if (!ASSERT_OK(err, "bpf_prog_get_info_by_fd"))
@@ -293,7 +293,7 @@ static int get_btf_id_by_fd(int btf_fd, __u32 *id)
  *  1) Create a new btf, it's referenced only by a file descriptor, so refcnt=1
  *  2) Load a BPF prog with fd_array[0] = btf_fd; now btf's refcnt=2
  *  3) Close the btf_fd, now refcnt=1
- * Wait and check that BTF stil exists.
+ * Wait and check that BTF still exists.
  */
 static void check_fd_array_cnt__referenced_btfs(void)
 {
@@ -312,7 +312,7 @@ static void check_fd_array_cnt__referenced_btfs(void)
 
 	/* btf should still exist when original file descriptor is closed */
 	err = get_btf_id_by_fd(extra_fds[0], &btf_id);
-	if (!ASSERT_GE(err, 0, "get_btf_id_by_fd"))
+	if (!ASSERT_EQ(err, 0, "get_btf_id_by_fd"))
 		goto cleanup;
 
 	Close(extra_fds[0]);
@@ -412,8 +412,8 @@ static void check_fd_array_cnt__fd_array_too_big(void)
 	ASSERT_EQ(prog_fd, -E2BIG, "prog should have been rejected with -E2BIG");
 
 cleanup_fds:
-	while (i > 0)
-		Close(extra_fds[--i]);
+	while (i-- > 0)
+		Close(extra_fds[i]);
 }
 
 void test_fd_array_cnt(void)

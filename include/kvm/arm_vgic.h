@@ -8,8 +8,8 @@
 #include <linux/bits.h>
 #include <linux/kvm.h>
 #include <linux/irqreturn.h>
-#include <linux/kref.h>
 #include <linux/mutex.h>
+#include <linux/refcount.h>
 #include <linux/spinlock.h>
 #include <linux/static_key.h>
 #include <linux/types.h>
@@ -19,7 +19,9 @@
 #include <linux/jump_label.h>
 
 #include <linux/irqchip/arm-gic-v4.h>
+#include <linux/irqchip/arm-gic-v5.h>
 
+#define VGIC_V5_MAX_CPUS	512
 #define VGIC_V3_MAX_CPUS	512
 #define VGIC_V2_MAX_CPUS	8
 #define VGIC_NR_IRQS_LEGACY     256
@@ -31,13 +33,101 @@
 #define VGIC_MIN_LPI		8192
 #define KVM_IRQCHIP_NUM_PINS	(1020 - 32)
 
-#define irq_is_ppi(irq) ((irq) >= VGIC_NR_SGIS && (irq) < VGIC_NR_PRIVATE_IRQS)
-#define irq_is_spi(irq) ((irq) >= VGIC_NR_PRIVATE_IRQS && \
-			 (irq) <= VGIC_MAX_SPI)
+/*
+ * GICv5 supports 128 PPIs, but only the first 64 are architected. We only
+ * support the timers and PMU in KVM, both of which are architected. Rather than
+ * handling twice the state, we instead opt to only support the architected set
+ * in KVM for now. At a future stage, this can be bumped up to 128, if required.
+ */
+#define VGIC_V5_NR_PRIVATE_IRQS	64
+
+#define is_v5_type(t, i)	(FIELD_GET(GICV5_HWIRQ_TYPE, (i)) == (t))
+
+#define __irq_is_sgi(t, i)						\
+	({								\
+		bool __ret;						\
+									\
+		switch (t) {						\
+		case KVM_DEV_TYPE_ARM_VGIC_V5:				\
+			__ret = false;					\
+			break;						\
+		default:						\
+			__ret  = (i) < VGIC_NR_SGIS;			\
+		}							\
+									\
+		__ret;							\
+	})
+
+#define __irq_is_ppi(t, i)						\
+	({								\
+		bool __ret;						\
+									\
+		switch (t) {						\
+		case KVM_DEV_TYPE_ARM_VGIC_V5:				\
+			__ret = is_v5_type(GICV5_HWIRQ_TYPE_PPI, (i));	\
+			break;						\
+		default:						\
+			__ret  = (i) >= VGIC_NR_SGIS;			\
+			__ret &= (i) < VGIC_NR_PRIVATE_IRQS;		\
+		}							\
+									\
+		__ret;							\
+	})
+
+#define __irq_is_spi(t, i)						\
+	({								\
+		bool __ret;						\
+									\
+		switch (t) {						\
+		case KVM_DEV_TYPE_ARM_VGIC_V5:				\
+			__ret = is_v5_type(GICV5_HWIRQ_TYPE_SPI, (i));	\
+			break;						\
+		default:						\
+			__ret  = (i) <= VGIC_MAX_SPI;			\
+			__ret &= (i) >= VGIC_NR_PRIVATE_IRQS;		\
+		}							\
+									\
+		__ret;							\
+	})
+
+#define __irq_is_lpi(t, i)						\
+	({								\
+		bool __ret;						\
+									\
+		switch (t) {						\
+		case KVM_DEV_TYPE_ARM_VGIC_V5:				\
+			__ret = is_v5_type(GICV5_HWIRQ_TYPE_LPI, (i));	\
+			break;						\
+		default:						\
+			__ret  = (i) >= 8192;				\
+		}							\
+									\
+		__ret;							\
+	})
+
+#define irq_is_sgi(k, i) __irq_is_sgi((k)->arch.vgic.vgic_model, i)
+#define irq_is_ppi(k, i) __irq_is_ppi((k)->arch.vgic.vgic_model, i)
+#define irq_is_spi(k, i) __irq_is_spi((k)->arch.vgic.vgic_model, i)
+#define irq_is_lpi(k, i) __irq_is_lpi((k)->arch.vgic.vgic_model, i)
+
+#define irq_is_private(k, i) (irq_is_ppi(k, i) || irq_is_sgi(k, i))
+
+#define vgic_v5_get_hwirq_id(x) FIELD_GET(GICV5_HWIRQ_ID, (x))
+#define vgic_v5_set_hwirq_id(x) FIELD_PREP(GICV5_HWIRQ_ID, (x))
+
+#define __vgic_v5_set_type(t) (FIELD_PREP(GICV5_HWIRQ_TYPE, GICV5_HWIRQ_TYPE_##t))
+#define vgic_v5_make_ppi(x) (__vgic_v5_set_type(PPI) | vgic_v5_set_hwirq_id(x))
+#define vgic_v5_make_spi(x) (__vgic_v5_set_type(SPI) | vgic_v5_set_hwirq_id(x))
+#define vgic_v5_make_lpi(x) (__vgic_v5_set_type(LPI) | vgic_v5_set_hwirq_id(x))
+
+#define __vgic_is_v(k, v) ((k)->arch.vgic.vgic_model == KVM_DEV_TYPE_ARM_VGIC_V##v)
+#define vgic_is_v3(k) (__vgic_is_v(k, 3))
+#define vgic_is_v5(k) (__vgic_is_v(k, 5))
 
 enum vgic_type {
 	VGIC_V2,		/* Good ol' GICv2 */
 	VGIC_V3,		/* New fancy GICv3 */
+	VGIC_V5,		/* Newer, fancier GICv5 */
 };
 
 /* same for all guests, as depending only on the _host's_ GIC model */
@@ -58,6 +148,9 @@ struct vgic_global {
 	/* virtual control interface mapping, HYP VA */
 	void __iomem		*vctrl_hyp;
 
+	/* Physical CPU interface, kernel VA */
+	void __iomem		*gicc_base;
+
 	/* Number of implemented list registers */
 	int			nr_lr;
 
@@ -77,10 +170,18 @@ struct vgic_global {
 	/* Pseudo GICv3 from outer space */
 	bool			no_hw_deactivation;
 
-	/* GIC system register CPU interface */
+	/* GICv3 system register CPU interface */
 	struct static_key_false gicv3_cpuif;
 
+	/* GICv3 compat mode on a GICv5 host */
+	bool			has_gcie_v3_compat;
+
 	u32			ich_vtr_el2;
+
+	/* GICv5 PPI capabilities */
+	struct {
+		DECLARE_BITMAP(impl_ppi_mask, VGIC_V5_NR_PRIVATE_IRQS);
+	} vgic_v5_ppi_caps;
 };
 
 extern struct vgic_global kvm_vgic_global_state;
@@ -94,6 +195,8 @@ enum vgic_irq_config {
 	VGIC_CONFIG_LEVEL
 };
 
+struct vgic_irq;
+
 /*
  * Per-irq ops overriding some common behavious.
  *
@@ -102,7 +205,7 @@ enum vgic_irq_config {
  */
 struct irq_ops {
 	/* Per interrupt flags for special-cased interrupts */
-	unsigned long flags;
+	unsigned long (*get_flags)(void);
 
 #define VGIC_IRQ_SW_RESAMPLE	BIT(0)	/* Clear the active state for resampling */
 
@@ -112,10 +215,24 @@ struct irq_ops {
 	 * peaking into the physical GIC.
 	 */
 	bool (*get_input_level)(int vintid);
+
+	/*
+	 * Function pointer to override the queuing of an IRQ.
+	 */
+	bool (*queue_irq_unlock)(struct kvm *kvm, struct vgic_irq *irq,
+				unsigned long flags) __releases(&irq->irq_lock);
+
+	/*
+	 * Callback function pointer to either enable or disable direct
+	 * injection for a mapped interrupt.
+	 */
+	void (*set_direct_injection)(struct kvm_vcpu *vcpu,
+				     struct vgic_irq *irq, bool direct);
 };
 
 struct vgic_irq {
 	raw_spinlock_t irq_lock;	/* Protects the content of the struct */
+	u32 intid;			/* Guest visible INTID */
 	struct rcu_head rcu;
 	struct list_head ap_list;
 
@@ -130,15 +247,16 @@ struct vgic_irq {
 					 * affinity reg (v3).
 					 */
 
-	u32 intid;			/* Guest visible INTID */
-	bool line_level;		/* Level only */
-	bool pending_latch;		/* The pending latch state used to calculate
+	bool pending_latch:1;		/* The pending latch state used to calculate
 					 * the pending state for both level
 					 * and edge triggered IRQs. */
-	bool active;			/* not used for LPIs */
-	bool enabled;
-	bool hw;			/* Tied to HW IRQ */
-	struct kref refcount;		/* Used for LPIs */
+	enum vgic_irq_config config:1;	/* Level or edge */
+	bool line_level:1;		/* Level only */
+	bool enabled:1;
+	bool active:1;
+	bool hw:1;			/* Tied to HW IRQ */
+	bool on_lr:1;			/* Present in a CPU LR */
+	refcount_t refcount;		/* Used for LPIs */
 	u32 hwintid;			/* HW INTID number */
 	unsigned int host_irq;		/* linux irq corresponding to hwintid */
 	union {
@@ -149,9 +267,8 @@ struct vgic_irq {
 	u8 active_source;		/* GICv2 SGIs only */
 	u8 priority;
 	u8 group;			/* 0 == group 0, 1 == group 1 */
-	enum vgic_irq_config config;	/* Level or edge */
 
-	struct irq_ops *ops;
+	const struct irq_ops *ops;
 
 	void *owner;			/* Opaque pointer to reserve an interrupt
 					   for in-kernel devices. */
@@ -159,7 +276,8 @@ struct vgic_irq {
 
 static inline bool vgic_irq_needs_resampling(struct vgic_irq *irq)
 {
-	return irq->ops && (irq->ops->flags & VGIC_IRQ_SW_RESAMPLE);
+	return irq->ops && irq->ops->get_flags &&
+	       (irq->ops->get_flags() & VGIC_IRQ_SW_RESAMPLE);
 }
 
 struct vgic_register_region;
@@ -227,6 +345,26 @@ struct vgic_redist_region {
 	struct list_head list;
 };
 
+struct vgic_v5_vm {
+	/*
+	 * We only expose a subset of PPIs to the guest. This subset is a
+	 * combination of the PPIs that are actually implemented and what we
+	 * actually choose to expose.
+	 */
+	DECLARE_BITMAP(vgic_ppi_mask, VGIC_V5_NR_PRIVATE_IRQS);
+
+	/* A mask of the PPIs that are exposed for userspace to drive. */
+	DECLARE_BITMAP(userspace_ppis, VGIC_V5_NR_PRIVATE_IRQS);
+
+	/*
+	 * The HMR itself is handled by the hardware, but we still need to have
+	 * a mask that we can use when merging in pending state (only the state
+	 * of Edge PPIs is merged back in from the guest an the HMR provides a
+	 * convenient way to do that).
+	 */
+	DECLARE_BITMAP(vgic_ppi_hmr, VGIC_V5_NR_PRIVATE_IRQS);
+};
+
 struct vgic_dist {
 	bool			in_kernel;
 	bool			ready;
@@ -249,6 +387,12 @@ struct vgic_dist {
 
 	int			nr_spis;
 
+	/* The GIC maintenance IRQ for nested hypervisors. */
+	u32			mi_intid;
+
+	/* Track the number of in-flight active SPIs */
+	atomic_t		active_spis;
+
 	/* base addresses in guest physical address space: */
 	gpa_t			vgic_dist_base;		/* distributor */
 	union {
@@ -261,12 +405,16 @@ struct vgic_dist {
 	/* distributor enabled */
 	bool			enabled;
 
+	/* Supports SGIs without active state */
+	bool			nassgicap;
+
 	/* Wants SGIs without active state */
 	bool			nassgireq;
 
 	struct vgic_irq		*spis;
 
 	struct vgic_io_device	dist_iodev;
+	struct vgic_io_device	cpuif_iodev;
 
 	bool			has_its;
 	bool			table_write_in_progress;
@@ -279,11 +427,7 @@ struct vgic_dist {
 	 */
 	u64			propbaser;
 
-#define LPI_XA_MARK_DEBUG_ITER	XA_MARK_0
 	struct xarray		lpi_xa;
-
-	/* used by vgic-debug */
-	struct vgic_state_iter *iter;
 
 	/*
 	 * GICv4 ITS per-VM data, containing the IRQ domain, the VPE
@@ -293,6 +437,11 @@ struct vgic_dist {
 	 * else.
 	 */
 	struct its_vm		its_vm;
+
+	/*
+	 * GICv5 per-VM data.
+	 */
+	struct vgic_v5_vm	gicv5_vm;
 };
 
 struct vgic_v2_cpu_if {
@@ -323,11 +472,35 @@ struct vgic_v3_cpu_if {
 	unsigned int used_lrs;
 };
 
+struct vgic_v5_cpu_if {
+	u64	vgic_apr;
+	u64	vgic_vmcr;
+
+	/* PPI register state */
+	DECLARE_BITMAP(vgic_ppi_dvir, VGIC_V5_NR_PRIVATE_IRQS);
+	DECLARE_BITMAP(vgic_ppi_activer, VGIC_V5_NR_PRIVATE_IRQS);
+	DECLARE_BITMAP(vgic_ppi_enabler, VGIC_V5_NR_PRIVATE_IRQS);
+	/* We have one byte (of which 5 bits are used) per PPI for priority */
+	u64	vgic_ppi_priorityr[VGIC_V5_NR_PRIVATE_IRQS / 8];
+
+	/*
+	 * The ICSR is re-used across host and guest, and hence it needs to be
+	 * saved/restored. Only one copy is required as the host should block
+	 * preemption between executing GIC CDRCFG and acccessing the
+	 * ICC_ICSR_EL1. A guest, of course, can never guarantee this, and hence
+	 * it is the hyp's responsibility to keep the state constistent.
+	 */
+	u64	vgic_icsr;
+
+	struct gicv5_vpe gicv5_vpe;
+};
+
 struct vgic_cpu {
 	/* CPU vif control registers for world switch */
 	union {
 		struct vgic_v2_cpu_if	vgic_v2;
 		struct vgic_v3_cpu_if	vgic_v3;
+		struct vgic_v5_cpu_if	vgic_v5;
 	};
 
 	struct vgic_irq *private_irqs;
@@ -365,21 +538,27 @@ struct vgic_cpu {
 
 extern struct static_key_false vgic_v2_cpuif_trap;
 extern struct static_key_false vgic_v3_cpuif_trap;
+extern struct static_key_false vgic_v3_has_v2_compat;
 
 int kvm_set_legacy_vgic_v2_addr(struct kvm *kvm, struct kvm_arm_device_addr *dev_addr);
 void kvm_vgic_early_init(struct kvm *kvm);
 int kvm_vgic_vcpu_init(struct kvm_vcpu *vcpu);
+int kvm_vgic_vcpu_nv_init(struct kvm_vcpu *vcpu);
 int kvm_vgic_create(struct kvm *kvm, u32 type);
 void kvm_vgic_destroy(struct kvm *kvm);
 void kvm_vgic_vcpu_destroy(struct kvm_vcpu *vcpu);
 int kvm_vgic_map_resources(struct kvm *kvm);
+void kvm_vgic_finalize_idregs(struct kvm *kvm);
 int kvm_vgic_hyp_init(void);
 void kvm_vgic_init_cpu_hardware(void);
 
 int kvm_vgic_inject_irq(struct kvm *kvm, struct kvm_vcpu *vcpu,
 			unsigned int intid, bool level, void *owner);
+void kvm_vgic_set_irq_ops(struct kvm_vcpu *vcpu, u32 vintid,
+			  const struct irq_ops *ops);
+void kvm_vgic_clear_irq_ops(struct kvm_vcpu *vcpu, u32 vintid);
 int kvm_vgic_map_phys_irq(struct kvm_vcpu *vcpu, unsigned int host_irq,
-			  u32 vintid, struct irq_ops *ops);
+			  u32 vintid);
 int kvm_vgic_unmap_phys_irq(struct kvm_vcpu *vcpu, unsigned int vintid);
 int kvm_vgic_get_map(struct kvm_vcpu *vcpu, unsigned int vintid);
 bool kvm_vgic_map_is_active(struct kvm_vcpu *vcpu, unsigned int vintid);
@@ -389,16 +568,32 @@ int kvm_vgic_vcpu_pending_irq(struct kvm_vcpu *vcpu);
 void kvm_vgic_load(struct kvm_vcpu *vcpu);
 void kvm_vgic_put(struct kvm_vcpu *vcpu);
 
+u16 vgic_v3_get_eisr(struct kvm_vcpu *vcpu);
+u16 vgic_v3_get_elrsr(struct kvm_vcpu *vcpu);
+u64 vgic_v3_get_misr(struct kvm_vcpu *vcpu);
+
 #define irqchip_in_kernel(k)	(!!((k)->arch.vgic.in_kernel))
 #define vgic_initialized(k)	((k)->arch.vgic.initialized)
-#define vgic_ready(k)		((k)->arch.vgic.ready)
-#define vgic_valid_spi(k, i)	(((i) >= VGIC_NR_PRIVATE_IRQS) && \
-			((i) < (k)->arch.vgic.nr_spis + VGIC_NR_PRIVATE_IRQS))
+#define vgic_valid_spi(k, i)						\
+	({								\
+		bool __ret = irq_is_spi(k, i);				\
+									\
+		switch ((k)->arch.vgic.vgic_model) {			\
+		case KVM_DEV_TYPE_ARM_VGIC_V5:				\
+			__ret &= FIELD_GET(GICV5_HWIRQ_ID, i) < (k)->arch.vgic.nr_spis; \
+			break;						\
+		default:						\
+			__ret &= (i) < ((k)->arch.vgic.nr_spis + VGIC_NR_PRIVATE_IRQS); \
+		}							\
+									\
+		__ret;							\
+	})
 
 bool kvm_vcpu_has_pending_irqs(struct kvm_vcpu *vcpu);
 void kvm_vgic_sync_hwstate(struct kvm_vcpu *vcpu);
 void kvm_vgic_flush_hwstate(struct kvm_vcpu *vcpu);
 void kvm_vgic_reset_mapped_irq(struct kvm_vcpu *vcpu, u32 vintid);
+void kvm_vgic_process_async_update(struct kvm_vcpu *vcpu);
 
 void vgic_v3_dispatch_sgi(struct kvm_vcpu *vcpu, u64 reg, bool allow_group1);
 
@@ -426,12 +621,18 @@ struct kvm_kernel_irq_routing_entry;
 int kvm_vgic_v4_set_forwarding(struct kvm *kvm, int irq,
 			       struct kvm_kernel_irq_routing_entry *irq_entry);
 
-int kvm_vgic_v4_unset_forwarding(struct kvm *kvm, int irq,
-				 struct kvm_kernel_irq_routing_entry *irq_entry);
+void kvm_vgic_v4_unset_forwarding(struct kvm *kvm, int host_irq);
 
 int vgic_v4_load(struct kvm_vcpu *vcpu);
 void vgic_v4_commit(struct kvm_vcpu *vcpu);
 int vgic_v4_put(struct kvm_vcpu *vcpu);
+
+int vgic_v5_finalize_ppi_state(struct kvm *kvm);
+bool vgic_v5_ppi_queue_irq_unlock(struct kvm *kvm, struct vgic_irq *irq,
+				  unsigned long flags);
+void vgic_v5_set_ppi_dvi(struct kvm_vcpu *vcpu, struct vgic_irq *irq, bool dvi);
+
+bool vgic_state_is_nested(struct kvm_vcpu *vcpu);
 
 /* CPU HP callbacks */
 void kvm_vgic_cpu_up(void);

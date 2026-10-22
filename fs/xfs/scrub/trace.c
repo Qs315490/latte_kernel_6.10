@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -22,6 +22,7 @@
 #include "xfs_parent.h"
 #include "xfs_metafile.h"
 #include "xfs_rtgroup.h"
+#include "xfs_trans.h"
 #include "scrub/scrub.h"
 #include "scrub/xfile.h"
 #include "scrub/xfarray.h"
@@ -47,7 +48,7 @@ xchk_btree_cur_fsbno(
 
 	if (level == cur->bc_nlevels - 1 &&
 	    cur->bc_ops->type == XFS_BTREE_TYPE_INODE)
-		return XFS_INO_TO_FSB(cur->bc_mp, cur->bc_ino.ip->i_ino);
+		return XFS_INODE_TO_FSB(cur->bc_ino.ip);
 
 	return NULLFSBLOCK;
 }

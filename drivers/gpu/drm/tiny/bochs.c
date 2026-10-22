@@ -19,8 +19,12 @@
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/drm_managed.h>
 #include <drm/drm_module.h>
+#include <drm/drm_panic.h>
 #include <drm/drm_plane_helper.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
+#include <drm/drm_vblank.h>
+#include <drm/drm_vblank_helper.h>
 
 #include <video/vga.h>
 
@@ -251,7 +255,7 @@ static int bochs_hw_init(struct bochs_device *bochs)
 		}
 		bochs->ioports = 1;
 	} else {
-		dev_err(dev->dev, "I/O ports are not supported\n");
+		drm_err(dev, "I/O ports are not supported\n");
 		return -EIO;
 	}
 
@@ -415,7 +419,7 @@ static const uint32_t bochs_primary_plane_formats[] = {
 };
 
 static int bochs_primary_plane_helper_atomic_check(struct drm_plane *plane,
-						   struct drm_atomic_state *state)
+						   struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state, plane);
 	struct drm_crtc *new_crtc = new_plane_state->crtc;
@@ -438,7 +442,7 @@ static int bochs_primary_plane_helper_atomic_check(struct drm_plane *plane,
 }
 
 static void bochs_primary_plane_helper_atomic_update(struct drm_plane *plane,
-						     struct drm_atomic_state *state)
+						     struct drm_atomic_commit *state)
 {
 	struct drm_device *dev = plane->dev;
 	struct bochs_device *bochs = to_bochs_device(dev);
@@ -469,10 +473,28 @@ static void bochs_primary_plane_helper_atomic_update(struct drm_plane *plane,
 	bochs_hw_setformat(bochs, fb->format);
 }
 
+static int bochs_primary_plane_helper_get_scanout_buffer(struct drm_plane *plane,
+							 struct drm_scanout_buffer *sb)
+{
+	struct bochs_device *bochs = to_bochs_device(plane->dev);
+	struct iosys_map map = IOSYS_MAP_INIT_VADDR_IOMEM(bochs->fb_map);
+
+	if (plane->state && plane->state->fb) {
+		sb->format = plane->state->fb->format;
+		sb->width = plane->state->fb->width;
+		sb->height = plane->state->fb->height;
+		sb->pitch[0] = plane->state->fb->pitches[0];
+		sb->map[0] = map;
+		return 0;
+	}
+	return -ENODEV;
+}
+
 static const struct drm_plane_helper_funcs bochs_primary_plane_helper_funcs = {
 	DRM_GEM_SHADOW_PLANE_HELPER_FUNCS,
 	.atomic_check = bochs_primary_plane_helper_atomic_check,
 	.atomic_update = bochs_primary_plane_helper_atomic_update,
+	.get_scanout_buffer = bochs_primary_plane_helper_get_scanout_buffer,
 };
 
 static const struct drm_plane_funcs bochs_primary_plane_funcs = {
@@ -491,7 +513,7 @@ static void bochs_crtc_helper_mode_set_nofb(struct drm_crtc *crtc)
 }
 
 static int bochs_crtc_helper_atomic_check(struct drm_crtc *crtc,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 
@@ -502,24 +524,27 @@ static int bochs_crtc_helper_atomic_check(struct drm_crtc *crtc,
 }
 
 static void bochs_crtc_helper_atomic_enable(struct drm_crtc *crtc,
-					    struct drm_atomic_state *state)
+					    struct drm_atomic_commit *state)
 {
 	struct bochs_device *bochs = to_bochs_device(crtc->dev);
 
 	bochs_hw_blank(bochs, false);
+	drm_crtc_vblank_on(crtc);
 }
 
 static void bochs_crtc_helper_atomic_disable(struct drm_crtc *crtc,
-					     struct drm_atomic_state *crtc_state)
+					     struct drm_atomic_commit *crtc_state)
 {
 	struct bochs_device *bochs = to_bochs_device(crtc->dev);
 
+	drm_crtc_vblank_off(crtc);
 	bochs_hw_blank(bochs, true);
 }
 
 static const struct drm_crtc_helper_funcs bochs_crtc_helper_funcs = {
 	.mode_set_nofb = bochs_crtc_helper_mode_set_nofb,
 	.atomic_check = bochs_crtc_helper_atomic_check,
+	.atomic_flush = drm_crtc_vblank_atomic_flush,
 	.atomic_enable = bochs_crtc_helper_atomic_enable,
 	.atomic_disable = bochs_crtc_helper_atomic_disable,
 };
@@ -531,6 +556,7 @@ static const struct drm_crtc_funcs bochs_crtc_funcs = {
 	.page_flip = drm_atomic_helper_page_flip,
 	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
+	DRM_CRTC_VBLANK_TIMER_FUNCS,
 };
 
 static const struct drm_encoder_funcs bochs_encoder_funcs = {
@@ -651,6 +677,10 @@ static int bochs_kms_init(struct bochs_device *bochs)
 	drm_connector_attach_edid_property(connector);
 	drm_connector_attach_encoder(connector, encoder);
 
+	ret = drm_vblank_init(dev, 1);
+	if (ret)
+		return ret;
+
 	drm_mode_config_reset(dev);
 
 	return 0;
@@ -731,24 +761,20 @@ static int bochs_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent
 
 	ret = pcim_enable_device(pdev);
 	if (ret)
-		goto err_free_dev;
+		return ret;
 
 	pci_set_drvdata(pdev, dev);
 
 	ret = bochs_load(bochs);
 	if (ret)
-		goto err_free_dev;
+		return ret;
 
 	ret = drm_dev_register(dev, 0);
 	if (ret)
-		goto err_free_dev;
+		return ret;
 
 	drm_client_setup(dev, NULL);
 
-	return ret;
-
-err_free_dev:
-	drm_dev_put(dev);
 	return ret;
 }
 

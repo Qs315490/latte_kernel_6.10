@@ -40,7 +40,10 @@
 #define AU1000_GPIO2_INTENABLE	0x10
 #define AU1000_GPIO2_ENABLE	0x14
 
-struct gpio;
+struct software_node;
+
+extern const struct software_node alchemy_gpio1_node;
+extern const struct software_node alchemy_gpio2_node;
 
 static inline int au1000_gpio1_to_irq(int gpio)
 {

@@ -55,11 +55,28 @@
 #include "hisi-ptt.h"
 #include "s390-cpumsf.h"
 #include "util/mmap.h"
+#include "powerpc-vpadtl.h"
 
 #include <linux/ctype.h>
 #include "symbol/kallsyms.h"
 #include <internal/lib.h>
 #include "util/sample.h"
+
+#define AUXTRACE_SYNTH_EVENT_ID_OFFSET	1000000000ULL
+
+/*
+ * Event IDs are allocated sequentially, so a big offset from any
+ * existing ID will reach a unused range.
+ */
+u64 auxtrace_synth_id_range_start(struct evsel *evsel)
+{
+	u64 id = evsel->core.id[0] + AUXTRACE_SYNTH_EVENT_ID_OFFSET;
+
+	if (!id)
+		id = 1;
+
+	return id;
+}
 
 /*
  * Make a group from 'leader' to 'last', requiring that the events were not
@@ -185,10 +202,7 @@ void auxtrace_mmap_params__set_idx(struct auxtrace_mmap_params *mp,
 
 	if (per_cpu) {
 		mp->cpu = perf_cpu_map__cpu(evlist->core.all_cpus, idx);
-		if (evlist->core.threads)
-			mp->tid = perf_thread_map__pid(evlist->core.threads, 0);
-		else
-			mp->tid = -1;
+		mp->tid = perf_thread_map__pid(evlist->core.threads, 0);
 	} else {
 		mp->cpu.cpu = -1;
 		mp->tid = perf_thread_map__pid(evlist->core.threads, idx);
@@ -358,7 +372,8 @@ static bool filter_cpu(struct perf_session *session, struct perf_cpu cpu)
 {
 	unsigned long *cpu_bitmap = session->itrace_synth_opts->cpu_bitmap;
 
-	return cpu_bitmap && cpu.cpu != -1 && !test_bit(cpu.cpu, cpu_bitmap);
+	return cpu_bitmap && cpu.cpu >= 0 && cpu.cpu < MAX_NR_CPUS &&
+	       !test_bit(cpu.cpu, cpu_bitmap);
 }
 
 static int auxtrace_queues__add_buffer(struct auxtrace_queues *queues,
@@ -882,6 +897,21 @@ regroup:
 	return 0;
 }
 
+/**
+ * auxtrace_record__init - Initialize an AUX area tracing record.
+ * @evlist: The list of events to check for AUX area tracing event.
+ * @err: Pointer to an integer to store return code.
+ *
+ * This function looks through the @evlist to determine which AUX area
+ * tracing hardware is being used and initializes the auxtrace_record
+ * structure.
+ *
+ * Return:
+ * a) A pointer to the struct auxtrace_record with @err = 0 on success.
+ * b) NULL with @err = 0 if no AUX area tracing event is found/supported
+ *    (not considered an error).
+ * c) NULL with non-zero @err on actual auxtrace_record__init failure.
+ */
 struct auxtrace_record *__weak
 auxtrace_record__init(struct evlist *evlist __maybe_unused, int *err)
 {
@@ -1173,16 +1203,19 @@ static int auxtrace_queue_data_cb(struct perf_session *session,
 	if (!qd->samples || event->header.type != PERF_RECORD_SAMPLE)
 		return 0;
 
+	perf_sample__init(&sample, /*all=*/false);
 	err = evlist__parse_sample(session->evlist, event, &sample);
 	if (err)
-		return err;
+		goto out;
 
-	if (!sample.aux_sample.size)
-		return 0;
+	if (sample.aux_sample.size) {
+		offset += sample.aux_sample.data - (void *)event;
 
-	offset += sample.aux_sample.data - (void *)event;
-
-	return session->auxtrace->queue_data(session, &sample, NULL, offset);
+		err = session->auxtrace->queue_data(session, &sample, NULL, offset);
+	}
+out:
+	perf_sample__exit(&sample);
+	return err;
 }
 
 int auxtrace_queue_data(struct perf_session *session, bool samples, bool events)
@@ -1362,7 +1395,8 @@ static void unleader_auxtrace(struct perf_session *session)
 	}
 }
 
-int perf_event__process_auxtrace_info(struct perf_session *session,
+int perf_event__process_auxtrace_info(const struct perf_tool *tool __maybe_unused,
+				      struct perf_session *session,
 				      union perf_event *event)
 {
 	enum auxtrace_type type = event->auxtrace_info.type;
@@ -1390,6 +1424,9 @@ int perf_event__process_auxtrace_info(struct perf_session *session,
 	case PERF_AUXTRACE_HISI_PTT:
 		err = hisi_ptt_process_auxtrace_info(event, session);
 		break;
+	case PERF_AUXTRACE_VPA_DTL:
+		err = powerpc_vpadtl_process_auxtrace_info(event, session);
+		break;
 	case PERF_AUXTRACE_UNKNOWN:
 	default:
 		return -EINVAL;
@@ -1403,7 +1440,8 @@ int perf_event__process_auxtrace_info(struct perf_session *session,
 	return 0;
 }
 
-s64 perf_event__process_auxtrace(struct perf_session *session,
+s64 perf_event__process_auxtrace(const struct perf_tool *tool __maybe_unused,
+				 struct perf_session *session,
 				 union perf_event *event)
 {
 	s64 err;
@@ -1737,7 +1775,7 @@ static const char * const auxtrace_error_type_name[] = {
 	[PERF_AUXTRACE_ERROR_ITRACE] = "instruction trace",
 };
 
-static const char *auxtrace_error_name(int type)
+static const char *auxtrace_error_name(unsigned int type)
 {
 	const char *error_type_name = NULL;
 
@@ -1753,6 +1791,7 @@ size_t perf_event__fprintf_auxtrace_error(union perf_event *event, FILE *fp)
 	struct perf_record_auxtrace_error *e = &event->auxtrace_error;
 	unsigned long long nsecs = e->time;
 	const char *msg = e->msg;
+	int msg_max;
 	int ret;
 
 	ret = fprintf(fp, " %s error type %u",
@@ -1770,11 +1809,26 @@ size_t perf_event__fprintf_auxtrace_error(union perf_event *event, FILE *fp)
 	if (!e->fmt)
 		msg = (const char *)&e->time;
 
-	if (e->fmt >= 2 && e->machine_pid)
+	/* Bound msg to the bytes actually within the event, capped at the array size */
+	msg_max = (int)((void *)event + event->header.size - (void *)msg);
+	if (msg_max < 0)
+		msg_max = 0;
+	if (msg_max > (int)sizeof(e->msg))
+		msg_max = sizeof(e->msg);
+
+	/*
+	 * Unlike the swap path which downgrades fmt in place,
+	 * native-endian events are mmap'd read-only — check size
+	 * instead to avoid accessing machine_pid/vcpu OOB.
+	 */
+	if (e->fmt >= 2 &&
+	    event->header.size >= offsetof(typeof(event->auxtrace_error), vcpu) +
+				  sizeof(event->auxtrace_error.vcpu) &&
+	    e->machine_pid)
 		ret += fprintf(fp, " machine_pid %d vcpu %d", e->machine_pid, e->vcpu);
 
-	ret += fprintf(fp, " cpu %d pid %d tid %d ip %#"PRI_lx64" code %u: %s\n",
-		       e->cpu, e->pid, e->tid, e->ip, e->code, msg);
+	ret += fprintf(fp, " cpu %d pid %d tid %d ip %#"PRI_lx64" code %u: %.*s\n",
+		       e->cpu, e->pid, e->tid, e->ip, e->code, msg_max, msg);
 	return ret;
 }
 
@@ -1800,7 +1854,8 @@ void events_stats__auxtrace_error_warn(const struct events_stats *stats)
 	}
 }
 
-int perf_event__process_auxtrace_error(struct perf_session *session,
+int perf_event__process_auxtrace_error(const struct perf_tool *tool __maybe_unused,
+				       struct perf_session *session,
 				       union perf_event *event)
 {
 	if (auxtrace__dont_decode(session))
@@ -1887,7 +1942,7 @@ int __weak compat_auxtrace_mmap__write_tail(struct auxtrace_mmap *mm, u64 tail)
 }
 
 static int __auxtrace_mmap__read(struct mmap *map,
-				 struct auxtrace_record *itr,
+				 struct auxtrace_record *itr, struct perf_env *env,
 				 const struct perf_tool *tool, process_auxtrace_t fn,
 				 bool snapshot, size_t snapshot_size)
 {
@@ -1897,7 +1952,7 @@ static int __auxtrace_mmap__read(struct mmap *map,
 	size_t size, head_off, old_off, len1, len2, padding;
 	union perf_event ev;
 	void *data1, *data2;
-	int kernel_is_64_bit = perf_env__kernel_is_64_bit(evsel__env(NULL));
+	int kernel_is_64_bit = perf_env__kernel_is_64_bit(env);
 
 	head = auxtrace_mmap__read_head(mm, kernel_is_64_bit);
 
@@ -1999,17 +2054,18 @@ static int __auxtrace_mmap__read(struct mmap *map,
 }
 
 int auxtrace_mmap__read(struct mmap *map, struct auxtrace_record *itr,
-			const struct perf_tool *tool, process_auxtrace_t fn)
+			struct perf_env *env, const struct perf_tool *tool,
+			process_auxtrace_t fn)
 {
-	return __auxtrace_mmap__read(map, itr, tool, fn, false, 0);
+	return __auxtrace_mmap__read(map, itr, env, tool, fn, false, 0);
 }
 
 int auxtrace_mmap__read_snapshot(struct mmap *map,
-				 struct auxtrace_record *itr,
+				 struct auxtrace_record *itr, struct perf_env *env,
 				 const struct perf_tool *tool, process_auxtrace_t fn,
 				 size_t snapshot_size)
 {
-	return __auxtrace_mmap__read(map, itr, tool, fn, true, snapshot_size);
+	return __auxtrace_mmap__read(map, itr, env, tool, fn, true, snapshot_size);
 }
 
 /**
@@ -2639,7 +2695,7 @@ static bool dso_sym_match(struct symbol *sym, const char *name, int *cnt,
 {
 	/* Same name, and global or the n'th found or any */
 	return !arch__compare_symbol_names(name, sym->name) &&
-	       ((!idx && sym->binding == STB_GLOBAL) ||
+	       ((!idx && symbol__binding(sym) == STB_GLOBAL) ||
 		(idx > 0 && ++*cnt == idx) ||
 		idx < 0);
 }
@@ -2657,8 +2713,8 @@ static void print_duplicate_syms(struct dso *dso, const char *sym_name)
 		if (dso_sym_match(sym, sym_name, &cnt, -1)) {
 			pr_err("#%d\t0x%"PRIx64"\t%c\t%s\n",
 			       ++cnt, sym->start,
-			       sym->binding == STB_GLOBAL ? 'g' :
-			       sym->binding == STB_LOCAL  ? 'l' : 'w',
+			       symbol__binding(sym) == STB_GLOBAL ? 'g' :
+			       symbol__binding(sym) == STB_LOCAL  ? 'l' : 'w',
 			       sym->name);
 			near = true;
 		} else if (near) {

@@ -6,7 +6,6 @@
 #include <linux/kernel.h>
 #include <linux/device.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/i2c.h>
 #include <linux/regmap.h>
 #include <linux/property.h>
@@ -67,8 +66,7 @@ static int inv_icm42600_probe(struct i2c_client *client)
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 
-	return inv_icm42600_core_probe(regmap, chip, client->irq,
-				       inv_icm42600_i2c_bus_setup);
+	return inv_icm42600_core_probe(regmap, chip, inv_icm42600_i2c_bus_setup);
 }
 
 /*
@@ -76,13 +74,13 @@ static int inv_icm42600_probe(struct i2c_client *client)
  * supported by this driver
  */
 static const struct i2c_device_id inv_icm42600_id[] = {
-	{ "icm42600", INV_CHIP_ICM42600 },
-	{ "icm42602", INV_CHIP_ICM42602 },
-	{ "icm42605", INV_CHIP_ICM42605 },
-	{ "icm42686", INV_CHIP_ICM42686 },
-	{ "icm42622", INV_CHIP_ICM42622 },
-	{ "icm42688", INV_CHIP_ICM42688 },
-	{ "icm42631", INV_CHIP_ICM42631 },
+	{ .name = "icm42600", .driver_data = INV_CHIP_ICM42600 },
+	{ .name = "icm42602", .driver_data = INV_CHIP_ICM42602 },
+	{ .name = "icm42605", .driver_data = INV_CHIP_ICM42605 },
+	{ .name = "icm42686", .driver_data = INV_CHIP_ICM42686 },
+	{ .name = "icm42622", .driver_data = INV_CHIP_ICM42622 },
+	{ .name = "icm42688", .driver_data = INV_CHIP_ICM42688 },
+	{ .name = "icm42631", .driver_data = INV_CHIP_ICM42631 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, inv_icm42600_id);
@@ -110,7 +108,7 @@ static const struct of_device_id inv_icm42600_of_matches[] = {
 		.compatible = "invensense,icm42631",
 		.data = (void *)INV_CHIP_ICM42631,
 	},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, inv_icm42600_of_matches);
 

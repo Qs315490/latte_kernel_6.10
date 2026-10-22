@@ -19,6 +19,7 @@
 #include <linux/sched.h>
 #include <linux/topology.h>
 #include <asm/processor.h>
+#include <asm/cpuid/api.h>
 #include <asm/msr.h>
 
 MODULE_DESCRIPTION("AMD Family 15h CPU processor power monitor");
@@ -143,8 +144,8 @@ static void do_read_registers_on_cu(void *_data)
 	 */
 	cu = topology_core_id(smp_processor_id());
 
-	rdmsrl_safe(MSR_F15H_CU_PWR_ACCUMULATOR, &data->cu_acc_power[cu]);
-	rdmsrl_safe(MSR_F15H_PTSC, &data->cpu_sw_pwr_ptsc[cu]);
+	rdmsrq_safe(MSR_F15H_CU_PWR_ACCUMULATOR, &data->cu_acc_power[cu]);
+	rdmsrq_safe(MSR_F15H_PTSC, &data->cpu_sw_pwr_ptsc[cu]);
 
 	data->cu_on[cu] = 1;
 }
@@ -372,15 +373,14 @@ static void tweak_runavg_range(struct pci_dev *pdev)
 		REG_TDP_RUNNING_AVERAGE, val);
 }
 
-#ifdef CONFIG_PM
-static int fam15h_power_resume(struct pci_dev *pdev)
+static int fam15h_power_resume(struct device *dev)
 {
+	struct pci_dev *pdev = to_pci_dev(dev);
 	tweak_runavg_range(pdev);
 	return 0;
 }
-#else
-#define fam15h_power_resume NULL
-#endif
+
+static DEFINE_SIMPLE_DEV_PM_OPS(fam15h_power_ops, NULL, fam15h_power_resume);
 
 static int fam15h_power_init_data(struct pci_dev *f4,
 				  struct fam15h_power_data *data)
@@ -424,7 +424,7 @@ static int fam15h_power_init_data(struct pci_dev *f4,
 	 */
 	data->cpu_pwr_sample_ratio = cpuid_ecx(0x80000007);
 
-	if (rdmsrl_safe(MSR_F15H_CU_MAX_PWR_ACCUMULATOR, &tmp)) {
+	if (rdmsrq_safe(MSR_F15H_CU_MAX_PWR_ACCUMULATOR, &tmp)) {
 		pr_err("Failed to read max compute unit power accumulator MSR\n");
 		return -ENODEV;
 	}
@@ -493,7 +493,7 @@ static struct pci_driver fam15h_power_driver = {
 	.name = "fam15h_power",
 	.id_table = fam15h_power_id_table,
 	.probe = fam15h_power_probe,
-	.resume = fam15h_power_resume,
+	.driver.pm = &fam15h_power_ops,
 };
 
 module_pci_driver(fam15h_power_driver);

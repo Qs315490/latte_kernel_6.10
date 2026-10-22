@@ -93,19 +93,19 @@ static unsigned short ams_delta_audio_agc;
  * Used for passing a codec structure pointer
  * from the board initialization code to the tty line discipline.
  */
-static struct snd_soc_component *cx20442_codec;
+static struct cx20442_codec cx20442_codec;
 
 static int ams_delta_set_audio_mode(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
-	struct snd_soc_dapm_context *dapm = &card->dapm;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	struct soc_enum *control = (struct soc_enum *)kcontrol->private_value;
 	unsigned short pins;
 	int pin, changed = 0;
 
 	/* Refuse any mode changes if we are not able to control the codec. */
-	if (!cx20442_codec->card->pop_time)
+	if (!cx20442_codec.ready)
 		return -EUNATCH;
 
 	if (ucontrol->value.enumerated.item[0] >= control->items)
@@ -172,7 +172,7 @@ static int ams_delta_get_audio_mode(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
-	struct snd_soc_dapm_context *dapm = &card->dapm;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	unsigned short pins, mode;
 
 	pins = ((snd_soc_dapm_get_pin_status(dapm, "Mouthpiece") <<
@@ -264,10 +264,10 @@ static void cx81801_timeout(struct timer_list *unused)
 {
 	int muted;
 
-	spin_lock(&ams_delta_lock);
-	cx81801_cmd_pending = 0;
-	muted = ams_delta_muted;
-	spin_unlock(&ams_delta_lock);
+	scoped_guard(spinlock, &ams_delta_lock) {
+		cx81801_cmd_pending = 0;
+		muted = ams_delta_muted;
+	}
 
 	/* Reconnect the codec DAI back from the modem to the CPU DAI
 	 * only if digital mute still off */
@@ -280,14 +280,14 @@ static int cx81801_open(struct tty_struct *tty)
 {
 	int ret;
 
-	if (!cx20442_codec)
+	if (!cx20442_codec.component)
 		return -ENODEV;
 
 	/*
 	 * Pass the codec structure pointer for use by other ldisc callbacks,
 	 * both the card and the codec specific parts.
 	 */
-	tty->disc_data = cx20442_codec;
+	tty->disc_data = &cx20442_codec;
 
 	ret = v253_ops.open(tty);
 
@@ -300,10 +300,13 @@ static int cx81801_open(struct tty_struct *tty)
 /* Line discipline .close() */
 static void cx81801_close(struct tty_struct *tty)
 {
-	struct snd_soc_component *component = tty->disc_data;
+	struct snd_soc_component *component = cx20442_codec.component;
 	struct snd_soc_dapm_context *dapm;
 
-	del_timer_sync(&cx81801_timer);
+	if (WARN_ON(tty->disc_data != &cx20442_codec))
+		return;
+
+	timer_delete_sync(&cx81801_timer);
 
 	/* Prevent the hook switch from further changing the DAPM pins */
 	INIT_LIST_HEAD(&ams_delta_hook_switch.pins);
@@ -313,7 +316,7 @@ static void cx81801_close(struct tty_struct *tty)
 
 	v253_ops.close(tty);
 
-	dapm = &component->card->dapm;
+	dapm = snd_soc_card_to_dapm(component->card);
 
 	/* Revert back to default audio input/output constellation */
 	snd_soc_dapm_mutex_lock(dapm);
@@ -339,14 +342,14 @@ static void cx81801_hangup(struct tty_struct *tty)
 static void cx81801_receive(struct tty_struct *tty, const u8 *cp, const u8 *fp,
 			    size_t count)
 {
-	struct snd_soc_component *component = tty->disc_data;
+	struct snd_soc_component *component = cx20442_codec.component;
 	const unsigned char *c;
 	int apply, ret;
 
-	if (!component)
+	if (WARN_ON(tty->disc_data != &cx20442_codec))
 		return;
 
-	if (!component->card->pop_time) {
+	if (!cx20442_codec.ready) {
 		/* First modem response, complete setup procedure */
 
 		/* Initialize timer used for config pulse generation */
@@ -373,11 +376,11 @@ static void cx81801_receive(struct tty_struct *tty, const u8 *cp, const u8 *fp,
 			continue;
 		/* Complete modem response received, apply config to codec */
 
-		spin_lock_bh(&ams_delta_lock);
-		mod_timer(&cx81801_timer, jiffies + msecs_to_jiffies(150));
-		apply = !ams_delta_muted && !cx81801_cmd_pending;
-		cx81801_cmd_pending = 1;
-		spin_unlock_bh(&ams_delta_lock);
+		scoped_guard(spinlock_bh, &ams_delta_lock) {
+			mod_timer(&cx81801_timer, jiffies + msecs_to_jiffies(150));
+			apply = !ams_delta_muted && !cx81801_cmd_pending;
+			cx81801_cmd_pending = 1;
+		}
 
 		/* Apply config pulse by connecting the codec to the modem
 		 * if not already done */
@@ -426,10 +429,10 @@ static int ams_delta_mute(struct snd_soc_dai *dai, int mute, int direction)
 	if (ams_delta_muted == mute)
 		return 0;
 
-	spin_lock_bh(&ams_delta_lock);
-	ams_delta_muted = mute;
-	apply = !cx81801_cmd_pending;
-	spin_unlock_bh(&ams_delta_lock);
+	scoped_guard(spinlock_bh, &ams_delta_lock) {
+		ams_delta_muted = mute;
+		apply = !cx81801_cmd_pending;
+	}
 
 	if (apply)
 		gpiod_set_value(gpiod_modem_codec, !!mute);
@@ -462,12 +465,12 @@ static int ams_delta_cx20442_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
 	struct snd_soc_card *card = rtd->card;
-	struct snd_soc_dapm_context *dapm = &card->dapm;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	int ret;
 	/* Codec is ready, now add/activate board specific controls */
 
 	/* Store a pointer to the codec structure for tty ldisc use */
-	cx20442_codec = snd_soc_rtd_to_codec(rtd, 0)->component;
+	cx20442_codec.component = snd_soc_rtd_to_codec(rtd, 0)->component;
 
 	/* Add hook switch - can be used to control the codec from userspace
 	 * even if line discipline fails */
@@ -532,7 +535,7 @@ static struct snd_soc_dai_link ams_delta_dai_link = {
 	.init = ams_delta_cx20442_init,
 	.ops = &ams_delta_ops,
 	.dai_fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBM_CFM,
+		   SND_SOC_DAIFMT_CBP_CFP,
 	SND_SOC_DAILINK_REG(cx20442),
 };
 

@@ -12,6 +12,7 @@
 #include <linux/platform_device.h>
 #include <linux/thermal.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 #include <linux/soc/qcom/qcom_aoss.h>
 
 #define CREATE_TRACE_POINTS
@@ -354,11 +355,11 @@ static int qmp_cdev_set_cur_state(struct thermal_cooling_device *cdev,
 	/* Normalize state */
 	cdev_state = !!state;
 
-	if (qmp_cdev->state == state)
+	if (qmp_cdev->state == cdev_state)
 		return 0;
 
 	ret = qmp_send(qmp_cdev->qmp, "{class: volt_flr, event:zero_temp, res:%s, value:%s}",
-		       qmp_cdev->name, cdev_state ? "on" : "off");
+		       qmp_cdev->name, str_on_off(cdev_state));
 	if (!ret)
 		qmp_cdev->state = cdev_state;
 
@@ -380,7 +381,7 @@ static int qmp_cooling_device_add(struct qmp *qmp,
 	qmp_cdev->qmp = qmp;
 	qmp_cdev->state = !qmp_cdev_max_state;
 	qmp_cdev->name = cdev_name;
-	qmp_cdev->cdev = devm_thermal_of_cooling_device_register
+	qmp_cdev->cdev = devm_thermal_of_child_cooling_device_register
 				(qmp->dev, node,
 				cdev_name,
 				qmp_cdev, &qmp_cooling_device_ops);

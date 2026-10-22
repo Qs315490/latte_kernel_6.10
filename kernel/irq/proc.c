@@ -10,8 +10,10 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/interrupt.h>
+#include <linux/kernel.h>
 #include <linux/kernel_stat.h>
 #include <linux/mutex.h>
+#include <linux/string.h>
 
 #include "internals.h"
 
@@ -48,6 +50,8 @@ static int show_irq_affinity(int type, struct seq_file *m)
 	struct irq_desc *desc = irq_to_desc((long)m->private);
 	const struct cpumask *mask;
 
+	guard(raw_spinlock_irq)(&desc->lock);
+
 	switch (type) {
 	case AFFINITY:
 	case AFFINITY_LIST:
@@ -81,20 +85,18 @@ static int show_irq_affinity(int type, struct seq_file *m)
 static int irq_affinity_hint_proc_show(struct seq_file *m, void *v)
 {
 	struct irq_desc *desc = irq_to_desc((long)m->private);
-	unsigned long flags;
 	cpumask_var_t mask;
 
 	if (!zalloc_cpumask_var(&mask, GFP_KERNEL))
 		return -ENOMEM;
 
-	raw_spin_lock_irqsave(&desc->lock, flags);
-	if (desc->affinity_hint)
-		cpumask_copy(mask, desc->affinity_hint);
-	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	scoped_guard(raw_spinlock_irq, &desc->lock) {
+		if (desc->affinity_hint)
+			cpumask_copy(mask, desc->affinity_hint);
+	}
 
 	seq_printf(m, "%*pb\n", cpumask_pr_args(mask));
 	free_cpumask_var(mask);
-
 	return 0;
 }
 
@@ -295,35 +297,29 @@ static int irq_spurious_proc_show(struct seq_file *m, void *v)
 
 #define MAX_NAMELEN 128
 
-static int name_unique(unsigned int irq, struct irqaction *new_action)
+static bool name_unique(unsigned int irq, struct irqaction *new_action)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
 	struct irqaction *action;
-	unsigned long flags;
-	int ret = 1;
 
-	raw_spin_lock_irqsave(&desc->lock, flags);
+	guard(raw_spinlock_irq)(&desc->lock);
 	for_each_action_of_desc(desc, action) {
 		if ((action != new_action) && action->name &&
-				!strcmp(new_action->name, action->name)) {
-			ret = 0;
-			break;
-		}
+		    !strcmp(new_action->name, action->name))
+			return false;
 	}
-	raw_spin_unlock_irqrestore(&desc->lock, flags);
-	return ret;
+	return true;
 }
 
 void register_handler_proc(unsigned int irq, struct irqaction *action)
 {
-	char name [MAX_NAMELEN];
+	char name[MAX_NAMELEN];
 	struct irq_desc *desc = irq_to_desc(irq);
 
-	if (!desc->dir || action->dir || !action->name ||
-					!name_unique(irq, action))
+	if (!desc->dir || action->dir || !action->name || !name_unique(irq, action))
 		return;
 
-	snprintf(name, MAX_NAMELEN, "%s", action->name);
+	strscpy(name, action->name);
 
 	/* create /proc/irq/1234/handler/ */
 	action->dir = proc_mkdir(name, desc->dir);
@@ -331,7 +327,7 @@ void register_handler_proc(unsigned int irq, struct irqaction *action)
 
 #undef MAX_NAMELEN
 
-#define MAX_NAMELEN 10
+#define MAX_NAMELEN 11
 
 void register_irq_proc(unsigned int irq, struct irq_desc *desc)
 {
@@ -347,17 +343,16 @@ void register_irq_proc(unsigned int irq, struct irq_desc *desc)
 	 * added, not when the descriptor is created, so multiple
 	 * tasks might try to register at the same time.
 	 */
-	mutex_lock(&register_lock);
+	guard(mutex)(&register_lock);
 
 	if (desc->dir)
-		goto out_unlock;
-
-	sprintf(name, "%d", irq);
+		return;
 
 	/* create /proc/irq/1234 */
+	snprintf(name, MAX_NAMELEN, "%u", irq);
 	desc->dir = proc_mkdir(name, root_irq_dir);
 	if (!desc->dir)
-		goto out_unlock;
+		return;
 
 #ifdef CONFIG_SMP
 	umode_t umode = S_IRUGO;
@@ -366,31 +361,27 @@ void register_irq_proc(unsigned int irq, struct irq_desc *desc)
 		umode |= S_IWUSR;
 
 	/* create /proc/irq/<irq>/smp_affinity */
-	proc_create_data("smp_affinity", umode, desc->dir,
-			 &irq_affinity_proc_ops, irqp);
+	proc_create_data("smp_affinity", umode, desc->dir, &irq_affinity_proc_ops, irqp);
 
 	/* create /proc/irq/<irq>/affinity_hint */
 	proc_create_single_data("affinity_hint", 0444, desc->dir,
-			irq_affinity_hint_proc_show, irqp);
+				irq_affinity_hint_proc_show, irqp);
 
 	/* create /proc/irq/<irq>/smp_affinity_list */
 	proc_create_data("smp_affinity_list", umode, desc->dir,
 			 &irq_affinity_list_proc_ops, irqp);
 
-	proc_create_single_data("node", 0444, desc->dir, irq_node_proc_show,
-			irqp);
+	proc_create_single_data("node", 0444, desc->dir, irq_node_proc_show, irqp);
 # ifdef CONFIG_GENERIC_IRQ_EFFECTIVE_AFF_MASK
 	proc_create_single_data("effective_affinity", 0444, desc->dir,
-			irq_effective_aff_proc_show, irqp);
+				irq_effective_aff_proc_show, irqp);
 	proc_create_single_data("effective_affinity_list", 0444, desc->dir,
-			irq_effective_aff_list_proc_show, irqp);
+				irq_effective_aff_list_proc_show, irqp);
 # endif
 #endif
 	proc_create_single_data("spurious", 0444, desc->dir,
-			irq_spurious_proc_show, (void *)(long)irq);
+				irq_spurious_proc_show, (void *)(long)irq);
 
-out_unlock:
-	mutex_unlock(&register_lock);
 }
 
 void unregister_irq_proc(unsigned int irq, struct irq_desc *desc)
@@ -411,7 +402,7 @@ void unregister_irq_proc(unsigned int irq, struct irq_desc *desc)
 #endif
 	remove_proc_entry("spurious", desc->dir);
 
-	sprintf(name, "%u", irq);
+	snprintf(name, MAX_NAMELEN, "%u", irq);
 	remove_proc_entry(name, root_irq_dir);
 }
 
@@ -449,78 +440,159 @@ void init_irq_proc(void)
 		register_irq_proc(irq, desc);
 }
 
+void irq_proc_update_valid(struct irq_desc *desc)
+{
+	u32 set = _IRQ_PROC_VALID;
+
+	if (irq_settings_is_hidden(desc) || irq_desc_is_chained(desc) || !desc->action)
+		set = 0;
+
+	irq_settings_update_proc_valid(desc, set);
+}
+
 #ifdef CONFIG_GENERIC_IRQ_SHOW
+
+#define ARCH_PROC_IRQDESC ((void *)0x00001111)
 
 int __weak arch_show_interrupts(struct seq_file *p, int prec)
 {
 	return 0;
 }
 
+static DEFINE_RAW_SPINLOCK(irq_proc_constraints_lock);
+
+static struct irq_proc_constraints {
+	bool		print_header;
+	unsigned int	num_prec;
+	unsigned int	chip_width;
+} irq_proc_constraints __read_mostly = {
+	.num_prec	= 4,
+	.chip_width	= 8,
+};
+
 #ifndef ACTUAL_NR_IRQS
-# define ACTUAL_NR_IRQS irq_get_nr_irqs()
+# define ACTUAL_NR_IRQS total_nr_irqs
 #endif
 
-int show_interrupts(struct seq_file *p, void *v)
+void irq_proc_calc_prec(void)
 {
-	const unsigned int nr_irqs = irq_get_nr_irqs();
-	static int prec;
+	unsigned int prec, n;
 
-	int i = *(loff_t *) v, j;
+	for (prec = 4, n = 10000; prec < 10 && n <= total_nr_irqs; ++prec)
+		n *= 10;
+
+	guard(raw_spinlock_irqsave)(&irq_proc_constraints_lock);
+	if (prec > irq_proc_constraints.num_prec)
+		WRITE_ONCE(irq_proc_constraints.num_prec, prec);
+}
+
+void irq_proc_update_chip(const struct irq_chip *chip)
+{
+	unsigned int len = chip && chip->name ? strlen(chip->name) : 0;
+
+	if (!len || len <= READ_ONCE(irq_proc_constraints.chip_width))
+		return;
+
+	/* Can be invoked from interrupt disabled contexts */
+	guard(raw_spinlock_irqsave)(&irq_proc_constraints_lock);
+	if (len > irq_proc_constraints.chip_width)
+		WRITE_ONCE(irq_proc_constraints.chip_width, len);
+}
+
+/* Same as seq_put_decimal_ull_width(p, " ", cnt, 10) */
+#define ZSTR1 "          0"
+#define ZSTR1_LEN	(sizeof(ZSTR1) - 1)
+#define ZSTR16		ZSTR1 ZSTR1 ZSTR1 ZSTR1 ZSTR1 ZSTR1 ZSTR1 ZSTR1 \
+			ZSTR1 ZSTR1 ZSTR1 ZSTR1 ZSTR1 ZSTR1 ZSTR1 ZSTR1
+#define ZSTR256		ZSTR16 ZSTR16 ZSTR16 ZSTR16 ZSTR16 ZSTR16 ZSTR16 ZSTR16 \
+			ZSTR16 ZSTR16 ZSTR16 ZSTR16 ZSTR16 ZSTR16 ZSTR16 ZSTR16
+
+static inline void irq_proc_emit_zero_counts(struct seq_file *p, unsigned int zeros)
+{
+	if (!zeros)
+		return;
+
+	for (unsigned int n = min(zeros, 256); n; zeros -= n, n = min(zeros, 256))
+		seq_write(p, ZSTR256, n * ZSTR1_LEN);
+}
+
+static inline unsigned int irq_proc_emit_count(struct seq_file *p, unsigned int cnt,
+					       unsigned int zeros)
+{
+	if (!cnt)
+		return zeros + 1;
+
+	irq_proc_emit_zero_counts(p, zeros);
+	seq_put_decimal_ull_width(p, " ", cnt, 10);
+	return 0;
+}
+
+void irq_proc_emit_counts(struct seq_file *p, unsigned int __percpu *cnts)
+{
+	unsigned int cpu, zeros = 0;
+
+	for_each_online_cpu(cpu)
+		zeros = irq_proc_emit_count(p, per_cpu(*cnts, cpu), zeros);
+	irq_proc_emit_zero_counts(p, zeros);
+}
+
+static int irq_seq_show(struct seq_file *p, void *v)
+{
+	struct irq_proc_constraints *constr = p->private;
+	struct irq_desc *desc = v;
 	struct irqaction *action;
-	struct irq_desc *desc;
-	unsigned long flags;
 
-	if (i > ACTUAL_NR_IRQS)
-		return 0;
+	/* Print header for the first interrupt? */
+	if (constr->print_header) {
+		unsigned int cpu;
 
-	if (i == ACTUAL_NR_IRQS)
-		return arch_show_interrupts(p, prec);
-
-	/* print header and calculate the width of the first column */
-	if (i == 0) {
-		for (prec = 3, j = 1000; prec < 10 && j <= nr_irqs; ++prec)
-			j *= 10;
-
-		seq_printf(p, "%*s", prec + 8, "");
-		for_each_online_cpu(j)
-			seq_printf(p, "CPU%-8d", j);
+		seq_printf(p, "%*s", constr->num_prec + 8, "");
+		for_each_online_cpu(cpu)
+			seq_printf(p, "CPU%-8d", cpu);
 		seq_putc(p, '\n');
+		constr->print_header = false;
 	}
 
-	rcu_read_lock();
-	desc = irq_to_desc(i);
-	if (!desc || irq_settings_is_hidden(desc))
-		goto outsparse;
+	if (desc == ARCH_PROC_IRQDESC)
+		return arch_show_interrupts(p, constr->num_prec);
 
-	if (!desc->action || irq_desc_is_chained(desc) || !desc->kstat_irqs)
-		goto outsparse;
+	seq_put_decimal_ull_width(p, "", irq_desc_get_irq(desc), constr->num_prec);
+	seq_putc(p, ':');
 
-	seq_printf(p, "%*d:", prec, i);
-	for_each_online_cpu(j) {
-		unsigned int cnt = desc->kstat_irqs ? per_cpu(desc->kstat_irqs->cnt, j) : 0;
+	/*
+	 * Always output per CPU interrupts. Output device interrupts only when
+	 * desc::tot_count is not zero.
+	 */
+	if (irq_settings_is_per_cpu(desc) || irq_settings_is_per_cpu_devid(desc) ||
+	    data_race(desc->tot_count))
+		irq_proc_emit_counts(p, &desc->kstat_irqs->cnt);
+	else
+		irq_proc_emit_zero_counts(p, num_online_cpus());
 
-		seq_put_decimal_ull_width(p, " ", cnt, 10);
-	}
-	seq_putc(p, ' ');
+	/* Enforce a visual gap */
+	seq_write(p, "  ", 2);
 
-	raw_spin_lock_irqsave(&desc->lock, flags);
+	guard(raw_spinlock_irq)(&desc->lock);
 	if (desc->irq_data.chip) {
 		if (desc->irq_data.chip->irq_print_chip)
 			desc->irq_data.chip->irq_print_chip(&desc->irq_data, p);
 		else if (desc->irq_data.chip->name)
-			seq_printf(p, "%8s", desc->irq_data.chip->name);
+			seq_printf(p, "%-*s", constr->chip_width, desc->irq_data.chip->name);
 		else
-			seq_printf(p, "%8s", "-");
+			seq_printf(p, "%-*s", constr->chip_width, "-");
 	} else {
-		seq_printf(p, "%8s", "None");
+		seq_printf(p, "%-*s", constr->chip_width, "None");
 	}
+
+	seq_putc(p, ' ');
 	if (desc->irq_data.domain)
-		seq_printf(p, " %*lu", prec, desc->irq_data.hwirq);
+		seq_put_decimal_ull_width(p, "", desc->irq_data.hwirq, constr->num_prec);
 	else
-		seq_printf(p, " %*s", prec, "");
-#ifdef CONFIG_GENERIC_IRQ_SHOW_LEVEL
-	seq_printf(p, " %-8s", irqd_is_level_type(&desc->irq_data) ? "Level" : "Edge");
-#endif
+		seq_printf(p, " %*s", constr->num_prec, "");
+
+	if (IS_ENABLED(CONFIG_GENERIC_IRQ_SHOW_LEVEL))
+		seq_printf(p, " %-8s", irqd_is_level_type(&desc->irq_data) ? "Level" : "Edge");
+
 	if (desc->name)
 		seq_printf(p, "-%-8s", desc->name);
 
@@ -532,9 +604,75 @@ int show_interrupts(struct seq_file *p, void *v)
 	}
 
 	seq_putc(p, '\n');
-	raw_spin_unlock_irqrestore(&desc->lock, flags);
-outsparse:
-	rcu_read_unlock();
 	return 0;
 }
+
+static void *irq_seq_next_desc(loff_t *pos)
+{
+	if (*pos > total_nr_irqs)
+		return NULL;
+
+	guard(rcu)();
+	for (;;) {
+		struct irq_desc *desc = irq_find_desc_at_or_after((unsigned int) *pos);
+
+		if (desc) {
+			*pos = irq_desc_get_irq(desc);
+			/*
+			 * If valid for output then try to acquire a reference
+			 * count on the descriptor so that it can't be freed
+			 * after dropping RCU read lock on return.
+			 */
+			if (irq_settings_proc_valid(desc) && irq_desc_get_ref(desc))
+				return desc;
+			(*pos)++;
+		} else {
+			*pos = total_nr_irqs;
+			return ARCH_PROC_IRQDESC;
+		}
+	}
+}
+
+static void *irq_seq_start(struct seq_file *f, loff_t *pos)
+{
+	if (!*pos) {
+		struct irq_proc_constraints *constr = f->private;
+
+		constr->num_prec = READ_ONCE(irq_proc_constraints.num_prec);
+		constr->chip_width = READ_ONCE(irq_proc_constraints.chip_width);
+		constr->print_header = true;
+	}
+	return irq_seq_next_desc(pos);
+}
+
+static void *irq_seq_next(struct seq_file *f, void *v, loff_t *pos)
+{
+	if (v && v != ARCH_PROC_IRQDESC)
+		irq_desc_put_ref(v);
+
+	(*pos)++;
+	return irq_seq_next_desc(pos);
+}
+
+static void irq_seq_stop(struct seq_file *f, void *v)
+{
+	if (v && v != ARCH_PROC_IRQDESC)
+		irq_desc_put_ref(v);
+}
+
+static const struct seq_operations irq_seq_ops = {
+	.start = irq_seq_start,
+	.next  = irq_seq_next,
+	.stop  = irq_seq_stop,
+	.show  = irq_seq_show,
+};
+
+static int __init irq_proc_init(void)
+{
+	proc_create_seq_private("interrupts", 0, NULL, &irq_seq_ops,
+				sizeof(irq_proc_constraints), NULL);
+	return 0;
+}
+fs_initcall(irq_proc_init);
+
 #endif

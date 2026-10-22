@@ -10,7 +10,6 @@
 
 #include <linux/i2c.h>
 #include <linux/err.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/delay.h>
@@ -273,9 +272,9 @@ static ssize_t in_illuminance_scale_available_show
 
 	mutex_lock(&chip->lock);
 	for (i = 0; i < ARRAY_SIZE(isl29018_scales[chip->int_time]); ++i)
-		len += sprintf(buf + len, "%d.%06d ",
-			       isl29018_scales[chip->int_time][i].scale,
-			       isl29018_scales[chip->int_time][i].uscale);
+		len += sysfs_emit_at(buf, len, "%d.%06d ",
+				     isl29018_scales[chip->int_time][i].scale,
+				     isl29018_scales[chip->int_time][i].uscale);
 	mutex_unlock(&chip->lock);
 
 	buf[len - 1] = '\n';
@@ -293,8 +292,8 @@ static ssize_t in_illuminance_integration_time_available_show
 	int len = 0;
 
 	for (i = 0; i < ARRAY_SIZE(isl29018_int_utimes[chip->type]); ++i)
-		len += sprintf(buf + len, "0.%06d ",
-			       isl29018_int_utimes[chip->type][i]);
+		len += sysfs_emit_at(buf, len, "0.%06d ",
+				     isl29018_int_utimes[chip->type][i]);
 
 	buf[len - 1] = '\n';
 
@@ -330,7 +329,7 @@ static ssize_t proximity_on_chip_ambient_infrared_suppression_show
 	 * Return the "proximity scheme" i.e. if the chip does on chip
 	 * infrared suppression (1 means perform on chip suppression)
 	 */
-	return sprintf(buf, "%d\n", chip->prox_scheme);
+	return sysfs_emit(buf, "%d\n", chip->prox_scheme);
 }
 
 static ssize_t proximity_on_chip_ambient_infrared_suppression_store
@@ -824,15 +823,15 @@ static const struct acpi_device_id isl29018_acpi_match[] = {
 	{"ISL29018", isl29018},
 	{"ISL29023", isl29023},
 	{"ISL29035", isl29035},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, isl29018_acpi_match);
 
 static const struct i2c_device_id isl29018_id[] = {
-	{"isl29018", isl29018},
-	{"isl29023", isl29023},
-	{"isl29035", isl29035},
-	{}
+	{ .name = "isl29018", .driver_data = isl29018 },
+	{ .name = "isl29023", .driver_data = isl29023 },
+	{ .name = "isl29035", .driver_data = isl29035 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, isl29018_id);
 

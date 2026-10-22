@@ -10,6 +10,7 @@
 #include <linux/log2.h>
 #include <linux/string.h>
 #include <linux/zalloc.h>
+#include <errno.h>
 #include <time.h>
 
 #include "../../../util/cpumap.h"
@@ -39,6 +40,19 @@ struct arm_spe_recording {
 	int			wrapped_cnt;
 	bool			*wrapped;
 };
+
+/* Iterate config list to detect if the "freq" parameter is set */
+static bool arm_spe_is_set_freq(struct evsel *evsel)
+{
+	struct evsel_config_term *term;
+
+	list_for_each_entry(term, &evsel->config_terms, list) {
+		if (term->type == EVSEL__CONFIG_TERM_FREQ)
+			return true;
+	}
+
+	return false;
+}
 
 /*
  * arm_spe_find_cpus() returns a new cpu map, and the caller should invoke
@@ -108,12 +122,17 @@ static int arm_spe_save_cpu_header(struct auxtrace_record *itr,
 		/* No Arm SPE PMU is found */
 		data[ARM_SPE_CPU_PMU_TYPE] = ULLONG_MAX;
 		data[ARM_SPE_CAP_MIN_IVAL] = 0;
+		data[ARM_SPE_CAP_EVENT_FILTER] = 0;
 	} else {
 		data[ARM_SPE_CPU_PMU_TYPE] = pmu->type;
 
 		if (perf_pmu__scan_file(pmu, "caps/min_interval", "%lu", &val) != 1)
 			val = 0;
 		data[ARM_SPE_CAP_MIN_IVAL] = val;
+
+		if (perf_pmu__scan_file(pmu, "caps/event_filter", "%lx", &val) != 1)
+			val = 0;
+		data[ARM_SPE_CAP_EVENT_FILTER] = val;
 	}
 
 	free(cpuid);
@@ -125,7 +144,8 @@ static int arm_spe_info_fill(struct auxtrace_record *itr,
 			     struct perf_record_auxtrace_info *auxtrace_info,
 			     size_t priv_size)
 {
-	int i, ret;
+	unsigned int i;
+	int ret;
 	size_t offset;
 	struct arm_spe_recording *sper =
 			container_of(itr, struct arm_spe_recording, itr);
@@ -237,7 +257,7 @@ static __u64 arm_spe_pmu__sample_period(const struct perf_pmu *arm_spe_pmu)
 
 static void arm_spe_setup_evsel(struct evsel *evsel, struct perf_cpu_map *cpus)
 {
-	u64 bit;
+	u64 pa_enable_bit;
 
 	evsel->core.attr.freq = 0;
 	evsel->core.attr.sample_period = arm_spe_pmu__sample_period(evsel->pmu);
@@ -255,7 +275,7 @@ static void arm_spe_setup_evsel(struct evsel *evsel, struct perf_cpu_map *cpus)
 	 */
 	if (!perf_cpu_map__is_any_cpu_or_is_empty(cpus)) {
 		evsel__set_sample_bit(evsel, CPU);
-		evsel__set_config_if_unset(evsel->pmu, evsel, "ts_enable", 1);
+		evsel__set_config_if_unset(evsel, "ts_enable", 1);
 	}
 
 	/*
@@ -269,9 +289,10 @@ static void arm_spe_setup_evsel(struct evsel *evsel, struct perf_cpu_map *cpus)
 	 * inform that the resulting output's SPE samples contain physical addresses
 	 * where applicable.
 	 */
-	bit = perf_pmu__format_bits(evsel->pmu, "pa_enable");
-	if (evsel->core.attr.config & bit)
-		evsel__set_sample_bit(evsel, PHYS_ADDR);
+
+	if (!evsel__get_config_val(evsel, "pa_enable", &pa_enable_bit))
+		if (pa_enable_bit)
+			evsel__set_sample_bit(evsel, PHYS_ADDR);
 }
 
 static int arm_spe_setup_aux_buffer(struct record_opts *opts)
@@ -378,6 +399,7 @@ static int arm_spe_recording_options(struct auxtrace_record *itr,
 	struct perf_cpu_map *cpus = evlist->core.user_requested_cpus;
 	bool discard = false;
 	int err;
+	u64 discard_bit;
 
 	sper->evlist = evlist;
 
@@ -389,6 +411,14 @@ static int arm_spe_recording_options(struct auxtrace_record *itr,
 				return -EINVAL;
 			}
 			opts->full_auxtrace = true;
+
+			if (opts->user_freq != UINT_MAX ||
+			    arm_spe_is_set_freq(evsel)) {
+				pr_err("Arm SPE: Frequency is not supported. "
+				       "Set period with -c option or PMU parameter (-e %s/period=NUM/).\n",
+				       evsel->pmu->name);
+				return -EINVAL;
+			}
 		}
 	}
 
@@ -398,9 +428,9 @@ static int arm_spe_recording_options(struct auxtrace_record *itr,
 	evlist__for_each_entry_safe(evlist, tmp, evsel) {
 		if (evsel__is_aux_event(evsel)) {
 			arm_spe_setup_evsel(evsel, cpus);
-			if (evsel->core.attr.config &
-			    perf_pmu__format_bits(evsel->pmu, "discard"))
-				discard = true;
+			if (evsel__config_exists(evsel, "discard") &&
+			    !evsel__get_config_val(evsel, "discard", &discard_bit))
+				discard = !!discard_bit;
 		}
 	}
 

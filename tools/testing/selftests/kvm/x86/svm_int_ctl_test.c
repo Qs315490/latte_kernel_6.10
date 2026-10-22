@@ -42,10 +42,7 @@ static void l2_guest_code(struct svm_test_data *svm)
 	x2apic_write_reg(APIC_ICR,
 		APIC_DEST_SELF | APIC_INT_ASSERT | INTR_IRQ_NUMBER);
 
-	__asm__ __volatile__(
-		"sti\n"
-		"nop\n"
-	);
+	sti_nop();
 
 	GUEST_ASSERT(vintr_irq_called);
 	GUEST_ASSERT(intr_irq_called);
@@ -85,7 +82,7 @@ static void l1_guest_code(struct svm_test_data *svm)
 int main(int argc, char *argv[])
 {
 	struct kvm_vcpu *vcpu;
-	vm_vaddr_t svm_gva;
+	gva_t svm_gva;
 	struct kvm_vm *vm;
 	struct ucall uc;
 

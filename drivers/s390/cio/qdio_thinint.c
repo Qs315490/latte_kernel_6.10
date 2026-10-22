@@ -99,7 +99,7 @@ static inline u32 clear_shared_ind(void)
 static void tiqdio_thinint_handler(struct airq_struct *airq,
 				   struct tpi_info *tpi_info)
 {
-	u64 irq_time = get_lowcore()->int_clock;
+	u64 irq_time = get_lowcore()->int_clock.tod;
 	u32 si_used = clear_shared_ind();
 	struct qdio_irq *irq;
 
@@ -204,8 +204,7 @@ int __init qdio_thinint_init(void)
 {
 	int rc;
 
-	q_indicators = kcalloc(TIQDIO_NR_INDICATORS, sizeof(struct indicator_t),
-			       GFP_KERNEL);
+	q_indicators = kzalloc_objs(struct indicator_t, TIQDIO_NR_INDICATORS);
 	if (!q_indicators)
 		return -ENOMEM;
 

@@ -451,7 +451,7 @@ static void happy_meal_tcvr_write(struct happy_meal *hp,
 /* Auto negotiation.  The scheme is very simple.  We have a timer routine
  * that keeps watching the auto negotiation process as it progresses.
  * The DP83840 is first told to start doing it's thing, we set up the time
- * and place the timer state machine in it's initial state.
+ * and place the timer state machine in its initial state.
  *
  * Here the timer peeks at the DP83840 status registers at each click to see
  * if the auto negotiation has completed, we assume here that the DP83840 PHY
@@ -721,7 +721,7 @@ force_link:
 
 static void happy_meal_timer(struct timer_list *t)
 {
-	struct happy_meal *hp = from_timer(hp, t, happy_timer);
+	struct happy_meal *hp = timer_container_of(hp, t, happy_timer);
 	void __iomem *tregs = hp->tcvregs;
 	int restart_timer = 0;
 
@@ -1118,7 +1118,7 @@ static void happy_meal_transceiver_check(struct happy_meal *hp, void __iomem *tr
  *
  * We use skb_reserve() to align the data block we get in the skb.  We
  * also program the etxregs->cfg register to use an offset of 2.  This
- * imperical constant plus the ethernet header size will always leave
+ * empirical constant plus the ethernet header size will always leave
  * us with a nicely aligned ip header once we pass things up to the
  * protocol layers.
  *
@@ -1265,7 +1265,7 @@ static int happy_meal_init(struct happy_meal *hp)
 	u32 regtmp, rxcfg;
 
 	/* If auto-negotiation timer is running, kill it. */
-	del_timer(&hp->happy_timer);
+	timer_delete(&hp->happy_timer);
 
 	HMD("happy_flags[%08x]\n", hp->happy_flags);
 	if (!(hp->happy_flags & HFLAG_INIT)) {
@@ -1922,7 +1922,7 @@ static int happy_meal_close(struct net_device *dev)
 	happy_meal_clean_rings(hp);
 
 	/* If auto-negotiation timer is running, kill it. */
-	del_timer(&hp->happy_timer);
+	timer_delete(&hp->happy_timer);
 
 	spin_unlock_irq(&hp->happy_lock);
 
@@ -2184,7 +2184,7 @@ static int hme_set_link_ksettings(struct net_device *dev,
 
 	/* Ok, do it to it. */
 	spin_lock_irq(&hp->happy_lock);
-	del_timer(&hp->happy_timer);
+	timer_delete(&hp->happy_timer);
 	happy_meal_begin_auto_negotiation(hp, hp->tcvregs, cmd);
 	spin_unlock_irq(&hp->happy_lock);
 
@@ -2248,7 +2248,7 @@ static struct quattro *quattro_sbus_find(struct platform_device *child)
 	if (qp)
 		return qp;
 
-	qp = kzalloc(sizeof(*qp), GFP_KERNEL);
+	qp = kzalloc_obj(*qp);
 	if (!qp)
 		return NULL;
 
@@ -2278,7 +2278,7 @@ static struct quattro *quattro_pci_find(struct pci_dev *pdev)
 			return qp;
 	}
 
-	qp = kmalloc(sizeof(struct quattro), GFP_KERNEL);
+	qp = kmalloc_obj(struct quattro);
 	if (!qp)
 		return ERR_PTR(-ENOMEM);
 
@@ -2551,6 +2551,9 @@ static int happy_meal_sbus_probe_one(struct platform_device *op, int is_qfe)
 		goto err_out_clear_quattro;
 	}
 
+	/* BIGMAC may have bogus sizes */
+	if ((op->resource[3].end - op->resource[3].start) >= BMAC_REG_SIZE)
+		op->resource[3].end = op->resource[3].start + BMAC_REG_SIZE - 1;
 	hp->bigmacregs = devm_platform_ioremap_resource(op, 3);
 	if (IS_ERR(hp->bigmacregs)) {
 		dev_err(&op->dev, "Cannot map BIGMAC registers.\n");

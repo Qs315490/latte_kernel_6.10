@@ -361,7 +361,7 @@ static bool imx_should_bind(struct thermal_zone_device *tz,
 	return trip->type == THERMAL_TRIP_PASSIVE;
 }
 
-static struct thermal_zone_device_ops imx_tz_ops = {
+static const struct thermal_zone_device_ops imx_tz_ops = {
 	.should_bind = imx_should_bind,
 	.get_temp = imx_get_temp,
 	.change_mode = imx_change_mode,
@@ -693,8 +693,8 @@ static int imx_thermal_probe(struct platform_device *pdev)
 		goto clk_disable;
 	}
 
-	dev_info(dev, "%s CPU temperature grade - max:%dC"
-		 " critical:%dC passive:%dC\n", data->temp_grade,
+	dev_info(dev, "%s CPU temperature grade - max:%dC critical:%dC passive:%dC\n",
+			 data->temp_grade,
 		 data->temp_max / 1000, trips[IMX_TRIP_CRITICAL].temperature / 1000,
 		 trips[IMX_TRIP_PASSIVE].temperature / 1000);
 

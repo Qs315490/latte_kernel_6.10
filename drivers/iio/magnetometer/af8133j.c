@@ -361,16 +361,15 @@ static irqreturn_t af8133j_trigger_handler(int irq, void *p)
 	struct {
 		__le16 values[3];
 		aligned_s64 timestamp;
-	} sample;
+	} sample = { };
 	int ret;
-
-	memset(&sample, 0, sizeof(sample));
 
 	ret = af8133j_read_measurement(data, sample.values);
 	if (ret)
 		goto out_done;
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &sample, timestamp);
+	iio_push_to_buffers_with_ts(indio_dev, &sample, sizeof(sample),
+				    timestamp);
 
 out_done:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -383,7 +382,6 @@ static const struct regmap_config af8133j_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = AF8133J_REG_SWR,
-	.cache_type = REGCACHE_NONE,
 };
 
 static void af8133j_power_down_action(void *ptr)
@@ -506,7 +504,7 @@ static const struct of_device_id af8133j_of_match[] = {
 MODULE_DEVICE_TABLE(of, af8133j_of_match);
 
 static const struct i2c_device_id af8133j_id[] = {
-	{ "af8133j" },
+	{ .name = "af8133j" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, af8133j_id);

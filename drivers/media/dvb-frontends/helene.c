@@ -997,7 +997,7 @@ struct dvb_frontend *helene_attach_s(struct dvb_frontend *fe,
 {
 	struct helene_priv *priv = NULL;
 
-	priv = kzalloc(sizeof(struct helene_priv), GFP_KERNEL);
+	priv = kzalloc_obj(struct helene_priv);
 	if (priv == NULL)
 		return NULL;
 	priv->i2c_address = (config->i2c_address >> 1);
@@ -1033,7 +1033,7 @@ struct dvb_frontend *helene_attach(struct dvb_frontend *fe,
 {
 	struct helene_priv *priv = NULL;
 
-	priv = kzalloc(sizeof(struct helene_priv), GFP_KERNEL);
+	priv = kzalloc_obj(struct helene_priv);
 	if (priv == NULL)
 		return NULL;
 	priv->i2c_address = (config->i2c_address >> 1);
@@ -1101,8 +1101,8 @@ static int helene_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id helene_id[] = {
-	{ "helene", },
-	{}
+	{ .name = "helene" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, helene_id);
 

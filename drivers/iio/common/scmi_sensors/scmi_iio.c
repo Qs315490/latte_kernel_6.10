@@ -66,10 +66,9 @@ static int scmi_iio_sensor_update_cb(struct notifier_block *nb,
 		/*
 		 *  Timestamp returned by SCMI is in seconds and is equal to
 		 *  time * power-of-10 multiplier(tstamp_scale) seconds.
-		 *  Converting the timestamp to nanoseconds below.
+		 *  Converting the timestamp to nanoseconds (10⁹) below.
 		 */
-		tstamp_scale = sensor->sensor_info->tstamp_scale +
-			       const_ilog2(NSEC_PER_SEC) / const_ilog2(10);
+		tstamp_scale = sensor->sensor_info->tstamp_scale + 9;
 		if (tstamp_scale < 0) {
 			do_div(time, int_pow(10, abs(tstamp_scale)));
 			time_ns = time;
@@ -351,12 +350,11 @@ static int scmi_iio_read_raw(struct iio_dev *iio_dev,
 		ret = scmi_iio_get_odr_val(iio_dev, val, val2);
 		return ret ? ret : IIO_VAL_INT_PLUS_MICRO;
 	case IIO_CHAN_INFO_RAW:
-		ret = iio_device_claim_direct_mode(iio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(iio_dev))
+			return -EBUSY;
 
 		ret = scmi_iio_read_channel_data(iio_dev, ch, val, val2);
-		iio_device_release_direct_mode(iio_dev);
+		iio_device_release_direct(iio_dev);
 		return ret;
 	default:
 		return -EINVAL;
@@ -418,19 +416,8 @@ static const struct iio_chan_spec_ext_info scmi_iio_ext_info[] = {
 		.read = scmi_iio_get_raw_available,
 		.shared = IIO_SHARED_BY_TYPE,
 	},
-	{},
+	{ }
 };
-
-static void scmi_iio_set_timestamp_channel(struct iio_chan_spec *iio_chan,
-					   int scan_index)
-{
-	iio_chan->type = IIO_TIMESTAMP;
-	iio_chan->channel = -1;
-	iio_chan->scan_index = scan_index;
-	iio_chan->scan_type.sign = 'u';
-	iio_chan->scan_type.realbits = 64;
-	iio_chan->scan_type.storagebits = 64;
-}
 
 static void scmi_iio_set_data_channel(struct iio_chan_spec *iio_chan,
 				      enum iio_chan_type type,
@@ -522,9 +509,9 @@ static int scmi_iio_set_sampling_freq_avail(struct iio_dev *iio_dev)
 	int i;
 
 	sensor->freq_avail =
-		devm_kzalloc(&iio_dev->dev,
-			     sizeof(*sensor->freq_avail) *
-				     (sensor->sensor_info->intervals.count * 2),
+		devm_kcalloc(&iio_dev->dev,
+			     array_size(sensor->sensor_info->intervals.count, 2),
+			     sizeof(*sensor->freq_avail),
 			     GFP_KERNEL);
 	if (!sensor->freq_avail)
 		return -ENOMEM;
@@ -598,8 +585,8 @@ scmi_alloc_iiodev(struct scmi_device *sdev,
 	iiodev->info = &scmi_iio_info;
 
 	iio_channels =
-		devm_kzalloc(dev,
-			     sizeof(*iio_channels) * (iiodev->num_channels),
+		devm_kcalloc(dev, iiodev->num_channels,
+			     sizeof(*iio_channels),
 			     GFP_KERNEL);
 	if (!iio_channels)
 		return ERR_PTR(-ENOMEM);
@@ -631,7 +618,7 @@ scmi_alloc_iiodev(struct scmi_device *sdev,
 					 "Error in registering sensor update notifier for sensor %s\n",
 					 sensor->sensor_info->name);
 
-	scmi_iio_set_timestamp_channel(&iio_channels[i], i);
+	iio_channels[i] = IIO_CHAN_SOFT_TIMESTAMP(i);
 	iiodev->channels = iio_channels;
 	return iiodev;
 }
@@ -705,7 +692,7 @@ static int scmi_iio_dev_probe(struct scmi_device *sdev)
 
 static const struct scmi_device_id scmi_id_table[] = {
 	{ SCMI_PROTOCOL_SENSOR, "iiodev" },
-	{},
+	{ }
 };
 
 MODULE_DEVICE_TABLE(scmi, scmi_id_table);

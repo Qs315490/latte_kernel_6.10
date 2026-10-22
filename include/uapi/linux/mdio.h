@@ -23,6 +23,10 @@
 #define MDIO_MMD_DTEXS		5	/* DTE Extender Sublayer */
 #define MDIO_MMD_TC		6	/* Transmission Convergence */
 #define MDIO_MMD_AN		7	/* Auto-Negotiation */
+#define MDIO_MMD_SEP_PMA1	8	/* Separated PMA (1) */
+#define MDIO_MMD_SEP_PMA2	9	/* Separated PMA (2) */
+#define MDIO_MMD_SEP_PMA3	10	/* Separated PMA (3) */
+#define MDIO_MMD_SEP_PMA4	11	/* Separated PMA (4) */
 #define MDIO_MMD_POWER_UNIT	13	/* PHY Power Unit */
 #define MDIO_MMD_C22EXT		29	/* Clause 22 extension */
 #define MDIO_MMD_VEND1		30	/* Vendor specific 1 */
@@ -63,6 +67,8 @@
 					 * Lanes B-D are numbered 134-136. */
 #define MDIO_PMA_10GBR_FSRT_CSR	147	/* 10GBASE-R fast retrain status and control */
 #define MDIO_PMA_10GBR_FECABLE	170	/* 10GBASE-R FEC ability */
+#define MDIO_PMA_RSFEC_CTRL	200	/* RSFEC control */
+#define MDIO_PMA_RSFEC_LANE_MAP	206	/* RSFEC lane mapping */
 #define MDIO_PCS_10GBX_STAT1	24	/* 10GBASE-X PCS status 1 */
 #define MDIO_PCS_10GBRT_STAT1	32	/* 10GBASE-R/-T PCS status 1 */
 #define MDIO_PCS_10GBRT_STAT2	33	/* 10GBASE-R/-T PCS status 2 */
@@ -116,10 +122,24 @@
 #define MDIO_CTRL1_SPEED10G		(MDIO_CTRL1_SPEEDSELEXT | 0x00)
 /* 10PASS-TS/2BASE-TL */
 #define MDIO_CTRL1_SPEED10P2B		(MDIO_CTRL1_SPEEDSELEXT | 0x04)
+/* Note: the MDIO_CTRL1_SPEED_XXX values for everything past 10PASS-TS/2BASE-TL
+ * do not match between the PCS and PMA values. Any additions past this point
+ * should be PMA or PCS specific. The following 2 defines are workarounds for
+ * values added before this was caught. They should be considered deprecated.
+ */
+#define MDIO_CTRL1_SPEED2_5G		MDIO_PMA_CTRL1_SPEED2_5G
+#define MDIO_CTRL1_SPEED5G		MDIO_PMA_CTRL1_SPEED5G
+/* 100 Gb/s */
+#define MDIO_PCS_CTRL1_SPEED100G	(MDIO_CTRL1_SPEEDSELEXT | 0x10)
+/* 25 Gb/s */
+#define MDIO_PCS_CTRL1_SPEED25G		(MDIO_CTRL1_SPEEDSELEXT | 0x14)
+/* 50 Gb/s */
+#define MDIO_PCS_CTRL1_SPEED50G		(MDIO_CTRL1_SPEEDSELEXT | 0x18)
 /* 2.5 Gb/s */
-#define MDIO_CTRL1_SPEED2_5G		(MDIO_CTRL1_SPEEDSELEXT | 0x18)
+#define MDIO_PMA_CTRL1_SPEED2_5G	(MDIO_CTRL1_SPEEDSELEXT | 0x18)
 /* 5 Gb/s */
-#define MDIO_CTRL1_SPEED5G		(MDIO_CTRL1_SPEEDSELEXT | 0x1c)
+#define MDIO_PMA_CTRL1_SPEED5G		(MDIO_CTRL1_SPEEDSELEXT | 0x1c)
+
 
 /* Status register 1. */
 #define MDIO_STAT1_LPOWERABLE		0x0002	/* Low-power ability */
@@ -132,6 +152,11 @@
 #define MDIO_AN_STAT1_COMPLETE		BMSR_ANEGCOMPLETE
 #define MDIO_AN_STAT1_PAGE		0x0040	/* Page received */
 #define MDIO_AN_STAT1_XNP		0x0080	/* Extended next page status */
+
+/* Device Identifier 2 */
+#define MDIO_DEVID2_OUI			0xfc00	/* OUI Portion of PHY ID */
+#define MDIO_DEVID2_MODEL_NUM		0x03f0	/* Manufacturer's Model Number */
+#define MDIO_DEVID2_REV_NUM		0x000f	/* Revision Number */
 
 /* Speed register. */
 #define MDIO_SPEED_10G			0x0001	/* 10G capable */
@@ -156,6 +181,10 @@
 #define MDIO_DEVS_DTEXS			MDIO_DEVS_PRESENT(MDIO_MMD_DTEXS)
 #define MDIO_DEVS_TC			MDIO_DEVS_PRESENT(MDIO_MMD_TC)
 #define MDIO_DEVS_AN			MDIO_DEVS_PRESENT(MDIO_MMD_AN)
+#define MDIO_DEVS_SEP_PMA1		MDIO_DEVS_PRESENT(MDIO_MMD_SEP_PMA1)
+#define MDIO_DEVS_SEP_PMA2		MDIO_DEVS_PRESENT(MDIO_MMD_SEP_PMA2)
+#define MDIO_DEVS_SEP_PMA3		MDIO_DEVS_PRESENT(MDIO_MMD_SEP_PMA3)
+#define MDIO_DEVS_SEP_PMA4		MDIO_DEVS_PRESENT(MDIO_MMD_SEP_PMA4)
 #define MDIO_DEVS_C22EXT		MDIO_DEVS_PRESENT(MDIO_MMD_C22EXT)
 #define MDIO_DEVS_VEND1			MDIO_DEVS_PRESENT(MDIO_MMD_VEND1)
 #define MDIO_DEVS_VEND2			MDIO_DEVS_PRESENT(MDIO_MMD_VEND2)

@@ -79,24 +79,22 @@ static void __p_read_format(char *buf, size_t size, u64 value)
 #define ENUM_ID_TO_STR_CASE(x) case x: return (#x);
 static const char *stringify_perf_type_id(struct perf_pmu *pmu, u32 type)
 {
-	if (pmu)
-		return pmu->name;
-
 	switch (type) {
 	ENUM_ID_TO_STR_CASE(PERF_TYPE_HARDWARE)
 	ENUM_ID_TO_STR_CASE(PERF_TYPE_SOFTWARE)
 	ENUM_ID_TO_STR_CASE(PERF_TYPE_TRACEPOINT)
 	ENUM_ID_TO_STR_CASE(PERF_TYPE_HW_CACHE)
-	ENUM_ID_TO_STR_CASE(PERF_TYPE_RAW)
 	ENUM_ID_TO_STR_CASE(PERF_TYPE_BREAKPOINT)
+	case PERF_TYPE_RAW:
+		return pmu ? pmu->name : "PERF_TYPE_RAW";
 	default:
-		return NULL;
+		return pmu ? pmu->name : NULL;
 	}
 }
 
 static const char *stringify_perf_hw_id(u64 value)
 {
-	switch (value) {
+	switch (value & PERF_HW_EVENT_MASK) {
 	ENUM_ID_TO_STR_CASE(PERF_COUNT_HW_CPU_CYCLES)
 	ENUM_ID_TO_STR_CASE(PERF_COUNT_HW_INSTRUCTIONS)
 	ENUM_ID_TO_STR_CASE(PERF_COUNT_HW_CACHE_REFERENCES)
@@ -169,79 +167,100 @@ static const char *stringify_perf_sw_id(u64 value)
 }
 #undef ENUM_ID_TO_STR_CASE
 
-#define PRINT_ID(_s, _f)					\
-do {								\
-	const char *__s = _s;					\
-	if (__s == NULL)					\
-		snprintf(buf, size, _f, value);			\
-	else							\
-		snprintf(buf, size, _f" (%s)", value, __s);	\
-} while (0)
-#define print_id_unsigned(_s)	PRINT_ID(_s, "%"PRIu64)
-#define print_id_hex(_s)	PRINT_ID(_s, "%#"PRIx64)
-
-static void __p_type_id(struct perf_pmu *pmu, char *buf, size_t size, u64 value)
+static void print_id_unsigned(char *buf, size_t size, u64 value, const char *s)
 {
-	print_id_unsigned(stringify_perf_type_id(pmu, value));
+	if (s == NULL)
+		snprintf(buf, size, "%"PRIu64, value);
+	else
+		snprintf(buf, size, "%"PRIu64" (%s)", value, s);
 }
 
-static void __p_config_hw_id(char *buf, size_t size, u64 value)
+static void print_id_hex(char *buf, size_t size, u64 value, const char *s)
 {
-	print_id_hex(stringify_perf_hw_id(value));
-}
-
-static void __p_config_sw_id(char *buf, size_t size, u64 value)
-{
-	print_id_hex(stringify_perf_sw_id(value));
-}
-
-static void __p_config_hw_cache_id(char *buf, size_t size, u64 value)
-{
-	const char *hw_cache_str = stringify_perf_hw_cache_id(value & 0xff);
-	const char *hw_cache_op_str =
-		stringify_perf_hw_cache_op_id((value & 0xff00) >> 8);
-	const char *hw_cache_op_result_str =
-		stringify_perf_hw_cache_op_result_id((value & 0xff0000) >> 16);
-
-	if (hw_cache_str == NULL || hw_cache_op_str == NULL ||
-	    hw_cache_op_result_str == NULL) {
+	if (s == NULL)
 		snprintf(buf, size, "%#"PRIx64, value);
+	else
+		snprintf(buf, size, "%#"PRIx64" (%s)", value, s);
+}
+
+static void __p_type_id(char *buf, size_t size, struct perf_pmu *pmu, u32 type)
+{
+	print_id_unsigned(buf, size, type, stringify_perf_type_id(pmu, type));
+}
+
+static void __p_config_hw_id(char *buf, size_t size, struct perf_pmu *pmu, u64 config)
+{
+	const char *name = stringify_perf_hw_id(config);
+
+	if (name == NULL) {
+		if (pmu == NULL) {
+			snprintf(buf, size, "%#"PRIx64, config);
+		} else {
+			snprintf(buf, size, "%#"PRIx64" (%s/config=%#"PRIx64"/)", config, pmu->name,
+				 config);
+		}
 	} else {
-		snprintf(buf, size, "%#"PRIx64" (%s | %s | %s)", value,
-			 hw_cache_op_result_str, hw_cache_op_str, hw_cache_str);
+		if (pmu == NULL)
+			snprintf(buf, size, "%#"PRIx64" (%s)", config, name);
+		else
+			snprintf(buf, size, "%#"PRIx64" (%s/%s/)", config, pmu->name, name);
 	}
 }
 
-static void __p_config_tracepoint_id(char *buf, size_t size, u64 value)
+static void __p_config_sw_id(char *buf, size_t size, u64 id)
 {
-	char *str = tracepoint_id_to_name(value);
+	print_id_hex(buf, size, id, stringify_perf_sw_id(id));
+}
 
-	print_id_hex(str);
+static void __p_config_hw_cache_id(char *buf, size_t size, struct perf_pmu *pmu, u64 config)
+{
+	const char *hw_cache_str = stringify_perf_hw_cache_id(config & 0xff);
+	const char *hw_cache_op_str =
+		stringify_perf_hw_cache_op_id((config & 0xff00) >> 8);
+	const char *hw_cache_op_result_str =
+		stringify_perf_hw_cache_op_result_id((config & 0xff0000) >> 16);
+
+	if (hw_cache_str == NULL || hw_cache_op_str == NULL || hw_cache_op_result_str == NULL) {
+		if (pmu == NULL) {
+			snprintf(buf, size, "%#"PRIx64, config);
+		} else {
+			snprintf(buf, size, "%#"PRIx64" (%s/config=%#"PRIx64"/)", config, pmu->name,
+				 config);
+		}
+	} else {
+		if (pmu == NULL) {
+			snprintf(buf, size, "%#"PRIx64" (%s | %s | %s)", config,
+				 hw_cache_op_result_str, hw_cache_op_str, hw_cache_str);
+		} else {
+			snprintf(buf, size, "%#"PRIx64" (%s/%s | %s | %s/)", config, pmu->name,
+				 hw_cache_op_result_str, hw_cache_op_str, hw_cache_str);
+		}
+	}
+}
+
+static void __p_config_tracepoint_id(char *buf, size_t size, u64 id)
+{
+	char *str = tracepoint_id_to_name(id);
+
+	print_id_hex(buf, size, id, str);
 	free(str);
 }
 
-static void __p_config_id(struct perf_pmu *pmu, char *buf, size_t size, u32 type, u64 value)
+static void __p_config_id(struct perf_pmu *pmu, char *buf, size_t size, u32 type, u64 config)
 {
-	const char *name = perf_pmu__name_from_config(pmu, value);
-
-	if (name) {
-		print_id_hex(name);
-		return;
-	}
 	switch (type) {
 	case PERF_TYPE_HARDWARE:
-		return __p_config_hw_id(buf, size, value);
+		return __p_config_hw_id(buf, size, pmu, config);
 	case PERF_TYPE_SOFTWARE:
-		return __p_config_sw_id(buf, size, value);
+		return __p_config_sw_id(buf, size, config);
 	case PERF_TYPE_HW_CACHE:
-		return __p_config_hw_cache_id(buf, size, value);
+		return __p_config_hw_cache_id(buf, size, pmu, config);
 	case PERF_TYPE_TRACEPOINT:
-		return __p_config_tracepoint_id(buf, size, value);
+		return __p_config_tracepoint_id(buf, size, config);
 	case PERF_TYPE_RAW:
 	case PERF_TYPE_BREAKPOINT:
 	default:
-		snprintf(buf, size, "%#"PRIx64, value);
-		return;
+		return print_id_hex(buf, size, config, perf_pmu__name_from_config(pmu, config));
 	}
 }
 
@@ -253,25 +272,64 @@ static void __p_config_id(struct perf_pmu *pmu, char *buf, size_t size, u32 type
 #define p_sample_type(val)	__p_sample_type(buf, BUF_SIZE, val)
 #define p_branch_sample_type(val) __p_branch_sample_type(buf, BUF_SIZE, val)
 #define p_read_format(val)	__p_read_format(buf, BUF_SIZE, val)
-#define p_type_id(val)		__p_type_id(pmu, buf, BUF_SIZE, val)
+#define p_type_id(val)		__p_type_id(buf, BUF_SIZE, pmu, val)
 #define p_config_id(val)	__p_config_id(pmu, buf, BUF_SIZE, attr->type, val)
 
-#define PRINT_ATTRn(_n, _f, _p, _a)			\
-do {							\
-	if (_a || attr->_f) {				\
-		_p(attr->_f);				\
-		ret += attr__fprintf(fp, _n, buf, priv);\
-	}						\
+#define PRINT_ATTRn(_n, _f, _p, _a)					\
+do {									\
+	if (attr_size >= offsetof(struct perf_event_attr, _f) +		\
+			 sizeof(attr->_f) &&				\
+	    (_a || attr->_f)) {						\
+		_p(attr->_f);						\
+		ret += attr__fprintf(fp, _n, buf, priv);		\
+	}								\
+} while (0)
+
+/* bitfield members share an offset; most are within PERF_ATTR_SIZE_VER0 */
+#define PRINT_ATTRn_bf(_n, _f, _p, _a)					\
+do {									\
+	if (_a || attr->_f) {						\
+		_p(attr->_f);						\
+		ret += attr__fprintf(fp, _n, buf, priv);		\
+	}								\
 } while (0)
 
 #define PRINT_ATTRf(_f, _p)	PRINT_ATTRn(#_f, _f, _p, false)
+#define PRINT_ATTRf_bf(_f, _p)	PRINT_ATTRn_bf(#_f, _f, _p, false)
 
 int perf_event_attr__fprintf(FILE *fp, struct perf_event_attr *attr,
 			     attr__fprintf_f attr__fprintf, void *priv)
 {
 	struct perf_pmu *pmu = perf_pmus__find_by_type(attr->type);
+	/*
+	 * size == 0 means ABI0 — the producer didn't set attr.size.
+	 * perf_event__fprintf_attr() may pass the raw mmap'd event
+	 * before the local copy, so default to PERF_ATTR_SIZE_VER0
+	 * (the ABI0 footprint) to avoid reading past the attr into
+	 * the ID array that follows it in HEADER_ATTR events.
+	 */
+	u32 attr_size = attr->size ?: PERF_ATTR_SIZE_VER0;
 	char buf[BUF_SIZE];
 	int ret = 0;
+
+	/*
+	 * Cap to what we understand: all callers store the attr in a
+	 * buffer of sizeof(*attr) bytes (perf.data read path copies
+	 * min(attr.size, sizeof), BPF augmented path copies into a
+	 * fixed-size value[] array).  A spoofed attr->size larger
+	 * than sizeof would cause PRINT_ATTRn to read past the
+	 * actual buffer.
+	 */
+	if (attr_size > sizeof(*attr))
+		attr_size = sizeof(*attr);
+
+	if (!pmu && attr_size >= offsetof(struct perf_event_attr, config) + sizeof(attr->config) &&
+	    (attr->type == PERF_TYPE_HARDWARE || attr->type == PERF_TYPE_HW_CACHE)) {
+		u32 extended_type = attr->config >> PERF_PMU_TYPE_SHIFT;
+
+		if (extended_type)
+			pmu = perf_pmus__find_by_type(extended_type);
+	}
 
 	PRINT_ATTRn("type", type, p_type_id, true);
 	PRINT_ATTRf(size, p_unsigned);
@@ -280,43 +338,53 @@ int perf_event_attr__fprintf(FILE *fp, struct perf_event_attr *attr,
 	PRINT_ATTRf(sample_type, p_sample_type);
 	PRINT_ATTRf(read_format, p_read_format);
 
-	PRINT_ATTRf(disabled, p_unsigned);
-	PRINT_ATTRf(inherit, p_unsigned);
-	PRINT_ATTRf(pinned, p_unsigned);
-	PRINT_ATTRf(exclusive, p_unsigned);
-	PRINT_ATTRf(exclude_user, p_unsigned);
-	PRINT_ATTRf(exclude_kernel, p_unsigned);
-	PRINT_ATTRf(exclude_hv, p_unsigned);
-	PRINT_ATTRf(exclude_idle, p_unsigned);
-	PRINT_ATTRf(mmap, p_unsigned);
-	PRINT_ATTRf(comm, p_unsigned);
-	PRINT_ATTRf(freq, p_unsigned);
-	PRINT_ATTRf(inherit_stat, p_unsigned);
-	PRINT_ATTRf(enable_on_exec, p_unsigned);
-	PRINT_ATTRf(task, p_unsigned);
-	PRINT_ATTRf(watermark, p_unsigned);
-	PRINT_ATTRf(precise_ip, p_unsigned);
-	PRINT_ATTRf(mmap_data, p_unsigned);
-	PRINT_ATTRf(sample_id_all, p_unsigned);
-	PRINT_ATTRf(exclude_host, p_unsigned);
-	PRINT_ATTRf(exclude_guest, p_unsigned);
-	PRINT_ATTRf(exclude_callchain_kernel, p_unsigned);
-	PRINT_ATTRf(exclude_callchain_user, p_unsigned);
-	PRINT_ATTRf(mmap2, p_unsigned);
-	PRINT_ATTRf(comm_exec, p_unsigned);
-	PRINT_ATTRf(use_clockid, p_unsigned);
-	PRINT_ATTRf(context_switch, p_unsigned);
-	PRINT_ATTRf(write_backward, p_unsigned);
-	PRINT_ATTRf(namespaces, p_unsigned);
-	PRINT_ATTRf(ksymbol, p_unsigned);
-	PRINT_ATTRf(bpf_event, p_unsigned);
-	PRINT_ATTRf(aux_output, p_unsigned);
-	PRINT_ATTRf(cgroup, p_unsigned);
-	PRINT_ATTRf(text_poke, p_unsigned);
-	PRINT_ATTRf(build_id, p_unsigned);
-	PRINT_ATTRf(inherit_thread, p_unsigned);
-	PRINT_ATTRf(remove_on_exec, p_unsigned);
-	PRINT_ATTRf(sigtrap, p_unsigned);
+	/*
+	 * All bitfields share a single __u64 right after read_format.
+	 * BPF-captured attrs from perf trace may have a small size
+	 * when the tracee passes a minimal struct, so skip the
+	 * entire block when it's not covered.
+	 */
+	if (attr_size >= offsetof(struct perf_event_attr, wakeup_events)) {
+		PRINT_ATTRf_bf(disabled, p_unsigned);
+		PRINT_ATTRf_bf(inherit, p_unsigned);
+		PRINT_ATTRf_bf(pinned, p_unsigned);
+		PRINT_ATTRf_bf(exclusive, p_unsigned);
+		PRINT_ATTRf_bf(exclude_user, p_unsigned);
+		PRINT_ATTRf_bf(exclude_kernel, p_unsigned);
+		PRINT_ATTRf_bf(exclude_hv, p_unsigned);
+		PRINT_ATTRf_bf(exclude_idle, p_unsigned);
+		PRINT_ATTRf_bf(mmap, p_unsigned);
+		PRINT_ATTRf_bf(comm, p_unsigned);
+		PRINT_ATTRf_bf(freq, p_unsigned);
+		PRINT_ATTRf_bf(inherit_stat, p_unsigned);
+		PRINT_ATTRf_bf(enable_on_exec, p_unsigned);
+		PRINT_ATTRf_bf(task, p_unsigned);
+		PRINT_ATTRf_bf(watermark, p_unsigned);
+		PRINT_ATTRf_bf(precise_ip, p_unsigned);
+		PRINT_ATTRf_bf(mmap_data, p_unsigned);
+		PRINT_ATTRf_bf(sample_id_all, p_unsigned);
+		PRINT_ATTRf_bf(exclude_host, p_unsigned);
+		PRINT_ATTRf_bf(exclude_guest, p_unsigned);
+		PRINT_ATTRf_bf(exclude_callchain_kernel, p_unsigned);
+		PRINT_ATTRf_bf(exclude_callchain_user, p_unsigned);
+		PRINT_ATTRf_bf(mmap2, p_unsigned);
+		PRINT_ATTRf_bf(comm_exec, p_unsigned);
+		PRINT_ATTRf_bf(use_clockid, p_unsigned);
+		PRINT_ATTRf_bf(context_switch, p_unsigned);
+		PRINT_ATTRf_bf(write_backward, p_unsigned);
+		PRINT_ATTRf_bf(namespaces, p_unsigned);
+		PRINT_ATTRf_bf(ksymbol, p_unsigned);
+		PRINT_ATTRf_bf(bpf_event, p_unsigned);
+		PRINT_ATTRf_bf(aux_output, p_unsigned);
+		PRINT_ATTRf_bf(cgroup, p_unsigned);
+		PRINT_ATTRf_bf(text_poke, p_unsigned);
+		PRINT_ATTRf_bf(build_id, p_unsigned);
+		PRINT_ATTRf_bf(inherit_thread, p_unsigned);
+		PRINT_ATTRf_bf(remove_on_exec, p_unsigned);
+		PRINT_ATTRf_bf(sigtrap, p_unsigned);
+		PRINT_ATTRf_bf(defer_callchain, p_unsigned);
+		PRINT_ATTRf_bf(defer_output, p_unsigned);
+	}
 
 	PRINT_ATTRn("{ wakeup_events, wakeup_watermark }", wakeup_events, p_unsigned, false);
 	PRINT_ATTRf(bp_type, p_unsigned);
@@ -331,9 +399,12 @@ int perf_event_attr__fprintf(FILE *fp, struct perf_event_attr *attr,
 	PRINT_ATTRf(sample_max_stack, p_unsigned);
 	PRINT_ATTRf(aux_sample_size, p_unsigned);
 	PRINT_ATTRf(sig_data, p_unsigned);
-	PRINT_ATTRf(aux_start_paused, p_unsigned);
-	PRINT_ATTRf(aux_pause, p_unsigned);
-	PRINT_ATTRf(aux_resume, p_unsigned);
+	/* aux_{start_paused,pause,resume} are at byte 116, past VER0 */
+	if (attr_size >= offsetof(struct perf_event_attr, sig_data)) {
+		PRINT_ATTRf_bf(aux_start_paused, p_unsigned);
+		PRINT_ATTRf_bf(aux_pause, p_unsigned);
+		PRINT_ATTRf_bf(aux_resume, p_unsigned);
+	}
 
 	return ret;
 }

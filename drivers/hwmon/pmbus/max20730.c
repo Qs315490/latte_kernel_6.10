@@ -715,10 +715,7 @@ static int max20730_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	if (client->dev.of_node)
-		chip_id = (uintptr_t)of_device_get_match_data(dev);
-	else
-		chip_id = i2c_match_id(max20730_id, client)->driver_data;
+	chip_id = (uintptr_t)i2c_get_match_data(client);
 
 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
@@ -754,11 +751,11 @@ static int max20730_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max20730_id[] = {
-	{ "max20710", max20710 },
-	{ "max20730", max20730 },
-	{ "max20734", max20734 },
-	{ "max20743", max20743 },
-	{ },
+	{ .name = "max20710", .driver_data = max20710 },
+	{ .name = "max20730", .driver_data = max20730 },
+	{ .name = "max20734", .driver_data = max20734 },
+	{ .name = "max20743", .driver_data = max20743 },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, max20730_id);

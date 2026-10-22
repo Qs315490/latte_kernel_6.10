@@ -20,19 +20,15 @@
 static int __maybe_unused crypto_kpp_report(
 	struct sk_buff *skb, struct crypto_alg *alg)
 {
-	struct crypto_report_kpp rkpp;
-
-	memset(&rkpp, 0, sizeof(rkpp));
-
-	strscpy(rkpp.type, "kpp", sizeof(rkpp.type));
+	struct crypto_report_kpp rkpp = {
+		.type = "kpp",
+	};
 
 	return nla_put(skb, CRYPTOCFGA_REPORT_KPP, sizeof(rkpp), &rkpp);
 }
 
-static void crypto_kpp_show(struct seq_file *m, struct crypto_alg *alg)
-	__maybe_unused;
-
-static void crypto_kpp_show(struct seq_file *m, struct crypto_alg *alg)
+static void __maybe_unused crypto_kpp_show(struct seq_file *m,
+					   struct crypto_alg *alg)
 {
 	seq_puts(m, "type         : kpp\n");
 }
@@ -80,6 +76,7 @@ static const struct crypto_type crypto_kpp_type = {
 	.maskset = CRYPTO_ALG_TYPE_MASK,
 	.type = CRYPTO_ALG_TYPE_KPP,
 	.tfmsize = offsetof(struct crypto_kpp, base),
+	.algsize = offsetof(struct kpp_alg, base),
 };
 
 struct crypto_kpp *crypto_alloc_kpp(const char *alg_name, u32 type, u32 mask)

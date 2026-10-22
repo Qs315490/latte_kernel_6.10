@@ -34,7 +34,7 @@ config MTD_NAND_DENALI_DT
 config MTD_NAND_AMS_DELTA
 	tristate "Amstrad E3 NAND controller"
 	depends on MACH_AMS_DELTA || COMPILE_TEST
-	default y
+	default MACH_AMS_DELTA
 	help
 	  Support for NAND flash on Amstrad E3 (Delta).
 
@@ -71,37 +71,12 @@ config MTD_NAND_AU1550
 
 config MTD_NAND_NDFC
 	tristate "IBM/MCC 4xx NAND controller"
-	depends on 4xx
+	depends on 44x || COMPILE_TEST
+	depends on OF
 	select MTD_NAND_ECC_SW_HAMMING
 	select MTD_NAND_ECC_SW_HAMMING_SMC
 	help
 	  NDFC Nand Flash Controllers are integrated in IBM/AMCC's 4xx SoCs
-
-config MTD_NAND_S3C2410
-	tristate "Samsung S3C NAND controller"
-	depends on ARCH_S3C64XX
-	help
-	  This enables the NAND flash controller on the S3C24xx and S3C64xx
-	  SoCs
-
-	  No board specific support is done by this driver, each board
-	  must advertise a platform_device for the driver to attach.
-
-config MTD_NAND_S3C2410_DEBUG
-	bool "Samsung S3C NAND controller debug"
-	depends on MTD_NAND_S3C2410
-	help
-	  Enable debugging of the S3C NAND driver
-
-config MTD_NAND_S3C2410_CLKSTOP
-	bool "Samsung S3C NAND IDLE clock stop"
-	depends on MTD_NAND_S3C2410
-	default n
-	help
-	  Stop the clock to the NAND controller when there is no chip
-	  selected to save power. This will mean there is a small delay
-	  when the is NAND chip selected or released, but will save
-	  approximately 5mA of power when there is nothing happening.
 
 config MTD_NAND_SHARPSL
 	tristate "Sharp SL Series (C7xx + others) NAND controller"
@@ -330,7 +305,7 @@ config MTD_NAND_HISI504
 	  Enables support for NAND controller on Hisilicon SoC Hip04.
 
 config MTD_NAND_QCOM
-	tristate "QCOM NAND controller"
+	tristate "Qualcomm NAND controller"
 	depends on ARCH_QCOM || COMPILE_TEST
 	depends on HAS_IOMEM
 	help
@@ -461,6 +436,13 @@ config MTD_NAND_NUVOTON_MA35
 	help
 	  Enables support for the NAND controller found on
 	  the Nuvoton MA35 series SoCs.
+
+config MTD_NAND_LOONGSON
+	tristate "Loongson NAND controller"
+	depends on LOONGSON1_APB_DMA || LOONGSON2_APB_DMA || COMPILE_TEST
+	select REGMAP_MMIO
+	help
+	  Enables support for NAND controller on Loongson family chips.
 
 comment "Misc"
 

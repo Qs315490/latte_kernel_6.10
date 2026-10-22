@@ -39,10 +39,8 @@
 #include <asm/processor.h>
 
 .section .data
-.global empty_zero_page
+/* The MMU requires a page aligned page directory. */
 .align 12
-empty_zero_page:
-	.space	PAGE_SIZE
 .global swapper_pg_dir
 swapper_pg_dir:
 	.space	PAGE_SIZE

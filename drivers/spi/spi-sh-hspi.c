@@ -224,15 +224,14 @@ static int hspi_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	ctlr = spi_alloc_host(&pdev->dev, sizeof(*hspi));
+	ctlr = devm_spi_alloc_host(&pdev->dev, sizeof(*hspi));
 	if (!ctlr)
 		return -ENOMEM;
 
 	clk = clk_get(&pdev->dev, NULL);
 	if (IS_ERR(clk)) {
 		dev_err(&pdev->dev, "couldn't get clock\n");
-		ret = -EINVAL;
-		goto error0;
+		return PTR_ERR(clk);
 	}
 
 	hspi = spi_controller_get_devdata(ctlr);
@@ -253,14 +252,13 @@ static int hspi_probe(struct platform_device *pdev)
 
 	ctlr->bus_num = pdev->id;
 	ctlr->mode_bits	= SPI_CPOL | SPI_CPHA;
-	ctlr->dev.of_node = pdev->dev.of_node;
 	ctlr->auto_runtime_pm = true;
 	ctlr->transfer_one_message = hspi_transfer_one_message;
 	ctlr->bits_per_word_mask = SPI_BPW_MASK(8);
 
-	ret = devm_spi_register_controller(&pdev->dev, ctlr);
+	ret = spi_register_controller(ctlr);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "devm_spi_register_controller error.\n");
+		dev_err(&pdev->dev, "failed to register controller\n");
 		goto error2;
 	}
 
@@ -270,8 +268,6 @@ static int hspi_probe(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
  error1:
 	clk_put(clk);
- error0:
-	spi_controller_put(ctlr);
 
 	return ret;
 }
@@ -279,6 +275,8 @@ static int hspi_probe(struct platform_device *pdev)
 static void hspi_remove(struct platform_device *pdev)
 {
 	struct hspi_priv *hspi = platform_get_drvdata(pdev);
+
+	spi_unregister_controller(hspi->ctlr);
 
 	pm_runtime_disable(&pdev->dev);
 

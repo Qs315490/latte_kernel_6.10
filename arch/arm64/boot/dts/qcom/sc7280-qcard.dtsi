@@ -16,7 +16,7 @@
 #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 
-#include "sc7280.dtsi"
+#include "kodiak.dtsi"
 
 /* PMICs depend on spmi_bus label and so must come after SoC */
 #include "pm7325.dtsi"
@@ -562,7 +562,7 @@ mos_bt_uart: &uart7 {
  *
  * This has entries that are defined by Qcard even if they go to the main
  * board. In cases where the pulls may be board dependent we defer those
- * settings to the board device tree. Drive strengths tend to be assinged here
+ * settings to the board device tree. Drive strengths tend to be assigned here
  * but could conceivably be overwridden by board device trees.
  */
 

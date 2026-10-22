@@ -132,20 +132,15 @@ snd_emux_create_port(struct snd_emux *emu, char *name,
 	int i, type, cap;
 
 	/* Allocate structures for this channel */
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc_flex(*p, chset.channels, max_channels);
 	if (!p)
 		return NULL;
 
-	p->chset.channels = kcalloc(max_channels, sizeof(*p->chset.channels),
-				    GFP_KERNEL);
-	if (!p->chset.channels) {
-		kfree(p);
-		return NULL;
-	}
+	p->chset.max_channels = max_channels;
+
 	for (i = 0; i < max_channels; i++)
 		p->chset.channels[i].number = i;
 	p->chset.private_data = p;
-	p->chset.max_channels = max_channels;
 	p->emu = emu;
 	p->chset.client = emu->client;
 #ifdef SNDRV_EMUX_USE_RAW_EFFECT
@@ -183,7 +178,6 @@ free_port(void *private_data)
 #ifdef SNDRV_EMUX_USE_RAW_EFFECT
 		snd_emux_delete_effect(p);
 #endif
-		kfree(p->chset.channels);
 		kfree(p);
 	}
 }
@@ -272,12 +266,8 @@ __snd_emux_inc_count(struct snd_emux *emu)
 
 int snd_emux_inc_count(struct snd_emux *emu)
 {
-	int ret;
-
-	mutex_lock(&emu->register_mutex);
-	ret = __snd_emux_inc_count(emu);
-	mutex_unlock(&emu->register_mutex);
-	return ret;
+	guard(mutex)(&emu->register_mutex);
+	return __snd_emux_inc_count(emu);
 }
 
 /*
@@ -295,9 +285,8 @@ __snd_emux_dec_count(struct snd_emux *emu)
 
 void snd_emux_dec_count(struct snd_emux *emu)
 {
-	mutex_lock(&emu->register_mutex);
+	guard(mutex)(&emu->register_mutex);
 	__snd_emux_dec_count(emu);
-	mutex_unlock(&emu->register_mutex);
 }
 
 /*
@@ -316,10 +305,9 @@ snd_emux_use(void *private_data, struct snd_seq_port_subscribe *info)
 	if (snd_BUG_ON(!emu))
 		return -EINVAL;
 
-	mutex_lock(&emu->register_mutex);
+	guard(mutex)(&emu->register_mutex);
 	snd_emux_init_port(p);
 	__snd_emux_inc_count(emu);
-	mutex_unlock(&emu->register_mutex);
 	return 0;
 }
 
@@ -339,10 +327,9 @@ snd_emux_unuse(void *private_data, struct snd_seq_port_subscribe *info)
 	if (snd_BUG_ON(!emu))
 		return -EINVAL;
 
-	mutex_lock(&emu->register_mutex);
+	guard(mutex)(&emu->register_mutex);
 	snd_emux_sounds_off_all(p);
 	__snd_emux_dec_count(emu);
-	mutex_unlock(&emu->register_mutex);
 	return 0;
 }
 
@@ -358,7 +345,7 @@ int snd_emux_init_virmidi(struct snd_emux *emu, struct snd_card *card)
 	if (emu->midi_ports <= 0)
 		return 0;
 
-	emu->vmidi = kcalloc(emu->midi_ports, sizeof(*emu->vmidi), GFP_KERNEL);
+	emu->vmidi = kzalloc_objs(*emu->vmidi, emu->midi_ports);
 	if (!emu->vmidi)
 		return -ENOMEM;
 

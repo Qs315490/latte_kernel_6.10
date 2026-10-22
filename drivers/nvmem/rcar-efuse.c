@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/export.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/nvmem-provider.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -127,6 +126,7 @@ static const struct of_device_id rcar_fuse_match[] = {
 	{ .compatible = "renesas,r8a779h0-otp", .data = &rcar_fuse_v4m },
 	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, rcar_fuse_match);
 
 static struct platform_driver rcar_fuse_driver = {
 	.probe = rcar_fuse_probe,

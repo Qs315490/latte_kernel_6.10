@@ -8,6 +8,7 @@
  * Copyright IBM Corp. 1999, 2009
  */
 
+#include <linux/export.h>
 #include <linux/kmod.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -20,7 +21,9 @@
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/vmalloc.h>
+#include <linux/delay.h>
 
+#include <asm/machine.h>
 #include <asm/ccwdev.h>
 #include <asm/ebcdic.h>
 #include <asm/idals.h>
@@ -84,7 +87,7 @@ struct dasd_device *dasd_alloc_device(void)
 {
 	struct dasd_device *device;
 
-	device = kzalloc(sizeof(struct dasd_device), GFP_ATOMIC);
+	device = kzalloc_obj(struct dasd_device, GFP_ATOMIC);
 	if (!device)
 		return ERR_PTR(-ENOMEM);
 
@@ -148,7 +151,7 @@ struct dasd_block *dasd_alloc_block(void)
 {
 	struct dasd_block *block;
 
-	block = kzalloc(sizeof(*block), GFP_ATOMIC);
+	block = kzalloc_obj(*block, GFP_ATOMIC);
 	if (!block)
 		return ERR_PTR(-ENOMEM);
 	/* open_count = 0 means device online but not in use */
@@ -205,19 +208,6 @@ static int dasd_state_known_to_new(struct dasd_device *device)
 	return 0;
 }
 
-static struct dentry *dasd_debugfs_setup(const char *name,
-					 struct dentry *base_dentry)
-{
-	struct dentry *pde;
-
-	if (!base_dentry)
-		return NULL;
-	pde = debugfs_create_dir(name, base_dentry);
-	if (!pde || IS_ERR(pde))
-		return NULL;
-	return pde;
-}
-
 /*
  * Request the irq line for the device.
  */
@@ -232,14 +222,14 @@ static int dasd_state_known_to_basic(struct dasd_device *device)
 		if (rc)
 			return rc;
 		block->debugfs_dentry =
-			dasd_debugfs_setup(block->gdp->disk_name,
+			debugfs_create_dir(block->gdp->disk_name,
 					   dasd_debugfs_root_entry);
 		dasd_profile_init(&block->profile, block->debugfs_dentry);
 		if (dasd_global_profile_level == DASD_PROFILE_ON)
 			dasd_profile_on(&device->block->profile);
 	}
 	device->debugfs_dentry =
-		dasd_debugfs_setup(dev_name(&device->cdev->dev),
+		debugfs_create_dir(dev_name(&device->cdev->dev),
 				   dasd_debugfs_root_entry);
 	dasd_profile_init(&device->profile, device->debugfs_dentry);
 	dasd_hosts_init(device->debugfs_dentry, device);
@@ -332,6 +322,11 @@ static int dasd_state_basic_to_ready(struct dasd_device *device)
 	lim.max_dev_sectors = device->discipline->max_sectors(block);
 	lim.max_hw_sectors = lim.max_dev_sectors;
 	lim.logical_block_size = block->bp_block;
+	/*
+	 * Adjust dma_alignment to match block_size - 1
+	 * to ensure proper buffer alignment checks in the block layer.
+	 */
+	lim.dma_alignment = lim.logical_block_size - 1;
 
 	if (device->discipline->has_discard) {
 		unsigned int max_bytes;
@@ -874,7 +869,7 @@ int dasd_profile_on(struct dasd_profile *profile)
 {
 	struct dasd_profile_info *data;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 	spin_lock_bh(&profile->lock);
@@ -967,8 +962,7 @@ static void dasd_stats_array(struct seq_file *m, unsigned int *array)
 static void dasd_stats_seq_print(struct seq_file *m,
 				 struct dasd_profile_info *data)
 {
-	seq_printf(m, "start_time %lld.%09ld\n",
-		   (s64)data->starttod.tv_sec, data->starttod.tv_nsec);
+	seq_printf(m, "start_time %ptSp\n", &data->starttod);
 	seq_printf(m, "total_requests %u\n", data->dasd_io_reqs);
 	seq_printf(m, "total_sectors %u\n", data->dasd_io_sects);
 	seq_printf(m, "total_pav %u\n", data->dasd_io_alias);
@@ -1051,19 +1045,9 @@ static const struct file_operations dasd_stats_raw_fops = {
 static void dasd_profile_init(struct dasd_profile *profile,
 			      struct dentry *base_dentry)
 {
-	umode_t mode;
-	struct dentry *pde;
-
-	if (!base_dentry)
-		return;
-	profile->dentry = NULL;
 	profile->data = NULL;
-	mode = (S_IRUSR | S_IWUSR | S_IFREG);
-	pde = debugfs_create_file("statistics", mode, base_dentry,
-				  profile, &dasd_stats_raw_fops);
-	if (pde && !IS_ERR(pde))
-		profile->dentry = pde;
-	return;
+	profile->dentry = debugfs_create_file("statistics", 0600, base_dentry,
+					      profile, &dasd_stats_raw_fops);
 }
 
 static void dasd_profile_exit(struct dasd_profile *profile)
@@ -1083,25 +1067,9 @@ static void dasd_statistics_removeroot(void)
 
 static void dasd_statistics_createroot(void)
 {
-	struct dentry *pde;
-
-	dasd_debugfs_root_entry = NULL;
-	pde = debugfs_create_dir("dasd", NULL);
-	if (!pde || IS_ERR(pde))
-		goto error;
-	dasd_debugfs_root_entry = pde;
-	pde = debugfs_create_dir("global", dasd_debugfs_root_entry);
-	if (!pde || IS_ERR(pde))
-		goto error;
-	dasd_debugfs_global_entry = pde;
+	dasd_debugfs_root_entry = debugfs_create_dir("dasd", NULL);
+	dasd_debugfs_global_entry = debugfs_create_dir("global", dasd_debugfs_root_entry);
 	dasd_profile_init(&dasd_global_profile, dasd_debugfs_global_entry);
-	return;
-
-error:
-	DBF_EVENT(DBF_ERR, "%s",
-		  "Creation of the dasd debugfs interface failed");
-	dasd_statistics_removeroot();
-	return;
 }
 
 #else
@@ -1162,17 +1130,8 @@ static void dasd_hosts_exit(struct dasd_device *device)
 static void dasd_hosts_init(struct dentry *base_dentry,
 			    struct dasd_device *device)
 {
-	struct dentry *pde;
-	umode_t mode;
-
-	if (!base_dentry)
-		return;
-
-	mode = S_IRUSR | S_IFREG;
-	pde = debugfs_create_file("host_access_list", mode, base_dentry,
-				  device, &dasd_hosts_fops);
-	if (pde && !IS_ERR(pde))
-		device->hosts_dentry = pde;
+	device->hosts_dentry = debugfs_create_file("host_access_list", 0400, base_dentry,
+						   device, &dasd_hosts_fops);
 }
 
 struct dasd_ccw_req *dasd_smalloc_request(int magic, int cplength, int datasize,
@@ -1492,7 +1451,7 @@ static void dasd_device_timeout(struct timer_list *t)
 	unsigned long flags;
 	struct dasd_device *device;
 
-	device = from_timer(device, t, timer);
+	device = timer_container_of(device, t, timer);
 	spin_lock_irqsave(get_ccwdev_lock(device->cdev), flags);
 	/* re-activate request queue */
 	dasd_device_remove_stop_bits(device, DASD_STOPPED_PENDING);
@@ -1506,7 +1465,7 @@ static void dasd_device_timeout(struct timer_list *t)
 void dasd_device_set_timer(struct dasd_device *device, int expires)
 {
 	if (expires == 0)
-		del_timer(&device->timer);
+		timer_delete(&device->timer);
 	else
 		mod_timer(&device->timer, jiffies + expires);
 }
@@ -1517,7 +1476,7 @@ EXPORT_SYMBOL(dasd_device_set_timer);
  */
 void dasd_device_clear_timer(struct dasd_device *device)
 {
-	del_timer(&device->timer);
+	timer_delete(&device->timer);
 }
 EXPORT_SYMBOL(dasd_device_clear_timer);
 
@@ -2553,6 +2512,13 @@ static inline int _dasd_term_running_cqr(struct dasd_device *device)
 	if (list_empty(&device->ccw_queue))
 		return 0;
 	cqr = list_entry(device->ccw_queue.next, struct dasd_ccw_req, devlist);
+	/*
+	 * Path verification requests must not be terminated. They are critical
+	 * for bringing paths back online. Terminating them would cause rc=-EIO
+	 * because CLEARED requests skip the retry path.
+	 */
+	if (test_bit(DASD_CQR_VERIFY_PATH, &cqr->flags))
+		return -EAGAIN;
 	rc = device->discipline->term_IO(cqr);
 	if (!rc)
 		/*
@@ -2577,7 +2543,11 @@ int dasd_sleep_on_immediatly(struct dasd_ccw_req *cqr)
 		return -EIO;
 	}
 	spin_lock_irq(get_ccwdev_lock(device->cdev));
-	rc = _dasd_term_running_cqr(device);
+	while ((rc = _dasd_term_running_cqr(device)) == -EAGAIN) {
+		spin_unlock_irq(get_ccwdev_lock(device->cdev));
+		msleep(1);
+		spin_lock_irq(get_ccwdev_lock(device->cdev));
+	}
 	if (rc) {
 		spin_unlock_irq(get_ccwdev_lock(device->cdev));
 		return rc;
@@ -2676,7 +2646,7 @@ static void dasd_block_timeout(struct timer_list *t)
 	unsigned long flags;
 	struct dasd_block *block;
 
-	block = from_timer(block, t, timer);
+	block = timer_container_of(block, t, timer);
 	spin_lock_irqsave(get_ccwdev_lock(block->base->cdev), flags);
 	/* re-activate request queue */
 	dasd_device_remove_stop_bits(block->base, DASD_STOPPED_PENDING);
@@ -2691,7 +2661,7 @@ static void dasd_block_timeout(struct timer_list *t)
 void dasd_block_set_timer(struct dasd_block *block, int expires)
 {
 	if (expires == 0)
-		del_timer(&block->timer);
+		timer_delete(&block->timer);
 	else
 		mod_timer(&block->timer, jiffies + expires);
 }
@@ -2702,7 +2672,7 @@ EXPORT_SYMBOL(dasd_block_set_timer);
  */
 void dasd_block_clear_timer(struct dasd_block *block)
 {
-	del_timer(&block->timer);
+	timer_delete(&block->timer);
 }
 EXPORT_SYMBOL(dasd_block_clear_timer);
 
@@ -3112,12 +3082,14 @@ static blk_status_t do_dasd_request(struct blk_mq_hw_ctx *hctx,
 		    PTR_ERR(cqr) == -ENOMEM ||
 		    PTR_ERR(cqr) == -EAGAIN) {
 			rc = BLK_STS_RESOURCE;
-			goto out;
+		} else if (PTR_ERR(cqr) == -EINVAL) {
+			rc = BLK_STS_INVAL;
+		} else {
+			DBF_DEV_EVENT(DBF_ERR, basedev,
+				      "CCW creation failed (rc=%ld) on request %p",
+				      PTR_ERR(cqr), req);
+			rc = BLK_STS_IOERR;
 		}
-		DBF_DEV_EVENT(DBF_ERR, basedev,
-			      "CCW creation failed (rc=%ld) on request %p",
-			      PTR_ERR(cqr), req);
-		rc = BLK_STS_IOERR;
 		goto out;
 	}
 	/*
@@ -3220,7 +3192,7 @@ enum blk_eh_timer_return dasd_times_out(struct request *req)
 static int dasd_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 			  unsigned int idx)
 {
-	struct dasd_queue *dq = kzalloc(sizeof(*dq), GFP_KERNEL);
+	struct dasd_queue *dq = kzalloc_obj(*dq);
 
 	if (!dq)
 		return -ENOMEM;
@@ -3315,11 +3287,11 @@ static void dasd_release(struct gendisk *disk)
 /*
  * Return disk geometry.
  */
-static int dasd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+static int dasd_getgeo(struct gendisk *disk, struct hd_geometry *geo)
 {
 	struct dasd_device *base;
 
-	base = dasd_device_from_gendisk(bdev->bd_disk);
+	base = dasd_device_from_gendisk(disk);
 	if (!base)
 		return -ENODEV;
 
@@ -3329,7 +3301,8 @@ static int dasd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 		return -EINVAL;
 	}
 	base->discipline->fill_geometry(base->block, geo);
-	geo->start = get_start_sect(bdev) >> base->block->s2b_shift;
+	// geo->start is left unchanged by the above
+	geo->start >>= base->block->s2b_shift;
 	dasd_put_device(base);
 	return 0;
 }
@@ -3340,7 +3313,6 @@ dasd_device_operations = {
 	.open		= dasd_open,
 	.release	= dasd_release,
 	.ioctl		= dasd_ioctl,
-	.compat_ioctl	= dasd_ioctl,
 	.getgeo		= dasd_getgeo,
 	.set_read_only	= dasd_set_read_only,
 };
@@ -3382,7 +3354,7 @@ int dasd_device_is_ro(struct dasd_device *device)
 	struct diag210 diag_data;
 	int rc;
 
-	if (!MACHINE_IS_VM)
+	if (!machine_is_vm())
 		return 0;
 	ccw_device_get_id(device->cdev, &dev_id);
 	memset(&diag_data, 0, sizeof(diag_data));

@@ -6,6 +6,7 @@
  */
 #include <stdio.h>
 #include <signal.h>
+#include <assert.h>
 #include <unistd.h>
 #include <libgen.h>
 #include <limits.h>
@@ -101,8 +102,12 @@ static float read_cpu_util(__u64 *last_sum, __u64 *last_idle)
 
 static void fcg_read_stats(struct scx_flatcg *skel, __u64 *stats)
 {
-	__u64 cnts[FCG_NR_STATS][skel->rodata->nr_cpus];
+	__u64 *cnts;
 	__u32 idx;
+
+	cnts = calloc(skel->rodata->nr_cpus, sizeof(__u64));
+	if (!cnts)
+		return;
 
 	memset(stats, 0, sizeof(stats[0]) * FCG_NR_STATS);
 
@@ -110,12 +115,14 @@ static void fcg_read_stats(struct scx_flatcg *skel, __u64 *stats)
 		int ret, cpu;
 
 		ret = bpf_map_lookup_elem(bpf_map__fd(skel->maps.stats),
-					  &idx, cnts[idx]);
+					  &idx, cnts);
 		if (ret < 0)
 			continue;
 		for (cpu = 0; cpu < skel->rodata->nr_cpus; cpu++)
-			stats[idx] += cnts[idx][cpu];
+			stats[idx] += cnts[cpu];
 	}
+
+	free(cnts);
 }
 
 int main(int argc, char **argv)
@@ -123,7 +130,6 @@ int main(int argc, char **argv)
 	struct scx_flatcg *skel;
 	struct bpf_link *link;
 	struct timespec intv_ts = { .tv_sec = 2, .tv_nsec = 0 };
-	bool dump_cgrps = false;
 	__u64 last_cpu_sum = 0, last_cpu_idle = 0;
 	__u64 last_stats[FCG_NR_STATS] = {};
 	unsigned long seq = 0;
@@ -134,12 +140,14 @@ int main(int argc, char **argv)
 	signal(SIGINT, sigint_handler);
 	signal(SIGTERM, sigint_handler);
 restart:
+	optind = 1;
 	skel = SCX_OPS_OPEN(flatcg_ops, scx_flatcg);
 
 	skel->rodata->nr_cpus = libbpf_num_possible_cpus();
+	assert(skel->rodata->nr_cpus > 0);
 	skel->rodata->cgrp_slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
-	while ((opt = getopt(argc, argv, "s:i:dfvh")) != -1) {
+	while ((opt = getopt(argc, argv, "s:i:fvh")) != -1) {
 		double v;
 
 		switch (opt) {
@@ -151,9 +159,6 @@ restart:
 			v = strtod(optarg, NULL);
 			intv_ts.tv_sec = v;
 			intv_ts.tv_nsec = (v - (float)intv_ts.tv_sec) * 1000000000;
-			break;
-		case 'd':
-			dump_cgrps = true;
 			break;
 		case 'f':
 			skel->rodata->fifo_sched = true;
@@ -168,10 +173,10 @@ restart:
 		}
 	}
 
-	printf("slice=%.1lfms intv=%.1lfs dump_cgrps=%d",
+	printf("slice=%.1lfms intv=%.1lfs",
 	       (double)skel->rodata->cgrp_slice_ns / 1000000.0,
-	       (double)intv_ts.tv_sec + (double)intv_ts.tv_nsec / 1000000000.0,
-	       dump_cgrps);
+	       (double)intv_ts.tv_sec + (double)intv_ts.tv_nsec / 1000000000.0);
+
 
 	SCX_OPS_LOAD(skel, flatcg_ops, scx_flatcg, uei);
 	link = SCX_OPS_ATTACH(skel, flatcg_ops, scx_flatcg);

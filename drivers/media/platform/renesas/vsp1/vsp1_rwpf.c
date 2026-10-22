@@ -10,30 +10,59 @@
 #include <media/v4l2-subdev.h>
 
 #include "vsp1.h"
+#include "vsp1_entity.h"
 #include "vsp1_rwpf.h"
 #include "vsp1_video.h"
-
-#define RWPF_MIN_WIDTH				1
-#define RWPF_MIN_HEIGHT				1
 
 /* -----------------------------------------------------------------------------
  * V4L2 Subdevice Operations
  */
 
+/* Keep HSV last. */
+static const unsigned int rwpf_codes[] = {
+	MEDIA_BUS_FMT_AYUV8_1X32,
+	MEDIA_BUS_FMT_ARGB8888_1X32,
+	MEDIA_BUS_FMT_AHSV8888_1X32,
+};
+
 static int vsp1_rwpf_enum_mbus_code(struct v4l2_subdev *subdev,
 				    struct v4l2_subdev_state *sd_state,
 				    struct v4l2_subdev_mbus_code_enum *code)
 {
-	static const unsigned int codes[] = {
-		MEDIA_BUS_FMT_ARGB8888_1X32,
-		MEDIA_BUS_FMT_AHSV8888_1X32,
-		MEDIA_BUS_FMT_AYUV8_1X32,
-	};
+	struct vsp1_entity *entity = to_vsp1_entity(subdev);
+	struct v4l2_subdev_state *state;
+	struct v4l2_mbus_framefmt *format;
 
-	if (code->index >= ARRAY_SIZE(codes))
+	if (code->pad == RWPF_PAD_SINK)
+		return vsp1_subdev_enum_mbus_code(subdev, sd_state, code);
+
+	state = vsp1_entity_get_state(entity, sd_state, code->which);
+	if (!state)
 		return -EINVAL;
 
-	code->code = codes[code->index];
+	format = v4l2_subdev_state_get_format(state, RWPF_PAD_SINK);
+
+	guard(mutex)(&entity->lock);
+
+	/*
+	 * The RWPF supports conversion between RGB and YUV formats, but HSV
+	 * formats can't be converted.
+	 */
+	if (format->code == MEDIA_BUS_FMT_AHSV8888_1X32) {
+		if (code->index)
+			return -EINVAL;
+
+		code->code = MEDIA_BUS_FMT_AHSV8888_1X32;
+	} else {
+		if (code->index >= ARRAY_SIZE(rwpf_codes) - 1)
+			return -EINVAL;
+
+		code->code = rwpf_codes[code->index];
+	}
+
+	if (code->code == MEDIA_BUS_FMT_AYUV8_1X32)
+		code->flags = V4L2_SUBDEV_MBUS_CODE_CSC_YCBCR_ENC
+			    | V4L2_SUBDEV_MBUS_CODE_CSC_QUANTIZATION;
 
 	return 0;
 }
@@ -42,12 +71,42 @@ static int vsp1_rwpf_enum_frame_size(struct v4l2_subdev *subdev,
 				     struct v4l2_subdev_state *sd_state,
 				     struct v4l2_subdev_frame_size_enum *fse)
 {
-	struct vsp1_rwpf *rwpf = to_rwpf(subdev);
+	struct vsp1_entity *entity = to_vsp1_entity(subdev);
+	struct v4l2_subdev_state *state;
+	struct v4l2_mbus_framefmt *format;
 
-	return vsp1_subdev_enum_frame_size(subdev, sd_state, fse,
-					   RWPF_MIN_WIDTH,
-					   RWPF_MIN_HEIGHT, rwpf->max_width,
-					   rwpf->max_height);
+	if (fse->pad == RWPF_PAD_SINK)
+		return vsp1_subdev_enum_frame_size(subdev, sd_state, fse);
+
+	if (fse->index)
+		return -EINVAL;
+
+	state = vsp1_entity_get_state(entity, sd_state, fse->which);
+	if (!state)
+		return -EINVAL;
+
+	format = v4l2_subdev_state_get_format(state, RWPF_PAD_SINK);
+
+	guard(mutex)(&entity->lock);
+
+	/*
+	 * The RWPF supports conversion between RGB and YUV formats, but
+	 * HSV formats can't be converted.
+	 */
+	if ((format->code == MEDIA_BUS_FMT_AHSV8888_1X32) !=
+	    (fse->code == MEDIA_BUS_FMT_AHSV8888_1X32))
+		return -EINVAL;
+
+	/*
+	 * The size on the source pad is fixed and always identical to
+	 * the sink pad.
+	 */
+	fse->min_width = format->width;
+	fse->max_width = format->width;
+	fse->min_height = format->height;
+	fse->max_height = format->height;
+
+	return 0;
 }
 
 static int vsp1_rwpf_set_format(struct v4l2_subdev *subdev,
@@ -57,15 +116,12 @@ static int vsp1_rwpf_set_format(struct v4l2_subdev *subdev,
 	struct vsp1_rwpf *rwpf = to_rwpf(subdev);
 	struct v4l2_subdev_state *state;
 	struct v4l2_mbus_framefmt *format;
-	int ret = 0;
 
-	mutex_lock(&rwpf->entity.lock);
+	guard(mutex)(&rwpf->entity.lock);
 
 	state = vsp1_entity_get_state(&rwpf->entity, sd_state, fmt->which);
-	if (!state) {
-		ret = -EINVAL;
-		goto done;
-	}
+	if (!state)
+		return -EINVAL;
 
 	/* Default to YUV if the requested format is not supported. */
 	if (fmt->format.code != MEDIA_BUS_FMT_ARGB8888_1X32 &&
@@ -76,22 +132,61 @@ static int vsp1_rwpf_set_format(struct v4l2_subdev *subdev,
 	format = v4l2_subdev_state_get_format(state, fmt->pad);
 
 	if (fmt->pad == RWPF_PAD_SOURCE) {
+		const struct v4l2_mbus_framefmt *sink_format =
+			v4l2_subdev_state_get_format(state, RWPF_PAD_SINK);
+		u16 flags = fmt->format.flags & V4L2_MBUS_FRAMEFMT_SET_CSC;
+		bool csc;
+
 		/*
 		 * The RWPF performs format conversion but can't scale, only the
-		 * format code can be changed on the source pad.
+		 * format code, encoding and quantization can be changed on the
+		 * source pad when converting between RGB and YUV.
 		 */
-		format->code = fmt->format.code;
+		if (sink_format->code != MEDIA_BUS_FMT_AHSV8888_1X32 &&
+		    fmt->format.code != MEDIA_BUS_FMT_AHSV8888_1X32)
+			format->code = fmt->format.code;
+		else
+			format->code = sink_format->code;
+
+		/*
+		 * Encoding and quantization can only be configured when YCbCr
+		 * <-> RGB is enabled. The V4L2 API requires userspace to set
+		 * the V4L2_MBUS_FRAMEFMT_SET_CSC flag. If either of these
+		 * conditions is not met, use the encoding and quantization
+		 * values from the sink pad.
+		 */
+		csc = (format->code == MEDIA_BUS_FMT_AYUV8_1X32) !=
+		      (sink_format->code == MEDIA_BUS_FMT_AYUV8_1X32);
+
+		if (csc && (flags & V4L2_MBUS_FRAMEFMT_SET_CSC)) {
+			format->ycbcr_enc = fmt->format.ycbcr_enc;
+			format->quantization = fmt->format.quantization;
+		} else {
+			format->ycbcr_enc = sink_format->ycbcr_enc;
+			format->quantization = sink_format->quantization;
+		}
+
+		vsp1_entity_adjust_color_space(format);
+
 		fmt->format = *format;
-		goto done;
+		fmt->format.flags = flags;
+
+		return 0;
 	}
 
 	format->code = fmt->format.code;
 	format->width = clamp_t(unsigned int, fmt->format.width,
-				RWPF_MIN_WIDTH, rwpf->max_width);
+				RWPF_MIN_WIDTH, rwpf->entity.max_width);
 	format->height = clamp_t(unsigned int, fmt->format.height,
-				 RWPF_MIN_HEIGHT, rwpf->max_height);
+				 RWPF_MIN_HEIGHT, rwpf->entity.max_height);
 	format->field = V4L2_FIELD_NONE;
-	format->colorspace = V4L2_COLORSPACE_SRGB;
+
+	format->colorspace = fmt->format.colorspace;
+	format->xfer_func = fmt->format.xfer_func;
+	format->ycbcr_enc = fmt->format.ycbcr_enc;
+	format->quantization = fmt->format.quantization;
+
+	vsp1_entity_adjust_color_space(format);
 
 	fmt->format = *format;
 
@@ -115,9 +210,7 @@ static int vsp1_rwpf_set_format(struct v4l2_subdev *subdev,
 		format->height = fmt->format.width;
 	}
 
-done:
-	mutex_unlock(&rwpf->entity.lock);
-	return ret;
+	return 0;
 }
 
 static int vsp1_rwpf_get_selection(struct v4l2_subdev *subdev,
@@ -127,7 +220,6 @@ static int vsp1_rwpf_get_selection(struct v4l2_subdev *subdev,
 	struct vsp1_rwpf *rwpf = to_rwpf(subdev);
 	struct v4l2_subdev_state *state;
 	struct v4l2_mbus_framefmt *format;
-	int ret = 0;
 
 	/*
 	 * Cropping is only supported on the RPF and is implemented on the sink
@@ -136,13 +228,11 @@ static int vsp1_rwpf_get_selection(struct v4l2_subdev *subdev,
 	if (rwpf->entity.type == VSP1_ENTITY_WPF || sel->pad != RWPF_PAD_SINK)
 		return -EINVAL;
 
-	mutex_lock(&rwpf->entity.lock);
+	guard(mutex)(&rwpf->entity.lock);
 
 	state = vsp1_entity_get_state(&rwpf->entity, sd_state, sel->which);
-	if (!state) {
-		ret = -EINVAL;
-		goto done;
-	}
+	if (!state)
+		return -EINVAL;
 
 	switch (sel->target) {
 	case V4L2_SEL_TGT_CROP:
@@ -158,24 +248,22 @@ static int vsp1_rwpf_get_selection(struct v4l2_subdev *subdev,
 		break;
 
 	default:
-		ret = -EINVAL;
-		break;
+		return -EINVAL;
 	}
 
-done:
-	mutex_unlock(&rwpf->entity.lock);
-	return ret;
+	return 0;
 }
 
 static int vsp1_rwpf_set_selection(struct v4l2_subdev *subdev,
 				   struct v4l2_subdev_state *sd_state,
 				   struct v4l2_subdev_selection *sel)
 {
+	unsigned int min_width = RWPF_MIN_WIDTH;
+	unsigned int min_height = RWPF_MIN_HEIGHT;
 	struct vsp1_rwpf *rwpf = to_rwpf(subdev);
 	struct v4l2_subdev_state *state;
 	struct v4l2_mbus_framefmt *format;
 	struct v4l2_rect *crop;
-	int ret = 0;
 
 	/*
 	 * Cropping is only supported on the RPF and is implemented on the sink
@@ -187,33 +275,49 @@ static int vsp1_rwpf_set_selection(struct v4l2_subdev *subdev,
 	if (sel->target != V4L2_SEL_TGT_CROP)
 		return -EINVAL;
 
-	mutex_lock(&rwpf->entity.lock);
+	guard(mutex)(&rwpf->entity.lock);
 
 	state = vsp1_entity_get_state(&rwpf->entity, sd_state, sel->which);
-	if (!state) {
-		ret = -EINVAL;
-		goto done;
-	}
+	if (!state)
+		return -EINVAL;
 
 	/* Make sure the crop rectangle is entirely contained in the image. */
 	format = v4l2_subdev_state_get_format(state, RWPF_PAD_SINK);
 
 	/*
-	 * Restrict the crop rectangle coordinates to multiples of 2 to avoid
-	 * shifting the color plane.
+	 * For YUV formats, restrict the crop rectangle coordinates to multiples
+	 * of 2 to avoid shifting the color plane.
 	 */
 	if (format->code == MEDIA_BUS_FMT_AYUV8_1X32) {
 		sel->r.left = ALIGN(sel->r.left, 2);
 		sel->r.top = ALIGN(sel->r.top, 2);
 		sel->r.width = round_down(sel->r.width, 2);
 		sel->r.height = round_down(sel->r.height, 2);
+
+		/*
+		 * The RPF doesn't enforces the alignment constraint on the sink
+		 * pad format, which could have an odd size, possibly down to
+		 * 1x1. In that case, the minimum width and height would be
+		 * smaller than the sink pad format, leading to a negative upper
+		 * bound in the left and top clamping. Clamp the minimum width
+		 * and height to the format width and height to avoid this.
+		 *
+		 * In such a situation, odd values for the crop rectangle size
+		 * would be accepted when clamping the width and height below.
+		 * While that would create an invalid hardware configuration,
+		 * the video device enforces proper alignment of the pixel
+		 * format, and the mismatch will then result in link validation
+		 * failure. Incorrect operation of the hardware is not possible.
+		 */
+		min_width = min(ALIGN(min_width, 2), format->width);
+		min_height = min(ALIGN(min_height, 2), format->height);
 	}
 
-	sel->r.left = min_t(unsigned int, sel->r.left, format->width - 2);
-	sel->r.top = min_t(unsigned int, sel->r.top, format->height - 2);
-	sel->r.width = min_t(unsigned int, sel->r.width,
+	sel->r.left = clamp_t(int, sel->r.left, 0, format->width - min_width);
+	sel->r.top = clamp_t(int, sel->r.top, 0, format->height - min_height);
+	sel->r.width = clamp(sel->r.width, min_width,
 			     format->width - sel->r.left);
-	sel->r.height = min_t(unsigned int, sel->r.height,
+	sel->r.height = clamp(sel->r.height, min_height,
 			      format->height - sel->r.top);
 
 	crop = v4l2_subdev_state_get_crop(state, RWPF_PAD_SINK);
@@ -224,9 +328,7 @@ static int vsp1_rwpf_set_selection(struct v4l2_subdev *subdev,
 	format->width = crop->width;
 	format->height = crop->height;
 
-done:
-	mutex_unlock(&rwpf->entity.lock);
-	return ret;
+	return 0;
 }
 
 static const struct v4l2_subdev_pad_ops vsp1_rwpf_pad_ops = {
@@ -239,6 +341,7 @@ static const struct v4l2_subdev_pad_ops vsp1_rwpf_pad_ops = {
 };
 
 const struct v4l2_subdev_ops vsp1_rwpf_subdev_ops = {
+	.core	= &vsp1_entity_core_ops,
 	.pad    = &vsp1_rwpf_pad_ops,
 };
 
@@ -266,6 +369,9 @@ static const struct v4l2_ctrl_ops vsp1_rwpf_ctrl_ops = {
 
 int vsp1_rwpf_init_ctrls(struct vsp1_rwpf *rwpf, unsigned int ncontrols)
 {
+	rwpf->entity.codes = rwpf_codes;
+	rwpf->entity.num_codes = ARRAY_SIZE(rwpf_codes);
+
 	v4l2_ctrl_handler_init(&rwpf->ctrls, ncontrols + 1);
 	v4l2_ctrl_new_std(&rwpf->ctrls, &vsp1_rwpf_ctrl_ops,
 			  V4L2_CID_ALPHA_COMPONENT, 0, 255, 1, 255);

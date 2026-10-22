@@ -22,6 +22,7 @@
 #include <linux/vmalloc.h>
 #include <linux/elf.h>
 #include <linux/seq_file.h>
+#include <linux/string.h>
 #include <linux/syscalls.h>
 #include <linux/moduleloader.h>
 #include <linux/interrupt.h>
@@ -93,7 +94,7 @@ struct vpe *alloc_vpe(int minor)
 {
 	struct vpe *v;
 
-	v = kzalloc(sizeof(struct vpe), GFP_KERNEL);
+	v = kzalloc_obj(struct vpe);
 	if (v == NULL)
 		goto out;
 
@@ -114,7 +115,7 @@ struct tc *alloc_tc(int index)
 {
 	struct tc *tc;
 
-	tc = kzalloc(sizeof(struct tc), GFP_KERNEL);
+	tc = kzalloc_obj(struct tc);
 	if (tc == NULL)
 		goto out;
 
@@ -317,7 +318,7 @@ static int apply_r_mips_hi16(struct module *me, uint32_t *location,
 	 * the carry we need to add.  Save the information, and let LO16 do the
 	 * actual relocation.
 	 */
-	n = kmalloc(sizeof(*n), GFP_KERNEL);
+	n = kmalloc_obj(*n);
 	if (!n)
 		return -ENOMEM;
 
@@ -582,7 +583,7 @@ static int vpe_elfload(struct vpe *v)
 	struct module mod; /* so we can re-use the relocations code */
 
 	memset(&mod, 0, sizeof(struct module));
-	strcpy(mod.name, "VPE loader");
+	strscpy(mod.name, "VPE loader");
 
 	hdr = (Elf_Ehdr *) v->pbuffer;
 	len = v->plen;

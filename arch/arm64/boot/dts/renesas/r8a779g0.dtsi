@@ -13,6 +13,7 @@
 	compatible = "renesas,r8a779g0";
 	#address-cells = <2>;
 	#size-cells = <2>;
+	interrupt-parent = <&gic>;
 
 	/* External Audio clock - to be overridden by boards that provide it */
 	audio_clkin: audio_clkin {
@@ -166,6 +167,7 @@
 		#clock-cells = <0>;
 		/* This value must be overridden by the board */
 		clock-frequency = <0>;
+		bootph-all;
 	};
 
 	extalr_clk: extalr {
@@ -173,6 +175,7 @@
 		#clock-cells = <0>;
 		/* This value must be overridden by the board */
 		clock-frequency = <0>;
+		bootph-all;
 	};
 
 	pcie0_clkref: pcie0-clkref {
@@ -191,7 +194,7 @@
 
 	pmu_a76 {
 		compatible = "arm,cortex-a76-pmu";
-		interrupts-extended = <&gic GIC_PPI 7 IRQ_TYPE_LEVEL_LOW>;
+		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_LOW>;
 	};
 
 	psci {
@@ -214,7 +217,8 @@
 
 	soc: soc {
 		compatible = "simple-bus";
-		interrupt-parent = <&gic>;
+		bootph-all;
+
 		#address-cells = <2>;
 		#size-cells = <2>;
 		ranges;
@@ -230,6 +234,16 @@
 			status = "disabled";
 		};
 
+		swdt: watchdog@e6030000 {
+			compatible = "renesas,r8a779g0-wdt", "renesas,rcar-gen4-wdt";
+			reg = <0 0xe6030000 0 0x0c>;
+			interrupts = <GIC_SPI 331 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cpg CPG_CORE R8A779G0_CLK_OSC>;
+			power-domains = <&sysc R8A779G0_PD_ALWAYS_ON>;
+			resets = <&cpg 1128>;
+			status = "disabled";
+		};
+
 		pfc: pinctrl@e6050000 {
 			compatible = "renesas,pfc-r8a779g0";
 			reg = <0 0xe6050000 0 0x16c>, <0 0xe6050800 0 0x16c>,
@@ -237,6 +251,7 @@
 			      <0 0xe6060000 0 0x16c>, <0 0xe6060800 0 0x16c>,
 			      <0 0xe6061000 0 0x16c>, <0 0xe6061800 0 0x16c>,
 			      <0 0xe6068000 0 0x16c>;
+			bootph-all;
 		};
 
 		gpio0: gpio@e6050180 {
@@ -452,11 +467,13 @@
 			#clock-cells = <2>;
 			#power-domain-cells = <0>;
 			#reset-cells = <1>;
+			bootph-all;
 		};
 
 		rst: reset-controller@e6160000 {
 			compatible = "renesas,r8a779g0-rst";
 			reg = <0 0xe6160000 0 0x4000>;
+			bootph-all;
 		};
 
 		sysc: system-controller@e6180000 {
@@ -791,6 +808,16 @@
 					<0 0 0 4 &gic GIC_SPI 449 IRQ_TYPE_LEVEL_HIGH>;
 			snps,enable-cdm-check;
 			status = "disabled";
+
+			/* PCIe bridge, Root Port */
+			pciec0_rp: pci@0,0 {
+				#address-cells = <3>;
+				#size-cells = <2>;
+				reg = <0x0 0x0 0x0 0x0 0x0>;
+				compatible = "pciclass,0604";
+				device_type = "pci";
+				ranges;
+			};
 		};
 
 		pciec1: pcie@e65d8000 {
@@ -828,6 +855,16 @@
 					<0 0 0 4 &gic GIC_SPI 456 IRQ_TYPE_LEVEL_HIGH>;
 			snps,enable-cdm-check;
 			status = "disabled";
+
+			/* PCIe bridge, Root Port */
+			pciec1_rp: pci@0,0 {
+				#address-cells = <3>;
+				#size-cells = <2>;
+				reg = <0x0 0x0 0x0 0x0 0x0>;
+				compatible = "pciclass,0604";
+				device_type = "pci";
+				ranges;
+			};
 		};
 
 		pciec0_ep: pcie-ep@e65d0000 {
@@ -2171,6 +2208,24 @@
 			iommus = <&ipmmu_vi1 7>;
 		};
 
+		fcpvx0: fcp@fedb0000 {
+			compatible = "renesas,fcpv";
+			reg = <0 0xfedb0000 0 0x200>;
+			clocks = <&cpg CPG_MOD 1100>;
+			power-domains = <&sysc R8A779G0_PD_A3ISP0>;
+			resets = <&cpg 1100>;
+			iommus = <&ipmmu_vi1 24>;
+		};
+
+		fcpvx1: fcp@fedb8000 {
+			compatible = "renesas,fcpv";
+			reg = <0 0xfedb8000 0 0x200>;
+			clocks = <&cpg CPG_MOD 1101>;
+			power-domains = <&sysc R8A779G0_PD_A3ISP1>;
+			resets = <&cpg 1101>;
+			iommus = <&ipmmu_vi1 25>;
+		};
+
 		vspd0: vsp@fea20000 {
 			compatible = "renesas,vsp2";
 			reg = <0 0xfea20000 0 0x7000>;
@@ -2191,6 +2246,28 @@
 			resets = <&cpg 831>;
 
 			renesas,fcp = <&fcpvd1>;
+		};
+
+		vspx0: vsp@fedd0000 {
+			compatible = "renesas,vsp2";
+			reg = <0 0xfedd0000 0 0x8000>;
+			interrupts = <GIC_SPI 556 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cpg CPG_MOD 1028>;
+			power-domains = <&sysc R8A779G0_PD_A3ISP0>;
+			resets = <&cpg 1028>;
+
+			renesas,fcp = <&fcpvx0>;
+		};
+
+		vspx1: vsp@fedd8000 {
+			compatible = "renesas,vsp2";
+			reg = <0 0xfedd8000 0 0x8000>;
+			interrupts = <GIC_SPI 557 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cpg CPG_MOD 1029>;
+			power-domains = <&sysc R8A779G0_PD_A3ISP1>;
+			resets = <&cpg 1029>;
+
+			renesas,fcp = <&fcpvx1>;
 		};
 
 		du: display@feb00000 {
@@ -2230,12 +2307,19 @@
 		isp0: isp@fed00000 {
 			compatible = "renesas,r8a779g0-isp",
 				     "renesas,rcar-gen4-isp";
-			reg = <0 0xfed00000 0 0x10000>;
-			interrupts = <GIC_SPI 473 IRQ_TYPE_LEVEL_LOW>;
-			clocks = <&cpg CPG_MOD 612>;
+			reg = <0 0xfed00000 0 0x10000>, <0 0xfec00000 0 0x100000>;
+			reg-names = "cs", "core";
+			interrupts = <GIC_SPI 473 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 475 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "cs", "core";
+			clocks = <&cpg CPG_MOD 612>, <&cpg CPG_MOD 16>;
+			clock-names = "cs", "core";
 			power-domains = <&sysc R8A779G0_PD_A3ISP0>;
-			resets = <&cpg 612>;
+			resets = <&cpg 612>, <&cpg 16>;
+			reset-names = "cs", "core";
 			status = "disabled";
+
+			renesas,vspx = <&vspx0>;
 
 			ports {
 				#address-cells = <1>;
@@ -2314,12 +2398,19 @@
 		isp1: isp@fed20000 {
 			compatible = "renesas,r8a779g0-isp",
 				     "renesas,rcar-gen4-isp";
-			reg = <0 0xfed20000 0 0x10000>;
-			interrupts = <GIC_SPI 474 IRQ_TYPE_LEVEL_LOW>;
-			clocks = <&cpg CPG_MOD 613>;
+			reg = <0 0xfed20000 0 0x10000>, <0 0xfee00000 0 0x100000>;
+			reg-names = "cs", "core";
+			interrupts = <GIC_SPI 474 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 476 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "cs", "core";
+			clocks = <&cpg CPG_MOD 613>, <&cpg CPG_MOD 17>;
+			clock-names = "cs", "core";
 			power-domains = <&sysc R8A779G0_PD_A3ISP1>;
-			resets = <&cpg 613>;
+			resets = <&cpg 613>, <&cpg 17>;
+			reset-names = "cs", "core";
 			status = "disabled";
+
+			renesas,vspx = <&vspx1>;
 
 			ports {
 				#address-cells = <1>;
@@ -2395,7 +2486,7 @@
 			};
 		};
 
-		dsi0: dsi-encoder@fed80000 {
+		dsi0: dsi@fed80000 {
 			compatible = "renesas,r8a779g0-dsi-csi2-tx";
 			reg = <0 0xfed80000 0 0x10000>;
 			clocks = <&cpg CPG_MOD 415>,
@@ -2424,7 +2515,7 @@
 			};
 		};
 
-		dsi1: dsi-encoder@fed90000 {
+		dsi1: dsi@fed90000 {
 			compatible = "renesas,r8a779g0-dsi-csi2-tx";
 			reg = <0 0xfed90000 0 0x10000>;
 			clocks = <&cpg CPG_MOD 416>,
@@ -2453,49 +2544,122 @@
 			};
 		};
 
-		fcpvx0: fcp@fedb0000 {
-			compatible = "renesas,fcpv";
-			reg = <0 0xfedb0000 0 0x200>;
-			clocks = <&cpg CPG_MOD 1100>;
-			power-domains = <&sysc R8A779G0_PD_A3ISP0>;
-			resets = <&cpg 1100>;
-			iommus = <&ipmmu_vi1 24>;
+		wwdt0: watchdog@ffc90000 {
+			compatible = "renesas,r8a779g0-wwdt",
+				     "renesas,rcar-gen4-wwdt";
+			reg = <0 0xffc90000 0 0x10>;
+			interrupts = <GIC_SPI 310 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 311 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "pretimeout", "error";
+			clocks = <&cpg CPG_CORE R8A779G0_CLK_R>,
+				 <&cpg CPG_CORE R8A779G0_CLK_SASYNCRT>;
+			clock-names = "cnt", "bus";
+			power-domains = <&sysc R8A779G0_PD_ALWAYS_ON>;
+			resets = <&cpg 1200>;
+			reset-names = "cnt";
+			status = "disabled";
 		};
 
-		fcpvx1: fcp@fedb8000 {
-			compatible = "renesas,fcpv";
-			reg = <0 0xfedb8000 0 0x200>;
-			clocks = <&cpg CPG_MOD 1101>;
-			power-domains = <&sysc R8A779G0_PD_A3ISP1>;
-			resets = <&cpg 1101>;
-			iommus = <&ipmmu_vi1 25>;
+		wwdt1: watchdog@ffca0000 {
+			compatible = "renesas,r8a779g0-wwdt",
+				     "renesas,rcar-gen4-wwdt";
+			reg = <0 0xffca0000 0 0x10>;
+			interrupts = <GIC_SPI 312 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 313 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "pretimeout", "error";
+			clocks = <&cpg CPG_CORE R8A779G0_CLK_R>,
+				 <&cpg CPG_CORE R8A779G0_CLK_SASYNCRT>;
+			clock-names = "cnt", "bus";
+			power-domains = <&sysc R8A779G0_PD_ALWAYS_ON>;
+			resets = <&cpg 1201>;
+			reset-names = "cnt";
+			status = "disabled";
 		};
 
-		vspx0: vsp@fedd0000 {
-			compatible = "renesas,vsp2";
-			reg = <0 0xfedd0000 0 0x8000>;
-			interrupts = <GIC_SPI 556 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&cpg CPG_MOD 1028>;
-			power-domains = <&sysc R8A779G0_PD_A3ISP0>;
-			resets = <&cpg 1028>;
-
-			renesas,fcp = <&fcpvx0>;
+		wwdt2: watchdog@ffcb0000 {
+			compatible = "renesas,r8a779g0-wwdt",
+				     "renesas,rcar-gen4-wwdt";
+			reg = <0 0xffcb0000 0 0x10>;
+			interrupts = <GIC_SPI 314 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 315 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "pretimeout", "error";
+			clocks = <&cpg CPG_CORE R8A779G0_CLK_R>,
+				 <&cpg CPG_CORE R8A779G0_CLK_SASYNCRT>;
+			clock-names = "cnt", "bus";
+			power-domains = <&sysc R8A779G0_PD_ALWAYS_ON>;
+			resets = <&cpg 1202>;
+			reset-names = "cnt";
+			status = "disabled";
 		};
 
-		vspx1: vsp@fedd8000 {
-			compatible = "renesas,vsp2";
-			reg = <0 0xfedd8000 0 0x8000>;
-			interrupts = <GIC_SPI 557 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&cpg CPG_MOD 1029>;
-			power-domains = <&sysc R8A779G0_PD_A3ISP1>;
-			resets = <&cpg 1029>;
+		wwdt3: watchdog@ffcc0000 {
+			compatible = "renesas,r8a779g0-wwdt",
+				     "renesas,rcar-gen4-wwdt";
+			reg = <0 0xffcc0000 0 0x10>;
+			interrupts = <GIC_SPI 316 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 317 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "pretimeout", "error";
+			clocks = <&cpg CPG_CORE R8A779G0_CLK_R>,
+				 <&cpg CPG_CORE R8A779G0_CLK_SASYNCRT>;
+			clock-names = "cnt", "bus";
+			power-domains = <&sysc R8A779G0_PD_ALWAYS_ON>;
+			resets = <&cpg 1203>;
+			reset-names = "cnt";
+			status = "disabled";
+		};
 
-			renesas,fcp = <&fcpvx1>;
+		wwdt4: watchdog@ffcf0000 {
+			compatible = "renesas,r8a779g0-wwdt",
+				     "renesas,rcar-gen4-wwdt";
+			reg = <0 0xffcf0000 0 0x10>;
+			interrupts = <GIC_SPI 318 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 319 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "pretimeout", "error";
+			clocks = <&cpg CPG_CORE R8A779G0_CLK_R>,
+				 <&cpg CPG_CORE R8A779G0_CLK_SASYNCRT>;
+			clock-names = "cnt", "bus";
+			power-domains = <&sysc R8A779G0_PD_ALWAYS_ON>;
+			resets = <&cpg 1204>;
+			reset-names = "cnt";
+			status = "disabled";
+		};
+
+		wwdt5: watchdog@ffef0000 {
+			compatible = "renesas,r8a779g0-wwdt",
+				     "renesas,rcar-gen4-wwdt";
+			reg = <0 0xffef0000 0 0x10>;
+			interrupts = <GIC_SPI 320 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 321 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "pretimeout", "error";
+			clocks = <&cpg CPG_CORE R8A779G0_CLK_R>,
+				 <&cpg CPG_CORE R8A779G0_CLK_SASYNCRT>;
+			clock-names = "cnt", "bus";
+			power-domains = <&sysc R8A779G0_PD_ALWAYS_ON>;
+			resets = <&cpg 1205>;
+			reset-names = "cnt";
+			status = "disabled";
+		};
+
+		wwdt6: watchdog@fff10000 {
+			compatible = "renesas,r8a779g0-wwdt",
+				     "renesas,rcar-gen4-wwdt";
+			reg = <0 0xfff10000 0 0x10>;
+			interrupts = <GIC_SPI 322 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 323 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "pretimeout", "error";
+			clocks = <&cpg CPG_CORE R8A779G0_CLK_R>,
+				 <&cpg CPG_CORE R8A779G0_CLK_SASYNCRT>;
+			clock-names = "cnt", "bus";
+			power-domains = <&sysc R8A779G0_PD_ALWAYS_ON>;
+			resets = <&cpg 1206>;
+			reset-names = "cnt";
+			status = "disabled";
 		};
 
 		prr: chipid@fff00044 {
 			compatible = "renesas,prr";
 			reg = <0 0xfff00044 0 4>;
+			bootph-all;
 		};
 	};
 
@@ -2559,11 +2723,11 @@
 
 	timer {
 		compatible = "arm,armv8-timer";
-		interrupts-extended = <&gic GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
-				      <&gic GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>,
-				      <&gic GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>,
-				      <&gic GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>,
-				      <&gic GIC_PPI 12 IRQ_TYPE_LEVEL_LOW>;
+		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_PPI 12 IRQ_TYPE_LEVEL_LOW>;
 		interrupt-names = "sec-phys", "phys", "virt", "hyp-phys",
 				  "hyp-virt";
 	};

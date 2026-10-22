@@ -37,7 +37,7 @@ enum hwmon_type {
 /**
  * enum hwmon_item:
  *
- * Similar to enum hwmon_type but describes the item part of a a sysfs filename.
+ * Similar to enum hwmon_type but describes the item part of a sysfs filename.
  *
  * This enum is exposed for testing.
  */
@@ -91,6 +91,22 @@ enum hwmon_item {
 	HWMON_ITEM__MAX,
 };
 
+/**
+ * union hwmon_pmu_event_key: Key for hwmon_pmu->events as such each key
+ * represents an event.
+ * union is exposed for testing to ensure problems are avoided on big
+ * endian machines.
+ *
+ * Related hwmon files start <type><number> that this key represents.
+ */
+union hwmon_pmu_event_key {
+	long type_and_num;
+	struct {
+		int num :16;
+		enum hwmon_type type :8;
+	};
+};
+
 bool perf_pmu__is_hwmon(const struct perf_pmu *pmu);
 bool evsel__is_hwmon(const struct evsel *evsel);
 
@@ -119,14 +135,14 @@ bool parse_hwmon_filename(const char *filename,
  * hwmon_pmu__new() - Allocate and construct a hwmon PMU.
  *
  * @pmus: The list of PMUs to be added to.
- * @hwmon_dir: An O_DIRECTORY file descriptor for a hwmon directory.
+ * @hwmon_dir: The path to a hwmon directory.
  * @sysfs_name: Name of the hwmon sysfs directory like hwmon0.
  * @name: The contents of the "name" file in the hwmon directory.
  *
  * Exposed for testing. Regular construction should happen via
  * perf_pmus__read_hwmon_pmus.
  */
-struct perf_pmu *hwmon_pmu__new(struct list_head *pmus, int hwmon_dir,
+struct perf_pmu *hwmon_pmu__new(struct list_head *pmus, const char *hwmon_dir,
 				const char *sysfs_name, const char *name);
 void hwmon_pmu__exit(struct perf_pmu *pmu);
 

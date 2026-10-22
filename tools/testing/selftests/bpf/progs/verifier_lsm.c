@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 
-#include <linux/bpf.h>
+#include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
 #include "bpf_misc.h"
 
-SEC("lsm/file_alloc_security")
+SEC("lsm/file_permission")
 __description("lsm bpf prog with -4095~0 retval. test 1")
 __success
 __naked int errno_zero_retval_test1(void *ctx)
@@ -15,7 +16,7 @@ __naked int errno_zero_retval_test1(void *ctx)
 	::: __clobber_all);
 }
 
-SEC("lsm/file_alloc_security")
+SEC("lsm/file_permission")
 __description("lsm bpf prog with -4095~0 retval. test 2")
 __success
 __naked int errno_zero_retval_test2(void *ctx)
@@ -154,6 +155,58 @@ __failure __msg("points to disabled hook")
 __naked int disabled_hook_test3(void *ctx)
 {
 	asm volatile (
+	"r0 = 0;"
+	"exit;"
+	::: __clobber_all);
+}
+
+SEC("lsm/mmap_file")
+__description("not null checking nullable pointer in bpf_lsm_mmap_file")
+__failure __msg("R1 invalid mem access 'trusted_ptr_or_null_'")
+int BPF_PROG(no_null_check, struct file *file)
+{
+	struct inode *inode;
+
+	inode = file->f_inode;
+	__sink(inode);
+
+	return 0;
+}
+
+SEC("lsm/mmap_file")
+__description("null checking nullable pointer in bpf_lsm_mmap_file")
+__success
+int BPF_PROG(null_check, struct file *file)
+{
+	struct inode *inode;
+
+	if (file) {
+		inode = file->f_inode;
+		__sink(inode);
+	}
+
+	return 0;
+}
+
+SEC("lsm_cgroup/file_open")
+__description("sleepable lsm_cgroup program is rejected")
+__failure __msg("Program of this type cannot be sleepable")
+__flag(BPF_F_SLEEPABLE)
+int BPF_PROG(sleepable_lsm_cgroup)
+{
+	return 0;
+}
+
+SEC("lsm/file_mprotect")
+__description("lsm retval load must reset stale register bounds")
+__failure __msg("div by zero")
+__naked int retval_load_resets_bounds(void *ctx)
+{
+	asm volatile (
+	"r6 = 0;"
+	"r6 = *(u64 *)(r1 + 24);"
+	"if r6 == 0 goto +1;"
+	"r6 /= 0;"
 	"r0 = 0;"
 	"exit;"
 	::: __clobber_all);

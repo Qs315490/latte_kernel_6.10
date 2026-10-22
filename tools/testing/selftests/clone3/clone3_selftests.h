@@ -11,12 +11,12 @@
 #include <syscall.h>
 #include <sys/wait.h>
 
-#include "../kselftest.h"
+#include "kselftest.h"
 
 #define ptr_to_u64(ptr) ((__u64)((uintptr_t)(ptr)))
 
 #ifndef __NR_clone3
-#define __NR_clone3 -1
+#define __NR_clone3 435
 #endif
 
 struct __clone_args {

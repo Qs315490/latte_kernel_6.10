@@ -3,8 +3,10 @@
 
 lib_dir=$(dirname $0)/../../../net/forwarding
 
-ALL_TESTS="fw_flash_test params_test regions_test reload_test \
-	   netns_reload_test resource_test dev_info_test \
+ALL_TESTS="fw_flash_test params_test  \
+	   params_default_test regions_test reload_test \
+	   netns_reload_test resource_test resource_dump_test \
+	   port_resource_doit_test dev_info_test \
 	   empty_reporter_test dummy_reporter_test rate_test"
 NUM_NETIFS=0
 source $lib_dir/lib.sh
@@ -39,6 +41,8 @@ fw_flash_test()
 		echo "SKIP: unable to find suitable dummy firmware file"
 		return
 	fi
+
+	echo "10"> $DEBUGFS_DIR/fw_update_flash_chunk_time_ms
 
 	devlink dev flash $DL_HANDLE file $DUMMYFILE
 	check_err $? "Failed to flash with status updates on"
@@ -76,17 +80,28 @@ fw_flash_test()
 param_get()
 {
 	local name=$1
+	local attr=${2:-value}
+	local cmode=${3:-driverinit}
 
 	cmd_jq "devlink dev param show $DL_HANDLE name $name -j" \
-	       '.[][][].values[] | select(.cmode == "driverinit").value'
+	       '.[][][].values[] | select(.cmode == "'"$cmode"'").'"$attr"
 }
 
 param_set()
 {
 	local name=$1
 	local value=$2
+	local cmode=${3:-driverinit}
 
-	devlink dev param set $DL_HANDLE name $name cmode driverinit value $value
+	devlink dev param set $DL_HANDLE name $name cmode $cmode value $value
+}
+
+param_set_default()
+{
+	local name=$1
+	local cmode=${2:-driverinit}
+
+	devlink dev param set $DL_HANDLE name $name default cmode $cmode
 }
 
 check_value()
@@ -95,12 +110,18 @@ check_value()
 	local phase_name=$2
 	local expected_param_value=$3
 	local expected_debugfs_value=$4
+	local cmode=${5:-driverinit}
 	local value
+	local attr="value"
 
-	value=$(param_get $name)
-	check_err $? "Failed to get $name param value"
+	if [[ "$phase_name" == *"default"* ]]; then
+		attr="default"
+	fi
+
+	value=$(param_get $name $attr $cmode)
+	check_err $? "Failed to get $name param $attr"
 	[ "$value" == "$expected_param_value" ]
-	check_err $? "Unexpected $phase_name $name param value"
+	check_err $? "Unexpected $phase_name $name param $attr"
 	value=$(<$DEBUGFS_DIR/$name)
 	check_err $? "Failed to get $name debugfs value"
 	[ "$value" == "$expected_debugfs_value" ]
@@ -131,6 +152,92 @@ params_test()
 	check_value test1 post-reload false N
 
 	log_test "params test"
+}
+
+value_to_debugfs()
+{
+	local value=$1
+
+	case "$value" in
+		true)
+			echo "Y"
+			;;
+		false)
+			echo "N"
+			;;
+		*)
+			echo "$value"
+			;;
+	esac
+}
+
+test_default()
+{
+	local param_name=$1
+	local new_value=$2
+	local expected_default=$3
+	local cmode=${4:-driverinit}
+	local default_debugfs
+	local new_debugfs
+	local expected_debugfs
+
+	default_debugfs=$(value_to_debugfs $expected_default)
+	new_debugfs=$(value_to_debugfs $new_value)
+
+	expected_debugfs=$default_debugfs
+	check_value $param_name initial-default $expected_default $expected_debugfs $cmode
+
+	param_set $param_name $new_value $cmode
+	check_err $? "Failed to set $param_name to $new_value"
+
+	expected_debugfs=$([ "$cmode" == "runtime" ] && echo "$new_debugfs" || echo "$default_debugfs")
+	check_value $param_name post-set $new_value $expected_debugfs $cmode
+
+	devlink dev reload $DL_HANDLE
+	check_err $? "Failed to reload device"
+
+	expected_debugfs=$new_debugfs
+	check_value $param_name post-reload-new-value $new_value $expected_debugfs $cmode
+
+	param_set_default $param_name $cmode
+	check_err $? "Failed to set $param_name to default"
+
+	expected_debugfs=$([ "$cmode" == "runtime" ] && echo "$default_debugfs" || echo "$new_debugfs")
+	check_value $param_name post-set-default $expected_default $expected_debugfs $cmode
+
+	devlink dev reload $DL_HANDLE
+	check_err $? "Failed to reload device"
+
+	expected_debugfs=$default_debugfs
+	check_value $param_name post-reload-default $expected_default $expected_debugfs $cmode
+}
+
+params_default_test()
+{
+	RET=0
+
+	if ! devlink dev param help 2>&1 | grep -q "value VALUE | default"; then
+		echo "SKIP: devlink cli missing default feature"
+		return
+	fi
+
+	# Remove side effects of previous tests. Use plain param_set, because
+	# param_set_default is a feature under test here.
+	param_set max_macs 32 driverinit
+	check_err $? "Failed to reset max_macs to default value"
+	param_set test1 true driverinit
+	check_err $? "Failed to reset test1 to default value"
+	param_set test2 1234 runtime
+	check_err $? "Failed to reset test2 to default value"
+
+	devlink dev reload $DL_HANDLE
+	check_err $? "Failed to reload device for clean state"
+
+	test_default max_macs 16 32 driverinit
+	test_default test1 false true driverinit
+	test_default test2 100 1234 runtime
+
+	log_test "params default test"
 }
 
 check_region_size()
@@ -376,6 +483,56 @@ resource_test()
 	log_test "resource test"
 }
 
+resource_dump_test()
+{
+	RET=0
+
+	local port_jq
+	local dev_jq
+	local dl_jq
+	local count
+
+	dl_jq="with_entries(select(.key | startswith(\"$DL_HANDLE\")))"
+	port_jq="[.[] | $dl_jq | keys |"
+	port_jq+=" map(select(test(\"/.+/\"))) | length] | add"
+	dev_jq="[.[] | $dl_jq | keys |"
+	dev_jq+=" map(select(test(\"/.+/\")|not)) | length] | add"
+
+	if ! devlink resource help 2>&1 | grep -q "scope"; then
+		echo "SKIP: devlink resource show not supported"
+		return
+	fi
+
+	devlink resource show > /dev/null 2>&1
+	check_err $? "Failed to dump all resources"
+
+	count=$(cmd_jq "devlink resource show -j" "$port_jq")
+	[ "$count" -gt "0" ]
+	check_err $? "missing port resources in resource dump"
+
+	count=$(cmd_jq "devlink resource show -j" "$dev_jq")
+	[ "$count" -gt "0" ]
+	check_err $? "missing device resources in resource dump"
+
+	count=$(cmd_jq "devlink resource show scope dev -j" "$dev_jq")
+	[ "$count" -gt "0" ]
+	check_err $? "dev scope missing device resources"
+
+	count=$(cmd_jq "devlink resource show scope dev -j" "$port_jq")
+	[ "$count" -eq "0" ]
+	check_err $? "dev scope returned port resources"
+
+	count=$(cmd_jq "devlink resource show scope port -j" "$port_jq")
+	[ "$count" -gt "0" ]
+	check_err $? "port scope missing port resources"
+
+	count=$(cmd_jq "devlink resource show scope port -j" "$dev_jq")
+	[ "$count" -eq "0" ]
+	check_err $? "port scope returned device resources"
+
+	log_test "resource dump test"
+}
+
 info_get()
 {
 	local name=$1
@@ -608,6 +765,46 @@ rate_attr_parent_check()
 	check_err $? "Unexpected parent attr value $api_value != $parent"
 }
 
+rate_attr_tc_bw_check()
+{
+	local handle=$1
+	local tc_bw=$2
+	local debug_file=$3
+
+	local tc_bw_str=""
+	for bw in $tc_bw; do
+		local tc=${bw%%:*}
+		local value=${bw##*:}
+		tc_bw_str="$tc_bw_str $tc:$value"
+	done
+	tc_bw_str=${tc_bw_str# }
+
+	rate_attr_set "$handle" tc-bw "$tc_bw_str"
+	check_err $? "Failed to set tc-bw values"
+
+	for bw in $tc_bw; do
+		local tc=${bw%%:*}
+		local value=${bw##*:}
+		local debug_value
+		debug_value=$(cat "$debug_file"/tc"${tc}"_bw)
+		check_err $? "Failed to read tc-bw value from debugfs for tc$tc"
+		[ "$debug_value" == "$value" ]
+		check_err $? "Unexpected tc-bw debug value for tc$tc: $debug_value != $value"
+	done
+
+	for bw in $tc_bw; do
+		local tc=${bw%%:*}
+		local expected_value=${bw##*:}
+		local api_value
+		api_value=$(rate_attr_get "$handle" tc_"$tc")
+		if [ "$api_value" = "null" ]; then
+			api_value=0
+		fi
+		[ "$api_value" == "$expected_value" ]
+		check_err $? "Unexpected tc-bw value for tc$tc: $api_value != $expected_value"
+	done
+}
+
 rate_node_add()
 {
 	local handle=$1
@@ -620,6 +817,32 @@ rate_node_del()
 	local handle=$1
 
 	devlink port function rate del $handle
+}
+
+port_resource_doit_test()
+{
+	RET=0
+
+	local port_handle="${DL_HANDLE}/0"
+	local name
+	local size
+
+	if ! devlink resource help 2>&1 | grep -q "PORT_INDEX"; then
+		echo "SKIP: devlink resource show with port not supported"
+		return
+	fi
+
+	name=$(cmd_jq "devlink resource show $port_handle -j" \
+		      '.[][][].name')
+	[ "$name" == "test_resource" ]
+	check_err $? "wrong port resource name (got $name)"
+
+	size=$(cmd_jq "devlink resource show $port_handle -j" \
+		      '.[][][].size')
+	[ "$size" == "20" ]
+	check_err $? "wrong port resource size (got $size)"
+
+	log_test "port resource doit test"
 }
 
 rate_test()
@@ -649,6 +872,13 @@ rate_test()
 		rate=$(($rate+100))
 	done
 
+	local tc_bw="0:0 1:40 2:0 3:0 4:0 5:0 6:60 7:0"
+	for r_obj in $leafs
+	do
+		rate_attr_tc_bw_check "$r_obj" "$tc_bw" \
+			"$DEBUGFS_DIR"/ports/"${r_obj##*/}"
+	done
+
 	local node1_name='group1'
 	local node1="$DL_HANDLE/$node1_name"
 	rate_node_add "$node1"
@@ -665,6 +895,12 @@ rate_test()
 	local node_tx_max=100
 	rate_attr_tx_rate_check $node1 tx_max $node_tx_max \
 		$DEBUGFS_DIR/rate_nodes/${node1##*/}/tx_max
+
+
+	local tc_bw="0:20 1:0 2:0 3:0 4:0 5:20 6:60 7:0"
+	rate_attr_tc_bw_check $node1 "$tc_bw" \
+		"$DEBUGFS_DIR"/rate_nodes/"${node1##*/}"
+
 
 	rate_node_del "$node1"
 	check_err $? "Failed to delete node $node1"

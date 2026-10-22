@@ -486,7 +486,7 @@ static int lance_close(struct net_device *dev)
 	volatile struct lance_regs *ll = lp->ll;
 
 	netif_stop_queue(dev);
-	del_timer_sync(&lp->multicast_timer);
+	timer_delete_sync(&lp->multicast_timer);
 
 	/* Stop the card */
 	ll->rap = LE_CSR0;
@@ -636,7 +636,7 @@ static void lance_set_multicast(struct net_device *dev)
 
 static void lance_set_multicast_retry(struct timer_list *t)
 {
-	struct lance_private *lp = from_timer(lp, t, multicast_timer);
+	struct lance_private *lp = timer_container_of(lp, t, multicast_timer);
 
 	lance_set_multicast(lp->dev);
 }
@@ -647,10 +647,10 @@ static void a2065_remove_one(struct zorro_dev *z);
 
 
 static const struct zorro_device_id a2065_zorro_tbl[] = {
-	{ ZORRO_PROD_CBM_A2065_1 },
-	{ ZORRO_PROD_CBM_A2065_2 },
-	{ ZORRO_PROD_AMERISTAR_A2065 },
-	{ 0 }
+	{ .id = ZORRO_PROD_CBM_A2065_1 },
+	{ .id = ZORRO_PROD_CBM_A2065_2 },
+	{ .id = ZORRO_PROD_AMERISTAR_A2065 },
+	{ }
 };
 MODULE_DEVICE_TABLE(zorro, a2065_zorro_tbl);
 

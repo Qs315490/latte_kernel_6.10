@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2022 Meta Platforms, Inc. and affiliates. */
 #include <linux/capability.h>
+#include <linux/err.h>
 #include <stdlib.h>
-#include <regex.h>
 #include <test_progs.h>
 #include <bpf/btf.h>
 
@@ -12,34 +12,18 @@
 #include "cap_helpers.h"
 #include "jit_disasm_helpers.h"
 
-#define str_has_pfx(str, pfx) \
-	(strncmp(str, pfx, __builtin_constant_p(pfx) ? sizeof(pfx) - 1 : strlen(pfx)) == 0)
+static inline const char *str_has_pfx(const char *str, const char *pfx)
+{
+	size_t len = strlen(pfx);
+
+	return strncmp(str, pfx, len) == 0 ? str + len : NULL;
+}
 
 #define TEST_LOADER_LOG_BUF_SZ 2097152
 
-#define TEST_TAG_EXPECT_FAILURE "comment:test_expect_failure"
-#define TEST_TAG_EXPECT_SUCCESS "comment:test_expect_success"
-#define TEST_TAG_EXPECT_MSG_PFX "comment:test_expect_msg="
-#define TEST_TAG_EXPECT_XLATED_PFX "comment:test_expect_xlated="
-#define TEST_TAG_EXPECT_FAILURE_UNPRIV "comment:test_expect_failure_unpriv"
-#define TEST_TAG_EXPECT_SUCCESS_UNPRIV "comment:test_expect_success_unpriv"
-#define TEST_TAG_EXPECT_MSG_PFX_UNPRIV "comment:test_expect_msg_unpriv="
-#define TEST_TAG_EXPECT_XLATED_PFX_UNPRIV "comment:test_expect_xlated_unpriv="
-#define TEST_TAG_LOG_LEVEL_PFX "comment:test_log_level="
-#define TEST_TAG_PROG_FLAGS_PFX "comment:test_prog_flags="
-#define TEST_TAG_DESCRIPTION_PFX "comment:test_description="
-#define TEST_TAG_RETVAL_PFX "comment:test_retval="
-#define TEST_TAG_RETVAL_PFX_UNPRIV "comment:test_retval_unpriv="
-#define TEST_TAG_AUXILIARY "comment:test_auxiliary"
-#define TEST_TAG_AUXILIARY_UNPRIV "comment:test_auxiliary_unpriv"
-#define TEST_BTF_PATH "comment:test_btf_path="
-#define TEST_TAG_ARCH "comment:test_arch="
-#define TEST_TAG_JITED_PFX "comment:test_jited="
-#define TEST_TAG_JITED_PFX_UNPRIV "comment:test_jited_unpriv="
-#define TEST_TAG_CAPS_UNPRIV "comment:test_caps_unpriv="
 
 /* Warning: duplicated in bpf_misc.h */
-#define POINTER_VALUE	0xcafe4all
+#define POINTER_VALUE	0xbadcafe
 #define TEST_DATA_LEN	64
 
 #ifdef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
@@ -55,24 +39,20 @@ enum mode {
 	UNPRIV = 2
 };
 
-struct expect_msg {
-	const char *substr; /* substring match */
-	regex_t regex;
-	bool is_regex;
-	bool on_next_line;
-};
-
-struct expected_msgs {
-	struct expect_msg *patterns;
-	size_t cnt;
+enum load_mode {
+	JITED		= 1 << 0,
+	NO_JITED	= 1 << 1,
 };
 
 struct test_subspec {
 	char *name;
+	char *description;
 	bool expect_failure;
 	struct expected_msgs expect_msgs;
 	struct expected_msgs expect_xlated;
 	struct expected_msgs jited;
+	struct expected_msgs stderr;
+	struct expected_msgs stdout;
 	int retval;
 	bool execute;
 	__u64 caps;
@@ -83,10 +63,13 @@ struct test_spec {
 	struct test_subspec priv;
 	struct test_subspec unpriv;
 	const char *btf_custom_path;
+	const char *btf_custom_func_path;
 	int log_level;
 	int prog_flags;
 	int mode_mask;
 	int arch_mask;
+	int load_mask;
+	int linear_sz;
 	bool auxiliary;
 	bool valid;
 };
@@ -111,7 +94,7 @@ void test_loader_fini(struct test_loader *tester)
 	free(tester->log_buf);
 }
 
-static void free_msgs(struct expected_msgs *msgs)
+void free_msgs(struct expected_msgs *msgs)
 {
 	int i;
 
@@ -132,11 +115,19 @@ static void free_test_spec(struct test_spec *spec)
 	free_msgs(&spec->unpriv.expect_xlated);
 	free_msgs(&spec->priv.jited);
 	free_msgs(&spec->unpriv.jited);
+	free_msgs(&spec->unpriv.stderr);
+	free_msgs(&spec->priv.stderr);
+	free_msgs(&spec->unpriv.stdout);
+	free_msgs(&spec->priv.stdout);
 
 	free(spec->priv.name);
+	free(spec->priv.description);
 	free(spec->unpriv.name);
+	free(spec->unpriv.description);
 	spec->priv.name = NULL;
+	spec->priv.description = NULL;
 	spec->unpriv.name = NULL;
+	spec->unpriv.description = NULL;
 }
 
 /* Compiles regular expression matching pattern.
@@ -153,21 +144,21 @@ static void free_test_spec(struct test_spec *spec)
 static int compile_regex(const char *pattern, regex_t *regex)
 {
 	char err_buf[256], buf[256] = {}, *ptr, *buf_end;
-	const char *original_pattern = pattern;
+	const char *original_pattern = pattern, *next;
 	bool in_regex = false;
 	int err;
 
 	buf_end = buf + sizeof(buf);
 	ptr = buf;
 	while (*pattern && ptr < buf_end - 2) {
-		if (!in_regex && str_has_pfx(pattern, "{{")) {
+		if (!in_regex && (next = str_has_pfx(pattern, "{{"))) {
 			in_regex = true;
-			pattern += 2;
+			pattern = next;
 			continue;
 		}
-		if (in_regex && str_has_pfx(pattern, "}}")) {
+		if (in_regex && (next = str_has_pfx(pattern, "}}"))) {
 			in_regex = false;
-			pattern += 2;
+			pattern = next;
 			continue;
 		}
 		if (in_regex) {
@@ -199,7 +190,8 @@ static int compile_regex(const char *pattern, regex_t *regex)
 	return 0;
 }
 
-static int __push_msg(const char *pattern, bool on_next_line, struct expected_msgs *msgs)
+static int __push_msg(const char *pattern, bool on_next_line, bool negative,
+		      struct expected_msgs *msgs)
 {
 	struct expect_msg *msg;
 	void *tmp;
@@ -215,6 +207,7 @@ static int __push_msg(const char *pattern, bool on_next_line, struct expected_ms
 	msg = &msgs->patterns[msgs->cnt];
 	msg->on_next_line = on_next_line;
 	msg->substr = pattern;
+	msg->negative = negative;
 	msg->is_regex = false;
 	if (strstr(pattern, "{{")) {
 		err = compile_regex(pattern, &msg->regex);
@@ -233,16 +226,16 @@ static int clone_msgs(struct expected_msgs *from, struct expected_msgs *to)
 
 	for (i = 0; i < from->cnt; i++) {
 		msg = &from->patterns[i];
-		err = __push_msg(msg->substr, msg->on_next_line, to);
+		err = __push_msg(msg->substr, msg->on_next_line, msg->negative, to);
 		if (err)
 			return err;
 	}
 	return 0;
 }
 
-static int push_msg(const char *substr, struct expected_msgs *msgs)
+static int push_msg(const char *substr, bool negative, struct expected_msgs *msgs)
 {
-	return __push_msg(substr, false, msgs);
+	return __push_msg(substr, false, negative, msgs);
 }
 
 static int push_disasm_msg(const char *regex_str, bool *on_next_line, struct expected_msgs *msgs)
@@ -253,7 +246,7 @@ static int push_disasm_msg(const char *regex_str, bool *on_next_line, struct exp
 		*on_next_line = false;
 		return 0;
 	}
-	err = __push_msg(regex_str, *on_next_line, msgs);
+	err = __push_msg(regex_str, *on_next_line, false, msgs);
 	if (err)
 		return err;
 	*on_next_line = true;
@@ -311,20 +304,14 @@ static int parse_caps(const char *str, __u64 *val, const char *name)
 
 static int parse_retval(const char *str, int *val, const char *name)
 {
-	struct {
-		char *name;
-		int val;
-	} named_values[] = {
-		{ "INT_MIN"      , INT_MIN },
-		{ "POINTER_VALUE", POINTER_VALUE },
-		{ "TEST_DATA_LEN", TEST_DATA_LEN },
-	};
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(named_values); ++i) {
-		if (strcmp(str, named_values[i].name) != 0)
-			continue;
-		*val = named_values[i].val;
+	/*
+	 * INT_MIN is defined as (-INT_MAX -1), i.e. it doesn't expand to a
+	 * single int and cannot be parsed with strtol, so we handle it
+	 * separately here. In addition, it expands to different expressions in
+	 * different compilers so we use a prefixed _INT_MIN instead.
+	 */
+	if (strcmp(str, "_INT_MIN") == 0) {
+		*val = INT_MIN;
 		return 0;
 	}
 
@@ -339,33 +326,49 @@ static void update_flags(int *flags, int flag, bool clear)
 		*flags |= flag;
 }
 
-/* Matches a string of form '<pfx>[^=]=.*' and returns it's suffix.
- * Used to parse btf_decl_tag values.
- * Such values require unique prefix because compiler does not add
- * same __attribute__((btf_decl_tag(...))) twice.
- * Test suite uses two-component tags for such cases:
- *
- *   <pfx> __COUNTER__ '='
- *
- * For example, two consecutive __msg tags '__msg("foo") __msg("foo")'
- * would be encoded as:
- *
- *   [18] DECL_TAG 'comment:test_expect_msg=0=foo' type_id=15 component_idx=-1
- *   [19] DECL_TAG 'comment:test_expect_msg=1=foo' type_id=15 component_idx=-1
- *
- * And the purpose of this function is to extract 'foo' from the above.
- */
-static const char *skip_dynamic_pfx(const char *s, const char *pfx)
+static const char *skip_decl_tag_pfx(const char *s)
 {
-	const char *msg;
+	int n = 0;
 
-	if (strncmp(s, pfx, strlen(pfx)) != 0)
+	if (sscanf(s, "comment:%*d:%n", &n) < 0 || !n)
 		return NULL;
-	msg = s + strlen(pfx);
-	msg = strchr(msg, '=');
-	if (!msg)
-		return NULL;
-	return msg + 1;
+	return s + n;
+}
+
+static int compare_decl_tags(const void *a, const void *b)
+{
+	return strverscmp(*(const char **)a, *(const char **)b);
+}
+
+/*
+ * Compilers don't guarantee order in which BTF attributes would be generated,
+ * while order is important for test tags like __msg.
+ * Each test tag has the following prefix: "comment:" __COUNTER__,
+ * when sorted using strverscmp this gives same order as in the original C code.
+ */
+static const char **collect_decl_tags(struct btf *btf, int id, int *cnt)
+{
+	const char **tmp, **tags = NULL;
+	const struct btf_type *t;
+	int i;
+
+	*cnt = 0;
+	for (i = 1; i < btf__type_cnt(btf); i++) {
+		t = btf__type_by_id(btf, i);
+		if (!btf_is_decl_tag(t) || t->type != id || btf_decl_tag(t)->component_idx != -1)
+			continue;
+		tmp = realloc(tags, (*cnt + 1) * sizeof(*tags));
+		if (!tmp) {
+			free(tags);
+			return ERR_PTR(-ENOMEM);
+		}
+		tags = tmp;
+		tags[(*cnt)++] = btf__str_by_offset(btf, t->name_off);
+	}
+
+	if (*cnt)
+		qsort(tags, *cnt, sizeof(*tags), compare_decl_tags);
+	return tags;
 }
 
 enum arch {
@@ -373,6 +376,8 @@ enum arch {
 	ARCH_X86_64	= 0x2,
 	ARCH_ARM64	= 0x4,
 	ARCH_RISCV64	= 0x8,
+	ARCH_S390X	= 0x10,
+	ARCH_LOONGARCH	= 0x20,
 };
 
 static int get_current_arch(void)
@@ -383,6 +388,10 @@ static int get_current_arch(void)
 	return ARCH_ARM64;
 #elif defined(__riscv) && __riscv_xlen == 64
 	return ARCH_RISCV64;
+#elif defined(__s390x__)
+	return ARCH_S390X;
+#elif defined(__loongarch__)
+	return ARCH_LOONGARCH;
 #endif
 	return ARCH_UNKNOWN;
 }
@@ -403,9 +412,16 @@ static int parse_test_spec(struct test_loader *tester,
 	bool xlated_on_next_line = true;
 	bool unpriv_jit_on_next_line;
 	bool jit_on_next_line;
+	bool stderr_on_next_line = true;
+	bool unpriv_stderr_on_next_line = true;
+	bool stdout_on_next_line = true;
+	bool unpriv_stdout_on_next_line = true;
 	bool collect_jit = false;
-	int func_id, i, err = 0;
+	const char **tags = NULL;
+	int func_id, i, nr_tags;
+	int err = 0;
 	u32 arch_mask = 0;
+	u32 load_mask = 0;
 	struct btf *btf;
 	enum arch arch;
 
@@ -426,53 +442,61 @@ static int parse_test_spec(struct test_loader *tester,
 		return -EINVAL;
 	}
 
-	for (i = 1; i < btf__type_cnt(btf); i++) {
+	tags = collect_decl_tags(btf, func_id, &nr_tags);
+	if (IS_ERR(tags))
+		return PTR_ERR(tags);
+
+	for (i = 0; i < nr_tags; i++) {
 		const char *s, *val, *msg;
-		const struct btf_type *t;
 		bool clear;
 		int flags;
 
-		t = btf__type_by_id(btf, i);
-		if (!btf_is_decl_tag(t))
+		s = skip_decl_tag_pfx(tags[i]);
+		if (!s)
 			continue;
-
-		if (t->type != func_id || btf_decl_tag(t)->component_idx != -1)
-			continue;
-
-		s = btf__str_by_offset(btf, t->name_off);
-		if (str_has_pfx(s, TEST_TAG_DESCRIPTION_PFX)) {
-			description = s + sizeof(TEST_TAG_DESCRIPTION_PFX) - 1;
-		} else if (strcmp(s, TEST_TAG_EXPECT_FAILURE) == 0) {
+		if ((val = str_has_pfx(s, "test_description="))) {
+			description = val;
+		} else if (strcmp(s, "test_expect_failure") == 0) {
 			spec->priv.expect_failure = true;
 			spec->mode_mask |= PRIV;
-		} else if (strcmp(s, TEST_TAG_EXPECT_SUCCESS) == 0) {
+		} else if (strcmp(s, "test_expect_success") == 0) {
 			spec->priv.expect_failure = false;
 			spec->mode_mask |= PRIV;
-		} else if (strcmp(s, TEST_TAG_EXPECT_FAILURE_UNPRIV) == 0) {
+		} else if (strcmp(s, "test_expect_failure_unpriv") == 0) {
 			spec->unpriv.expect_failure = true;
 			spec->mode_mask |= UNPRIV;
 			has_unpriv_result = true;
-		} else if (strcmp(s, TEST_TAG_EXPECT_SUCCESS_UNPRIV) == 0) {
+		} else if (strcmp(s, "test_expect_success_unpriv") == 0) {
 			spec->unpriv.expect_failure = false;
 			spec->mode_mask |= UNPRIV;
 			has_unpriv_result = true;
-		} else if (strcmp(s, TEST_TAG_AUXILIARY) == 0) {
+		} else if (strcmp(s, "test_auxiliary") == 0) {
 			spec->auxiliary = true;
 			spec->mode_mask |= PRIV;
-		} else if (strcmp(s, TEST_TAG_AUXILIARY_UNPRIV) == 0) {
+		} else if (strcmp(s, "test_auxiliary_unpriv") == 0) {
 			spec->auxiliary = true;
 			spec->mode_mask |= UNPRIV;
-		} else if ((msg = skip_dynamic_pfx(s, TEST_TAG_EXPECT_MSG_PFX))) {
-			err = push_msg(msg, &spec->priv.expect_msgs);
+		} else if ((msg = str_has_pfx(s, "test_expect_msg="))) {
+			err = push_msg(msg, false, &spec->priv.expect_msgs);
 			if (err)
 				goto cleanup;
 			spec->mode_mask |= PRIV;
-		} else if ((msg = skip_dynamic_pfx(s, TEST_TAG_EXPECT_MSG_PFX_UNPRIV))) {
-			err = push_msg(msg, &spec->unpriv.expect_msgs);
+		} else if ((msg = str_has_pfx(s, "test_expect_not_msg="))) {
+			err = push_msg(msg, true, &spec->priv.expect_msgs);
+			if (err)
+				goto cleanup;
+			spec->mode_mask |= PRIV;
+		} else if ((msg = str_has_pfx(s, "test_expect_msg_unpriv="))) {
+			err = push_msg(msg, false, &spec->unpriv.expect_msgs);
 			if (err)
 				goto cleanup;
 			spec->mode_mask |= UNPRIV;
-		} else if ((msg = skip_dynamic_pfx(s, TEST_TAG_JITED_PFX))) {
+		} else if ((msg = str_has_pfx(s, "test_expect_not_msg_unpriv="))) {
+			err = push_msg(msg, true, &spec->unpriv.expect_msgs);
+			if (err)
+				goto cleanup;
+			spec->mode_mask |= UNPRIV;
+		} else if ((msg = str_has_pfx(s, "test_jited="))) {
 			if (arch_mask == 0) {
 				PRINT_FAIL("__jited used before __arch_*");
 				goto cleanup;
@@ -484,7 +508,7 @@ static int parse_test_spec(struct test_loader *tester,
 					goto cleanup;
 				spec->mode_mask |= PRIV;
 			}
-		} else if ((msg = skip_dynamic_pfx(s, TEST_TAG_JITED_PFX_UNPRIV))) {
+		} else if ((msg = str_has_pfx(s, "test_jited_unpriv="))) {
 			if (arch_mask == 0) {
 				PRINT_FAIL("__unpriv_jited used before __arch_*");
 				goto cleanup;
@@ -496,41 +520,36 @@ static int parse_test_spec(struct test_loader *tester,
 					goto cleanup;
 				spec->mode_mask |= UNPRIV;
 			}
-		} else if ((msg = skip_dynamic_pfx(s, TEST_TAG_EXPECT_XLATED_PFX))) {
+		} else if ((msg = str_has_pfx(s, "test_expect_xlated="))) {
 			err = push_disasm_msg(msg, &xlated_on_next_line,
 					      &spec->priv.expect_xlated);
 			if (err)
 				goto cleanup;
 			spec->mode_mask |= PRIV;
-		} else if ((msg = skip_dynamic_pfx(s, TEST_TAG_EXPECT_XLATED_PFX_UNPRIV))) {
+		} else if ((msg = str_has_pfx(s, "test_expect_xlated_unpriv="))) {
 			err = push_disasm_msg(msg, &unpriv_xlated_on_next_line,
 					      &spec->unpriv.expect_xlated);
 			if (err)
 				goto cleanup;
 			spec->mode_mask |= UNPRIV;
-		} else if (str_has_pfx(s, TEST_TAG_RETVAL_PFX)) {
-			val = s + sizeof(TEST_TAG_RETVAL_PFX) - 1;
+		} else if ((val = str_has_pfx(s, "test_retval="))) {
 			err = parse_retval(val, &spec->priv.retval, "__retval");
 			if (err)
 				goto cleanup;
 			spec->priv.execute = true;
 			spec->mode_mask |= PRIV;
-		} else if (str_has_pfx(s, TEST_TAG_RETVAL_PFX_UNPRIV)) {
-			val = s + sizeof(TEST_TAG_RETVAL_PFX_UNPRIV) - 1;
+		} else if ((val = str_has_pfx(s, "test_retval_unpriv="))) {
 			err = parse_retval(val, &spec->unpriv.retval, "__retval_unpriv");
 			if (err)
 				goto cleanup;
 			spec->mode_mask |= UNPRIV;
 			spec->unpriv.execute = true;
 			has_unpriv_retval = true;
-		} else if (str_has_pfx(s, TEST_TAG_LOG_LEVEL_PFX)) {
-			val = s + sizeof(TEST_TAG_LOG_LEVEL_PFX) - 1;
+		} else if ((val = str_has_pfx(s, "test_log_level="))) {
 			err = parse_int(val, &spec->log_level, "test log level");
 			if (err)
 				goto cleanup;
-		} else if (str_has_pfx(s, TEST_TAG_PROG_FLAGS_PFX)) {
-			val = s + sizeof(TEST_TAG_PROG_FLAGS_PFX) - 1;
-
+		} else if ((val = str_has_pfx(s, "test_prog_flags="))) {
 			clear = val[0] == '!';
 			if (clear)
 				val++;
@@ -555,16 +574,19 @@ static int parse_test_spec(struct test_loader *tester,
 					goto cleanup;
 				update_flags(&spec->prog_flags, flags, clear);
 			}
-		} else if (str_has_pfx(s, TEST_TAG_ARCH)) {
-			val = s + sizeof(TEST_TAG_ARCH) - 1;
+		} else if ((val = str_has_pfx(s, "test_arch="))) {
 			if (strcmp(val, "X86_64") == 0) {
 				arch = ARCH_X86_64;
 			} else if (strcmp(val, "ARM64") == 0) {
 				arch = ARCH_ARM64;
 			} else if (strcmp(val, "RISCV64") == 0) {
 				arch = ARCH_RISCV64;
+			} else if (strcmp(val, "s390x") == 0) {
+				arch = ARCH_S390X;
+			} else if (strcmp(val, "LOONGARCH") == 0) {
+				arch = ARCH_LOONGARCH;
 			} else {
-				PRINT_FAIL("bad arch spec: '%s'", val);
+				PRINT_FAIL("bad arch spec: '%s'\n", val);
 				err = -EINVAL;
 				goto cleanup;
 			}
@@ -572,49 +594,118 @@ static int parse_test_spec(struct test_loader *tester,
 			collect_jit = get_current_arch() == arch;
 			unpriv_jit_on_next_line = true;
 			jit_on_next_line = true;
-		} else if (str_has_pfx(s, TEST_BTF_PATH)) {
-			spec->btf_custom_path = s + sizeof(TEST_BTF_PATH) - 1;
-		} else if (str_has_pfx(s, TEST_TAG_CAPS_UNPRIV)) {
-			val = s + sizeof(TEST_TAG_CAPS_UNPRIV) - 1;
+		} else if ((val = str_has_pfx(s, "test_btf_path="))) {
+			spec->btf_custom_path = val;
+		} else if ((val = str_has_pfx(s, "test_btf_func_path="))) {
+			spec->btf_custom_func_path = val;
+		} else if ((val = str_has_pfx(s, "test_caps_unpriv="))) {
 			err = parse_caps(val, &spec->unpriv.caps, "test caps");
 			if (err)
 				goto cleanup;
 			spec->mode_mask |= UNPRIV;
+		} else if ((val = str_has_pfx(s, "load_mode="))) {
+			if (strcmp(val, "jited") == 0) {
+				load_mask = JITED;
+			} else if (strcmp(val, "no_jited") == 0) {
+				load_mask = NO_JITED;
+			} else {
+				PRINT_FAIL("bad load spec: '%s'", val);
+				err = -EINVAL;
+				goto cleanup;
+			}
+		} else if ((msg = str_has_pfx(s, "test_expect_stderr="))) {
+			err = push_disasm_msg(msg, &stderr_on_next_line,
+					      &spec->priv.stderr);
+			if (err)
+				goto cleanup;
+		} else if ((msg = str_has_pfx(s, "test_expect_stderr_unpriv="))) {
+			err = push_disasm_msg(msg, &unpriv_stderr_on_next_line,
+					      &spec->unpriv.stderr);
+			if (err)
+				goto cleanup;
+		} else if ((msg = str_has_pfx(s, "test_expect_stdout="))) {
+			err = push_disasm_msg(msg, &stdout_on_next_line,
+					      &spec->priv.stdout);
+			if (err)
+				goto cleanup;
+		} else if ((msg = str_has_pfx(s, "test_expect_stdout_unpriv="))) {
+			err = push_disasm_msg(msg, &unpriv_stdout_on_next_line,
+					      &spec->unpriv.stdout);
+			if (err)
+				goto cleanup;
+		} else if ((val = str_has_pfx(s, "test_linear_size="))) {
+			switch (bpf_program__type(prog)) {
+			case BPF_PROG_TYPE_SCHED_ACT:
+			case BPF_PROG_TYPE_SCHED_CLS:
+			case BPF_PROG_TYPE_CGROUP_SKB:
+				err = parse_int(val, &spec->linear_sz, "test linear size");
+				if (err)
+					goto cleanup;
+				break;
+			default:
+				PRINT_FAIL("__linear_size for unsupported program type");
+				err = -EINVAL;
+				goto cleanup;
+			}
 		}
 	}
 
 	spec->arch_mask = arch_mask ?: -1;
+	spec->load_mask = load_mask ?: (JITED | NO_JITED);
 
 	if (spec->mode_mask == 0)
 		spec->mode_mask = PRIV;
 
-	if (!description)
-		description = spec->prog_name;
-
 	if (spec->mode_mask & PRIV) {
-		spec->priv.name = strdup(description);
+		spec->priv.name = strdup(spec->prog_name);
 		if (!spec->priv.name) {
 			PRINT_FAIL("failed to allocate memory for priv.name\n");
 			err = -ENOMEM;
 			goto cleanup;
 		}
+
+		if (description) {
+			spec->priv.description = strdup(description);
+			if (!spec->priv.description) {
+				PRINT_FAIL("failed to allocate memory for priv.description\n");
+				err = -ENOMEM;
+				goto cleanup;
+			}
+		}
 	}
 
 	if (spec->mode_mask & UNPRIV) {
-		int descr_len = strlen(description);
+		int name_len = strlen(spec->prog_name);
 		const char *suffix = " @unpriv";
+		int suffix_len = strlen(suffix);
 		char *name;
 
-		name = malloc(descr_len + strlen(suffix) + 1);
+		name = malloc(name_len + suffix_len + 1);
 		if (!name) {
 			PRINT_FAIL("failed to allocate memory for unpriv.name\n");
 			err = -ENOMEM;
 			goto cleanup;
 		}
 
-		strcpy(name, description);
-		strcpy(&name[descr_len], suffix);
+		strcpy(name, spec->prog_name);
+		strcpy(&name[name_len], suffix);
 		spec->unpriv.name = name;
+
+		if (description) {
+			int descr_len = strlen(description);
+			char *descr;
+
+			descr = malloc(descr_len + suffix_len + 1);
+			if (!descr) {
+				PRINT_FAIL("failed to allocate memory for unpriv.description\n");
+				err = -ENOMEM;
+				goto cleanup;
+			}
+
+			strcpy(descr, description);
+			strcpy(&descr[descr_len], suffix);
+			spec->unpriv.description = descr;
+		}
 	}
 
 	if (spec->mode_mask & (PRIV | UNPRIV)) {
@@ -632,13 +723,19 @@ static int parse_test_spec(struct test_loader *tester,
 			clone_msgs(&spec->priv.expect_xlated, &spec->unpriv.expect_xlated);
 		if (spec->unpriv.jited.cnt == 0)
 			clone_msgs(&spec->priv.jited, &spec->unpriv.jited);
+		if (spec->unpriv.stderr.cnt == 0)
+			clone_msgs(&spec->priv.stderr, &spec->unpriv.stderr);
+		if (spec->unpriv.stdout.cnt == 0)
+			clone_msgs(&spec->priv.stdout, &spec->unpriv.stdout);
 	}
 
 	spec->valid = true;
 
+	free(tags);
 	return 0;
 
 cleanup:
+	free(tags);
 	free_test_spec(spec);
 	return err;
 }
@@ -693,44 +790,192 @@ static void emit_jited(const char *jited, bool force)
 	fprintf(stdout, "JITED:\n=============\n%s=============\n", jited);
 }
 
-static void validate_msgs(char *log_buf, struct expected_msgs *msgs,
-			  void (*emit_fn)(const char *buf, bool force))
+static void emit_stderr(const char *stderr, bool force)
 {
-	const char *log = log_buf, *prev_match;
-	regmatch_t reg_match[1];
-	int prev_match_line;
-	int match_line;
-	int i, j, err;
+	if (!force && env.verbosity == VERBOSE_NONE)
+		return;
+	fprintf(stdout, "STDERR:\n=============\n%s=============\n", stderr);
+}
 
-	prev_match_line = -1;
-	match_line = 0;
+static void verify_stderr(int prog_fd, struct expected_msgs *msgs)
+{
+	LIBBPF_OPTS(bpf_prog_stream_read_opts, ropts);
+	char *buf;
+	int ret;
+
+	if (!msgs->cnt)
+		return;
+
+	buf = malloc(TEST_LOADER_LOG_BUF_SZ);
+	if (!ASSERT_OK_PTR(buf, "malloc"))
+		return;
+
+	ret = bpf_prog_stream_read(prog_fd, 2, buf, TEST_LOADER_LOG_BUF_SZ - 1,
+				    &ropts);
+	if (ret > 0) {
+		buf[ret] = '\0';
+		emit_stderr(buf, false);
+		validate_msgs(buf, msgs, emit_stderr);
+	} else {
+		ASSERT_GT(ret, 0, "stderr stream read");
+	}
+
+	free(buf);
+}
+
+void verify_test_stderr(struct bpf_object *obj, struct bpf_program *prog)
+{
+	struct test_spec spec = {};
+
+	if (parse_test_spec(NULL, obj, prog, &spec))
+		return;
+
+	verify_stderr(bpf_program__fd(prog), &spec.priv.stderr);
+	free_test_spec(&spec);
+}
+
+static void emit_stdout(const char *bpf_stdout, bool force)
+{
+	if (!force && env.verbosity == VERBOSE_NONE)
+		return;
+	fprintf(stdout, "STDOUT:\n=============\n%s=============\n", bpf_stdout);
+}
+
+static const char *match_msg(struct expect_msg *msg, const char **log)
+{
+	const char *match = NULL;
+	regmatch_t reg_match[1];
+	int err;
+
+	if (!msg->is_regex) {
+		match = strstr(*log, msg->substr);
+		if (match)
+			*log = match + strlen(msg->substr);
+	} else {
+		err = regexec(&msg->regex, *log, 1, reg_match, 0);
+		if (err == 0) {
+			match = *log + reg_match[0].rm_so;
+			*log += reg_match[0].rm_eo;
+		}
+	}
+	return match;
+}
+
+static int count_lines(const char *start, const char *end)
+{
+	const char *tmp;
+	int n = 0;
+
+	for (tmp = start; tmp < end; ++tmp)
+		if (*tmp == '\n')
+			n++;
+	return n;
+}
+
+struct match {
+	const char *start;
+	const char *end;
+	int line;
+};
+
+/*
+ * Positive messages are matched sequentially, each next message
+ * is looked for starting from the end of a previous matched one.
+ */
+static void match_positive_msgs(const char *log, struct expected_msgs *msgs, struct match *matches)
+{
+	const char *prev_match;
+	int i, line;
+
 	prev_match = log;
+	line = 0;
 	for (i = 0; i < msgs->cnt; i++) {
 		struct expect_msg *msg = &msgs->patterns[i];
-		const char *match = NULL, *pat_status;
-		bool wrong_line = false;
+		const char *match = NULL;
 
-		if (!msg->is_regex) {
-			match = strstr(log, msg->substr);
-			if (match)
-				log = match + strlen(msg->substr);
-		} else {
-			err = regexec(&msg->regex, log, 1, reg_match, 0);
-			if (err == 0) {
-				match = log + reg_match[0].rm_so;
-				log += reg_match[0].rm_eo;
+		if (msg->negative)
+			continue;
+
+		match = match_msg(msg, &log);
+		if (match) {
+			line += count_lines(prev_match, match);
+			matches[i].start = match;
+			matches[i].end   = log;
+			matches[i].line  = line;
+			prev_match = match;
+		}
+	}
+}
+
+/*
+ * Each negative messages N located between positive messages P1 and P2
+ * is matched in the span P1.end .. P2.start. Consequently, negative messages
+ * are unordered within the span.
+ */
+static void match_negative_msgs(const char *log, struct expected_msgs *msgs, struct match *matches)
+{
+	const char *start = log, *end, *next, *match;
+	const char *log_end = log + strlen(log);
+	int i, j, next_positive;
+
+	for (i = 0; i < msgs->cnt; i++) {
+		struct expect_msg *msg = &msgs->patterns[i];
+
+		/* positive message bumps span start */
+		if (!msg->negative) {
+			start = matches[i].end ?: start;
+			continue;
+		}
+
+		/* count stride of negative patterns and adjust span end */
+		end = log_end;
+		for (next_positive = i + 1; next_positive < msgs->cnt; next_positive++) {
+			if (!msgs->patterns[next_positive].negative) {
+				end = matches[next_positive].start;
+				break;
 			}
 		}
 
-		if (match) {
-			for (; prev_match < match; ++prev_match)
-				if (*prev_match == '\n')
-					++match_line;
-			wrong_line = msg->on_next_line && prev_match_line >= 0 &&
-				     prev_match_line + 1 != match_line;
+		/* try matching negative messages within identified span */
+		for (j = i; j < next_positive; j++) {
+			next = start;
+			match = match_msg(msg, &next);
+			if (match && next <= end) {
+				matches[j].start = match;
+				matches[j].end = next;
+			}
 		}
 
-		if (!match || wrong_line) {
+		/* -1 to account for i++ */
+		i = next_positive - 1;
+	}
+}
+
+void validate_msgs(const char *log_buf, struct expected_msgs *msgs,
+		   void (*emit_fn)(const char *buf, bool force))
+{
+	struct match matches[msgs->cnt];
+	struct match *prev_match = NULL;
+	int i, j;
+
+	memset(matches, 0, sizeof(*matches) * msgs->cnt);
+	match_positive_msgs(log_buf, msgs, matches);
+	match_negative_msgs(log_buf, msgs, matches);
+
+	for (i = 0; i < msgs->cnt; i++) {
+		struct expect_msg *msg = &msgs->patterns[i];
+		struct match *match = &matches[i];
+		const char *pat_status;
+		bool unexpected;
+		bool wrong_line;
+		bool no_match;
+
+		no_match   = !msg->negative && !match->start;
+		wrong_line = !msg->negative &&
+			     msg->on_next_line &&
+			     prev_match && prev_match->line + 1 != match->line;
+		unexpected = msg->negative && match->start;
+		if (no_match || wrong_line || unexpected) {
 			PRINT_FAIL("expect_msg\n");
 			if (env.verbosity == VERBOSE_NONE)
 				emit_fn(log_buf, true /*force*/);
@@ -740,8 +985,10 @@ static void validate_msgs(char *log_buf, struct expected_msgs *msgs,
 					pat_status = "MATCHED   ";
 				else if (wrong_line)
 					pat_status = "WRONG LINE";
-				else
+				else if (no_match)
 					pat_status = "EXPECTED  ";
+				else
+					pat_status = "UNEXPECTED";
 				msg = &msgs->patterns[j];
 				fprintf(stderr, "%s %s: '%s'\n",
 					pat_status,
@@ -751,12 +998,13 @@ static void validate_msgs(char *log_buf, struct expected_msgs *msgs,
 			if (wrong_line) {
 				fprintf(stderr,
 					"expecting match at line %d, actual match is at line %d\n",
-					prev_match_line + 1, match_line);
+					prev_match->line + 1, match->line);
 			}
 			break;
 		}
 
-		prev_match_line = match_line;
+		if (!msg->negative)
+			prev_match = match;
 	}
 }
 
@@ -773,7 +1021,7 @@ static int drop_capabilities(struct cap_state *caps)
 
 	err = cap_disable_effective(caps_to_drop, &caps->old_caps);
 	if (err) {
-		PRINT_FAIL("failed to drop capabilities: %i, %s\n", err, strerror(err));
+		PRINT_FAIL("failed to drop capabilities: %i, %s\n", err, strerror(-err));
 		return err;
 	}
 
@@ -790,7 +1038,7 @@ static int restore_capabilities(struct cap_state *caps)
 
 	err = cap_enable_effective(caps->old_caps, NULL);
 	if (err)
-		PRINT_FAIL("failed to restore capabilities: %i, %s\n", err, strerror(err));
+		PRINT_FAIL("failed to restore capabilities: %i, %s\n", err, strerror(-err));
 	caps->initialized = false;
 	return err;
 }
@@ -835,10 +1083,11 @@ static bool is_unpriv_capable_map(struct bpf_map *map)
 	}
 }
 
-static int do_prog_test_run(int fd_prog, int *retval, bool empty_opts)
+static int do_prog_test_run(int fd_prog, int *retval, bool empty_opts, int linear_sz)
 {
 	__u8 tmp_out[TEST_DATA_LEN << 2] = {};
 	__u8 tmp_in[TEST_DATA_LEN] = {};
+	struct __sk_buff ctx = {};
 	int err, saved_errno;
 	LIBBPF_OPTS(bpf_test_run_opts, topts,
 		.data_in = tmp_in,
@@ -847,6 +1096,12 @@ static int do_prog_test_run(int fd_prog, int *retval, bool empty_opts)
 		.data_size_out = sizeof(tmp_out),
 		.repeat = 1,
 	);
+
+	if (linear_sz) {
+		ctx.data_end = linear_sz;
+		topts.ctx_in = &ctx;
+		topts.ctx_size_in = sizeof(ctx);
+	}
 
 	if (empty_opts) {
 		memset(&topts, 0, sizeof(struct bpf_test_run_opts));
@@ -915,6 +1170,136 @@ out:
 	return err;
 }
 
+/* Read the bpf stream corresponding to the stream_id */
+static int get_stream(int stream_id, int prog_fd, char *text, size_t text_sz)
+{
+	LIBBPF_OPTS(bpf_prog_stream_read_opts, ropts);
+	int ret;
+
+	ret = bpf_prog_stream_read(prog_fd, stream_id, text, text_sz, &ropts);
+	ASSERT_GT(ret, 0, "stream read");
+	text[ret] = '\0';
+
+	return ret;
+}
+
+/*
+ * Fix up the program's BTF using BTF from a separate file.
+ *
+ * For __naked subprogs, clang drops parameter names from BTF. Find FUNC
+ * entries with anonymous parameters and replace their FUNC_PROTO with the
+ * properly-named version from the custom file.
+ */
+static int fixup_btf_from_path(struct bpf_object *obj, const char *path)
+{
+	struct btf *prog_btf, *custom_btf;
+	__u32 i, j, cnt, custom_cnt;
+	int err = 0;
+
+	prog_btf = bpf_object__btf(obj);
+	if (!prog_btf)
+		return 0;
+
+	custom_btf = btf__parse(path, NULL);
+	if (!ASSERT_OK_PTR(custom_btf, "parse_custom_btf"))
+		return -EINVAL;
+
+	cnt = btf__type_cnt(prog_btf);
+	custom_cnt = btf__type_cnt(custom_btf);
+
+	/* Fix up FUNC entries with anonymous params.
+	 * Save all data from prog_btf BEFORE calling btf__add_*,
+	 * since those calls may reallocate the BTF data buffer
+	 * and invalidate any pointers obtained from btf__type_by_id.
+	 */
+	for (i = 1; i < cnt; i++) {
+		const struct btf_type *t = btf__type_by_id(prog_btf, i);
+		const struct btf_type *fp, *custom_t, *custom_fp;
+		const struct btf_param *params, *custom_params;
+		__u32 ret_type_id, vlen;
+		__u32 *prog_param_types = NULL;
+		const char *name;
+		int new_proto_id;
+
+		if (!btf_is_func(t))
+			continue;
+
+		fp = btf__type_by_id(prog_btf, t->type);
+		if (!fp || !btf_is_func_proto(fp) || btf_vlen(fp) == 0)
+			continue;
+
+		/* Check if any param is anonymous */
+		params = btf_params(fp);
+		if (params[0].name_off != 0)
+			continue;
+
+		/* Find matching FUNC by name in custom BTF */
+		name = btf__name_by_offset(prog_btf, t->name_off);
+		if (!name)
+			continue;
+
+		for (j = 1; j < custom_cnt; j++) {
+			const char *cname;
+
+			custom_t = btf__type_by_id(custom_btf, j);
+			if (!btf_is_func(custom_t))
+				continue;
+			cname = btf__name_by_offset(custom_btf, custom_t->name_off);
+			if (cname && strcmp(name, cname) == 0)
+				break;
+		}
+		if (j >= custom_cnt)
+			continue;
+
+		custom_fp = btf__type_by_id(custom_btf, custom_t->type);
+		if (!custom_fp || !btf_is_func_proto(custom_fp))
+			continue;
+
+		vlen = btf_vlen(fp);
+		if (vlen != btf_vlen(custom_fp))
+			continue;
+
+		/* Save data before btf__add_* calls invalidate pointers */
+		ret_type_id = fp->type;
+		prog_param_types = malloc(vlen * sizeof(*prog_param_types));
+		if (!prog_param_types) {
+			err = -ENOMEM;
+			break;
+		}
+		for (j = 0; j < vlen; j++)
+			prog_param_types[j] = params[j].type;
+
+		/* Add a new FUNC_PROTO: param names from custom, types from prog */
+		new_proto_id = btf__add_func_proto(prog_btf, ret_type_id);
+		if (new_proto_id < 0) {
+			err = new_proto_id;
+			free(prog_param_types);
+			break;
+		}
+
+		custom_params = btf_params(custom_fp);
+		for (j = 0; j < vlen; j++) {
+			const char *pname;
+
+			pname = btf__name_by_offset(custom_btf, custom_params[j].name_off);
+			err = btf__add_func_param(prog_btf, pname ?: "", prog_param_types[j]);
+			if (err)
+				break;
+		}
+		free(prog_param_types);
+		if (err)
+			break;
+
+		/* Update the FUNC to point to the new FUNC_PROTO (re-fetch
+		 * since btf__add_* may have reallocated the data buffer).
+		 */
+		((struct btf_type *)btf__type_by_id(prog_btf, i))->type = new_proto_id;
+	}
+
+	btf__free(custom_btf);
+	return err;
+}
+
 /* this function is forced noinline and has short generic name to look better
  * in test_progs output (in case of a failure)
  */
@@ -928,6 +1313,7 @@ void run_subtest(struct test_loader *tester,
 		 bool unpriv)
 {
 	struct test_subspec *subspec = unpriv ? &spec->unpriv : &spec->priv;
+	int current_runtime = is_jit_enabled() ? JITED : NO_JITED;
 	struct bpf_program *tprog = NULL, *tprog_iter;
 	struct bpf_link *link, *links[32] = {};
 	struct test_spec *spec_iter;
@@ -938,10 +1324,15 @@ void run_subtest(struct test_loader *tester,
 	int links_cnt = 0;
 	bool should_load;
 
-	if (!test__start_subtest(subspec->name))
+	if (!test__start_subtest_with_desc(subspec->name, subspec->description))
 		return;
 
 	if ((get_current_arch() & spec->arch_mask) == 0) {
+		test__skip();
+		return;
+	}
+
+	if ((current_runtime & spec->load_mask) == 0) {
 		test__skip();
 		return;
 	}
@@ -959,18 +1350,32 @@ void run_subtest(struct test_loader *tester,
 		if (subspec->caps) {
 			err = cap_enable_effective(subspec->caps, NULL);
 			if (err) {
-				PRINT_FAIL("failed to set capabilities: %i, %s\n", err, strerror(err));
+				PRINT_FAIL("failed to set capabilities: %i, %s\n", err, strerror(-err));
 				goto subtest_cleanup;
 			}
 		}
 	}
 
-	/* Implicitly reset to NULL if next test case doesn't specify */
+	/* Implicitly reset to NULL if next test case doesn't specify.
+	 * btf_custom_func_path also serves as btf_custom_path for kfunc resolution.
+	 */
 	open_opts->btf_custom_path = spec->btf_custom_path;
+	if (!open_opts->btf_custom_path)
+		open_opts->btf_custom_path = spec->btf_custom_func_path;
 
 	tobj = bpf_object__open_mem(obj_bytes, obj_byte_cnt, open_opts);
 	if (!ASSERT_OK_PTR(tobj, "obj_open_mem")) /* shouldn't happen */
 		goto subtest_cleanup;
+
+	/* Fix up __naked subprog BTF using a separate file with named params */
+	if (spec->btf_custom_func_path) {
+		err = fixup_btf_from_path(tobj, spec->btf_custom_func_path);
+		if (err) {
+			PRINT_FAIL("failed to fixup BTF from %s: %d\n",
+				   spec->btf_custom_func_path, err);
+			goto tobj_cleanup;
+		}
+	}
 
 	i = 0;
 	bpf_object__for_each_program(tprog_iter, tobj) {
@@ -1016,6 +1421,14 @@ void run_subtest(struct test_loader *tester,
 	emit_verifier_log(tester->log_buf, false /*force*/);
 	validate_msgs(tester->log_buf, &subspec->expect_msgs, emit_verifier_log);
 
+	/* Restore capabilities because the kernel will silently ignore requests
+	 * for program info (such as xlated program text) if we are not
+	 * bpf-capable. Also, for some reason test_verifier executes programs
+	 * with all capabilities restored. Do the same here.
+	 */
+	if (restore_capabilities(&caps))
+		goto tobj_cleanup;
+
 	if (subspec->expect_xlated.cnt) {
 		err = get_xlated_program_text(bpf_program__fd(tprog),
 					      tester->log_buf, tester->log_buf_sz);
@@ -1041,12 +1454,6 @@ void run_subtest(struct test_loader *tester,
 	}
 
 	if (should_do_test_run(spec, subspec)) {
-		/* For some reason test_verifier executes programs
-		 * with all capabilities restored. Do the same here.
-		 */
-		if (restore_capabilities(&caps))
-			goto tobj_cleanup;
-
 		/* Do bpf_map__attach_struct_ops() for each struct_ops map.
 		 * This should trigger bpf_struct_ops->reg callback on kernel side.
 		 */
@@ -1061,7 +1468,7 @@ void run_subtest(struct test_loader *tester,
 			link = bpf_map__attach_struct_ops(map);
 			if (!link) {
 				PRINT_FAIL("bpf_map__attach_struct_ops failed for map %s: err=%d\n",
-					   bpf_map__name(map), err);
+					   bpf_map__name(map), -errno);
 				goto tobj_cleanup;
 			}
 			links[links_cnt++] = link;
@@ -1075,12 +1482,28 @@ void run_subtest(struct test_loader *tester,
 			}
 		}
 
-		do_prog_test_run(bpf_program__fd(tprog), &retval,
-				 bpf_program__type(tprog) == BPF_PROG_TYPE_SYSCALL ? true : false);
-		if (retval != subspec->retval && subspec->retval != POINTER_VALUE) {
+		err = do_prog_test_run(bpf_program__fd(tprog), &retval,
+				       bpf_program__type(tprog) == BPF_PROG_TYPE_SYSCALL ? true : false,
+				       spec->linear_sz);
+		if (!err && retval != subspec->retval && subspec->retval != POINTER_VALUE) {
 			PRINT_FAIL("Unexpected retval: %d != %d\n", retval, subspec->retval);
 			goto tobj_cleanup;
 		}
+
+		verify_stderr(bpf_program__fd(tprog), &subspec->stderr);
+
+		if (subspec->stdout.cnt) {
+			err = get_stream(1, bpf_program__fd(tprog),
+					 tester->log_buf, tester->log_buf_sz);
+			if (err <= 0) {
+				PRINT_FAIL("Unexpected retval from get_stream(): %d, errno = %d\n",
+					   err, errno);
+				goto tobj_cleanup;
+			}
+			emit_stdout(tester->log_buf, false /*force*/);
+			validate_msgs(tester->log_buf, &subspec->stdout, emit_stdout);
+		}
+
 		/* redo bpf_map__attach_struct_ops for each test */
 		while (links_cnt > 0)
 			bpf_link__destroy(links[--links_cnt]);

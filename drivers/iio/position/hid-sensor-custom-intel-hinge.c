@@ -8,7 +8,6 @@
 #include <linux/iio/iio.h>
 #include <linux/platform_device.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 
 #include "../common/hid-sensors/hid-sensor-trigger.h"
 
@@ -176,7 +175,7 @@ static int hinge_read_label(struct iio_dev *indio_dev,
 {
 	struct hinge_state *st = iio_priv(indio_dev);
 
-	return sprintf(label, "%s\n", st->labels[chan->channel]);
+	return sysfs_emit(label, "%s\n", st->labels[chan->channel]);
 }
 
 static const struct iio_info hinge_info = {
@@ -358,7 +357,7 @@ static const struct platform_device_id hid_hinge_ids[] = {
 		/* Format: HID-SENSOR-INT-usage_id_in_hex_lowercase */
 		.name = "HID-SENSOR-INT-020b",
 	},
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, hid_hinge_ids);
 

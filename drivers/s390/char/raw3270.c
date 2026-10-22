@@ -8,6 +8,7 @@
  *     Copyright IBM Corp. 2003, 2009
  */
 
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/err.h>
 #include <linux/init.h>
@@ -17,6 +18,7 @@
 #include <linux/types.h>
 #include <linux/wait.h>
 
+#include <asm/machine.h>
 #include <asm/ccwdev.h>
 #include <asm/cio.h>
 #include <asm/ebcdic.h>
@@ -144,7 +146,7 @@ struct raw3270_request *raw3270_request_alloc(size_t size)
 	struct raw3270_request *rq;
 
 	/* Allocate request structure */
-	rq = kzalloc(sizeof(*rq), GFP_KERNEL | GFP_DMA);
+	rq = kzalloc_obj(*rq, GFP_KERNEL | GFP_DMA);
 	if (!rq)
 		return ERR_PTR(-ENOMEM);
 
@@ -618,7 +620,7 @@ static void raw3270_reset_device_cb(struct raw3270_request *rq, void *data)
 	if (rq->rc) {
 		/* Reset command failed. */
 		rp->state = RAW3270_STATE_INIT;
-	} else if (MACHINE_IS_VM) {
+	} else if (machine_is_vm()) {
 		raw3270_size_device_vm(rp);
 		raw3270_size_device_done(rp);
 	} else {
@@ -811,7 +813,7 @@ struct raw3270 __init *raw3270_setup_console(void)
 	if (IS_ERR(cdev))
 		return ERR_CAST(cdev);
 
-	rp = kzalloc(sizeof(*rp), GFP_KERNEL | GFP_DMA);
+	rp = kzalloc_obj(*rp, GFP_KERNEL | GFP_DMA);
 	ascebc = kzalloc(256, GFP_KERNEL);
 	rc = raw3270_setup_device(cdev, rp, ascebc);
 	if (rc)
@@ -856,7 +858,7 @@ static struct raw3270 *raw3270_create_device(struct ccw_device *cdev)
 	char *ascebc;
 	int rc;
 
-	rp = kzalloc(sizeof(*rp), GFP_KERNEL | GFP_DMA);
+	rp = kzalloc_obj(*rp, GFP_KERNEL | GFP_DMA);
 	if (!rp)
 		return ERR_PTR(-ENOMEM);
 	ascebc = kmalloc(256, GFP_KERNEL);

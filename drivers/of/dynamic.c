@@ -74,6 +74,20 @@ static const char *action_names[] = {
 	[OF_RECONFIG_UPDATE_PROPERTY] = "UPDATE_PROPERTY",
 };
 
+static bool of_property_status_ok(const struct property *prop)
+{
+	const char *status;
+
+	if (!prop || !prop->value || prop->length <= 0)
+		return false;
+
+	status = prop->value;
+	if (strnlen(status, prop->length) >= prop->length)
+		return false;
+
+	return !strcmp(status, "okay") || !strcmp(status, "ok");
+}
+
 #define _do_print(func, prefix, action, node, prop, ...) ({	\
 	func("changeset: " prefix "%-15s %pOF%s%s\n",		\
 	     ##__VA_ARGS__, action_names[action], node,		\
@@ -135,11 +149,9 @@ int of_reconfig_get_state_change(unsigned long action, struct of_reconfig_data *
 
 	if (prop && !strcmp(prop->name, "status")) {
 		is_status = 1;
-		status_state = !strcmp(prop->value, "okay") ||
-			       !strcmp(prop->value, "ok");
+		status_state = of_property_status_ok(prop);
 		if (old_prop)
-			old_status_state = !strcmp(old_prop->value, "okay") ||
-					   !strcmp(old_prop->value, "ok");
+			old_status_state = of_property_status_ok(old_prop);
 	}
 
 	switch (action) {
@@ -225,7 +237,6 @@ static void __of_attach_node(struct device_node *np)
 	np->sibling = np->parent->child;
 	np->parent->child = np;
 	of_node_clear_flag(np, OF_DETACHED);
-	np->fwnode.flags |= FWNODE_FLAG_NOT_DEVICE;
 
 	raw_spin_unlock_irqrestore(&devtree_lock, flags);
 
@@ -411,7 +422,7 @@ struct property *__of_prop_dup(const struct property *prop, gfp_t allocflags)
 {
 	struct property *new;
 
-	new = kzalloc(sizeof(*new), allocflags);
+	new = kzalloc_obj(*new, allocflags);
 	if (!new)
 		return NULL;
 
@@ -454,7 +465,7 @@ struct device_node *__of_node_dup(const struct device_node *np,
 {
 	struct device_node *node;
 
-	node = kzalloc(sizeof(*node), GFP_KERNEL);
+	node = kzalloc_obj(*node);
 	if (!node)
 		return NULL;
 	node->full_name = kstrdup(full_name, GFP_KERNEL);
@@ -908,7 +919,7 @@ int of_changeset_action(struct of_changeset *ocs, unsigned long action,
 	if (WARN_ON(action >= ARRAY_SIZE(action_names)))
 		return -EINVAL;
 
-	ce = kzalloc(sizeof(*ce), GFP_KERNEL);
+	ce = kzalloc_obj(*ce);
 	if (!ce)
 		return -ENOMEM;
 
@@ -935,10 +946,15 @@ static int of_changeset_add_prop_helper(struct of_changeset *ocs,
 		return -ENOMEM;
 
 	ret = of_changeset_add_property(ocs, np, new_pp);
-	if (ret)
+	if (ret) {
 		__of_prop_free(new_pp);
+		return ret;
+	}
 
-	return ret;
+	new_pp->next = np->deadprops;
+	np->deadprops = new_pp;
+
+	return 0;
 }
 
 /**

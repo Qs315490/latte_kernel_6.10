@@ -33,8 +33,8 @@
 
 	/* cmd flags */
 	enum {
-		RTW_CMDF_DIRECTLY = BIT0,
-		RTW_CMDF_WAIT_ACK = BIT1,
+		RTW_CMDF_DIRECTLY = BIT(0),
+		RTW_CMDF_WAIT_ACK = BIT(1),
 	};
 
 	struct cmd_priv {
@@ -559,7 +559,7 @@ struct RunInThread_param {
 Result:
 0x00: success
 0x01: success, and check Response.
-0x02: cmd ignored due to duplicated sequcne number
+0x02: cmd ignored due to duplicated sequence number
 0x03: cmd dropped due to invalid cmd code
 0x04: reserved.
 
@@ -712,4 +712,4 @@ enum {
 #define _GetRFReg_CMD_		_Read_RFREG_CMD_
 #define _SetRFReg_CMD_		_Write_RFREG_CMD_
 
-#endif /*  _CMD_H_ */
+#endif /* __RTW_CMD_H_ */

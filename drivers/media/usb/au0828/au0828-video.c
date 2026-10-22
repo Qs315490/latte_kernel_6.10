@@ -857,7 +857,7 @@ static void au0828_stop_streaming(struct vb2_queue *vq)
 	}
 
 	dev->vid_timeout_running = 0;
-	del_timer_sync(&dev->vid_timeout);
+	timer_delete_sync(&dev->vid_timeout);
 
 	spin_lock_irqsave(&dev->slock, flags);
 	if (dev->isoc_ctl.buf != NULL) {
@@ -905,7 +905,7 @@ void au0828_stop_vbi_streaming(struct vb2_queue *vq)
 	spin_unlock_irqrestore(&dev->slock, flags);
 
 	dev->vbi_timeout_running = 0;
-	del_timer_sync(&dev->vbi_timeout);
+	timer_delete_sync(&dev->vbi_timeout);
 }
 
 static const struct vb2_ops au0828_video_qops = {
@@ -948,7 +948,7 @@ int au0828_analog_unregister(struct au0828_dev *dev)
    such as tvtime from hanging) */
 static void au0828_vid_buffer_timeout(struct timer_list *t)
 {
-	struct au0828_dev *dev = from_timer(dev, t, vid_timeout);
+	struct au0828_dev *dev = timer_container_of(dev, t, vid_timeout);
 	struct au0828_dmaqueue *dma_q = &dev->vidq;
 	struct au0828_buffer *buf;
 	unsigned char *vid_data;
@@ -972,7 +972,7 @@ static void au0828_vid_buffer_timeout(struct timer_list *t)
 
 static void au0828_vbi_buffer_timeout(struct timer_list *t)
 {
-	struct au0828_dev *dev = from_timer(dev, t, vbi_timeout);
+	struct au0828_dev *dev = timer_container_of(dev, t, vbi_timeout);
 	struct au0828_dmaqueue *dma_q = &dev->vbiq;
 	struct au0828_buffer *buf;
 	unsigned char *vbi_data;
@@ -1040,12 +1040,12 @@ static int au0828_v4l2_close(struct file *filp)
 	if (vdev->vfl_type == VFL_TYPE_VIDEO && dev->vid_timeout_running) {
 		/* Cancel timeout thread in case they didn't call streamoff */
 		dev->vid_timeout_running = 0;
-		del_timer_sync(&dev->vid_timeout);
+		timer_delete_sync(&dev->vid_timeout);
 	} else if (vdev->vfl_type == VFL_TYPE_VBI &&
 			dev->vbi_timeout_running) {
 		/* Cancel timeout thread in case they didn't call streamoff */
 		dev->vbi_timeout_running = 0;
-		del_timer_sync(&dev->vbi_timeout);
+		timer_delete_sync(&dev->vbi_timeout);
 	}
 
 	if (test_bit(DEV_DISCONNECTED, &dev->dev_state))
@@ -1671,6 +1671,27 @@ static int vidioc_log_status(struct file *file, void *fh)
 	return 0;
 }
 
+static int vidioc_dqbuf(struct file *file, void *priv, struct v4l2_buffer *b)
+{
+	struct au0828_dev *dev = video_drvdata(file);
+	int rc;
+
+	rc = check_dev(dev);
+	if (rc < 0)
+		return rc;
+
+	/* Workaround for a bug in the au0828 hardware design that
+	 * sometimes results in the colorspace being inverted
+	 */
+	if (dev->greenscreen_detected == 1) {
+		dprintk(1, "Detected green frame.  Resetting stream...\n");
+		au0828_analog_stream_reset(dev);
+		dev->greenscreen_detected = 0;
+	}
+
+	return vb2_ioctl_dqbuf(file, priv, b);
+}
+
 void au0828_v4l2_suspend(struct au0828_dev *dev)
 {
 	struct urb *urb;
@@ -1694,9 +1715,9 @@ void au0828_v4l2_suspend(struct au0828_dev *dev)
 	}
 
 	if (dev->vid_timeout_running)
-		del_timer_sync(&dev->vid_timeout);
+		timer_delete_sync(&dev->vid_timeout);
 	if (dev->vbi_timeout_running)
-		del_timer_sync(&dev->vbi_timeout);
+		timer_delete_sync(&dev->vbi_timeout);
 }
 
 void au0828_v4l2_resume(struct au0828_dev *dev)
@@ -1764,8 +1785,8 @@ static const struct v4l2_ioctl_ops video_ioctl_ops = {
 	.vidioc_prepare_buf         = vb2_ioctl_prepare_buf,
 	.vidioc_querybuf            = vb2_ioctl_querybuf,
 	.vidioc_qbuf                = vb2_ioctl_qbuf,
-	.vidioc_dqbuf               = vb2_ioctl_dqbuf,
-	.vidioc_expbuf               = vb2_ioctl_expbuf,
+	.vidioc_dqbuf               = vidioc_dqbuf,
+	.vidioc_expbuf              = vb2_ioctl_expbuf,
 
 	.vidioc_s_std               = vidioc_s_std,
 	.vidioc_g_std               = vidioc_g_std,
@@ -1921,9 +1942,8 @@ int au0828_analog_register(struct au0828_dev *dev,
 	iface_desc = interface->cur_altsetting;
 	for (i = 0; i < iface_desc->desc.bNumEndpoints; i++) {
 		endpoint = &iface_desc->endpoint[i].desc;
-		if (((endpoint->bEndpointAddress & USB_ENDPOINT_DIR_MASK)
-		     == USB_DIR_IN) &&
-		    ((endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK)
+		if (usb_endpoint_dir_in(endpoint) &&
+		    (usb_endpoint_type(endpoint)
 		     == USB_ENDPOINT_XFER_ISOC)) {
 
 			/* we find our isoc in endpoint */

@@ -33,6 +33,8 @@
 #include "display_mode_vba_30.h"
 #include "dcn30_fpu.h"
 
+#include "../dml1_frl_cap_chk.h"
+
 #define REG(reg)\
 	optc1->tg_regs->reg
 
@@ -131,6 +133,7 @@ struct _vcs_dpi_soc_bounding_box_st dcn3_0_soc = {
 				.phyclk_mhz = 300.0,
 				.phyclk_d18_mhz = 667.0,
 				.dscclk_mhz = 405.6,
+				.dtbclk_mhz = 1217.0,
 			},
 		},
 
@@ -178,86 +181,11 @@ struct _vcs_dpi_soc_bounding_box_st dcn3_0_soc = {
 };
 
 
-void optc3_fpu_set_vrr_m_const(struct timing_generator *optc,
-		double vtotal_avg)
-{
-	struct optc *optc1 = DCN10TG_FROM_TG(optc);
-	double vtotal_min, vtotal_max;
-	double ratio, modulo, phase;
-	uint32_t vblank_start;
-	uint32_t v_total_mask_value = 0;
-
-	dc_assert_fp_enabled();
-
-	/* Compute VTOTAL_MIN and VTOTAL_MAX, so that
-	 * VOTAL_MAX - VTOTAL_MIN = 1
-	 */
-	v_total_mask_value = 16;
-	vtotal_min = dcn_bw_floor(vtotal_avg);
-	vtotal_max = dcn_bw_ceil(vtotal_avg);
-
-	/* Check that bottom VBLANK is at least 2 lines tall when running with
-	 * VTOTAL_MIN. Note that VTOTAL registers are defined as 'total number
-	 * of lines in a frame - 1'.
-	 */
-	REG_GET(OTG_V_BLANK_START_END, OTG_V_BLANK_START,
-		&vblank_start);
-	ASSERT(vtotal_min >= vblank_start + 1);
-
-	/* Special case where the average frame rate can be achieved
-	 * without using the DTO
-	 */
-	if (vtotal_min == vtotal_max) {
-		REG_SET(OTG_V_TOTAL, 0, OTG_V_TOTAL, (uint32_t)vtotal_min);
-
-		optc->funcs->set_vtotal_min_max(optc, 0, 0);
-		REG_SET(OTG_M_CONST_DTO0, 0, OTG_M_CONST_DTO_PHASE, 0);
-		REG_SET(OTG_M_CONST_DTO1, 0, OTG_M_CONST_DTO_MODULO, 0);
-		REG_UPDATE_3(OTG_V_TOTAL_CONTROL,
-			OTG_V_TOTAL_MIN_SEL, 0,
-			OTG_V_TOTAL_MAX_SEL, 0,
-			OTG_SET_V_TOTAL_MIN_MASK_EN, 0);
-		return;
-	}
-
-	ratio = vtotal_max - vtotal_avg;
-	modulo = 65536.0 * 65536.0 - 1.0; /* 2^32 - 1 */
-	phase = ratio * modulo;
-
-	/* Special cases where the DTO phase gets rounded to 0 or
-	 * to DTO modulo
-	 */
-	if (phase <= 0 || phase >= modulo) {
-		REG_SET(OTG_V_TOTAL, 0, OTG_V_TOTAL,
-			phase <= 0 ?
-				(uint32_t)vtotal_max : (uint32_t)vtotal_min);
-		REG_SET(OTG_V_TOTAL_MIN, 0, OTG_V_TOTAL_MIN, 0);
-		REG_SET(OTG_V_TOTAL_MAX, 0, OTG_V_TOTAL_MAX, 0);
-		REG_SET(OTG_M_CONST_DTO0, 0, OTG_M_CONST_DTO_PHASE, 0);
-		REG_SET(OTG_M_CONST_DTO1, 0, OTG_M_CONST_DTO_MODULO, 0);
-		REG_UPDATE_3(OTG_V_TOTAL_CONTROL,
-			OTG_V_TOTAL_MIN_SEL, 0,
-			OTG_V_TOTAL_MAX_SEL, 0,
-			OTG_SET_V_TOTAL_MIN_MASK_EN, 0);
-		return;
-	}
-	REG_UPDATE_6(OTG_V_TOTAL_CONTROL,
-		OTG_V_TOTAL_MIN_SEL, 1,
-		OTG_V_TOTAL_MAX_SEL, 1,
-		OTG_SET_V_TOTAL_MIN_MASK_EN, 1,
-		OTG_SET_V_TOTAL_MIN_MASK, v_total_mask_value,
-		OTG_VTOTAL_MID_REPLACING_MIN_EN, 0,
-		OTG_VTOTAL_MID_REPLACING_MAX_EN, 0);
-	REG_SET(OTG_V_TOTAL, 0, OTG_V_TOTAL, (uint32_t)vtotal_min);
-	optc->funcs->set_vtotal_min_max(optc, vtotal_min, vtotal_max);
-	REG_SET(OTG_M_CONST_DTO0, 0, OTG_M_CONST_DTO_PHASE, (uint32_t)phase);
-	REG_SET(OTG_M_CONST_DTO1, 0, OTG_M_CONST_DTO_MODULO, (uint32_t)modulo);
-}
-
 void dcn30_fpu_populate_dml_writeback_from_context(
 		struct dc *dc, struct resource_context *res_ctx, display_e2e_pipe_params_st *pipes)
 {
-	int pipe_cnt, i, j;
+	int pipe_cnt;
+	unsigned int i, j;
 	double max_calc_writeback_dispclk;
 	double writeback_dispclk;
 	struct writeback_st dout_wb = {0};
@@ -355,11 +283,11 @@ void dcn30_fpu_set_mcif_arb_params(struct mcif_arb_params *wb_arb_params,
 	dc_assert_fp_enabled();
 
 	for (i = 0; i < ARRAY_SIZE(wb_arb_params->cli_watermark); i++) {
-		wb_arb_params->cli_watermark[i] = get_wm_writeback_urgent(dml, pipes, pipe_cnt) * 1000;
-		wb_arb_params->pstate_watermark[i] = get_wm_writeback_dram_clock_change(dml, pipes, pipe_cnt) * 1000;
+		wb_arb_params->cli_watermark[i] = (unsigned int)(get_wm_writeback_urgent(dml, pipes, pipe_cnt) * 1000);
+		wb_arb_params->pstate_watermark[i] = (unsigned int)(get_wm_writeback_dram_clock_change(dml, pipes, pipe_cnt) * 1000);
 	}
 
-	wb_arb_params->dram_speed_change_duration = dml->vba.WritebackAllowDRAMClockChangeEndPosition[cur_pipe] * pipes[0].clks_cfg.refclk_mhz; /* num_clock_cycles = us * MHz */
+	wb_arb_params->dram_speed_change_duration = (unsigned int)(dml->vba.WritebackAllowDRAMClockChangeEndPosition[cur_pipe] * pipes[0].clks_cfg.refclk_mhz); /* num_clock_cycles = us * MHz */
 }
 
 void dcn30_fpu_update_soc_for_wm_a(struct dc *dc, struct dc_state *context)
@@ -384,6 +312,7 @@ void dcn30_fpu_calculate_wm_and_dlg(
 {
 	int maxMpcComb = context->bw_ctx.dml.vba.maxMpcComb;
 	int i, pipe_idx;
+	unsigned int pipe_i, state_i;
 	double dcfclk = context->bw_ctx.dml.vba.DCFCLKState[vlevel][maxMpcComb];
 	bool pstate_en = context->bw_ctx.dml.vba.DRAMClockChangeSupport[vlevel][maxMpcComb] != dm_dram_clock_change_unsupported;
 	unsigned int dummy_latency_index = 0;
@@ -415,7 +344,8 @@ void dcn30_fpu_calculate_wm_and_dlg(
 			 * newly found dummy_latency_index
 			 */
 			context->bw_ctx.dml.soc.dram_clock_change_latency_us = dc->clk_mgr->bw_params->wm_table.nv_entries[WM_A].dml_input.pstate_latency_us;
-			dcn30_internal_validate_bw(dc, context, pipes, &pipe_cnt, &vlevel, false, true);
+			dcn30_internal_validate_bw(dc, context, pipes, &pipe_cnt, &vlevel,
+				DC_VALIDATE_MODE_AND_PROGRAMMING, true);
 			maxMpcComb = context->bw_ctx.dml.vba.maxMpcComb;
 			dcfclk = context->bw_ctx.dml.vba.DCFCLKState[vlevel][context->bw_ctx.dml.vba.maxMpcComb];
 			pstate_en = context->bw_ctx.dml.vba.DRAMClockChangeSupport[vlevel][maxMpcComb] != dm_dram_clock_change_unsupported;
@@ -442,14 +372,14 @@ void dcn30_fpu_calculate_wm_and_dlg(
 		context->bw_ctx.dml.soc.sr_enter_plus_exit_time_us = dc->clk_mgr->bw_params->wm_table.nv_entries[WM_B].dml_input.sr_enter_plus_exit_time_us;
 		context->bw_ctx.dml.soc.sr_exit_time_us = dc->clk_mgr->bw_params->wm_table.nv_entries[WM_B].dml_input.sr_exit_time_us;
 	}
-	context->bw_ctx.bw.dcn.watermarks.b.urgent_ns = get_wm_urgent(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.b.cstate_pstate.cstate_enter_plus_exit_ns = get_wm_stutter_enter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.b.cstate_pstate.cstate_exit_ns = get_wm_stutter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.b.cstate_pstate.pstate_change_ns = get_wm_dram_clock_change(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.b.pte_meta_urgent_ns = get_wm_memory_trip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.b.frac_urg_bw_nom = get_fraction_of_urgent_bandwidth(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.b.frac_urg_bw_flip = get_fraction_of_urgent_bandwidth_imm_flip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.b.urgent_latency_ns = get_urgent_latency(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
+	context->bw_ctx.bw.dcn.watermarks.b.urgent_ns = (uint32_t)(get_wm_urgent(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.b.cstate_pstate.cstate_enter_plus_exit_ns = (uint32_t)(get_wm_stutter_enter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.b.cstate_pstate.cstate_exit_ns = (uint32_t)(get_wm_stutter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.b.cstate_pstate.pstate_change_ns = (uint32_t)(get_wm_dram_clock_change(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.b.pte_meta_urgent_ns = (uint32_t)(get_wm_memory_trip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.b.frac_urg_bw_nom = (uint32_t)(get_fraction_of_urgent_bandwidth(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.b.frac_urg_bw_flip = (uint32_t)(get_fraction_of_urgent_bandwidth_imm_flip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.b.urgent_latency_ns = (uint32_t)(get_urgent_latency(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
 
 	pipes[0].clks_cfg.voltage = vlevel;
 	pipes[0].clks_cfg.dcfclk_mhz = dcfclk;
@@ -481,7 +411,7 @@ void dcn30_fpu_calculate_wm_and_dlg(
 	 * pstate latency overridden to 5us
 	 */
 	if (dc->clk_mgr->bw_params->wm_table.nv_entries[WM_C].valid) {
-		unsigned int min_dram_speed_mts = context->bw_ctx.dml.vba.DRAMSpeed;
+		unsigned int min_dram_speed_mts = (unsigned int)context->bw_ctx.dml.vba.DRAMSpeed;
 		unsigned int min_dram_speed_mts_margin = 160;
 
 		context->bw_ctx.dml.soc.dram_clock_change_latency_us =
@@ -512,14 +442,14 @@ void dcn30_fpu_calculate_wm_and_dlg(
 		context->bw_ctx.dml.soc.sr_exit_time_us = dc->clk_mgr->bw_params->wm_table.nv_entries[WM_C].dml_input.sr_exit_time_us;
 	}
 
-	context->bw_ctx.bw.dcn.watermarks.c.urgent_ns = get_wm_urgent(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.c.cstate_pstate.cstate_enter_plus_exit_ns = get_wm_stutter_enter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.c.cstate_pstate.cstate_exit_ns = get_wm_stutter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.c.cstate_pstate.pstate_change_ns = get_wm_dram_clock_change(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.c.pte_meta_urgent_ns = get_wm_memory_trip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.c.frac_urg_bw_nom = get_fraction_of_urgent_bandwidth(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.c.frac_urg_bw_flip = get_fraction_of_urgent_bandwidth_imm_flip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.c.urgent_latency_ns = get_urgent_latency(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
+	context->bw_ctx.bw.dcn.watermarks.c.urgent_ns = (uint32_t)(get_wm_urgent(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.c.cstate_pstate.cstate_enter_plus_exit_ns = (uint32_t)(get_wm_stutter_enter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.c.cstate_pstate.cstate_exit_ns = (uint32_t)(get_wm_stutter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.c.cstate_pstate.pstate_change_ns = (uint32_t)(get_wm_dram_clock_change(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.c.pte_meta_urgent_ns = (uint32_t)(get_wm_memory_trip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.c.frac_urg_bw_nom = (uint32_t)(get_fraction_of_urgent_bandwidth(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.c.frac_urg_bw_flip = (uint32_t)(get_fraction_of_urgent_bandwidth_imm_flip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.c.urgent_latency_ns = (uint32_t)(get_urgent_latency(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
 
 	if (!pstate_en) {
 		/* The only difference between A and C is p-state latency, if p-state is not supported we want to
@@ -535,23 +465,23 @@ void dcn30_fpu_calculate_wm_and_dlg(
 		 * Set A calculated last so that following calculations are based on Set A
 		 */
 		dc->res_pool->funcs->update_soc_for_wm_a(dc, context);
-		context->bw_ctx.bw.dcn.watermarks.a.urgent_ns = get_wm_urgent(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-		context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_enter_plus_exit_ns = get_wm_stutter_enter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-		context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_exit_ns = get_wm_stutter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-		context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.pstate_change_ns = get_wm_dram_clock_change(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-		context->bw_ctx.bw.dcn.watermarks.a.pte_meta_urgent_ns = get_wm_memory_trip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-		context->bw_ctx.bw.dcn.watermarks.a.frac_urg_bw_nom = get_fraction_of_urgent_bandwidth(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-		context->bw_ctx.bw.dcn.watermarks.a.frac_urg_bw_flip = get_fraction_of_urgent_bandwidth_imm_flip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-		context->bw_ctx.bw.dcn.watermarks.a.urgent_latency_ns = get_urgent_latency(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
+		context->bw_ctx.bw.dcn.watermarks.a.urgent_ns = (uint32_t)(get_wm_urgent(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+		context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_enter_plus_exit_ns = (uint32_t)(get_wm_stutter_enter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+		context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_exit_ns = (uint32_t)(get_wm_stutter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+		context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.pstate_change_ns = (uint32_t)(get_wm_dram_clock_change(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+		context->bw_ctx.bw.dcn.watermarks.a.pte_meta_urgent_ns = (uint32_t)(get_wm_memory_trip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+		context->bw_ctx.bw.dcn.watermarks.a.frac_urg_bw_nom = (uint32_t)(get_fraction_of_urgent_bandwidth(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+		context->bw_ctx.bw.dcn.watermarks.a.frac_urg_bw_flip = (uint32_t)(get_fraction_of_urgent_bandwidth_imm_flip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+		context->bw_ctx.bw.dcn.watermarks.a.urgent_latency_ns = (uint32_t)(get_urgent_latency(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
 	}
 
-	context->perf_params.stutter_period_us = context->bw_ctx.dml.vba.StutterPeriod;
+	context->perf_params.stutter_period_us = (unsigned int)context->bw_ctx.dml.vba.StutterPeriod;
 
 	/* Make set D = set A until set D is enabled */
 	context->bw_ctx.bw.dcn.watermarks.d = context->bw_ctx.bw.dcn.watermarks.a;
 
-	for (i = 0, pipe_idx = 0; i < dc->res_pool->pipe_count; i++) {
-		if (!context->res_ctx.pipe_ctx[i].stream)
+	for (pipe_i = 0, pipe_idx = 0; pipe_i < dc->res_pool->pipe_count; pipe_i++) {
+		if (!context->res_ctx.pipe_ctx[pipe_i].stream)
 			continue;
 
 		pipes[pipe_idx].clks_cfg.dispclk_mhz = get_dispclk_calculated(&context->bw_ctx.dml, pipes, pipe_cnt);
@@ -575,9 +505,9 @@ void dcn30_fpu_calculate_wm_and_dlg(
 			context->bw_ctx.dml.vba.DRAMSpeed <= 1700 &&
 			context->bw_ctx.dml.vba.DRAMSpeed >= 1500) {
 
-		for (i = 0; i < dc->dml.soc.num_states; i++) {
-			if (dc->dml.soc.clock_limits[i].dram_speed_mts > 1700) {
-				context->bw_ctx.dml.vba.DRAMSpeed = dc->dml.soc.clock_limits[i].dram_speed_mts;
+		for (state_i = 0; state_i < dc->dml.soc.num_states; state_i++) {
+			if (dc->dml.soc.clock_limits[state_i].dram_speed_mts > 1700) {
+				context->bw_ctx.dml.vba.DRAMSpeed = dc->dml.soc.clock_limits[state_i].dram_speed_mts;
 				break;
 			}
 		}
@@ -607,13 +537,13 @@ void dcn30_fpu_update_max_clk(struct dc_bounding_box_max_clk *dcn30_bb_max_clk)
 		dc_assert_fp_enabled();
 
 		if (!dcn30_bb_max_clk->max_dcfclk_mhz)
-			dcn30_bb_max_clk->max_dcfclk_mhz = dcn3_0_soc.clock_limits[0].dcfclk_mhz;
+			dcn30_bb_max_clk->max_dcfclk_mhz = (int)dcn3_0_soc.clock_limits[0].dcfclk_mhz;
 		if (!dcn30_bb_max_clk->max_dispclk_mhz)
-			dcn30_bb_max_clk->max_dispclk_mhz = dcn3_0_soc.clock_limits[0].dispclk_mhz;
+			dcn30_bb_max_clk->max_dispclk_mhz = (int)dcn3_0_soc.clock_limits[0].dispclk_mhz;
 		if (!dcn30_bb_max_clk->max_dppclk_mhz)
-			dcn30_bb_max_clk->max_dppclk_mhz = dcn3_0_soc.clock_limits[0].dppclk_mhz;
+			dcn30_bb_max_clk->max_dppclk_mhz = (int)dcn3_0_soc.clock_limits[0].dppclk_mhz;
 		if (!dcn30_bb_max_clk->max_phyclk_mhz)
-			dcn30_bb_max_clk->max_phyclk_mhz = dcn3_0_soc.clock_limits[0].phyclk_mhz;
+			dcn30_bb_max_clk->max_phyclk_mhz = (int)dcn3_0_soc.clock_limits[0].phyclk_mhz;
 }
 
 void dcn30_fpu_get_optimal_dcfclk_fclk_for_uclk(unsigned int uclk_mts,
@@ -632,12 +562,12 @@ void dcn30_fpu_get_optimal_dcfclk_fclk_for_uclk(unsigned int uclk_mts,
 	bw_from_dram = (bw_from_dram1 < bw_from_dram2) ? bw_from_dram1 : bw_from_dram2;
 
 	if (optimal_fclk)
-		*optimal_fclk = bw_from_dram /
-		(dcn3_0_soc.fabric_datapath_to_dcn_data_return_bytes * (dcn3_0_soc.max_avg_sdp_bw_use_normal_percent / 100));
+		*optimal_fclk = (unsigned int)(bw_from_dram /
+		(dcn3_0_soc.fabric_datapath_to_dcn_data_return_bytes * (dcn3_0_soc.max_avg_sdp_bw_use_normal_percent / 100)));
 
 	if (optimal_dcfclk)
-		*optimal_dcfclk =  bw_from_dram /
-		(dcn3_0_soc.return_bus_width_bytes * (dcn3_0_soc.max_avg_sdp_bw_use_normal_percent / 100));
+		*optimal_dcfclk = (unsigned int)(bw_from_dram /
+		(dcn3_0_soc.return_bus_width_bytes * (dcn3_0_soc.max_avg_sdp_bw_use_normal_percent / 100)));
 }
 
 void dcn30_fpu_update_bw_bounding_box(struct dc *dc,
@@ -646,6 +576,7 @@ void dcn30_fpu_update_bw_bounding_box(struct dc *dc,
 	unsigned int *dcfclk_mhz,
 	unsigned int *dram_speed_mts)
 {
+	(void)bw_params;
 	unsigned int i;
 
 	dc_assert_fp_enabled();
@@ -706,7 +637,8 @@ int dcn30_find_dummy_latency_index_for_fw_based_mclk_switch(struct dc *dc,
 	while (dummy_latency_index < max_latency_table_entries) {
 		context->bw_ctx.dml.soc.dram_clock_change_latency_us =
 				dc->clk_mgr->bw_params->dummy_pstate_table[dummy_latency_index].dummy_pstate_latency_us;
-		dcn30_internal_validate_bw(dc, context, pipes, &pipe_cnt, &vlevel, false, true);
+		dcn30_internal_validate_bw(dc, context, pipes, &pipe_cnt, &vlevel,
+			DC_VALIDATE_MODE_AND_PROGRAMMING, true);
 
 		if (context->bw_ctx.dml.soc.allow_dram_self_refresh_or_dram_clock_change_in_vblank ==
 			dm_allow_self_refresh_and_mclk_switch)
@@ -735,7 +667,7 @@ void dcn3_fpu_build_wm_range_table(struct clk_mgr *base)
 	double pstate_latency_us = base->ctx->dc->dml.soc.dram_clock_change_latency_us;
 	double sr_exit_time_us = base->ctx->dc->dml.soc.sr_exit_time_us;
 	double sr_enter_plus_exit_time_us = base->ctx->dc->dml.soc.sr_enter_plus_exit_time_us;
-	uint16_t min_uclk_mhz = base->bw_params->clk_table.entries[0].memclk_mhz;
+	uint16_t min_uclk_mhz = (uint16_t)base->bw_params->clk_table.entries[0].memclk_mhz;
 
 	dc_assert_fp_enabled();
 
@@ -792,8 +724,9 @@ void dcn3_fpu_build_wm_range_table(struct clk_mgr *base)
 	base->bw_params->wm_table.nv_entries[WM_D].pmfw_breakdown.max_uclk = 0xFFFF;
 }
 
-void patch_dcn30_soc_bounding_box(struct dc *dc, struct _vcs_dpi_soc_bounding_box_st *dcn3_0_ip)
+void patch_dcn30_soc_bounding_box(struct dc *dc, struct _vcs_dpi_soc_bounding_box_st *soc_bb)
 {
+	(void)soc_bb;
 	dc_assert_fp_enabled();
 
 	if (dc->ctx->dc_bios->funcs->get_soc_bb_info) {
@@ -810,4 +743,128 @@ void patch_dcn30_soc_bounding_box(struct dc *dc, struct _vcs_dpi_soc_bounding_bo
 				dcn3_0_soc.sr_exit_time_us = bb_info.dram_sr_exit_latency_100ns * 10;
 		}
 	}
+}
+
+#undef DC_LOGGER
+#define DC_LOGGER \
+		enc3->base.ctx->logger
+
+#define hdmi_frl_print(str, ...) {DC_LOG_HDMI_FRL(str, ##__VA_ARGS__); }
+
+#define DEBUG_FRL_CAP_CHK 1
+
+void hpo_fpu_enc3_validate_hdmi_frl_output_link(struct hpo_frl_stream_encoder *enc,
+						struct dc_hdmi_frl_link_settings *frl_link_settings,
+						struct frl_cap_chk_params *frl_params,
+						const struct dc_crtc_timing *timing,
+						unsigned int dsc_max_rate)
+{
+	(void)enc;
+	dc_assert_fp_enabled();
+
+	switch (frl_link_settings->frl_link_rate) {
+	case HDMI_FRL_LINK_RATE_3GBPS:
+		frl_params->r_bit_nominal = 3.0e9;
+		break;
+	case HDMI_FRL_LINK_RATE_6GBPS:
+	case HDMI_FRL_LINK_RATE_6GBPS_4LANE:
+		frl_params->r_bit_nominal = 6.0e9;
+		break;
+	case HDMI_FRL_LINK_RATE_8GBPS:
+		frl_params->r_bit_nominal = 8.0e9;
+		break;
+	case HDMI_FRL_LINK_RATE_10GBPS:
+	default:
+		frl_params->r_bit_nominal = 10.0e9;
+		break;
+	case HDMI_FRL_LINK_RATE_12GBPS:
+		frl_params->r_bit_nominal = 12.0e9;
+		break;
+	}
+
+	if (timing->flags.DSC &&
+			(unsigned int)frl_link_settings->frl_link_rate > dsc_max_rate) {
+		if (dsc_max_rate < HDMI_FRL_LINK_RATE_6GBPS_4LANE) {
+			frl_params->lanes = 3;
+		} else {
+			frl_params->lanes = 4;
+		}
+
+		switch (dsc_max_rate) {
+		case HDMI_FRL_LINK_RATE_3GBPS:
+			frl_params->r_bit_nominal = 3.0e9;
+			break;
+		case HDMI_FRL_LINK_RATE_6GBPS:
+		case HDMI_FRL_LINK_RATE_6GBPS_4LANE:
+			frl_params->r_bit_nominal = 6.0e9;
+			break;
+		case HDMI_FRL_LINK_RATE_8GBPS:
+			frl_params->r_bit_nominal = 8.0e9;
+			break;
+		case HDMI_FRL_LINK_RATE_10GBPS:
+		default:
+			frl_params->r_bit_nominal = 10.0e9;
+			break;
+		case HDMI_FRL_LINK_RATE_12GBPS:
+			frl_params->r_bit_nominal = 12.0e9;
+			break;
+		}
+	}
+
+	if (timing->flags.DSC && timing->rid > 0)
+		frl_params->is_ovt = true;
+
+	frl_params->f_pixel_clock_nominal = (double)timing->pix_clk_100hz * 100;
+	frl_params->h_active = timing->h_addressable + timing->h_border_left + timing->h_border_right;
+	frl_params->h_blank = timing->h_total - frl_params->h_active;
+	frl_params->vic = timing->vic;
+}
+
+void hpo_fpu_enc3_validate_hdmi_frl_output_timing(
+		const struct dc_crtc_timing *timing,
+		const struct audio_check *audio,
+		struct frl_cap_chk_params *frl_params)
+{
+	dc_assert_fp_enabled();
+
+	if (timing->flags.DSC) {
+		frl_params->compressed = true;
+		frl_params->slices = timing->dsc_cfg.num_slices_h;
+		frl_params->slice_width = (frl_params->h_active + frl_params->slices - 1) / frl_params->slices;
+		// If YCBCR420 slice width must be even
+		if (timing->pixel_encoding == PIXEL_ENCODING_YCBCR420 && frl_params->slice_width % 2 != 0)
+			frl_params->slice_width++;
+		frl_params->bpp_target = timing->dsc_cfg.bits_per_pixel / 16.0;
+	} else {
+		frl_params->compressed = false;
+	}
+
+	frl_params->audio_packet_type = audio->audio_packet_type;
+	frl_params->f_audio = audio->max_audiosample_rate;
+	frl_params->acat = audio->acat;
+}
+
+enum frl_cap_chk_result frl_fpu_cap_chk_common(struct hpo_frl_stream_encoder *enc,
+					       struct frl_cap_chk_intermediates *inter,
+					       struct frl_cap_chk_params *params)
+{
+	(void)enc;
+	return dml1_frl_cap_chk_common(inter, params);
+}
+
+
+enum frl_cap_chk_result frl_fpu_cap_chk_uncompressed(struct hpo_frl_stream_encoder *enc,
+						     struct frl_cap_chk_params *params,
+						     struct frl_cap_chk_intermediates *inter)
+{
+	(void)enc;
+	return dml1_frl_cap_chk_uncompressed(params, inter);
+}
+
+enum frl_cap_chk_result frl_fpu_cap_chk_compressed(struct hpo_frl_stream_encoder *enc,
+						   struct frl_cap_chk_params *params,
+						   struct frl_cap_chk_intermediates *inter)
+{
+	(void)enc;
+	return dml1_frl_cap_chk_compressed(params, inter);
 }

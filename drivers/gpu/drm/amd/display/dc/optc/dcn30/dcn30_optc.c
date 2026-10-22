@@ -189,7 +189,13 @@ void optc3_set_dsc_config(struct timing_generator *optc,
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 
 	optc2_set_dsc_config(optc, dsc_mode, dsc_bytes_per_pixel, dsc_slice_width);
-	REG_UPDATE(OTG_V_SYNC_A_CNTL, OTG_V_SYNC_MODE, 0);
+
+	if (dsc_mode != OPTC_DSC_DISABLED
+			&& optc1->signal == SIGNAL_TYPE_HDMI_FRL) {
+		REG_UPDATE(OTG_V_SYNC_A_CNTL, OTG_V_SYNC_MODE, 1);
+	} else {
+		REG_UPDATE(OTG_V_SYNC_A_CNTL, OTG_V_SYNC_MODE, 0);
+	}
 }
 
 void optc3_set_odm_bypass(struct timing_generator *optc,
@@ -218,6 +224,7 @@ void optc3_set_odm_bypass(struct timing_generator *optc,
 void optc3_set_odm_combine(struct timing_generator *optc, int *opp_id, int opp_cnt,
 		int segment_width, int last_segment_width)
 {
+	(void)last_segment_width;
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 	uint32_t memory_mask = 0;
 
@@ -357,7 +364,7 @@ void optc3_tg_init(struct timing_generator *optc)
 	optc1_clear_optc_underflow(optc);
 }
 
-static struct timing_generator_funcs dcn30_tg_funcs = {
+static const struct timing_generator_funcs dcn30_tg_funcs = {
 		.validate_timing = optc1_validate_timing,
 		.program_timing = optc1_program_timing,
 		.setup_vertical_interrupt0 = optc1_setup_vertical_interrupt0,
@@ -420,6 +427,7 @@ static struct timing_generator_funcs dcn30_tg_funcs = {
 		.get_optc_double_buffer_pending = optc3_get_optc_double_buffer_pending,
 		.get_otg_double_buffer_pending = optc3_get_otg_update_pending,
 		.get_pipe_update_pending = optc3_get_pipe_update_pending,
+		.read_otg_state = optc1_read_otg_state,
 };
 
 void dcn30_timing_generator_init(struct optc *optc1)

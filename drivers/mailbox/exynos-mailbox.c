@@ -16,15 +16,8 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
-#define EXYNOS_MBOX_MCUCTRL		0x0	/* Mailbox Control Register */
-#define EXYNOS_MBOX_INTCR0		0x24	/* Interrupt Clear Register 0 */
 #define EXYNOS_MBOX_INTMR0		0x28	/* Interrupt Mask Register 0 */
-#define EXYNOS_MBOX_INTSR0		0x2c	/* Interrupt Status Register 0 */
-#define EXYNOS_MBOX_INTMSR0		0x30	/* Interrupt Mask Status Register 0 */
 #define EXYNOS_MBOX_INTGR1		0x40	/* Interrupt Generation Register 1 */
-#define EXYNOS_MBOX_INTMR1		0x48	/* Interrupt Mask Register 1 */
-#define EXYNOS_MBOX_INTSR1		0x4c	/* Interrupt Status Register 1 */
-#define EXYNOS_MBOX_INTMSR1		0x50	/* Interrupt Mask Status Register 1 */
 
 #define EXYNOS_MBOX_INTMR0_MASK		GENMASK(15, 0)
 #define EXYNOS_MBOX_INTGR1_MASK		GENMASK(15, 0)
@@ -35,12 +28,10 @@
  * struct exynos_mbox - driver's private data.
  * @regs:	mailbox registers base address.
  * @mbox:	pointer to the mailbox controller.
- * @pclk:	pointer to the mailbox peripheral clock.
  */
 struct exynos_mbox {
 	void __iomem *regs;
 	struct mbox_controller *mbox;
-	struct clk *pclk;
 };
 
 static int exynos_mbox_send_data(struct mbox_chan *chan, void *data)
@@ -57,7 +48,7 @@ static int exynos_mbox_send_data(struct mbox_chan *chan, void *data)
 	if (msg->chan_type != EXYNOS_MBOX_CHAN_TYPE_DOORBELL) {
 		dev_err(dev, "Unsupported channel type [%d]\n", msg->chan_type);
 		return -EINVAL;
-	};
+	}
 
 	writel(BIT(msg->chan_id), exynos_mbox->regs + EXYNOS_MBOX_INTGR1);
 
@@ -100,7 +91,7 @@ static int exynos_mbox_probe(struct platform_device *pdev)
 	struct exynos_mbox *exynos_mbox;
 	struct mbox_controller *mbox;
 	struct mbox_chan *chans;
-	int i;
+	struct clk *pclk;
 
 	exynos_mbox = devm_kzalloc(dev, sizeof(*exynos_mbox), GFP_KERNEL);
 	if (!exynos_mbox)
@@ -119,9 +110,9 @@ static int exynos_mbox_probe(struct platform_device *pdev)
 	if (IS_ERR(exynos_mbox->regs))
 		return PTR_ERR(exynos_mbox->regs);
 
-	exynos_mbox->pclk = devm_clk_get_enabled(dev, "pclk");
-	if (IS_ERR(exynos_mbox->pclk))
-		return dev_err_probe(dev, PTR_ERR(exynos_mbox->pclk),
+	pclk = devm_clk_get_enabled(dev, "pclk");
+	if (IS_ERR(pclk))
+		return dev_err_probe(dev, PTR_ERR(pclk),
 				     "Failed to enable clock.\n");
 
 	mbox->num_chans = EXYNOS_MBOX_CHAN_COUNT;
@@ -129,9 +120,6 @@ static int exynos_mbox_probe(struct platform_device *pdev)
 	mbox->dev = dev;
 	mbox->ops = &exynos_mbox_chan_ops;
 	mbox->of_xlate = exynos_mbox_of_xlate;
-
-	for (i = 0; i < EXYNOS_MBOX_CHAN_COUNT; i++)
-		chans[i].mbox = mbox;
 
 	exynos_mbox->mbox = mbox;
 

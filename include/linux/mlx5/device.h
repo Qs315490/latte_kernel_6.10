@@ -280,6 +280,7 @@ enum {
 	MLX5_MKEY_MASK_SMALL_FENCE	= 1ull << 23,
 	MLX5_MKEY_MASK_RELAXED_ORDERING_WRITE	= 1ull << 25,
 	MLX5_MKEY_MASK_FREE			= 1ull << 29,
+	MLX5_MKEY_MASK_PAGE_SIZE_5		= 1ull << 42,
 	MLX5_MKEY_MASK_RELAXED_ORDERING_READ	= 1ull << 47,
 };
 
@@ -292,6 +293,7 @@ enum {
 	MLX5_UMR_INLINE			= (1 << 7),
 };
 
+#define MLX5_UMR_ALIGN (2048)
 #define MLX5_UMR_FLEX_ALIGNMENT 0x40
 #define MLX5_UMR_MTT_NUM_ENTRIES_ALIGNMENT (MLX5_UMR_FLEX_ALIGNMENT / sizeof(struct mlx5_mtt))
 #define MLX5_UMR_KLM_NUM_ENTRIES_ALIGNMENT (MLX5_UMR_FLEX_ALIGNMENT / sizeof(struct mlx5_klm))
@@ -538,6 +540,7 @@ struct mlx5_cmd_layout {
 };
 
 enum mlx5_rfr_severity_bit_offsets {
+	MLX5_CRR_BIT_OFFSET = 0x6,
 	MLX5_RFR_BIT_OFFSET = 0x7,
 };
 
@@ -960,6 +963,11 @@ static inline u16 get_cqe_flow_tag(struct mlx5_cqe64 *cqe)
 	return be32_to_cpu(cqe->sop_drop_qpn) & 0xFFF;
 }
 
+static inline u8 get_cqe_lro_num_seg(struct mlx5_cqe64 *cqe)
+{
+	return be32_to_cpu(cqe->srqn) >> 24;
+}
+
 #define MLX5_MPWQE_LOG_NUM_STRIDES_EXT_BASE	3
 #define MLX5_MPWQE_LOG_NUM_STRIDES_BASE		9
 #define MLX5_MPWQE_LOG_NUM_STRIDES_MAX		16
@@ -1246,10 +1254,13 @@ enum mlx5_cap_type {
 	MLX5_CAP_IPSEC,
 	MLX5_CAP_CRYPTO = 0x1a,
 	MLX5_CAP_SHAMPO = 0x1d,
+	MLX5_CAP_PSP = 0x1e,
 	MLX5_CAP_MACSEC = 0x1f,
 	MLX5_CAP_GENERAL_2 = 0x20,
 	MLX5_CAP_PORT_SELECTION = 0x25,
 	MLX5_CAP_ADV_VIRTUALIZATION = 0x26,
+	MLX5_CAP_ADV_RDMA = 0x28,
+	MLX5_CAP_TLP_EMULATION = 0x2a,
 	/* NUM OF CAP Types */
 	MLX5_CAP_NUM
 };
@@ -1344,6 +1355,12 @@ enum mlx5_qcam_feature_groups {
 #define MLX5_CAP_FLOWTABLE_RDMA_TX(mdev, cap) \
 	MLX5_CAP_FLOWTABLE(mdev, flow_table_properties_nic_transmit_rdma.cap)
 
+#define MLX5_CAP_FLOWTABLE_RDMA_TRANSPORT_RX(mdev, cap) \
+	MLX5_CAP_ADV_RDMA(mdev, rdma_transport_rx_flow_table_properties.cap)
+
+#define MLX5_CAP_FLOWTABLE_RDMA_TRANSPORT_TX(mdev, cap) \
+	MLX5_CAP_ADV_RDMA(mdev, rdma_transport_tx_flow_table_properties.cap)
+
 #define MLX5_CAP_ESW_FLOWTABLE(mdev, cap) \
 	MLX5_GET(flow_table_eswitch_cap, \
 		 mdev->caps.hca[MLX5_CAP_ESWITCH_FLOW_TABLE]->cur, cap)
@@ -1382,6 +1399,10 @@ enum mlx5_qcam_feature_groups {
 #define MLX5_CAP_ADV_VIRTUALIZATION(mdev, cap) \
 	MLX5_GET(adv_virtualization_cap, \
 		 mdev->caps.hca[MLX5_CAP_ADV_VIRTUALIZATION]->cur, cap)
+
+#define MLX5_CAP_ADV_RDMA(mdev, cap) \
+	MLX5_GET(adv_rdma_cap, \
+		 mdev->caps.hca[MLX5_CAP_ADV_RDMA]->cur, cap)
 
 #define MLX5_CAP_FLOWTABLE_PORT_SELECTION(mdev, cap) \
 	MLX5_CAP_PORT_SELECTION(mdev, flow_table_properties_port_selection.cap)
@@ -1462,6 +1483,14 @@ enum mlx5_qcam_feature_groups {
 	MLX5_GET64(virtio_emulation_cap, \
 		(mdev)->caps.hca[MLX5_CAP_VDPA_EMULATION]->cur, cap)
 
+#define MLX5_CAP_DEV_TLP_EMULATION(mdev, cap)\
+	MLX5_GET(tlp_dev_emu_capabilities, \
+		(mdev)->caps.hca[MLX5_CAP_TLP_EMULATION]->cur, cap)
+
+#define MLX5_CAP64_DEV_TLP_EMULATION(mdev, cap)\
+	MLX5_GET64(tlp_dev_emu_capabilities, \
+		(mdev)->caps.hca[MLX5_CAP_TLP_EMULATION]->cur, cap)
+
 #define MLX5_CAP_IPSEC(mdev, cap)\
 	MLX5_GET(ipsec_cap, (mdev)->caps.hca[MLX5_CAP_IPSEC]->cur, cap)
 
@@ -1473,6 +1502,9 @@ enum mlx5_qcam_feature_groups {
 
 #define MLX5_CAP_SHAMPO(mdev, cap) \
 	MLX5_GET(shampo_cap, mdev->caps.hca[MLX5_CAP_SHAMPO]->cur, cap)
+
+#define MLX5_CAP_PSP(mdev, cap)\
+	MLX5_GET(psp_cap, (mdev)->caps.hca[MLX5_CAP_PSP]->cur, cap)
 
 enum {
 	MLX5_CMD_STAT_OK			= 0x0,
@@ -1505,8 +1537,10 @@ enum {
 	MLX5_PHYSICAL_LAYER_COUNTERS_GROUP    = 0x12,
 	MLX5_PER_TRAFFIC_CLASS_CONGESTION_GROUP = 0x13,
 	MLX5_PHYSICAL_LAYER_STATISTICAL_GROUP = 0x16,
+	MLX5_PHYSICAL_LAYER_RECOVERY_GROUP    = 0x1a,
 	MLX5_INFINIBAND_PORT_COUNTERS_GROUP   = 0x20,
 	MLX5_INFINIBAND_EXTENDED_PORT_COUNTERS_GROUP = 0x21,
+	MLX5_RS_FEC_HISTOGRAM_GROUP = 0x23,
 };
 
 enum {
@@ -1520,8 +1554,8 @@ static inline u16 mlx5_to_sw_pkey_sz(int pkey_sz)
 	return MLX5_MIN_PKEY_TABLE_SIZE << pkey_sz;
 }
 
-#define MLX5_RDMA_RX_NUM_COUNTERS_PRIOS 2
-#define MLX5_RDMA_TX_NUM_COUNTERS_PRIOS 1
+#define MLX5_RDMA_RX_NUM_COUNTERS_PRIOS 6
+#define MLX5_RDMA_TX_NUM_COUNTERS_PRIOS 4
 #define MLX5_BY_PASS_NUM_REGULAR_PRIOS 16
 #define MLX5_BY_PASS_NUM_DONT_TRAP_PRIOS 16
 #define MLX5_BY_PASS_NUM_MULTICAST_PRIOS 1

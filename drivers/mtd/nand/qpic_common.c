@@ -57,14 +57,15 @@ qcom_alloc_bam_transaction(struct qcom_nand_controller *nandc)
 	bam_txn_buf += sizeof(*bam_txn);
 
 	bam_txn->bam_ce = bam_txn_buf;
-	bam_txn_buf +=
-		sizeof(*bam_txn->bam_ce) * QPIC_PER_CW_CMD_ELEMENTS * num_cw;
+	bam_txn->bam_ce_nitems = QPIC_PER_CW_CMD_ELEMENTS * num_cw;
+	bam_txn_buf += sizeof(*bam_txn->bam_ce) * bam_txn->bam_ce_nitems;
 
 	bam_txn->cmd_sgl = bam_txn_buf;
-	bam_txn_buf +=
-		sizeof(*bam_txn->cmd_sgl) * QPIC_PER_CW_CMD_SGL * num_cw;
+	bam_txn->cmd_sgl_nitems = QPIC_PER_CW_CMD_SGL * num_cw;
+	bam_txn_buf += sizeof(*bam_txn->cmd_sgl) * bam_txn->cmd_sgl_nitems;
 
 	bam_txn->data_sgl = bam_txn_buf;
+	bam_txn->data_sgl_nitems = QPIC_PER_CW_DATA_SGL * num_cw;
 
 	init_completion(&bam_txn->txn_done);
 
@@ -88,10 +89,8 @@ void qcom_clear_bam_transaction(struct qcom_nand_controller *nandc)
 	memset(&bam_txn->bam_positions, 0, sizeof(bam_txn->bam_positions));
 	bam_txn->last_data_desc = NULL;
 
-	sg_init_table(bam_txn->cmd_sgl, nandc->max_cwperpage *
-		      QPIC_PER_CW_CMD_SGL);
-	sg_init_table(bam_txn->data_sgl, nandc->max_cwperpage *
-		      QPIC_PER_CW_DATA_SGL);
+	sg_init_table(bam_txn->cmd_sgl, bam_txn->cmd_sgl_nitems);
+	sg_init_table(bam_txn->data_sgl, bam_txn->data_sgl_nitems);
 
 	reinit_completion(&bam_txn->txn_done);
 }
@@ -157,7 +156,7 @@ int qcom_prepare_bam_async_desc(struct qcom_nand_controller *nandc,
 	enum dma_transfer_direction dir_eng;
 	struct dma_async_tx_descriptor *dma_desc;
 
-	desc = kzalloc(sizeof(*desc), GFP_KERNEL);
+	desc = kzalloc_obj(*desc);
 	if (!desc)
 		return -ENOMEM;
 
@@ -236,21 +235,26 @@ int qcom_prep_bam_dma_desc_cmd(struct qcom_nand_controller *nandc, bool read,
 	int i, ret;
 	struct bam_cmd_element *bam_ce_buffer;
 	struct bam_transaction *bam_txn = nandc->bam_txn;
+	u32 offset;
+
+	if (bam_txn->bam_ce_pos + size > bam_txn->bam_ce_nitems) {
+		dev_err(nandc->dev, "BAM %s array is full\n", "CE");
+		return -EINVAL;
+	}
 
 	bam_ce_buffer = &bam_txn->bam_ce[bam_txn->bam_ce_pos];
 
 	/* fill the command desc */
 	for (i = 0; i < size; i++) {
+		offset = nandc->props->bam_offset + reg_off + 4 * i;
 		if (read)
 			bam_prep_ce(&bam_ce_buffer[i],
-				    nandc_reg_phys(nandc, reg_off + 4 * i),
-				    BAM_READ_COMMAND,
+				    offset, BAM_READ_COMMAND,
 				    reg_buf_dma_addr(nandc,
 						     (__le32 *)vaddr + i));
 		else
 			bam_prep_ce_le32(&bam_ce_buffer[i],
-					 nandc_reg_phys(nandc, reg_off + 4 * i),
-					 BAM_WRITE_COMMAND,
+					 offset, BAM_WRITE_COMMAND,
 					 *((__le32 *)vaddr + i));
 	}
 
@@ -258,6 +262,12 @@ int qcom_prep_bam_dma_desc_cmd(struct qcom_nand_controller *nandc, bool read,
 
 	/* use the separate sgl after this command */
 	if (flags & NAND_BAM_NEXT_SGL) {
+		if (bam_txn->cmd_sgl_pos >= bam_txn->cmd_sgl_nitems) {
+			dev_err(nandc->dev, "BAM %s array is full\n",
+				"CMD sgl");
+			return -EINVAL;
+		}
+
 		bam_ce_buffer = &bam_txn->bam_ce[bam_txn->bam_ce_start];
 		bam_ce_size = (bam_txn->bam_ce_pos -
 				bam_txn->bam_ce_start) *
@@ -297,10 +307,20 @@ int qcom_prep_bam_dma_desc_data(struct qcom_nand_controller *nandc, bool read,
 	struct bam_transaction *bam_txn = nandc->bam_txn;
 
 	if (read) {
+		if (bam_txn->rx_sgl_pos >= bam_txn->data_sgl_nitems) {
+			dev_err(nandc->dev, "BAM %s array is full\n", "RX sgl");
+			return -EINVAL;
+		}
+
 		sg_set_buf(&bam_txn->data_sgl[bam_txn->rx_sgl_pos],
 			   vaddr, size);
 		bam_txn->rx_sgl_pos++;
 	} else {
+		if (bam_txn->tx_sgl_pos >= bam_txn->data_sgl_nitems) {
+			dev_err(nandc->dev, "BAM %s array is full\n", "TX sgl");
+			return -EINVAL;
+		}
+
 		sg_set_buf(&bam_txn->data_sgl[bam_txn->tx_sgl_pos],
 			   vaddr, size);
 		bam_txn->tx_sgl_pos++;
@@ -344,7 +364,7 @@ int qcom_prep_adm_dma_desc(struct qcom_nand_controller *nandc, bool read,
 	struct scatterlist *sgl;
 	int ret;
 
-	desc = kzalloc(sizeof(*desc), GFP_KERNEL);
+	desc = kzalloc_obj(*desc);
 	if (!desc)
 		return -ENOMEM;
 

@@ -17,29 +17,57 @@ endif
 # it defaults to this nolibc directory.
 OUTPUT ?= $(CURDIR)/
 
-ifeq ($(V),1)
-Q=
-else
-Q=@
-endif
-
-nolibc_arch := $(patsubst arm64,aarch64,$(ARCH))
-arch_file := arch-$(nolibc_arch).h
+architectures := arm arm64 loongarch m68k mips openrisc parisc powerpc riscv s390 sh sparc x86
+arch_files := arch.h $(addsuffix .h, $(addprefix arch-, $(architectures)))
 all_files := \
+		alloca.h \
+		assert.h \
+		byteswap.h \
 		compiler.h \
 		crt.h \
 		ctype.h \
+		dirent.h \
+		elf.h \
+		endian.h \
+		err.h \
 		errno.h \
+		fcntl.h \
+		getopt.h \
+		inttypes.h \
+		limits.h \
+		math.h \
 		nolibc.h \
+		poll.h \
+		sched.h \
 		signal.h \
 		stackprotector.h \
 		std.h \
 		stdarg.h \
 		stdbool.h \
+		stddef.h \
 		stdint.h \
 		stdlib.h \
 		string.h \
 		sys.h \
+		sys/auxv.h \
+		sys/ioctl.h \
+		sys/mman.h \
+		sys/mount.h \
+		sys/prctl.h \
+		sys/ptrace.h \
+		sys/random.h \
+		sys/reboot.h \
+		sys/resource.h \
+		sys/select.h \
+		sys/stat.h \
+		sys/syscall.h \
+		sys/sysmacros.h \
+		sys/time.h \
+		sys/timerfd.h \
+		sys/types.h \
+		sys/uio.h \
+		sys/utsname.h \
+		sys/wait.h \
 		time.h \
 		types.h \
 		unistd.h \
@@ -55,7 +83,7 @@ help:
 	@echo "Supported targets under nolibc:"
 	@echo "  all                 call \"headers\""
 	@echo "  clean               clean the sysroot"
-	@echo "  headers             prepare a sysroot in tools/include/nolibc/sysroot"
+	@echo "  headers             prepare a multi-arch sysroot in \$${OUTPUT}sysroot"
 	@echo "  headers_standalone  like \"headers\", and also install kernel headers"
 	@echo "  help                this help"
 	@echo ""
@@ -66,28 +94,22 @@ help:
 	@echo "  OUTPUT  = $(OUTPUT)"
 	@echo ""
 
-# Note: when ARCH is "x86" we concatenate both x86_64 and i386
+# installs headers for all archs at once.
 headers:
-	$(Q)mkdir -p $(OUTPUT)sysroot
-	$(Q)mkdir -p $(OUTPUT)sysroot/include
-	$(Q)cp $(all_files) $(OUTPUT)sysroot/include/
-	$(Q)if [ "$(ARCH)" = "x86" ]; then      \
-		sed -e                          \
-		  's,^#ifndef _NOLIBC_ARCH_X86_64_H,#if !defined(_NOLIBC_ARCH_X86_64_H) \&\& defined(__x86_64__),' \
-		  arch-x86_64.h;                \
-		sed -e                          \
-		  's,^#ifndef _NOLIBC_ARCH_I386_H,#if !defined(_NOLIBC_ARCH_I386_H) \&\& !defined(__x86_64__),' \
-		  arch-i386.h;                  \
-	elif [ -e "$(arch_file)" ]; then        \
-		cat $(arch_file);               \
-	else                                    \
-		echo "Fatal: architecture $(ARCH) not yet supported by nolibc." >&2; \
-		exit 1;                         \
-	fi > $(OUTPUT)sysroot/include/arch.h
+	$(Q)mkdir -p "$(OUTPUT)sysroot/include"
+	$(Q)cp --parents $(arch_files) $(all_files) "$(OUTPUT)sysroot/include/"
 
 headers_standalone: headers
-	$(Q)$(MAKE) -C $(srctree) headers
 	$(Q)$(MAKE) -C $(srctree) headers_install INSTALL_HDR_PATH=$(OUTPUT)sysroot
+
+CFLAGS_s390 := -m64
+CFLAGS := $(CFLAGS_$(ARCH))
+
+headers_check: headers_standalone
+	$(Q)for header in $(filter-out crt.h std.h,$(all_files)); do \
+		$(CC) $(CFLAGS) $(CLANG_CROSS_FLAGS) -Wall -Werror -nostdinc -fsyntax-only -x c /dev/null \
+			-I$(or $(objtree),$(srctree))/usr/include -include $$header -include $$header || exit 1; \
+	done
 
 clean:
 	$(call QUIET_CLEAN, nolibc) rm -rf "$(OUTPUT)sysroot"

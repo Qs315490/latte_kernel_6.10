@@ -251,7 +251,7 @@ static void byd_report_input(struct psmouse *psmouse)
 
 static void byd_clear_touch(struct timer_list *t)
 {
-	struct byd_data *priv = from_timer(priv, t, timer);
+	struct byd_data *priv = timer_container_of(priv, t, timer);
 	struct psmouse *psmouse = priv->psmouse;
 
 	guard(serio_pause_rx)(psmouse->ps2dev.serio);
@@ -314,10 +314,8 @@ static psmouse_ret_t byd_process_byte(struct psmouse *psmouse)
 		break;
 	}
 	default:
-		psmouse_warn(psmouse,
-			     "Unrecognized Z: pkt = %02x %02x %02x %02x\n",
-			     psmouse->packet[0], psmouse->packet[1],
-			     psmouse->packet[2], psmouse->packet[3]);
+		psmouse_warn(psmouse, "Unrecognized Z: pkt = %*ph\n",
+			     4, psmouse->packet);
 		return PSMOUSE_BAD_DATA;
 	}
 
@@ -425,7 +423,7 @@ static void byd_disconnect(struct psmouse *psmouse)
 	struct byd_data *priv = psmouse->private;
 
 	if (priv) {
-		del_timer(&priv->timer);
+		timer_shutdown_sync(&priv->timer);
 		kfree(psmouse->private);
 		psmouse->private = NULL;
 	}
@@ -471,7 +469,7 @@ int byd_init(struct psmouse *psmouse)
 	if (byd_reset_touchpad(psmouse))
 		return -EIO;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 

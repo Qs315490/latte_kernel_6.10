@@ -93,6 +93,13 @@ static void __forget_cached_acl(struct posix_acl **p)
 {
 	struct posix_acl *old;
 
+	/*
+	 * ACL_DONT_CACHE is expected to be a "const" value and xchg it with
+	 * ACL_NOT_CACHED would enable acl caching for the inode -
+	 * clearly not what the caller has intended.
+	 */
+	if (READ_ONCE(*p) == ACL_DONT_CACHE)
+		return;
 	old = xchg(p, ACL_NOT_CACHED);
 	if (!is_uncached_acl(old))
 		posix_acl_release(old);
@@ -204,7 +211,7 @@ posix_acl_alloc(unsigned int count, gfp_t flags)
 {
 	struct posix_acl *acl;
 
-	acl = kmalloc(struct_size(acl, a_entries, count), flags);
+	acl = kmalloc_flex(*acl, a_entries, count, flags);
 	if (acl)
 		posix_acl_init(acl, count);
 	return acl;
@@ -829,19 +836,19 @@ EXPORT_SYMBOL (posix_acl_from_xattr);
 /*
  * Convert from in-memory to extended attribute representation.
  */
-int
+void *
 posix_acl_to_xattr(struct user_namespace *user_ns, const struct posix_acl *acl,
-		   void *buffer, size_t size)
+		   size_t *sizep, gfp_t gfp)
 {
-	struct posix_acl_xattr_header *ext_acl = buffer;
+	struct posix_acl_xattr_header *ext_acl;
 	struct posix_acl_xattr_entry *ext_entry;
-	int real_size, n;
+	size_t size;
+	int n;
 
-	real_size = posix_acl_xattr_size(acl->a_count);
-	if (!buffer)
-		return real_size;
-	if (real_size > size)
-		return -ERANGE;
+	size = posix_acl_xattr_size(acl->a_count);
+	ext_acl = kmalloc(size, gfp);
+	if (!ext_acl)
+		return NULL;
 
 	ext_entry = (void *)(ext_acl + 1);
 	ext_acl->a_version = cpu_to_le32(POSIX_ACL_XATTR_VERSION);
@@ -864,7 +871,8 @@ posix_acl_to_xattr(struct user_namespace *user_ns, const struct posix_acl *acl,
 			break;
 		}
 	}
-	return real_size;
+	*sizep = size;
+	return ext_acl;
 }
 EXPORT_SYMBOL (posix_acl_to_xattr);
 
@@ -1091,7 +1099,7 @@ int vfs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	int acl_type;
 	int error;
 	struct inode *inode = d_inode(dentry);
-	struct inode *delegated_inode = NULL;
+	struct delegated_inode delegated_inode = { };
 
 	acl_type = posix_acl_type(acl_name);
 	if (acl_type < 0)
@@ -1125,7 +1133,7 @@ retry_deleg:
 	if (error)
 		goto out_inode_unlock;
 
-	error = try_break_deleg(inode, &delegated_inode);
+	error = try_break_deleg(inode, 0, &delegated_inode);
 	if (error)
 		goto out_inode_unlock;
 
@@ -1141,7 +1149,7 @@ retry_deleg:
 out_inode_unlock:
 	inode_unlock(inode);
 
-	if (delegated_inode) {
+	if (is_delegated(&delegated_inode)) {
 		error = break_deleg_wait(&delegated_inode);
 		if (!error)
 			goto retry_deleg;
@@ -1212,7 +1220,7 @@ int vfs_remove_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	int acl_type;
 	int error;
 	struct inode *inode = d_inode(dentry);
-	struct inode *delegated_inode = NULL;
+	struct delegated_inode delegated_inode = { };
 
 	acl_type = posix_acl_type(acl_name);
 	if (acl_type < 0)
@@ -1233,7 +1241,7 @@ retry_deleg:
 	if (error)
 		goto out_inode_unlock;
 
-	error = try_break_deleg(inode, &delegated_inode);
+	error = try_break_deleg(inode, 0, &delegated_inode);
 	if (error)
 		goto out_inode_unlock;
 
@@ -1249,7 +1257,7 @@ retry_deleg:
 out_inode_unlock:
 	inode_unlock(inode);
 
-	if (delegated_inode) {
+	if (is_delegated(&delegated_inode)) {
 		error = break_deleg_wait(&delegated_inode);
 		if (!error)
 			goto retry_deleg;

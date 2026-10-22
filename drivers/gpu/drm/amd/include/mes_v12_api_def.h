@@ -66,8 +66,16 @@ enum MES_SCH_API_OPCODE {
 	MES_SCH_API_SET_SE_MODE			= 17,
 	MES_SCH_API_SET_GANG_SUBMIT		= 18,
 	MES_SCH_API_SET_HW_RSRC_1               = 19,
+	MES_SCH_API_INV_TLBS                    = 20,
 
 	MES_SCH_API_MAX = 0xFF
+};
+
+enum MES_RRMT_MODE {
+	MES_RRMT_MODE_LOCAL_XCD,
+	MES_RRMT_MODE_LOCAL_REMOTE_AID,
+	MES_RRMT_MODE_REMOTE_XCD,
+	MES_RRMT_MODE_REMOTE_MID
 };
 
 union MES_API_HEADER {
@@ -105,6 +113,43 @@ struct MES_API_STATUS {
 	uint64_t api_completion_fence_value;
 };
 
+/*
+ * MES will set api_completion_fence_value in api_completion_fence_addr
+ * when it can successflly process the API. MES will also trigger
+ * following interrupt when it finish process the API no matter success
+ * or failed.
+ *     Interrupt source id 181 (EOP) with context ID (DW 6 in the int
+ *     cookie) set to 0xb1 and context type set to 8. Driver side need
+ *     to enable TIME_STAMP_INT_ENABLE in CPC_INT_CNTL for MES pipe to
+ *     catch this interrupt.
+ *     Driver side also need to set enable_mes_fence_int = 1 in
+ *     set_HW_resource package to enable this fence interrupt.
+ * when the API process failed.
+ *     lowre 32 bits set to 0.
+ *     higher 32 bits set as follows (bit shift within high 32)
+ *         bit 0  -  7    API specific error code.
+ *         bit 8  - 15    API OPCODE.
+ *         bit 16 - 23    MISC OPCODE if any
+ *         bit 24 - 30    ERROR category (API_ERROR_XXX)
+ *         bit 31         Set to 1 to indicate error status
+ *
+ */
+enum { MES_SCH_ERROR_CODE_HEADER_SHIFT_12 = 8 };
+enum { MES_SCH_ERROR_CODE_MISC_OP_SHIFT_12 = 16 };
+enum { MES_ERROR_CATEGORY_SHIFT_12 = 24 };
+enum { MES_API_STATUS_ERROR_SHIFT_12 = 31 };
+
+enum MES_ERROR_CATEGORY_CODE_12 {
+	MES_ERROR_API                = 1,
+	MES_ERROR_SCHEDULING         = 2,
+	MES_ERROR_UNKNOWN            = 3,
+};
+
+#define MES_ERR_CODE(api_err, opcode, misc_op, category) \
+			((uint64) (api_err | opcode << MES_SCH_ERROR_CODE_HEADER_SHIFT_12 | \
+			misc_op << MES_SCH_ERROR_CODE_MISC_OP_SHIFT_12 | \
+			category << MES_ERROR_CATEGORY_SHIFT_12 | \
+			1 << MES_API_STATUS_ERROR_SHIFT_12) << 32)
 
 enum { MAX_COMPUTE_PIPES = 8 };
 enum { MAX_GFX_PIPES	 = 2 };
@@ -248,7 +293,9 @@ union MESAPI_SET_HW_RESOURCES {
 				uint32_t enable_mes_sch_stb_log : 1;
 				uint32_t limit_single_process : 1;
 				uint32_t unmapped_doorbell_handling: 2;
-				uint32_t reserved : 11;
+				uint32_t enable_mes_fence_int: 1;
+				uint32_t enable_lr_compute_wa : 1;
+				uint32_t reserved : 9;
 			};
 			uint32_t uint32_all;
 		};
@@ -270,7 +317,8 @@ union MESAPI_SET_HW_RESOURCES_1 {
 		union {
 			struct {
 				uint32_t enable_mes_debug_ctx : 1;
-				uint32_t reserved : 31;
+				uint32_t mes_coop_mode : 1; /* 0: non-coop; 1: coop */
+				uint32_t reserved : 30;
 			};
 			uint32_t uint32_all;
 		};
@@ -278,6 +326,9 @@ union MESAPI_SET_HW_RESOURCES_1 {
 		uint32_t                            mes_debug_ctx_size;
 		/* unit is 100ms */
 		uint32_t                            mes_kiq_unmap_timeout;
+		/* shared buffer of master/slaves, valid if mes_coop_mode=1 */
+		uint64_t                            coop_sch_shared_mc_addr;
+		uint64_t                            cleaner_shader_fence_mc_addr;
 	};
 
 	uint32_t max_dwords_in_api[API_FRAME_SIZE_IN_DWORDS];
@@ -341,6 +392,7 @@ union MESAPI__ADD_QUEUE {
 		uint32_t		pipe_id;	//used for mapping legacy kernel queue
 		uint32_t		queue_id;
 		uint32_t		alignment_mode_setting;
+		uint32_t		full_sh_mem_config_data;
 	};
 
 	uint32_t max_dwords_in_api[API_FRAME_SIZE_IN_DWORDS];
@@ -357,7 +409,8 @@ union MESAPI__REMOVE_QUEUE {
 			uint32_t unmap_kiq_utility_queue  : 1;
 			uint32_t preempt_legacy_gfx_queue : 1;
 			uint32_t unmap_legacy_queue	  : 1;
-			uint32_t reserved		  : 28;
+			uint32_t remove_queue_after_reset : 1;
+			uint32_t reserved		  : 27;
 		};
 		struct MES_API_STATUS		api_status;
 
@@ -439,8 +492,10 @@ union MESAPI__SUSPEND {
 		union MES_API_HEADER	header;
 		/* false - suspend all gangs; true - specific gang */
 		struct {
-			uint32_t	suspend_all_gangs : 1;
-			uint32_t	reserved : 31;
+			uint32_t      suspend_all_gangs : 1; // suspend all compute gangs (can be set together with suspend_all_sdma_gangs)
+			uint32_t      query_status : 1;
+			uint32_t      suspend_all_sdma_gangs : 1; // suspend all sdma gangs (can be set together with suspend_all_gangs)
+			uint32_t      reserved : 29;
 		};
 		/* gang_context_addr is valid only if suspend_all = false */
 
@@ -510,7 +565,26 @@ union MESAPI__RESET {
 		/* valid only if reset_queue_only = true */
 		uint32_t			doorbell_offset;
 
-		/* valid only if hang_detect_then_reset = true */
+		/*
+		 * valid only if hang_detect_then_reset or hang_detect_only = true
+		 * doorbell_offset_addr will store the structure as follows
+		 * struct
+		 * {
+		 *	uint32_t db_offset[list_size];
+		 *	uint32_t hqd_id[list_size];
+		 * }
+		 * The hqd_id has following defines :
+		 * struct
+		 * {
+		 *	uint32 queue_type : 3;  Type of the queue
+		 *	uint32 pipe_index : 4;  pipe Index
+		 *	uint32 hqd_index  : 8;  This is queue_index within the pipe
+		 *	uint32 reserved   : 17;
+		 * };
+		 * The list_size is the total queue numbers that been managed by mes.
+		 * It can be calculated from all hqd_masks(including gfX, compute and sdma)
+		 * on set_hw_resource API
+	         */
 		uint64_t			doorbell_offset_addr;
 		enum MES_QUEUE_TYPE		queue_type;
 
@@ -629,6 +703,7 @@ union MESAPI__SET_DEBUG_VMID {
 		uint32_t		process_context_array_index;
 
 		uint32_t		alignment_mode_setting;
+		uint32_t		full_sh_mem_config_data;
 	};
 
 	uint32_t max_dwords_in_api[API_FRAME_SIZE_IN_DWORDS];
@@ -653,9 +728,26 @@ enum MESAPI_MISC_OPCODE {
 
 enum {MISC_DATA_MAX_SIZE_IN_DWORDS = 20};
 
+/*
+ * RRMT(Register Remapping Table), allow the firmware to modify the upper
+ * address to correctly steer the register transaction to expected DIE
+ */
+struct RRMT_OPTION {
+	union {
+		struct {
+			uint32_t mode : 4;
+			uint32_t mid_die_id : 4;
+			uint32_t xcd_die_id : 4;
+		};
+		uint32_t all;
+	};
+};
+
+
 struct WRITE_REG {
-	uint32_t	reg_offset;
-	uint32_t	reg_value;
+	uint32_t                  reg_offset;
+	uint32_t                  reg_value;
+	struct RRMT_OPTION        rrmt_opt;
 };
 
 struct READ_REG {
@@ -668,6 +760,7 @@ struct READ_REG {
 		} bits;
 		uint32_t all;
 	} option;
+	struct RRMT_OPTION        rrmt_opt;
 };
 
 struct INV_GART {
@@ -693,6 +786,8 @@ struct WAIT_REG_MEM {
 	uint32_t mask;
 	uint32_t reg_offset1;
 	uint32_t reg_offset2;
+	struct RRMT_OPTION rrmt_opt1; /* for reg1 */
+	struct RRMT_OPTION rrmt_opt2; /* for reg2 */
 };
 
 struct SET_SHADER_DEBUGGER {
@@ -701,7 +796,8 @@ struct SET_SHADER_DEBUGGER {
 		struct {
 			uint32_t single_memop : 1; // SQ_DEBUG.single_memop
 			uint32_t single_alu_op : 1; // SQ_DEBUG.single_alu_op
-			uint32_t reserved : 30;
+			uint32_t lds_oor_reporting : 1; /* SQ_DEBUG.ADDR_OUT_OF_RANGE_REPORTING */
+			uint32_t reserved : 29;
 		};
 		uint32_t u32all;
 	} flags;
@@ -825,6 +921,35 @@ union MESAPI__SET_GANG_SUBMIT {
 		union MES_API_HEADER	header;
 		struct MES_API_STATUS	api_status;
 		struct SET_GANG_SUBMIT	set_gang_submit;
+	};
+
+	uint32_t max_dwords_in_api[API_FRAME_SIZE_IN_DWORDS];
+};
+
+/*
+ * @inv_sel        0-select pasid as input to do the invalidation , 1-select vmid
+ * @flush_type     0-old style, 1-light weight, 2-heavyweight, 3-heavyweight2
+ * @inv_sel_id     specific pasid when inv_sel is 0 and specific vmid if inv_sel is 1
+ * @hub_id         0-gc_hub, 1-mm_hub
+ */
+struct INV_TLBS {
+	uint8_t     inv_sel;
+	uint8_t     flush_type;
+	uint16_t    inv_sel_id;
+	uint32_t    hub_id;
+	/* If following two inv_range setting are all 0 , whole VM will be invalidated,
+	 * otherwise only required range be invalidated
+	 */
+	uint64_t    inv_range_va_start;
+	uint64_t    inv_range_size;
+	uint64_t    reserved;
+};
+
+union MESAPI__INV_TLBS {
+	struct {
+		union MES_API_HEADER    header;
+		struct MES_API_STATUS   api_status;
+		struct INV_TLBS         invalidate_tlbs;
 	};
 
 	uint32_t max_dwords_in_api[API_FRAME_SIZE_IN_DWORDS];

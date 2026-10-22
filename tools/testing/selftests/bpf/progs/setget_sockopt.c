@@ -61,6 +61,9 @@ static const struct sockopt_test sol_tcp_tests[] = {
 	{ .opt = TCP_NOTSENT_LOWAT, .new = 1314, .expected = 1314, },
 	{ .opt = TCP_BPF_SOCK_OPS_CB_FLAGS, .new = BPF_SOCK_OPS_ALL_CB_FLAGS,
 	  .expected = BPF_SOCK_OPS_ALL_CB_FLAGS, },
+	{ .opt = TCP_BPF_DELACK_MAX, .new = 30000, .expected = 30000, },
+	{ .opt = TCP_BPF_RTO_MIN, .new = 30000, .expected = 30000, },
+	{ .opt = TCP_RTO_MAX_MS, .new = 2000, .expected = 2000, },
 	{ .opt = 0, },
 };
 
@@ -80,6 +83,14 @@ struct loop_ctx {
 	struct sock *sk;
 };
 
+static bool sk_is_tcp(struct sock *sk)
+{
+	return (sk->__sk_common.skc_family == AF_INET ||
+		sk->__sk_common.skc_family == AF_INET6) &&
+		sk->sk_type == SOCK_STREAM &&
+		sk->sk_protocol == IPPROTO_TCP;
+}
+
 static int bpf_test_sockopt_flip(void *ctx, struct sock *sk,
 				 const struct sockopt_test *t,
 				 int level)
@@ -87,6 +98,9 @@ static int bpf_test_sockopt_flip(void *ctx, struct sock *sk,
 	int old, tmp, new, opt = t->opt;
 
 	opt = t->opt;
+
+	if (opt == SO_TXREHASH && !sk_is_tcp(sk))
+		return 0;
 
 	if (bpf_getsockopt(ctx, level, opt, &old, sizeof(old)))
 		return 1;
@@ -373,6 +387,24 @@ int _getsockopt(struct bpf_sockopt *ctx)
 	return 1;
 }
 
+int v4mapped_v6_ip_tos_enable;
+int v4mapped_v6_ip_tos_ret;
+int v4mapped_v6_ip_tos_cnt;
+int v4mapped_v6_ip_tos_val;
+
+static void test_v4mapped_v6_ip_tos(struct bpf_sock_ops *skops)
+{
+	int tos = v4mapped_v6_ip_tos_val;
+
+	if (!v4mapped_v6_ip_tos_enable || skops->op != BPF_SOCK_OPS_TCP_CONNECT_CB)
+		return;
+	if (skops->family != AF_INET6)
+		return;
+
+	v4mapped_v6_ip_tos_cnt++;
+	v4mapped_v6_ip_tos_ret = bpf_setsockopt(skops, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+}
+
 SEC("sockops")
 int skops_sockopt(struct bpf_sock_ops *skops)
 {
@@ -386,6 +418,11 @@ int skops_sockopt(struct bpf_sock_ops *skops)
 	sk = (struct sock *)bpf_skc_to_tcp_sock(bpf_sk);
 	if (!sk)
 		return 1;
+
+	if (v4mapped_v6_ip_tos_enable) {
+		test_v4mapped_v6_ip_tos(skops);
+		return 1;
+	}
 
 	switch (skops->op) {
 	case BPF_SOCK_OPS_TCP_LISTEN_CB:

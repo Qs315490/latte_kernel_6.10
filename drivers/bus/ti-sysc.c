@@ -48,6 +48,7 @@ enum sysc_soc {
 	SOC_UNKNOWN,
 	SOC_2420,
 	SOC_2430,
+	SOC_AM33,
 	SOC_3430,
 	SOC_AM35,
 	SOC_3630,
@@ -353,7 +354,7 @@ static int sysc_add_named_clock_from_child(struct sysc *ddata,
 	 * limit for clk_get(). If cl ever needs to be freed, it should be done
 	 * with clkdev_drop().
 	 */
-	cl = kzalloc(sizeof(*cl), GFP_KERNEL);
+	cl = kzalloc_obj(*cl);
 	if (!cl)
 		return -ENOMEM;
 
@@ -677,51 +678,6 @@ static int sysc_parse_and_check_child_range(struct sysc *ddata)
 	return 0;
 }
 
-/* Interconnect instances to probe before l4_per instances */
-static struct resource early_bus_ranges[] = {
-	/* am3/4 l4_wkup */
-	{ .start = 0x44c00000, .end = 0x44c00000 + 0x300000, },
-	/* omap4/5 and dra7 l4_cfg */
-	{ .start = 0x4a000000, .end = 0x4a000000 + 0x300000, },
-	/* omap4 l4_wkup */
-	{ .start = 0x4a300000, .end = 0x4a300000 + 0x30000,  },
-	/* omap5 and dra7 l4_wkup without dra7 dcan segment */
-	{ .start = 0x4ae00000, .end = 0x4ae00000 + 0x30000,  },
-};
-
-static atomic_t sysc_defer = ATOMIC_INIT(10);
-
-/**
- * sysc_defer_non_critical - defer non_critical interconnect probing
- * @ddata: device driver data
- *
- * We want to probe l4_cfg and l4_wkup interconnect instances before any
- * l4_per instances as l4_per instances depend on resources on l4_cfg and
- * l4_wkup interconnects.
- */
-static int sysc_defer_non_critical(struct sysc *ddata)
-{
-	struct resource *res;
-	int i;
-
-	if (!atomic_read(&sysc_defer))
-		return 0;
-
-	for (i = 0; i < ARRAY_SIZE(early_bus_ranges); i++) {
-		res = &early_bus_ranges[i];
-		if (ddata->module_pa >= res->start &&
-		    ddata->module_pa <= res->end) {
-			atomic_set(&sysc_defer, 0);
-
-			return 0;
-		}
-	}
-
-	atomic_dec_if_positive(&sysc_defer);
-
-	return -EPROBE_DEFER;
-}
-
 static struct device_node *stdout_path;
 
 static void sysc_init_stdout_path(struct sysc *ddata)
@@ -944,10 +900,6 @@ static int sysc_map_and_check_registers(struct sysc *ddata)
 	int error;
 
 	error = sysc_parse_and_check_child_range(ddata);
-	if (error)
-		return error;
-
-	error = sysc_defer_non_critical(ddata);
 	if (error)
 		return error;
 
@@ -2036,6 +1988,21 @@ static void sysc_module_disable_quirk_pruss(struct sysc *ddata)
 	sysc_write(ddata, ddata->offsets[SYSC_SYSCONFIG], reg);
 }
 
+static void sysc_module_enable_quirk_pruss(struct sysc *ddata)
+{
+	u32 reg;
+
+	reg = sysc_read(ddata, ddata->offsets[SYSC_SYSCONFIG]);
+
+	/*
+	 * Clearing the SYSC_PRUSS_STANDBY_INIT bit - Updates OCP master
+	 * port configuration to enable memory access outside of the
+	 * PRU-ICSS subsystem.
+	 */
+	reg &= (~SYSC_PRUSS_STANDBY_INIT);
+	sysc_write(ddata, ddata->offsets[SYSC_SYSCONFIG], reg);
+}
+
 static void sysc_init_module_quirks(struct sysc *ddata)
 {
 	if (ddata->legacy_mode || !ddata->name)
@@ -2088,8 +2055,10 @@ static void sysc_init_module_quirks(struct sysc *ddata)
 		ddata->module_disable_quirk = sysc_reset_done_quirk_wdt;
 	}
 
-	if (ddata->cfg.quirks & SYSC_MODULE_QUIRK_PRUSS)
+	if (ddata->cfg.quirks & SYSC_MODULE_QUIRK_PRUSS) {
+		ddata->module_enable_quirk = sysc_module_enable_quirk_pruss;
 		ddata->module_disable_quirk = sysc_module_disable_quirk_pruss;
+	}
 }
 
 static int sysc_clockdomain_init(struct sysc *ddata)
@@ -2202,9 +2171,8 @@ static int sysc_reset(struct sysc *ddata)
 static int sysc_init_module(struct sysc *ddata)
 {
 	bool rstctrl_deasserted = false;
-	int error = 0;
+	int error = sysc_clockdomain_init(ddata);
 
-	error = sysc_clockdomain_init(ddata);
 	if (error)
 		return error;
 
@@ -2502,7 +2470,7 @@ static void sysc_add_restored(struct sysc *ddata)
 {
 	struct sysc_module *restored_module;
 
-	restored_module = kzalloc(sizeof(*restored_module), GFP_KERNEL);
+	restored_module = kzalloc_obj(*restored_module);
 	if (!restored_module)
 		return;
 
@@ -2945,6 +2913,7 @@ static void ti_sysc_idle(struct work_struct *work)
 static const struct soc_device_attribute sysc_soc_match[] = {
 	SOC_FLAG("OMAP242*", SOC_2420),
 	SOC_FLAG("OMAP243*", SOC_2430),
+	SOC_FLAG("AM33*", SOC_AM33),
 	SOC_FLAG("AM35*", SOC_AM35),
 	SOC_FLAG("OMAP3[45]*", SOC_3430),
 	SOC_FLAG("OMAP3[67]*", SOC_3630),
@@ -2984,7 +2953,7 @@ static int sysc_add_disabled(unsigned long base)
 {
 	struct sysc_address *disabled_module;
 
-	disabled_module = kzalloc(sizeof(*disabled_module), GFP_KERNEL);
+	disabled_module = kzalloc_obj(*disabled_module);
 	if (!disabled_module)
 		return -ENOMEM;
 
@@ -3015,7 +2984,7 @@ static int sysc_init_static_data(struct sysc *ddata)
 	if (sysc_soc)
 		return 0;
 
-	sysc_soc = kzalloc(sizeof(*sysc_soc), GFP_KERNEL);
+	sysc_soc = kzalloc_obj(*sysc_soc);
 	if (!sysc_soc)
 		return -ENOMEM;
 
@@ -3150,10 +3119,15 @@ static int sysc_check_active_timer(struct sysc *ddata)
 	 * can be dropped if we stop supporting old beagleboard revisions
 	 * A to B4 at some point.
 	 */
-	if (sysc_soc->soc == SOC_3430 || sysc_soc->soc == SOC_AM35)
+	switch (sysc_soc->soc) {
+	case SOC_AM33:
+	case SOC_3430:
+	case SOC_AM35:
 		error = -ENXIO;
-	else
+		break;
+	default:
 		error = -EBUSY;
+	}
 
 	if ((ddata->cfg.quirks & SYSC_QUIRK_NO_RESET_ON_INIT) &&
 	    (ddata->cfg.quirks & SYSC_QUIRK_NO_IDLE))

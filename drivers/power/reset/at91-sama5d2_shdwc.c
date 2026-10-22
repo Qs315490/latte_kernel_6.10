@@ -129,7 +129,7 @@ static void at91_wakeup_status(struct platform_device *pdev)
 	else if (SHDW_RTTWK(reg, &rcfg->shdwc))
 		reason = "RTT";
 
-	pr_info("AT91: Wake-Up source: %s\n", reason);
+	dev_info(&pdev->dev, "Wake-Up source: %s\n", reason);
 }
 
 static void at91_poweroff(void)
@@ -327,6 +327,7 @@ static const struct of_device_id at91_pmc_ids[] = {
 	{ .compatible = "microchip,sam9x60-pmc" },
 	{ .compatible = "microchip,sama7g5-pmc" },
 	{ .compatible = "microchip,sam9x7-pmc" },
+	{ .compatible = "microchip,sama7d65-pmc" },
 	{ /* Sentinel. */ }
 };
 

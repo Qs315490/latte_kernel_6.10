@@ -69,19 +69,19 @@ static struct test_case test_cases[] = {
 #if defined(__x86_64__) || defined(__aarch64__)
 	{
 		N(SCHED_CLS, struct __sk_buff, tstamp),
-		.read  = "r11 = *(u8 *)($ctx + sk_buff::__mono_tc_offset);"
-			 "if w11 & 0x4 goto pc+1;"
+		.read  = "r12 = *(u8 *)($ctx + sk_buff::__mono_tc_offset);"
+			 "if w12 & 0x4 goto pc+1;"
 			 "goto pc+4;"
-			 "if w11 & 0x3 goto pc+1;"
+			 "if w12 & 0x3 goto pc+1;"
 			 "goto pc+2;"
 			 "$dst = 0;"
 			 "goto pc+1;"
 			 "$dst = *(u64 *)($ctx + sk_buff::tstamp);",
-		.write = "r11 = *(u8 *)($ctx + sk_buff::__mono_tc_offset);"
-			 "if w11 & 0x4 goto pc+1;"
+		.write = "r12 = *(u8 *)($ctx + sk_buff::__mono_tc_offset);"
+			 "if w12 & 0x4 goto pc+1;"
 			 "goto pc+2;"
-			 "w11 &= -4;"
-			 "*(u8 *)($ctx + sk_buff::__mono_tc_offset) = r11;"
+			 "w12 &= -4;"
+			 "*(u8 *)($ctx + sk_buff::__mono_tc_offset) = r12;"
 			 "*(u64 *)($ctx + sk_buff::tstamp) = $src;",
 	},
 #endif
@@ -253,8 +253,7 @@ static int find_field_offset_aux(struct btf *btf, int btf_id, char *field_name, 
 {
 	const struct btf_type *type = btf__type_by_id(btf, btf_id);
 	const struct btf_member *m;
-	__u16 mnum;
-	int i;
+	__u32 mnum, i;
 
 	if (!type) {
 		PRINT_FAIL("Can't find btf_type for id %d\n", btf_id);
@@ -308,8 +307,10 @@ static int find_field_offset(struct btf *btf, char *pattern, regmatch_t *matches
 		return -1;
 	}
 
-	strncpy(type_str, type, type_sz);
-	strncpy(field_str, field, field_sz);
+	memcpy(type_str, type, type_sz);
+	type_str[type_sz] = '\0';
+	memcpy(field_str, field, field_sz);
+	field_str[field_sz] = '\0';
 	btf_id = btf__find_by_name(btf, type_str);
 	if (btf_id < 0) {
 		PRINT_FAIL("No BTF info for type %s\n", type_str);

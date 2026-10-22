@@ -96,7 +96,7 @@ void __kunit_activate_static_stub(struct kunit *test,
 
 	/* If the replacement address is NULL, deactivate the stub. */
 	if (!replacement_addr) {
-		kunit_deactivate_static_stub(test, replacement_addr);
+		kunit_deactivate_static_stub(test, real_fn_addr);
 		return;
 	}
 
@@ -111,7 +111,7 @@ void __kunit_activate_static_stub(struct kunit *test,
 		/* We got an extra reference from find_resource(), so put it. */
 		kunit_put_resource(res);
 	} else {
-		ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
+		ctx = kmalloc_obj(*ctx);
 		KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ctx);
 		ctx->real_fn_addr = real_fn_addr;
 		ctx->replacement_addr = replacement_addr;

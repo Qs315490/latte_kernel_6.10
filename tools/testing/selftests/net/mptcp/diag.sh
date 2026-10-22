@@ -28,7 +28,7 @@ flush_pids()
 }
 
 # This function is used in the cleanup trap
-#shellcheck disable=SC2317
+#shellcheck disable=SC2317,SC2329
 cleanup()
 {
 	ip netns pids "${ns}" | xargs --no-run-if-empty kill -SIGKILL &>/dev/null
@@ -200,6 +200,62 @@ chk_msk_cestab()
 		 "${expected}" "${msg}" ""
 }
 
+chk_dump_one()
+{
+	local ss_token
+	local token
+	local msg
+
+	ss_token="$(ss -inmHMN $ns |
+		    mptcp_lib_get_info_value "token" "token")"
+
+	token="$(ip netns exec $ns ./mptcp_diag -t $ss_token |\
+		 awk -F':[ \t]+' '/^token/ {print $2}')"
+
+	msg="....chk dump_one"
+
+	mptcp_lib_print_title "$msg"
+	if [ -n "$ss_token" ] && [ "$ss_token" = "$token" ]; then
+		mptcp_lib_pr_ok
+		mptcp_lib_result_pass "${msg}"
+	else
+		mptcp_lib_pr_fail "expected $ss_token found $token"
+		mptcp_lib_result_fail "${msg}"
+		ret=${KSFT_FAIL}
+	fi
+}
+
+chk_dump_subflow()
+{
+	local inet_diag_token
+	local subflow_line
+	local ss_output
+	local ss_token
+	local msg
+
+	ss_output=$(ss -tniN $ns)
+
+	subflow_line=$(echo "$ss_output" | \
+		       grep -m1 -Eo '[0-9.]+:[0-9].+ +[0-9.]+:[0-9.]+')
+
+	ss_token=$(echo "$ss_output" | grep -m1 -Eo 'token:[^ ]+')
+
+	inet_diag_token=$(ip netns exec $ns ./mptcp_diag -s "$subflow_line" | \
+			  grep -Eo 'token:[^ ]+')
+
+	msg="....chk dump_subflow"
+
+	mptcp_lib_print_title "$msg"
+	if [ -n "$ss_token" ] && [ "$ss_token" = "$inet_diag_token" ]; then
+		mptcp_lib_pr_ok
+		mptcp_lib_result_pass "${msg}"
+	else
+		mptcp_lib_pr_fail "expected $ss_token found $inet_diag_token"
+		mptcp_lib_result_fail "${msg}"
+		ret=${KSFT_FAIL}
+	fi
+}
+
 msk_info_get_value()
 {
 	local port="${1}"
@@ -266,6 +322,33 @@ wait_connected()
 	done
 }
 
+chk_sndbuf()
+{
+	local server_sndbuf client_sndbuf msg
+	local port=${1}
+
+	msg="....chk sndbuf server/client"
+	server_sndbuf=$(ss -N "${ns}" -inmHM "sport" "${port}" | \
+			sed -n 's/.*tb\([0-9]\+\).*/\1/p')
+	client_sndbuf=$(ss -N "${ns}" -inmHM "dport" "${port}" | \
+			sed -n 's/.*tb\([0-9]\+\).*/\1/p')
+
+	mptcp_lib_print_title "${msg}"
+	if [ -z "${server_sndbuf}" ] || [ -z "${client_sndbuf}" ]; then
+		mptcp_lib_pr_fail "sndbuf S=${server_sndbuf} C=${client_sndbuf}"
+		mptcp_lib_result_fail "${msg}"
+		ret=${KSFT_FAIL}
+	elif [ "${server_sndbuf}" != "${client_sndbuf}" ]; then
+		mptcp_lib_pr_fail "sndbuf S=${server_sndbuf} != C=${client_sndbuf}"
+		mptcp_lib_result_fail "${msg}"
+		ret=${KSFT_FAIL}
+	else
+		mptcp_lib_pr_ok
+		mptcp_lib_result_pass "${msg}"
+	fi
+}
+
+
 trap cleanup EXIT
 mptcp_lib_ns_init ns
 
@@ -285,11 +368,14 @@ echo "b" | \
 				127.0.0.1 >/dev/null &
 wait_connected $ns 10000
 chk_msk_nr 2 "after MPC handshake"
+chk_sndbuf 10000
 chk_last_time_info 10000
 chk_msk_remote_key_nr 2 "....chk remote_key"
 chk_msk_fallback_nr 0 "....chk no fallback"
 chk_msk_inuse 2
 chk_msk_cestab 2
+chk_dump_one
+chk_dump_subflow
 flush_pids
 
 chk_msk_inuse 0 "2->0"

@@ -23,6 +23,7 @@
 #ifndef __DRM_BRIDGE_H__
 #define __DRM_BRIDGE_H__
 
+#include <linux/cleanup.h>
 #include <linux/ctype.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
@@ -32,6 +33,7 @@
 #include <drm/drm_mode_object.h>
 #include <drm/drm_modes.h>
 
+struct cec_msg;
 struct device_node;
 
 struct drm_bridge;
@@ -73,8 +75,18 @@ struct drm_bridge_funcs {
 	 *
 	 * Zero on success, error code on failure.
 	 */
-	int (*attach)(struct drm_bridge *bridge,
+	int (*attach)(struct drm_bridge *bridge, struct drm_encoder *encoder,
 		      enum drm_bridge_attach_flags flags);
+
+	/**
+	 * @destroy:
+	 *
+	 * This callback is invoked when the bridge is about to be
+	 * deallocated.
+	 *
+	 * The @destroy callback is optional.
+	 */
+	void (*destroy)(struct drm_bridge *bridge);
 
 	/**
 	 * @detach:
@@ -305,7 +317,7 @@ struct drm_bridge_funcs {
 	 * The @atomic_pre_enable callback is optional.
 	 */
 	void (*atomic_pre_enable)(struct drm_bridge *bridge,
-				  struct drm_bridge_state *old_bridge_state);
+				  struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_enable:
@@ -325,7 +337,7 @@ struct drm_bridge_funcs {
 	 * The @atomic_enable callback is optional.
 	 */
 	void (*atomic_enable)(struct drm_bridge *bridge,
-			      struct drm_bridge_state *old_bridge_state);
+			      struct drm_atomic_commit *state);
 	/**
 	 * @atomic_disable:
 	 *
@@ -342,7 +354,7 @@ struct drm_bridge_funcs {
 	 * The @atomic_disable callback is optional.
 	 */
 	void (*atomic_disable)(struct drm_bridge *bridge,
-			       struct drm_bridge_state *old_bridge_state);
+			       struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_post_disable:
@@ -361,7 +373,7 @@ struct drm_bridge_funcs {
 	 * The @atomic_post_disable callback is optional.
 	 */
 	void (*atomic_post_disable)(struct drm_bridge *bridge,
-				    struct drm_bridge_state *old_bridge_state);
+				    struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_duplicate_state:
@@ -532,7 +544,8 @@ struct drm_bridge_funcs {
 	 *
 	 * drm_connector_status indicating the bridge output status.
 	 */
-	enum drm_connector_status (*detect)(struct drm_bridge *bridge);
+	enum drm_connector_status (*detect)(struct drm_bridge *bridge,
+					    struct drm_connector *connector);
 
 	/**
 	 * @get_modes:
@@ -601,6 +614,7 @@ struct drm_bridge_funcs {
 	 * controllers for HDMI bridges.
 	 */
 	void (*hpd_notify)(struct drm_bridge *bridge,
+			   struct drm_connector *connector,
 			   enum drm_connector_status status);
 
 	/**
@@ -654,80 +668,289 @@ struct drm_bridge_funcs {
 				     unsigned long long tmds_rate);
 
 	/**
-	 * @hdmi_clear_infoframe:
+	 * @hdmi_clear_avi_infoframe:
 	 *
 	 * This callback clears the infoframes in the hardware during commit.
-	 * It will be called multiple times, once for every disabled infoframe
-	 * type.
 	 *
 	 * This callback is optional but it must be implemented by bridges that
 	 * set the DRM_BRIDGE_OP_HDMI flag in their &drm_bridge->ops.
 	 */
-	int (*hdmi_clear_infoframe)(struct drm_bridge *bridge,
-				    enum hdmi_infoframe_type type);
+	int (*hdmi_clear_avi_infoframe)(struct drm_bridge *bridge);
+
 	/**
-	 * @hdmi_write_infoframe:
+	 * @hdmi_write_avi_infoframe:
 	 *
-	 * Program the infoframe into the hardware. It will be called multiple
-	 * times, once for every updated infoframe type.
+	 * Program the infoframe into the hardware.
 	 *
 	 * This callback is optional but it must be implemented by bridges that
 	 * set the DRM_BRIDGE_OP_HDMI flag in their &drm_bridge->ops.
 	 */
-	int (*hdmi_write_infoframe)(struct drm_bridge *bridge,
-				    enum hdmi_infoframe_type type,
-				    const u8 *buffer, size_t len);
+	int (*hdmi_write_avi_infoframe)(struct drm_bridge *bridge,
+					const u8 *buffer, size_t len);
+
+	/**
+	 * @hdmi_clear_hdmi_infoframe:
+	 *
+	 * This callback clears the infoframes in the hardware during commit.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the DRM_BRIDGE_OP_HDMI flag in their &drm_bridge->ops.
+	 */
+	int (*hdmi_clear_hdmi_infoframe)(struct drm_bridge *bridge);
+
+	/**
+	 * @hdmi_write_hdmi_infoframe:
+	 *
+	 * Program the infoframe into the hardware.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the DRM_BRIDGE_OP_HDMI flag in their &drm_bridge->ops.
+	 */
+	int (*hdmi_write_hdmi_infoframe)(struct drm_bridge *bridge,
+					    const u8 *buffer, size_t len);
+
+	/**
+	 * @hdmi_clear_hdr_drm_infoframe:
+	 *
+	 * This callback clears the infoframes in the hardware during commit.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the DRM_BRIDGE_OP_HDMI_HDR_DRM_INFOFRAME flag in their
+	 * &drm_bridge->ops.
+	 */
+	int (*hdmi_clear_hdr_drm_infoframe)(struct drm_bridge *bridge);
+
+	/**
+	 * @hdmi_write_hdr_drm_infoframe:
+	 *
+	 * Program the infoframe into the hardware.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the DRM_BRIDGE_OP_HDMI_HDR_DRM_INFOFRAME flag in their
+	 * &drm_bridge->ops.
+	 */
+	int (*hdmi_write_hdr_drm_infoframe)(struct drm_bridge *bridge,
+					const u8 *buffer, size_t len);
+
+	/**
+	 * @hdmi_clear_spd_infoframe:
+	 *
+	 * This callback clears the infoframes in the hardware during commit.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the DRM_BRIDGE_OP_HDMI_SPD_INFOFRAME flag in their
+	 * &drm_bridge->ops.
+	 */
+	int (*hdmi_clear_spd_infoframe)(struct drm_bridge *bridge);
+
+	/**
+	 * @hdmi_write_spd_infoframe:
+	 *
+	 * Program the infoframe into the hardware.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the DRM_BRIDGE_OP_HDMI_SPD_INFOFRAME flag in their
+	 * &drm_bridge->ops.
+	 */
+	int (*hdmi_write_spd_infoframe)(struct drm_bridge *bridge,
+					const u8 *buffer, size_t len);
+
+	/**
+	 * @hdmi_clear_audio_infoframe:
+	 *
+	 * This callback clears the infoframes in the hardware during commit.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the DRM_BRIDGE_OP_HDMI_AUDIO flag in their &drm_bridge->ops.
+	 */
+	int (*hdmi_clear_audio_infoframe)(struct drm_bridge *bridge);
+
+	/**
+	 * @hdmi_write_audio_infoframe:
+	 *
+	 * Program the infoframe into the hardware.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the DRM_BRIDGE_OP_HDMI_AUDIO flag in their &drm_bridge->ops.
+	 */
+	int (*hdmi_write_audio_infoframe)(struct drm_bridge *bridge,
+					  const u8 *buffer, size_t len);
 
 	/**
 	 * @hdmi_audio_startup:
 	 *
-	 * Called when ASoC starts an audio stream setup. The
-	 * @hdmi_audio_startup() is optional.
+	 * Called when ASoC starts an audio stream setup.
+	 *
+	 * This callback is optional, it can be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_HDMI_AUDIO flag in their &drm_bridge->ops.
 	 *
 	 * Returns:
 	 * 0 on success, a negative error code otherwise
 	 */
-	int (*hdmi_audio_startup)(struct drm_connector *connector,
-				  struct drm_bridge *bridge);
+	int (*hdmi_audio_startup)(struct drm_bridge *bridge,
+				  struct drm_connector *connector);
 
 	/**
 	 * @hdmi_audio_prepare:
 	 * Configures HDMI-encoder for audio stream. Can be called multiple
-	 * times for each setup. Mandatory if HDMI audio is enabled in the
-	 * bridge's configuration.
+	 * times for each setup.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_HDMI_AUDIO flag in their &drm_bridge->ops.
 	 *
 	 * Returns:
 	 * 0 on success, a negative error code otherwise
 	 */
-	int (*hdmi_audio_prepare)(struct drm_connector *connector,
-				  struct drm_bridge *bridge,
+	int (*hdmi_audio_prepare)(struct drm_bridge *bridge,
+				  struct drm_connector *connector,
 				  struct hdmi_codec_daifmt *fmt,
 				  struct hdmi_codec_params *hparms);
 
 	/**
 	 * @hdmi_audio_shutdown:
 	 *
-	 * Shut down the audio stream. Mandatory if HDMI audio is enabled in
-	 * the bridge's configuration.
+	 * Shut down the audio stream.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_HDMI_AUDIO flag in their &drm_bridge->ops.
 	 *
 	 * Returns:
 	 * 0 on success, a negative error code otherwise
 	 */
-	void (*hdmi_audio_shutdown)(struct drm_connector *connector,
-				    struct drm_bridge *bridge);
+	void (*hdmi_audio_shutdown)(struct drm_bridge *bridge,
+				    struct drm_connector *connector);
 
 	/**
 	 * @hdmi_audio_mute_stream:
 	 *
-	 * Mute/unmute HDMI audio stream. The @hdmi_audio_mute_stream callback
-	 * is optional.
+	 * Mute/unmute HDMI audio stream.
+	 *
+	 * This callback is optional, it can be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_HDMI_AUDIO flag in their &drm_bridge->ops.
 	 *
 	 * Returns:
 	 * 0 on success, a negative error code otherwise
 	 */
-	int (*hdmi_audio_mute_stream)(struct drm_connector *connector,
-				      struct drm_bridge *bridge,
+	int (*hdmi_audio_mute_stream)(struct drm_bridge *bridge,
+				      struct drm_connector *connector,
 				      bool enable, int direction);
+
+	/**
+	 * @hdmi_cec_init:
+	 *
+	 * Initialize CEC part of the bridge.
+	 *
+	 * This callback is optional, it can be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_HDMI_CEC_ADAPTER flag in their
+	 * &drm_bridge->ops.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*hdmi_cec_init)(struct drm_bridge *bridge,
+			     struct drm_connector *connector);
+
+	/**
+	 * @hdmi_cec_enable:
+	 *
+	 * Enable or disable the CEC adapter inside the bridge.
+	 *
+	 * This callback is optional, it can be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_HDMI_CEC_ADAPTER flag in their
+	 * &drm_bridge->ops.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*hdmi_cec_enable)(struct drm_bridge *bridge, bool enable);
+
+	/**
+	 * @hdmi_cec_log_addr:
+	 *
+	 * Set the logical address of the CEC adapter inside the bridge.
+	 *
+	 * This callback is optional, it can be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_HDMI_CEC_ADAPTER flag in their
+	 * &drm_bridge->ops.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*hdmi_cec_log_addr)(struct drm_bridge *bridge, u8 logical_addr);
+
+	/**
+	 * @hdmi_cec_transmit:
+	 *
+	 * Transmit the message using the CEC adapter inside the bridge.
+	 *
+	 * This callback is optional, it can be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_HDMI_CEC_ADAPTER flag in their
+	 * &drm_bridge->ops.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*hdmi_cec_transmit)(struct drm_bridge *bridge, u8 attempts,
+				 u32 signal_free_time, struct cec_msg *msg);
+
+	/**
+	 * @dp_audio_startup:
+	 *
+	 * Called when ASoC starts a DisplayPort audio stream setup.
+	 *
+	 * This callback is optional, it can be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_DP_AUDIO flag in their &drm_bridge->ops.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*dp_audio_startup)(struct drm_bridge *bridge,
+				struct drm_connector *connector);
+
+	/**
+	 * @dp_audio_prepare:
+	 * Configures DisplayPort audio stream. Can be called multiple
+	 * times for each setup.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_DP_AUDIO flag in their &drm_bridge->ops.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*dp_audio_prepare)(struct drm_bridge *bridge,
+				struct drm_connector *connector,
+				struct hdmi_codec_daifmt *fmt,
+				struct hdmi_codec_params *hparms);
+
+	/**
+	 * @dp_audio_shutdown:
+	 *
+	 * Shut down the DisplayPort audio stream.
+	 *
+	 * This callback is optional but it must be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_DP_AUDIO flag in their &drm_bridge->ops.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	void (*dp_audio_shutdown)(struct drm_bridge *bridge,
+				  struct drm_connector *connector);
+
+	/**
+	 * @dp_audio_mute_stream:
+	 *
+	 * Mute/unmute DisplayPort audio stream.
+	 *
+	 * This callback is optional, it can be implemented by bridges that
+	 * set the @DRM_BRIDGE_OP_DP_AUDIO flag in their &drm_bridge->ops.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*dp_audio_mute_stream)(struct drm_bridge *bridge,
+				    struct drm_connector *connector,
+				    bool enable, int direction);
 
 	/**
 	 * @debugfs_init:
@@ -807,13 +1030,68 @@ enum drm_bridge_ops {
 	/**
 	 * @DRM_BRIDGE_OP_HDMI: The bridge provides HDMI connector operations,
 	 * including infoframes support. Bridges that set this flag must
-	 * implement the &drm_bridge_funcs->write_infoframe callback.
+	 * provide HDMI-related information and implement the
+	 * &drm_bridge_funcs->clear_avi_infoframe,
+	 * &drm_bridge_funcs->write_avi_infoframe,
+	 * &drm_bridge_funcs->clear_hdmi_infoframe and
+	 * &drm_bridge_funcs->write_hdmi_infoframe callbacks.
 	 *
 	 * Note: currently there can be at most one bridge in a chain that sets
 	 * this bit. This is to simplify corresponding glue code in connector
 	 * drivers.
 	 */
 	DRM_BRIDGE_OP_HDMI = BIT(4),
+	/**
+	 * @DRM_BRIDGE_OP_HDMI_AUDIO: The bridge provides HDMI audio operations.
+	 * Bridges that set this flag must implement the
+	 * &drm_bridge_funcs->hdmi_audio_prepare and
+	 * &drm_bridge_funcs->hdmi_audio_shutdown callbacks.
+	 * If the bridge implements @DRM_BRIDGE_OP_HDMI, it also must implement
+	 * &drm_bridge_funcs->hdmi_write_audio_infoframe and
+	 * &drm_bridge_funcs->hdmi_cleaer_audio_infoframe callbacks.
+	 *
+	 * Note: currently there can be at most one bridge in a chain that sets
+	 * this bit. This is to simplify corresponding glue code in connector
+	 * drivers. Also it is not possible to have a bridge in the chain that
+	 * sets @DRM_BRIDGE_OP_DP_AUDIO if there is a bridge that sets this
+	 * flag.
+	 */
+	DRM_BRIDGE_OP_HDMI_AUDIO = BIT(5),
+	/**
+	 * @DRM_BRIDGE_OP_DP_AUDIO: The bridge provides DisplayPort audio operations.
+	 * Bridges that set this flag must implement the
+	 * &drm_bridge_funcs->dp_audio_prepare and
+	 * &drm_bridge_funcs->dp_audio_shutdown callbacks.
+	 *
+	 * Note: currently there can be at most one bridge in a chain that sets
+	 * this bit. This is to simplify corresponding glue code in connector
+	 * drivers. Also it is not possible to have a bridge in the chain that
+	 * sets @DRM_BRIDGE_OP_HDMI_AUDIO if there is a bridge that sets this
+	 * flag.
+	 */
+	DRM_BRIDGE_OP_DP_AUDIO = BIT(6),
+	/**
+	 * @DRM_BRIDGE_OP_HDMI_CEC_NOTIFIER: The bridge requires CEC notifier
+	 * to be present.
+	 */
+	DRM_BRIDGE_OP_HDMI_CEC_NOTIFIER = BIT(7),
+	/**
+	 * @DRM_BRIDGE_OP_HDMI_CEC_ADAPTER: The bridge requires CEC adapter
+	 * to be present.
+	 */
+	DRM_BRIDGE_OP_HDMI_CEC_ADAPTER = BIT(8),
+	/**
+	 * @DRM_BRIDGE_OP_HDMI_HDR_DRM_INFOFRAME: The bridge supports
+	 * &drm_bridge_funcs->hdmi_write_hdr_drm_infoframe and
+	 * &drm_bridge_funcs->hdmi_clear_hdr_drm_infoframe callbacks.
+	 */
+	DRM_BRIDGE_OP_HDMI_HDR_DRM_INFOFRAME = BIT(9),
+	/**
+	 * @DRM_BRIDGE_OP_HDMI_SPD_INFOFRAME: The bridge supports
+	 * &drm_bridge_funcs->hdmi_write_spd_infoframe and
+	 * &drm_bridge_funcs->hdmi_clear_spd_infoframe callbacks.
+	 */
+	DRM_BRIDGE_OP_HDMI_SPD_INFOFRAME = BIT(10),
 };
 
 /**
@@ -840,6 +1118,26 @@ struct drm_bridge {
 	const struct drm_bridge_timings *timings;
 	/** @funcs: control functions */
 	const struct drm_bridge_funcs *funcs;
+
+	/**
+	 * @container: Pointer to the private driver struct embedding this
+	 * @struct drm_bridge.
+	 */
+	void *container;
+
+	/**
+	 * @refcount: reference count of users referencing this bridge.
+	 */
+	struct kref refcount;
+
+	/**
+	 * @unplugged:
+	 *
+	 * Flag to tell if the bridge has been unplugged.
+	 * See drm_bridge_enter() and drm_bridge_unplug().
+	 */
+	bool unplugged;
+
 	/** @driver_private: pointer to the bridge driver's internal context */
 	void *driver_private;
 	/** @ops: bitmask of operations supported by the bridge */
@@ -869,9 +1167,90 @@ struct drm_bridge {
 	 */
 	bool pre_enable_prev_first;
 	/**
+	 * @support_hdcp: Indicate that the bridge supports HDCP.
+	 */
+	bool support_hdcp;
+	/**
 	 * @ddc: Associated I2C adapter for DDC access, if any.
 	 */
 	struct i2c_adapter *ddc;
+
+	/**
+	 * @vendor: Vendor of the product to be used for the SPD InfoFrame
+	 * generation. This is required if @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	const char *vendor;
+
+	/**
+	 * @product: Name of the product to be used for the SPD InfoFrame
+	 * generation. This is required if @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	const char *product;
+
+	/**
+	 * @supported_formats: Bitmask of @drm_output_color_format listing
+	 * supported output formats. This is only relevant if
+	 * @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	unsigned int supported_formats;
+
+	/**
+	 * @max_bpc: Maximum bits per char the HDMI bridge supports. Allowed
+	 * values are 8, 10 and 12. This is only relevant if
+	 * @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	unsigned int max_bpc;
+
+	/**
+	 * @hdmi_cec_dev: device to be used as a containing device for CEC
+	 * functions.
+	 */
+	struct device *hdmi_cec_dev;
+
+	/**
+	 * @hdmi_audio_dev: device to be used as a parent for the HDMI Codec if
+	 * either of @DRM_BRIDGE_OP_HDMI_AUDIO or @DRM_BRIDGE_OP_DP_AUDIO is set.
+	 */
+	struct device *hdmi_audio_dev;
+
+	/**
+	 * @hdmi_audio_max_i2s_playback_channels: maximum number of playback
+	 * I2S channels for the @DRM_BRIDGE_OP_HDMI_AUDIO or
+	 * @DRM_BRIDGE_OP_DP_AUDIO.
+	 */
+	int hdmi_audio_max_i2s_playback_channels;
+
+	/**
+	 * @hdmi_audio_i2s_formats: supported I2S formats, optional. The
+	 * default is to allow all formats supported by the corresponding I2S
+	 * bus driver. This is only used for bridges setting
+	 * @DRM_BRIDGE_OP_HDMI_AUDIO or @DRM_BRIDGE_OP_DP_AUDIO.
+	 */
+	u64 hdmi_audio_i2s_formats;
+
+	/**
+	 * @hdmi_audio_spdif_playback: set if this bridge has S/PDIF playback
+	 * port for @DRM_BRIDGE_OP_HDMI_AUDIO or @DRM_BRIDGE_OP_DP_AUDIO.
+	 */
+	unsigned int hdmi_audio_spdif_playback : 1;
+
+	/**
+	 * @hdmi_audio_dai_port: sound DAI port for either of
+	 * @DRM_BRIDGE_OP_HDMI_AUDIO and @DRM_BRIDGE_OP_DP_AUDIO, -1 if it is
+	 * not used.
+	 */
+	int hdmi_audio_dai_port;
+
+	/**
+	 * @hdmi_cec_adapter_name: the name of the adapter to register
+	 */
+	const char *hdmi_cec_adapter_name;
+
+	/**
+	 * @hdmi_cec_available_las: number of logical addresses, CEC_MAX_LOG_ADDRS if unset
+	 */
+	u8 hdmi_cec_available_las;
+
 	/** private: */
 	/**
 	 * @hpd_mutex: Protects the @hpd_cb and @hpd_data fields.
@@ -889,50 +1268,15 @@ struct drm_bridge {
 	void *hpd_data;
 
 	/**
-	 * @vendor: Vendor of the product to be used for the SPD InfoFrame
-	 * generation. This is required if @DRM_BRIDGE_OP_HDMI is set.
+	 * @next_bridge: Pointer to the following bridge, automatically put
+	 * when this bridge is freed (i.e. at destroy time). This is for
+	 * drivers needing to store a pointer to the next bridge in the
+	 * chain, and ensures any code still holding a reference to this
+	 * bridge after its removal cannot use-after-free the next
+	 * bridge. Any other bridge pointers stored by the driver must be
+	 * put in the .destroy callback by driver code.
 	 */
-	const char *vendor;
-
-	/**
-	 * @product: Name of the product to be used for the SPD InfoFrame
-	 * generation. This is required if @DRM_BRIDGE_OP_HDMI is set.
-	 */
-	const char *product;
-
-	/**
-	 * @supported_formats: Bitmask of @hdmi_colorspace listing supported
-	 * output formats. This is only relevant if @DRM_BRIDGE_OP_HDMI is set.
-	 */
-	unsigned int supported_formats;
-
-	/**
-	 * @max_bpc: Maximum bits per char the HDMI bridge supports. Allowed
-	 * values are 8, 10 and 12. This is only relevant if
-	 * @DRM_BRIDGE_OP_HDMI is set.
-	 */
-	unsigned int max_bpc;
-
-	/**
-	 * @hdmi_audio_dev: device to be used as a parent for the HDMI Codec
-	 */
-	struct device *hdmi_audio_dev;
-
-	/**
-	 * @hdmi_audio_max_i2s_playback_channels: maximum number of playback
-	 * I2S channels for the HDMI codec
-	 */
-	int hdmi_audio_max_i2s_playback_channels;
-
-	/**
-	 * @hdmi_audio_spdif_playback: set if HDMI codec has S/PDIF playback port
-	 */
-	unsigned int hdmi_audio_spdif_playback : 1;
-
-	/**
-	 * @hdmi_audio_dai_port: sound DAI port, -1 if it is not enabled
-	 */
-	int hdmi_audio_dai_port;
+	struct drm_bridge *next_bridge;
 };
 
 static inline struct drm_bridge *
@@ -940,6 +1284,38 @@ drm_priv_to_bridge(struct drm_private_obj *priv)
 {
 	return container_of(priv, struct drm_bridge, base);
 }
+
+bool drm_bridge_enter(struct drm_bridge *bridge, int *idx);
+void drm_bridge_exit(int idx);
+void drm_bridge_unplug(struct drm_bridge *bridge);
+
+struct drm_bridge *drm_bridge_get(struct drm_bridge *bridge);
+void drm_bridge_put(struct drm_bridge *bridge);
+void drm_bridge_clear_and_put(struct drm_bridge **bridge_pp);
+
+/* Cleanup action for use with __free() */
+DEFINE_FREE(drm_bridge_put, struct drm_bridge *, if (_T) drm_bridge_put(_T))
+
+void *__devm_drm_bridge_alloc(struct device *dev, size_t size, size_t offset,
+			      const struct drm_bridge_funcs *funcs);
+
+/**
+ * devm_drm_bridge_alloc - Allocate and initialize a bridge
+ * @dev: struct device of the bridge device
+ * @type: the type of the struct which contains struct &drm_bridge
+ * @member: the name of the &drm_bridge within @type
+ * @funcs: callbacks for this bridge
+ *
+ * The reference count of the returned bridge is initialized to 1. This
+ * reference will be automatically dropped via devm (by calling
+ * drm_bridge_put()) when @dev is removed.
+ *
+ * Returns:
+ * Pointer to new bridge, or ERR_PTR on failure.
+ */
+#define devm_drm_bridge_alloc(dev, type, member, funcs) \
+	((type *)__devm_drm_bridge_alloc(dev, sizeof(type), \
+					 offsetof(type, member), funcs))
 
 void drm_bridge_add(struct drm_bridge *bridge);
 int devm_drm_bridge_add(struct device *dev, struct drm_bridge *bridge);
@@ -949,17 +1325,73 @@ int drm_bridge_attach(struct drm_encoder *encoder, struct drm_bridge *bridge,
 		      enum drm_bridge_attach_flags flags);
 
 #ifdef CONFIG_OF
+struct drm_bridge *of_drm_find_and_get_bridge(struct device_node *np);
 struct drm_bridge *of_drm_find_bridge(struct device_node *np);
+struct drm_bridge *of_drm_get_bridge_by_endpoint(const struct device_node *np,
+						 int port, int endpoint);
 #else
+static inline struct drm_bridge *of_drm_find_and_get_bridge(struct device_node *np)
+{
+	return NULL;
+}
 static inline struct drm_bridge *of_drm_find_bridge(struct device_node *np)
 {
 	return NULL;
 }
+static inline struct drm_bridge *of_drm_get_bridge_by_endpoint(const struct device_node *np,
+							       int port, int endpoint)
+{
+	return ERR_PTR(-ENODEV);
+}
 #endif
+
+static inline bool drm_bridge_is_last(struct drm_bridge *bridge)
+{
+	return list_is_last(&bridge->chain_node, &bridge->encoder->bridge_chain);
+}
+
+/**
+ * drm_bridge_get_current_state() - Get the current bridge state
+ * @bridge: bridge object
+ *
+ * This function must be called with the modeset lock held.
+ *
+ * RETURNS:
+ *
+ * The current bridge state, or NULL if there is none.
+ */
+static inline struct drm_bridge_state *
+drm_bridge_get_current_state(struct drm_bridge *bridge)
+{
+	if (!bridge)
+		return NULL;
+
+	/*
+	 * Only atomic bridges will have bridge->base initialized by
+	 * drm_atomic_private_obj_init(), so we need to make sure we're
+	 * working with one before we try to use the lock.
+	 */
+	if (!bridge->funcs || !bridge->funcs->atomic_reset)
+		return NULL;
+
+	drm_modeset_lock_assert_held(&bridge->base.lock);
+
+	if (!bridge->base.state)
+		return NULL;
+
+	return drm_priv_to_bridge_state(bridge->base.state);
+}
 
 /**
  * drm_bridge_get_next_bridge() - Get the next bridge in the chain
  * @bridge: bridge object
+ *
+ * The caller is responsible of having a reference to @bridge via
+ * drm_bridge_get() or equivalent. This function leaves the refcount of
+ * @bridge unmodified.
+ *
+ * The refcount of the returned bridge is incremented. Use drm_bridge_put()
+ * when done with it.
  *
  * RETURNS:
  * the next bridge in the chain after @bridge, or NULL if @bridge is the last.
@@ -970,12 +1402,19 @@ drm_bridge_get_next_bridge(struct drm_bridge *bridge)
 	if (list_is_last(&bridge->chain_node, &bridge->encoder->bridge_chain))
 		return NULL;
 
-	return list_next_entry(bridge, chain_node);
+	return drm_bridge_get(list_next_entry(bridge, chain_node));
 }
 
 /**
  * drm_bridge_get_prev_bridge() - Get the previous bridge in the chain
  * @bridge: bridge object
+ *
+ * The caller is responsible of having a reference to @bridge via
+ * drm_bridge_get() or equivalent. This function leaves the refcount of
+ * @bridge unmodified.
+ *
+ * The refcount of the returned bridge is incremented. Use drm_bridge_put()
+ * when done with it.
  *
  * RETURNS:
  * the previous bridge in the chain, or NULL if @bridge is the first.
@@ -986,12 +1425,15 @@ drm_bridge_get_prev_bridge(struct drm_bridge *bridge)
 	if (list_is_first(&bridge->chain_node, &bridge->encoder->bridge_chain))
 		return NULL;
 
-	return list_prev_entry(bridge, chain_node);
+	return drm_bridge_get(list_prev_entry(bridge, chain_node));
 }
 
 /**
  * drm_bridge_chain_get_first_bridge() - Get the first bridge in the chain
  * @encoder: encoder object
+ *
+ * The refcount of the returned bridge is incremented. Use drm_bridge_put()
+ * when done with it.
  *
  * RETURNS:
  * the first bridge in the chain, or NULL if @encoder has no bridge attached
@@ -1000,20 +1442,105 @@ drm_bridge_get_prev_bridge(struct drm_bridge *bridge)
 static inline struct drm_bridge *
 drm_bridge_chain_get_first_bridge(struct drm_encoder *encoder)
 {
-	return list_first_entry_or_null(&encoder->bridge_chain,
-					struct drm_bridge, chain_node);
+	return drm_bridge_get(list_first_entry_or_null(&encoder->bridge_chain,
+						       struct drm_bridge, chain_node));
 }
 
 /**
- * drm_for_each_bridge_in_chain() - Iterate over all bridges present in a chain
+ * drm_bridge_chain_get_last_bridge() - Get the last bridge in the chain
+ * @encoder: encoder object
+ *
+ * The refcount of the returned bridge is incremented. Use drm_bridge_put()
+ * when done with it.
+ *
+ * RETURNS:
+ * the last bridge in the chain, or NULL if @encoder has no bridge attached
+ * to it.
+ */
+static inline struct drm_bridge *
+drm_bridge_chain_get_last_bridge(struct drm_encoder *encoder)
+{
+	return drm_bridge_get(list_last_entry_or_null(&encoder->bridge_chain,
+						      struct drm_bridge, chain_node));
+}
+
+/* Internal to drm_for_each_bridge_in_chain*() */
+static inline struct drm_bridge *__drm_for_each_bridge_in_chain_next(struct drm_bridge *bridge)
+{
+	struct drm_bridge *next = drm_bridge_get_next_bridge(bridge);
+
+	if (!next)
+		mutex_unlock(&bridge->encoder->bridge_chain_mutex);
+
+	drm_bridge_put(bridge);
+
+	return next;
+}
+
+/* Internal to drm_for_each_bridge_in_chain*() */
+DEFINE_FREE(__drm_for_each_bridge_in_chain_cleanup, struct drm_bridge *,
+	if (_T) { mutex_unlock(&_T->encoder->bridge_chain_mutex); drm_bridge_put(_T); })
+
+/* Internal to drm_for_each_bridge_in_chain_scoped() */
+static inline struct drm_bridge *
+__drm_for_each_bridge_in_chain_scoped_start(struct drm_encoder *encoder)
+{
+	mutex_lock(&encoder->bridge_chain_mutex);
+
+	struct drm_bridge *bridge = drm_bridge_chain_get_first_bridge(encoder);
+
+	if (!bridge)
+		mutex_unlock(&encoder->bridge_chain_mutex);
+
+	return bridge;
+}
+
+/**
+ * drm_for_each_bridge_in_chain_scoped - iterate over all bridges attached
+ *                                       to an encoder
  * @encoder: the encoder to iterate bridges on
  * @bridge: a bridge pointer updated to point to the current bridge at each
  *	    iteration
  *
  * Iterate over all bridges present in the bridge chain attached to @encoder.
+ *
+ * Automatically gets/puts the bridge reference while iterating and locks
+ * the encoder chain mutex to prevent chain modifications while iterating.
  */
-#define drm_for_each_bridge_in_chain(encoder, bridge)			\
-	list_for_each_entry(bridge, &(encoder)->bridge_chain, chain_node)
+#define drm_for_each_bridge_in_chain_scoped(encoder, bridge)				\
+	for (struct drm_bridge *bridge __free(__drm_for_each_bridge_in_chain_cleanup) =	\
+		__drm_for_each_bridge_in_chain_scoped_start((encoder));			\
+	     bridge;									\
+	     bridge = __drm_for_each_bridge_in_chain_next(bridge))			\
+
+/* Internal to drm_for_each_bridge_in_chain_from() */
+static inline struct drm_bridge *
+__drm_for_each_bridge_in_chain_from_start(struct drm_bridge *bridge)
+{
+	drm_bridge_get(bridge);
+	mutex_lock(&bridge->encoder->bridge_chain_mutex);
+
+	return bridge;
+}
+
+/**
+ * drm_for_each_bridge_in_chain_from - iterate over all bridges starting
+ *                                     from the given bridge
+ * @first_bridge: the bridge to start from
+ * @bridge: a bridge pointer updated to point to the current bridge at each
+ *	    iteration
+ *
+ * Iterate over all bridges in the encoder chain starting from
+ * @first_bridge, included.
+ *
+ * Automatically gets/puts the bridge reference while iterating and locks
+ * the encoder chain mutex to prevent chain modifications while iterating.
+ */
+#define drm_for_each_bridge_in_chain_from(first_bridge, bridge)				\
+	for (struct drm_bridge *bridge __free(__drm_for_each_bridge_in_chain_cleanup) =	\
+		__drm_for_each_bridge_in_chain_from_start(first_bridge);		\
+	     bridge;									\
+	     bridge = __drm_for_each_bridge_in_chain_next(bridge))			\
 
 enum drm_mode_status
 drm_bridge_chain_mode_valid(struct drm_bridge *bridge,
@@ -1027,13 +1554,13 @@ int drm_atomic_bridge_chain_check(struct drm_bridge *bridge,
 				  struct drm_crtc_state *crtc_state,
 				  struct drm_connector_state *conn_state);
 void drm_atomic_bridge_chain_disable(struct drm_bridge *bridge,
-				     struct drm_atomic_state *state);
+				     struct drm_atomic_commit *state);
 void drm_atomic_bridge_chain_post_disable(struct drm_bridge *bridge,
-					  struct drm_atomic_state *state);
+					  struct drm_atomic_commit *state);
 void drm_atomic_bridge_chain_pre_enable(struct drm_bridge *bridge,
-					struct drm_atomic_state *state);
+					struct drm_atomic_commit *state);
 void drm_atomic_bridge_chain_enable(struct drm_bridge *bridge,
-				    struct drm_atomic_state *state);
+				    struct drm_atomic_commit *state);
 
 u32 *
 drm_atomic_helper_bridge_propagate_bus_fmt(struct drm_bridge *bridge,
@@ -1043,7 +1570,8 @@ drm_atomic_helper_bridge_propagate_bus_fmt(struct drm_bridge *bridge,
 					u32 output_fmt,
 					unsigned int *num_input_fmts);
 
-enum drm_connector_status drm_bridge_detect(struct drm_bridge *bridge);
+enum drm_connector_status
+drm_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector);
 int drm_bridge_get_modes(struct drm_bridge *bridge,
 			 struct drm_connector *connector);
 const struct drm_edid *drm_bridge_edid_read(struct drm_bridge *bridge,
@@ -1107,5 +1635,10 @@ static inline struct drm_bridge *drmm_of_get_bridge(struct drm_device *drm,
 	return ERR_PTR(-ENODEV);
 }
 #endif
+
+void devm_drm_put_bridge(struct device *dev, struct drm_bridge *bridge);
+
+void drm_bridge_debugfs_params(struct dentry *root);
+void drm_bridge_debugfs_encoder_params(struct dentry *root, struct drm_encoder *encoder);
 
 #endif

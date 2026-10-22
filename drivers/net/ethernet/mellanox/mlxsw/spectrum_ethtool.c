@@ -262,7 +262,7 @@ err_port_pause_configure:
 }
 
 struct mlxsw_sp_port_hw_stats {
-	char str[ETH_GSTRING_LEN];
+	char str[ETH_GSTRING_LEN] __nonstring;
 	u64 (*getter)(const char *payload);
 	bool cells_bytes;
 };
@@ -541,6 +541,10 @@ static struct mlxsw_sp_port_hw_stats mlxsw_sp_port_hw_prio_stats[] = {
 	{
 		.str = "tx_pause_duration_prio",
 		.getter = mlxsw_reg_ppcnt_tx_pause_duration_get,
+	},
+	{
+		.str = "rx_discards_pg",
+		.getter = mlxsw_reg_ppcnt_rx_discards_get,
 	},
 };
 

@@ -33,9 +33,9 @@
   .cfi_rel_offset r2, PPC_MIN_STKFRM + STK_GOT
 #endif
 	.ifeq	\call_time
-		get_datapage	r5 VDSO_DATA_OFFSET
+		get_datapage	r5 vdso_u_time_data
 	.else
-		get_datapage	r4 VDSO_DATA_OFFSET
+		get_datapage	r4 vdso_u_time_data
 	.endif
 	bl		CFUNC(DOTSYM(\funct))
 	PPC_LL		r0, PPC_MIN_STKFRM + PPC_LR_STKOFF(r1)
@@ -102,6 +102,18 @@ V_FUNCTION_END(__kernel_clock_gettime64)
 V_FUNCTION_BEGIN(__kernel_clock_getres)
 	cvdso_call __c_kernel_clock_getres
 V_FUNCTION_END(__kernel_clock_getres)
+
+/*
+ * Exact prototype of clock_getres_time64()
+ *
+ * int __kernel_clock_getres(clockid_t clock_id, struct __timespec64 *res);
+ *
+ */
+#ifndef __powerpc64__
+V_FUNCTION_BEGIN(__kernel_clock_getres_time64)
+	cvdso_call __c_kernel_clock_getres_time64
+V_FUNCTION_END(__kernel_clock_getres_time64)
+#endif
 
 
 /*

@@ -98,11 +98,11 @@ struct btrfs_device *btrfs_alloc_dummy_device(struct btrfs_fs_info *fs_info)
 {
 	struct btrfs_device *dev;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
-	extent_io_tree_init(fs_info, &dev->alloc_state, 0);
+	btrfs_extent_io_tree_init(fs_info, &dev->alloc_state, 0);
 	INIT_LIST_HEAD(&dev->dev_list);
 	list_add(&dev->dev_list, &fs_info->fs_devices->devices);
 
@@ -111,27 +111,24 @@ struct btrfs_device *btrfs_alloc_dummy_device(struct btrfs_fs_info *fs_info)
 
 static void btrfs_free_dummy_device(struct btrfs_device *dev)
 {
-	extent_io_tree_release(&dev->alloc_state);
+	btrfs_extent_io_tree_release(&dev->alloc_state);
 	kfree(dev);
 }
 
 struct btrfs_fs_info *btrfs_alloc_dummy_fs_info(u32 nodesize, u32 sectorsize)
 {
-	struct btrfs_fs_info *fs_info = kzalloc(sizeof(struct btrfs_fs_info),
-						GFP_KERNEL);
+	struct btrfs_fs_info *fs_info = kzalloc_obj(struct btrfs_fs_info);
 
 	if (!fs_info)
 		return fs_info;
-	fs_info->fs_devices = kzalloc(sizeof(struct btrfs_fs_devices),
-				      GFP_KERNEL);
+	fs_info->fs_devices = kzalloc_obj(struct btrfs_fs_devices);
 	if (!fs_info->fs_devices) {
 		kfree(fs_info);
 		return NULL;
 	}
 	INIT_LIST_HEAD(&fs_info->fs_devices->devices);
 
-	fs_info->super_copy = kzalloc(sizeof(struct btrfs_super_block),
-				      GFP_KERNEL);
+	fs_info->super_copy = kzalloc_obj(struct btrfs_super_block);
 	if (!fs_info->super_copy) {
 		kfree(fs_info->fs_devices);
 		kfree(fs_info);
@@ -148,6 +145,7 @@ struct btrfs_fs_info *btrfs_alloc_dummy_fs_info(u32 nodesize, u32 sectorsize)
 	fs_info->csum_size = 4;
 	fs_info->csums_per_leaf = BTRFS_MAX_ITEM_SIZE(fs_info) /
 		fs_info->csum_size;
+	fs_info->use_bitmap = btrfs_use_bitmap;
 	set_bit(BTRFS_FS_STATE_DUMMY_FS_INFO, &fs_info->fs_state);
 
 	test_mnt->mnt_sb->s_fs_info = fs_info;
@@ -157,9 +155,9 @@ struct btrfs_fs_info *btrfs_alloc_dummy_fs_info(u32 nodesize, u32 sectorsize)
 
 void btrfs_free_dummy_fs_info(struct btrfs_fs_info *fs_info)
 {
-	struct radix_tree_iter iter;
-	void **slot;
 	struct btrfs_device *dev, *tmp;
+	struct extent_buffer *eb;
+	unsigned long index;
 
 	if (!fs_info)
 		return;
@@ -169,25 +167,13 @@ void btrfs_free_dummy_fs_info(struct btrfs_fs_info *fs_info)
 
 	test_mnt->mnt_sb->s_fs_info = NULL;
 
-	spin_lock(&fs_info->buffer_lock);
-	radix_tree_for_each_slot(slot, &fs_info->buffer_radix, &iter, 0) {
-		struct extent_buffer *eb;
-
-		eb = radix_tree_deref_slot_protected(slot, &fs_info->buffer_lock);
-		if (!eb)
-			continue;
-		/* Shouldn't happen but that kind of thinking creates CVE's */
-		if (radix_tree_exception(eb)) {
-			if (radix_tree_deref_retry(eb))
-				slot = radix_tree_iter_retry(&iter);
-			continue;
-		}
-		slot = radix_tree_iter_resume(slot, &iter);
-		spin_unlock(&fs_info->buffer_lock);
-		free_extent_buffer_stale(eb);
-		spin_lock(&fs_info->buffer_lock);
+	xa_lock_irq(&fs_info->buffer_tree);
+	xa_for_each(&fs_info->buffer_tree, index, eb) {
+		xa_unlock_irq(&fs_info->buffer_tree);
+		free_extent_buffer(eb);
+		xa_lock_irq(&fs_info->buffer_tree);
 	}
-	spin_unlock(&fs_info->buffer_lock);
+	xa_unlock_irq(&fs_info->buffer_tree);
 
 	btrfs_mapping_tree_free(fs_info);
 	list_for_each_entry_safe(dev, tmp, &fs_info->fs_devices->devices,
@@ -220,11 +206,10 @@ btrfs_alloc_dummy_block_group(struct btrfs_fs_info *fs_info,
 {
 	struct btrfs_block_group *cache;
 
-	cache = kzalloc(sizeof(*cache), GFP_KERNEL);
+	cache = kzalloc_obj(*cache);
 	if (!cache)
 		return NULL;
-	cache->free_space_ctl = kzalloc(sizeof(*cache->free_space_ctl),
-					GFP_KERNEL);
+	cache->free_space_ctl = kzalloc_obj(*cache->free_space_ctl);
 	if (!cache->free_space_ctl) {
 		kfree(cache);
 		return NULL;
@@ -313,9 +298,15 @@ int btrfs_run_sanity_tests(void)
 			ret = btrfs_test_delayed_refs(sectorsize, nodesize);
 			if (ret)
 				goto out;
+			ret = btrfs_test_chunk_allocation(sectorsize, nodesize);
+			if (ret)
+				goto out;
 		}
 	}
 	ret = btrfs_test_extent_map();
+	if (ret)
+		goto out;
+	ret = btrfs_test_zoned();
 
 out:
 	btrfs_destroy_test_fs();

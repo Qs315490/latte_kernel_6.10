@@ -1,12 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
    BlueZ - Bluetooth protocol stack for Linux
 
    Copyright (C) 2010  Nokia Corporation
    Copyright (C) 2011-2012  Intel Corporation
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License version 2 as
-   published by the Free Software Foundation;
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -53,10 +50,15 @@ struct mgmt_hdr {
 } __packed;
 
 struct mgmt_tlv {
-	__le16 type;
-	__u8   length;
+	/* New members MUST be added within the __struct_group() macro below. */
+	__struct_group(mgmt_tlv_hdr, __hdr, __packed,
+		__le16 type;
+		__u8   length;
+	);
 	__u8   value[];
 } __packed;
+static_assert(offsetof(struct mgmt_tlv, value) == sizeof(struct mgmt_tlv_hdr),
+	      "struct member likely outside of __struct_group()");
 
 struct mgmt_addr_info {
 	bdaddr_t	bdaddr;
@@ -113,6 +115,9 @@ struct mgmt_rp_read_index_list {
 #define MGMT_SETTING_CIS_PERIPHERAL	BIT(19)
 #define MGMT_SETTING_ISO_BROADCASTER	BIT(20)
 #define MGMT_SETTING_ISO_SYNC_RECEIVER	BIT(21)
+#define MGMT_SETTING_LL_PRIVACY		BIT(22)
+#define MGMT_SETTING_PAST_SENDER	BIT(23)
+#define MGMT_SETTING_PAST_RECEIVER	BIT(24)
 
 #define MGMT_OP_READ_INFO		0x0004
 #define MGMT_READ_INFO_SIZE		0
@@ -774,7 +779,7 @@ struct mgmt_adv_pattern {
 	__u8 ad_type;
 	__u8 offset;
 	__u8 length;
-	__u8 value[31];
+	__u8 value[HCI_MAX_AD_LENGTH];
 } __packed;
 
 #define MGMT_OP_ADD_ADV_PATTERNS_MONITOR	0x0052
@@ -847,7 +852,7 @@ struct mgmt_cp_set_mesh {
 	__le16 window;
 	__le16 period;
 	__u8   num_ad_types;
-	__u8   ad_types[];
+	__u8   ad_types[] __counted_by(num_ad_types);
 } __packed;
 #define MGMT_SET_MESH_RECEIVER_SIZE	6
 

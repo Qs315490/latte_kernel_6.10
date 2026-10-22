@@ -13,17 +13,15 @@
 extern const struct nf_conntrack_l4proto nf_conntrack_l4proto_tcp;
 extern const struct nf_conntrack_l4proto nf_conntrack_l4proto_udp;
 extern const struct nf_conntrack_l4proto nf_conntrack_l4proto_icmp;
-#ifdef CONFIG_NF_CT_PROTO_DCCP
-extern const struct nf_conntrack_l4proto nf_conntrack_l4proto_dccp;
-#endif
 #ifdef CONFIG_NF_CT_PROTO_SCTP
 extern const struct nf_conntrack_l4proto nf_conntrack_l4proto_sctp;
 #endif
-#ifdef CONFIG_NF_CT_PROTO_UDPLITE
-extern const struct nf_conntrack_l4proto nf_conntrack_l4proto_udplite;
-#endif
 #ifdef CONFIG_NF_CT_PROTO_GRE
 extern const struct nf_conntrack_l4proto nf_conntrack_l4proto_gre;
+#endif
+
+#if IS_ENABLED(CONFIG_NF_CONNTRACK_PPTP)
+void gre_pptp_destroy_siblings(struct nf_conn *ct);
 #endif
 
 #endif /*_NF_CONNTRACK_IPV4_H*/

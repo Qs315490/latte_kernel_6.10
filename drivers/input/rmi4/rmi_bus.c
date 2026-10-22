@@ -4,6 +4,7 @@
  * Copyright (c) 2011 Unixphere
  */
 
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
 #include <linux/irq.h>
@@ -77,7 +78,7 @@ int rmi_register_transport_device(struct rmi_transport_dev *xport)
 	struct rmi_device *rmi_dev;
 	int error;
 
-	rmi_dev = kzalloc(sizeof(struct rmi_device), GFP_KERNEL);
+	rmi_dev = kzalloc_obj(struct rmi_device);
 	if (!rmi_dev)
 		return -ENOMEM;
 
@@ -236,36 +237,44 @@ static int rmi_function_remove(struct device *dev)
 	return 0;
 }
 
+struct rmi_function *rmi_alloc_function(struct rmi_device *rmi_dev, u8 id)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(&rmi_dev->dev);
+	struct rmi_function *fn;
+
+	fn = kzalloc_flex(*fn, irq_mask, BITS_TO_LONGS(data->irq_count));
+	if (!fn)
+		return NULL;
+
+	device_initialize(&fn->dev);
+
+	dev_set_name(&fn->dev, "%s.fn%02x", dev_name(&rmi_dev->dev), id);
+
+	fn->dev.parent = &rmi_dev->dev;
+	fn->dev.type = &rmi_function_type;
+	fn->dev.bus = &rmi_bus_type;
+	fn->rmi_dev = rmi_dev;
+
+	return fn;
+}
+
 int rmi_register_function(struct rmi_function *fn)
 {
 	struct rmi_device *rmi_dev = fn->rmi_dev;
 	int error;
 
-	device_initialize(&fn->dev);
-
-	dev_set_name(&fn->dev, "%s.fn%02x",
-		     dev_name(&rmi_dev->dev), fn->fd.function_number);
-
-	fn->dev.parent = &rmi_dev->dev;
-	fn->dev.type = &rmi_function_type;
-	fn->dev.bus = &rmi_bus_type;
-
 	error = device_add(&fn->dev);
 	if (error) {
 		dev_err(&rmi_dev->dev,
-			"Failed device_register function device %s\n",
+			"Failed to register function device %s\n",
 			dev_name(&fn->dev));
-		goto err_put_device;
+		return error;
 	}
 
 	rmi_dbg(RMI_DEBUG_CORE, &rmi_dev->dev, "Registered F%02X.\n",
 			fn->fd.function_number);
 
 	return 0;
-
-err_put_device:
-	put_device(&fn->dev);
-	return error;
 }
 
 void rmi_unregister_function(struct rmi_function *fn)
@@ -360,6 +369,12 @@ static struct rmi_function_handler *fn_handlers[] = {
 #ifdef CONFIG_RMI4_F12
 	&rmi_f12_handler,
 #endif
+#ifdef CONFIG_RMI4_F1A
+	&rmi_f1a_handler,
+#endif
+#ifdef CONFIG_RMI4_F21
+	&rmi_f21_handler,
+#endif
 #ifdef CONFIG_RMI4_F30
 	&rmi_f30_handler,
 #endif
@@ -448,11 +463,13 @@ static int __init rmi_bus_init(void)
 	if (error) {
 		pr_err("%s: error registering the RMI physical driver: %d\n",
 			__func__, error);
-		goto err_unregister_bus;
+		goto err_unregister_function_handlers;
 	}
 
 	return 0;
 
+err_unregister_function_handlers:
+	rmi_unregister_function_handlers();
 err_unregister_bus:
 	bus_unregister(&rmi_bus_type);
 	return error;

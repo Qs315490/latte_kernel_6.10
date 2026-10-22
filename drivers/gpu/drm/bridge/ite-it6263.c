@@ -146,6 +146,7 @@
 #define  HDMI_COLOR_DEPTH_24		FIELD_PREP(HDMI_COLOR_DEPTH, 4)
 
 #define HDMI_REG_PKT_GENERAL_CTRL	0xc6
+#define HDMI_REG_PKT_NULL_CTRL		0xc9
 #define HDMI_REG_AVI_INFOFRM_CTRL	0xcd
 #define  ENABLE_PKT			BIT(0)
 #define  REPEAT_PKT			BIT(1)
@@ -153,6 +154,12 @@
 /* -----------------------------------------------------------------------------
  * 3) HDMI register bank1: 0x130 ~ 0x1ff (HDMI packet registers)
  */
+
+/* NULL packet registers */
+/* Header Byte(HB): n = 0 ~ 2 */
+#define HDMI_REG_PKT_HB(n)		(0x138 + (n))
+/* Packet Byte(PB): n = 0 ~ 27(HDMI_MAX_INFOFRAME_SIZE), n = 0 for checksum */
+#define HDMI_REG_PKT_PB(n)		(0x13b + (n))
 
 /* AVI packet registers */
 #define HDMI_REG_AVI_DB1		0x158
@@ -193,6 +200,7 @@ struct it6263 {
 	struct regmap *lvds_regmap;
 	struct drm_bridge bridge;
 	struct drm_bridge *next_bridge;
+	struct gpio_desc *reset_gpio;
 	int lvds_data_mapping;
 	bool lvds_dual_link;
 	bool lvds_link12_swap;
@@ -224,7 +232,9 @@ static bool it6263_hdmi_writeable_reg(struct device *dev, unsigned int reg)
 	case HDMI_REG_HDMI_MODE:
 	case HDMI_REG_GCP:
 	case HDMI_REG_PKT_GENERAL_CTRL:
+	case HDMI_REG_PKT_NULL_CTRL:
 	case HDMI_REG_AVI_INFOFRM_CTRL:
+	case HDMI_REG_PKT_HB(0) ... HDMI_REG_PKT_PB(HDMI_MAX_INFOFRAME_SIZE):
 	case HDMI_REG_AVI_DB1:
 	case HDMI_REG_AVI_DB2:
 	case HDMI_REG_AVI_DB3:
@@ -569,9 +579,8 @@ static int it6263_read_edid(void *data, u8 *buf, unsigned int block, size_t len)
 	return 0;
 }
 
-static void
-it6263_bridge_atomic_disable(struct drm_bridge *bridge,
-			     struct drm_bridge_state *old_bridge_state)
+static void it6263_bridge_atomic_disable(struct drm_bridge *bridge,
+					 struct drm_atomic_commit *state)
 {
 	struct it6263 *it = bridge_to_it6263(bridge);
 
@@ -581,11 +590,9 @@ it6263_bridge_atomic_disable(struct drm_bridge *bridge,
 		     AFE_DRV_RST | AFE_DRV_PWD);
 }
 
-static void
-it6263_bridge_atomic_enable(struct drm_bridge *bridge,
-			    struct drm_bridge_state *old_bridge_state)
+static void it6263_bridge_atomic_enable(struct drm_bridge *bridge,
+					struct drm_atomic_commit *state)
 {
-	struct drm_atomic_state *state = old_bridge_state->base.state;
 	struct it6263 *it = bridge_to_it6263(bridge);
 	const struct drm_crtc_state *crtc_state;
 	struct regmap *regmap = it->hdmi_regmap;
@@ -596,6 +603,15 @@ it6263_bridge_atomic_enable(struct drm_bridge *bridge,
 	unsigned int val;
 	bool pclk_high;
 	int i, ret;
+
+	it6263_hw_reset(it->reset_gpio);
+
+	ret = it6263_lvds_set_i2c_addr(it);
+	if (ret)
+		dev_err(it->dev, "failed to set I2C addr\n");
+
+	it6263_lvds_config(it);
+	it6263_hdmi_config(it);
 
 	connector = drm_atomic_get_new_connector_for_encoder(state,
 							     bridge->encoder);
@@ -660,7 +676,7 @@ it6263_bridge_mode_valid(struct drm_bridge *bridge,
 {
 	unsigned long long rate;
 
-	rate = drm_hdmi_compute_mode_clock(mode, 8, HDMI_COLORSPACE_RGB);
+	rate = drm_hdmi_compute_mode_clock(mode, 8, DRM_OUTPUT_COLOR_FORMAT_RGB444);
 	if (rate == 0)
 		return MODE_NOCLOCK;
 
@@ -668,13 +684,14 @@ it6263_bridge_mode_valid(struct drm_bridge *bridge,
 }
 
 static int it6263_bridge_attach(struct drm_bridge *bridge,
+				struct drm_encoder *encoder,
 				enum drm_bridge_attach_flags flags)
 {
 	struct it6263 *it = bridge_to_it6263(bridge);
 	struct drm_connector *connector;
 	int ret;
 
-	ret = drm_bridge_attach(bridge->encoder, it->next_bridge, bridge,
+	ret = drm_bridge_attach(encoder, it->next_bridge, bridge,
 				flags | DRM_BRIDGE_ATTACH_NO_CONNECTOR);
 	if (ret < 0)
 		return ret;
@@ -682,7 +699,7 @@ static int it6263_bridge_attach(struct drm_bridge *bridge,
 	if (flags & DRM_BRIDGE_ATTACH_NO_CONNECTOR)
 		return 0;
 
-	connector = drm_bridge_connector_init(bridge->dev, bridge->encoder);
+	connector = drm_bridge_connector_init(bridge->dev, encoder);
 	if (IS_ERR(connector)) {
 		ret = PTR_ERR(connector);
 		dev_err(it->dev, "failed to initialize bridge connector: %d\n",
@@ -690,12 +707,11 @@ static int it6263_bridge_attach(struct drm_bridge *bridge,
 		return ret;
 	}
 
-	drm_connector_attach_encoder(connector, bridge->encoder);
-
 	return 0;
 }
 
-static enum drm_connector_status it6263_bridge_detect(struct drm_bridge *bridge)
+static enum drm_connector_status
+it6263_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector)
 {
 	struct it6263 *it = bridge_to_it6263(bridge);
 
@@ -727,7 +743,7 @@ it6263_bridge_atomic_get_input_bus_fmts(struct drm_bridge *bridge,
 	if (!it6263_is_input_bus_fmt_valid(it->lvds_data_mapping))
 		return NULL;
 
-	input_fmts = kmalloc(sizeof(*input_fmts), GFP_KERNEL);
+	input_fmts = kmalloc_obj(*input_fmts);
 	if (!input_fmts)
 		return NULL;
 
@@ -751,30 +767,29 @@ it6263_hdmi_tmds_char_rate_valid(const struct drm_bridge *bridge,
 	return MODE_OK;
 }
 
-static int it6263_hdmi_clear_infoframe(struct drm_bridge *bridge,
-				       enum hdmi_infoframe_type type)
+static int it6263_hdmi_clear_avi_infoframe(struct drm_bridge *bridge)
 {
 	struct it6263 *it = bridge_to_it6263(bridge);
 
-	if (type == HDMI_INFOFRAME_TYPE_AVI)
-		regmap_write(it->hdmi_regmap, HDMI_REG_AVI_INFOFRM_CTRL, 0);
-	else
-		dev_dbg(it->dev, "unsupported HDMI infoframe 0x%x\n", type);
+	regmap_write(it->hdmi_regmap, HDMI_REG_AVI_INFOFRM_CTRL, 0);
 
 	return 0;
 }
 
-static int it6263_hdmi_write_infoframe(struct drm_bridge *bridge,
-				       enum hdmi_infoframe_type type,
-				       const u8 *buffer, size_t len)
+static int it6263_hdmi_clear_hdmi_infoframe(struct drm_bridge *bridge)
+{
+	struct it6263 *it = bridge_to_it6263(bridge);
+
+	regmap_write(it->hdmi_regmap, HDMI_REG_PKT_NULL_CTRL, 0);
+
+	return 0;
+}
+
+static int it6263_hdmi_write_avi_infoframe(struct drm_bridge *bridge,
+					   const u8 *buffer, size_t len)
 {
 	struct it6263 *it = bridge_to_it6263(bridge);
 	struct regmap *regmap = it->hdmi_regmap;
-
-	if (type != HDMI_INFOFRAME_TYPE_AVI) {
-		dev_dbg(it->dev, "unsupported HDMI infoframe 0x%x\n", type);
-		return 0;
-	}
 
 	/* write the first AVI infoframe data byte chunk(DB1-DB5) */
 	regmap_bulk_write(regmap, HDMI_REG_AVI_DB1,
@@ -790,7 +805,23 @@ static int it6263_hdmi_write_infoframe(struct drm_bridge *bridge,
 	/* write checksum */
 	regmap_write(regmap, HDMI_REG_AVI_CSUM, buffer[3]);
 
-	regmap_write(regmap, HDMI_REG_AVI_INFOFRM_CTRL, ENABLE_PKT | REPEAT_PKT);
+	regmap_write(regmap, HDMI_REG_AVI_INFOFRM_CTRL,
+		     ENABLE_PKT | REPEAT_PKT);
+
+	return 0;
+}
+
+static int it6263_hdmi_write_hdmi_infoframe(struct drm_bridge *bridge,
+					    const u8 *buffer, size_t len)
+{
+	struct it6263 *it = bridge_to_it6263(bridge);
+	struct regmap *regmap = it->hdmi_regmap;
+
+	/* write header and payload */
+	regmap_bulk_write(regmap, HDMI_REG_PKT_HB(0), buffer, len);
+
+	regmap_write(regmap, HDMI_REG_PKT_NULL_CTRL,
+		     ENABLE_PKT | REPEAT_PKT);
 
 	return 0;
 }
@@ -807,20 +838,22 @@ static const struct drm_bridge_funcs it6263_bridge_funcs = {
 	.edid_read = it6263_bridge_edid_read,
 	.atomic_get_input_bus_fmts = it6263_bridge_atomic_get_input_bus_fmts,
 	.hdmi_tmds_char_rate_valid = it6263_hdmi_tmds_char_rate_valid,
-	.hdmi_clear_infoframe = it6263_hdmi_clear_infoframe,
-	.hdmi_write_infoframe = it6263_hdmi_write_infoframe,
+	.hdmi_clear_avi_infoframe = it6263_hdmi_clear_avi_infoframe,
+	.hdmi_write_avi_infoframe = it6263_hdmi_write_avi_infoframe,
+	.hdmi_clear_hdmi_infoframe = it6263_hdmi_clear_hdmi_infoframe,
+	.hdmi_write_hdmi_infoframe = it6263_hdmi_write_hdmi_infoframe,
 };
 
 static int it6263_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
-	struct gpio_desc *reset_gpio;
 	struct it6263 *it;
 	int ret;
 
-	it = devm_kzalloc(dev, sizeof(*it), GFP_KERNEL);
-	if (!it)
-		return -ENOMEM;
+	it = devm_drm_bridge_alloc(dev, struct it6263, bridge,
+				   &it6263_bridge_funcs);
+	if (IS_ERR(it))
+		return PTR_ERR(it);
 
 	it->dev = dev;
 	it->hdmi_i2c = client;
@@ -831,9 +864,9 @@ static int it6263_probe(struct i2c_client *client)
 		return dev_err_probe(dev, PTR_ERR(it->hdmi_regmap),
 				     "failed to init I2C regmap for HDMI\n");
 
-	reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(reset_gpio))
-		return dev_err_probe(dev, PTR_ERR(reset_gpio),
+	it->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
+	if (IS_ERR(it->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(it->reset_gpio),
 				     "failed to get reset gpio\n");
 
 	ret = devm_regulator_bulk_get_enable(dev, ARRAY_SIZE(it6263_supplies),
@@ -844,12 +877,6 @@ static int it6263_probe(struct i2c_client *client)
 	ret = it6263_parse_dt(it);
 	if (ret)
 		return ret;
-
-	it6263_hw_reset(reset_gpio);
-
-	ret = it6263_lvds_set_i2c_addr(it);
-	if (ret)
-		return dev_err_probe(dev, ret, "failed to set I2C addr\n");
 
 	it->lvds_i2c = devm_i2c_new_dummy_device(dev, client->adapter,
 						 LVDS_INPUT_CTRL_I2C_ADDR);
@@ -863,12 +890,8 @@ static int it6263_probe(struct i2c_client *client)
 		return dev_err_probe(dev, PTR_ERR(it->lvds_regmap),
 				     "failed to init I2C regmap for LVDS\n");
 
-	it6263_lvds_config(it);
-	it6263_hdmi_config(it);
-
 	i2c_set_clientdata(client, it);
 
-	it->bridge.funcs = &it6263_bridge_funcs;
 	it->bridge.of_node = dev->of_node;
 	/* IT6263 chip doesn't support HPD interrupt. */
 	it->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID |

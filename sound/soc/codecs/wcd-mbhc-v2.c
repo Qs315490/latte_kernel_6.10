@@ -825,7 +825,6 @@ static int wcd_mbhc_initialise(struct wcd_mbhc *mbhc)
 
 	mutex_unlock(&mbhc->lock);
 
-	pm_runtime_mark_last_busy(component->dev);
 	pm_runtime_put_autosuspend(component->dev);
 
 	return 0;
@@ -1260,7 +1259,7 @@ correct_plug_type:
 			if (pt_gnd_mic_swap_cnt == mbhc->swap_thr) {
 				/* US_EU gpio present, flip switch */
 				if (mbhc->cfg->swap_gnd_mic) {
-					if (mbhc->cfg->swap_gnd_mic(component, true))
+					if (mbhc->cfg->swap_gnd_mic(component))
 						continue;
 				}
 			}
@@ -1319,7 +1318,6 @@ exit:
 	if (mbhc->mbhc_cb->hph_pull_down_ctrl)
 		mbhc->mbhc_cb->hph_pull_down_ctrl(component, true);
 
-	pm_runtime_mark_last_busy(component->dev);
 	pm_runtime_put_autosuspend(component->dev);
 }
 
@@ -1517,7 +1515,7 @@ struct wcd_mbhc *wcd_mbhc_init(struct snd_soc_component *component,
 		return ERR_PTR(-EINVAL);
 	}
 
-	mbhc = kzalloc(sizeof(*mbhc), GFP_KERNEL);
+	mbhc = kzalloc_obj(*mbhc);
 	if (!mbhc)
 		return ERR_PTR(-ENOMEM);
 
@@ -1632,18 +1630,6 @@ void wcd_mbhc_deinit(struct wcd_mbhc *mbhc)
 	kfree(mbhc);
 }
 EXPORT_SYMBOL(wcd_mbhc_deinit);
-
-static int __init mbhc_init(void)
-{
-	return 0;
-}
-
-static void __exit mbhc_exit(void)
-{
-}
-
-module_init(mbhc_init);
-module_exit(mbhc_exit);
 
 MODULE_DESCRIPTION("wcd MBHC v2 module");
 MODULE_LICENSE("GPL");

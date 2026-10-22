@@ -235,7 +235,6 @@ static int snd_pcm_ioctl_hw_params_compat(struct snd_pcm_substream *substream,
 					  int refine, 
 					  struct snd_pcm_hw_params32 __user *data32)
 {
-	struct snd_pcm_hw_params *data __free(kfree) = NULL;
 	struct snd_pcm_runtime *runtime;
 	int err;
 
@@ -243,7 +242,8 @@ static int snd_pcm_ioctl_hw_params_compat(struct snd_pcm_substream *substream,
 	if (!runtime)
 		return -ENOTTY;
 
-	data = kmalloc(sizeof(*data), GFP_KERNEL);
+	struct snd_pcm_hw_params *data __free(kfree) =
+		kmalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -293,7 +293,7 @@ static int snd_pcm_ioctl_xferi_compat(struct snd_pcm_substream *substream,
 		return -ENOTTY;
 	if (substream->stream != dir)
 		return -EINVAL;
-	if (substream->runtime->state == SNDRV_PCM_STATE_OPEN)
+	if (snd_pcm_get_state(substream) == SNDRV_PCM_STATE_OPEN)
 		return -EBADFD;
 
 	if (get_user(buf, &data32->buf) ||
@@ -332,14 +332,13 @@ static int snd_pcm_ioctl_xfern_compat(struct snd_pcm_substream *substream,
 	compat_caddr_t buf;
 	compat_caddr_t __user *bufptr;
 	u32 frames;
-	void __user **bufs __free(kfree) = NULL;
 	int err, ch, i;
 
 	if (! substream->runtime)
 		return -ENOTTY;
 	if (substream->stream != dir)
 		return -EINVAL;
-	if (substream->runtime->state == SNDRV_PCM_STATE_OPEN)
+	if (snd_pcm_get_state(substream) == SNDRV_PCM_STATE_OPEN)
 		return -EBADFD;
 
 	ch = substream->runtime->channels;
@@ -349,7 +348,9 @@ static int snd_pcm_ioctl_xfern_compat(struct snd_pcm_substream *substream,
 	    get_user(frames, &data32->frames))
 		return -EFAULT;
 	bufptr = compat_ptr(buf);
-	bufs = kmalloc_array(ch, sizeof(void __user *), GFP_KERNEL);
+
+	void __user **bufs __free(kfree) =
+		kmalloc_array(ch, sizeof(void __user *), GFP_KERNEL);
 	if (bufs == NULL)
 		return -ENOMEM;
 	for (i = 0; i < ch; i++) {
@@ -377,12 +378,10 @@ struct snd_pcm_mmap_status_x32 {
 	s32 pad1;
 	u32 hw_ptr;
 	u32 pad2; /* alignment */
-	s64 tstamp_sec;
-	s64 tstamp_nsec;
+	struct __snd_timespec64 tstamp;
 	snd_pcm_state_t suspended_state;
 	s32 pad3;
-	s64 audio_tstamp_sec;
-	s64 audio_tstamp_nsec;
+	struct __snd_timespec64 audio_tstamp;
 } __packed;
 
 struct snd_pcm_mmap_control_x32 {
@@ -418,9 +417,7 @@ static int snd_pcm_ioctl_sync_ptr_x32(struct snd_pcm_substream *substream,
 	if (snd_BUG_ON(!runtime))
 		return -EINVAL;
 
-	if (get_user(sflags, &src->flags) ||
-	    get_user(scontrol.appl_ptr, &src->c.control.appl_ptr) ||
-	    get_user(scontrol.avail_min, &src->c.control.avail_min))
+	if (snd_pcm_sync_ptr_get_user(sflags, scontrol, src))
 		return -EFAULT;
 	if (sflags & SNDRV_PCM_SYNC_PTR_HWSYNC) {
 		err = snd_pcm_hwsync(substream);
@@ -433,11 +430,13 @@ static int snd_pcm_ioctl_sync_ptr_x32(struct snd_pcm_substream *substream,
 	if (!boundary)
 		boundary = 0x7fffffff;
 	scoped_guard(pcm_stream_lock_irq, substream) {
-		/* FIXME: we should consider the boundary for the sync from app */
-		if (!(sflags & SNDRV_PCM_SYNC_PTR_APPL))
-			control->appl_ptr = scontrol.appl_ptr;
-		else
+		if (!(sflags & SNDRV_PCM_SYNC_PTR_APPL)) {
+			err = pcm_lib_apply_appl_ptr(substream, scontrol.appl_ptr);
+			if (err < 0)
+				return err;
+		} else {
 			scontrol.appl_ptr = control->appl_ptr % boundary;
+		}
 		if (!(sflags & SNDRV_PCM_SYNC_PTR_AVAIL_MIN))
 			control->avail_min = scontrol.avail_min;
 		else
@@ -450,15 +449,7 @@ static int snd_pcm_ioctl_sync_ptr_x32(struct snd_pcm_substream *substream,
 	}
 	if (!(sflags & SNDRV_PCM_SYNC_PTR_APPL))
 		snd_pcm_dma_buffer_sync(substream, SNDRV_DMA_SYNC_DEVICE);
-	if (put_user(sstatus.state, &src->s.status.state) ||
-	    put_user(sstatus.hw_ptr, &src->s.status.hw_ptr) ||
-	    put_user(sstatus.tstamp.tv_sec, &src->s.status.tstamp_sec) ||
-	    put_user(sstatus.tstamp.tv_nsec, &src->s.status.tstamp_nsec) ||
-	    put_user(sstatus.suspended_state, &src->s.status.suspended_state) ||
-	    put_user(sstatus.audio_tstamp.tv_sec, &src->s.status.audio_tstamp_sec) ||
-	    put_user(sstatus.audio_tstamp.tv_nsec, &src->s.status.audio_tstamp_nsec) ||
-	    put_user(scontrol.appl_ptr, &src->c.control.appl_ptr) ||
-	    put_user(scontrol.avail_min, &src->c.control.avail_min))
+	if (snd_pcm_sync_ptr_put_user(sstatus, scontrol, src))
 		return -EFAULT;
 
 	return 0;

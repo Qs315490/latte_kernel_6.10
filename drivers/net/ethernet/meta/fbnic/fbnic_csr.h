@@ -6,19 +6,36 @@
 
 #include <linux/bitops.h>
 
+struct fbnic_dev;
+
 #define CSR_BIT(nr)		(1u << (nr))
 #define CSR_GENMASK(h, l)	GENMASK(h, l)
 
 #define DESC_BIT(nr)		BIT_ULL(nr)
 #define DESC_GENMASK(h, l)	GENMASK_ULL(h, l)
 
+#define FW_VER_CODE(_major, _minor, _patch, _build) (		      \
+		FIELD_PREP(FBNIC_FW_CAP_RESP_VERSION_MAJOR, _major) | \
+		FIELD_PREP(FBNIC_FW_CAP_RESP_VERSION_MINOR, _minor) | \
+		FIELD_PREP(FBNIC_FW_CAP_RESP_VERSION_PATCH, _patch) | \
+		FIELD_PREP(FBNIC_FW_CAP_RESP_VERSION_BUILD, _build))
+
 /* Defines the minimum firmware version required by the driver */
-#define MIN_FW_MAJOR_VERSION    0
-#define MIN_FW_MINOR_VERSION    10
-#define MIN_FW_BUILD_VERSION    6
-#define MIN_FW_VERSION_CODE     (MIN_FW_MAJOR_VERSION * (1u << 24) + \
-				 MIN_FW_MINOR_VERSION * (1u << 16) + \
-				 MIN_FW_BUILD_VERSION)
+#define MIN_FW_VER_CODE				FW_VER_CODE(0, 10, 6, 0)
+
+/* Defines the minimum firmware version required for firmware logs */
+#define MIN_FW_VER_CODE_LOG			FW_VER_CODE(0, 12, 9, 0)
+
+/* Driver can request that firmware sends all cached logs in bulk. This
+ * feature was enabled on older firmware however firmware has a bug
+ * which attempted to send 30 messages per mbx message which caused an
+ * overflow flooding the mailbox. This results in a kernel warning
+ * related to corrupt mailbox messages.
+ *
+ * If firmware is new enough only request sending historical logs when
+ * the log buffer is empty to prevent duplicate logs.
+ */
+#define MIN_FW_VER_CODE_HIST			FW_VER_CODE(25, 5, 7, 0)
 
 #define PCI_DEVICE_ID_META_FBNIC_ASIC		0x0013
 
@@ -215,6 +232,7 @@ enum {
 #define FBNIC_INTR_MSIX_CTRL_VECTOR_MASK	CSR_GENMASK(7, 0)
 #define FBNIC_INTR_MSIX_CTRL_ENABLE		CSR_BIT(31)
 enum {
+	FBNIC_INTR_MSIX_CTRL_RXB_IDX	= 7,
 	FBNIC_INTR_MSIX_CTRL_PCS_IDX	= 34,
 };
 
@@ -397,6 +415,15 @@ enum {
 #define FBNIC_TCE_DROP_CTRL_TTI_FRM_DROP_EN	CSR_BIT(1)
 #define FBNIC_TCE_DROP_CTRL_TTI_TBI_DROP_EN	CSR_BIT(2)
 
+#define FBNIC_TCE_TTI_CM_DROP_PKTS	0x0403e		/* 0x100f8 */
+#define FBNIC_TCE_TTI_CM_DROP_BYTE_L	0x0403f		/* 0x100fc */
+#define FBNIC_TCE_TTI_CM_DROP_BYTE_H	0x04040		/* 0x10100 */
+#define FBNIC_TCE_TTI_FRAME_DROP_PKTS	0x04041		/* 0x10104 */
+#define FBNIC_TCE_TTI_FRAME_DROP_BYTE_L	0x04042		/* 0x10108 */
+#define FBNIC_TCE_TTI_FRAME_DROP_BYTE_H	0x04043		/* 0x1010c */
+#define FBNIC_TCE_TBI_DROP_PKTS		0x04044		/* 0x10110 */
+#define FBNIC_TCE_TBI_DROP_BYTE_L	0x04045		/* 0x10114 */
+
 #define FBNIC_TCE_TCAM_IDX2DEST_MAP	0x0404A		/* 0x10128 */
 #define FBNIC_TCE_TCAM_IDX2DEST_MAP_DEST_ID_0	CSR_GENMASK(3, 0)
 enum {
@@ -432,6 +459,31 @@ enum {
 #define FBNIC_TMI_SOP_PROT_CTRL		0x04400		/* 0x11000 */
 #define FBNIC_TMI_DROP_CTRL		0x04401		/* 0x11004 */
 #define FBNIC_TMI_DROP_CTRL_EN			CSR_BIT(0)
+#define FBNIC_TMI_DROP_PKTS		0x04402		/* 0x11008 */
+#define FBNIC_TMI_DROP_BYTE_L		0x04403		/* 0x1100c */
+#define FBNIC_TMI_ILLEGAL_PTP_REQS	0x04409		/* 0x11024 */
+#define FBNIC_TMI_GOOD_PTP_TS		0x0440a		/* 0x11028 */
+#define FBNIC_TMI_BAD_PTP_TS		0x0440b		/* 0x1102c */
+#define FBNIC_TMI_STAT_TX_PACKET_1519_2047_BYTES_L \
+					0x04433		/* 0x110cc */
+#define FBNIC_TMI_STAT_TX_PACKET_1519_2047_BYTES_H \
+					0x04434		/* 0x110d0 */
+#define FBNIC_TMI_STAT_TX_PACKET_2048_4095_BYTES_L \
+					0x04435		/* 0x110d4 */
+#define FBNIC_TMI_STAT_TX_PACKET_2048_4095_BYTES_H \
+					0x04436		/* 0x110d8 */
+#define FBNIC_TMI_STAT_TX_PACKET_4096_8191_BYTES_L \
+					0x04437		/* 0x110dc */
+#define FBNIC_TMI_STAT_TX_PACKET_4096_8191_BYTES_H \
+					0x04438		/* 0x110e0 */
+#define FBNIC_TMI_STAT_TX_PACKET_8192_9216_BYTES_L \
+					0x04439		/* 0x110e4 */
+#define FBNIC_TMI_STAT_TX_PACKET_8192_9216_BYTES_H \
+					0x0443a		/* 0x110e8 */
+#define FBNIC_TMI_STAT_TX_PACKET_9217_MAX_BYTES_L \
+					0x0443b		/* 0x110ec */
+#define FBNIC_TMI_STAT_TX_PACKET_9217_MAX_BYTES_H \
+					0x0443c		/* 0x110f0 */
 #define FBNIC_CSR_END_TMI		0x0443f	/* CSR section delimiter */
 
 /* Precision Time Protocol Registers */
@@ -459,7 +511,7 @@ enum {
 
 #define FBNIC_PTP_ADD_VAL_NS		0x04806		/* 0x12018 */
 #define FBNIC_PTP_ADD_VAL_NS_MASK		CSR_GENMASK(15, 0)
-#define FBNIC_PTP_ADD_VAL_SUBNS		0x04807	/* 0x1201c */
+#define FBNIC_PTP_ADD_VAL_SUBNS		0x04807		/* 0x1201c */
 
 #define FBNIC_PTP_CTR_VAL_HI		0x04808		/* 0x12020 */
 #define FBNIC_PTP_CTR_VAL_LO		0x04809		/* 0x12024 */
@@ -485,6 +537,14 @@ enum {
 	FBNIC_RXB_FIFO_INDICES		= 8
 };
 
+enum {
+	FBNIC_RXB_INTF_NET = 0,
+	FBNIC_RXB_INTF_RBT = 1,
+	/* Unused */
+	/* Unused */
+	FBNIC_RXB_INTF_INDICES	= 4
+};
+
 #define FBNIC_RXB_CT_SIZE(n)		(0x08000 + (n))	/* 0x20000 + 4*n */
 #define FBNIC_RXB_CT_SIZE_CNT			8
 #define FBNIC_RXB_CT_SIZE_HEADER		CSR_GENMASK(5, 0)
@@ -503,6 +563,11 @@ enum {
 #define FBNIC_RXB_DROP_THLD_CNT			8
 #define FBNIC_RXB_DROP_THLD_ON			CSR_GENMASK(12, 0)
 #define FBNIC_RXB_DROP_THLD_OFF			CSR_GENMASK(25, 13)
+#define FBNIC_RXB_PAUSE_STORM(n)	(0x08019 + (n)) /* 0x20064 + 4*n */
+#define FBNIC_RXB_PAUSE_STORM_CNT		4
+#define FBNIC_RXB_PAUSE_STORM_FORCE_NORMAL	CSR_BIT(20)
+#define FBNIC_RXB_PAUSE_STORM_THLD_TIME		CSR_GENMASK(19, 0)
+#define FBNIC_RXB_PAUSE_STORM_UNIT_WR	0x0801d		/* 0x20074 */
 #define FBNIC_RXB_ECN_THLD(n)		(0x0801e + (n)) /* 0x20078 + 4*n */
 #define FBNIC_RXB_ECN_THLD_CNT			8
 #define FBNIC_RXB_ECN_THLD_ON			CSR_GENMASK(12, 0)
@@ -539,6 +604,9 @@ enum {
 #define FBNIC_RXB_INTF_CREDIT_MASK2		CSR_GENMASK(11, 8)
 #define FBNIC_RXB_INTF_CREDIT_MASK3		CSR_GENMASK(15, 12)
 
+#define FBNIC_RXB_ERR_INTR_STS		0x08050		/* 0x20140 */
+#define FBNIC_RXB_ERR_INTR_STS_PS		CSR_GENMASK(15, 12)
+#define FBNIC_RXB_ERR_INTR_MASK		0x08052		/* 0x20148 */
 #define FBNIC_RXB_PAUSE_EVENT_CNT(n)	(0x08053 + (n))	/* 0x2014c + 4*n */
 #define FBNIC_RXB_DROP_FRMS_STS(n)	(0x08057 + (n))	/* 0x2015c + 4*n */
 #define FBNIC_RXB_DROP_BYTES_STS_L(n) \
@@ -561,6 +629,7 @@ enum {
 	FBNIC_RXB_ENQUEUE_INDICES	= 4
 };
 
+#define FBNIC_RXB_INTR_PS_COUNT(n)	(0x080e9 + (n))	/* 0x203a4 + 4*n */
 #define FBNIC_RXB_DRBO_FRM_CNT_SRC(n)	(0x080f9 + (n))	/* 0x203e4 + 4*n */
 #define FBNIC_RXB_DRBO_BYTE_CNT_SRC_L(n) \
 					(0x080fd + (n))	/* 0x203f4 + 4*n */
@@ -579,6 +648,7 @@ enum {
 
 #define FBNIC_RXB_PBUF_FIFO_LEVEL(n)	(0x0811d + (n)) /* 0x20474 + 4*n */
 
+#define FBNIC_RXB_PAUSE_STORM_UNIT_RD	0x08125		/* 0x20494 */
 #define FBNIC_RXB_INTEGRITY_ERR(n)	(0x0812f + (n))	/* 0x204bc + 4*n */
 #define FBNIC_RXB_MAC_ERR(n)		(0x08133 + (n))	/* 0x204cc + 4*n */
 #define FBNIC_RXB_PARSER_ERR(n)		(0x08137 + (n))	/* 0x204dc + 4*n */
@@ -605,8 +675,11 @@ enum {
 	FBNIC_RPC_ACT_TBL0_DEST_EI	= 4,
 };
 
+#define FBNIC_RPC_ACT_TBL0_Q_SEL		CSR_BIT(4)
+#define FBNIC_RPC_ACT_TBL0_Q_ID			CSR_GENMASK(15, 8)
 #define FBNIC_RPC_ACT_TBL0_DMA_HINT		CSR_GENMASK(24, 16)
 #define FBNIC_RPC_ACT_TBL0_TS_ENA		CSR_BIT(28)
+#define FBNIC_RPC_ACT_TBL0_ACT_TBL_IDX		CSR_BIT(29)
 #define FBNIC_RPC_ACT_TBL0_RSS_CTXT_ID		CSR_BIT(30)
 
 #define FBNIC_RPC_ACT_TBL1_DEFAULT	0x0840b		/* 0x2102c */
@@ -649,6 +722,26 @@ enum {
 #define FBNIC_RPC_CNTR_OVR_SIZE_ERR	0x084a6		/* 0x21298 */
 
 #define FBNIC_RPC_TCAM_MACDA_VALIDATE	0x0852d		/* 0x214b4 */
+#define FBNIC_RPC_STAT_RX_PACKET_1519_2047_BYTES_L \
+					0x0855f		/* 0x2157c */
+#define FBNIC_RPC_STAT_RX_PACKET_1519_2047_BYTES_H \
+					0x08560		/* 0x21580 */
+#define FBNIC_RPC_STAT_RX_PACKET_2048_4095_BYTES_L \
+					0x08561		/* 0x21584 */
+#define FBNIC_RPC_STAT_RX_PACKET_2048_4095_BYTES_H \
+					0x08562		/* 0x21588 */
+#define FBNIC_RPC_STAT_RX_PACKET_4096_8191_BYTES_L \
+					0x08563		/* 0x2158c */
+#define FBNIC_RPC_STAT_RX_PACKET_4096_8191_BYTES_H \
+					0x08564		/* 0x21590 */
+#define FBNIC_RPC_STAT_RX_PACKET_8192_9216_BYTES_L \
+					0x08565		/* 0x21594 */
+#define FBNIC_RPC_STAT_RX_PACKET_8192_9216_BYTES_H \
+					0x08566		/* 0x21598 */
+#define FBNIC_RPC_STAT_RX_PACKET_9217_MAX_BYTES_L \
+					0x08567		/* 0x2159c */
+#define FBNIC_RPC_STAT_RX_PACKET_9217_MAX_BYTES_H \
+					0x08568		/* 0x215a0 */
 #define FBNIC_CSR_END_RPC		0x0856b	/* CSR section delimiter */
 
 /* RPC RAM Registers */
@@ -677,6 +770,9 @@ enum {
 
 #define FBNIC_RPC_TCAM_OUTER_IPSRC(m, n)\
 	(0x08c00 + 0x08 * (n) + (m))		/* 0x023000 + 32*n + 4*m */
+#define FBNIC_RPC_TCAM_IP_ADDR_VALUE		CSR_GENMASK(15, 0)
+#define FBNIC_RPC_TCAM_IP_ADDR_MASK		CSR_GENMASK(31, 16)
+
 #define FBNIC_RPC_TCAM_OUTER_IPDST(m, n)\
 	(0x08c48 + 0x08 * (n) + (m))		/* 0x023120 + 32*n + 4*m */
 #define FBNIC_RPC_TCAM_IPSRC(m, n)\
@@ -704,9 +800,27 @@ enum {
 
 /* MAC PCS registers */
 #define FBNIC_CSR_START_PCS		0x10000 /* CSR section delimiter */
+#define FBNIC_PCS_PAGE(n)	(0x10000 + 0x400 * (n))	/* 0x40000 + 1024*n */
+#define FBNIC_PCS(reg, n)	((reg) + FBNIC_PCS_PAGE(n))
 #define FBNIC_CSR_END_PCS		0x10668 /* CSR section delimiter */
 
 #define FBNIC_CSR_START_RSFEC		0x10800 /* CSR section delimiter */
+#define FBNIC_RSFEC_CONTROL(n)	(0x10800 + 8 * (n))	/* 0x42000 + 32*n */
+
+/* We have 4 RSFEC engines present in our part, however we are only using 1.
+ * As such only CCW(0) and NCCW(0) will never be non-zero and the other
+ * registers can be ignored.
+ */
+#define FBNIC_RSFEC_CCW_LO(n)	(0x10802 + 8 * (n))	/* 0x42008 + 32*n */
+#define FBNIC_RSFEC_CCW_HI(n)	(0x10803 + 8 * (n))	/* 0x4200c + 32*n */
+#define FBNIC_RSFEC_NCCW_LO(n)	(0x10804 + 8 * (n))	/* 0x42010 + 32*n */
+#define FBNIC_RSFEC_NCCW_HI(n)	(0x10805 + 8 * (n))	/* 0x42014 + 32*n */
+
+#define FBNIC_PCS_MAX_LANES			4
+#define FBNIC_PCS_SYMBLERR_LO(n) \
+				(0x10880 + 2 * (n))	/* 0x42200 + 8*n */
+#define FBNIC_PCS_SYMBLERR_HI(n) \
+				(0x10881 + 2 * (n))	/* 0x42204 + 8*n */
 #define FBNIC_CSR_END_RSFEC		0x108c8 /* CSR section delimiter */
 
 /* MAC MAC registers (ASIC only) */
@@ -746,18 +860,18 @@ enum {
 #define FBNIC_CSR_END_SIG		0x1184e /* CSR section delimiter */
 
 #define FBNIC_CSR_START_MAC_STAT	0x11a00
+#define FBNIC_MAC_STAT_RX_XOFF_STB_L	0x11a00		/* 0x46800 */
+#define FBNIC_MAC_STAT_RX_XOFF_STB_H	0x11a01		/* 0x46804 */
+#define FBNIC_MAC_STAT_TX_XOFF_STB_L	0x11a04		/* 0x46810 */
+#define FBNIC_MAC_STAT_TX_XOFF_STB_H	0x11a05		/* 0x46814 */
 #define FBNIC_MAC_STAT_RX_BYTE_COUNT_L	0x11a08		/* 0x46820 */
 #define FBNIC_MAC_STAT_RX_BYTE_COUNT_H	0x11a09		/* 0x46824 */
-#define FBNIC_MAC_STAT_RX_ALIGN_ERROR_L \
-					0x11a0a		/* 0x46828 */
-#define FBNIC_MAC_STAT_RX_ALIGN_ERROR_H \
-					0x11a0b		/* 0x4682c */
+#define FBNIC_MAC_STAT_RX_ALIGN_ERROR_L	0x11a0a		/* 0x46828 */
+#define FBNIC_MAC_STAT_RX_ALIGN_ERROR_H	0x11a0b		/* 0x4682c */
 #define FBNIC_MAC_STAT_RX_TOOLONG_L	0x11a0e		/* 0x46838 */
 #define FBNIC_MAC_STAT_RX_TOOLONG_H	0x11a0f		/* 0x4683c */
-#define FBNIC_MAC_STAT_RX_RECEIVED_OK_L	\
-					0x11a12		/* 0x46848 */
-#define FBNIC_MAC_STAT_RX_RECEIVED_OK_H	\
-					0x11a13		/* 0x4684c */
+#define FBNIC_MAC_STAT_RX_RECEIVED_OK_L	0x11a12		/* 0x46848 */
+#define FBNIC_MAC_STAT_RX_RECEIVED_OK_H	0x11a13		/* 0x4684c */
 #define FBNIC_MAC_STAT_RX_PACKET_BAD_FCS_L \
 					0x11a14		/* 0x46850 */
 #define FBNIC_MAC_STAT_RX_PACKET_BAD_FCS_H \
@@ -768,27 +882,150 @@ enum {
 #define FBNIC_MAC_STAT_RX_MULTICAST_H	0x11a1d		/* 0x46874 */
 #define FBNIC_MAC_STAT_RX_BROADCAST_L	0x11a1e		/* 0x46878 */
 #define FBNIC_MAC_STAT_RX_BROADCAST_H	0x11a1f		/* 0x4687c */
+#define FBNIC_MAC_STAT_RX_UNDERSIZE_L	0x11a24		/* 0x46890 */
+#define FBNIC_MAC_STAT_RX_UNDERSIZE_H	0x11a25		/* 0x46894 */
+#define FBNIC_MAC_STAT_RX_PACKET_64_BYTES_L \
+					0x11a26		/* 0x46898 */
+#define FBNIC_MAC_STAT_RX_PACKET_64_BYTES_H \
+					0x11a27		/* 0x4689c */
+#define FBNIC_MAC_STAT_RX_PACKET_65_127_BYTES_L \
+					0x11a28		/* 0x468a0 */
+#define FBNIC_MAC_STAT_RX_PACKET_65_127_BYTES_H \
+					0x11a29		/* 0x468a4 */
+#define FBNIC_MAC_STAT_RX_PACKET_128_255_BYTES_L \
+					0x11a2a		/* 0x468a8 */
+#define FBNIC_MAC_STAT_RX_PACKET_128_255_BYTES_H \
+					0x11a2b		/* 0x468ac */
+#define FBNIC_MAC_STAT_RX_PACKET_256_511_BYTES_L \
+					0x11a2c		/* 0x468b0 */
+#define FBNIC_MAC_STAT_RX_PACKET_256_511_BYTES_H \
+					0x11a2d		/* 0x468b4 */
+#define FBNIC_MAC_STAT_RX_PACKET_512_1023_BYTES_L \
+					0x11a2e		/* 0x468b8 */
+#define FBNIC_MAC_STAT_RX_PACKET_512_1023_BYTES_H \
+					0x11a2f		/* 0x468bc */
+#define FBNIC_MAC_STAT_RX_PACKET_1024_1518_BYTES_L \
+					0x11a30		/* 0x468c0 */
+#define FBNIC_MAC_STAT_RX_PACKET_1024_1518_BYTES_H \
+					0x11a31		/* 0x468c4 */
+#define FBNIC_MAC_STAT_RX_PACKET_1519_MAX_BYTES_L \
+					0x11a32		/* 0x468c8 */
+#define FBNIC_MAC_STAT_RX_PACKET_1519_MAX_BYTES_H \
+					0x11a33		/* 0x468cc */
+#define FBNIC_MAC_STAT_RX_OVERSIZE_L	0x11a34		/* 0x468d0 */
+#define FBNIC_MAC_STAT_RX_OVERSSIZE_H	0x11a35		/* 0x468d4 */
+#define FBNIC_MAC_STAT_RX_JABBER_L	0x11a36		/* 0x468d8 */
+#define FBNIC_MAC_STAT_RX_JABBER_H	0x11a37		/* 0x468dc */
+#define FBNIC_MAC_STAT_RX_FRAGMENT_L	0x11a38		/* 0x468e0 */
+#define FBNIC_MAC_STAT_RX_FRAGMENT_H	0x11a39		/* 0x468e4 */
+#define FBNIC_MAC_STAT_RX_CONTROL_FRAMES_L \
+					0x11a3c		/* 0x468f0 */
+#define FBNIC_MAC_STAT_RX_CONTROL_FRAMES_H \
+					0x11a3d		/* 0x468f4 */
 #define FBNIC_MAC_STAT_TX_BYTE_COUNT_L	0x11a3e		/* 0x468f8 */
 #define FBNIC_MAC_STAT_TX_BYTE_COUNT_H	0x11a3f		/* 0x468fc */
 #define FBNIC_MAC_STAT_TX_TRANSMITTED_OK_L \
 					0x11a42		/* 0x46908 */
 #define FBNIC_MAC_STAT_TX_TRANSMITTED_OK_H \
 					0x11a43		/* 0x4690c */
-#define FBNIC_MAC_STAT_TX_IFOUTERRORS_L \
-					0x11a46		/* 0x46918 */
-#define FBNIC_MAC_STAT_TX_IFOUTERRORS_H \
-					0x11a47		/* 0x4691c */
+#define FBNIC_MAC_STAT_TX_IFOUTERRORS_L	0x11a46		/* 0x46918 */
+#define FBNIC_MAC_STAT_TX_IFOUTERRORS_H	0x11a47		/* 0x4691c */
 #define FBNIC_MAC_STAT_TX_MULTICAST_L	0x11a4a		/* 0x46928 */
 #define FBNIC_MAC_STAT_TX_MULTICAST_H	0x11a4b		/* 0x4692c */
 #define FBNIC_MAC_STAT_TX_BROADCAST_L	0x11a4c		/* 0x46930 */
 #define FBNIC_MAC_STAT_TX_BROADCAST_H	0x11a4d		/* 0x46934 */
+#define FBNIC_MAC_STAT_TX_PACKET_64_BYTES_L \
+					0x11a4e		/* 0x46938 */
+#define FBNIC_MAC_STAT_TX_PACKET_64_BYTES_H \
+					0x11a4f		/* 0x4693c */
+#define FBNIC_MAC_STAT_TX_PACKET_65_127_BYTES_L \
+					0x11a50		/* 0x46940 */
+#define FBNIC_MAC_STAT_TX_PACKET_65_127_BYTES_H \
+					0x11a51		/* 0x46944 */
+#define FBNIC_MAC_STAT_TX_PACKET_128_255_BYTES_L \
+					0x11a52		/* 0x46948 */
+#define FBNIC_MAC_STAT_TX_PACKET_128_255_BYTES_H \
+					0x11a53		/* 0x4694c */
+#define FBNIC_MAC_STAT_TX_PACKET_256_511_BYTES_L \
+					0x11a54		/* 0x46950 */
+#define FBNIC_MAC_STAT_TX_PACKET_256_511_BYTES_H \
+					0x11a55		/* 0x46954 */
+#define FBNIC_MAC_STAT_TX_PACKET_512_1023_BYTES_L \
+					0x11a56		/* 0x46958 */
+#define FBNIC_MAC_STAT_TX_PACKET_512_1023_BYTES_H \
+					0x11a57		/* 0x4695c */
+#define FBNIC_MAC_STAT_TX_PACKET_1024_1518_BYTES_L \
+					0x11a58		/* 0x46960 */
+#define FBNIC_MAC_STAT_TX_PACKET_1024_1518_BYTES_H \
+					0x11a59		/* 0x46964 */
+#define FBNIC_MAC_STAT_TX_PACKET_1519_MAX_BYTES_L \
+					0x11a5a		/* 0x46968 */
+#define FBNIC_MAC_STAT_TX_PACKET_1519_MAX_BYTES_H \
+					0x11a5b		/* 0x4696c */
+#define FBNIC_MAC_STAT_TX_CONTROL_FRAMES_L \
+					0x11a5e		/* 0x46978 */
+#define FBNIC_MAC_STAT_TX_CONTROL_FRAMES_H \
+					0x11a5f		/* 0x4697c */
+
+/* PCIE Comphy Registers */
+#define FBNIC_CSR_START_PCIE_SS_COMPHY	0x2442e /* CSR section delimiter */
+#define FBNIC_CSR_END_PCIE_SS_COMPHY	0x279d7	/* CSR section delimiter */
+
 /* PUL User Registers */
 #define FBNIC_CSR_START_PUL_USER	0x31000	/* CSR section delimiter */
 #define FBNIC_PUL_OB_TLP_HDR_AW_CFG	0x3103d		/* 0xc40f4 */
+#define FBNIC_PUL_OB_TLP_HDR_AW_CFG_FLUSH	CSR_BIT(19)
 #define FBNIC_PUL_OB_TLP_HDR_AW_CFG_BME		CSR_BIT(18)
+#define FBNIC_PUL_OB_TLP_HDR_AW_CFG_RDE_ATTR	CSR_GENMASK(17, 15)
+#define FBNIC_PUL_OB_TLP_HDR_AW_CFG_RQM_ATTR	CSR_GENMASK(14, 12)
+#define FBNIC_PUL_OB_TLP_HDR_AW_CFG_TQM_ATTR	CSR_GENMASK(11, 9)
+enum {
+	FBNIC_TLP_ATTR_NS	= 1,
+	FBNIC_TLP_ATTR_RO	= 2,
+	FBNIC_TLP_ATTR_IDO	= 4,
+};
+
 #define FBNIC_PUL_OB_TLP_HDR_AR_CFG	0x3103e		/* 0xc40f8 */
+#define FBNIC_PUL_OB_TLP_HDR_AR_CFG_FLUSH	CSR_BIT(19)
 #define FBNIC_PUL_OB_TLP_HDR_AR_CFG_BME		CSR_BIT(18)
-#define FBNIC_CSR_END_PUL_USER	0x31080	/* CSR section delimiter */
+#define FBNIC_PUL_OB_TLP_HDR_AR_CFG_TDE_ATTR	CSR_GENMASK(17, 15)
+#define FBNIC_PUL_OB_TLP_HDR_AR_CFG_RQM_ATTR	CSR_GENMASK(14, 12)
+#define FBNIC_PUL_OB_TLP_HDR_AR_CFG_TQM_ATTR	CSR_GENMASK(11, 9)
+#define FBNIC_PUL_USER_OB_RD_TLP_CNT_31_0 \
+					0x3106e		/* 0xc41b8 */
+#define FBNIC_PUL_USER_OB_RD_DWORD_CNT_31_0 \
+					0x31070		/* 0xc41c0 */
+#define FBNIC_PUL_USER_OB_RD_DWORD_CNT_63_32 \
+					0x31071		/* 0xc41c4 */
+#define FBNIC_PUL_USER_OB_WR_TLP_CNT_31_0 \
+					0x31072		/* 0xc41c8 */
+#define FBNIC_PUL_USER_OB_WR_TLP_CNT_63_32 \
+					0x31073		/* 0xc41cc */
+#define FBNIC_PUL_USER_OB_WR_DWORD_CNT_31_0 \
+					0x31074		/* 0xc41d0 */
+#define FBNIC_PUL_USER_OB_WR_DWORD_CNT_63_32 \
+					0x31075		/* 0xc41d4 */
+#define FBNIC_PUL_USER_OB_CPL_TLP_CNT_31_0 \
+					0x31076		/* 0xc41d8 */
+#define FBNIC_PUL_USER_OB_CPL_TLP_CNT_63_32 \
+					0x31077		/* 0xc41dc */
+#define FBNIC_PUL_USER_OB_CPL_DWORD_CNT_31_0 \
+					0x31078		/* 0xc41e0 */
+#define FBNIC_PUL_USER_OB_CPL_DWORD_CNT_63_32 \
+					0x31079		/* 0xc41e4 */
+#define FBNIC_PUL_USER_OB_RD_DBG_CNT_CPL_CRED_31_0 \
+					0x3107a		/* 0xc41e8 */
+#define FBNIC_PUL_USER_OB_RD_DBG_CNT_CPL_CRED_63_32 \
+					0x3107b		/* 0xc41ec */
+#define FBNIC_PUL_USER_OB_RD_DBG_CNT_TAG_31_0 \
+					0x3107c		/* 0xc41f0 */
+#define FBNIC_PUL_USER_OB_RD_DBG_CNT_TAG_63_32 \
+					0x3107d		/* 0xc41f4 */
+#define FBNIC_PUL_USER_OB_RD_DBG_CNT_NP_CRED_31_0 \
+					0x3107e		/* 0xc41f8 */
+#define FBNIC_PUL_USER_OB_RD_DBG_CNT_NP_CRED_63_32 \
+					0x3107f		/* 0xc41fc */
+#define FBNIC_CSR_END_PUL_USER		0x310ea	/* CSR section delimiter */
 
 /* Queue Registers
  *
@@ -808,6 +1045,9 @@ enum {
 #define FBNIC_QUEUE_TWQ_CTL_ENABLE		CSR_BIT(1)
 #define FBNIC_QUEUE_TWQ0_TAIL		0x002		/* 0x008 */
 #define FBNIC_QUEUE_TWQ1_TAIL		0x003		/* 0x00c */
+#define FBNIC_QUEUE_TWQ0_PTRS		0x004		/* 0x010 */
+#define FBNIC_QUEUE_TWQ1_PTRS		0x005		/* 0x014 */
+#define FBNIC_QUEUE_TWQ_PTRS_HEAD_MASK		CSR_GENMASK(31, 16)
 
 #define FBNIC_QUEUE_TWQ0_SIZE		0x00a		/* 0x028 */
 #define FBNIC_QUEUE_TWQ1_SIZE		0x00b		/* 0x02c */
@@ -819,12 +1059,20 @@ enum {
 #define FBNIC_QUEUE_TWQ1_BAL		0x022		/* 0x088 */
 #define FBNIC_QUEUE_TWQ1_BAH		0x023		/* 0x08c */
 
+/* Tx Work Queue Statistics Registers */
+#define FBNIC_QUEUE_TWQ0_PKT_CNT	0x062		/* 0x188 */
+#define FBNIC_QUEUE_TWQ0_ERR_CNT	0x063		/* 0x18c */
+#define FBNIC_QUEUE_TWQ1_PKT_CNT	0x072		/* 0x1c8 */
+#define FBNIC_QUEUE_TWQ1_ERR_CNT	0x073		/* 0x1cc */
+
 /* Tx Completion Queue Registers */
 #define FBNIC_QUEUE_TCQ_CTL		0x080		/* 0x200 */
 #define FBNIC_QUEUE_TCQ_CTL_RESET		CSR_BIT(0)
 #define FBNIC_QUEUE_TCQ_CTL_ENABLE		CSR_BIT(1)
 
 #define FBNIC_QUEUE_TCQ_HEAD		0x081		/* 0x204 */
+#define FBNIC_QUEUE_TCQ_PTRS		0x082		/* 0x208 */
+#define FBNIC_QUEUE_TCQ_PTRS_TAIL_MASK		CSR_GENMASK(31, 16)
 
 #define FBNIC_QUEUE_TCQ_SIZE		0x084		/* 0x210 */
 #define FBNIC_QUEUE_TCQ_SIZE_MASK		CSR_GENMASK(3, 0)
@@ -858,6 +1106,9 @@ enum {
 #define FBNIC_QUEUE_RCQ_CTL_ENABLE		CSR_BIT(1)
 
 #define FBNIC_QUEUE_RCQ_HEAD		0x201		/* 0x804 */
+#define FBNIC_QUEUE_RCQ_PTRS		0x202		/* 0x808 */
+#define FBNIC_QUEUE_RCQ_PTRS_TAIL_MASK		CSR_GENMASK(31, 16)
+#define FBNIC_QUEUE_RCQ_PTRS_HEAD_MASK		CSR_GENMASK(15, 0)
 
 #define FBNIC_QUEUE_RCQ_SIZE		0x204		/* 0x810 */
 #define FBNIC_QUEUE_RCQ_SIZE_MASK		CSR_GENMASK(3, 0)
@@ -873,6 +1124,10 @@ enum {
 
 #define FBNIC_QUEUE_BDQ_HPQ_TAIL	0x241		/* 0x904 */
 #define FBNIC_QUEUE_BDQ_PPQ_TAIL	0x242		/* 0x908 */
+#define FBNIC_QUEUE_BDQ_HPQ_PTRS	0x243		/* 0x90c */
+#define FBNIC_QUEUE_BDQ_PPQ_PTRS	0x244		/* 0x910 */
+#define FBNIC_QUEUE_BDQ_PTRS_HEAD_MASK		CSR_GENMASK(31, 16)
+#define FBNIC_QUEUE_BDQ_PTRS_TAIL_MASK		CSR_GENMASK(15, 0)
 
 #define FBNIC_QUEUE_BDQ_HPQ_SIZE	0x247		/* 0x91c */
 #define FBNIC_QUEUE_BDQ_PPQ_SIZE	0x248		/* 0x920 */
@@ -908,6 +1163,12 @@ enum {
 	FBNIC_QUEUE_RDE_CTL1_PAYLD_PACK_RSS	= 2,
 };
 
+/* Rx Per CQ Statistics Counters */
+#define FBNIC_QUEUE_RDE_PKT_CNT		0x2a2		/* 0xa88 */
+#define FBNIC_QUEUE_RDE_PKT_ERR_CNT	0x2a3		/* 0xa8c */
+#define FBNIC_QUEUE_RDE_CQ_DROP_CNT	0x2a4		/* 0xa90 */
+#define FBNIC_QUEUE_RDE_BDQ_DROP_CNT	0x2a5		/* 0xa94 */
+
 /* Rx Interrupt Manager Registers */
 #define FBNIC_QUEUE_RIM_CTL		0x2c0		/* 0xb00 */
 #define FBNIC_QUEUE_RIM_CTL_MSIX_MASK		CSR_GENMASK(7, 0)
@@ -927,43 +1188,6 @@ enum {
 #define FBNIC_QUEUE_RIM_TIMER_MASK		CSR_GENMASK(13, 0)
 #define FBNIC_MAX_QUEUES		128
 #define FBNIC_CSR_END_QUEUE	(0x40000 + 0x400 * FBNIC_MAX_QUEUES - 1)
-
-/* PUL User Registers*/
-#define FBNIC_PUL_USER_OB_RD_TLP_CNT_31_0 \
-					0x3106e		/* 0xc41b8 */
-#define FBNIC_PUL_USER_OB_RD_DWORD_CNT_31_0 \
-					0x31070		/* 0xc41c0 */
-#define FBNIC_PUL_USER_OB_RD_DWORD_CNT_63_32 \
-					0x31071		/* 0xc41c4 */
-#define FBNIC_PUL_USER_OB_WR_TLP_CNT_31_0 \
-					0x31072		/* 0xc41c8 */
-#define FBNIC_PUL_USER_OB_WR_TLP_CNT_63_32 \
-					0x31073		/* 0xc41cc */
-#define FBNIC_PUL_USER_OB_WR_DWORD_CNT_31_0 \
-					0x31074		/* 0xc41d0 */
-#define FBNIC_PUL_USER_OB_WR_DWORD_CNT_63_32 \
-					0x31075		/* 0xc41d4 */
-#define FBNIC_PUL_USER_OB_CPL_TLP_CNT_31_0 \
-					0x31076		/* 0xc41d8 */
-#define FBNIC_PUL_USER_OB_CPL_TLP_CNT_63_32 \
-					0x31077		/* 0xc41dc */
-#define FBNIC_PUL_USER_OB_CPL_DWORD_CNT_31_0 \
-					0x31078		/* 0xc41e0 */
-#define FBNIC_PUL_USER_OB_CPL_DWORD_CNT_63_32 \
-					0x31079		/* 0xc41e4 */
-#define FBNIC_PUL_USER_OB_RD_DBG_CNT_CPL_CRED_31_0 \
-					0x3107a		/* 0xc41e8 */
-#define FBNIC_PUL_USER_OB_RD_DBG_CNT_CPL_CRED_63_32 \
-					0x3107b		/* 0xc41ec */
-#define FBNIC_PUL_USER_OB_RD_DBG_CNT_TAG_31_0 \
-					0x3107c		/* 0xc41f0 */
-#define FBNIC_PUL_USER_OB_RD_DBG_CNT_TAG_63_32 \
-					0x3107d		/* 0xc41f4 */
-#define FBNIC_PUL_USER_OB_RD_DBG_CNT_NP_CRED_31_0 \
-					0x3107e		/* 0xc41f8 */
-#define FBNIC_PUL_USER_OB_RD_DBG_CNT_NP_CRED_63_32 \
-					0x3107f		/* 0xc41fc */
-#define FBNIC_CSR_END_PUL_USER	0x31080	/* CSR section delimiter */
 
 /* BAR 4 CSRs */
 
@@ -993,5 +1217,40 @@ enum {
 #define FBNIC_IPC_MBX_DESC_ADDR_MASK	DESC_GENMASK(45, 3)
 #define FBNIC_IPC_MBX_DESC_FW_CMPL	DESC_BIT(1)
 #define FBNIC_IPC_MBX_DESC_HOST_CMPL	DESC_BIT(0)
+
+/* OTP Registers
+ * These registers are accessible via bar4 offset and are written by CMRT
+ * on boot. For the write status, the register is broken up in half with OTP
+ * Write Data Status occupying the top 16 bits and the ECC status occupying the
+ * bottom 16 bits.
+ */
+#define FBNIC_NS_OTP_STATUS		0x0021d
+#define FBNIC_NS_OTP_WRITE_STATUS	0x0021e
+
+#define FBNIC_NS_OTP_WRITE_DATA_STATUS_MASK	CSR_GENMASK(31, 16)
+#define FBNIC_NS_OTP_WRITE_ECC_STATUS_MASK	CSR_GENMASK(15, 0)
+
+#define FBNIC_REGS_VERSION			CSR_GENMASK(31, 16)
+#define FBNIC_REGS_HW_TYPE			CSR_GENMASK(15, 8)
+enum{
+	FBNIC_CSR_VERSION_V1_0_ASIC = 1,
+};
+
+/**
+ * enum fbnic_reg_self_test_codes - return codes from self test routines
+ *
+ * This is the code that is returned from the register self test
+ * routines.
+ *
+ * The test either returns success or the register number
+ * that failed during the test.
+ *
+ * @FBNIC_REG_TEST_SUCCESS: no errors
+ */
+enum fbnic_reg_self_test_codes {
+	FBNIC_REG_TEST_SUCCESS = 0,
+};
+
+enum fbnic_reg_self_test_codes fbnic_csr_regs_test(struct fbnic_dev *fbd);
 
 #endif /* _FBNIC_CSR_H_ */

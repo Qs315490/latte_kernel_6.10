@@ -94,6 +94,7 @@ likely to be of interest on almost any system.
 
    cgroup-v2
    cgroup-v1/index
+   cpu-isolation
    cpu-load
    mm/index
    module-signing
@@ -187,13 +188,5 @@ A few hard-to-categorize and generally obsolete documents.
 .. toctree::
    :maxdepth: 1
 
-   highuid
    ldm
    unicode
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

@@ -45,7 +45,7 @@ void hubp35_set_fgcg(struct hubp *hubp, bool enable)
 	REG_UPDATE(HUBP_CLK_CNTL, HUBP_FGCG_REP_DIS, !enable);
 }
 
-static void hubp35_init(struct hubp *hubp)
+void hubp35_init(struct hubp *hubp)
 {
 	hubp3_init(hubp);
 
@@ -179,6 +179,7 @@ void hubp35_program_surface_config(
 	bool horizontal_mirror,
 	unsigned int compat_level)
 {
+	(void)compat_level;
 	struct dcn20_hubp *hubp2 = TO_DCN20_HUBP(hubp);
 
 	hubp3_dcc_control_sienna_cichlid(hubp, dcc);
@@ -209,6 +210,7 @@ static struct hubp_funcs dcn35_hubp_funcs = {
 	.dmdata_load = hubp2_dmdata_load,
 	.dmdata_status_done = hubp2_dmdata_status_done,
 	.hubp_read_state = hubp3_read_state,
+	.hubp_read_reg_state = hubp3_read_reg_state,
 	.hubp_clear_underflow = hubp2_clear_underflow,
 	.hubp_set_flip_control_surface_gsl = hubp2_set_flip_control_surface_gsl,
 	.hubp_init = hubp35_init,

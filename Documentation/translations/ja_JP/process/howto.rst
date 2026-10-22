@@ -1,34 +1,17 @@
-.. raw:: latex
+.. SPDX-License-Identifier: GPL-2.0
 
-	\kerneldocCJKoff
-
-NOTE:
-This is a version of Documentation/process/howto.rst translated into Japanese.
-This document is maintained by Tsugikazu Shibata <tshibata@ab.jp.nec.com>
-If you find any difference between this document and the original file or
-a problem with the translation, please contact the maintainer of this file.
-
-Please also note that the purpose of this file is to be easier to
-read for non English (read: Japanese) speakers and is not intended as
-a fork. So if you have any comments or updates for this file, please
-try to update the original English file first.
-
-----------------------------------
-
-.. raw:: latex
-
-	\kerneldocCJKon
-
-この文書は、
-Documentation/process/howto.rst
-の和訳です。
-
-翻訳者： Tsugikazu Shibata <tshibata@ab.jp.nec.com>
-
-----------------------------------
+.. Originally contributed by Tsugikazu Shibata
 
 Linux カーネル開発のやり方
 ==========================
+
+.. note:: 【訳註】
+   この文書は、
+   Documentation/process/howto.rst
+   の翻訳です。
+   免責条項については、
+   :ref:`免責条項の抄訳 <translations_ja_JP_disclaimer>` および、
+   :ref:`Disclaimer (英語版) <translations_disclaimer>` を参照してください。
 
 これは上のトピック( Linux カーネル開発のやり方)の重要な事柄を網羅した
 ドキュメントです。ここには Linux カーネル開発者になるための方法とLinux
@@ -66,7 +49,7 @@ Linux カーネル開発のやり方
 
 カーネルは GNU C と GNU ツールチェインを使って書かれています。カーネル
 は ISO C11 仕様に準拠して書く一方で、標準には無い言語拡張を多く使って
-います。カーネルは標準 C ライブラリに依存しない、C 言語非依存環境です。
+います。カーネルは標準 C ライブラリに依存しない、自立した C 環境です。
 そのため、C の標準の中で使えないものもあります。特に任意の long long
 の除算や浮動小数点は使えません。カーネルがツールチェインや C 言語拡張
 に置いている前提がどうなっているのかわかりにくいことが時々あり、また、
@@ -78,7 +61,7 @@ info ページ( info gcc )を見てください。
 発手順について高度な標準を持つ、多様な人の集まりです。地理的に分散した
 大規模なチームに対してもっともうまくいくとわかったことをベースにしなが
 ら、これらの標準は長い時間をかけて築かれてきました。これらはきちんと文
-書化されていますから、事前にこれらの標準について事前にできるだけたくさ
+書化されていますから、これらの標準について事前にできるだけたくさ
 ん学んでください。また皆があなたやあなたの会社のやり方に合わせてくれる
 と思わないでください。
 
@@ -380,7 +363,7 @@ linux-next の実行テストを行う冒険好きなテスターは大いに歓
 
 あなたのハッキングのスキルを訓練する最高の方法のひとつに、他人がレポー
 トしたバグを修正することがあります。あなたがカーネルをより安定化させる
-こに寄与するということだけでなく、あなたは 現実の問題を修正することを
+ことに寄与するということだけでなく、あなたは 現実の問題を修正することを
 学び、自分のスキルも強化でき、また他の開発者があなたの存在に気がつきま
 す。バグを修正することは、多くの開発者の中から自分が功績をあげる最善の
 道です、なぜなら多くの人は他人のバグの修正に時間を浪費することを好まな

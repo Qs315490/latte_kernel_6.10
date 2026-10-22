@@ -162,7 +162,7 @@ ppp_sync_open(struct tty_struct *tty)
 	if (tty->ops->write == NULL)
 		return -EOPNOTSUPP;
 
-	ap = kzalloc(sizeof(*ap), GFP_KERNEL);
+	ap = kzalloc_obj(*ap);
 	err = -ENOMEM;
 	if (!ap)
 		goto out;
@@ -483,7 +483,7 @@ static void ppp_sync_process(struct tasklet_struct *t)
 	while ((skb = skb_dequeue(&ap->rqueue)) != NULL) {
 		if (skb->len == 0) {
 			/* zero length buffers indicate error */
-			ppp_input_error(&ap->chan, 0);
+			ppp_input_error(&ap->chan);
 			kfree_skb(skb);
 		}
 		else
@@ -506,6 +506,11 @@ ppp_sync_txmunge(struct syncppp *ap, struct sk_buff *skb)
 	unsigned char *data;
 	int islcp;
 
+	/* Ensure we can safely access protocol field and LCP code */
+	if (!pskb_may_pull(skb, 3)) {
+		kfree_skb(skb);
+		return NULL;
+	}
 	data  = skb->data;
 	proto = get_unaligned_be16(data);
 

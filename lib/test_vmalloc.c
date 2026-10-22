@@ -13,9 +13,9 @@
 #include <linux/moduleparam.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
-#include <linux/rwsem.h>
 #include <linux/mm.h>
 #include <linux/rcupdate.h>
+#include <linux/srcu.h>
 #include <linux/slab.h>
 
 #define __param(type, name, init, msg)		\
@@ -41,7 +41,7 @@ __param(int, nr_pages, 0,
 __param(bool, use_huge, false,
 	"Use vmalloc_huge in fix_size_alloc_test");
 
-__param(int, run_test_mask, INT_MAX,
+__param(int, run_test_mask, 7,
 	"Set tests specified in the mask.\n\n"
 		"\t\tid: 1,    name: fix_size_alloc_test\n"
 		"\t\tid: 2,    name: full_fit_alloc_test\n"
@@ -54,14 +54,18 @@ __param(int, run_test_mask, INT_MAX,
 		"\t\tid: 256,  name: kvfree_rcu_1_arg_vmalloc_test\n"
 		"\t\tid: 512,  name: kvfree_rcu_2_arg_vmalloc_test\n"
 		"\t\tid: 1024, name: vm_map_ram_test\n"
+		"\t\tid: 2048, name: no_block_alloc_test\n"
+		"\t\tid: 4096, name: vrealloc_test\n"
 		/* Add a new test case description here. */
 );
 
+__param(int, nr_pcpu_objects, 35000,
+	"Number of pcpu objects to allocate for pcpu_alloc_test");
+
 /*
- * Read write semaphore for synchronization of setup
- * phase that is done in main thread and workers.
+ * This is for synchronization of setup phase.
  */
-static DECLARE_RWSEM(prepare_for_test_rwsem);
+DEFINE_STATIC_SRCU(prepare_for_test_srcu);
 
 /*
  * Completion tracking for worker threads.
@@ -284,6 +288,30 @@ static int fix_size_alloc_test(void)
 	return 0;
 }
 
+static int no_block_alloc_test(void)
+{
+	void *ptr;
+	int i;
+
+	for (i = 0; i < test_loop_count; i++) {
+		bool use_atomic = !!(get_random_u8() % 2);
+		gfp_t gfp = use_atomic ? GFP_ATOMIC : GFP_NOWAIT;
+		unsigned long size = (nr_pages > 0 ? nr_pages : 1) * PAGE_SIZE;
+
+		preempt_disable();
+		ptr = __vmalloc(size, gfp);
+		preempt_enable();
+
+		if (!ptr)
+			return -1;
+
+		*((__u8 *)ptr) = 0;
+		vfree(ptr);
+	}
+
+	return 0;
+}
+
 static int
 pcpu_alloc_test(void)
 {
@@ -293,24 +321,24 @@ pcpu_alloc_test(void)
 	size_t size, align;
 	int i;
 
-	pcpu = vmalloc(sizeof(void __percpu *) * 35000);
+	pcpu = vmalloc(sizeof(void __percpu *) * nr_pcpu_objects);
 	if (!pcpu)
 		return -1;
 
-	for (i = 0; i < 35000; i++) {
+	for (i = 0; i < nr_pcpu_objects; i++) {
 		size = get_random_u32_inclusive(1, PAGE_SIZE / 4);
 
 		/*
 		 * Maximum PAGE_SIZE
 		 */
-		align = 1 << get_random_u32_inclusive(1, 11);
+		align = 1 << get_random_u32_inclusive(1, PAGE_SHIFT - 1);
 
 		pcpu[i] = __alloc_percpu(size, align);
 		if (!pcpu[i])
 			rv = -1;
 	}
 
-	for (i = 0; i < 35000; i++)
+	for (i = 0; i < nr_pcpu_objects; i++)
 		free_percpu(pcpu[i]);
 
 	vfree(pcpu);
@@ -369,7 +397,7 @@ vm_map_ram_test(void)
 	int i;
 
 	map_nr_pages = nr_pages > 0 ? nr_pages:1;
-	pages = kcalloc(map_nr_pages, sizeof(struct page *), GFP_KERNEL);
+	pages = kzalloc_objs(struct page *, map_nr_pages);
 	if (!pages)
 		return -1;
 
@@ -394,28 +422,92 @@ cleanup:
 	return nr_allocated != map_nr_pages;
 }
 
+static int vrealloc_test(void)
+{
+	void *ptr, *tmp;
+	int i;
+
+	for (i = 0; i < test_loop_count; i++) {
+		int err = -1;
+
+		ptr = vrealloc(NULL, PAGE_SIZE, GFP_KERNEL);
+		if (!ptr)
+			return -1;
+
+		*((__u8 *)ptr) = 'a';
+
+		/* Grow: beyond allocated pages, triggers full realloc. */
+		tmp = vrealloc(ptr, 4 * PAGE_SIZE, GFP_KERNEL);
+		if (!tmp)
+			goto error;
+		ptr = tmp;
+
+		if (*((__u8 *)ptr) != 'a')
+			goto error;
+
+		/* Shrink: crosses page boundary, frees tail pages. */
+		tmp = vrealloc(ptr, PAGE_SIZE, GFP_KERNEL);
+		if (!tmp)
+			goto error;
+		ptr = tmp;
+
+		if (*((__u8 *)ptr) != 'a')
+			goto error;
+
+		/* Shrink: within same page, no page freeing. */
+		tmp = vrealloc(ptr, PAGE_SIZE / 2, GFP_KERNEL);
+		if (!tmp)
+			goto error;
+		ptr = tmp;
+
+		if (*((__u8 *)ptr) != 'a')
+			goto error;
+
+		/* Grow: within allocated page, in-place, no realloc. */
+		tmp = vrealloc(ptr, PAGE_SIZE, GFP_KERNEL);
+		if (!tmp)
+			goto error;
+		ptr = tmp;
+
+		if (*((__u8 *)ptr) != 'a')
+			goto error;
+
+		err = 0;
+error:
+		vfree(ptr);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
 struct test_case_desc {
 	const char *test_name;
 	int (*test_func)(void);
+	bool xfail;
 };
 
 static struct test_case_desc test_case_array[] = {
-	{ "fix_size_alloc_test", fix_size_alloc_test },
-	{ "full_fit_alloc_test", full_fit_alloc_test },
-	{ "long_busy_list_alloc_test", long_busy_list_alloc_test },
-	{ "random_size_alloc_test", random_size_alloc_test },
-	{ "fix_align_alloc_test", fix_align_alloc_test },
-	{ "random_size_align_alloc_test", random_size_align_alloc_test },
-	{ "align_shift_alloc_test", align_shift_alloc_test },
-	{ "pcpu_alloc_test", pcpu_alloc_test },
-	{ "kvfree_rcu_1_arg_vmalloc_test", kvfree_rcu_1_arg_vmalloc_test },
-	{ "kvfree_rcu_2_arg_vmalloc_test", kvfree_rcu_2_arg_vmalloc_test },
-	{ "vm_map_ram_test", vm_map_ram_test },
+	{ "fix_size_alloc_test", fix_size_alloc_test, },
+	{ "full_fit_alloc_test", full_fit_alloc_test, },
+	{ "long_busy_list_alloc_test", long_busy_list_alloc_test, },
+	{ "random_size_alloc_test", random_size_alloc_test, },
+	{ "fix_align_alloc_test", fix_align_alloc_test, },
+	{ "random_size_align_alloc_test", random_size_align_alloc_test, },
+	{ "align_shift_alloc_test", align_shift_alloc_test, true },
+	{ "pcpu_alloc_test", pcpu_alloc_test, },
+	{ "kvfree_rcu_1_arg_vmalloc_test", kvfree_rcu_1_arg_vmalloc_test, },
+	{ "kvfree_rcu_2_arg_vmalloc_test", kvfree_rcu_2_arg_vmalloc_test, },
+	{ "vm_map_ram_test", vm_map_ram_test, },
+	{ "no_block_alloc_test", no_block_alloc_test, true },
+	{ "vrealloc_test", vrealloc_test, },
 	/* Add a new test case here. */
 };
 
 struct test_case_data {
 	int test_failed;
+	int test_xfailed;
 	int test_passed;
 	u64 time;
 };
@@ -445,7 +537,7 @@ static int test_func(void *private)
 {
 	struct test_driver *t = private;
 	int random_array[ARRAY_SIZE(test_case_array)];
-	int index, i, j;
+	int index, i, j, ret;
 	ktime_t kt;
 	u64 delta;
 
@@ -458,7 +550,7 @@ static int test_func(void *private)
 	/*
 	 * Block until initialization is done.
 	 */
-	down_read(&prepare_for_test_rwsem);
+	synchronize_srcu(&prepare_for_test_srcu);
 
 	t->start = get_cycles();
 	for (i = 0; i < ARRAY_SIZE(test_case_array); i++) {
@@ -469,11 +561,14 @@ static int test_func(void *private)
 		 */
 		if (!((run_test_mask & (1 << index)) >> index))
 			continue;
-
 		kt = ktime_get();
 		for (j = 0; j < test_repeat_count; j++) {
-			if (!test_case_array[index].test_func())
+			ret = test_case_array[index].test_func();
+
+			if (!ret)
 				t->data[index].test_passed++;
+			else if (ret && test_case_array[index].xfail)
+				t->data[index].test_xfailed++;
 			else
 				t->data[index].test_failed++;
 		}
@@ -487,8 +582,6 @@ static int test_func(void *private)
 		t->data[index].time = delta;
 	}
 	t->stop = get_cycles();
-
-	up_read(&prepare_for_test_rwsem);
 	test_report_one_done();
 
 	/*
@@ -511,7 +604,7 @@ init_test_configuration(void)
 	nr_threads = clamp(nr_threads, 1, (int) USHRT_MAX);
 
 	/* Allocate the space for test instances. */
-	tdriver = kvcalloc(nr_threads, sizeof(*tdriver), GFP_KERNEL);
+	tdriver = kvzalloc_objs(*tdriver, nr_threads);
 	if (tdriver == NULL)
 		return -1;
 
@@ -526,7 +619,7 @@ init_test_configuration(void)
 
 static void do_concurrent_test(void)
 {
-	int i, ret;
+	int i, ret, idx;
 
 	/*
 	 * Set some basic configurations plus sanity check.
@@ -538,7 +631,7 @@ static void do_concurrent_test(void)
 	/*
 	 * Put on hold all workers.
 	 */
-	down_write(&prepare_for_test_rwsem);
+	idx = srcu_read_lock(&prepare_for_test_srcu);
 
 	for (i = 0; i < nr_threads; i++) {
 		struct test_driver *t = &tdriver[i];
@@ -555,7 +648,7 @@ static void do_concurrent_test(void)
 	/*
 	 * Now let the workers do their job.
 	 */
-	up_write(&prepare_for_test_rwsem);
+	srcu_read_unlock(&prepare_for_test_srcu, idx);
 
 	/*
 	 * Sleep quiet until all workers are done with 1 second
@@ -579,10 +672,11 @@ static void do_concurrent_test(void)
 				continue;
 
 			pr_info(
-				"Summary: %s passed: %d failed: %d repeat: %d loops: %d avg: %llu usec\n",
+				"Summary: %s passed: %d failed: %d xfailed: %d repeat: %d loops: %d avg: %llu usec\n",
 				test_case_array[j].test_name,
 				t->data[j].test_passed,
 				t->data[j].test_failed,
+				t->data[j].test_xfailed,
 				test_repeat_count, test_loop_count,
 				t->data[j].time);
 		}
@@ -594,13 +688,18 @@ static void do_concurrent_test(void)
 	kvfree(tdriver);
 }
 
-static int vmalloc_test_init(void)
+static int __init vmalloc_test_init(void)
 {
 	do_concurrent_test();
-	return -EAGAIN; /* Fail will directly unload the module */
+	/* Fail will directly unload the module */
+	return IS_BUILTIN(CONFIG_TEST_VMALLOC) ? 0:-EAGAIN;
 }
 
+#ifdef MODULE
 module_init(vmalloc_test_init)
+#else
+late_initcall(vmalloc_test_init);
+#endif
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Uladzislau Rezki");

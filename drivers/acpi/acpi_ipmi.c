@@ -117,7 +117,7 @@ ipmi_dev_alloc(int iface, struct device *dev, acpi_handle handle)
 	int err;
 	struct ipmi_user *user;
 
-	ipmi_device = kzalloc(sizeof(*ipmi_device), GFP_KERNEL);
+	ipmi_device = kzalloc_obj(*ipmi_device);
 	if (!ipmi_device)
 		return NULL;
 
@@ -197,7 +197,7 @@ static struct acpi_ipmi_msg *ipmi_msg_alloc(void)
 	if (!ipmi)
 		return NULL;
 
-	ipmi_msg = kzalloc(sizeof(struct acpi_ipmi_msg), GFP_KERNEL);
+	ipmi_msg = kzalloc_obj(struct acpi_ipmi_msg);
 	if (!ipmi_msg) {
 		acpi_ipmi_dev_put(ipmi);
 		return NULL;
@@ -490,7 +490,7 @@ static void ipmi_bmc_gone(int iface)
 	mutex_lock(&driver_data.ipmi_lock);
 	list_for_each_entry_safe(iter, temp,
 				 &driver_data.ipmi_devices, head) {
-		if (iter->ipmi_ifnum != iface) {
+		if (iter->ipmi_ifnum == iface) {
 			ipmi_device = iter;
 			__ipmi_dev_kill(iter);
 			break;
@@ -550,7 +550,6 @@ acpi_ipmi_space_handler(u32 function, acpi_physical_address address,
 		return AE_TYPE;
 	}
 
-	acpi_ipmi_msg_get(tx_msg);
 	mutex_lock(&driver_data.ipmi_lock);
 	/* Do not add a tx_msg that can not be flushed. */
 	if (ipmi_device->dead) {
@@ -558,6 +557,7 @@ acpi_ipmi_space_handler(u32 function, acpi_physical_address address,
 		ipmi_msg_release(tx_msg);
 		return AE_NOT_EXIST;
 	}
+	acpi_ipmi_msg_get(tx_msg);
 	spin_lock_irqsave(&ipmi_device->tx_msg_lock, flags);
 	list_add_tail(&tx_msg->head, &ipmi_device->tx_msg_list);
 	spin_unlock_irqrestore(&ipmi_device->tx_msg_lock, flags);

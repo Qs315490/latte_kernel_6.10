@@ -92,7 +92,6 @@ struct dra7xx_pcie {
 	struct phy		**phy;
 	struct irq_domain	*irq_domain;
 	struct clk              *clk;
-	enum dw_pcie_device_mode mode;
 };
 
 struct dra7xx_pcie_of_data {
@@ -118,12 +117,12 @@ static u64 dra7xx_pcie_cpu_addr_fixup(struct dw_pcie *pci, u64 cpu_addr)
 	return cpu_addr & DRA7XX_CPU_TO_BUS_ADDR;
 }
 
-static int dra7xx_pcie_link_up(struct dw_pcie *pci)
+static bool dra7xx_pcie_link_up(struct dw_pcie *pci)
 {
 	struct dra7xx_pcie *dra7xx = to_dra7xx_pcie(pci);
 	u32 reg = dra7xx_pcie_readl(dra7xx, PCIECTRL_DRA7XX_CONF_PHY_CS);
 
-	return !!(reg & LINK_UP);
+	return reg & LINK_UP;
 }
 
 static void dra7xx_pcie_stop_link(struct dw_pcie *pci)
@@ -328,7 +327,7 @@ static irqreturn_t dra7xx_pcie_irq_handler(int irq, void *arg)
 		dev_dbg(dev, "Link Request Reset\n");
 
 	if (reg & LINK_UP_EVT) {
-		if (dra7xx->mode == DW_PCIE_EP_TYPE)
+		if (dra7xx->pci->mode == DW_PCIE_EP_TYPE)
 			dw_pcie_ep_linkup(ep);
 		dev_dbg(dev, "Link-up state change\n");
 	}
@@ -359,8 +358,8 @@ static int dra7xx_pcie_init_irq_domain(struct dw_pcie_rp *pp)
 
 	irq_set_chained_handler_and_data(pp->irq, dra7xx_pcie_msi_irq_handler,
 					 pp);
-	dra7xx->irq_domain = irq_domain_add_linear(pcie_intc_node, PCI_NUM_INTX,
-						   &intx_domain_ops, pp);
+	dra7xx->irq_domain = irq_domain_create_linear(of_fwnode_handle(pcie_intc_node),
+						      PCI_NUM_INTX, &intx_domain_ops, pp);
 	of_node_put(pcie_intc_node);
 	if (!dra7xx->irq_domain) {
 		dev_err(dev, "Failed to get a INTx IRQ domain\n");
@@ -378,10 +377,6 @@ static void dra7xx_pcie_ep_init(struct dw_pcie_ep *ep)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	struct dra7xx_pcie *dra7xx = to_dra7xx_pcie(pci);
-	enum pci_barno bar;
-
-	for (bar = 0; bar < PCI_STD_NUM_BARS; bar++)
-		dw_pcie_ep_reset_bar(pci, bar);
 
 	dra7xx_pcie_enable_wrapper_interrupts(dra7xx);
 }
@@ -424,9 +419,9 @@ static int dra7xx_pcie_raise_irq(struct dw_pcie_ep *ep, u8 func_no,
 }
 
 static const struct pci_epc_features dra7xx_pcie_epc_features = {
+	DWC_EPC_COMMON_FEATURES,
 	.linkup_notifier = true,
 	.msi_capable = true,
-	.msix_capable = false,
 };
 
 static const struct pci_epc_features*
@@ -832,7 +827,7 @@ static int dra7xx_pcie_probe(struct platform_device *pdev)
 	default:
 		dev_err(dev, "INVALID device type %d\n", mode);
 	}
-	dra7xx->mode = mode;
+	dra7xx->pci->mode = mode;
 
 	ret = devm_request_threaded_irq(dev, irq, NULL, dra7xx_pcie_irq_handler,
 					IRQF_SHARED | IRQF_ONESHOT,
@@ -845,7 +840,7 @@ static int dra7xx_pcie_probe(struct platform_device *pdev)
 	return 0;
 
 err_deinit:
-	if (dra7xx->mode == DW_PCIE_RC_TYPE)
+	if (dra7xx->pci->mode == DW_PCIE_RC_TYPE)
 		dw_pcie_host_deinit(&dra7xx->pci->pp);
 	else
 		dw_pcie_ep_deinit(&dra7xx->pci->ep);
@@ -869,7 +864,7 @@ static int dra7xx_pcie_suspend(struct device *dev)
 	struct dw_pcie *pci = dra7xx->pci;
 	u32 val;
 
-	if (dra7xx->mode != DW_PCIE_RC_TYPE)
+	if (pci->mode != DW_PCIE_RC_TYPE)
 		return 0;
 
 	/* clear MSE */
@@ -886,7 +881,7 @@ static int dra7xx_pcie_resume(struct device *dev)
 	struct dw_pcie *pci = dra7xx->pci;
 	u32 val;
 
-	if (dra7xx->mode != DW_PCIE_RC_TYPE)
+	if (pci->mode != DW_PCIE_RC_TYPE)
 		return 0;
 
 	/* set MSE */

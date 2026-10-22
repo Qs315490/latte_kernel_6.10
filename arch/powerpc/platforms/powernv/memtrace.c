@@ -48,11 +48,15 @@ static ssize_t memtrace_read(struct file *filp, char __user *ubuf,
 static int memtrace_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	struct memtrace_entry *ent = filp->private_data;
+	unsigned long ent_nrpages = ent->size >> PAGE_SHIFT;
+	unsigned long vma_nrpages = vma_pages(vma);
 
-	if (ent->size < vma->vm_end - vma->vm_start)
+	/* The requested page offset should be within object's page count */
+	if (vma->vm_pgoff >= ent_nrpages)
 		return -EINVAL;
 
-	if (vma->vm_pgoff << PAGE_SHIFT >= ent->size)
+	/* The requested mapping range should remain within the bounds */
+	if (vma_nrpages > ent_nrpages - vma->vm_pgoff)
 		return -EINVAL;
 
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
@@ -129,8 +133,7 @@ static int memtrace_init_regions_runtime(u64 size)
 	u32 nid;
 	u64 m;
 
-	memtrace_array = kcalloc(num_online_nodes(),
-				sizeof(struct memtrace_entry), GFP_KERNEL);
+	memtrace_array = kzalloc_objs(struct memtrace_entry, num_online_nodes());
 	if (!memtrace_array) {
 		pr_err("Failed to allocate memtrace_array\n");
 		return -EINVAL;

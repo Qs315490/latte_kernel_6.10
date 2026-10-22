@@ -25,11 +25,6 @@ struct qdisc_walker {
 		 const struct Qdisc * : (const void *)&q->privdata,	\
 		 struct Qdisc * : (void *)&q->privdata)
 
-static inline struct Qdisc *qdisc_from_priv(void *priv)
-{
-	return container_of(priv, struct Qdisc, privdata);
-}
-
 /* 
    Timer resolution MUST BE < 10% of min_schedulable_packet_size/bandwidth
    
@@ -48,7 +43,6 @@ static inline struct Qdisc *qdisc_from_priv(void *priv)
  */
 
 typedef u64	psched_time_t;
-typedef long	psched_tdiff_t;
 
 /* Avoid doing 64 bit divide */
 #define PSCHED_SHIFT			6
@@ -114,19 +108,19 @@ struct qdisc_rate_table *qdisc_get_rtab(struct tc_ratespec *r,
 					struct netlink_ext_ack *extack);
 void qdisc_put_rtab(struct qdisc_rate_table *tab);
 void qdisc_put_stab(struct qdisc_size_table *tab);
-void qdisc_warn_nonwc(const char *txt, struct Qdisc *qdisc);
 bool sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 		     struct net_device *dev, struct netdev_queue *txq,
 		     spinlock_t *root_lock, bool validate);
 
 void __qdisc_run(struct Qdisc *q);
 
-static inline void qdisc_run(struct Qdisc *q)
+static inline struct sk_buff *qdisc_run(struct Qdisc *q)
 {
 	if (qdisc_run_begin(q)) {
 		__qdisc_run(q);
-		qdisc_run_end(q);
+		return qdisc_run_end(q);
 	}
+	return NULL;
 }
 
 extern const struct nla_policy rtm_tca_policy[TCA_MAX + 1];
@@ -288,6 +282,54 @@ static inline bool tc_qdisc_stats_dump(struct Qdisc *sch,
 
 	arg->count++;
 	return true;
+}
+
+static inline void qdisc_warn_nonwc(const char *txt, struct Qdisc *qdisc)
+{
+	if (!(qdisc->flags & TCQ_F_WARN_NONWC)) {
+		pr_warn("%s: %s qdisc %X: is non-work-conserving?\n",
+			txt, qdisc->ops->id, qdisc->handle >> 16);
+		qdisc->flags |= TCQ_F_WARN_NONWC;
+	}
+}
+
+static inline unsigned int qdisc_peek_len(struct Qdisc *sch)
+{
+	struct sk_buff *skb;
+	unsigned int len;
+
+	skb = sch->ops->peek(sch);
+	if (unlikely(skb == NULL)) {
+		qdisc_warn_nonwc("qdisc_peek_len", sch);
+		return 0;
+	}
+	len = qdisc_pkt_len(skb);
+
+	return len;
+}
+
+static inline void qdisc_lock_init(struct Qdisc *sch,
+				   const struct Qdisc_ops *ops)
+{
+	spin_lock_init(&sch->q.lock);
+
+	/* Skip dynamic keys if nesting is not possible */
+	if (ops->static_flags & TCQ_F_INGRESS ||
+	    ops == &noqueue_qdisc_ops)
+		return;
+
+	lockdep_register_key(&sch->root_lock_key);
+	lockdep_set_class(&sch->q.lock, &sch->root_lock_key);
+}
+
+static inline void qdisc_lock_uninit(struct Qdisc *sch,
+				     const struct Qdisc_ops *ops)
+{
+	if (ops->static_flags & TCQ_F_INGRESS ||
+	    ops == &noqueue_qdisc_ops)
+		return;
+
+	lockdep_unregister_key(&sch->root_lock_key);
 }
 
 #endif

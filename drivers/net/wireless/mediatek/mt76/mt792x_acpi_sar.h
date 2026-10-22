@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: ISC */
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /* Copyright (C) 2023 MediaTek Inc. */
 
 #ifndef __MT7921_ACPI_SAR_H
@@ -14,6 +14,8 @@
 #define MT792x_ACPI_MTDS		"MTDS"
 #define MT792x_ACPI_MTGS		"MTGS"
 #define MT792x_ACPI_MTFG		"MTFG"
+
+#define MT792X_ACPI_MTCL_INVALID	0xffffffff
 
 struct mt792x_asar_dyn_limit {
 	u8 idx;
@@ -72,6 +74,17 @@ struct mt792x_asar_geo_v2 {
 	DECLARE_FLEX_ARRAY(struct mt792x_asar_geo_limit_v2, tbl);
 } __packed;
 
+struct mt792x_asar_cl_v3 {
+	u8 names[4];
+	u8 version;
+	u8 mode_6g;
+	u8 cl6g[6];
+	u8 mode_5g9;
+	u8 cl5g9[6];
+	u8 mode_be;
+	u8 clbe[6];
+} __packed;
+
 struct mt792x_asar_cl {
 	u8 names[4];
 	u8 version;
@@ -100,7 +113,10 @@ struct mt792x_acpi_sar {
 		struct mt792x_asar_geo *geo;
 		struct mt792x_asar_geo_v2 *geo_v2;
 	};
-	struct mt792x_asar_cl *countrylist;
+	union {
+		struct mt792x_asar_cl *countrylist;
+		struct mt792x_asar_cl_v3 *countrylist_v3;
+	};
 	struct mt792x_asar_fg *fg;
 };
 

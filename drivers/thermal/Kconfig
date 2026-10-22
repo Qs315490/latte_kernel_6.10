@@ -257,7 +257,7 @@ config HISI_THERMAL
 	depends on ARCH_HISI || COMPILE_TEST
 	depends on HAS_IOMEM
 	depends on OF
-	default y
+	default ARCH_HISI
 	help
 	  Enable this to plug hisilicon's thermal sensor driver into the Linux
 	  thermal framework. cpufreq is used as the cooling device to throttle
@@ -296,6 +296,16 @@ config IMX8MM_THERMAL
 	  cpufreq is used as the cooling device to throttle CPUs when the passive
 	  trip is crossed.
 
+config IMX91_THERMAL
+	tristate "Temperature sensor driver for NXP i.MX91 SoC"
+	depends on ARCH_MXC || COMPILE_TEST
+	depends on OF
+	help
+	  Include one sensor and six comparators. Each of them compares the
+	  temperature value (from the sensor) against the programmable
+	  threshold values. The direction of the comparison is configurable
+	  (greater / lesser than).
+
 config K3_THERMAL
 	tristate "Texas Instruments K3 thermal support"
 	depends on ARCH_K3 || COMPILE_TEST
@@ -326,6 +336,15 @@ config QORIQ_THERMAL
 	  It supports one critical trip point and one passive trip point. The
 	  cpufreq is used as the cooling device to throttle CPUs when the
 	  passive trip is crossed.
+
+config AIROHA_THERMAL
+	tristate "Airoha thermal sensor driver"
+	depends on ARCH_AIROHA || COMPILE_TEST
+	depends on MFD_SYSCON
+	depends on OF
+	help
+	  Enable this to plug the Airoha thermal sensor driver into the Linux
+	  thermal framework.
 
 config SPEAR_THERMAL
 	tristate "SPEAr thermal sensor driver"
@@ -417,6 +436,7 @@ config AMLOGIC_THERMAL
 	tristate "Amlogic Thermal Support"
 	default ARCH_MESON
 	depends on OF && ARCH_MESON
+	depends on MESON_SM
 	help
 	  If you say yes here you get support for Amlogic Thermal
 	  for G12 SoC Family.
@@ -452,6 +472,8 @@ source "drivers/thermal/st/Kconfig"
 endmenu
 
 source "drivers/thermal/renesas/Kconfig"
+
+source "drivers/thermal/spacemit/Kconfig"
 
 source "drivers/thermal/tegra/Kconfig"
 

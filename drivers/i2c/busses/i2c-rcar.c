@@ -1084,11 +1084,11 @@ static u32 rcar_i2c_func(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm rcar_i2c_algo = {
-	.master_xfer	= rcar_i2c_master_xfer,
-	.master_xfer_atomic = rcar_i2c_master_xfer_atomic,
-	.functionality	= rcar_i2c_func,
-	.reg_slave	= rcar_reg_slave,
-	.unreg_slave	= rcar_unreg_slave,
+	.xfer = rcar_i2c_master_xfer,
+	.xfer_atomic = rcar_i2c_master_xfer_atomic,
+	.functionality = rcar_i2c_func,
+	.reg_slave = rcar_reg_slave,
+	.unreg_slave = rcar_unreg_slave,
 };
 
 static const struct i2c_adapter_quirks rcar_i2c_quirks = {
@@ -1141,7 +1141,7 @@ static int rcar_i2c_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->io))
 		return PTR_ERR(priv->io);
 
-	priv->devtype = (enum rcar_i2c_type)of_device_get_match_data(dev);
+	priv->devtype = (kernel_ulong_t)of_device_get_match_data(dev);
 	init_waitqueue_head(&priv->wait);
 
 	adap = &priv->adap;

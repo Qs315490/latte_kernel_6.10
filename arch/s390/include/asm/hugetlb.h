@@ -9,12 +9,13 @@
 #ifndef _ASM_S390_HUGETLB_H
 #define _ASM_S390_HUGETLB_H
 
+#include <linux/cpufeature.h>
 #include <linux/pgtable.h>
 #include <linux/swap.h>
 #include <linux/swapops.h>
 #include <asm/page.h>
 
-#define hugepages_supported()			(MACHINE_HAS_EDAT1)
+#define hugepages_supported()	cpu_has_edat1()
 
 #define __HAVE_ARCH_HUGE_SET_HUGE_PTE_AT
 void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
@@ -36,17 +37,11 @@ static inline pte_t huge_ptep_get_and_clear(struct mm_struct *mm,
 	return __huge_ptep_get_and_clear(mm, addr, ptep);
 }
 
-static inline void arch_clear_hugetlb_flags(struct folio *folio)
-{
-	clear_bit(PG_arch_1, &folio->flags);
-}
-#define arch_clear_hugetlb_flags arch_clear_hugetlb_flags
-
 #define __HAVE_ARCH_HUGE_PTE_CLEAR
 static inline void huge_pte_clear(struct mm_struct *mm, unsigned long addr,
 				  pte_t *ptep, unsigned long sz)
 {
-	if ((pte_val(*ptep) & _REGION_ENTRY_TYPE_MASK) == _REGION_ENTRY_TYPE_R3)
+	if ((pte_val(ptep_get(ptep)) & _REGION_ENTRY_TYPE_MASK) == _REGION_ENTRY_TYPE_R3)
 		set_pte(ptep, __pte(_REGION3_ENTRY_EMPTY));
 	else
 		set_pte(ptep, __pte(_SEGMENT_ENTRY_EMPTY));

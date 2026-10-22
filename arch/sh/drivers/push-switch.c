@@ -25,7 +25,7 @@ static DEVICE_ATTR_RO(switch);
 
 static void switch_timer(struct timer_list *t)
 {
-	struct push_switch *psw = from_timer(psw, t, debounce);
+	struct push_switch *psw = timer_container_of(psw, t, debounce);
 
 	schedule_work(&psw->work);
 }
@@ -46,7 +46,7 @@ static int switch_drv_probe(struct platform_device *pdev)
 	struct push_switch *psw;
 	int ret, irq;
 
-	psw = kzalloc(sizeof(struct push_switch), GFP_KERNEL);
+	psw = kzalloc_obj(struct push_switch);
 	if (unlikely(!psw))
 		return -ENOMEM;
 

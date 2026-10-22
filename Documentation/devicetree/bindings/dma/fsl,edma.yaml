@@ -12,6 +12,9 @@ description: |
   DMAMUX0 and DMAMUX1, specific DMA request source can only be multiplexed
   by any channel of certain group, DMAMUX0 or DMAMUX1, but not both.
 
+  This binding has an inverted dma-channel-mask definition compared to
+  the common DMA binding for historical reasons.
+
 maintainers:
   - Peng Fan <peng.fan@nxp.com>
 
@@ -28,6 +31,14 @@ properties:
           - fsl,imx95-edma5
           - nxp,s32g2-edma
       - items:
+          - enum:
+              - fsl,imx94-edma3
+          - const: fsl,imx93-edma3
+      - items:
+          - enum:
+              - fsl,imx94-edma5
+          - const: fsl,imx95-edma5
+      - items:
           - const: fsl,ls1028a-edma
           - const: fsl,vf610-edma
       - items:
@@ -40,11 +51,11 @@ properties:
 
   interrupts:
     minItems: 1
-    maxItems: 64
+    maxItems: 65
 
   interrupt-names:
     minItems: 1
-    maxItems: 64
+    maxItems: 65
 
   "#dma-cells":
     description: |
@@ -86,6 +97,12 @@ properties:
       If present registers and hardware scatter/gather descriptors of the
       eDMA are implemented in big endian mode, otherwise in little mode.
     type: boolean
+
+  dma-channel-mask:
+    description: |
+      Bitmask of available DMA channels (inverted definition).
+      Bit semantics: 0 means channel available, 1 means channel unavailable
+    default: 0
 
 required:
   - "#dma-cells"

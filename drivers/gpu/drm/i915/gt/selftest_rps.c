@@ -22,7 +22,7 @@
 #include "selftests/igt_spinner.h"
 #include "selftests/librapl.h"
 
-/* Try to isolate the impact of cstates from determing frequency response */
+/* Try to isolate the impact of cstates from determining frequency response */
 #define CPU_LATENCY 0 /* -1 to disable pm_qos, 0 to disable cstates */
 
 static void dummy_rps_work(struct work_struct *wrk)
@@ -378,6 +378,7 @@ int live_rps_control(void *arg)
 	enum intel_engine_id id;
 	struct igt_spinner spin;
 	intel_wakeref_t wakeref;
+	u32 throttle;
 	int err = 0;
 
 	/*
@@ -463,6 +464,9 @@ int live_rps_control(void *arg)
 		max = rps_set_check(rps, limit);
 		max_dt = ktime_sub(ktime_get(), max_dt);
 
+		throttle = intel_uncore_read(gt->uncore, intel_gt_perf_limit_reasons_reg(gt));
+		throttle &= GT0_PERF_LIMIT_REASONS_MASK;
+
 		min_dt = ktime_get();
 		min = rps_set_check(rps, rps->min_freq);
 		min_dt = ktime_sub(ktime_get(), min_dt);
@@ -477,12 +481,11 @@ int live_rps_control(void *arg)
 			limit, intel_gpu_freq(rps, limit),
 			min, max, ktime_to_ns(min_dt), ktime_to_ns(max_dt));
 
-		if (limit == rps->min_freq) {
-			pr_err("%s: GPU throttled to minimum!\n",
-			       engine->name);
+		if (limit != rps->max_freq) {
+			if (throttle)
+				pr_warn("%s: GPU throttled with reasons 0x%08x\n",
+					engine->name, throttle);
 			show_pstate_limits(rps);
-			err = -ENODEV;
-			break;
 		}
 
 		if (igt_flush_test(gt->i915)) {
@@ -1115,7 +1118,7 @@ static u64 measure_power(struct intel_rps *rps, int *freq)
 	for (i = 0; i < 5; i++)
 		x[i] = __measure_power(5);
 
-	*freq = (*freq + intel_rps_read_actual_frequency(rps)) / 2;
+	*freq = (*freq + read_cagf(rps)) / 2;
 
 	/* A simple triangle filter for better result stability */
 	sort(x, 5, sizeof(*x), cmp_u64, NULL);
@@ -1137,6 +1140,7 @@ int live_rps_power(void *arg)
 	struct intel_engine_cs *engine;
 	enum intel_engine_id id;
 	struct igt_spinner spin;
+	u32 throttle;
 	int err = 0;
 
 	/*
@@ -1194,6 +1198,9 @@ int live_rps_power(void *arg)
 		max.freq = rps->max_freq;
 		max.power = measure_power_at(rps, &max.freq);
 
+		throttle = intel_uncore_read(gt->uncore, intel_gt_perf_limit_reasons_reg(gt));
+		throttle &= GT0_PERF_LIMIT_REASONS_MASK;
+
 		min.freq = rps->min_freq;
 		min.power = measure_power_at(rps, &min.freq);
 
@@ -1209,12 +1216,21 @@ int live_rps_power(void *arg)
 			pr_notice("Could not control frequency, ran at [%d:%uMHz, %d:%uMhz]\n",
 				  min.freq, intel_gpu_freq(rps, min.freq),
 				  max.freq, intel_gpu_freq(rps, max.freq));
+
+			if (throttle)
+				pr_warn("%s: GPU throttled with reasons 0x%08x\n",
+					engine->name, throttle);
 			continue;
 		}
 
 		if (11 * min.power > 10 * max.power) {
 			pr_err("%s: did not conserve power when setting lower frequency!\n",
 			       engine->name);
+
+			if (throttle)
+				pr_warn("%s: GPU throttled with reasons 0x%08x\n",
+					engine->name, throttle);
+
 			err = -EINVAL;
 			break;
 		}
@@ -1240,6 +1256,7 @@ int live_rps_dynamic(void *arg)
 	struct intel_engine_cs *engine;
 	enum intel_engine_id id;
 	struct igt_spinner spin;
+	u32 throttle;
 	int err = 0;
 
 	/*
@@ -1292,6 +1309,9 @@ int live_rps_dynamic(void *arg)
 		max.freq = wait_for_freq(rps, rps->max_freq, 500);
 		max.dt = ktime_sub(ktime_get(), max.dt);
 
+		throttle = intel_uncore_read(gt->uncore, intel_gt_perf_limit_reasons_reg(gt));
+		throttle &= GT0_PERF_LIMIT_REASONS_MASK;
+
 		igt_spinner_end(&spin);
 
 		min.dt = ktime_get();
@@ -1307,6 +1327,11 @@ int live_rps_dynamic(void *arg)
 		if (min.freq >= max.freq) {
 			pr_err("%s: dynamic reclocking of spinner failed\n!",
 			       engine->name);
+
+			if (throttle)
+				pr_warn("%s: GPU throttled with reasons 0x%08x\n",
+					engine->name, throttle);
+
 			err = -EINVAL;
 		}
 

@@ -907,8 +907,7 @@ il_init_channel_map(struct il_priv *il)
 	D_EEPROM("Parsing data for %d channels.\n", il->channel_count);
 
 	il->channel_info =
-	    kcalloc(il->channel_count, sizeof(struct il_channel_info),
-		    GFP_KERNEL);
+	    kzalloc_objs(struct il_channel_info, il->channel_count);
 	if (!il->channel_info) {
 		IL_ERR("Could not allocate channel_info\n");
 		il->channel_count = 0;
@@ -2180,8 +2179,8 @@ il_remove_station(struct il_priv *il, const u8 sta_id, const u8 * addr)
 	il->stations[sta_id].used &= ~IL_STA_DRIVER_ACTIVE;
 
 	il->num_stations--;
-
-	BUG_ON(il->num_stations < 0);
+	if (WARN_ON(il->num_stations < 0))
+		il->num_stations = 0;
 
 	spin_unlock_irqrestore(&il->sta_lock, flags);
 
@@ -2329,7 +2328,8 @@ il_dealloc_bcast_stations(struct il_priv *il)
 
 		il->stations[i].used &= ~IL_STA_UCODE_ACTIVE;
 		il->num_stations--;
-		BUG_ON(il->num_stations < 0);
+		if (WARN_ON(il->num_stations < 0))
+			il->num_stations = 0;
 		kfree(il->stations[i].lq);
 		il->stations[i].lq = NULL;
 	}
@@ -2969,9 +2969,7 @@ il_tx_queue_alloc(struct il_priv *il, struct il_tx_queue *txq, u32 id)
 	/* Driver ilate data, only for Tx (not command) queues,
 	 * not shared with device. */
 	if (id != il->cmd_queue) {
-		txq->skbs = kcalloc(TFD_QUEUE_SIZE_MAX,
-				    sizeof(struct sk_buff *),
-				    GFP_KERNEL);
+		txq->skbs = kzalloc_objs(struct sk_buff *, TFD_QUEUE_SIZE_MAX);
 		if (!txq->skbs) {
 			IL_ERR("Fail to alloc skbs\n");
 			goto error;
@@ -3024,9 +3022,9 @@ il_tx_queue_init(struct il_priv *il, u32 txq_id)
 	}
 
 	txq->meta =
-	    kcalloc(actual_slots, sizeof(struct il_cmd_meta), GFP_KERNEL);
+	    kzalloc_objs(struct il_cmd_meta, actual_slots);
 	txq->cmd =
-	    kcalloc(actual_slots, sizeof(struct il_device_cmd *), GFP_KERNEL);
+	    kzalloc_objs(struct il_device_cmd *, actual_slots);
 
 	if (!txq->meta || !txq->cmd)
 		goto out_free_arrays;
@@ -3444,12 +3442,11 @@ il_init_geos(struct il_priv *il)
 	}
 
 	channels =
-	    kcalloc(il->channel_count, sizeof(struct ieee80211_channel),
-		    GFP_KERNEL);
+	    kzalloc_objs(struct ieee80211_channel, il->channel_count);
 	if (!channels)
 		return -ENOMEM;
 
-	rates = kcalloc(RATE_COUNT_LEGACY, sizeof(*rates), GFP_KERNEL);
+	rates = kzalloc_objs(*rates, RATE_COUNT_LEGACY);
 	if (!rates) {
 		kfree(channels);
 		return -ENOMEM;
@@ -4611,9 +4608,7 @@ il_alloc_txq_mem(struct il_priv *il)
 {
 	if (!il->txq)
 		il->txq =
-		    kcalloc(il->cfg->num_of_queues,
-			    sizeof(struct il_tx_queue),
-			    GFP_KERNEL);
+		    kzalloc_objs(struct il_tx_queue, il->cfg->num_of_queues);
 	if (!il->txq) {
 		IL_ERR("Not enough memory for txq\n");
 		return -ENOMEM;
@@ -4804,7 +4799,7 @@ il_check_stuck_queue(struct il_priv *il, int cnt)
 void
 il_bg_watchdog(struct timer_list *t)
 {
-	struct il_priv *il = from_timer(il, t, watchdog);
+	struct il_priv *il = timer_container_of(il, t, watchdog);
 	int cnt;
 	unsigned long timeout;
 
@@ -4842,7 +4837,7 @@ il_setup_watchdog(struct il_priv *il)
 		mod_timer(&il->watchdog,
 			  jiffies + msecs_to_jiffies(IL_WD_TICK(timeout)));
 	else
-		del_timer(&il->watchdog);
+		timer_delete(&il->watchdog);
 }
 EXPORT_SYMBOL(il_setup_watchdog);
 
@@ -4990,7 +4985,7 @@ il_update_qos(struct il_priv *il)
  * il_mac_config - mac80211 config callback
  */
 int
-il_mac_config(struct ieee80211_hw *hw, u32 changed)
+il_mac_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 {
 	struct il_priv *il = hw->priv;
 	const struct il_channel_info *ch_info;

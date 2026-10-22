@@ -65,6 +65,7 @@ static const struct of_device_id bcm_ns_usb3_id_table[] = {
 	},
 	{},
 };
+MODULE_DEVICE_TABLE(of, bcm_ns_usb3_id_table);
 
 static int bcm_ns_usb3_mdio_phy_write(struct bcm_ns_usb3 *usb3, u16 reg,
 				      u16 value);
@@ -203,7 +204,7 @@ static int bcm_ns_usb3_mdio_probe(struct mdio_device *mdiodev)
 	usb3->dev = dev;
 	usb3->mdiodev = mdiodev;
 
-	usb3->family = (enum bcm_ns_family)device_get_match_data(dev);
+	usb3->family = (unsigned long)device_get_match_data(dev);
 
 	syscon_np = of_parse_phandle(dev->of_node, "usb3-dmp-syscon", 0);
 	err = of_address_to_resource(syscon_np, 0, &res);
@@ -242,4 +243,3 @@ mdio_module_driver(bcm_ns_usb3_mdio_driver);
 
 MODULE_DESCRIPTION("Broadcom Northstar USB 3.0 PHY Driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, bcm_ns_usb3_id_table);

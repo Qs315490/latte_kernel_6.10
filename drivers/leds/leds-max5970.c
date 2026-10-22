@@ -12,7 +12,6 @@
 #include <linux/device.h>
 #include <linux/leds.h>
 #include <linux/mfd/max5970.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -60,7 +59,7 @@ static int max5970_led_probe(struct platform_device *pdev)
 	if (!led_node)
 		return -ENODEV;
 
-	fwnode_for_each_available_child_node(led_node, child) {
+	fwnode_for_each_child_node(led_node, child) {
 		u32 reg;
 
 		if (fwnode_property_read_u32(child, "reg", &reg))

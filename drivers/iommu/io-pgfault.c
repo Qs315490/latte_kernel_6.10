@@ -65,7 +65,7 @@ static int report_partial_fault(struct iommu_fault_param *fault_param,
 {
 	struct iopf_fault *iopf;
 
-	iopf = kzalloc(sizeof(*iopf), GFP_KERNEL);
+	iopf = kzalloc_obj(*iopf);
 	if (!iopf)
 		return -ENOMEM;
 
@@ -85,7 +85,7 @@ static struct iopf_group *iopf_group_alloc(struct iommu_fault_param *iopf_param,
 	struct iopf_fault *iopf, *next;
 	struct iopf_group *group;
 
-	group = kzalloc(sizeof(*group), GFP_KERNEL);
+	group = kzalloc_obj(*group);
 	if (!group) {
 		/*
 		 * We always need to construct the group as we need it to abort
@@ -332,15 +332,29 @@ void iopf_group_response(struct iopf_group *group,
 		.code = status,
 	};
 
-	/* Only send response if there is a fault report pending */
 	mutex_lock(&fault_param->lock);
-	if (!list_empty(&group->pending_node)) {
-		ops->page_response(dev, &group->last_fault, &resp);
-		list_del_init(&group->pending_node);
-	}
+	ops->page_response(dev, &group->last_fault, &resp);
+	list_del_init(&group->pending_node);
 	mutex_unlock(&fault_param->lock);
 }
 EXPORT_SYMBOL_GPL(iopf_group_response);
+
+/**
+ * iopf_group_dequeue - Dequeue a page fault group from the pending list
+ * @group: the group to dequeue
+ *
+ * The fault handler is responsible for responding to the group after
+ * this function returns.
+ */
+void iopf_group_dequeue(struct iopf_group *group)
+{
+	struct iommu_fault_param *fault_param = group->fault_param;
+
+	mutex_lock(&fault_param->lock);
+	list_del_init(&group->pending_node);
+	mutex_unlock(&fault_param->lock);
+}
+EXPORT_SYMBOL_GPL(iopf_group_dequeue);
 
 /**
  * iopf_queue_discard_partial - Remove all pending partial fault
@@ -400,7 +414,7 @@ int iopf_queue_add_device(struct iopf_queue *queue, struct device *dev)
 		goto done_unlock;
 	}
 
-	fault_param = kzalloc(sizeof(*fault_param), GFP_KERNEL);
+	fault_param = kzalloc_obj(*fault_param);
 	if (!fault_param) {
 		ret = -ENOMEM;
 		goto done_unlock;
@@ -503,7 +517,7 @@ struct iopf_queue *iopf_queue_alloc(const char *name)
 {
 	struct iopf_queue *queue;
 
-	queue = kzalloc(sizeof(*queue), GFP_KERNEL);
+	queue = kzalloc_obj(*queue);
 	if (!queue)
 		return NULL;
 

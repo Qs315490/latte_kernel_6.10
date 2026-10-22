@@ -28,15 +28,16 @@
  * and GCC realigned stacks.
  */
 #define ORC_REG_UNDEFINED		0
-#define ORC_REG_PREV_SP			1
+#define ORC_REG_AX			1
 #define ORC_REG_DX			2
-#define ORC_REG_DI			3
+#define ORC_REG_SP			3
 #define ORC_REG_BP			4
-#define ORC_REG_SP			5
+#define ORC_REG_DI			5
 #define ORC_REG_R10			6
 #define ORC_REG_R13			7
-#define ORC_REG_BP_INDIRECT		8
+#define ORC_REG_PREV_SP			8
 #define ORC_REG_SP_INDIRECT		9
+#define ORC_REG_BP_INDIRECT		10
 #define ORC_REG_MAX			15
 
 #define ORC_TYPE_UNDEFINED		0
@@ -45,7 +46,7 @@
 #define ORC_TYPE_REGS			3
 #define ORC_TYPE_REGS_PARTIAL		4
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <asm/byteorder.h>
 
 /*
@@ -73,6 +74,6 @@ struct orc_entry {
 #endif
 } __packed;
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* _ORC_TYPES_H */

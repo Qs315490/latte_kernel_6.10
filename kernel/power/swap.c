@@ -12,6 +12,7 @@
 
 #define pr_fmt(fmt) "PM: " fmt
 
+#include <crypto/acompress.h>
 #include <linux/module.h>
 #include <linux/file.h>
 #include <linux/delay.h>
@@ -45,19 +46,18 @@ static bool clean_pages_on_read;
 static bool clean_pages_on_decompress;
 
 /*
- *	The swap map is a data structure used for keeping track of each page
- *	written to a swap partition.  It consists of many swap_map_page
- *	structures that contain each an array of MAP_PAGE_ENTRIES swap entries.
- *	These structures are stored on the swap and linked together with the
- *	help of the .next_swap member.
+ * The swap map is a data structure used for keeping track of each page
+ * written to a swap partition.  It consists of many swap_map_page structures
+ * that contain each an array of MAP_PAGE_ENTRIES swap entries.  These
+ * structures are stored on the swap and linked together with the help of the
+ * .next_swap member.
  *
- *	The swap map is created during suspend.  The swap map pages are
- *	allocated and populated one at a time, so we only need one memory
- *	page to set up the entire structure.
+ * The swap map is created during suspend.  The swap map pages are allocated and
+ * populated one at a time, so we only need one memory page to set up the entire
+ * structure.
  *
- *	During resume we pick up all swap_map_page structures into a list.
+ * During resume we pick up all swap_map_page structures into a list.
  */
-
 #define MAP_PAGE_ENTRIES	(PAGE_SIZE / sizeof(sector_t) - 1)
 
 /*
@@ -88,10 +88,8 @@ struct swap_map_page_list {
 };
 
 /*
- *	The swap_map_handle structure is used for handling swap in
- *	a file-alike way
+ * The swap_map_handle structure is used for handling swap in a file-alike way.
  */
-
 struct swap_map_handle {
 	struct swap_map_page *cur;
 	struct swap_map_page_list *maps;
@@ -116,10 +114,9 @@ struct swsusp_header {
 static struct swsusp_header *swsusp_header;
 
 /*
- *	The following functions are used for tracing the allocated
- *	swap pages, so that they can be freed in case of an error.
+ * The following functions are used for tracing the allocated swap pages, so
+ * that they can be freed in case of an error.
  */
-
 struct swsusp_extent {
 	struct rb_node node;
 	unsigned long start;
@@ -158,7 +155,7 @@ static int swsusp_extents_insert(unsigned long swap_offset)
 		}
 	}
 	/* Add the new node and rebalance the tree. */
-	ext = kzalloc(sizeof(struct swsusp_extent), GFP_KERNEL);
+	ext = kzalloc_obj(struct swsusp_extent);
 	if (!ext)
 		return -ENOMEM;
 
@@ -169,42 +166,41 @@ static int swsusp_extents_insert(unsigned long swap_offset)
 	return 0;
 }
 
-/*
- *	alloc_swapdev_block - allocate a swap page and register that it has
- *	been allocated, so that it can be freed in case of an error.
- */
-
 sector_t alloc_swapdev_block(int swap)
 {
 	unsigned long offset;
 
-	offset = swp_offset(get_swap_page_of_type(swap));
+	/*
+	 * Allocate a swap page and register that it has been allocated, so that
+	 * it can be freed in case of an error.
+	 */
+	offset = swp_offset(swap_alloc_hibernation_slot(swap));
 	if (offset) {
 		if (swsusp_extents_insert(offset))
-			swap_free(swp_entry(swap, offset));
+			swap_free_hibernation_slot(swp_entry(swap, offset));
 		else
 			return swapdev_block(swap, offset);
 	}
 	return 0;
 }
 
-/*
- *	free_all_swap_pages - free swap pages allocated for saving image data.
- *	It also frees the extents used to register which swap entries had been
- *	allocated.
- */
-
 void free_all_swap_pages(int swap)
 {
+	unsigned long offset;
 	struct rb_node *node;
 
+	/*
+	 * Free swap pages allocated for saving image data.  It also frees the
+	 * extents used to register which swap entries had been allocated.
+	 */
 	while ((node = swsusp_extents.rb_node)) {
 		struct swsusp_extent *ext;
 
 		ext = rb_entry(node, struct swsusp_extent, node);
 		rb_erase(node, &swsusp_extents);
-		swap_free_nr(swp_entry(swap, ext->start),
-			     ext->end - ext->start + 1);
+
+		for (offset = ext->start; offset <= ext->end; offset++)
+			swap_free_hibernation_slot(swp_entry(swap, offset));
 
 		kfree(ext);
 	}
@@ -267,35 +263,26 @@ static void hib_end_io(struct bio *bio)
 	bio_put(bio);
 }
 
-static int hib_submit_io(blk_opf_t opf, pgoff_t page_off, void *addr,
+static int hib_submit_io_sync(blk_opf_t opf, pgoff_t page_off, void *addr)
+{
+	return bdev_rw_virt(file_bdev(hib_resume_bdev_file),
+			page_off * (PAGE_SIZE >> 9), addr, PAGE_SIZE, opf);
+}
+
+static int hib_submit_io_async(blk_opf_t opf, pgoff_t page_off, void *addr,
 			 struct hib_bio_batch *hb)
 {
-	struct page *page = virt_to_page(addr);
 	struct bio *bio;
-	int error = 0;
 
 	bio = bio_alloc(file_bdev(hib_resume_bdev_file), 1, opf,
 			GFP_NOIO | __GFP_HIGH);
 	bio->bi_iter.bi_sector = page_off * (PAGE_SIZE >> 9);
-
-	if (bio_add_page(bio, page, PAGE_SIZE, 0) < PAGE_SIZE) {
-		pr_err("Adding page to bio failed at %llu\n",
-		       (unsigned long long)bio->bi_iter.bi_sector);
-		bio_put(bio);
-		return -EFAULT;
-	}
-
-	if (hb) {
-		bio->bi_end_io = hib_end_io;
-		bio->bi_private = hb;
-		atomic_inc(&hb->count);
-		submit_bio(bio);
-	} else {
-		error = submit_bio_wait(bio);
-		bio_put(bio);
-	}
-
-	return error;
+	bio_add_virt_nofail(bio, addr, PAGE_SIZE);
+	bio->bi_end_io = hib_end_io;
+	bio->bi_private = hb;
+	atomic_inc(&hb->count);
+	submit_bio(bio);
+	return 0;
 }
 
 static int hib_wait_io(struct hib_bio_batch *hb)
@@ -311,11 +298,12 @@ static int hib_wait_io(struct hib_bio_batch *hb)
 /*
  * Saving part
  */
+
 static int mark_swapfiles(struct swap_map_handle *handle, unsigned int flags)
 {
 	int error;
 
-	hib_submit_io(REQ_OP_READ, swsusp_resume_block, swsusp_header, NULL);
+	hib_submit_io_sync(REQ_OP_READ, swsusp_resume_block, swsusp_header);
 	if (!memcmp("SWAP-SPACE",swsusp_header->sig, 10) ||
 	    !memcmp("SWAPSPACE2",swsusp_header->sig, 10)) {
 		memcpy(swsusp_header->orig_sig,swsusp_header->sig, 10);
@@ -328,8 +316,8 @@ static int mark_swapfiles(struct swap_map_handle *handle, unsigned int flags)
 		swsusp_header->flags = flags;
 		if (flags & SF_CRC32_MODE)
 			swsusp_header->crc32 = handle->crc32;
-		error = hib_submit_io(REQ_OP_WRITE | REQ_SYNC,
-				      swsusp_resume_block, swsusp_header, NULL);
+		error = hib_submit_io_sync(REQ_OP_WRITE | REQ_SYNC,
+				      swsusp_resume_block, swsusp_header);
 	} else {
 		pr_err("Swap header not found!\n");
 		error = -ENODEV;
@@ -344,18 +332,16 @@ static int mark_swapfiles(struct swap_map_handle *handle, unsigned int flags)
  */
 unsigned int swsusp_header_flags;
 
-/**
- *	swsusp_swap_check - check if the resume device is a swap device
- *	and get its index (if so)
- *
- *	This is called before saving image
- */
 static int swsusp_swap_check(void)
 {
 	int res;
 
+	/*
+	 * Check if the resume device is a swap device and get its index (if so).
+	 * This is called before saving the image.
+	 */
 	if (swsusp_resume_device)
-		res = swap_type_of(swsusp_resume_device, swsusp_resume_block);
+		res = find_hibernation_swap_type(swsusp_resume_device, swsusp_resume_block);
 	else
 		res = find_first_swap(&swsusp_resume_device);
 	if (res < 0)
@@ -370,45 +356,32 @@ static int swsusp_swap_check(void)
 	return 0;
 }
 
-/**
- *	write_page - Write one page to given swap location.
- *	@buf:		Address we're writing.
- *	@offset:	Offset of the swap page we're writing to.
- *	@hb:		bio completion batch
- */
-
 static int write_page(void *buf, sector_t offset, struct hib_bio_batch *hb)
 {
+	gfp_t gfp = GFP_NOIO | __GFP_NOWARN | __GFP_NORETRY;
 	void *src;
 	int ret;
 
 	if (!offset)
 		return -ENOSPC;
 
-	if (hb) {
-		src = (void *)__get_free_page(GFP_NOIO | __GFP_NOWARN |
-		                              __GFP_NORETRY);
-		if (src) {
-			copy_page(src, buf);
-		} else {
-			ret = hib_wait_io(hb); /* Free pages */
-			if (ret)
-				return ret;
-			src = (void *)__get_free_page(GFP_NOIO |
-			                              __GFP_NOWARN |
-			                              __GFP_NORETRY);
-			if (src) {
-				copy_page(src, buf);
-			} else {
-				WARN_ON_ONCE(1);
-				hb = NULL;	/* Go synchronous */
-				src = buf;
-			}
-		}
-	} else {
-		src = buf;
+	if (!hb)
+		goto sync_io;
+
+	src = (void *)__get_free_page(gfp);
+	if (!src) {
+		ret = hib_wait_io(hb); /* Free pages */
+		if (ret)
+			return ret;
+		src = (void *)__get_free_page(gfp);
+		if (WARN_ON_ONCE(!src))
+			goto sync_io;
 	}
-	return hib_submit_io(REQ_OP_WRITE | REQ_SYNC, offset, src, hb);
+
+	copy_page(src, buf);
+	return hib_submit_io_async(REQ_OP_WRITE | REQ_SYNC, offset, src, hb);
+sync_io:
+	return hib_submit_io_sync(REQ_OP_WRITE | REQ_SYNC, offset, buf);
 }
 
 static void release_swap_writer(struct swap_map_handle *handle)
@@ -533,16 +506,13 @@ static int swap_writer_finish(struct swap_map_handle *handle,
 				CMP_HEADER, PAGE_SIZE)
 #define CMP_SIZE	(CMP_PAGES * PAGE_SIZE)
 
-/* Maximum number of threads for compression/decompression. */
-#define CMP_THREADS	3
+/* Default number of threads for compression/decompression. */
+#define CMP_THREADS    3
+static unsigned int hibernate_compression_threads = CMP_THREADS;
 
 /* Minimum/maximum number of pages for read buffering. */
 #define CMP_MIN_RD_PAGES	1024
 #define CMP_MAX_RD_PAGES	8192
-
-/**
- *	save_image - save the suspend image data
- */
 
 static int save_image(struct swap_map_handle *handle,
                       struct snapshot_handle *snapshot,
@@ -599,13 +569,41 @@ struct crc_data {
 	wait_queue_head_t go;                     /* start crc update */
 	wait_queue_head_t done;                   /* crc update done */
 	u32 *crc32;                               /* points to handle's crc32 */
-	size_t *unc_len[CMP_THREADS];             /* uncompressed lengths */
-	unsigned char *unc[CMP_THREADS];          /* uncompressed data */
+	size_t **unc_len;			  /* uncompressed lengths */
+	unsigned char *unc[];			  /* uncompressed data */
 };
 
-/*
- * CRC32 update function that runs in its own thread.
- */
+static struct crc_data *alloc_crc_data(int nr_threads)
+{
+	struct crc_data *crc;
+
+	crc = kzalloc_flex(*crc, unc, nr_threads);
+	if (!crc)
+		return NULL;
+
+	crc->unc_len = kzalloc_objs(*crc->unc_len, nr_threads);
+	if (!crc->unc_len)
+		goto err_free_crc;
+
+	return crc;
+
+err_free_crc:
+	kfree(crc);
+	return NULL;
+}
+
+static void free_crc_data(struct crc_data *crc)
+{
+	if (!crc)
+		return;
+
+	if (crc->thr)
+		kthread_stop(crc->thr);
+
+	kfree(crc->unc_len);
+	kfree(crc);
+}
+
 static int crc32_threadfn(void *data)
 {
 	struct crc_data *d = data;
@@ -630,12 +628,14 @@ static int crc32_threadfn(void *data)
 	}
 	return 0;
 }
+
 /*
  * Structure used for data compression.
  */
 struct cmp_data {
 	struct task_struct *thr;                  /* thread */
-	struct crypto_comp *cc;                   /* crypto compressor stream */
+	struct crypto_acomp *cc;		  /* crypto compressor */
+	struct acomp_req *cr;			  /* crypto request */
 	atomic_t ready;                           /* ready to start flag */
 	atomic_t stop;                            /* ready to stop flag */
 	int ret;                                  /* return code */
@@ -648,15 +648,11 @@ struct cmp_data {
 };
 
 /* Indicates the image size after compression */
-static atomic_t compressed_size = ATOMIC_INIT(0);
+static atomic64_t compressed_size = ATOMIC_INIT(0);
 
-/*
- * Compression function that runs in its own thread.
- */
 static int compress_threadfn(void *data)
 {
 	struct cmp_data *d = data;
-	unsigned int cmp_len = 0;
 
 	while (1) {
 		wait_event(d->go, atomic_read_acquire(&d->ready) ||
@@ -670,25 +666,21 @@ static int compress_threadfn(void *data)
 		}
 		atomic_set(&d->ready, 0);
 
-		cmp_len = CMP_SIZE - CMP_HEADER;
-		d->ret = crypto_comp_compress(d->cc, d->unc, d->unc_len,
-					      d->cmp + CMP_HEADER,
-					      &cmp_len);
-		d->cmp_len = cmp_len;
+		acomp_request_set_callback(d->cr, CRYPTO_TFM_REQ_MAY_SLEEP,
+					   NULL, NULL);
+		acomp_request_set_src_nondma(d->cr, d->unc, d->unc_len);
+		acomp_request_set_dst_nondma(d->cr, d->cmp + CMP_HEADER,
+					     CMP_SIZE - CMP_HEADER);
+		d->ret = crypto_acomp_compress(d->cr);
+		d->cmp_len = d->cr->dlen;
 
-		atomic_set(&compressed_size, atomic_read(&compressed_size) + d->cmp_len);
+		atomic64_add(d->cmp_len, &compressed_size);
 		atomic_set_release(&d->stop, 1);
 		wake_up(&d->done);
 	}
 	return 0;
 }
 
-/**
- * save_compressed_image - Save the suspend image data after compression.
- * @handle: Swap map handle to use for saving the image.
- * @snapshot: Image to read data from.
- * @nr_to_write: Number of pages to save.
- */
 static int save_compressed_image(struct swap_map_handle *handle,
 				 struct snapshot_handle *snapshot,
 				 unsigned int nr_to_write)
@@ -701,21 +693,21 @@ static int save_compressed_image(struct swap_map_handle *handle,
 	ktime_t start;
 	ktime_t stop;
 	size_t off;
-	unsigned thr, run_threads, nr_threads;
+	unsigned int thr, run_threads, nr_threads;
 	unsigned char *page = NULL;
 	struct cmp_data *data = NULL;
 	struct crc_data *crc = NULL;
 
 	hib_init_batch(&hb);
 
-	atomic_set(&compressed_size, 0);
+	atomic64_set(&compressed_size, 0);
 
 	/*
 	 * We'll limit the number of threads for compression to limit memory
 	 * footprint.
 	 */
 	nr_threads = num_online_cpus() - 1;
-	nr_threads = clamp_val(nr_threads, 1, CMP_THREADS);
+	nr_threads = clamp_val(nr_threads, 1, hibernate_compression_threads);
 
 	page = (void *)__get_free_page(GFP_NOIO | __GFP_HIGH);
 	if (!page) {
@@ -724,14 +716,14 @@ static int save_compressed_image(struct swap_map_handle *handle,
 		goto out_clean;
 	}
 
-	data = vzalloc(array_size(nr_threads, sizeof(*data)));
+	data = vcalloc(nr_threads, sizeof(*data));
 	if (!data) {
 		pr_err("Failed to allocate %s data\n", hib_comp_algo);
 		ret = -ENOMEM;
 		goto out_clean;
 	}
 
-	crc = kzalloc(sizeof(*crc), GFP_KERNEL);
+	crc = alloc_crc_data(nr_threads);
 	if (!crc) {
 		pr_err("Failed to allocate crc\n");
 		ret = -ENOMEM;
@@ -745,10 +737,17 @@ static int save_compressed_image(struct swap_map_handle *handle,
 		init_waitqueue_head(&data[thr].go);
 		init_waitqueue_head(&data[thr].done);
 
-		data[thr].cc = crypto_alloc_comp(hib_comp_algo, 0, 0);
+		data[thr].cc = crypto_alloc_acomp(hib_comp_algo, 0, CRYPTO_ALG_ASYNC);
 		if (IS_ERR_OR_NULL(data[thr].cc)) {
 			pr_err("Could not allocate comp stream %ld\n", PTR_ERR(data[thr].cc));
 			ret = -EFAULT;
+			goto out_clean;
+		}
+
+		data[thr].cr = acomp_request_alloc(data[thr].cc);
+		if (!data[thr].cr) {
+			pr_err("Could not allocate comp request\n");
+			ret = -ENOMEM;
 			goto out_clean;
 		}
 
@@ -882,39 +881,35 @@ out_finish:
 	stop = ktime_get();
 	if (!ret)
 		ret = err2;
-	if (!ret)
+	if (!ret) {
+		swsusp_show_speed(start, stop, nr_to_write, "Wrote");
+		pr_info("Image size after compression: %lld kbytes\n",
+			(atomic64_read(&compressed_size) / 1024));
 		pr_info("Image saving done\n");
-	swsusp_show_speed(start, stop, nr_to_write, "Wrote");
-	pr_info("Image size after compression: %d kbytes\n",
-		(atomic_read(&compressed_size) / 1024));
+	} else {
+		pr_err("Image saving failed: %d\n", ret);
+	}
 
 out_clean:
 	hib_finish_batch(&hb);
-	if (crc) {
-		if (crc->thr)
-			kthread_stop(crc->thr);
-		kfree(crc);
-	}
+	free_crc_data(crc);
 	if (data) {
 		for (thr = 0; thr < nr_threads; thr++) {
 			if (data[thr].thr)
 				kthread_stop(data[thr].thr);
-			if (data[thr].cc)
-				crypto_free_comp(data[thr].cc);
+
+			acomp_request_free(data[thr].cr);
+
+			if (!IS_ERR_OR_NULL(data[thr].cc))
+				crypto_free_acomp(data[thr].cc);
 		}
 		vfree(data);
 	}
-	if (page) free_page((unsigned long)page);
+	if (page)
+		free_page((unsigned long)page);
 
 	return ret;
 }
-
-/**
- *	enough_swap - Make sure we have enough swap to save the image.
- *
- *	Returns TRUE or FALSE after checking the total amount of swap
- *	space available from the resume partition.
- */
 
 static int enough_swap(unsigned int nr_pages)
 {
@@ -928,15 +923,16 @@ static int enough_swap(unsigned int nr_pages)
 }
 
 /**
- *	swsusp_write - Write entire image and metadata.
- *	@flags: flags to pass to the "boot" kernel in the image header
+ * swsusp_write - Write entire image and metadata.
+ * @flags: flags to pass to the "boot" kernel in the image header
  *
- *	It is important _NOT_ to umount filesystems at this point. We want
- *	them synced (in case something goes wrong) but we DO not want to mark
- *	filesystem clean: it is not. (And it does not matter, if we resume
- *	correctly, we'll mark system clean, anyway.)
+ * It is important _NOT_ to umount filesystems at this point. We want them
+ * synced (in case something goes wrong) but we DO not want to mark filesystem
+ * clean: it is not. (And it does not matter, if we resume correctly, we'll mark
+ * system clean, anyway.)
+ *
+ * Return: 0 on success, negative error code on failure.
  */
-
 int swsusp_write(unsigned int flags)
 {
 	struct swap_map_handle handle;
@@ -979,8 +975,8 @@ out_finish:
 }
 
 /*
- *	The following functions allow us to read data using a swap map
- *	in a file-like way.
+ * The following functions allow us to read data using a swap map in a file-like
+ * way.
  */
 
 static void release_swap_reader(struct swap_map_handle *handle)
@@ -1013,7 +1009,7 @@ static int get_swap_reader(struct swap_map_handle *handle,
 	last = handle->maps = NULL;
 	offset = swsusp_header->image;
 	while (offset) {
-		tmp = kzalloc(sizeof(*handle->maps), GFP_KERNEL);
+		tmp = kzalloc_obj(*handle->maps);
 		if (!tmp) {
 			release_swap_reader(handle);
 			return -ENOMEM;
@@ -1031,7 +1027,7 @@ static int get_swap_reader(struct swap_map_handle *handle,
 			return -ENOMEM;
 		}
 
-		error = hib_submit_io(REQ_OP_READ, offset, tmp->map, NULL);
+		error = hib_submit_io_sync(REQ_OP_READ, offset, tmp->map);
 		if (error) {
 			release_swap_reader(handle);
 			return error;
@@ -1055,7 +1051,10 @@ static int swap_read_page(struct swap_map_handle *handle, void *buf,
 	offset = handle->cur->entries[handle->k];
 	if (!offset)
 		return -EFAULT;
-	error = hib_submit_io(REQ_OP_READ, offset, buf, hb);
+	if (hb)
+		error = hib_submit_io_async(REQ_OP_READ, offset, buf, hb);
+	else
+		error = hib_submit_io_sync(REQ_OP_READ, offset, buf);
 	if (error)
 		return error;
 	if (++handle->k >= MAP_PAGE_ENTRIES) {
@@ -1078,12 +1077,6 @@ static int swap_reader_finish(struct swap_map_handle *handle)
 
 	return 0;
 }
-
-/**
- *	load_image - load the image using the swap map handle
- *	@handle and the snapshot handle @snapshot
- *	(assume there are @nr_pages pages to load)
- */
 
 static int load_image(struct swap_map_handle *handle,
                       struct snapshot_handle *snapshot,
@@ -1142,7 +1135,8 @@ static int load_image(struct swap_map_handle *handle,
  */
 struct dec_data {
 	struct task_struct *thr;                  /* thread */
-	struct crypto_comp *cc;                   /* crypto compressor stream */
+	struct crypto_acomp *cc;		  /* crypto compressor */
+	struct acomp_req *cr;			  /* crypto request */
 	atomic_t ready;                           /* ready to start flag */
 	atomic_t stop;                            /* ready to stop flag */
 	int ret;                                  /* return code */
@@ -1154,13 +1148,9 @@ struct dec_data {
 	unsigned char cmp[CMP_SIZE];              /* compressed buffer */
 };
 
-/*
- * Decompression function that runs in its own thread.
- */
 static int decompress_threadfn(void *data)
 {
 	struct dec_data *d = data;
-	unsigned int unc_len = 0;
 
 	while (1) {
 		wait_event(d->go, atomic_read_acquire(&d->ready) ||
@@ -1174,10 +1164,13 @@ static int decompress_threadfn(void *data)
 		}
 		atomic_set(&d->ready, 0);
 
-		unc_len = UNC_SIZE;
-		d->ret = crypto_comp_decompress(d->cc, d->cmp + CMP_HEADER, d->cmp_len,
-						d->unc, &unc_len);
-		d->unc_len = unc_len;
+		acomp_request_set_callback(d->cr, CRYPTO_TFM_REQ_MAY_SLEEP,
+					   NULL, NULL);
+		acomp_request_set_src_nondma(d->cr, d->cmp + CMP_HEADER,
+					     d->cmp_len);
+		acomp_request_set_dst_nondma(d->cr, d->unc, UNC_SIZE);
+		d->ret = crypto_acomp_decompress(d->cr);
+		d->unc_len = d->cr->dlen;
 
 		if (clean_pages_on_decompress)
 			flush_icache_range((unsigned long)d->unc,
@@ -1189,12 +1182,6 @@ static int decompress_threadfn(void *data)
 	return 0;
 }
 
-/**
- * load_compressed_image - Load compressed image data and decompress it.
- * @handle: Swap map handle to use for loading data.
- * @snapshot: Image to copy uncompressed data into.
- * @nr_to_read: Number of pages to load.
- */
 static int load_compressed_image(struct swap_map_handle *handle,
 				 struct snapshot_handle *snapshot,
 				 unsigned int nr_to_read)
@@ -1222,23 +1209,23 @@ static int load_compressed_image(struct swap_map_handle *handle,
 	 * footprint.
 	 */
 	nr_threads = num_online_cpus() - 1;
-	nr_threads = clamp_val(nr_threads, 1, CMP_THREADS);
+	nr_threads = clamp_val(nr_threads, 1, hibernate_compression_threads);
 
-	page = vmalloc(array_size(CMP_MAX_RD_PAGES, sizeof(*page)));
+	page = vmalloc_array(CMP_MAX_RD_PAGES, sizeof(*page));
 	if (!page) {
 		pr_err("Failed to allocate %s page\n", hib_comp_algo);
 		ret = -ENOMEM;
 		goto out_clean;
 	}
 
-	data = vzalloc(array_size(nr_threads, sizeof(*data)));
+	data = vcalloc(nr_threads, sizeof(*data));
 	if (!data) {
 		pr_err("Failed to allocate %s data\n", hib_comp_algo);
 		ret = -ENOMEM;
 		goto out_clean;
 	}
 
-	crc = kzalloc(sizeof(*crc), GFP_KERNEL);
+	crc = alloc_crc_data(nr_threads);
 	if (!crc) {
 		pr_err("Failed to allocate crc\n");
 		ret = -ENOMEM;
@@ -1254,10 +1241,17 @@ static int load_compressed_image(struct swap_map_handle *handle,
 		init_waitqueue_head(&data[thr].go);
 		init_waitqueue_head(&data[thr].done);
 
-		data[thr].cc = crypto_alloc_comp(hib_comp_algo, 0, 0);
+		data[thr].cc = crypto_alloc_acomp(hib_comp_algo, 0, CRYPTO_ALG_ASYNC);
 		if (IS_ERR_OR_NULL(data[thr].cc)) {
 			pr_err("Could not allocate comp stream %ld\n", PTR_ERR(data[thr].cc));
 			ret = -EFAULT;
+			goto out_clean;
+		}
+
+		data[thr].cr = acomp_request_alloc(data[thr].cc);
+		if (!data[thr].cr) {
+			pr_err("Could not allocate comp request\n");
+			ret = -ENOMEM;
 			goto out_clean;
 		}
 
@@ -1498,17 +1492,16 @@ out_clean:
 	hib_finish_batch(&hb);
 	for (i = 0; i < ring_size; i++)
 		free_page((unsigned long)page[i]);
-	if (crc) {
-		if (crc->thr)
-			kthread_stop(crc->thr);
-		kfree(crc);
-	}
+	free_crc_data(crc);
 	if (data) {
 		for (thr = 0; thr < nr_threads; thr++) {
 			if (data[thr].thr)
 				kthread_stop(data[thr].thr);
-			if (data[thr].cc)
-				crypto_free_comp(data[thr].cc);
+
+			acomp_request_free(data[thr].cr);
+
+			if (!IS_ERR_OR_NULL(data[thr].cc))
+				crypto_free_acomp(data[thr].cc);
 		}
 		vfree(data);
 	}
@@ -1521,8 +1514,9 @@ out_clean:
  *	swsusp_read - read the hibernation image.
  *	@flags_p: flags passed by the "frozen" kernel in the image header should
  *		  be written into this memory location
+ *
+ *	Return: 0 on success, negative error code on failure.
  */
-
 int swsusp_read(unsigned int *flags_p)
 {
 	int error;
@@ -1559,8 +1553,9 @@ static void *swsusp_holder;
 /**
  * swsusp_check - Open the resume device and check for the swsusp signature.
  * @exclusive: Open the resume device exclusively.
+ *
+ * Return: 0 if a valid image is found, negative error code otherwise.
  */
-
 int swsusp_check(bool exclusive)
 {
 	void *holder = exclusive ? &swsusp_holder : NULL;
@@ -1570,8 +1565,8 @@ int swsusp_check(bool exclusive)
 				BLK_OPEN_READ, holder, NULL);
 	if (!IS_ERR(hib_resume_bdev_file)) {
 		clear_page(swsusp_header);
-		error = hib_submit_io(REQ_OP_READ, swsusp_resume_block,
-					swsusp_header, NULL);
+		error = hib_submit_io_sync(REQ_OP_READ, swsusp_resume_block,
+					swsusp_header);
 		if (error)
 			goto put;
 
@@ -1579,9 +1574,9 @@ int swsusp_check(bool exclusive)
 			memcpy(swsusp_header->sig, swsusp_header->orig_sig, 10);
 			swsusp_header_flags = swsusp_header->flags;
 			/* Reset swap signature now */
-			error = hib_submit_io(REQ_OP_WRITE | REQ_SYNC,
+			error = hib_submit_io_sync(REQ_OP_WRITE | REQ_SYNC,
 						swsusp_resume_block,
-						swsusp_header, NULL);
+						swsusp_header);
 		} else {
 			error = -EINVAL;
 		}
@@ -1610,7 +1605,6 @@ put:
 /**
  * swsusp_close - close resume device.
  */
-
 void swsusp_close(void)
 {
 	if (IS_ERR(hib_resume_bdev_file)) {
@@ -1622,21 +1616,21 @@ void swsusp_close(void)
 }
 
 /**
- *      swsusp_unmark - Unmark swsusp signature in the resume device
+ * swsusp_unmark - Unmark swsusp signature in the resume device
+ *
+ * Return: 0 on success, negative error code on failure.
  */
-
 #ifdef CONFIG_SUSPEND
 int swsusp_unmark(void)
 {
 	int error;
 
-	hib_submit_io(REQ_OP_READ, swsusp_resume_block,
-			swsusp_header, NULL);
+	hib_submit_io_sync(REQ_OP_READ, swsusp_resume_block, swsusp_header);
 	if (!memcmp(HIBERNATE_SIG,swsusp_header->sig, 10)) {
 		memcpy(swsusp_header->sig,swsusp_header->orig_sig, 10);
-		error = hib_submit_io(REQ_OP_WRITE | REQ_SYNC,
+		error = hib_submit_io_sync(REQ_OP_WRITE | REQ_SYNC,
 					swsusp_resume_block,
-					swsusp_header, NULL);
+					swsusp_header);
 	} else {
 		pr_err("Cannot find swsusp signature!\n");
 		error = -ENODEV;
@@ -1651,8 +1645,46 @@ int swsusp_unmark(void)
 }
 #endif
 
+static ssize_t hibernate_compression_threads_show(struct kobject *kobj,
+				struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", hibernate_compression_threads);
+}
+
+static ssize_t hibernate_compression_threads_store(struct kobject *kobj,
+				struct kobj_attribute *attr,
+				const char *buf, size_t n)
+{
+	unsigned long val;
+
+	if (kstrtoul(buf, 0, &val))
+		return -EINVAL;
+
+	if (val < 1)
+		return -EINVAL;
+
+	hibernate_compression_threads = val;
+	return n;
+}
+power_attr(hibernate_compression_threads);
+
+static struct attribute *g[] = {
+	&hibernate_compression_threads_attr.attr,
+	NULL,
+};
+
+static const struct attribute_group attr_group = {
+	.attrs = g,
+};
+
 static int __init swsusp_header_init(void)
 {
+	int error;
+
+	error = sysfs_create_group(power_kobj, &attr_group);
+	if (error)
+		return -ENOMEM;
+
 	swsusp_header = (struct swsusp_header*) __get_free_page(GFP_KERNEL);
 	if (!swsusp_header)
 		panic("Could not allocate memory for swsusp_header\n");
@@ -1660,3 +1692,19 @@ static int __init swsusp_header_init(void)
 }
 
 core_initcall(swsusp_header_init);
+
+static int __init hibernate_compression_threads_setup(char *str)
+{
+	int rc = kstrtouint(str, 0, &hibernate_compression_threads);
+
+	if (rc)
+		return rc;
+
+	if (hibernate_compression_threads < 1)
+		hibernate_compression_threads = CMP_THREADS;
+
+	return 1;
+
+}
+
+__setup("hibernate_compression_threads=", hibernate_compression_threads_setup);

@@ -50,8 +50,6 @@ int sgi_partition(struct parsed_partitions *state)
 	p = &label->partitions[0];
 	magic = label->magic_mushroom;
 	if(be32_to_cpu(magic) != SGI_LABEL_MAGIC) {
-		/*printk("Dev %s SGI disklabel: bad magic %08x\n",
-		       state->disk->disk_name, be32_to_cpu(magic));*/
 		put_dev_sector(sect);
 		return 0;
 	}
@@ -81,7 +79,7 @@ int sgi_partition(struct parsed_partitions *state)
 		}
 		slot++;
 	}
-	strlcat(state->pp_buf, "\n", PAGE_SIZE);
+	seq_buf_puts(&state->pp_buf, "\n");
 	put_dev_sector(sect);
 	return 1;
 }

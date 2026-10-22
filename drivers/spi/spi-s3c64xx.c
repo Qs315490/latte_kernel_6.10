@@ -139,7 +139,9 @@ struct s3c64xx_spi_dma_data {
  * struct s3c64xx_spi_port_config - SPI Controller hardware info
  * @fifo_lvl_mask: [DEPRECATED] use @{rx, tx}_fifomask instead.
  * @rx_lvl_offset: [DEPRECATED] use @{rx,tx}_fifomask instead.
- * @fifo_depth: depth of the FIFO.
+ * @fifo_depth: depth of the FIFOs. Used by compatibles where all the instances
+ *              of the IP define the same FIFO depth. It has higher precedence
+ *              than the FIFO depth specified via DT.
  * @rx_fifomask: SPI_STATUS.RX_FIFO_LVL mask. Shifted mask defining the field's
  *               length and position.
  * @tx_fifomask: SPI_STATUS.TX_FIFO_LVL mask. Shifted mask defining the field's
@@ -959,7 +961,7 @@ static struct s3c64xx_spi_csinfo *s3c64xx_get_target_ctrldata(
 		return ERR_PTR(-EINVAL);
 	}
 
-	cs = kzalloc(sizeof(*cs), GFP_KERNEL);
+	cs = kzalloc_obj(*cs);
 	if (!cs)
 		return ERR_PTR(-ENOMEM);
 
@@ -1043,14 +1045,12 @@ static int s3c64xx_spi_setup(struct spi_device *spi)
 		}
 	}
 
-	pm_runtime_mark_last_busy(&sdd->pdev->dev);
 	pm_runtime_put_autosuspend(&sdd->pdev->dev);
 	s3c64xx_spi_set_cs(spi, false);
 
 	return 0;
 
 setup_exit:
-	pm_runtime_mark_last_busy(&sdd->pdev->dev);
 	pm_runtime_put_autosuspend(&sdd->pdev->dev);
 	/* setup() returns with device de-selected */
 	s3c64xx_spi_set_cs(spi, false);
@@ -1268,8 +1268,7 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
 
 	host = devm_spi_alloc_host(&pdev->dev, sizeof(*sdd));
 	if (!host)
-		return dev_err_probe(&pdev->dev, -ENOMEM,
-				     "Unable to allocate SPI Host\n");
+		return -ENOMEM;
 
 	platform_set_drvdata(pdev, host);
 
@@ -1296,7 +1295,6 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
 	sdd->tx_dma.direction = DMA_MEM_TO_DEV;
 	sdd->rx_dma.direction = DMA_DEV_TO_MEM;
 
-	host->dev.of_node = pdev->dev.of_node;
 	host->bus_num = -1;
 	host->setup = s3c64xx_spi_setup;
 	host->cleanup = s3c64xx_spi_cleanup;
@@ -1371,7 +1369,7 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
 	       S3C64XX_SPI_INT_TX_OVERRUN_EN | S3C64XX_SPI_INT_TX_UNDERRUN_EN,
 	       sdd->regs + S3C64XX_SPI_INT_EN);
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret != 0) {
 		dev_err(&pdev->dev, "cannot register SPI host: %d\n", ret);
 		goto err_pm_put;
@@ -1382,7 +1380,6 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
 	dev_dbg(&pdev->dev, "\tIOmem=[%pR]\tFIFO %dbytes\n",
 		mem_res, sdd->fifo_depth);
 
-	pm_runtime_mark_last_busy(&pdev->dev);
 	pm_runtime_put_autosuspend(&pdev->dev);
 
 	return 0;
@@ -1402,12 +1399,9 @@ static void s3c64xx_spi_remove(struct platform_device *pdev)
 
 	pm_runtime_get_sync(&pdev->dev);
 
-	writel(0, sdd->regs + S3C64XX_SPI_INT_EN);
+	spi_unregister_controller(host);
 
-	if (!is_polling(sdd)) {
-		dma_release_channel(sdd->rx_dma.ch);
-		dma_release_channel(sdd->tx_dma.ch);
-	}
+	writel(0, sdd->regs + S3C64XX_SPI_INT_EN);
 
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
@@ -1506,16 +1500,6 @@ static const struct dev_pm_ops s3c64xx_spi_pm = {
 	SET_SYSTEM_SLEEP_PM_OPS(s3c64xx_spi_suspend, s3c64xx_spi_resume)
 	SET_RUNTIME_PM_OPS(s3c64xx_spi_runtime_suspend,
 			   s3c64xx_spi_runtime_resume, NULL)
-};
-
-static const struct s3c64xx_spi_port_config s3c2443_spi_port_config = {
-	/* fifo_lvl_mask is deprecated. Use {rx, tx}_fifomask instead. */
-	.fifo_lvl_mask	= { 0x7f },
-	/* rx_lvl_offset is deprecated. Use {rx, tx}_fifomask instead. */
-	.rx_lvl_offset	= 13,
-	.tx_st_done	= 21,
-	.clk_div	= 2,
-	.high_speed	= true,
 };
 
 static const struct s3c64xx_spi_port_config s3c6410_spi_port_config = {
@@ -1629,22 +1613,16 @@ static const struct s3c64xx_spi_port_config gs101_spi_port_config = {
 
 static const struct platform_device_id s3c64xx_spi_driver_ids[] = {
 	{
-		.name		= "s3c2443-spi",
-		.driver_data	= (kernel_ulong_t)&s3c2443_spi_port_config,
-	}, {
-		.name		= "s3c6410-spi",
-		.driver_data	= (kernel_ulong_t)&s3c6410_spi_port_config,
+		.name = "s3c6410-spi",
+		.driver_data = (kernel_ulong_t)&s3c6410_spi_port_config,
 	},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, s3c64xx_spi_driver_ids);
 
 static const struct of_device_id s3c64xx_spi_dt_match[] = {
 	{ .compatible = "google,gs101-spi",
 			.data = &gs101_spi_port_config,
-	},
-	{ .compatible = "samsung,s3c2443-spi",
-			.data = &s3c2443_spi_port_config,
 	},
 	{ .compatible = "samsung,s3c6410-spi",
 			.data = &s3c6410_spi_port_config,

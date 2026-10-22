@@ -100,6 +100,9 @@ void ib_enum_all_roce_netdevs(roce_netdev_filter filter,
 			      roce_netdev_callback cb,
 			      void *cookie);
 
+void ib_device_enable_gid_updates(struct ib_device *device);
+void ib_device_disable_gid_updates(struct ib_device *device);
+
 typedef int (*nldev_callback)(struct ib_device *device,
 			      struct sk_buff *skb,
 			      struct netlink_callback *cb,
@@ -318,7 +321,7 @@ void nldev_exit(void);
 
 struct ib_qp *ib_create_qp_user(struct ib_device *dev, struct ib_pd *pd,
 				struct ib_qp_init_attr *attr,
-				struct ib_udata *udata,
+				struct uverbs_attr_bundle *uattrs,
 				struct ib_uqp_object *uobj, const char *caller);
 
 void ib_qp_usecnt_inc(struct ib_qp *qp);

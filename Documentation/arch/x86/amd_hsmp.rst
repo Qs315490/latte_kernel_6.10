@@ -14,7 +14,7 @@ set of mailbox registers.
 
 More details on the interface can be found in chapter
 "7 Host System Management Port (HSMP)" of the family/model PPR
-Eg: https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/programmer-references/55898_B1_pub_0_50.zip
+Eg: https://docs.amd.com/v/u/en-US/55898_B1_pub_0_50
 
 
 HSMP interface is supported on EPYC line of server CPUs and MI300A (APU).
@@ -71,6 +71,28 @@ Note: lseek() is not supported as entire metrics table is read.
 Metrics table definitions will be documented as part of Public PPR.
 The same is defined in the amd_hsmp.h header.
 
+2. HSMP telemetry sysfs files
+
+Following sysfs files are available at /sys/devices/platform/AMDI0097:0X/.
+
+* c0_residency_input: Percentage of cores in C0 state.
+* prochot_status: Reports 1 if the processor is at thermal threshold value,
+  0 otherwise.
+* smu_fw_version: SMU firmware version.
+* protocol_version: HSMP interface version.
+* ddr_max_bw: Theoretical maximum DDR bandwidth in GB/s.
+* ddr_utilised_bw_input: Current utilized DDR bandwidth in GB/s.
+* ddr_utilised_bw_perc_input(%): Percentage of current utilized DDR bandwidth.
+* mclk_input: Memory clock in MHz.
+* fclk_input: Fabric clock in MHz.
+* clk_fmax: Maximum frequency of socket in MHz.
+* clk_fmin: Minimum frequency of socket in MHz.
+* cclk_freq_limit_input: Core clock frequency limit per socket in MHz.
+* pwr_current_active_freq_limit: Current active frequency limit of socket
+  in MHz.
+* pwr_current_active_freq_limit_source: Source of current active frequency
+  limit.
+
 ACPI device object format
 =========================
 The ACPI object format expected from the amd_hsmp driver
@@ -116,6 +138,14 @@ for socket with ID00 is given below::
 			})
 		}
 
+HSMP HWMON interface
+====================
+HSMP power sensors are registered with the hwmon interface. A separate hwmon
+directory is created for each socket and the following files are generated
+within the hwmon directory.
+- power1_input (read only)
+- power1_cap_max (read only)
+- power1_cap (read, write)
 
 An example
 ==========
@@ -155,7 +185,7 @@ what happened. The transaction returns 0 on success.
 
 More details on the interface and message definitions can be found in chapter
 "7 Host System Management Port (HSMP)" of the respective family/model PPR
-eg: https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/programmer-references/55898_B1_pub_0_50.zip
+eg: https://docs.amd.com/v/u/en-US/55898_B1_pub_0_50
 
 User space C-APIs are made available by linking against the esmi library,
 which is provided by the E-SMS project https://www.amd.com/en/developer/e-sms.html.

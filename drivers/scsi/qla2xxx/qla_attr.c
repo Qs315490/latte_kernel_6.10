@@ -174,8 +174,8 @@ static const struct bin_attribute sysfs_fw_dump_attr = {
 		.mode = S_IRUSR | S_IWUSR,
 	},
 	.size = 0,
-	.read_new = qla2x00_sysfs_read_fw_dump,
-	.write_new = qla2x00_sysfs_write_fw_dump,
+	.read = qla2x00_sysfs_read_fw_dump,
+	.write = qla2x00_sysfs_write_fw_dump,
 };
 
 static ssize_t
@@ -288,8 +288,8 @@ static const struct bin_attribute sysfs_nvram_attr = {
 		.mode = S_IRUSR | S_IWUSR,
 	},
 	.size = 512,
-	.read_new = qla2x00_sysfs_read_nvram,
-	.write_new = qla2x00_sysfs_write_nvram,
+	.read = qla2x00_sysfs_read_nvram,
+	.write = qla2x00_sysfs_write_nvram,
 };
 
 static ssize_t
@@ -350,8 +350,8 @@ static const struct bin_attribute sysfs_optrom_attr = {
 		.mode = S_IRUSR | S_IWUSR,
 	},
 	.size = 0,
-	.read_new = qla2x00_sysfs_read_optrom,
-	.write_new = qla2x00_sysfs_write_optrom,
+	.read = qla2x00_sysfs_read_optrom,
+	.write = qla2x00_sysfs_write_optrom,
 };
 
 static ssize_t
@@ -535,7 +535,7 @@ static const struct bin_attribute sysfs_optrom_ctl_attr = {
 		.mode = S_IWUSR,
 	},
 	.size = 0,
-	.write_new = qla2x00_sysfs_write_optrom_ctl,
+	.write = qla2x00_sysfs_write_optrom_ctl,
 };
 
 static ssize_t
@@ -648,8 +648,8 @@ static const struct bin_attribute sysfs_vpd_attr = {
 		.mode = S_IRUSR | S_IWUSR,
 	},
 	.size = 0,
-	.read_new = qla2x00_sysfs_read_vpd,
-	.write_new = qla2x00_sysfs_write_vpd,
+	.read = qla2x00_sysfs_read_vpd,
+	.write = qla2x00_sysfs_write_vpd,
 };
 
 static ssize_t
@@ -685,7 +685,7 @@ static const struct bin_attribute sysfs_sfp_attr = {
 		.mode = S_IRUSR | S_IWUSR,
 	},
 	.size = SFP_DEV_SIZE,
-	.read_new = qla2x00_sysfs_read_sfp,
+	.read = qla2x00_sysfs_read_sfp,
 };
 
 static ssize_t
@@ -829,7 +829,7 @@ static const struct bin_attribute sysfs_reset_attr = {
 		.mode = S_IWUSR,
 	},
 	.size = 0,
-	.write_new = qla2x00_sysfs_write_reset,
+	.write = qla2x00_sysfs_write_reset,
 };
 
 static ssize_t
@@ -872,7 +872,7 @@ static const struct bin_attribute sysfs_issue_logo_attr = {
 		.mode = S_IWUSR,
 	},
 	.size = 0,
-	.write_new = qla2x00_issue_logo,
+	.write = qla2x00_issue_logo,
 };
 
 static ssize_t
@@ -935,7 +935,7 @@ static const struct bin_attribute sysfs_xgmac_stats_attr = {
 		.mode = S_IRUSR,
 	},
 	.size = 0,
-	.read_new = qla2x00_sysfs_read_xgmac_stats,
+	.read = qla2x00_sysfs_read_xgmac_stats,
 };
 
 static ssize_t
@@ -993,7 +993,7 @@ static const struct bin_attribute sysfs_dcbx_tlv_attr = {
 		.mode = S_IRUSR,
 	},
 	.size = 0,
-	.read_new = qla2x00_sysfs_read_dcbx_tlv,
+	.read = qla2x00_sysfs_read_dcbx_tlv,
 };
 
 static struct sysfs_entry {
@@ -1638,7 +1638,7 @@ qla2x00_fw_state_show(struct device *dev, struct device_attribute *attr,
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
 	int rval = QLA_FUNCTION_FAILED;
-	uint16_t state[6];
+	uint16_t state[16];
 	uint32_t pstate;
 
 	if (IS_QLAFX00(vha->hw)) {
@@ -2402,6 +2402,63 @@ qla2x00_dport_diagnostics_show(struct device *dev,
 	    vha->dport_data[0], vha->dport_data[1],
 	    vha->dport_data[2], vha->dport_data[3]);
 }
+
+static ssize_t
+qla2x00_mpi_fw_state_show(struct device *dev, struct device_attribute *attr,
+			  char *buf)
+{
+	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
+	int rval = QLA_FUNCTION_FAILED;
+	u16 state[16];
+	u16 mpi_state;
+	struct qla_hw_data *ha = vha->hw;
+
+	if (!(IS_QLA27XX(ha) || IS_QLA28XX(ha)))
+		return scnprintf(buf, PAGE_SIZE,
+				"MPI state reporting is not supported for this HBA.\n");
+
+	memset(state, 0, sizeof(state));
+
+	mutex_lock(&vha->hw->optrom_mutex);
+	if (qla2x00_chip_is_down(vha)) {
+		mutex_unlock(&vha->hw->optrom_mutex);
+		ql_dbg(ql_dbg_user, vha, 0x70df,
+		       "ISP reset is in progress, failing mpi_fw_state.\n");
+		return -EBUSY;
+	} else if (vha->hw->flags.eeh_busy) {
+		mutex_unlock(&vha->hw->optrom_mutex);
+		ql_dbg(ql_dbg_user, vha, 0x70ea,
+		       "HBA in PCI error state, failing mpi_fw_state.\n");
+		return -EBUSY;
+	}
+
+	rval = qla2x00_get_firmware_state(vha, state);
+	mutex_unlock(&vha->hw->optrom_mutex);
+	if (rval != QLA_SUCCESS) {
+		ql_dbg(ql_dbg_user, vha, 0x70eb,
+		       "MB Command to retrieve MPI state failed (%d), failing mpi_fw_state.\n",
+				rval);
+		return -EIO;
+	}
+
+	mpi_state = state[11];
+
+	if (!(mpi_state & BIT_15))
+		return scnprintf(buf, PAGE_SIZE,
+				 "MPI firmware state reporting is not supported by this firmware. (0x%02x)\n",
+				mpi_state);
+
+	if (!(mpi_state & BIT_8))
+		return scnprintf(buf, PAGE_SIZE,
+				 "MPI firmware is disabled. (0x%02x)\n",
+				mpi_state);
+
+	return scnprintf(buf, PAGE_SIZE,
+			 "MPI firmware is enabled, state is %s. (0x%02x)\n",
+			 mpi_state & BIT_9 ? "active" : "inactive",
+			 mpi_state);
+}
+
 static DEVICE_ATTR(dport_diagnostics, 0444,
 	   qla2x00_dport_diagnostics_show, NULL);
 
@@ -2469,6 +2526,8 @@ static DEVICE_ATTR(port_speed, 0644, qla2x00_port_speed_show,
     qla2x00_port_speed_store);
 static DEVICE_ATTR(port_no, 0444, qla2x00_port_no_show, NULL);
 static DEVICE_ATTR(fw_attr, 0444, qla2x00_fw_attr_show, NULL);
+static DEVICE_ATTR(mpi_fw_state, 0444, qla2x00_mpi_fw_state_show, NULL);
+
 
 static struct attribute *qla2x00_host_attrs[] = {
 	&dev_attr_driver_version.attr.attr,
@@ -2517,6 +2576,7 @@ static struct attribute *qla2x00_host_attrs[] = {
 	&dev_attr_qlini_mode.attr,
 	&dev_attr_ql2xiniexchg.attr,
 	&dev_attr_ql2xexchoffld.attr,
+	&dev_attr_mpi_fw_state.attr,
 	NULL,
 };
 

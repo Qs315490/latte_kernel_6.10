@@ -2,6 +2,7 @@
 /* Do not edit directly, auto-generated from: */
 /*	Documentation/netlink/specs/dpll.yaml */
 /* YNL-GEN uapi header */
+/* To regenerate run: tools/net/ynl/ynl-regen.sh */
 
 #ifndef _UAPI_LINUX_DPLL_H
 #define _UAPI_LINUX_DPLL_H
@@ -108,10 +109,12 @@ enum dpll_clock_quality_level {
  * enum dpll_type - type of dpll, valid values for DPLL_A_TYPE attribute
  * @DPLL_TYPE_PPS: dpll produces Pulse-Per-Second signal
  * @DPLL_TYPE_EEC: dpll drives the Ethernet Equipment Clock
+ * @DPLL_TYPE_GENERIC: generic dpll type for devices outside PPS/EEC classes
  */
 enum dpll_type {
 	DPLL_TYPE_PPS = 1,
 	DPLL_TYPE_EEC,
+	DPLL_TYPE_GENERIC,
 
 	/* private: */
 	__DPLL_TYPE_MAX,
@@ -178,6 +181,28 @@ enum dpll_pin_state {
 };
 
 /**
+ * enum dpll_pin_operstate - defines possible operational states of a pin with
+ *   respect to its parent DPLL device, valid values for DPLL_A_PIN_OPERSTATE
+ *   attribute
+ * @DPLL_PIN_OPERSTATE_ACTIVE: pin is qualified and actively used by the DPLL
+ * @DPLL_PIN_OPERSTATE_STANDBY: pin is qualified but not actively used by the
+ *   DPLL
+ * @DPLL_PIN_OPERSTATE_NO_SIGNAL: pin does not have a valid signal
+ * @DPLL_PIN_OPERSTATE_QUAL_FAILED: pin signal failed qualification (e.g.
+ *   frequency or phase monitor)
+ */
+enum dpll_pin_operstate {
+	DPLL_PIN_OPERSTATE_ACTIVE = 1,
+	DPLL_PIN_OPERSTATE_STANDBY,
+	DPLL_PIN_OPERSTATE_NO_SIGNAL,
+	DPLL_PIN_OPERSTATE_QUAL_FAILED,
+
+	/* private: */
+	__DPLL_PIN_OPERSTATE_MAX,
+	DPLL_PIN_OPERSTATE_MAX = (__DPLL_PIN_OPERSTATE_MAX - 1)
+};
+
+/**
  * enum dpll_pin_capabilities - defines possible capabilities of a pin, valid
  *   flags on DPLL_A_PIN_CAPABILITIES attribute
  * @DPLL_PIN_CAPABILITIES_DIRECTION_CAN_CHANGE: pin direction can be changed
@@ -190,7 +215,19 @@ enum dpll_pin_capabilities {
 	DPLL_PIN_CAPABILITIES_STATE_CAN_CHANGE = 4,
 };
 
-#define DPLL_PHASE_OFFSET_DIVIDER	1000
+#define DPLL_PHASE_OFFSET_DIVIDER		1000
+#define DPLL_PIN_MEASURED_FREQUENCY_DIVIDER	1000
+
+/**
+ * enum dpll_feature_state - Allow control (enable/disable) and status checking
+ *   over features.
+ * @DPLL_FEATURE_STATE_DISABLE: feature shall be disabled
+ * @DPLL_FEATURE_STATE_ENABLE: feature shall be enabled
+ */
+enum dpll_feature_state {
+	DPLL_FEATURE_STATE_DISABLE,
+	DPLL_FEATURE_STATE_ENABLE,
+};
 
 enum dpll_a {
 	DPLL_A_ID = 1,
@@ -204,6 +241,9 @@ enum dpll_a {
 	DPLL_A_TYPE,
 	DPLL_A_LOCK_STATUS_ERROR,
 	DPLL_A_CLOCK_QUALITY_LEVEL,
+	DPLL_A_PHASE_OFFSET_MONITOR,
+	DPLL_A_PHASE_OFFSET_AVG_FACTOR,
+	DPLL_A_FREQUENCY_MONITOR,
 
 	__DPLL_A_MAX,
 	DPLL_A_MAX = (__DPLL_A_MAX - 1)
@@ -237,6 +277,11 @@ enum dpll_a_pin {
 	DPLL_A_PIN_ESYNC_FREQUENCY,
 	DPLL_A_PIN_ESYNC_FREQUENCY_SUPPORTED,
 	DPLL_A_PIN_ESYNC_PULSE,
+	DPLL_A_PIN_REFERENCE_SYNC,
+	DPLL_A_PIN_PHASE_ADJUST_GRAN,
+	DPLL_A_PIN_FRACTIONAL_FREQUENCY_OFFSET_PPT,
+	DPLL_A_PIN_MEASURED_FREQUENCY,
+	DPLL_A_PIN_OPERSTATE,
 
 	__DPLL_A_PIN_MAX,
 	DPLL_A_PIN_MAX = (__DPLL_A_PIN_MAX - 1)

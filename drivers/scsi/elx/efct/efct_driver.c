@@ -93,7 +93,7 @@ efct_efclib_config(struct efct *efct, struct libefc_function_template *tt)
 	struct sli4 *sli;
 	int rc = 0;
 
-	efc = kzalloc(sizeof(*efc), GFP_KERNEL);
+	efc = kzalloc_obj(*efc);
 	if (!efc)
 		return -ENOMEM;
 
@@ -310,7 +310,7 @@ efct_fw_reset(struct efct *efct)
 	 * during attach.
 	 */
 	if (timer_pending(&efct->xport->stats_timer))
-		del_timer(&efct->xport->stats_timer);
+		timer_delete(&efct->xport->stats_timer);
 
 	if (efct_hw_reset(&efct->hw, EFCT_HW_RESET_FIRMWARE)) {
 		efc_log_info(efct, "failed to reset firmware\n");
@@ -415,12 +415,6 @@ efct_intr_thread(int irq, void *handle)
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t
-efct_intr_msix(int irq, void *handle)
-{
-	return IRQ_WAKE_THREAD;
-}
-
 static int
 efct_setup_msix(struct efct *efct, u32 num_intrs)
 {
@@ -450,7 +444,7 @@ efct_setup_msix(struct efct *efct, u32 num_intrs)
 		intr_ctx->index = i;
 
 		rc = request_threaded_irq(pci_irq_vector(efct->pci, i),
-					  efct_intr_msix, efct_intr_thread, 0,
+					  NULL, efct_intr_thread, IRQF_ONESHOT,
 					  EFCT_DRIVER_NAME, intr_ctx);
 		if (rc) {
 			dev_err(&efct->pci->dev,
@@ -735,7 +729,7 @@ efct_pci_io_resume(struct pci_dev *pdev)
 
 MODULE_DEVICE_TABLE(pci, efct_pci_table);
 
-static struct pci_error_handlers efct_pci_err_handler = {
+static const struct pci_error_handlers efct_pci_err_handler = {
 	.error_detected = efct_pci_io_error_detected,
 	.slot_reset = efct_pci_io_slot_reset,
 	.resume = efct_pci_io_resume,

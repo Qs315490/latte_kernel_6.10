@@ -56,6 +56,9 @@ enum ionic_cmd_opcode {
 	IONIC_CMD_VF_SETATTR			= 61,
 	IONIC_CMD_VF_CTRL			= 62,
 
+	/* CMB command */
+	IONIC_CMD_DISCOVER_CMB			= 80,
+
 	/* QoS commands */
 	IONIC_CMD_QOS_CLASS_IDENTIFY		= 240,
 	IONIC_CMD_QOS_CLASS_INIT		= 241,
@@ -269,9 +272,13 @@ union ionic_drv_identity {
 /**
  * enum ionic_dev_capability - Device capabilities
  * @IONIC_DEV_CAP_VF_CTRL:     Device supports VF ctrl operations
+ * @IONIC_DEV_CAP_DISC_CMB:    Device supports CMB discovery operations
+ * @IONIC_DEV_CAP_EXTRA_STATS: Device supports extra stats schema
  */
 enum ionic_dev_capability {
 	IONIC_DEV_CAP_VF_CTRL        = BIT(0),
+	IONIC_DEV_CAP_DISC_CMB       = BIT(1),
+	IONIC_DEV_CAP_EXTRA_STATS    = BIT(4),
 };
 
 /**
@@ -395,6 +402,7 @@ enum ionic_logical_qtype {
  * @IONIC_Q_F_4X_DESC:      Quadruple main descriptor size
  * @IONIC_Q_F_4X_CQ_DESC:   Quadruple cq descriptor size
  * @IONIC_Q_F_4X_SG_DESC:   Quadruple sg descriptor size
+ * @IONIC_QIDENT_F_EXPDB:   Queue supports express doorbell
  */
 enum ionic_q_feature {
 	IONIC_QIDENT_F_CQ		= BIT_ULL(0),
@@ -407,6 +415,7 @@ enum ionic_q_feature {
 	IONIC_Q_F_4X_DESC		= BIT_ULL(7),
 	IONIC_Q_F_4X_CQ_DESC		= BIT_ULL(8),
 	IONIC_Q_F_4X_SG_DESC		= BIT_ULL(9),
+	IONIC_QIDENT_F_EXPDB		= BIT_ULL(10),
 };
 
 /**
@@ -495,6 +504,16 @@ union ionic_lif_config {
 };
 
 /**
+ * enum ionic_lif_rdma_cap_stats - LIF stat type
+ * @IONIC_LIF_RDMA_STAT_GLOBAL:     Global stats
+ * @IONIC_LIF_RDMA_STAT_QP:         Queue pair stats
+ */
+enum ionic_lif_rdma_cap_stats {
+	IONIC_LIF_RDMA_STAT_GLOBAL = BIT(0),
+	IONIC_LIF_RDMA_STAT_QP = BIT(1),
+};
+
+/**
  * struct ionic_lif_identity - LIF identity information (type-specific)
  *
  * @capabilities:        LIF capabilities
@@ -513,10 +532,10 @@ union ionic_lif_config {
  *	@eth.config:             LIF config struct with features, mtu, mac, q counts
  *
  * @rdma:                RDMA identify structure
- *	@rdma.version:         RDMA version of opcodes and queue descriptors
+ *	@rdma.version:         RDMA capability version
  *	@rdma.qp_opcodes:      Number of RDMA queue pair opcodes supported
  *	@rdma.admin_opcodes:   Number of RDMA admin opcodes supported
- *	@rdma.rsvd:            reserved byte(s)
+ *	@rdma.minor_version:   RDMA capability minor version
  *	@rdma.npts_per_lif:    Page table size per LIF
  *	@rdma.nmrs_per_lif:    Number of memory regions per LIF
  *	@rdma.nahs_per_lif:    Number of address handles per LIF
@@ -526,12 +545,17 @@ union ionic_lif_config {
  *	@rdma.rrq_stride:      Remote RQ work request stride
  *	@rdma.rsq_stride:      Remote SQ work request stride
  *	@rdma.dcqcn_profiles:  Number of DCQCN profiles
- *	@rdma.rsvd_dimensions: reserved byte(s)
+ *	@rdma.udma_shift:      Log2 number of queues per queue group
+ *	@rdma.rsvd_dimensions: Reserved byte
+ *	@rdma.page_size_cap:   Supported page sizes
  *	@rdma.aq_qtype:        RDMA Admin Qtype
  *	@rdma.sq_qtype:        RDMA Send Qtype
  *	@rdma.rq_qtype:        RDMA Receive Qtype
  *	@rdma.cq_qtype:        RDMA Completion Qtype
  *	@rdma.eq_qtype:        RDMA Event Qtype
+ *	@rdma.stats_type:      Supported statistics type
+ *	                       (enum ionic_lif_rdma_cap_stats)
+ *	@rdma.rsvd1:           Reserved byte(s)
  * @words:               word access to struct contents
  */
 union ionic_lif_identity {
@@ -557,7 +581,7 @@ union ionic_lif_identity {
 			u8 version;
 			u8 qp_opcodes;
 			u8 admin_opcodes;
-			u8 rsvd;
+			u8 minor_version;
 			__le32 npts_per_lif;
 			__le32 nmrs_per_lif;
 			__le32 nahs_per_lif;
@@ -567,12 +591,16 @@ union ionic_lif_identity {
 			u8 rrq_stride;
 			u8 rsq_stride;
 			u8 dcqcn_profiles;
-			u8 rsvd_dimensions[10];
+			u8 udma_shift;
+			u8 rsvd_dimensions;
+			__le64 page_size_cap;
 			struct ionic_lif_logical_qtype aq_qtype;
 			struct ionic_lif_logical_qtype sq_qtype;
 			struct ionic_lif_logical_qtype rq_qtype;
 			struct ionic_lif_logical_qtype cq_qtype;
 			struct ionic_lif_logical_qtype eq_qtype;
+			__le16 stats_type;
+			u8 rsvd1[162];
 		} __packed rdma;
 	} __packed;
 	__le32 words[478];
@@ -1074,7 +1102,7 @@ struct ionic_rxq_sg_desc {
  *                    first IPv4 header.  If the receive packet
  *                    contains both a tunnel IPv4 header and a
  *                    transport IPv4 header, the device validates the
- *                    checksum for the both IPv4 headers.
+ *                    checksum for both IPv4 headers.
  *
  *                  IONIC_RXQ_COMP_CSUM_F_IP_BAD:
  *                    The IPv4 checksum calculated by the device did
@@ -1315,6 +1343,12 @@ enum ionic_xcvr_pid {
 	IONIC_XCVR_PID_QSFP_400G_DR4    = 80,
 	IONIC_XCVR_PID_QSFP_400G_SR4    = 81,
 	IONIC_XCVR_PID_QSFP_400G_VR4    = 82,
+	IONIC_XCVR_PID_QSFP_400G_AOC    = 83,
+	IONIC_XCVR_PID_QSFP_400G_AEC    = 84,
+	IONIC_XCVR_PID_QSFP_200G_AEC    = 85,
+	IONIC_XCVR_PID_QSFP_400G_LPO    = 86,
+	IONIC_XCVR_PID_QSFP_100G_FR4    = 87,
+	IONIC_XCVR_PID_QSFP_100G_DR4    = 88,
 };
 
 /**
@@ -2195,6 +2229,80 @@ struct ionic_vf_ctrl_comp {
 };
 
 /**
+ * struct ionic_discover_cmb_cmd - CMB discovery command
+ * @opcode: Opcode for the command
+ * @rsvd:   Reserved bytes
+ */
+struct ionic_discover_cmb_cmd {
+	u8	opcode;
+	u8	rsvd[63];
+};
+
+/**
+ * struct ionic_discover_cmb_comp - CMB discover command completion.
+ * @status: Status of the command (enum ionic_status_code)
+ * @rsvd:   Reserved bytes
+ */
+struct ionic_discover_cmb_comp {
+	u8	status;
+	u8	rsvd[15];
+};
+
+#define IONIC_MAX_CMB_REGIONS	16
+#define IONIC_CMB_SHIFT_64K	16
+
+enum ionic_cmb_type {
+	IONIC_CMB_TYPE_DEVMEM	= 0,
+	IONIC_CMB_TYPE_EXPDB64	= 1,
+	IONIC_CMB_TYPE_EXPDB128	= 2,
+	IONIC_CMB_TYPE_EXPDB256	= 3,
+	IONIC_CMB_TYPE_EXPDB512	= 4,
+};
+
+/**
+ * union ionic_cmb_region - Configuration for CMB region
+ * @bar_num:	CMB mapping number from FW
+ * @cmb_type:	Type of CMB this region describes (enum ionic_cmb_type)
+ * @rsvd:	Reserved
+ * @offset:	Offset within BAR in 64KB pages
+ * @length:	Length of the CMB region
+ * @words:	32-bit words for direct access to the entire region
+ */
+union ionic_cmb_region {
+	struct {
+		u8	bar_num;
+		u8	cmb_type;
+		u8	rsvd[6];
+		__le32	offset;
+		__le32	length;
+	} __packed;
+	__le32  words[4];
+};
+
+/**
+ * union ionic_discover_cmb_identity - CMB layout identity structure
+ * @num_regions:    Number of CMB regions, up to 16
+ * @flags:          Feature and capability bits (0 for express
+ *                  doorbell, 1 for 4K alignment indicator,
+ *                  31-24 for version information)
+ * @region:         CMB mappings region, entry 0 for regular
+ *                  mapping, entries 1-7 for WQE sizes 64,
+ *                  128, 256, 512, 1024, 2048 and 4096 bytes
+ * @words:          Full union buffer size
+ */
+union ionic_discover_cmb_identity {
+	struct {
+		__le32 num_regions;
+#define IONIC_CMB_FLAG_EXPDB	BIT(0)
+#define IONIC_CMB_FLAG_4KALIGN	BIT(1)
+#define IONIC_CMB_FLAG_VERSION	0xff000000
+		__le32 flags;
+		union ionic_cmb_region region[IONIC_MAX_CMB_REGIONS];
+	};
+	__le32 words[478];
+};
+
+/**
  * struct ionic_qos_identify_cmd - QoS identify command
  * @opcode:  opcode
  * @ver:     Highest version of identify supported by driver
@@ -2223,7 +2331,7 @@ struct ionic_qos_identify_comp {
 /* Capri max supported, should be renamed. */
 #define IONIC_QOS_CLASS_MAX		7
 #define IONIC_QOS_PCP_MAX		8
-#define IONIC_QOS_CLASS_NAME_SZ	32
+#define IONIC_QOS_CLASS_NAME_SZ		32
 #define IONIC_QOS_DSCP_MAX		64
 #define IONIC_QOS_ALL_PCP		0xFF
 #define IONIC_DSCP_BLOCK_SIZE		8
@@ -2749,54 +2857,12 @@ struct ionic_mgmt_port_stats {
 	__le64 frames_tx_pause;
 };
 
-enum ionic_pb_buffer_drop_stats {
-	IONIC_BUFFER_INTRINSIC_DROP = 0,
-	IONIC_BUFFER_DISCARDED,
-	IONIC_BUFFER_ADMITTED,
-	IONIC_BUFFER_OUT_OF_CELLS_DROP,
-	IONIC_BUFFER_OUT_OF_CELLS_DROP_2,
-	IONIC_BUFFER_OUT_OF_CREDIT_DROP,
-	IONIC_BUFFER_TRUNCATION_DROP,
-	IONIC_BUFFER_PORT_DISABLED_DROP,
-	IONIC_BUFFER_COPY_TO_CPU_TAIL_DROP,
-	IONIC_BUFFER_SPAN_TAIL_DROP,
-	IONIC_BUFFER_MIN_SIZE_VIOLATION_DROP,
-	IONIC_BUFFER_ENQUEUE_ERROR_DROP,
-	IONIC_BUFFER_INVALID_PORT_DROP,
-	IONIC_BUFFER_INVALID_OUTPUT_QUEUE_DROP,
-	IONIC_BUFFER_DROP_MAX,
-};
-
-enum ionic_oflow_drop_stats {
-	IONIC_OFLOW_OCCUPANCY_DROP,
-	IONIC_OFLOW_EMERGENCY_STOP_DROP,
-	IONIC_OFLOW_WRITE_BUFFER_ACK_FILL_UP_DROP,
-	IONIC_OFLOW_WRITE_BUFFER_ACK_FULL_DROP,
-	IONIC_OFLOW_WRITE_BUFFER_FULL_DROP,
-	IONIC_OFLOW_CONTROL_FIFO_FULL_DROP,
-	IONIC_OFLOW_DROP_MAX,
-};
-
-/* struct ionic_port_pb_stats - packet buffers system stats
- * uses ionic_pb_buffer_drop_stats for drop_counts[]
- */
-struct ionic_port_pb_stats {
-	__le64 sop_count_in;
-	__le64 eop_count_in;
-	__le64 sop_count_out;
-	__le64 eop_count_out;
-	__le64 drop_counts[IONIC_BUFFER_DROP_MAX];
-	__le64 input_queue_buffer_occupancy[IONIC_QOS_TC_MAX];
-	__le64 input_queue_port_monitor[IONIC_QOS_TC_MAX];
-	__le64 output_queue_port_monitor[IONIC_QOS_TC_MAX];
-	__le64 oflow_drop_counts[IONIC_OFLOW_DROP_MAX];
-	__le64 input_queue_good_pkts_in[IONIC_QOS_TC_MAX];
-	__le64 input_queue_good_pkts_out[IONIC_QOS_TC_MAX];
-	__le64 input_queue_err_pkts_in[IONIC_QOS_TC_MAX];
-	__le64 input_queue_fifo_depth[IONIC_QOS_TC_MAX];
-	__le64 input_queue_max_fifo_depth[IONIC_QOS_TC_MAX];
-	__le64 input_queue_peak_occupancy[IONIC_QOS_TC_MAX];
-	__le64 output_queue_buffer_occupancy[IONIC_QOS_TC_MAX];
+struct ionic_port_extra_stats {
+	__le64 rsfec_correctable_blocks;
+	__le64 rsfec_uncorrectable_blocks;
+	__le64 fec_corrected_bits_total;
+	__le64 rx_bits_phy;
+	__le64 fec_codeword_error_bin[16];
 };
 
 /**
@@ -2839,8 +2905,12 @@ union ionic_port_identity {
  * @status:          Port status data
  * @stats:           Port statistics data
  * @mgmt_stats:      Port management statistics data
+ * @sprom_epage:     Extended Transceiver sprom
+ * @sprom_page1:     Extended Transceiver sprom, page 1
+ * @sprom_page2:     Extended Transceiver sprom, page 2
+ * @sprom_page17:    Extended Transceiver sprom, page 17
  * @rsvd:            reserved byte(s)
- * @pb_stats:        uplink pb drop stats
+ * @extra_stats:     Extra port statistics data
  */
 struct ionic_port_info {
 	union ionic_port_config config;
@@ -2849,9 +2919,16 @@ struct ionic_port_info {
 		struct ionic_port_stats      stats;
 		struct ionic_mgmt_port_stats mgmt_stats;
 	};
-	/* room for pb_stats to start at 2k offset */
-	u8                          rsvd[760];
-	struct ionic_port_pb_stats  pb_stats;
+	union {
+		u8     sprom_epage[384];
+		struct {
+			u8 sprom_page1[128];
+			u8 sprom_page2[128];
+			u8 sprom_page17[128];
+		};
+	};
+	u8     rsvd[376];
+	struct ionic_port_extra_stats extra_stats;
 };
 
 /*
@@ -3041,6 +3118,8 @@ union ionic_dev_cmd {
 	struct ionic_vf_getattr_cmd vf_getattr;
 	struct ionic_vf_ctrl_cmd vf_ctrl;
 
+	struct ionic_discover_cmb_cmd discover_cmb;
+
 	struct ionic_lif_identify_cmd lif_identify;
 	struct ionic_lif_init_cmd lif_init;
 	struct ionic_lif_reset_cmd lif_reset;
@@ -3079,6 +3158,8 @@ union ionic_dev_cmd_comp {
 	struct ionic_vf_setattr_comp vf_setattr;
 	struct ionic_vf_getattr_comp vf_getattr;
 	struct ionic_vf_ctrl_comp vf_ctrl;
+
+	struct ionic_discover_cmb_comp discover_cmb;
 
 	struct ionic_lif_identify_comp lif_identify;
 	struct ionic_lif_init_comp lif_init;
@@ -3221,6 +3302,9 @@ union ionic_adminq_comp {
 #define IONIC_BAR0_DEV_CMD_DATA_REGS_OFFSET	0x0c00
 #define IONIC_BAR0_INTR_STATUS_OFFSET		0x1000
 #define IONIC_BAR0_INTR_CTRL_OFFSET		0x2000
+
+/* BAR2 */
+#define IONIC_BAR2_CMB_ENTRY_SIZE		0x800000
 #define IONIC_DEV_CMD_DONE			0x00000001
 
 #define IONIC_ASIC_TYPE_NONE			0
@@ -3274,6 +3358,7 @@ struct ionic_identity {
 	union ionic_port_identity port;
 	union ionic_qos_identity qos;
 	union ionic_q_identity txq;
+	union ionic_discover_cmb_identity cmb_layout;
 };
 
 #endif /* _IONIC_IF_H_ */

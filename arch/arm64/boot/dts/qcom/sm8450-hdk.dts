@@ -643,10 +643,10 @@
 
 &gpu {
 	status = "okay";
+};
 
-	zap-shader {
-		firmware-name = "qcom/sm8450/a730_zap.mbn";
-	};
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8450/a730_zap.mbn";
 };
 
 &i2c9 {
@@ -1172,7 +1172,7 @@
 		vddbtcmx-supply = <&vreg_pmu_btcmx_0p8>;
 		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
 		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
-		vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
+		vddrfa1p7-supply = <&vreg_pmu_rfa_1p7>;
 	};
 };
 
@@ -1197,11 +1197,6 @@
 
 &usb_1 {
 	status = "okay";
-};
-
-&usb_1_dwc3 {
-	dr_mode = "otg";
-	usb-role-switch;
 };
 
 &usb_1_dwc3_hs {

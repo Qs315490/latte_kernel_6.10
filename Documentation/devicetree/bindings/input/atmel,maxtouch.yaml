@@ -8,7 +8,7 @@ title: Atmel maXTouch touchscreen/touchpad
 
 maintainers:
   - Nick Dyer <nick@shmanahar.org>
-  - Linus Walleij <linus.walleij@linaro.org>
+  - Linus Walleij <linusw@kernel.org>
 
 description: |
   Atmel maXTouch touchscreen or touchpads such as the mXT244
@@ -16,6 +16,7 @@ description: |
 
 allOf:
   - $ref: input.yaml#
+  - $ref: touchscreen/touchscreen.yaml#
 
 properties:
   compatible:
@@ -87,15 +88,14 @@ properties:
       - 2 # ATMEL_MXT_WAKEUP_GPIO
     default: 0
 
-  wakeup-source:
-    type: boolean
+  wakeup-source: true
 
 required:
   - compatible
   - reg
   - interrupts
 
-additionalProperties: false
+unevaluatedProperties: false
 
 examples:
   - |

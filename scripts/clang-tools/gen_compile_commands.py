@@ -167,10 +167,10 @@ def process_line(root_directory, command_prefix, file_path):
             root_directory or file_directory.
     """
     # The .cmd files are intended to be included directly by Make, so they
-    # escape the pound sign '#', either as '\#' or '$(pound)' (depending on the
-    # kernel version). The compile_commands.json file is not interepreted
-    # by Make, so this code replaces the escaped version with '#'.
-    prefix = command_prefix.replace(r'\#', '#').replace('$(pound)', '#')
+    # escape the pound sign '#' as '$(pound)'. The compile_commands.json file
+    # is not interepreted by Make, so this code replaces the escaped version
+    # with '#'.
+    prefix = command_prefix.replace('$(pound)', '#')
 
     # Return the canonical path, eliminating any symbolic links encountered in the path.
     abs_path = os.path.realpath(os.path.join(root_directory, file_path))
@@ -201,6 +201,8 @@ def main():
         # Modules are listed in modules.order.
         if os.path.isdir(path):
             cmdfiles = cmdfiles_in_dir(path)
+        elif os.path.basename(path) == 'libgcc.a':
+            cmdfiles = []
         elif path.endswith('.a'):
             cmdfiles = cmdfiles_for_a(path, ar)
         elif path.endswith('modules.order'):

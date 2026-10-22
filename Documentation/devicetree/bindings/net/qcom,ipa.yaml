@@ -24,7 +24,6 @@ description:
   iommu/iommu.txt and iommu/arm,smmu.yaml for more information about SMMU
   bindings.
 
-
   - |
     --------             ---------
     |      |             |       |
@@ -45,6 +44,7 @@ properties:
   compatible:
     oneOf:
       - enum:
+          - qcom,milos-ipa
           - qcom,msm8998-ipa
           - qcom,sc7180-ipa
           - qcom,sc7280-ipa
@@ -54,6 +54,10 @@ properties:
           - qcom,sm6350-ipa
           - qcom,sm8350-ipa
           - qcom,sm8550-ipa
+      - items:
+          - enum:
+              - qcom,qcm2290-ipa
+          - const: qcom,sc7180-ipa
       - items:
           - enum:
               - qcom,sm8650-ipa
@@ -124,7 +128,19 @@ properties:
     description: State bits used in by the AP to signal the modem.
     items:
       - description: Whether the "ipa-clock-enabled" state bit is valid
+        items:
+          - description: Phandle to the Shared Memory Point 2 Point device
+              handling the communication with a remote processor
+          - description: Single bit index to toggle in the value sent to
+              the remote processor
+            maximum: 32
       - description: Whether the IPA clock is enabled (if valid)
+        items:
+          - description: Phandle to the Shared Memory Point 2 Point device
+              handling the communication with a remote processor
+          - description: Single bit index to toggle in the value sent to
+              the remote processor
+            maximum: 32
 
   qcom,smem-state-names:
     description: The names of the state bits used for SMP2P output
@@ -165,6 +181,13 @@ properties:
       firmware search path containing the firmware image used when
       initializing IPA hardware.  Optional, and only used when
       Trust Zone performs early initialization.
+
+  sram:
+    maxItems: 1
+    description:
+      A reference to an additional region residing in IMEM (special
+      on-chip SRAM), which is accessed by the IPA firmware and needs
+      to be IOMMU-mapped from the OS.
 
 required:
   - compatible
@@ -210,70 +233,70 @@ additionalProperties: false
 
 examples:
   - |
-        #include <dt-bindings/interrupt-controller/arm-gic.h>
-        #include <dt-bindings/clock/qcom,rpmh.h>
-        #include <dt-bindings/interconnect/qcom,sdm845.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/clock/qcom,rpmh.h>
+    #include <dt-bindings/interconnect/qcom,sdm845.h>
 
-        smp2p-mpss {
-                compatible = "qcom,smp2p";
-                interrupts = <GIC_SPI 576 IRQ_TYPE_EDGE_RISING>;
-                mboxes = <&apss_shared 6>;
-                qcom,smem = <94>, <432>;
-                qcom,local-pid = <0>;
-                qcom,remote-pid = <5>;
+    smp2p-mpss {
+        compatible = "qcom,smp2p";
+        interrupts = <GIC_SPI 576 IRQ_TYPE_EDGE_RISING>;
+        mboxes = <&apss_shared 6>;
+        qcom,smem = <94>, <432>;
+        qcom,local-pid = <0>;
+        qcom,remote-pid = <5>;
 
-                ipa_smp2p_out: ipa-ap-to-modem {
-                        qcom,entry-name = "ipa";
-                        #qcom,smem-state-cells = <1>;
-                };
-
-                ipa_smp2p_in: ipa-modem-to-ap {
-                        qcom,entry-name = "ipa";
-                        interrupt-controller;
-                        #interrupt-cells = <2>;
-                };
+        ipa_smp2p_out: ipa-ap-to-modem {
+                qcom,entry-name = "ipa";
+                #qcom,smem-state-cells = <1>;
         };
 
-        ipa@1e40000 {
-                compatible = "qcom,sc7180-ipa";
-
-                qcom,gsi-loader = "self";
-                memory-region = <&ipa_fw_mem>;
-                firmware-name = "qcom/sc7180-trogdor/modem/modem.mbn";
-
-                iommus = <&apps_smmu 0x440 0x0>,
-                         <&apps_smmu 0x442 0x0>;
-                reg = <0x1e40000 0x7000>,
-                      <0x1e47000 0x2000>,
-                      <0x1e04000 0x2c000>;
-                reg-names = "ipa-reg",
-                            "ipa-shared",
-                            "gsi";
-
-                interrupts-extended = <&intc GIC_SPI 311 IRQ_TYPE_EDGE_RISING>,
-                                      <&intc GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>,
-                                      <&ipa_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
-                                      <&ipa_smp2p_in 1 IRQ_TYPE_EDGE_RISING>;
-                interrupt-names = "ipa",
-                                  "gsi",
-                                  "ipa-clock-query",
-                                  "ipa-setup-ready";
-
-                clocks = <&rpmhcc RPMH_IPA_CLK>;
-                clock-names = "core";
-
-                interconnects =
-                        <&aggre2_noc MASTER_IPA 0 &mc_virt SLAVE_EBI1 0>,
-                        <&aggre2_noc MASTER_IPA 0 &system_noc SLAVE_IMEM 0>,
-                        <&gem_noc MASTER_APPSS_PROC 0 &config_noc SLAVE_IPA_CFG 0>;
-                interconnect-names = "memory",
-                                     "imem",
-                                     "config";
-
-                qcom,qmp = <&aoss_qmp>;
-
-                qcom,smem-states = <&ipa_smp2p_out 0>,
-                                   <&ipa_smp2p_out 1>;
-                qcom,smem-state-names = "ipa-clock-enabled-valid",
-                                        "ipa-clock-enabled";
+        ipa_smp2p_in: ipa-modem-to-ap {
+                qcom,entry-name = "ipa";
+                interrupt-controller;
+                #interrupt-cells = <2>;
         };
+    };
+
+    ipa@1e40000 {
+        compatible = "qcom,sc7180-ipa";
+
+        qcom,gsi-loader = "self";
+        memory-region = <&ipa_fw_mem>;
+        firmware-name = "qcom/sc7180-trogdor/modem/modem.mbn";
+
+        iommus = <&apps_smmu 0x440 0x0>,
+                 <&apps_smmu 0x442 0x0>;
+        reg = <0x1e40000 0x7000>,
+              <0x1e47000 0x2000>,
+              <0x1e04000 0x2c000>;
+        reg-names = "ipa-reg",
+                    "ipa-shared",
+                    "gsi";
+
+        interrupts-extended = <&intc GIC_SPI 311 IRQ_TYPE_EDGE_RISING>,
+                              <&intc GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>,
+                              <&ipa_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
+                              <&ipa_smp2p_in 1 IRQ_TYPE_EDGE_RISING>;
+        interrupt-names = "ipa",
+                          "gsi",
+                          "ipa-clock-query",
+                          "ipa-setup-ready";
+
+        clocks = <&rpmhcc RPMH_IPA_CLK>;
+        clock-names = "core";
+
+        interconnects =
+                <&aggre2_noc MASTER_IPA 0 &mc_virt SLAVE_EBI1 0>,
+                <&aggre2_noc MASTER_IPA 0 &system_noc SLAVE_IMEM 0>,
+                <&gem_noc MASTER_APPSS_PROC 0 &config_noc SLAVE_IPA_CFG 0>;
+        interconnect-names = "memory",
+                             "imem",
+                             "config";
+
+        qcom,qmp = <&aoss_qmp>;
+
+        qcom,smem-states = <&ipa_smp2p_out 0>,
+                           <&ipa_smp2p_out 1>;
+        qcom,smem-state-names = "ipa-clock-enabled-valid",
+                                "ipa-clock-enabled";
+    };

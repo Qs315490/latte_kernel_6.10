@@ -203,6 +203,104 @@ static void retrieve_apple_device_properties(struct boot_params *boot_params)
 	}
 }
 
+struct smbios_entry_point {
+	u8	anchor[4];
+	u8	ep_checksum;
+	u8	ep_length;
+	u8	major_version;
+	u8	minor_version;
+	u16	max_size_entry;
+	u8	ep_rev;
+	u8	reserved[5];
+
+	struct __packed {
+		u8	anchor[5];
+		u8	checksum;
+		u16	st_length;
+		u32	st_address;
+		u16	number_of_entries;
+		u8	bcd_rev;
+	} intm;
+};
+
+static bool verify_ep_checksum(const void *ptr, int length)
+{
+	u8 sum = 0;
+
+	for (int i = 0; i < length; i++)
+		sum += ((u8 *)ptr)[i];
+
+	return sum == 0;
+}
+
+static bool verify_ep_integrity(const struct smbios_entry_point *ep)
+{
+	if (memcmp(ep->anchor, "_SM_", sizeof(ep->anchor)) != 0)
+		return false;
+
+	if (memcmp(ep->intm.anchor, "_DMI_", sizeof(ep->intm.anchor)) != 0)
+		return false;
+
+	if (!verify_ep_checksum(ep, ep->ep_length) ||
+	    !verify_ep_checksum(&ep->intm, sizeof(ep->intm)))
+		return false;
+
+	return true;
+}
+
+static const struct efi_smbios_record *search_record(void *table, u32 length,
+						     u8 type)
+{
+	const u8 *p, *end;
+
+	p = (u8 *)table;
+	end = p + length;
+
+	while (p + sizeof(struct efi_smbios_record) < end) {
+		const struct efi_smbios_record *hdr =
+			(struct efi_smbios_record *)p;
+		const u8 *next;
+
+		if (hdr->type == type)
+			return hdr;
+
+		/* Type 127 = End-of-Table */
+		if (hdr->type == 0x7F)
+			return NULL;
+
+		/* Jumping to the unformed section */
+		next = p + hdr->length;
+
+		/* Unformed section ends with 0000h */
+		while ((next[0] != 0 || next[1] != 0) && next + 1 < end)
+			next++;
+
+		next += 2;
+		p = next;
+	}
+
+	return NULL;
+}
+
+static const struct efi_smbios_record *get_table_record(u8 type)
+{
+	const struct smbios_entry_point *ep;
+
+	/*
+	 * Locate the legacy 32-bit SMBIOS entrypoint in memory, and parse it
+	 * directly. Needed by some Macs that do not implement the EFI protocol.
+	 */
+	ep = get_efi_config_table(SMBIOS_TABLE_GUID);
+	if (!ep)
+		return NULL;
+
+	if (!verify_ep_integrity(ep))
+		return NULL;
+
+	return search_record((void *)(unsigned long)ep->intm.st_address,
+			     ep->intm.st_length, type);
+}
+
 static bool apple_match_product_name(void)
 {
 	static const char type1_product_matches[][15] = {
@@ -218,7 +316,8 @@ static bool apple_match_product_name(void)
 	const struct efi_smbios_type1_record *record;
 	const u8 *product;
 
-	record = (struct efi_smbios_type1_record *)efi_get_smbios_record(1);
+	record = (struct efi_smbios_type1_record *)
+			(efi_get_smbios_record(1) ?: get_table_record(1));
 	if (!record)
 		return false;
 
@@ -300,7 +399,7 @@ efi_status_t efi_adjust_memory_range_protection(unsigned long start,
 		return EFI_SUCCESS;
 
 	/*
-	 * Don't modify memory region attributes, they are
+	 * Don't modify memory region attributes, if they are
 	 * already suitable, to lower the possibility to
 	 * encounter firmware bugs.
 	 */
@@ -315,11 +414,13 @@ efi_status_t efi_adjust_memory_range_protection(unsigned long start,
 		next = desc.base_address + desc.length;
 
 		/*
-		 * Only system memory is suitable for trampoline/kernel image placement,
-		 * so only this type of memory needs its attributes to be modified.
+		 * Only system memory and more reliable memory are suitable for
+		 * trampoline/kernel image placement. So only those memory types
+		 * may need to have attributes modified.
 		 */
 
-		if (desc.gcd_memory_type != EfiGcdMemoryTypeSystemMemory ||
+		if ((desc.gcd_memory_type != EfiGcdMemoryTypeSystemMemory &&
+		     desc.gcd_memory_type != EfiGcdMemoryTypeMoreReliable) ||
 		    (desc.attributes & (EFI_MEMORY_RO | EFI_MEMORY_XP)) == 0)
 			continue;
 
@@ -386,8 +487,9 @@ static void setup_quirks(struct boot_params *boot_params)
 static void setup_graphics(struct boot_params *boot_params)
 {
 	struct screen_info *si = memset(&boot_params->screen_info, 0, sizeof(*si));
+	struct edid_info *edid = memset(&boot_params->edid_info, 0, sizeof(*edid));
 
-	efi_setup_gop(si);
+	efi_setup_graphics(si, edid);
 }
 
 static void __noreturn efi_exit(efi_handle_t handle, efi_status_t status)
@@ -397,17 +499,13 @@ static void __noreturn efi_exit(efi_handle_t handle, efi_status_t status)
 		asm("hlt");
 }
 
-void __noreturn efi_stub_entry(efi_handle_t handle,
-			       efi_system_table_t *sys_table_arg,
-			       struct boot_params *boot_params);
-
 /*
  * Because the x86 boot code expects to be passed a boot_params we
  * need to create one ourselves (usually the bootloader would create
  * one for us).
  */
-efi_status_t __efiapi efi_pe_entry(efi_handle_t handle,
-				   efi_system_table_t *sys_table_arg)
+static efi_status_t efi_allocate_bootparams(efi_handle_t handle,
+					    struct boot_params **bp)
 {
 	efi_guid_t proto = LOADED_IMAGE_PROTOCOL_GUID;
 	struct boot_params *boot_params;
@@ -416,21 +514,15 @@ efi_status_t __efiapi efi_pe_entry(efi_handle_t handle,
 	unsigned long alloc;
 	char *cmdline_ptr;
 
-	efi_system_table = sys_table_arg;
-
-	/* Check if we were booted by the EFI firmware */
-	if (efi_system_table->hdr.signature != EFI_SYSTEM_TABLE_SIGNATURE)
-		efi_exit(handle, EFI_INVALID_PARAMETER);
-
 	status = efi_bs_call(handle_protocol, handle, &proto, (void **)&image);
 	if (status != EFI_SUCCESS) {
 		efi_err("Failed to get handle for LOADED_IMAGE_PROTOCOL\n");
-		efi_exit(handle, status);
+		return status;
 	}
 
 	status = efi_allocate_pages(PARAM_SIZE, &alloc, ULONG_MAX);
 	if (status != EFI_SUCCESS)
-		efi_exit(handle, status);
+		return status;
 
 	boot_params = memset((void *)alloc, 0x0, PARAM_SIZE);
 	hdr	    = &boot_params->hdr;
@@ -446,14 +538,14 @@ efi_status_t __efiapi efi_pe_entry(efi_handle_t handle,
 	cmdline_ptr = efi_convert_cmdline(image);
 	if (!cmdline_ptr) {
 		efi_free(PARAM_SIZE, alloc);
-		efi_exit(handle, EFI_OUT_OF_RESOURCES);
+		return EFI_OUT_OF_RESOURCES;
 	}
 
 	efi_set_u64_split((unsigned long)cmdline_ptr, &hdr->cmd_line_ptr,
 			  &boot_params->ext_cmd_line_ptr);
 
-	efi_stub_entry(handle, sys_table_arg, boot_params);
-	/* not reached */
+	*bp = boot_params;
+	return EFI_SUCCESS;
 }
 
 static void add_e820ext(struct boot_params *params,
@@ -740,12 +832,15 @@ static efi_status_t parse_options(const char *cmdline)
 	return efi_parse_options(cmdline);
 }
 
-static efi_status_t efi_decompress_kernel(unsigned long *kernel_entry)
+static efi_status_t efi_decompress_kernel(unsigned long *kernel_entry,
+					  struct boot_params *boot_params)
 {
 	unsigned long virt_addr = LOAD_PHYSICAL_ADDR;
 	unsigned long addr, alloc_size, entry;
 	efi_status_t status;
 	u32 seed[2] = {};
+
+	boot_params_ptr	= boot_params;
 
 	/* determine the required size of the allocation */
 	alloc_size = ALIGN(max_t(unsigned long, output_len, kernel_total_size),
@@ -777,7 +872,7 @@ static efi_status_t efi_decompress_kernel(unsigned long *kernel_entry)
 			seed[0] = 0;
 		}
 
-		boot_params_ptr->hdr.loadflags |= KASLR_FLAG;
+		boot_params->hdr.loadflags |= KASLR_FLAG;
 	}
 
 	status = efi_random_alloc(alloc_size, CONFIG_PHYSICAL_ALIGN, &addr,
@@ -795,7 +890,9 @@ static efi_status_t efi_decompress_kernel(unsigned long *kernel_entry)
 
 	*kernel_entry = addr + entry;
 
-	return efi_adjust_memory_range_protection(addr, kernel_text_size);
+	return efi_adjust_memory_range_protection(addr, kernel_text_size) ?:
+	       efi_adjust_memory_range_protection(addr + kernel_inittext_offset,
+						  kernel_inittext_size);
 }
 
 static void __noreturn enter_kernel(unsigned long kernel_addr,
@@ -815,19 +912,26 @@ static void __noreturn enter_kernel(unsigned long kernel_addr,
 void __noreturn efi_stub_entry(efi_handle_t handle,
 			       efi_system_table_t *sys_table_arg,
 			       struct boot_params *boot_params)
+
 {
 	efi_guid_t guid = EFI_MEMORY_ATTRIBUTE_PROTOCOL_GUID;
-	struct setup_header *hdr = &boot_params->hdr;
 	const struct linux_efi_initrd *initrd = NULL;
 	unsigned long kernel_entry;
+	struct setup_header *hdr;
 	efi_status_t status;
-
-	boot_params_ptr = boot_params;
 
 	efi_system_table = sys_table_arg;
 	/* Check if we were booted by the EFI firmware */
 	if (efi_system_table->hdr.signature != EFI_SYSTEM_TABLE_SIGNATURE)
 		efi_exit(handle, EFI_INVALID_PARAMETER);
+
+	if (!IS_ENABLED(CONFIG_EFI_HANDOVER_PROTOCOL) || !boot_params) {
+		status = efi_allocate_bootparams(handle, &boot_params);
+		if (status != EFI_SUCCESS)
+			efi_exit(handle, status);
+	}
+
+	hdr = &boot_params->hdr;
 
 	if (have_unsupported_snp_features())
 		efi_exit(handle, EFI_UNSUPPORTED);
@@ -870,7 +974,7 @@ void __noreturn efi_stub_entry(efi_handle_t handle,
 	if (efi_mem_encrypt > 0)
 		hdr->xloadflags |= XLF_MEM_ENCRYPTION;
 
-	status = efi_decompress_kernel(&kernel_entry);
+	status = efi_decompress_kernel(&kernel_entry, boot_params);
 	if (status != EFI_SUCCESS) {
 		efi_err("Failed to decompress kernel\n");
 		goto fail;
@@ -938,6 +1042,12 @@ fail:
 	efi_err("efi_stub_entry() failed!\n");
 
 	efi_exit(handle, status);
+}
+
+efi_status_t __efiapi efi_pe_entry(efi_handle_t handle,
+				   efi_system_table_t *sys_table_arg)
+{
+	efi_stub_entry(handle, sys_table_arg, NULL);
 }
 
 #ifdef CONFIG_EFI_HANDOVER_PROTOCOL

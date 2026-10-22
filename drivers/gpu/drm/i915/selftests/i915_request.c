@@ -22,14 +22,15 @@
  *
  */
 
-#include <linux/prime_numbers.h>
 #include <linux/pm_qos.h>
+#include <linux/prime_numbers.h>
 #include <linux/sort.h>
+
+#include <drm/drm_print.h>
 
 #include "gem/i915_gem_internal.h"
 #include "gem/i915_gem_pm.h"
 #include "gem/selftests/mock_context.h"
-
 #include "gt/intel_engine_heartbeat.h"
 #include "gt/intel_engine_pm.h"
 #include "gt/intel_engine_user.h"
@@ -40,11 +41,11 @@
 
 #include "i915_random.h"
 #include "i915_selftest.h"
+#include "i915_wait_util.h"
 #include "igt_flush_test.h"
 #include "igt_live_test.h"
 #include "igt_spinner.h"
 #include "lib_sw_fence.h"
-
 #include "mock_drm.h"
 #include "mock_gem_device.h"
 
@@ -73,8 +74,8 @@ static int igt_add_request(void *arg)
 	/* Basic preliminary test to create a request and let it loose! */
 
 	request = mock_request(rcs0(i915)->kernel_context, HZ / 10);
-	if (!request)
-		return -ENOMEM;
+	if (IS_ERR(request))
+		return PTR_ERR(request);
 
 	i915_request_add(request);
 
@@ -91,8 +92,8 @@ static int igt_wait_request(void *arg)
 	/* Submit a request, then wait upon it */
 
 	request = mock_request(rcs0(i915)->kernel_context, T);
-	if (!request)
-		return -ENOMEM;
+	if (IS_ERR(request))
+		return PTR_ERR(request);
 
 	i915_request_get(request);
 
@@ -160,8 +161,8 @@ static int igt_fence_wait(void *arg)
 	/* Submit a request, treat it as a fence and wait upon it */
 
 	request = mock_request(rcs0(i915)->kernel_context, T);
-	if (!request)
-		return -ENOMEM;
+	if (IS_ERR(request))
+		return PTR_ERR(request);
 
 	if (dma_fence_wait_timeout(&request->fence, false, T) != -ETIME) {
 		pr_err("fence wait success before submit (expected timeout)!\n");
@@ -219,8 +220,8 @@ static int igt_request_rewind(void *arg)
 	GEM_BUG_ON(IS_ERR(ce));
 	request = mock_request(ce, 2 * HZ);
 	intel_context_put(ce);
-	if (!request) {
-		err = -ENOMEM;
+	if (IS_ERR(request)) {
+		err = PTR_ERR(request);
 		goto err_context_0;
 	}
 
@@ -237,8 +238,8 @@ static int igt_request_rewind(void *arg)
 	GEM_BUG_ON(IS_ERR(ce));
 	vip = mock_request(ce, 0);
 	intel_context_put(ce);
-	if (!vip) {
-		err = -ENOMEM;
+	if (IS_ERR(vip)) {
+		err = PTR_ERR(vip);
 		goto err_context_1;
 	}
 
@@ -328,7 +329,7 @@ static void __igt_breadcrumbs_smoketest(struct kthread_work *work)
 	 * that the fences were marked as signaled.
 	 */
 
-	requests = kcalloc(total, sizeof(*requests), GFP_KERNEL);
+	requests = kzalloc_objs(*requests, total);
 	if (!requests) {
 		thread->result = -ENOMEM;
 		return;
@@ -471,11 +472,11 @@ static int mock_breadcrumbs_smoketest(void *arg)
 	 * See __igt_breadcrumbs_smoketest();
 	 */
 
-	threads = kcalloc(ncpus, sizeof(*threads), GFP_KERNEL);
+	threads = kzalloc_objs(*threads, ncpus);
 	if (!threads)
 		return -ENOMEM;
 
-	t.contexts = kcalloc(t.ncontexts, sizeof(*t.contexts), GFP_KERNEL);
+	t.contexts = kzalloc_objs(*t.contexts, t.ncontexts);
 	if (!t.contexts) {
 		ret = -ENOMEM;
 		goto out_threads;
@@ -1202,7 +1203,7 @@ static int live_all_engines(void *arg)
 	 * block doing so, and that they don't complete too soon.
 	 */
 
-	request = kcalloc(nengines, sizeof(*request), GFP_KERNEL);
+	request = kzalloc_objs(*request, nengines);
 	if (!request)
 		return -ENOMEM;
 
@@ -1332,7 +1333,7 @@ static int live_sequential_engines(void *arg)
 	 * they are running on independent engines.
 	 */
 
-	request = kcalloc(nengines, sizeof(*request), GFP_KERNEL);
+	request = kzalloc_objs(*request, nengines);
 	if (!request)
 		return -ENOMEM;
 
@@ -1625,7 +1626,7 @@ static int live_parallel_engines(void *arg)
 	 * tests that we load up the system maximally.
 	 */
 
-	threads = kcalloc(nengines, sizeof(*threads), GFP_KERNEL);
+	threads = kzalloc_objs(*threads, nengines);
 	if (!threads)
 		return -ENOMEM;
 
@@ -1753,13 +1754,13 @@ static int live_breadcrumbs_smoketest(void *arg)
 		goto out_rpm;
 	}
 
-	smoke = kcalloc(nengines, sizeof(*smoke), GFP_KERNEL);
+	smoke = kzalloc_objs(*smoke, nengines);
 	if (!smoke) {
 		ret = -ENOMEM;
 		goto out_file;
 	}
 
-	threads = kcalloc(ncpus * nengines, sizeof(*threads), GFP_KERNEL);
+	threads = kzalloc_objs(*threads, ncpus * nengines);
 	if (!threads) {
 		ret = -ENOMEM;
 		goto out_smoke;
@@ -1767,9 +1768,7 @@ static int live_breadcrumbs_smoketest(void *arg)
 
 	smoke[0].request_alloc = __live_request_alloc;
 	smoke[0].ncontexts = 64;
-	smoke[0].contexts = kcalloc(smoke[0].ncontexts,
-				    sizeof(*smoke[0].contexts),
-				    GFP_KERNEL);
+	smoke[0].contexts = kzalloc_objs(*smoke[0].contexts, smoke[0].ncontexts);
 	if (!smoke[0].contexts) {
 		ret = -ENOMEM;
 		goto out_threads;
@@ -2837,11 +2836,11 @@ static int perf_series_engines(void *arg)
 	unsigned int idx;
 	int err = 0;
 
-	stats = kcalloc(nengines, sizeof(*stats), GFP_KERNEL);
+	stats = kzalloc_objs(*stats, nengines);
 	if (!stats)
 		return -ENOMEM;
 
-	ps = kzalloc(struct_size(ps, ce, nengines), GFP_KERNEL);
+	ps = kzalloc_flex(*ps, ce, nengines);
 	if (!ps) {
 		kfree(stats);
 		return -ENOMEM;
@@ -3193,7 +3192,7 @@ static int perf_parallel_engines(void *arg)
 	struct p_thread *engines;
 	int err = 0;
 
-	engines = kcalloc(nengines, sizeof(*engines), GFP_KERNEL);
+	engines = kzalloc_objs(*engines, nengines);
 	if (!engines)
 		return -ENOMEM;
 

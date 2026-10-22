@@ -19,12 +19,9 @@ struct dummy_drvdata {
 	u8				traceid;
 };
 
-DEFINE_CORESIGHT_DEVLIST(source_devs, "dummy_source");
-DEFINE_CORESIGHT_DEVLIST(sink_devs, "dummy_sink");
-
 static int dummy_source_enable(struct coresight_device *csdev,
 			       struct perf_event *event, enum cs_mode mode,
-			       __maybe_unused struct coresight_trace_id_map *id_map)
+			       __maybe_unused struct coresight_path *path)
 {
 	if (!coresight_take_mode(csdev, mode))
 		return -EBUSY;
@@ -41,8 +38,18 @@ static void dummy_source_disable(struct coresight_device *csdev,
 	dev_dbg(csdev->dev.parent, "Dummy source disabled\n");
 }
 
+static int dummy_source_trace_id(struct coresight_device *csdev, __maybe_unused enum cs_mode mode,
+				 __maybe_unused struct coresight_device *sink)
+{
+	struct dummy_drvdata *drvdata;
+
+	drvdata = dev_get_drvdata(csdev->dev.parent);
+
+	return drvdata->traceid;
+}
+
 static int dummy_sink_enable(struct coresight_device *csdev, enum cs_mode mode,
-				void *data)
+			     struct coresight_path *path)
 {
 	dev_dbg(csdev->dev.parent, "Dummy sink enabled\n");
 
@@ -62,7 +69,8 @@ static const struct coresight_ops_source dummy_source_ops = {
 };
 
 static const struct coresight_ops dummy_source_cs_ops = {
-	.source_ops = &dummy_source_ops,
+	.trace_id	= dummy_source_trace_id,
+	.source_ops	= &dummy_source_ops,
 };
 
 static const struct coresight_ops_sink dummy_sink_ops = {
@@ -115,7 +123,7 @@ static int dummy_probe(struct platform_device *pdev)
 
 	if (of_device_is_compatible(node, "arm,coresight-dummy-source")) {
 
-		desc.name = coresight_alloc_device_name(&source_devs, dev);
+		desc.name = coresight_alloc_device_name("dummy_source", dev);
 		if (!desc.name)
 			return -ENOMEM;
 
@@ -144,7 +152,7 @@ static int dummy_probe(struct platform_device *pdev)
 		drvdata->traceid = (u8)trace_id;
 
 	} else if (of_device_is_compatible(node, "arm,coresight-dummy-sink")) {
-		desc.name = coresight_alloc_device_name(&sink_devs, dev);
+		desc.name = coresight_alloc_device_name("dummy_sink", dev);
 		if (!desc.name)
 			return -ENOMEM;
 

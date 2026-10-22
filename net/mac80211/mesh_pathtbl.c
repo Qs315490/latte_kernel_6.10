@@ -22,7 +22,7 @@ static void mesh_path_free_rcu(struct mesh_table *tbl, struct mesh_path *mpath);
 static u32 mesh_table_hash(const void *addr, u32 len, u32 seed)
 {
 	/* Use last four bytes of hw addr as hash index */
-	return jhash_1word(__get_unaligned_cpu32((u8 *)addr + 2), seed);
+	return jhash_1word(get_unaligned((u32 *)((u8 *)addr + 2)), seed);
 }
 
 static const struct rhashtable_params mesh_rht_params = {
@@ -405,7 +405,7 @@ struct mesh_path *mesh_path_new(struct ieee80211_sub_if_data *sdata,
 {
 	struct mesh_path *new_mpath;
 
-	new_mpath = kzalloc(sizeof(struct mesh_path), gfp_flags);
+	new_mpath = kzalloc_obj(struct mesh_path, gfp_flags);
 	if (!new_mpath)
 		return NULL;
 

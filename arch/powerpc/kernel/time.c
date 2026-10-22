@@ -137,7 +137,7 @@ EXPORT_SYMBOL_GPL(rtc_lock);
 
 static u64 tb_to_ns_scale __read_mostly;
 static unsigned tb_to_ns_shift __read_mostly;
-static u64 boot_tb __read_mostly;
+static u64 boot_tb __ro_after_init;
 
 extern struct timezone sys_tz;
 static long timezone_offset;
@@ -376,6 +376,47 @@ void vtime_task_switch(struct task_struct *prev)
 		acct->starttime = acct0->starttime;
 	}
 }
+
+/**
+ * vtime_reset - Fast forward vtime entry clocks
+ *
+ * Called from dynticks idle IRQ entry to fast-forward the clocks to current time
+ * so that the IRQ time is still accounted by vtime while nohz cputime is paused.
+ */
+void vtime_reset(void)
+{
+	struct cpu_accounting_data *acct = get_accounting(current);
+
+	acct->starttime = mftb();
+#ifdef CONFIG_ARCH_HAS_SCALED_CPUTIME
+	acct->startspurr = read_spurr(acct->starttime);
+#endif
+}
+
+#ifdef CONFIG_NO_HZ_COMMON
+/**
+ * vtime_dyntick_start - Inform vtime about entry to idle-dynticks
+ *
+ * Called when idle enters in dyntick mode. The idle cputime that elapsed so far
+ * is accumulated and the tick subsystem takes over the idle cputime accounting.
+ */
+void vtime_dyntick_start(void)
+{
+	vtime_account_idle(current);
+}
+
+/**
+ * vtime_dyntick_stop - Inform vtime about exit from idle-dynticks
+ *
+ * Called when idle exits from dyntick mode. The vtime entry clocks are
+ * fast-forward to current time so that idle accounting restarts elapsing from
+ * now.
+ */
+void vtime_dyntick_stop(void)
+{
+	vtime_reset();
+}
+#endif /* CONFIG_NO_HZ_COMMON */
 #endif /* CONFIG_VIRT_CPU_ACCOUNTING_NATIVE */
 
 void __no_kcsan __delay(unsigned long loops)
@@ -458,6 +499,10 @@ DEFINE_PER_CPU(u8, irq_work_pending);
 
 #endif /* 32 vs 64 bit */
 
+/*
+ * Must be called with preemption disabled since it updates
+ * per-CPU irq_work state and programs the local CPU decrementer.
+ */
 void arch_irq_work_raise(void)
 {
 	/*
@@ -471,10 +516,8 @@ void arch_irq_work_raise(void)
 	 * which could get tangled up if we're messing with the same state
 	 * here.
 	 */
-	preempt_disable();
 	set_irq_work_pending_flag();
 	set_dec(1);
-	preempt_enable();
 }
 
 static void set_dec_or_work(u64 val)
@@ -639,6 +682,12 @@ notrace unsigned long long sched_clock(void)
 	return mulhdu(get_tb() - boot_tb, tb_to_ns_scale) << tb_to_ns_shift;
 }
 
+#ifdef CONFIG_PPC_SPLPAR
+u64 get_boot_tb(void)
+{
+	return boot_tb;
+}
+#endif
 
 #ifdef CONFIG_PPC_PSERIES
 
@@ -884,6 +933,7 @@ static void __init set_decrementer_max(void)
 static void __init init_decrementer_clockevent(void)
 {
 	register_decrementer_clockevent(smp_processor_id());
+	vtime_reset();
 }
 
 void secondary_cpu_time_init(void)
@@ -899,6 +949,39 @@ void secondary_cpu_time_init(void)
 	/* FIME: Should make unrelated change to move snapshot_timebase
 	 * call here ! */
 	register_decrementer_clockevent(smp_processor_id());
+	vtime_reset();
+}
+
+/*
+ * Divide a 128-bit dividend by a 32-bit divisor, leaving a 128 bit
+ * result.
+ */
+static __init void div128_by_32(u64 dividend_high, u64 dividend_low,
+				unsigned int divisor, struct div_result *dr)
+{
+	unsigned long a, b, c, d;
+	unsigned long w, x, y, z;
+	u64 ra, rb, rc;
+
+	a = dividend_high >> 32;
+	b = dividend_high & 0xffffffff;
+	c = dividend_low >> 32;
+	d = dividend_low & 0xffffffff;
+
+	w = a / divisor;
+	ra = ((u64)(a - (w * divisor)) << 32) + b;
+
+	rb = ((u64)do_div(ra, divisor) << 32) + c;
+	x = ra;
+
+	rc = ((u64)do_div(rb, divisor) << 32) + d;
+	y = rb;
+
+	do_div(rc, divisor);
+	z = rc;
+
+	dr->result_high = ((u64)w << 32) + x;
+	dr->result_low  = ((u64)y << 32) + z;
 }
 
 /* This function is only called on the boot processor */
@@ -950,7 +1033,7 @@ void __init time_init(void)
 		sys_tz.tz_dsttime = 0;
 	}
 
-	vdso_data->tb_ticks_per_sec = tb_ticks_per_sec;
+	vdso_k_arch_data->tb_ticks_per_sec = tb_ticks_per_sec;
 #ifdef CONFIG_PPC64_PROC_SYSTEMCFG
 	systemcfg->tb_ticks_per_sec = tb_ticks_per_sec;
 #endif
@@ -972,39 +1055,6 @@ void __init time_init(void)
 
 	of_clk_init(NULL);
 	enable_sched_clock_irqtime();
-}
-
-/*
- * Divide a 128-bit dividend by a 32-bit divisor, leaving a 128 bit
- * result.
- */
-void div128_by_32(u64 dividend_high, u64 dividend_low,
-		  unsigned divisor, struct div_result *dr)
-{
-	unsigned long a, b, c, d;
-	unsigned long w, x, y, z;
-	u64 ra, rb, rc;
-
-	a = dividend_high >> 32;
-	b = dividend_high & 0xffffffff;
-	c = dividend_low >> 32;
-	d = dividend_low & 0xffffffff;
-
-	w = a / divisor;
-	ra = ((u64)(a - (w * divisor)) << 32) + b;
-
-	rb = ((u64) do_div(ra, divisor) << 32) + c;
-	x = ra;
-
-	rc = ((u64) do_div(rb, divisor) << 32) + d;
-	y = rb;
-
-	do_div(rc, divisor);
-	z = rc;
-
-	dr->result_high = ((u64)w << 32) + x;
-	dr->result_low  = ((u64)y << 32) + z;
-
 }
 
 /* We don't need to calibrate delay, we use the CPU timebase for that */

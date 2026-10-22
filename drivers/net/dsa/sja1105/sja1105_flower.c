@@ -41,7 +41,7 @@ static int sja1105_setup_bcast_policer(struct sja1105_private *priv,
 	int rc;
 
 	if (!rule) {
-		rule = kzalloc(sizeof(*rule), GFP_KERNEL);
+		rule = kzalloc_obj(*rule);
 		if (!rule)
 			return -ENOMEM;
 
@@ -112,7 +112,7 @@ static int sja1105_setup_tc_policer(struct sja1105_private *priv,
 	int rc;
 
 	if (!rule) {
-		rule = kzalloc(sizeof(*rule), GFP_KERNEL);
+		rule = kzalloc_obj(*rule);
 		if (!rule)
 			return -ENOMEM;
 
@@ -391,9 +391,9 @@ int sja1105_cls_flower_add(struct dsa_switch *ds, int port,
 			struct dsa_port *to_dp;
 
 			to_dp = dsa_port_from_netdev(act->dev);
-			if (IS_ERR(to_dp)) {
+			if (IS_ERR(to_dp) || to_dp->ds != ds) {
 				NL_SET_ERR_MSG_MOD(extack,
-						   "Destination not a switch port");
+						   "Destination not a local switch port");
 				return -EOPNOTSUPP;
 			}
 

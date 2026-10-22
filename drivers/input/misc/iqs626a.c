@@ -19,7 +19,6 @@
 #include <linux/input/touchscreen.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -771,7 +770,7 @@ static int iqs626_parse_trackpad(struct iqs626_private *iqs626,
 		u8 *thresh = &sys_reg->tp_grp_reg.ch_reg_tp[i].thresh;
 		char tc_name[10];
 
-		snprintf(tc_name, sizeof(tc_name), "channel-%d", i);
+		scnprintf(tc_name, sizeof(tc_name), "channel-%d", i);
 
 		struct fwnode_handle *tc_node __free(fwnode_handle) =
 				fwnode_get_named_child_node(ch_node, tc_name);

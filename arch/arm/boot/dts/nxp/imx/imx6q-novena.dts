@@ -109,6 +109,7 @@
 	panel: panel {
 		compatible = "innolux,n133hse-ea1";
 		backlight = <&backlight>;
+		power-supply = <&reg_lvds_lcd>;
 	};
 
 	reg_2p5v: regulator-2p5v {
@@ -265,7 +266,7 @@
 		reg = <0x1c>;
 	};
 
-	rtc: pcf8523@68 {
+	rtc: rtc@68 {
 		compatible = "nxp,pcf8523";
 		reg = <0x68>;
 	};
@@ -288,7 +289,7 @@
 		vio-supply = <&reg_3p3v>;
 		vcc-supply = <&reg_3p3v>;
 
-		stmpe_touchscreen {
+		touchscreen {
 			compatible = "st,stmpe-ts";
 			st,sample-time = <4>;
 			st,mod-12b = <1>;

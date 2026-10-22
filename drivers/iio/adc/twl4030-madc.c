@@ -19,7 +19,6 @@
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -252,7 +251,7 @@ static const struct s16_fract twl4030_divider_ratios[16] = {
 	{5, 11},	/* CHANNEL 15 */
 };
 
-/* Conversion table from -3 to 55 degrees Celcius */
+/* Conversion table from -3 to 55 degrees Celsius */
 static int twl4030_therm_tbl[] = {
 	30800,	29500,	28300,	27100,
 	26000,	24900,	23900,	22900,	22000,	21100,	20300,	19400,	18700,
@@ -758,10 +757,8 @@ static int twl4030_madc_probe(struct platform_device *pdev)
 	}
 
 	iio_dev = devm_iio_device_alloc(&pdev->dev, sizeof(*madc));
-	if (!iio_dev) {
-		dev_err(&pdev->dev, "failed allocating iio device\n");
+	if (!iio_dev)
 		return -ENOMEM;
-	}
 
 	madc = iio_priv(iio_dev);
 	madc->dev = &pdev->dev;

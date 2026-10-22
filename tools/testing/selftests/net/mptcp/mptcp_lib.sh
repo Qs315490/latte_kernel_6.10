@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: GPL-2.0
 
 . "$(dirname "${0}")/../lib.sh"
-. "$(dirname "${0}")/../net_helper.sh"
 
 readonly KSFT_PASS=0
 readonly KSFT_FAIL=1
@@ -29,7 +28,7 @@ declare -rx MPTCP_LIB_AF_INET6=10
 MPTCP_LIB_SUBTESTS=()
 MPTCP_LIB_SUBTESTS_DUPLICATED=0
 MPTCP_LIB_SUBTEST_FLAKY=0
-MPTCP_LIB_SUBTESTS_LAST_TS_MS=
+MPTCP_LIB_SUBTESTS_LAST_TS_NS=
 MPTCP_LIB_TEST_COUNTER=0
 MPTCP_LIB_TEST_FORMAT="%02u %-50s"
 MPTCP_LIB_IP_MPTCP=0
@@ -107,23 +106,32 @@ mptcp_lib_pr_info() {
 	mptcp_lib_print_info "INFO: ${*}"
 }
 
-# $1-2: listener/connector ns ; $3 port ; $4-5 listener/connector stat file
+mptcp_lib_pr_nstat() {
+	local ns="${1}"
+	local hist="/tmp/${ns}.out"
+
+	if [ -f "${hist}" ]; then
+		awk '$2 != 0 { print "  "$0 }' "${hist}"
+	else
+		ip netns exec "${ns}" nstat -as | grep Tcp
+	fi
+}
+
+# $1-2: listener/connector ns ; $3 port
 mptcp_lib_pr_err_stats() {
 	local lns="${1}"
 	local cns="${2}"
 	local port="${3}"
-	local lstat="${4}"
-	local cstat="${5}"
 
 	echo -en "${MPTCP_LIB_COLOR_RED}"
 	{
 		printf "\nnetns %s (listener) socket stat for %d:\n" "${lns}" "${port}"
 		ip netns exec "${lns}" ss -Menitam -o "sport = :${port}"
-		cat "${lstat}"
+		mptcp_lib_pr_nstat "${lns}"
 
 		printf "\nnetns %s (connector) socket stat for %d:\n" "${cns}" "${port}"
 		ip netns exec "${cns}" ss -Menitam -o "dport = :${port}"
-		[ "${lstat}" != "${cstat}" ] && cat "${cstat}"
+		[ "${lns}" != "${cns}" ] && mptcp_lib_pr_nstat "${cns}"
 	} 1>&2
 	echo -en "${MPTCP_LIB_COLOR_RESET}"
 }
@@ -228,7 +236,7 @@ mptcp_lib_kversion_ge() {
 }
 
 mptcp_lib_subtests_last_ts_reset() {
-	MPTCP_LIB_SUBTESTS_LAST_TS_MS="$(date +%s%3N)"
+	MPTCP_LIB_SUBTESTS_LAST_TS_NS="$(date +%s%N)"
 }
 mptcp_lib_subtests_last_ts_reset
 
@@ -247,7 +255,7 @@ __mptcp_lib_result_check_duplicated() {
 __mptcp_lib_result_add() {
 	local result="${1}"
 	local time="time="
-	local ts_prev_ms
+	local ts_prev_ns
 	shift
 
 	local id=$((${#MPTCP_LIB_SUBTESTS[@]} + 1))
@@ -257,9 +265,9 @@ __mptcp_lib_result_add() {
 	# not to add two '#'
 	[[ "${*}" != *"#"* ]] && time="# ${time}"
 
-	ts_prev_ms="${MPTCP_LIB_SUBTESTS_LAST_TS_MS}"
+	ts_prev_ns="${MPTCP_LIB_SUBTESTS_LAST_TS_NS}"
 	mptcp_lib_subtests_last_ts_reset
-	time+="$((MPTCP_LIB_SUBTESTS_LAST_TS_MS - ts_prev_ms))ms"
+	time+="$(((MPTCP_LIB_SUBTESTS_LAST_TS_NS - ts_prev_ns) / 1000000))ms"
 
 	MPTCP_LIB_SUBTESTS+=("${result} ${id} - ${KSFT_TEST}: ${*} ${time}")
 }
@@ -331,12 +339,28 @@ mptcp_lib_result_print_all_tap() {
 
 # get the value of keyword $1 in the line marked by keyword $2
 mptcp_lib_get_info_value() {
-	grep "${2}" | sed -n 's/.*\('"${1}"':\)\([0-9a-f:.]*\).*$/\2/p;q'
+	grep "${2}" 2>/dev/null |
+		sed -n 's/.*\('"${1}"':\)\([0-9a-f:.]*\).*$/\2/p;q'
+		# the ';q' at the end limits to the first matched entry.
 }
 
 # $1: info name ; $2: evts_ns ; [$3: event type; [$4: addr]]
 mptcp_lib_evts_get_info() {
-	grep "${4:-}" "${2}" | mptcp_lib_get_info_value "${1}" "^type:${3:-1},"
+	grep "${4:-}" "${2}" 2>/dev/null |
+		mptcp_lib_get_info_value "${1}" "^type:${3:-1},"
+}
+
+mptcp_lib_wait_timeout() {
+	local timeout_test="${1}"
+	local listener_ns="${2}"
+	local connector_ns="${3}"
+	local port="${4}"
+	shift 4 # rest are PIDs
+
+	sleep "${timeout_test}"
+	mptcp_lib_print_err "timeout"
+	mptcp_lib_pr_err_stats "${listener_ns}" "${connector_ns}" "${port}"
+	kill "${@}" 2>/dev/null
 }
 
 # $1: PID
@@ -348,19 +372,62 @@ mptcp_lib_kill_wait() {
 	wait "${1}" 2>/dev/null
 }
 
+# $1: PID
+mptcp_lib_pid_list_children() {
+	local curr="${1}"
+	# evoke 'ps' only once
+	local pids="${2:-"$(ps o pid,ppid)"}"
+
+	echo "${curr}"
+
+	local pid
+	for pid in $(echo "${pids}" | awk "\$2 == ${curr} { print \$1 }"); do
+		mptcp_lib_pid_list_children "${pid}" "${pids}"
+	done
+}
+
+# $1: PID
+mptcp_lib_kill_group_wait() {
+	# Some users might not have procps-ng: cannot use "kill -- -PID"
+	mptcp_lib_pid_list_children "${1}" | xargs -r kill &>/dev/null
+	wait "${1}" 2>/dev/null
+}
+
 # $1: IP address
 mptcp_lib_is_v6() {
 	[ -z "${1##*:*}" ]
 }
 
+mptcp_lib_nstat_init() {
+	local ns="${1}"
+
+	rm -f "/tmp/${ns}."{nstat,out}
+	NSTAT_HISTORY="/tmp/${ns}.nstat" ip netns exec "${ns}" nstat -n
+}
+
+mptcp_lib_nstat_get() {
+	local ns="${1}"
+
+	# filter out non-*TCP stats, and the rate (last column)
+	NSTAT_HISTORY="/tmp/${ns}.nstat" ip netns exec "${ns}" nstat -sz |
+		grep -o ".*Tcp\S\+\s\+[0-9]\+" > "/tmp/${ns}.out"
+}
+
 # $1: ns, $2: MIB counter
+# Get the counter from the history (mptcp_lib_nstat_{init,get}()) if available.
+# If not, get the counter from nstat ignoring any history.
 mptcp_lib_get_counter() {
 	local ns="${1}"
 	local counter="${2}"
+	local hist="/tmp/${ns}.out"
 	local count
 
-	count=$(ip netns exec "${ns}" nstat -asz "${counter}" |
-		awk 'NR==1 {next} {print $2}')
+	if [[ -s "${hist}" && "${counter}" == *"Tcp"* ]]; then
+		count=$(awk "/^${counter} / {print \$2; exit}" "${hist}")
+	else
+		count=$(ip netns exec "${ns}" nstat -asz "${counter}" |
+			awk 'NR==1 {next} {print $2}')
+	fi
 	if [ -z "${count}" ]; then
 		mptcp_lib_fail_if_expected_feature "${counter} counter"
 		return 1
@@ -382,7 +449,7 @@ mptcp_lib_make_file() {
 mptcp_lib_print_file_err() {
 	ls -l "${1}" 1>&2
 	echo "Trailing bytes are: "
-	tail -c 27 "${1}"
+	tail -c 32 "${1}" | od -x | head -n2
 }
 
 # $1: input file ; $2: output file ; $3: what kind of file
@@ -407,20 +474,24 @@ mptcp_lib_wait_local_port_listen() {
 	wait_local_port_listen "${@}" "tcp"
 }
 
+# $1: error file, $2: cmd, $3: expected msg, [$4: expected error]
 mptcp_lib_check_output() {
 	local err="${1}"
 	local cmd="${2}"
 	local expected="${3}"
+	local exp_error="${4:-0}"
 	local cmd_ret=0
 	local out
 
-	if ! out=$(${cmd} 2>"${err}"); then
-		cmd_ret=${?}
-	fi
+	out=$(${cmd} 2>"${err}") || cmd_ret=1
 
-	if [ ${cmd_ret} -ne 0 ]; then
-		mptcp_lib_pr_fail "command execution '${cmd}' stderr"
-		cat "${err}"
+	if [ "${cmd_ret}" != "${exp_error}" ]; then
+		mptcp_lib_pr_fail "unexpected returned code for '${cmd}', info:"
+		if [ "${exp_error}" = 0 ]; then
+			cat "${err}"
+		else
+			echo "${out}"
+		fi
 		return 2
 	elif [ "${out}" = "${expected}" ]; then
 		return 0
@@ -476,8 +547,6 @@ mptcp_lib_ns_init() {
 	local netns
 	for netns in "${@}"; do
 		ip netns exec "${!netns}" sysctl -q net.mptcp.enabled=1
-		ip netns exec "${!netns}" sysctl -q net.ipv4.conf.all.rp_filter=0
-		ip netns exec "${!netns}" sysctl -q net.ipv4.conf.default.rp_filter=0
 	done
 }
 

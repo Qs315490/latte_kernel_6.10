@@ -12,7 +12,6 @@
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/types.h>
 
@@ -34,8 +33,13 @@ static int hsc_i2c_recv(struct hsc_data *data)
 	msg.buf = data->buffer;
 
 	ret = i2c_transfer(client->adapter, &msg, 1);
+	if (ret < 0)
+		return ret;
 
-	return (ret == 2) ? 0 : ret;
+	if (ret != 1)
+		return -EIO;
+
+	return 0;
 }
 
 static int hsc_i2c_probe(struct i2c_client *client)
@@ -48,13 +52,13 @@ static int hsc_i2c_probe(struct i2c_client *client)
 
 static const struct of_device_id hsc_i2c_match[] = {
 	{ .compatible = "honeywell,hsc030pa" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, hsc_i2c_match);
 
 static const struct i2c_device_id hsc_i2c_id[] = {
-	{ "hsc030pa" },
-	{}
+	{ .name = "hsc030pa" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, hsc_i2c_id);
 

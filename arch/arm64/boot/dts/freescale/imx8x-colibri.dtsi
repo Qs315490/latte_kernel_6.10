@@ -3,7 +3,21 @@
  * Copyright 2019 Toradex
  */
 
+#include "dt-bindings/pwm/pwm.h"
+
 / {
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_gpio_bl_on>;
+		brightness-levels = <0 45 63 88 119 158 203 255>;
+		default-brightness-level = <4>;
+		enable-gpios = <&lsio_gpio3 12 GPIO_ACTIVE_HIGH>; /* Colibri BL_ON */
+		power-supply = <&reg_module_3v3>;
+		pwms = <&adma_pwm 0 6666667 PWM_POLARITY_INVERTED>;
+		status = "disabled";
+	};
+
 	chosen {
 		stdout-path = &lpuart3;
 	};
@@ -52,6 +66,15 @@
 		regulator-name = "vref-1v8";
 	};
 
+	reg_module_wifi: regulator-module-wifi {
+		compatible = "regulator-fixed";
+		gpio = <&gpio_expander_43 6 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+		regulator-name = "Wi-Fi_PDn";
+		startup-delay-us = <2000>;
+	};
+
 	reg_usbh_vbus: regulator-usbh-vbus {
 		compatible = "regulator-fixed";
 		pinctrl-names = "default";
@@ -61,6 +84,19 @@
 		regulator-max-microvolt = <5000000>;
 		regulator-min-microvolt = <5000000>;
 		regulator-name = "usbh_vbus";
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		linux,cma {
+			compatible = "shared-dma-pool";
+			linux,cma-default;
+			reusable;
+			size = <0 0x1a000000>;
+		};
 	};
 
 	sound-card {
@@ -261,6 +297,16 @@
 	};
 };
 
+&hsio_phy {
+	fsl,hsio-cfg = "pciea-x2-pcieb";
+	fsl,refclk-pad-mode = "input";
+	status = "okay";
+};
+
+&hsio_refb_clk {
+	enable-gpios = <&gpio_expander_43 3 GPIO_ACTIVE_HIGH>;
+};
+
 /* Colibri SPI */
 &lpspi2 {
 	pinctrl-names = "default";
@@ -295,8 +341,8 @@
 			  "",
 			  "SODIMM_61",
 			  "SODIMM_103",
-			  "",
-			  "",
+			  "SODIMM_79",
+			  "SODIMM_97",
 			  "",
 			  "SODIMM_25",
 			  "SODIMM_27",
@@ -443,18 +489,26 @@
 
 /* VPU Mailboxes */
 &mu_m0 {
-	status="okay";
+	status = "okay";
 };
 
 &mu1_m0 {
-	status="okay";
+	status = "okay";
 };
 
 /* TODO MIPI CSI */
 
 /* TODO MIPI DSI with DSI-to-HDMI bridge lt8912 */
 
-/* TODO on-module PCIe for Wi-Fi */
+/* On-module PCIe for Wi-Fi */
+&pcieb {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_pcieb>, <&pinctrl_wifi>;
+	phys = <&hsio_phy 0 PHY_TYPE_PCIE 0>;
+	phy-names = "pcie-phy";
+	reset-gpios = <&lsio_gpio4 0 GPIO_ACTIVE_LOW>;
+	status = "okay";
+};
 
 /* On-module I2S */
 &sai0 {
@@ -577,12 +631,12 @@
 	 */
 	pinctrl_atmel_adap: atmeladaptergrp {
 		fsl,pins = <IMX8QXP_UART1_RX_LSIO_GPIO0_IO22			0x21>,		/* SODIMM  30 */
-			   <IMX8QXP_UART1_TX_LSIO_GPIO0_IO21			0x4000021>;	/* SODIMM  28 */
+			   <IMX8QXP_UART1_TX_LSIO_GPIO0_IO21			0x40000021>;	/* SODIMM  28 */
 	};
 
 	/* Atmel MXT touchsceen + boards with built-in Capacitive Touch Connector */
 	pinctrl_atmel_conn: atmelconnectorgrp {
-		fsl,pins = <IMX8QXP_QSPI0B_DATA2_LSIO_GPIO3_IO20		0x4000021>,	/* SODIMM 107 */
+		fsl,pins = <IMX8QXP_QSPI0B_DATA2_LSIO_GPIO3_IO20		0x40000021>,	/* SODIMM 107 */
 			   <IMX8QXP_QSPI0B_SS1_B_LSIO_GPIO3_IO24		0x21>;		/* SODIMM 106 */
 	};
 
@@ -596,7 +650,7 @@
 	};
 
 	pinctrl_csi_mclk: csimclkgrp {
-		fsl,pins = <IMX8QXP_CSI_MCLK_CI_PI_MCLK				0xC0000041>;	/* SODIMM  75 / X3-12 */
+		fsl,pins = <IMX8QXP_CSI_MCLK_CI_PI_MCLK				0xc0000041>;	/* SODIMM  75 / X3-12 */
 	};
 
 	pinctrl_ext_io0: extio0grp {

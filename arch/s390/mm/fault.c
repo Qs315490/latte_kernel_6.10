@@ -11,11 +11,11 @@
 
 #include <linux/kernel_stat.h>
 #include <linux/mmu_context.h>
+#include <linux/cpufeature.h>
 #include <linux/perf_event.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/sched/debug.h>
-#include <linux/jump_label.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
@@ -23,7 +23,6 @@
 #include <linux/ptrace.h>
 #include <linux/mman.h>
 #include <linux/mm.h>
-#include <linux/compat.h>
 #include <linux/smp.h>
 #include <linux/kdebug.h>
 #include <linux/init.h>
@@ -40,21 +39,10 @@
 #include <asm/ptrace.h>
 #include <asm/fault.h>
 #include <asm/diag.h>
-#include <asm/gmap.h>
 #include <asm/irq.h>
 #include <asm/facility.h>
 #include <asm/uv.h>
 #include "../kernel/entry.h"
-
-static DEFINE_STATIC_KEY_FALSE(have_store_indication);
-
-static int __init fault_init(void)
-{
-	if (test_facility(75))
-		static_branch_enable(&have_store_indication);
-	return 0;
-}
-early_initcall(fault_init);
 
 /*
  * Find out which address space caused the exception.
@@ -81,7 +69,7 @@ static __always_inline bool fault_is_write(struct pt_regs *regs)
 {
 	union teid teid = { .val = regs->int_parm_long };
 
-	if (static_branch_likely(&have_store_indication))
+	if (test_facility(75))
 		return teid.fsi == TEID_FSI_STORE;
 	return false;
 }
@@ -144,8 +132,17 @@ static void dump_fault_info(struct pt_regs *regs)
 	union teid teid = { .val = regs->int_parm_long };
 	unsigned long asce;
 
-	pr_alert("Failing address: %016lx TEID: %016lx\n",
+	pr_alert("Failing address: %016lx TEID: %016lx",
 		 get_fault_address(regs), teid.val);
+	if (test_facility(131))
+		pr_cont(" ESOP-2");
+	else if (machine_has_esop())
+		pr_cont(" ESOP-1");
+	else
+		pr_cont(" SOP");
+	if (test_facility(75))
+		pr_cont(" FSI");
+	pr_cont("\n");
 	pr_alert("Fault in ");
 	switch (teid.as) {
 	case PSW_BITS_AS_HOME:
@@ -174,6 +171,23 @@ static void dump_fault_info(struct pt_regs *regs)
 }
 
 int show_unhandled_signals = 1;
+
+static const struct ctl_table s390_fault_sysctl_table[] = {
+	{
+		.procname	= "userprocess_debug",
+		.data		= &show_unhandled_signals,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+};
+
+static int __init init_s390_fault_sysctls(void)
+{
+	register_sysctl_init("kernel", s390_fault_sysctl_table);
+	return 0;
+}
+arch_initcall(init_s390_fault_sysctls);
 
 void report_user_fault(struct pt_regs *regs, long signr, int is_mm_fault)
 {
@@ -359,25 +373,23 @@ void do_protection_exception(struct pt_regs *regs)
 	 * The exception to this rule are aborted transactions, for these
 	 * the PSW already points to the correct location.
 	 */
-	if (!(regs->int_code & 0x200))
+	if (!(regs->int_code & 0x200)) {
 		regs->psw.addr = __rewind_psw(regs->psw, regs->int_code >> 16);
+		set_pt_regs_flag(regs, PIF_PSW_ADDR_ADJUSTED);
+	}
 	/*
-	 * Check for low-address protection.  This needs to be treated
-	 * as a special case because the translation exception code
-	 * field is not guaranteed to contain valid data in this case.
+	 * If bit 61 if the TEID is not set, the remainder of the
+	 * TEID is unpredictable. Special handling is required.
 	 */
 	if (unlikely(!teid.b61)) {
 		if (user_mode(regs)) {
-			/* Low-address protection in user mode: cannot happen */
-			die(regs, "Low-address protection");
+			dump_fault_info(regs);
+			die(regs, "Unexpected TEID");
 		}
-		/*
-		 * Low-address protection in kernel mode means
-		 * NULL pointer write access in kernel mode.
-		 */
+		/* Assume low-address protection in kernel mode. */
 		return handle_fault_error_nolock(regs, 0);
 	}
-	if (unlikely(MACHINE_HAS_NX && teid.b56)) {
+	if (unlikely(cpu_has_nx() && teid.b56)) {
 		regs->int_parm_long = (teid.addr * PAGE_SIZE) | (regs->psw.addr & PAGE_MASK);
 		return handle_fault_error_nolock(regs, SEGV_ACCERR);
 	}
@@ -391,7 +403,7 @@ void do_dat_exception(struct pt_regs *regs)
 }
 NOKPROBE_SYMBOL(do_dat_exception);
 
-#if IS_ENABLED(CONFIG_PGSTE)
+#if IS_ENABLED(CONFIG_KVM)
 
 void do_secure_storage_access(struct pt_regs *regs)
 {
@@ -426,14 +438,23 @@ void do_secure_storage_access(struct pt_regs *regs)
 		panic("Unexpected PGM 0x3d with TEID bit 61=0");
 	}
 	if (is_kernel_fault(regs)) {
-		folio = phys_to_folio(addr);
+		folio = virt_to_folio((void *)addr);
 		if (unlikely(!folio_try_get(folio)))
 			return;
-		rc = arch_make_folio_accessible(folio);
+		rc = uv_convert_from_secure(folio_to_phys(folio));
+		if (!rc)
+			clear_bit(PG_arch_1, &folio->flags.f);
 		folio_put(folio);
+		/*
+		 * There are some valid fixup types for kernel
+		 * accesses to donated secure memory. zeropad is one
+		 * of them.
+		 */
 		if (rc)
-			BUG();
+			return handle_fault_error_nolock(regs, 0);
 	} else {
+		if (faulthandler_disabled())
+			return handle_fault_error_nolock(regs, 0);
 		mm = current->mm;
 		mmap_read_lock(mm);
 		vma = find_vma(mm, addr);
@@ -456,4 +477,4 @@ void do_secure_storage_access(struct pt_regs *regs)
 }
 NOKPROBE_SYMBOL(do_secure_storage_access);
 
-#endif /* CONFIG_PGSTE */
+#endif /* CONFIG_KVM */

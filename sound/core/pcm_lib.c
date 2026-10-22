@@ -545,7 +545,7 @@ void snd_pcm_set_sync_per_card(struct snd_pcm_substream *substream,
 			       struct snd_pcm_hw_params *params,
 			       const unsigned char *id, unsigned int len)
 {
-	*(__u32 *)params->sync = cpu_to_le32(substream->pcm->card->number);
+	*(__le32 *)params->sync = cpu_to_le32(substream->pcm->card->number);
 	len = min(12, len);
 	memcpy(params->sync + 4, id, len);
 	memset(params->sync + 4 + len, 0, 12 - len);
@@ -2138,6 +2138,9 @@ static int interleaved_copy(struct snd_pcm_substream *substream,
 	off = frames_to_bytes(runtime, off);
 	frames = frames_to_bytes(runtime, frames);
 
+	if (!data)
+		return fill_silence(substream, 0, hwoff, NULL, frames);
+
 	return do_transfer(substream, 0, hwoff, data + off, frames, transfer,
 			   in_kernel);
 }
@@ -2601,7 +2604,7 @@ int snd_pcm_add_chmap_ctls(struct snd_pcm *pcm, int stream,
 
 	if (WARN_ON(pcm->streams[stream].chmap_kctl))
 		return -EBUSY;
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 	info->pcm = pcm;

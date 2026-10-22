@@ -249,6 +249,8 @@
 		reg = <0>;
 		interrupts-extended = <&gpio5 19 IRQ_TYPE_LEVEL_LOW>;
 		reset-gpios = <&gpio5 18 GPIO_ACTIVE_LOW>;
+		reset-assert-us = <10000>;
+		reset-deassert-us = <300>;
 		/*
 		 * TX clock internal delay mode is required for reliable
 		 * 1Gbps communication using the KSZ9031RNX phy present on
@@ -308,6 +310,7 @@
 &i2c0 {
 	pinctrl-0 = <&i2c0_pins>;
 	pinctrl-names = "default";
+	bootph-all;
 	status = "okay";
 
 	ak4613: codec@10 {
@@ -434,7 +437,7 @@
 		};
 	};
 
-	cs2000: clk-multiplier@4f {
+	cs2000: clock-controller@4f {
 		#clock-cells = <0>;
 		compatible = "cirrus,cs2000-cp";
 		reg = <0x4f>;
@@ -449,6 +452,7 @@
 		compatible = "rohm,br24t01", "atmel,24c01";
 		reg = <0x50>;
 		pagesize = <8>;
+		bootph-all;
 	};
 };
 
@@ -658,7 +662,7 @@
 				reg = <0x00040000 0x140000>;
 				read-only;
 			};
-			cert_header_sa6@180000 {
+			cert-header-sa6@180000 {
 				reg = <0x00180000 0x040000>;
 				read-only;
 			};
@@ -695,6 +699,7 @@
 &scif2 {
 	pinctrl-0 = <&scif2_pins>;
 	pinctrl-names = "default";
+	bootph-all;
 
 	status = "okay";
 };
@@ -717,6 +722,11 @@
 
 &ssi4 {
 	shared-pin;
+};
+
+/* Firmware should reserve it but sadly doesn't */
+&swdt {
+	status = "reserved";
 };
 
 &usb2_phy0 {

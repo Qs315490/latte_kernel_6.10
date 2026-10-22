@@ -2,12 +2,18 @@
 #ifndef DRIVERS_PCI_H
 #define DRIVERS_PCI_H
 
+#include <linux/align.h>
+#include <linux/bitfield.h>
 #include <linux/pci.h>
+#include <trace/events/pci.h>
 
 struct pcie_tlp_log;
 
 /* Number of possible devfns: 0.0 to 1f.7 inclusive */
 #define MAX_NR_DEVFNS 256
+#define PCI_MAX_NR_DEVS	32
+
+#define MAX_NR_LANES 16
 
 #define PCI_FIND_CAP_TTL	48
 
@@ -34,13 +40,6 @@ struct pcie_tlp_log;
 #define PCIE_T_PERST_CLK_US		100
 
 /*
- * End of conventional reset (PERST# de-asserted) to first configuration
- * request (device able to respond with a "Request Retry Status" completion),
- * from PCIe r6.0, sec 6.6.1.
- */
-#define PCIE_T_RRS_READY_MS	100
-
-/*
  * PCIe r6.0, sec 5.3.3.2.1 <PME Synchronization>
  * Recommends 1ms to 10ms timeout to check L2 ready.
  */
@@ -59,7 +58,24 @@ struct pcie_tlp_log;
  *    completes before sending a Configuration Request to the device
  *    immediately below that Port."
  */
-#define PCIE_RESET_CONFIG_DEVICE_WAIT_MS	100
+#define PCIE_RESET_CONFIG_WAIT_MS	100
+
+/* Parameters for the waiting for link up routine */
+#define PCIE_LINK_WAIT_MAX_RETRIES	10
+#define PCIE_LINK_WAIT_SLEEP_MS		90
+
+/* Format of TLP; PCIe r7.0, sec 2.2.1 */
+#define PCIE_TLP_FMT_3DW_NO_DATA	0x00 /* 3DW header, no data */
+#define PCIE_TLP_FMT_4DW_NO_DATA	0x01 /* 4DW header, no data */
+#define PCIE_TLP_FMT_3DW_DATA		0x02 /* 3DW header, with data */
+#define PCIE_TLP_FMT_4DW_DATA		0x03 /* 4DW header, with data */
+
+/* Type of TLP; PCIe r7.0, sec 2.2.1 */
+#define PCIE_TLP_TYPE_MEM_RDWR		0x00 /* Memory Read/Write Request */
+#define PCIE_TLP_TYPE_IO_RDWR		0x02 /* I/O Read/Write Request */
+#define PCIE_TLP_TYPE_CFG0_RDWR		0x04 /* Config Type 0 Read/Write Request */
+#define PCIE_TLP_TYPE_CFG1_RDWR		0x05 /* Config Type 1 Read/Write Request */
+#define PCIE_TLP_TYPE_MSG		0x10 /* Message With/Without data Request */
 
 /* Message Routing (r[2:0]); PCIe r6.0, sec 2.2.8 */
 #define PCIE_MSG_TYPE_R_RC	0
@@ -82,12 +98,124 @@ struct pcie_tlp_log;
 #define PCIE_MSG_CODE_DEASSERT_INTC	0x26
 #define PCIE_MSG_CODE_DEASSERT_INTD	0x27
 
+/* Cpl. status of Complete; PCIe r7.0, sec 2.2.9.1 */
+#define PCIE_CPL_STS_SUCCESS		0x00 /* Successful Completion */
+
+#define PCI_BUS_BRIDGE_IO_WINDOW	0
+#define PCI_BUS_BRIDGE_MEM_WINDOW	1
+#define PCI_BUS_BRIDGE_PREF_MEM_WINDOW	2
+
+#define PCI_EXP_AER_FLAGS	(PCI_EXP_DEVCTL_CERE | PCI_EXP_DEVCTL_NFERE | \
+				 PCI_EXP_DEVCTL_FERE | PCI_EXP_DEVCTL_URRE)
+
 extern const unsigned char pcie_link_speed[];
+unsigned char pcie_get_link_speed(unsigned int speed);
+
 extern bool pci_early_dump;
+
+extern struct mutex pci_rescan_remove_lock;
 
 bool pcie_cap_has_lnkctl(const struct pci_dev *dev);
 bool pcie_cap_has_lnkctl2(const struct pci_dev *dev);
 bool pcie_cap_has_rtctl(const struct pci_dev *dev);
+
+/* Standard Capability finder */
+/**
+ * PCI_FIND_NEXT_CAP - Find a PCI standard capability
+ * @read_cfg: Function pointer for reading PCI config space
+ * @start: Starting position to begin search
+ * @cap: Capability ID to find
+ * @prev_ptr: Pointer to store position of preceding capability (optional)
+ * @args: Arguments to pass to read_cfg function
+ *
+ * Search the capability list in PCI config space to find @cap. If
+ * found, update *prev_ptr with the position of the preceding capability
+ * (if prev_ptr != NULL)
+ * Implements TTL (time-to-live) protection against infinite loops.
+ *
+ * Return: Position of the capability if found, 0 otherwise.
+ */
+#define PCI_FIND_NEXT_CAP(read_cfg, start, cap, prev_ptr, args...)	\
+({									\
+	int __ttl = PCI_FIND_CAP_TTL;					\
+	u8 __id,  __found_pos = 0;					\
+	u8 __prev_pos = (start);					\
+	u8 __pos = (start);						\
+	u16 __ent;							\
+									\
+	read_cfg##_byte(args, __pos, &__pos);				\
+									\
+	while (__ttl--) {						\
+		if (__pos < PCI_STD_HEADER_SIZEOF)			\
+			break;						\
+									\
+		__pos = ALIGN_DOWN(__pos, 4);				\
+		read_cfg##_word(args, __pos, &__ent);			\
+									\
+		__id = FIELD_GET(PCI_CAP_ID_MASK, __ent);		\
+		if (__id == 0xff)					\
+			break;						\
+									\
+		if (__id == (cap)) {					\
+			__found_pos = __pos;				\
+			if (prev_ptr != NULL)				\
+				*(u8 *)prev_ptr = __prev_pos;		\
+			break;						\
+		}							\
+									\
+		__prev_pos = __pos;					\
+		__pos = FIELD_GET(PCI_CAP_LIST_NEXT_MASK, __ent);	\
+	}								\
+	__found_pos;							\
+})
+
+/* Extended Capability finder */
+/**
+ * PCI_FIND_NEXT_EXT_CAP - Find a PCI extended capability
+ * @read_cfg: Function pointer for reading PCI config space
+ * @start: Starting position to begin search (0 for initial search)
+ * @cap: Extended capability ID to find
+ * @prev_ptr: Pointer to store position of preceding capability (optional)
+ * @args: Arguments to pass to read_cfg function
+ *
+ * Search the extended capability list in PCI config space to find @cap.
+ * If found, update *prev_ptr with the position of the preceding capability
+ * (if prev_ptr != NULL)
+ * Implements TTL protection against infinite loops using a calculated
+ * maximum search count.
+ *
+ * Return: Position of the capability if found, 0 otherwise.
+ */
+#define PCI_FIND_NEXT_EXT_CAP(read_cfg, start, cap, prev_ptr, args...)	\
+({									\
+	u16 __pos = (start) ?: PCI_CFG_SPACE_SIZE;			\
+	u16 __found_pos = 0;						\
+	u16 __prev_pos;							\
+	int __ttl, __ret;						\
+	u32 __header;							\
+									\
+	__prev_pos = __pos;						\
+	__ttl = (PCI_CFG_SPACE_EXP_SIZE - PCI_CFG_SPACE_SIZE) / 8;	\
+	while (__ttl-- > 0 && __pos >= PCI_CFG_SPACE_SIZE) {		\
+		__ret = read_cfg##_dword(args, __pos, &__header);	\
+		if (__ret != PCIBIOS_SUCCESSFUL)			\
+			break;						\
+									\
+		if (__header == 0)					\
+			break;						\
+									\
+		if (PCI_EXT_CAP_ID(__header) == (cap) && __pos != start) {\
+			__found_pos = __pos;				\
+			if (prev_ptr != NULL)				\
+				*(u16 *)prev_ptr = __prev_pos;		\
+			break;						\
+		}							\
+									\
+		__prev_pos = __pos;					\
+		__pos = PCI_EXT_CAP_NEXT(__header);			\
+	}								\
+	__found_pos;							\
+})
 
 /* Functions internal to the PCI core code */
 
@@ -106,7 +234,7 @@ bool pci_reset_supported(struct pci_dev *dev);
 void pci_init_reset_methods(struct pci_dev *dev);
 int pci_bridge_secondary_bus_reset(struct pci_dev *dev);
 int pci_bus_error_reset(struct pci_dev *dev);
-int __pci_reset_bus(struct pci_bus *bus);
+int pci_try_reset_bridge(struct pci_dev *bridge);
 
 struct pci_cap_saved_data {
 	u16		cap_nr;
@@ -148,8 +276,10 @@ void pci_dev_adjust_pme(struct pci_dev *dev);
 void pci_dev_complete_resume(struct pci_dev *pci_dev);
 void pci_config_pm_runtime_get(struct pci_dev *dev);
 void pci_config_pm_runtime_put(struct pci_dev *dev);
+void pci_pm_power_up_and_verify_state(struct pci_dev *pci_dev);
 void pci_pm_init(struct pci_dev *dev);
 void pci_ea_init(struct pci_dev *dev);
+bool pci_ea_fixed_busnrs(struct pci_dev *dev, u8 *sec, u8 *sub);
 void pci_msi_init(struct pci_dev *dev);
 void pci_msix_init(struct pci_dev *dev);
 bool pci_bridge_d3_possible(struct pci_dev *dev);
@@ -165,6 +295,22 @@ static inline void pci_wakeup_event(struct pci_dev *dev)
 {
 	/* Wait 100 ms before the system can be put into a sleep state. */
 	pm_wakeup_event(&dev->dev, 100);
+}
+
+/**
+ * pci_bar_index_is_valid - Check whether a BAR index is within valid range
+ * @bar: BAR index
+ *
+ * Protects against overflowing &struct pci_dev.resource array.
+ *
+ * Return: true for valid index, false otherwise.
+ */
+static inline bool pci_bar_index_is_valid(int bar)
+{
+	if (bar >= 0 && bar < PCI_NUM_RESOURCES)
+		return true;
+
+	return false;
 }
 
 static inline bool pci_has_subordinate(struct pci_dev *pci_dev)
@@ -211,14 +357,7 @@ static inline int pci_proc_detach_bus(struct pci_bus *bus) { return 0; }
 
 /* Functions for PCI Hotplug drivers to use */
 int pci_hp_add_bridge(struct pci_dev *dev);
-
-#if defined(CONFIG_SYSFS) && defined(HAVE_PCI_LEGACY)
-void pci_create_legacy_files(struct pci_bus *bus);
-void pci_remove_legacy_files(struct pci_bus *bus);
-#else
-static inline void pci_create_legacy_files(struct pci_bus *bus) { }
-static inline void pci_remove_legacy_files(struct pci_bus *bus) { }
-#endif
+bool pci_hp_spurious_link_change(struct pci_dev *pdev);
 
 /* Lock for read/write access to pci device and bus lists */
 extern struct rw_semaphore pci_bus_sem;
@@ -246,16 +385,17 @@ static inline int pci_no_d1d2(struct pci_dev *dev)
 
 }
 
+#ifdef HAVE_PCI_LEGACY
+bool pci_legacy_has_sparse(struct pci_bus *bus, enum pci_mmap_state type);
+#endif
+
 #ifdef CONFIG_SYSFS
-int pci_create_sysfs_dev_files(struct pci_dev *pdev);
-void pci_remove_sysfs_dev_files(struct pci_dev *pdev);
 extern const struct attribute_group *pci_dev_groups[];
 extern const struct attribute_group *pci_dev_attr_groups[];
 extern const struct attribute_group *pcibus_groups[];
 extern const struct attribute_group *pci_bus_groups[];
+extern const struct attribute_group pci_doe_sysfs_group;
 #else
-static inline int pci_create_sysfs_dev_files(struct pci_dev *pdev) { return 0; }
-static inline void pci_remove_sysfs_dev_files(struct pci_dev *pdev) { }
 #define pci_dev_groups NULL
 #define pci_dev_attr_groups NULL
 #define pcibus_groups NULL
@@ -266,6 +406,40 @@ extern unsigned long pci_hotplug_io_size;
 extern unsigned long pci_hotplug_mmio_size;
 extern unsigned long pci_hotplug_mmio_pref_size;
 extern unsigned long pci_hotplug_bus_size;
+
+static inline bool pci_is_cardbus_bridge(struct pci_dev *dev)
+{
+	return dev->hdr_type == PCI_HEADER_TYPE_CARDBUS;
+}
+#ifdef CONFIG_CARDBUS
+unsigned long pci_cardbus_resource_alignment(const struct resource *res);
+int pci_bus_size_cardbus_bridge(struct pci_bus *bus,
+				struct list_head *realloc_head);
+int pci_cardbus_scan_bridge_extend(struct pci_bus *bus, struct pci_dev *dev,
+				   u32 buses, int max,
+				   unsigned int available_buses, int pass);
+int pci_setup_cardbus(char *str);
+
+#else
+static inline unsigned long pci_cardbus_resource_alignment(const struct resource *res)
+{
+	return 0;
+}
+static inline int pci_bus_size_cardbus_bridge(struct pci_bus *bus,
+					      struct list_head *realloc_head)
+{
+	return -EOPNOTSUPP;
+}
+static inline int pci_cardbus_scan_bridge_extend(struct pci_bus *bus,
+						 struct pci_dev *dev,
+						 u32 buses, int max,
+						 unsigned int available_buses,
+						 int pass)
+{
+	return max;
+}
+static inline int pci_setup_cardbus(char *str) { return -ENOENT; }
+#endif /* CONFIG_CARDBUS */
 
 /**
  * pci_match_one_device - Tell if a PCI device structure has a matching
@@ -309,12 +483,17 @@ enum pci_bar_type {
 struct device *pci_get_host_bridge_device(struct pci_dev *dev);
 void pci_put_host_bridge_device(struct device *dev);
 
+void pci_resize_resource_set_size(struct pci_dev *dev, int resno, int size);
+int pci_do_resource_release_and_resize(struct pci_dev *dev, int resno, int size,
+				       int exclude_bars);
+unsigned int pci_rescan_bus_bridge_resize(struct pci_dev *bridge);
+int __must_check pci_reassign_resource(struct pci_dev *dev, int i, resource_size_t add_size, resource_size_t align);
+
 int pci_configure_extended_tags(struct pci_dev *dev, void *ign);
 bool pci_bus_read_dev_vendor_id(struct pci_bus *bus, int devfn, u32 *pl,
 				int rrs_timeout);
 bool pci_bus_generic_read_dev_vendor_id(struct pci_bus *bus, int devfn, u32 *pl,
 					int rrs_timeout);
-int pci_idt_bus_quirk(struct pci_bus *bus, int devfn, u32 *pl, int rrs_timeout);
 
 int pci_setup_device(struct pci_dev *dev);
 void __pci_size_stdbars(struct pci_dev *dev, int count,
@@ -322,10 +501,14 @@ void __pci_size_stdbars(struct pci_dev *dev, int count,
 int __pci_read_base(struct pci_dev *dev, enum pci_bar_type type,
 		    struct resource *res, unsigned int reg, u32 *sizes);
 void pci_configure_ari(struct pci_dev *dev);
+
+int pci_dev_res_add_to_list(struct list_head *head, struct pci_dev *dev,
+			    struct resource *res, resource_size_t add_size,
+			    resource_size_t min_align);
 void __pci_bus_size_bridges(struct pci_bus *bus,
 			struct list_head *realloc_head);
 void __pci_bus_assign_resources(const struct pci_bus *bus,
-				struct list_head *realloc_head,
+				struct list_head *add_list,
 				struct list_head *fail_head);
 bool pci_bus_clip_resource(struct pci_dev *dev, int idx);
 void pci_walk_bus_locked(struct pci_bus *top,
@@ -333,7 +516,38 @@ void pci_walk_bus_locked(struct pci_bus *top,
 			 void *userdata);
 
 const char *pci_resource_name(struct pci_dev *dev, unsigned int i);
+bool pci_resource_is_optional(const struct pci_dev *dev, int resno);
+static inline bool pci_resource_is_bridge_win(int resno)
+{
+	return resno >= PCI_BRIDGE_RESOURCES &&
+	       resno <= PCI_BRIDGE_RESOURCE_END;
+}
 
+/**
+ * pci_resource_num - Reverse lookup resource number from device resources
+ * @dev: PCI device
+ * @res: Resource to lookup index for (MUST be a @dev's resource)
+ *
+ * Perform reverse lookup to determine the resource number for @res within
+ * @dev resource array. NOTE: The caller is responsible for ensuring @res is
+ * among @dev's resources!
+ *
+ * Returns: resource number.
+ */
+static inline int pci_resource_num(const struct pci_dev *dev,
+				   const struct resource *res)
+{
+	int resno = res - &dev->resource[0];
+
+	/* Passing a resource that is not among dev's resources? */
+	WARN_ON_ONCE(resno >= PCI_NUM_RESOURCES);
+
+	return resno;
+}
+
+void pbus_validate_busn(struct pci_bus *bus);
+struct resource *pbus_select_window(struct pci_bus *bus,
+				    const struct resource *res);
 void pci_reassigndev_resource_alignment(struct pci_dev *dev);
 void pci_disable_bridge_window(struct pci_dev *dev);
 struct pci_bus *pci_bus_get(struct pci_bus *bus);
@@ -341,12 +555,14 @@ void pci_bus_put(struct pci_bus *bus);
 
 #define PCIE_LNKCAP_SLS2SPEED(lnkcap)					\
 ({									\
-	((lnkcap) == PCI_EXP_LNKCAP_SLS_64_0GB ? PCIE_SPEED_64_0GT :	\
-	 (lnkcap) == PCI_EXP_LNKCAP_SLS_32_0GB ? PCIE_SPEED_32_0GT :	\
-	 (lnkcap) == PCI_EXP_LNKCAP_SLS_16_0GB ? PCIE_SPEED_16_0GT :	\
-	 (lnkcap) == PCI_EXP_LNKCAP_SLS_8_0GB ? PCIE_SPEED_8_0GT :	\
-	 (lnkcap) == PCI_EXP_LNKCAP_SLS_5_0GB ? PCIE_SPEED_5_0GT :	\
-	 (lnkcap) == PCI_EXP_LNKCAP_SLS_2_5GB ? PCIE_SPEED_2_5GT :	\
+	u32 lnkcap_sls = (lnkcap) & PCI_EXP_LNKCAP_SLS;			\
+									\
+	(lnkcap_sls == PCI_EXP_LNKCAP_SLS_64_0GB ? PCIE_SPEED_64_0GT :	\
+	 lnkcap_sls == PCI_EXP_LNKCAP_SLS_32_0GB ? PCIE_SPEED_32_0GT :	\
+	 lnkcap_sls == PCI_EXP_LNKCAP_SLS_16_0GB ? PCIE_SPEED_16_0GT :	\
+	 lnkcap_sls == PCI_EXP_LNKCAP_SLS_8_0GB ? PCIE_SPEED_8_0GT :	\
+	 lnkcap_sls == PCI_EXP_LNKCAP_SLS_5_0GB ? PCIE_SPEED_5_0GT :	\
+	 lnkcap_sls == PCI_EXP_LNKCAP_SLS_2_5GB ? PCIE_SPEED_2_5GT :	\
 	 PCI_SPEED_UNKNOWN);						\
 })
 
@@ -361,13 +577,17 @@ void pci_bus_put(struct pci_bus *bus);
 	 PCI_SPEED_UNKNOWN)
 
 #define PCIE_LNKCTL2_TLS2SPEED(lnkctl2) \
-	((lnkctl2) == PCI_EXP_LNKCTL2_TLS_64_0GT ? PCIE_SPEED_64_0GT : \
-	 (lnkctl2) == PCI_EXP_LNKCTL2_TLS_32_0GT ? PCIE_SPEED_32_0GT : \
-	 (lnkctl2) == PCI_EXP_LNKCTL2_TLS_16_0GT ? PCIE_SPEED_16_0GT : \
-	 (lnkctl2) == PCI_EXP_LNKCTL2_TLS_8_0GT ? PCIE_SPEED_8_0GT : \
-	 (lnkctl2) == PCI_EXP_LNKCTL2_TLS_5_0GT ? PCIE_SPEED_5_0GT : \
-	 (lnkctl2) == PCI_EXP_LNKCTL2_TLS_2_5GT ? PCIE_SPEED_2_5GT : \
-	 PCI_SPEED_UNKNOWN)
+({									\
+	u16 lnkctl2_tls = (lnkctl2) & PCI_EXP_LNKCTL2_TLS;		\
+									\
+	(lnkctl2_tls == PCI_EXP_LNKCTL2_TLS_64_0GT ? PCIE_SPEED_64_0GT :	\
+	 lnkctl2_tls == PCI_EXP_LNKCTL2_TLS_32_0GT ? PCIE_SPEED_32_0GT :	\
+	 lnkctl2_tls == PCI_EXP_LNKCTL2_TLS_16_0GT ? PCIE_SPEED_16_0GT :	\
+	 lnkctl2_tls == PCI_EXP_LNKCTL2_TLS_8_0GT ? PCIE_SPEED_8_0GT :	\
+	 lnkctl2_tls == PCI_EXP_LNKCTL2_TLS_5_0GT ? PCIE_SPEED_5_0GT :	\
+	 lnkctl2_tls == PCI_EXP_LNKCTL2_TLS_2_5GT ? PCIE_SPEED_2_5GT :	\
+	 PCI_SPEED_UNKNOWN);						\
+})
 
 /* PCIe speed to Mb/s reduced by encoding overhead */
 #define PCIE_SPEED2MBS_ENC(speed) \
@@ -406,11 +626,28 @@ const char *pci_speed_string(enum pci_bus_speed speed);
 void __pcie_print_link_status(struct pci_dev *dev, bool verbose);
 void pcie_report_downtraining(struct pci_dev *dev);
 
-static inline void __pcie_update_link_speed(struct pci_bus *bus, u16 linksta)
+enum pcie_link_change_reason {
+	PCIE_LINK_RETRAIN,
+	PCIE_ADD_BUS,
+	PCIE_BWCTRL_ENABLE,
+	PCIE_BWCTRL_IRQ,
+	PCIE_HOTPLUG,
+};
+
+static inline void __pcie_update_link_speed(struct pci_bus *bus,
+					    enum pcie_link_change_reason reason,
+					    u16 linksta, u16 linksta2)
 {
 	bus->cur_bus_speed = pcie_link_speed[linksta & PCI_EXP_LNKSTA_CLS];
+	bus->flit_mode = (linksta2 & PCI_EXP_LNKSTA2_FLIT) ? 1 : 0;
+
+	trace_pcie_link_event(bus,
+			     reason,
+			     FIELD_GET(PCI_EXP_LNKSTA_NLW, linksta),
+			     linksta & PCI_EXP_LNKSTA_LINK_STATUS_MASK);
 }
-void pcie_update_link_speed(struct pci_bus *bus);
+
+void pcie_update_link_speed(struct pci_bus *bus, enum pcie_link_change_reason reason);
 
 /* Single Root I/O Virtualization */
 struct pci_sriov {
@@ -435,6 +672,7 @@ struct pci_sriov {
 	u16		subsystem_vendor; /* VF subsystem vendor */
 	u16		subsystem_device; /* VF subsystem device */
 	resource_size_t	barsz[PCI_SRIOV_NUM_BARS];	/* VF BAR size */
+	u16		vf_rebar_cap;	/* VF Resizable BAR capability offset */
 	bool		drivers_autoprobe; /* Auto probing of VFs by driver */
 };
 
@@ -454,6 +692,35 @@ void pci_npem_remove(struct pci_dev *dev);
 #else
 static inline void pci_npem_create(struct pci_dev *dev) { }
 static inline void pci_npem_remove(struct pci_dev *dev) { }
+#endif
+
+#if defined(CONFIG_PCI_DOE) && defined(CONFIG_SYSFS)
+void pci_doe_sysfs_init(struct pci_dev *pci_dev);
+void pci_doe_sysfs_teardown(struct pci_dev *pdev);
+#else
+static inline void pci_doe_sysfs_init(struct pci_dev *pdev) { }
+static inline void pci_doe_sysfs_teardown(struct pci_dev *pdev) { }
+#endif
+
+#ifdef CONFIG_PCI_IDE
+void pci_ide_init(struct pci_dev *dev);
+void pci_ide_init_host_bridge(struct pci_host_bridge *hb);
+void pci_ide_destroy(struct pci_dev *dev);
+extern const struct attribute_group pci_ide_attr_group;
+#else
+static inline void pci_ide_init(struct pci_dev *dev) { }
+static inline void pci_ide_init_host_bridge(struct pci_host_bridge *hb) { }
+static inline void pci_ide_destroy(struct pci_dev *dev) { }
+#endif
+
+#ifdef CONFIG_PCI_TSM
+void pci_tsm_init(struct pci_dev *pdev);
+void pci_tsm_destroy(struct pci_dev *pdev);
+extern const struct attribute_group pci_tsm_attr_group;
+extern const struct attribute_group pci_tsm_auth_attr_group;
+#else
+static inline void pci_tsm_init(struct pci_dev *pdev) { }
+static inline void pci_tsm_destroy(struct pci_dev *pdev) { }
 #endif
 
 /**
@@ -502,6 +769,10 @@ static inline int pci_dev_set_disconnected(struct pci_dev *dev, void *unused)
 #define PCI_DPC_RECOVERED 1
 #define PCI_DPC_RECOVERING 2
 #define PCI_DEV_REMOVED 3
+#define PCI_LINK_CHANGED 4
+#define PCI_LINK_CHANGING 5
+#define PCI_LINK_LBMS_SEEN	6
+#define PCI_DEV_ALLOW_BINDING 7
 
 static inline void pci_dev_assign_added(struct pci_dev *dev)
 {
@@ -525,38 +796,78 @@ static inline bool pci_dev_test_and_set_removed(struct pci_dev *dev)
 	return test_and_set_bit(PCI_DEV_REMOVED, &dev->priv_flags);
 }
 
+static inline void pci_dev_allow_binding(struct pci_dev *dev)
+{
+	set_bit(PCI_DEV_ALLOW_BINDING, &dev->priv_flags);
+}
+
+static inline bool pci_dev_binding_disallowed(struct pci_dev *dev)
+{
+	return !test_bit(PCI_DEV_ALLOW_BINDING, &dev->priv_flags);
+}
+
 #ifdef CONFIG_PCIEAER
 #include <linux/aer.h>
 
 #define AER_MAX_MULTI_ERR_DEVICES	5	/* Not likely to have more */
 
+/**
+ * struct aer_err_info - AER Error Information
+ * @dev: Devices reporting error
+ * @ratelimit_print: Flag to log or not log the devices' error. 0=NotLog/1=Log
+ * @__pad1: Padding for alignment
+ * @error_dev_num: Number of devices reporting an error
+ * @level: printk level to use in logging
+ * @id: Value from register PCI_ERR_ROOT_ERR_SRC
+ * @severity: AER severity, 0-UNCOR Non-fatal, 1-UNCOR fatal, 2-COR
+ * @root_ratelimit_print: Flag to log or not log the root's error. 0=NotLog/1=Log
+ * @multi_error_valid: If multiple errors are reported
+ * @first_error: First reported error
+ * @__pad2: Padding for alignment
+ * @is_cxl: Bus type error: 0-PCI Bus error, 1-CXL Bus error
+ * @tlp_header_valid: Indicates if TLP field contains error information
+ * @status: COR/UNCOR error status
+ * @mask: COR/UNCOR mask
+ * @tlp: Transaction packet information
+ */
 struct aer_err_info {
 	struct pci_dev *dev[AER_MAX_MULTI_ERR_DEVICES];
+	int ratelimit_print[AER_MAX_MULTI_ERR_DEVICES];
 	int error_dev_num;
+	const char *level;
 
 	unsigned int id:16;
 
-	unsigned int severity:2;	/* 0:NONFATAL | 1:FATAL | 2:COR */
-	unsigned int __pad1:5;
+	unsigned int severity:2;
+	unsigned int root_ratelimit_print:1;
+	unsigned int __pad1:4;
 	unsigned int multi_error_valid:1;
 
 	unsigned int first_error:5;
-	unsigned int __pad2:2;
+	unsigned int __pad2:1;
+	unsigned int is_cxl:1;
 	unsigned int tlp_header_valid:1;
 
-	unsigned int status;		/* COR/UNCOR Error Status */
-	unsigned int mask;		/* COR/UNCOR Error Mask */
-	struct pcie_tlp_log tlp;	/* TLP Header */
+	unsigned int status;
+	unsigned int mask;
+	struct pcie_tlp_log tlp;
 };
 
-int aer_get_device_error_info(struct pci_dev *dev, struct aer_err_info *info);
-void aer_print_error(struct pci_dev *dev, struct aer_err_info *info);
+int aer_get_device_error_info(struct aer_err_info *info, int i);
+void aer_print_error(struct aer_err_info *info, int i);
+
+static inline const char *aer_err_bus(struct aer_err_info *info)
+{
+	return info->is_cxl ? "CXL" : "PCIe";
+}
 
 int pcie_read_tlp_log(struct pci_dev *dev, int where, int where2,
-		      unsigned int tlp_len, struct pcie_tlp_log *log);
+		      unsigned int tlp_len, bool flit,
+		      struct pcie_tlp_log *log);
 unsigned int aer_tlp_log_len(struct pci_dev *dev, u32 aercc);
 void pcie_print_tlp_log(const struct pci_dev *dev,
-			const struct pcie_tlp_log *log, const char *pfx);
+			const struct pcie_tlp_log *log, const char *level,
+			const char *pfx);
 #endif	/* CONFIG_PCIEAER */
 
 #ifdef CONFIG_PCIEPORTBUS
@@ -629,9 +940,31 @@ int pci_iov_init(struct pci_dev *dev);
 void pci_iov_release(struct pci_dev *dev);
 void pci_iov_remove(struct pci_dev *dev);
 void pci_iov_update_resource(struct pci_dev *dev, int resno);
-resource_size_t pci_sriov_resource_alignment(struct pci_dev *dev, int resno);
+resource_size_t pci_sriov_resource_alignment(const struct pci_dev *dev,
+					     int resno);
 void pci_restore_iov_state(struct pci_dev *dev);
 int pci_iov_bus_range(struct pci_bus *bus);
+void pci_iov_resource_set_size(struct pci_dev *dev, int resno, int size);
+bool pci_iov_is_memory_decoding_enabled(struct pci_dev *dev);
+static inline u16 pci_iov_vf_rebar_cap(struct pci_dev *dev)
+{
+	if (!dev->is_physfn)
+		return 0;
+
+	return dev->sriov->vf_rebar_cap;
+}
+static inline bool pci_resource_is_iov(int resno)
+{
+	return resno >= PCI_IOV_RESOURCES && resno <= PCI_IOV_RESOURCE_END;
+}
+static inline int pci_resource_num_from_vf_bar(int resno)
+{
+	return resno + PCI_IOV_RESOURCES;
+}
+static inline int pci_resource_num_to_vf_bar(int resno)
+{
+	return resno - PCI_IOV_RESOURCES;
+}
 extern const struct attribute_group sriov_pf_dev_attr_group;
 extern const struct attribute_group sriov_vf_dev_attr_group;
 #else
@@ -641,12 +974,41 @@ static inline int pci_iov_init(struct pci_dev *dev)
 }
 static inline void pci_iov_release(struct pci_dev *dev) { }
 static inline void pci_iov_remove(struct pci_dev *dev) { }
+static inline void pci_iov_update_resource(struct pci_dev *dev, int resno) { }
+static inline resource_size_t pci_sriov_resource_alignment(const struct pci_dev *dev,
+							   int resno)
+{
+	return 0;
+}
 static inline void pci_restore_iov_state(struct pci_dev *dev) { }
 static inline int pci_iov_bus_range(struct pci_bus *bus)
 {
 	return 0;
 }
-
+static inline void pci_iov_resource_set_size(struct pci_dev *dev, int resno,
+					     int size) { }
+static inline bool pci_iov_is_memory_decoding_enabled(struct pci_dev *dev)
+{
+	return false;
+}
+static inline u16 pci_iov_vf_rebar_cap(struct pci_dev *dev)
+{
+	return 0;
+}
+static inline bool pci_resource_is_iov(int resno)
+{
+	return false;
+}
+static inline int pci_resource_num_from_vf_bar(int resno)
+{
+	WARN_ON_ONCE(1);
+	return -ENODEV;
+}
+static inline int pci_resource_num_to_vf_bar(int resno)
+{
+	WARN_ON_ONCE(1);
+	return -ENODEV;
+}
 #endif /* CONFIG_PCI_IOV */
 
 #ifdef CONFIG_PCIE_TPH
@@ -675,27 +1037,19 @@ static inline void pci_suspend_ptm(struct pci_dev *dev) { }
 static inline void pci_resume_ptm(struct pci_dev *dev) { }
 #endif
 
-unsigned long pci_cardbus_resource_alignment(struct resource *);
+resource_size_t pci_resource_alignment(const struct pci_dev *dev,
+				       const struct resource *res);
 
-static inline resource_size_t pci_resource_alignment(struct pci_dev *dev,
-						     struct resource *res)
-{
-#ifdef CONFIG_PCI_IOV
-	int resno = res - dev->resource;
-
-	if (resno >= PCI_IOV_RESOURCES && resno <= PCI_IOV_RESOURCE_END)
-		return pci_sriov_resource_alignment(dev, resno);
-#endif
-	if (dev->class >> 8 == PCI_CLASS_BRIDGE_CARDBUS)
-		return pci_cardbus_resource_alignment(res);
-	return resource_alignment(res);
-}
+resource_size_t pci_min_window_alignment(struct pci_bus *bus,
+					 unsigned long type);
 
 void pci_acs_init(struct pci_dev *dev);
+void pci_enable_acs(struct pci_dev *dev);
 #ifdef CONFIG_PCI_QUIRKS
 int pci_dev_specific_acs_enabled(struct pci_dev *dev, u16 acs_flags);
 int pci_dev_specific_enable_acs(struct pci_dev *dev);
 int pci_dev_specific_disable_acs_redir(struct pci_dev *dev);
+void pci_disable_broken_acs_cap(struct pci_dev *pdev);
 int pcie_failed_link_retrain(struct pci_dev *dev);
 #else
 static inline int pci_dev_specific_acs_enabled(struct pci_dev *dev,
@@ -711,6 +1065,7 @@ static inline int pci_dev_specific_disable_acs_redir(struct pci_dev *dev)
 {
 	return -ENOTTY;
 }
+static inline void pci_disable_broken_acs_cap(struct pci_dev *dev) { }
 static inline int pcie_failed_link_retrain(struct pci_dev *dev)
 {
 	return -ENOTTY;
@@ -733,19 +1088,27 @@ void pci_save_aspm_l1ss_state(struct pci_dev *dev);
 void pci_restore_aspm_l1ss_state(struct pci_dev *dev);
 
 #ifdef CONFIG_PCIEASPM
+void pcie_aspm_remove_cap(struct pci_dev *pdev, u32 lnkcap);
 void pcie_aspm_init_link_state(struct pci_dev *pdev);
 void pcie_aspm_exit_link_state(struct pci_dev *pdev);
 void pcie_aspm_pm_state_change(struct pci_dev *pdev, bool locked);
 void pcie_aspm_powersave_config_link(struct pci_dev *pdev);
 void pci_configure_ltr(struct pci_dev *pdev);
 void pci_bridge_reconfigure_ltr(struct pci_dev *pdev);
+void pcie_encode_t_power_on(u32 t_power_on_us, u8 *scale, u8 *value);
 #else
+static inline void pcie_aspm_remove_cap(struct pci_dev *pdev, u32 lnkcap) { }
 static inline void pcie_aspm_init_link_state(struct pci_dev *pdev) { }
 static inline void pcie_aspm_exit_link_state(struct pci_dev *pdev) { }
 static inline void pcie_aspm_pm_state_change(struct pci_dev *pdev, bool locked) { }
 static inline void pcie_aspm_powersave_config_link(struct pci_dev *pdev) { }
 static inline void pci_configure_ltr(struct pci_dev *pdev) { }
 static inline void pci_bridge_reconfigure_ltr(struct pci_dev *pdev) { }
+static inline void pcie_encode_t_power_on(u32 t_power_on_us, u8 *scale, u8 *value)
+{
+	*scale = 0;
+	*value = 0;
+}
 #endif
 
 #ifdef CONFIG_PCIE_ECRC
@@ -757,14 +1120,9 @@ static inline void pcie_ecrc_get_policy(char *str) { }
 #endif
 
 #ifdef CONFIG_PCIEPORTBUS
-void pcie_reset_lbms_count(struct pci_dev *port);
-int pcie_lbms_count(struct pci_dev *port, unsigned long *val);
+void pcie_reset_lbms(struct pci_dev *port);
 #else
-static inline void pcie_reset_lbms_count(struct pci_dev *port) {}
-static inline int pcie_lbms_count(struct pci_dev *port, unsigned long *val)
-{
-	return -EOPNOTSUPP;
-}
+static inline void pcie_reset_lbms(struct pci_dev *port) {}
 #endif
 
 struct pci_dev_reset_methods {
@@ -788,6 +1146,15 @@ static inline int pci_dev_specific_reset(struct pci_dev *dev, bool probe)
 }
 #endif
 
+#if defined(CONFIG_PCI_QUIRKS) && defined(CONFIG_PCI_ATS)
+bool pci_dev_specific_ats_required(struct pci_dev *dev);
+#else
+static inline bool pci_dev_specific_ats_required(struct pci_dev *dev)
+{
+	return false;
+}
+#endif
+
 #if defined(CONFIG_PCI_QUIRKS) && defined(CONFIG_ARM64)
 int acpi_get_rc_resources(struct device *dev, const char *hid, u16 segment,
 			  struct resource *res);
@@ -799,14 +1166,27 @@ static inline int acpi_get_rc_resources(struct device *dev, const char *hid,
 }
 #endif
 
+void pci_rebar_init(struct pci_dev *pdev);
+void pci_restore_rebar_state(struct pci_dev *pdev);
 int pci_rebar_get_current_size(struct pci_dev *pdev, int bar);
 int pci_rebar_set_size(struct pci_dev *pdev, int bar, int size);
-static inline u64 pci_rebar_size_to_bytes(int size)
-{
-	return 1ULL << (size + 20);
-}
 
 struct device_node;
+
+#define PCI_EQ_RESV	0xff
+
+enum equalization_preset_type {
+	EQ_PRESET_TYPE_8GTS,
+	EQ_PRESET_TYPE_16GTS,
+	EQ_PRESET_TYPE_32GTS,
+	EQ_PRESET_TYPE_64GTS,
+	EQ_PRESET_TYPE_MAX
+};
+
+struct pci_eq_presets {
+	u16 eq_presets_8gts[MAX_NR_LANES];
+	u8 eq_presets_Ngts[EQ_PRESET_TYPE_MAX - 1][MAX_NR_LANES];
+};
 
 #ifdef CONFIG_OF
 int of_get_pci_domain_nr(struct device_node *node);
@@ -822,7 +1202,9 @@ void pci_release_bus_of_node(struct pci_bus *bus);
 
 int devm_of_pci_bridge_init(struct device *dev, struct pci_host_bridge *bridge);
 bool of_pci_supply_present(struct device_node *np);
-
+int of_pci_get_equalization_presets(struct device *dev,
+				    struct pci_eq_presets *presets,
+				    int num_lanes);
 #else
 static inline int
 of_get_pci_domain_nr(struct device_node *node)
@@ -867,6 +1249,17 @@ static inline bool of_pci_supply_present(struct device_node *np)
 {
 	return false;
 }
+
+static inline int of_pci_get_equalization_presets(struct device *dev,
+						  struct pci_eq_presets *presets,
+						  int num_lanes)
+{
+	presets->eq_presets_8gts[0] = PCI_EQ_RESV;
+	for (int i = 0; i < EQ_PRESET_TYPE_MAX - 1; i++)
+		presets->eq_presets_Ngts[i][0] = PCI_EQ_RESV;
+
+	return 0;
+}
 #endif /* CONFIG_OF */
 
 struct of_changeset;
@@ -876,9 +1269,16 @@ void of_pci_make_dev_node(struct pci_dev *pdev);
 void of_pci_remove_node(struct pci_dev *pdev);
 int of_pci_add_properties(struct pci_dev *pdev, struct of_changeset *ocs,
 			  struct device_node *np);
+void of_pci_make_host_bridge_node(struct pci_host_bridge *bridge);
+void of_pci_remove_host_bridge_node(struct pci_host_bridge *bridge);
+int of_pci_add_host_bridge_properties(struct pci_host_bridge *bridge,
+				      struct of_changeset *ocs,
+				      struct device_node *np);
 #else
 static inline void of_pci_make_dev_node(struct pci_dev *pdev) { }
 static inline void of_pci_remove_node(struct pci_dev *pdev) { }
+static inline void of_pci_make_host_bridge_node(struct pci_host_bridge *bridge) { }
+static inline void of_pci_remove_host_bridge_node(struct pci_host_bridge *bridge) { }
 #endif
 
 #ifdef CONFIG_PCIEAER
@@ -886,6 +1286,7 @@ void pci_no_aer(void);
 void pci_aer_init(struct pci_dev *dev);
 void pci_aer_exit(struct pci_dev *dev);
 extern const struct attribute_group aer_stats_attr_group;
+extern const struct attribute_group aer_attr_group;
 void pci_aer_clear_fatal_status(struct pci_dev *dev);
 int pci_aer_clear_status(struct pci_dev *dev);
 int pci_aer_raw_clear_status(struct pci_dev *dev);
@@ -984,10 +1385,14 @@ static inline pci_power_t mid_pci_get_power_state(struct pci_dev *pdev)
 }
 #endif
 
-int pcim_intx(struct pci_dev *dev, int enable);
-int pcim_request_region_exclusive(struct pci_dev *pdev, int bar,
-				  const char *name);
-void pcim_release_region(struct pci_dev *pdev, int bar);
+#ifdef CONFIG_PCI_MSI
+int pci_msix_write_tph_tag(struct pci_dev *pdev, unsigned int index, u16 tag);
+#else
+static inline int pci_msix_write_tph_tag(struct pci_dev *pdev, unsigned int index, u16 tag)
+{
+	return -ENODEV;
+}
+#endif
 
 /*
  * Config Address for PCI Configuration Mechanism #1

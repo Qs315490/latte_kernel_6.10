@@ -12,8 +12,9 @@
 #define OCELOT_PORT_MODE_SGMII		BIT(1)
 #define OCELOT_PORT_MODE_QSGMII		BIT(2)
 #define OCELOT_PORT_MODE_2500BASEX	BIT(3)
-#define OCELOT_PORT_MODE_USXGMII	BIT(4)
+#define OCELOT_PORT_MODE_USXGMII	BIT(4) /* compatibility */
 #define OCELOT_PORT_MODE_1000BASEX	BIT(5)
+#define OCELOT_PORT_MODE_10G_QXGMII	BIT(6)
 
 struct device_node;
 
@@ -103,6 +104,6 @@ int felix_register_switch(struct device *dev, resource_size_t switch_base,
 			  enum dsa_tag_protocol init_tag_proto,
 			  const struct felix_info *info);
 struct net_device *felix_port_to_netdev(struct ocelot *ocelot, int port);
-int felix_netdev_to_port(struct net_device *dev);
+int felix_netdev_to_port(struct ocelot *ocelot, struct net_device *dev);
 
 #endif

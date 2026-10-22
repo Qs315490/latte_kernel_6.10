@@ -11,7 +11,10 @@ TESTS="unregister down carrier nexthop suppress ipv6_notify ipv4_notify \
        ipv6_rt ipv4_rt ipv6_addr_metric ipv4_addr_metric ipv6_route_metrics \
        ipv4_route_metrics ipv4_route_v6_gw rp_filter ipv4_del_addr \
        ipv6_del_addr ipv4_mangle ipv6_mangle ipv4_bcast_neigh fib6_gc_test \
-       ipv4_mpath_list ipv6_mpath_list"
+       ipv4_mpath_list ipv6_mpath_list ipv4_mpath_balance ipv6_mpath_balance \
+       ipv4_mpath_balance_preferred ipv4_mpath_oif ipv4_mpath_oif_nh \
+       ipv4_mpath_oif_vrf ipv6_mpath_oif ipv6_mpath_oif_nh ipv6_mpath_oif_vrf \
+       fib6_ra_to_static fib6_temp_addr_renewal"
 
 VERBOSE=0
 PAUSE_ON_FAIL=no
@@ -544,7 +547,7 @@ fib4_nexthop()
 fib6_nexthop()
 {
 	local lldummy=$(get_linklocal dummy0)
-	local llv1=$(get_linklocal dummy0)
+	local llv1=$(get_linklocal veth1)
 
 	if [ -z "$lldummy" ]; then
 		echo "Failed to get linklocal address for dummy0"
@@ -867,6 +870,64 @@ fib6_gc_test()
 	check_rt_num 5 $($IP -6 route list |grep -v expires|grep 2001:20::|wc -l)
 	log_test $ret 0 "ipv6 route garbage collection (replace with permanent)"
 
+	# Delete dummy_10 and remove all routes
+	$IP link del dev dummy_10
+
+	# rd6 is required for the next test. (ipv6toolkit)
+	if [ ! -x "$(command -v rd6)" ]; then
+	    echo "SKIP: rd6 not found."
+	    set +e
+	    cleanup &> /dev/null
+	    return
+	fi
+
+	setup_ns ns2
+	$IP link add veth1 type veth peer veth2 netns $ns2
+	$IP link set veth1 up
+	ip -netns $ns2 link set veth2 up
+	$IP addr add fe80:dead::1/64 dev veth1
+	ip -netns $ns2 addr add fe80:dead::2/64 dev veth2
+
+	# Add NTF_ROUTER neighbour to prevent rt6_age_examine_exception()
+	# from removing not-yet-expired exceptions.
+	ip -netns $ns2 link set veth2 address 00:11:22:33:44:55
+	$IP neigh add fe80:dead::3 lladdr 00:11:22:33:44:55 dev veth1 router
+
+	$NS_EXEC sysctl -wq net.ipv6.conf.veth1.accept_redirects=1
+	$NS_EXEC sysctl -wq net.ipv6.conf.veth1.forwarding=0
+
+	# Temporary routes
+	for i in $(seq 1 5); do
+	    # Expire route after $EXPIRE seconds
+	    $IP -6 route add 2001:10::$i \
+		via fe80:dead::2 dev veth1 expires $EXPIRE
+
+	    ip netns exec $ns2 rd6 -i veth2 \
+		-s fe80:dead::2 -d fe80:dead::1 \
+		-r 2001:10::$i -t fe80:dead::3 -p ICMP6
+	done
+
+	check_rt_num 5 $($IP -6 route list | grep expires | grep 2001:10:: | wc -l)
+
+	# Promote to permanent routes by "prepend" (w/o NLM_F_EXCL and NLM_F_REPLACE)
+	for i in $(seq 1 5); do
+	    # -EEXIST, but the temporary route becomes the permanent route.
+	    $IP -6 route append 2001:10::$i \
+		via fe80:dead::2 dev veth1 2>/dev/null || true
+	done
+
+	check_rt_num 5 $($IP -6 route list | grep -v expires | grep 2001:10:: | wc -l)
+	check_rt_num 5 $($IP -6 route list cache | grep 2001:10:: | wc -l)
+
+	# Trigger GC instead of waiting $GC_WAIT_TIME.
+	# rt6_nh_dump_exceptions() just skips expired exceptions.
+	$NS_EXEC sysctl -wq net.ipv6.route.flush=1
+	check_rt_num 0 $($IP -6 route list cache | grep 2001:10:: | wc -l)
+	log_test $ret 0 "ipv6 route garbage collection (promote to permanent routes)"
+
+	$IP neigh del fe80:dead::3 lladdr 00:11:22:33:44:55 dev veth1 router
+	$IP link del veth1
+
 	# ra6 is required for the next test. (ipv6toolkit)
 	if [ ! -x "$(command -v ra6)" ]; then
 	    echo "SKIP: ra6 not found."
@@ -874,9 +935,6 @@ fib6_gc_test()
 	    cleanup &> /dev/null
 	    return
 	fi
-
-	# Delete dummy_10 and remove all routes
-	$IP link del dev dummy_10
 
 	# Create a pair of veth devices to send a RA message from one
 	# device to another.
@@ -1083,6 +1141,35 @@ route_setup()
 	ip -netns $ns2 addr add 172.16.104.1/24 dev dummy1
 
 	set +e
+}
+
+forwarding_cleanup()
+{
+	cleanup_ns $ns3
+
+	route_cleanup
+}
+
+# extend route_setup with an ns3 reachable through ns2 over both devices
+forwarding_setup()
+{
+	forwarding_cleanup
+
+	route_setup
+
+	setup_ns ns3
+
+	ip link add veth5 netns $ns3 type veth peer name veth6 netns $ns2
+	ip -netns $ns3 link set veth5 up
+	ip -netns $ns2 link set veth6 up
+
+	ip -netns $ns3 -4 addr add dev veth5 172.16.105.1/24
+	ip -netns $ns2 -4 addr add dev veth6 172.16.105.2/24
+	ip -netns $ns3 -4 route add 172.16.100.0/22 via 172.16.105.2
+
+	ip -netns $ns3 -6 addr add dev veth5 2001:db8:105::1/64 nodad
+	ip -netns $ns2 -6 addr add dev veth6 2001:db8:105::2/64 nodad
+	ip -netns $ns3 -6 route add 2001:db8:101::/33 via 2001:db8:105::2
 }
 
 # assumption is that basic add of a single path route works
@@ -1445,6 +1532,141 @@ ipv6_route_metrics_test()
 	log_test $? 2 "Invalid metric (fails metric_convert)"
 
 	route_cleanup
+}
+
+fib6_ra_to_static()
+{
+	setup
+
+	echo
+	echo "Fib6 route promotion from RA-learned to static test"
+	set -e
+
+	# ra6 is required for the test. (ipv6toolkit)
+	if [ ! -x "$(command -v ra6)" ]; then
+	    echo "SKIP: ra6 not found."
+	    set +e
+	    cleanup &> /dev/null
+	    return
+	fi
+
+	# Create a pair of veth devices to send a RA message from one
+	# device to another.
+	$IP link add veth1 type veth peer name veth2
+	$IP link set dev veth1 up
+	$IP link set dev veth2 up
+	$IP -6 address add 2001:10::1/64 dev veth1 nodad
+	$IP -6 address add 2001:10::2/64 dev veth2 nodad
+
+	# Make veth1 ready to receive RA messages.
+	$NS_EXEC sysctl -wq net.ipv6.conf.veth1.accept_ra=2
+
+	# Send a RA message with a prefix from veth2.
+	$NS_EXEC ra6 -i veth2 -d 2001:10::1 -P 2001:12::/64\#LA\#120\#60
+
+	# Wait for the RA message.
+	sleep 1
+
+	# systemd may mess up the test. Make sure that
+	# systemd-networkd.service and systemd-networkd.socket are stopped.
+	check_rt_num_clean 2 $($IP -6 route list|grep expires|wc -l) || return
+
+	# Configure static address on the same prefix
+	$IP -6 address add 2001:12::dead/64 dev veth1 nodad
+
+	# On-link route won't expire anymore, default route still owned by RA
+	check_rt_num 1 $($IP -6 route list |grep expires|wc -l)
+
+	# Send a second RA message with a prefix from veth2.
+	$NS_EXEC ra6 -i veth2 -d 2001:10::1 -P 2001:12::/64\#LA\#120\#60
+	sleep 1
+
+	# Expire is not back, on-link route is still static
+	check_rt_num 1 $($IP -6 route list |grep expires|wc -l)
+
+	$IP -6 address del 2001:12::dead/64 dev veth1 nodad
+
+	# Expire is back, on-link route is now owned by RA again
+	check_rt_num 2 $($IP -6 route list |grep expires|wc -l)
+
+	log_test $ret 0 "ipv6 promote RA route to static"
+
+	# Prepare for RA route with gateway
+	$NS_EXEC sysctl -wq net.ipv6.conf.veth1.accept_ra_rt_info_max_plen=64
+
+	# Add initial route to cause ECMP merging
+	$IP -6 route add 2001:12::/64 via fe80::dead:beef dev veth1
+
+	$NS_EXEC ra6 -i veth2 -d 2001:10::1 -R 2001:12::/64#1#120
+
+	# Routes are not merged as RA routes are not elegible for ECMP
+	check_rt_num 2 "$($IP -6 route list | grep -c "2001:12::/64 via")"
+
+	$IP -6 route append 2001:12::/64 via fe80::dead:feeb dev veth1
+
+	check_rt_num 2 "$($IP -6 route list | grep -c "nexthop via")"
+
+	log_test "$ret" 0 "ipv6 RA route with nexthop do not merge into ECMP with static"
+
+	set +e
+
+	cleanup &> /dev/null
+}
+
+fib6_temp_addr_renewal() {
+	setup
+
+	echo
+	echo "Fib6 temporary address renewal test"
+	set -e
+
+	# ra6 is required for the test. (ipv6toolkit)
+	if [ ! -x "$(command -v ra6)" ]; then
+	    echo "SKIP: ra6 not found."
+	    set +e
+	    cleanup &> /dev/null
+	    return
+	fi
+
+	# Create a pair of veth devices to send a RA message from one
+	# device to another.
+	$IP link add veth1 type veth peer name veth2
+	$IP link set dev veth1 up
+	$IP link set dev veth2 up
+
+	# Make veth1 ready to receive RA messages.
+	$NS_EXEC sysctl -wq net.ipv6.conf.veth1.accept_ra=2
+	$NS_EXEC sysctl -wq net.ipv6.conf.veth1.use_tempaddr=2
+	$NS_EXEC sysctl -wq net.ipv6.conf.veth1.temp_prefered_lft=15
+	$NS_EXEC sysctl -wq net.ipv6.conf.veth1.max_desync_factor=0
+
+	# Send a RA message with a prefix from veth2.
+	$NS_EXEC ra6 -i veth2 -s fe80::1 -d ff02::1 -P 2001:12::/64\#LA\#3600\#3600 -e
+	sleep 3
+
+	# Deprecate it
+	$NS_EXEC ra6 -i veth2 -s fe80::1 -d ff02::1 -P 2001:12::/64\#LA\#3600\#0 -e
+	sleep 3
+
+	# Restore it
+	$NS_EXEC ra6 -i veth2 -s fe80::1 -d ff02::1 -P 2001:12::/64\#LA\#3600\#3600 -e
+
+	ret=1
+	for i in $(seq 1 25); do
+		sleep 1
+		num_dep="$($IP -6 addr | grep -c "temporary deprecated" || true)"
+		num_tot="$($IP -6 addr | grep -c "temporary" || true)"
+
+		if [ "$num_dep" -eq 1 ] && [ "$num_tot" -ge 2 ]; then
+			ret=0
+			break
+		fi
+	done
+	log_test "$ret" 0 "IPv6 temporary address cleanly deprecated and regenerated"
+
+	set +e
+
+	cleanup &> /dev/null
 }
 
 # add route for a prefix, flushing any existing routes first
@@ -2531,9 +2753,6 @@ ipv4_mpath_list_test()
 	run_cmd "ip -n $ns2 route add 203.0.113.0/24
 		nexthop via 172.16.201.2 nexthop via 172.16.202.2"
 	run_cmd "ip netns exec $ns2 sysctl -qw net.ipv4.fib_multipath_hash_policy=1"
-	run_cmd "ip netns exec $ns2 sysctl -qw net.ipv4.conf.veth2.rp_filter=0"
-	run_cmd "ip netns exec $ns2 sysctl -qw net.ipv4.conf.all.rp_filter=0"
-	run_cmd "ip netns exec $ns2 sysctl -qw net.ipv4.conf.default.rp_filter=0"
 	set +e
 
 	local dmac=$(ip -n $ns2 -j link show dev veth2 | jq -r '.[]["address"]')
@@ -2598,6 +2817,401 @@ ipv6_mpath_list_test()
 
 	rm $tmp_file
 	route_cleanup
+}
+
+tc_set_flower_counter__saddr_syn() {
+	tc_set_flower_counter $1 $2 $3 "src_ip $4 ip_proto tcp tcp_flags 0x2"
+}
+
+ip_mpath_balance_dep_check()
+{
+	if [ ! -x "$(command -v socat)" ]; then
+		echo "socat command not found. Skipping test"
+		return 1
+	fi
+
+	if [ ! -x "$(command -v jq)" ]; then
+		echo "jq command not found. Skipping test"
+		return 1
+	fi
+}
+
+ip_mpath_balance() {
+	local -r ipver=$1
+	local -r daddr=$2
+	local -r num_conn=20
+
+	for i in $(seq 1 $num_conn); do
+		ip netns exec $ns3 socat $ipver TCP-LISTEN:8000 STDIO >/dev/null &
+		sleep 0.02
+		echo -n a | ip netns exec $ns1 socat $ipver STDIO TCP:$daddr:8000
+	done
+
+	local -r syn0="$(tc_get_flower_counter $ns1 veth1)"
+	local -r syn1="$(tc_get_flower_counter $ns1 veth3)"
+	local -r syns=$((syn0+syn1))
+
+	[ "$VERBOSE" = "1" ] && echo "multipath: syns seen: ($syn0,$syn1)"
+
+	[[ $syns -ge $num_conn ]] && [[ $syn0 -gt 0 ]] && [[ $syn1 -gt 0 ]]
+}
+
+ipv4_mpath_balance_test()
+{
+	echo
+	echo "IPv4 multipath load balance test"
+
+	ip_mpath_balance_dep_check || return 1
+	forwarding_setup
+
+	$IP route add 172.16.105.1 \
+		nexthop via 172.16.101.2 \
+		nexthop via 172.16.103.2
+
+	ip netns exec $ns1 \
+		sysctl -q -w net.ipv4.fib_multipath_hash_policy=1
+
+	tc_set_flower_counter__saddr_syn $ns1 4 veth1 172.16.101.1
+	tc_set_flower_counter__saddr_syn $ns1 4 veth3 172.16.103.1
+
+	ip_mpath_balance -4 172.16.105.1
+
+	log_test $? 0 "IPv4 multipath loadbalance"
+
+	forwarding_cleanup
+}
+
+get_route_dev_src()
+{
+	local pfx="$1"
+	local src="$2"
+	local out
+
+	if out=$($IP -j route get "$pfx" from "$src" | jq -re ".[0].dev"); then
+		echo "$out"
+	fi
+}
+
+ipv4_mpath_preferred()
+{
+	local src_ip=$1
+	local pref_dev=$2
+	local dev routes
+	local route0=0
+	local route1=0
+	local pref_route=0
+	num_routes=254
+
+	for i in $(seq 1 $num_routes) ; do
+		dev=$(get_route_dev_src 172.16.105.$i $src_ip)
+		if [ "$dev" = "$pref_dev" ]; then
+			pref_route=$((pref_route+1))
+		elif [ "$dev" = "veth1" ]; then
+			route0=$((route0+1))
+		elif [ "$dev" = "veth3" ]; then
+			route1=$((route1+1))
+		fi
+	done
+
+	routes=$((route0+route1))
+
+	[ "$VERBOSE" = "1" ] && echo "multipath: routes seen: ($route0,$route1,$pref_route)"
+
+	if [ x"$pref_dev" = x"" ]; then
+		[[ $routes -ge $num_routes ]] && [[ $route0 -gt 0 ]] && [[ $route1 -gt 0 ]]
+	else
+		[[ $pref_route -ge $num_routes ]]
+	fi
+
+}
+
+ipv4_mpath_balance_preferred_test()
+{
+	echo
+	echo "IPv4 multipath load balance preferred route"
+
+	forwarding_setup
+
+	$IP route add 172.16.105.0/24 \
+		nexthop via 172.16.101.2 \
+		nexthop via 172.16.103.2
+
+	ipv4_mpath_preferred 172.16.101.1 veth1
+	log_test $? 0 "IPv4 multipath loadbalance from veth1"
+
+	ipv4_mpath_preferred 172.16.103.1 veth3
+	log_test $? 0 "IPv4 multipath loadbalance from veth3"
+
+	ipv4_mpath_preferred 198.51.100.1
+	log_test $? 0 "IPv4 multipath loadbalance from dummy"
+
+	forwarding_cleanup
+}
+
+ipv6_mpath_balance_test()
+{
+	echo
+	echo "IPv6 multipath load balance test"
+
+	ip_mpath_balance_dep_check || return 1
+	forwarding_setup
+
+	$IP route add 2001:db8:105::1\
+		nexthop via 2001:db8:101::2 \
+		nexthop via 2001:db8:103::2
+
+	ip netns exec $ns1 \
+		sysctl -q -w net.ipv6.fib_multipath_hash_policy=1
+
+	tc_set_flower_counter__saddr_syn $ns1 6 veth1 2001:db8:101::1
+	tc_set_flower_counter__saddr_syn $ns1 6 veth3 2001:db8:103::1
+
+	ip_mpath_balance -6 "[2001:db8:105::1]"
+
+	log_test $? 0 "IPv6 multipath loadbalance"
+
+	forwarding_cleanup
+}
+
+ipv4_mpath_oif_test_common()
+{
+	local get_param=$1; shift
+	local expected_oif=$1; shift
+	local test_name=$1; shift
+	local tmp_file
+
+	tmp_file=$(mktemp)
+
+	for i in {1..100}; do
+		$IP route get 203.0.113.${i} $get_param >> "$tmp_file"
+	done
+
+	[[ $(grep "$expected_oif" "$tmp_file" | wc -l) -eq 100 ]]
+	log_test $? 0 "$test_name"
+
+	rm "$tmp_file"
+}
+
+ipv4_mpath_oif_test()
+{
+	echo
+	echo "IPv4 multipath oif test"
+
+	setup
+
+	set -e
+	$IP link add dummy1 up type dummy
+	$IP address add 192.0.2.1/28 dev dummy1
+	$IP address add 192.0.2.17/32 dev lo
+
+	$IP route add 203.0.113.0/24 \
+		nexthop via 198.51.100.2 dev dummy0 \
+		nexthop via 192.0.2.2 dev dummy1
+	set +e
+
+	ipv4_mpath_oif_test_common "oif dummy0" "dummy0" \
+		"IPv4 multipath via first nexthop"
+
+	ipv4_mpath_oif_test_common "oif dummy1" "dummy1" \
+		"IPv4 multipath via second nexthop"
+
+	ipv4_mpath_oif_test_common "oif dummy0 from 192.0.2.17" "dummy0" \
+		"IPv4 multipath via first nexthop with source address"
+
+	ipv4_mpath_oif_test_common "oif dummy1 from 192.0.2.17" "dummy1" \
+		"IPv4 multipath via second nexthop with source address"
+
+	cleanup
+}
+
+ipv4_mpath_oif_nh_test()
+{
+	echo
+	echo "IPv4 multipath oif with nexthop object test"
+
+	setup
+
+	set -e
+	$IP link add dummy1 up type dummy
+	$IP address add 192.0.2.1/28 dev dummy1
+	$IP address add 192.0.2.17/32 dev lo
+
+	$IP nexthop add id 1 via 198.51.100.2 dev dummy0
+	$IP nexthop add id 2 via 192.0.2.2 dev dummy1
+	$IP nexthop add id 3 group 1/2
+	$IP route add 203.0.113.0/24 nhid 3
+	set +e
+
+	ipv4_mpath_oif_test_common "oif dummy0" "dummy0" \
+		"IPv4 multipath via first nexthop"
+
+	ipv4_mpath_oif_test_common "oif dummy1" "dummy1" \
+		"IPv4 multipath via second nexthop"
+
+	ipv4_mpath_oif_test_common "oif dummy0 from 192.0.2.17" "dummy0" \
+		"IPv4 multipath via first nexthop with source address"
+
+	ipv4_mpath_oif_test_common "oif dummy1 from 192.0.2.17" "dummy1" \
+		"IPv4 multipath via second nexthop with source address"
+
+	cleanup
+}
+
+ipv4_mpath_oif_vrf_test()
+{
+	echo
+	echo "IPv4 multipath oif with VRF test"
+
+	setup
+
+	set -e
+	$IP -4 rule add pref 32765 table local
+	$IP -4 rule del pref 0
+	$IP link add name vrf-123 up type vrf table 123
+	$IP link set dev dummy0 master vrf-123
+	$IP link add dummy1 up master vrf-123 type dummy
+	$IP address add 192.0.2.1/28 dev dummy1
+	$IP address add 192.0.2.17/32 dev vrf-123
+
+	$IP route add 203.0.113.0/24 vrf vrf-123 \
+		nexthop via 198.51.100.2 dev dummy0 \
+		nexthop via 192.0.2.2 dev dummy1
+	set +e
+
+	ipv4_mpath_oif_test_common "oif dummy0" "dummy0" \
+		"IPv4 multipath via first nexthop"
+
+	ipv4_mpath_oif_test_common "oif dummy1" "dummy1" \
+		"IPv4 multipath via second nexthop"
+
+	ipv4_mpath_oif_test_common "oif dummy0 from 192.0.2.17" "dummy0" \
+		"IPv4 multipath via first nexthop with source address"
+
+	ipv4_mpath_oif_test_common "oif dummy1 from 192.0.2.17" "dummy1" \
+		"IPv4 multipath via second nexthop with source address"
+
+	cleanup
+}
+
+ipv6_mpath_oif_test_common()
+{
+	local get_param=$1; shift
+	local expected_oif=$1; shift
+	local test_name=$1; shift
+	local tmp_file
+
+	tmp_file=$(mktemp)
+
+	for i in {1..100}; do
+		$IP route get 2001:db8:10::${i} $get_param >> "$tmp_file"
+	done
+
+	[[ $(grep "$expected_oif" "$tmp_file" | wc -l) -eq 100 ]]
+	log_test $? 0 "$test_name"
+
+	rm "$tmp_file"
+}
+
+ipv6_mpath_oif_test()
+{
+	echo
+	echo "IPv6 multipath oif test"
+
+	setup
+
+	set -e
+	$IP link add dummy1 up type dummy
+	$IP address add 2001:db8:2::1/64 dev dummy1
+	$IP address add 2001:db8:100::1/128 dev lo
+
+	$IP route add 2001:db8:10::/64 \
+		nexthop via 2001:db8:1::2 dev dummy0 \
+		nexthop via 2001:db8:2::2 dev dummy1
+	set +e
+
+	ipv6_mpath_oif_test_common "oif dummy0" "dummy0" \
+		"IPv6 multipath via first nexthop"
+
+	ipv6_mpath_oif_test_common "oif dummy1" "dummy1" \
+		"IPv6 multipath via second nexthop"
+
+	ipv6_mpath_oif_test_common "oif dummy0 from 2001:db8:100::1" "dummy0" \
+		"IPv6 multipath via first nexthop with source address"
+
+	ipv6_mpath_oif_test_common "oif dummy1 from 2001:db8:100::1" "dummy1" \
+		"IPv6 multipath via second nexthop with source address"
+
+	cleanup
+}
+
+ipv6_mpath_oif_nh_test()
+{
+	echo
+	echo "IPv6 multipath oif with nexthop object test"
+
+	setup
+
+	set -e
+	$IP link add dummy1 up type dummy
+	$IP address add 2001:db8:2::1/64 dev dummy1
+	$IP address add 2001:db8:100::1/128 dev lo
+
+	$IP nexthop add id 1 via 2001:db8:1::2 dev dummy0
+	$IP nexthop add id 2 via 2001:db8:2::2 dev dummy1
+	$IP nexthop add id 3 group 1/2
+	$IP route add 2001:db8:10::/64 nhid 3
+	set +e
+
+	ipv6_mpath_oif_test_common "oif dummy0" "dummy0" \
+		"IPv6 multipath via first nexthop"
+
+	ipv6_mpath_oif_test_common "oif dummy1" "dummy1" \
+		"IPv6 multipath via second nexthop"
+
+	ipv6_mpath_oif_test_common "oif dummy0 from 2001:db8:100::1" "dummy0" \
+		"IPv6 multipath via first nexthop with source address"
+
+	ipv6_mpath_oif_test_common "oif dummy1 from 2001:db8:100::1" "dummy1" \
+		"IPv6 multipath via second nexthop with source address"
+
+	cleanup
+}
+
+ipv6_mpath_oif_vrf_test()
+{
+	echo
+	echo "IPv6 multipath oif with VRF test"
+
+	setup
+
+	set -e
+	$NS_EXEC sysctl -qw net.ipv6.conf.all.keep_addr_on_down=1
+	$IP -6 rule add pref 32765 table local
+	$IP -6 rule del pref 0
+	$IP link add name vrf-123 up type vrf table 123
+	$IP link set dev dummy0 master vrf-123
+	$IP link add dummy1 up master vrf-123 type dummy
+	$IP address add 2001:db8:2::1/64 dev dummy1
+	$IP address add 2001:db8:100::1/128 dev vrf-123
+
+	$IP route add 2001:db8:10::/64 vrf vrf-123 \
+		nexthop via 2001:db8:1::2 dev dummy0 \
+		nexthop via 2001:db8:2::2 dev dummy1
+	set +e
+
+	ipv6_mpath_oif_test_common "oif dummy0" "dummy0" \
+		"IPv6 multipath via first nexthop"
+
+	ipv6_mpath_oif_test_common "oif dummy1" "dummy1" \
+		"IPv6 multipath via second nexthop"
+
+	ipv6_mpath_oif_test_common "oif dummy0 from 2001:db8:100::1" "dummy0" \
+		"IPv6 multipath via first nexthop with source address"
+
+	ipv6_mpath_oif_test_common "oif dummy1 from 2001:db8:100::1" "dummy1" \
+		"IPv6 multipath via second nexthop with source address"
+
+	cleanup
 }
 
 ################################################################################
@@ -2683,6 +3297,17 @@ do
 	fib6_gc_test|ipv6_gc)		fib6_gc_test;;
 	ipv4_mpath_list)		ipv4_mpath_list_test;;
 	ipv6_mpath_list)		ipv6_mpath_list_test;;
+	ipv4_mpath_balance)		ipv4_mpath_balance_test;;
+	ipv6_mpath_balance)		ipv6_mpath_balance_test;;
+	ipv4_mpath_balance_preferred)	ipv4_mpath_balance_preferred_test;;
+	ipv4_mpath_oif)			ipv4_mpath_oif_test;;
+	ipv4_mpath_oif_nh)		ipv4_mpath_oif_nh_test;;
+	ipv4_mpath_oif_vrf)		ipv4_mpath_oif_vrf_test;;
+	ipv6_mpath_oif)			ipv6_mpath_oif_test;;
+	ipv6_mpath_oif_nh)		ipv6_mpath_oif_nh_test;;
+	ipv6_mpath_oif_vrf)		ipv6_mpath_oif_vrf_test;;
+	fib6_ra_to_static)		fib6_ra_to_static;;
+	fib6_temp_addr_renewal)		fib6_temp_addr_renewal;;
 
 	help) echo "Test names: $TESTS"; exit 0;;
 	esac

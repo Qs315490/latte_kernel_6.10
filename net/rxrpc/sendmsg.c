@@ -282,7 +282,7 @@ static int rxrpc_alloc_txqueue(struct sock *sk, struct rxrpc_call *call)
 {
 	struct rxrpc_txqueue *tq;
 
-	tq = kzalloc(sizeof(*tq), sk->sk_allocation);
+	tq = kzalloc_obj(*tq, sk->sk_allocation);
 	if (!tq)
 		return -ENOMEM;
 
@@ -366,7 +366,8 @@ reload:
 	if (state >= RXRPC_CALL_COMPLETE)
 		goto maybe_error;
 	ret = -EPROTO;
-	if (state != RXRPC_CALL_CLIENT_SEND_REQUEST &&
+	if (state != RXRPC_CALL_CLIENT_PRE_SEND &&
+	    state != RXRPC_CALL_CLIENT_SEND_REQUEST &&
 	    state != RXRPC_CALL_SERVER_ACK_REQUEST &&
 	    state != RXRPC_CALL_SERVER_SEND_REPLY) {
 		/* Request phase complete for this client call */
@@ -607,7 +608,7 @@ static int rxrpc_sendmsg_cmsg(struct msghdr *msg, struct rxrpc_send_params *p)
 static struct rxrpc_call *
 rxrpc_new_client_call_for_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg,
 				  struct rxrpc_send_params *p)
-	__releases(&rx->sk.sk_lock.slock)
+	__releases(&rx->sk.sk_lock)
 	__acquires(&call->user_mutex)
 {
 	struct rxrpc_conn_parameters cp;
@@ -637,7 +638,7 @@ rxrpc_new_client_call_for_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg,
 	memset(&cp, 0, sizeof(cp));
 	cp.local		= rx->local;
 	cp.peer			= peer;
-	cp.key			= rx->key;
+	cp.key			= key;
 	cp.security_level	= rx->min_sec_level;
 	cp.exclusive		= rx->exclusive | p->exclusive;
 	cp.upgrade		= p->upgrade;
@@ -657,7 +658,6 @@ rxrpc_new_client_call_for_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg,
  * - the socket may be either a client socket or a server socket
  */
 int rxrpc_do_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg, size_t len)
-	__releases(&rx->sk.sk_lock.slock)
 {
 	struct rxrpc_call *call;
 	bool dropped_lock = false;
@@ -759,14 +759,21 @@ int rxrpc_do_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg, size_t len)
 	if (rxrpc_call_is_complete(call)) {
 		/* it's too late for this call */
 		ret = -ESHUTDOWN;
-	} else if (p.command == RXRPC_CMD_SEND_ABORT) {
+		goto out_put_unlock;
+	}
+
+	switch (p.command) {
+	case RXRPC_CMD_SEND_ABORT:
 		rxrpc_propose_abort(call, p.abort_code, -ECONNABORTED,
 				    rxrpc_abort_call_sendmsg);
 		ret = 0;
-	} else if (p.command != RXRPC_CMD_SEND_DATA) {
-		ret = -EINVAL;
-	} else {
+		break;
+	case RXRPC_CMD_SEND_DATA:
 		ret = rxrpc_send_data(rx, call, msg, len, NULL, &dropped_lock);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
 	}
 
 out_put_unlock:
@@ -794,6 +801,8 @@ error_release_sock:
  * appropriate to sending data.  No control data should be supplied in @msg,
  * nor should an address be supplied.  MSG_MORE should be flagged if there's
  * more data to come, otherwise this data will end the transmission phase.
+ *
+ * Return: %0 if successful and a negative error code otherwise.
  */
 int rxrpc_kernel_send_data(struct socket *sock, struct rxrpc_call *call,
 			   struct msghdr *msg, size_t len,
@@ -829,8 +838,9 @@ EXPORT_SYMBOL(rxrpc_kernel_send_data);
  * @error: Local error value
  * @why: Indication as to why.
  *
- * Allow a kernel service to abort a call, if it's still in an abortable state
- * and return true if the call was aborted, false if it was already complete.
+ * Allow a kernel service to abort a call if it's still in an abortable state.
+ *
+ * Return: %true if the call was aborted, %false if it was already complete.
  */
 bool rxrpc_kernel_abort_call(struct socket *sock, struct rxrpc_call *call,
 			     u32 abort_code, int error, enum rxrpc_abort_reason why)

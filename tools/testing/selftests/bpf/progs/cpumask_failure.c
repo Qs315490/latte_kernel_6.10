@@ -45,7 +45,7 @@ int BPF_PROG(test_alloc_no_release, struct task_struct *task, u64 clone_flags)
 }
 
 SEC("tp_btf/task_newtask")
-__failure __msg("NULL pointer passed to trusted arg0")
+__failure __msg("NULL pointer passed to trusted R1")
 int BPF_PROG(test_alloc_double_release, struct task_struct *task, u64 clone_flags)
 {
 	struct bpf_cpumask *cpumask;
@@ -73,7 +73,7 @@ int BPF_PROG(test_acquire_wrong_cpumask, struct task_struct *task, u64 clone_fla
 }
 
 SEC("tp_btf/task_newtask")
-__failure __msg("bpf_cpumask_set_cpu args#1 expected pointer to STRUCT bpf_cpumask")
+__failure __msg("bpf_cpumask_set_cpu R2 expected pointer to STRUCT bpf_cpumask")
 int BPF_PROG(test_mutate_cpumask, struct task_struct *task, u64 clone_flags)
 {
 	/* Can't set the CPU of a non-struct bpf_cpumask. */
@@ -107,10 +107,10 @@ int BPF_PROG(test_insert_remove_no_release, struct task_struct *task, u64 clone_
 }
 
 SEC("tp_btf/task_newtask")
-__failure __msg("NULL pointer passed to trusted arg0")
+__failure __msg("NULL pointer passed to trusted R1")
 int BPF_PROG(test_cpumask_null, struct task_struct *task, u64 clone_flags)
 {
-  /* NULL passed to KF_TRUSTED_ARGS kfunc. */
+  /* NULL passed to kfunc. */
 	bpf_cpumask_empty(NULL);
 
 	return 0;
@@ -151,7 +151,7 @@ int BPF_PROG(test_global_mask_out_of_rcu, struct task_struct *task, u64 clone_fl
 }
 
 SEC("tp_btf/task_newtask")
-__failure __msg("NULL pointer passed to trusted arg1")
+__failure __msg("NULL pointer passed to trusted R2")
 int BPF_PROG(test_global_mask_no_null_check, struct task_struct *task, u64 clone_flags)
 {
 	struct bpf_cpumask *local, *prev;
@@ -179,7 +179,7 @@ int BPF_PROG(test_global_mask_no_null_check, struct task_struct *task, u64 clone
 }
 
 SEC("tp_btf/task_newtask")
-__failure __msg("Possibly NULL pointer passed to helper arg2")
+__failure __msg("Possibly NULL pointer passed to helper R2")
 int BPF_PROG(test_global_mask_rcu_no_null_check, struct task_struct *task, u64 clone_flags)
 {
 	struct bpf_cpumask *prev, *curr;
@@ -219,6 +219,44 @@ int BPF_PROG(test_invalid_nested_array, struct task_struct *task, u64 clone_flag
 		err = 3;
 		return 0;
 	}
+
+	return 0;
+}
+
+SEC("tp_btf/task_newtask")
+__failure __msg("type=scalar expected=fp")
+int BPF_PROG(test_populate_invalid_destination, struct task_struct *task, u64 clone_flags)
+{
+	struct bpf_cpumask *invalid = (struct bpf_cpumask *)0x123456;
+	u64 bits;
+	int ret;
+
+	ret = bpf_cpumask_populate((struct cpumask *)invalid, &bits, sizeof(bits));
+	if (!ret)
+		err = 2;
+
+	return 0;
+}
+
+SEC("tp_btf/task_newtask")
+__failure __msg("leads to invalid memory access")
+int BPF_PROG(test_populate_invalid_source, struct task_struct *task, u64 clone_flags)
+{
+	void *garbage = (void *)0x123456;
+	struct bpf_cpumask *local;
+	int ret;
+
+	local = create_cpumask();
+	if (!local) {
+		err = 1;
+		return 0;
+	}
+
+	ret = bpf_cpumask_populate((struct cpumask *)local, garbage, 8);
+	if (!ret)
+		err = 2;
+
+	bpf_cpumask_release(local);
 
 	return 0;
 }

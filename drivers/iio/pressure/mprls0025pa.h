@@ -12,10 +12,7 @@
 #define _MPRLS0025PA_H
 
 #include <linux/completion.h>
-#include <linux/delay.h>
-#include <linux/device.h>
 #include <linux/mutex.h>
-#include <linux/stddef.h>
 #include <linux/types.h>
 
 #include <linux/iio/iio.h>
@@ -28,21 +25,8 @@
 
 struct device;
 
-struct iio_chan_spec;
-struct iio_dev;
-
 struct mpr_data;
 struct mpr_ops;
-
-/**
- * struct mpr_chan
- * @pres: pressure value
- * @ts: timestamp
- */
-struct mpr_chan {
-	s32 pres;
-	s64 ts;
-};
 
 enum mpr_func_id {
 	MPR_FUNCTION_A,
@@ -63,13 +47,15 @@ enum mpr_func_id {
  * @scale: pressure scale
  * @scale2: pressure scale, decimal number
  * @offset: pressure offset
- * @offset2: pressure offset, decimal number
  * @gpiod_reset: reset
  * @irq: end of conversion irq. used to distinguish between irq mode and
  *       reading in a loop until data is ready
  * @completion: handshake from irq to read
  * @chan: channel values for buffered mode
- * @buffer: raw conversion data
+ * @chan.pres: pressure value
+ * @chan.ts: timestamp
+ * @rx_buf: raw conversion data
+ * @tx_buf: output buffer
  */
 struct mpr_data {
 	struct device		*dev;
@@ -83,16 +69,18 @@ struct mpr_data {
 	int			scale;
 	int			scale2;
 	int			offset;
-	int			offset2;
 	struct gpio_desc	*gpiod_reset;
 	int			irq;
 	struct completion	completion;
-	struct mpr_chan		chan;
-	u8	    buffer[MPR_MEASUREMENT_RD_SIZE] __aligned(IIO_DMA_MINALIGN);
+	struct {
+		s32 pres;
+		aligned_s64 ts;
+	} chan;
+	u8 rx_buf[MPR_MEASUREMENT_RD_SIZE] __aligned(IIO_DMA_MINALIGN);
+	u8 tx_buf[MPR_MEASUREMENT_RD_SIZE];
 };
 
 struct mpr_ops {
-	int (*init)(struct device *dev);
 	int (*read)(struct mpr_data *data, const u8 cmd, const u8 cnt);
 	int (*write)(struct mpr_data *data, const u8 cmd, const u8 cnt);
 };

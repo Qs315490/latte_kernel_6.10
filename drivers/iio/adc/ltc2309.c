@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
+ * The LTC2305 is a  2-Channel, 12-Bit SAR ADC with an I2C Interface.
  * The LTC2309 is an 8-Channel, 12-Bit SAR ADC with an I2C Interface.
  *
  * Datasheet:
+ * https://www.analog.com/media/en/technical-documentation/data-sheets/23015fb.pdf
  * https://www.analog.com/media/en/technical-documentation/data-sheets/2309fd.pdf
  *
  * Copyright (c) 2023, Liam Beguin <liambeguin@gmail.com>
  */
+#include <linux/array_size.h>
 #include <linux/bitfield.h>
+#include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/iio/iio.h>
 #include <linux/kernel.h>
@@ -32,32 +36,41 @@
  * @client:	I2C reference
  * @lock:	Lock to serialize data access
  * @vref_mv:	Internal voltage reference
+ * @read_delay_us:	Chip-specific read delay in microseconds
  */
 struct ltc2309 {
 	struct device		*dev;
 	struct i2c_client	*client;
 	struct mutex		lock; /* serialize data access */
 	int			vref_mv;
+	unsigned int		read_delay_us;
 };
 
 /* Order matches expected channel address, See datasheet Table 1. */
+enum ltc2305_channels {
+	LTC2305_CH0_CH1 = 0x0,
+	LTC2305_CH1_CH0 = 0x4,
+	LTC2305_CH0     = 0x8,
+	LTC2305_CH1     = 0xc,
+};
+
 enum ltc2309_channels {
-	LTC2309_CH0_CH1 = 0,
-	LTC2309_CH2_CH3,
-	LTC2309_CH4_CH5,
-	LTC2309_CH6_CH7,
-	LTC2309_CH1_CH0,
-	LTC2309_CH3_CH2,
-	LTC2309_CH5_CH4,
-	LTC2309_CH7_CH6,
-	LTC2309_CH0,
-	LTC2309_CH2,
-	LTC2309_CH4,
-	LTC2309_CH6,
-	LTC2309_CH1,
-	LTC2309_CH3,
-	LTC2309_CH5,
-	LTC2309_CH7,
+	LTC2309_CH0_CH1 = 0x0,
+	LTC2309_CH2_CH3 = 0x1,
+	LTC2309_CH4_CH5 = 0x2,
+	LTC2309_CH6_CH7 = 0x3,
+	LTC2309_CH1_CH0 = 0x4,
+	LTC2309_CH3_CH2 = 0x5,
+	LTC2309_CH5_CH4 = 0x6,
+	LTC2309_CH7_CH6 = 0x7,
+	LTC2309_CH0     = 0x8,
+	LTC2309_CH2     = 0x9,
+	LTC2309_CH4     = 0xa,
+	LTC2309_CH6     = 0xb,
+	LTC2309_CH1     = 0xc,
+	LTC2309_CH3     = 0xd,
+	LTC2309_CH5     = 0xe,
+	LTC2309_CH7     = 0xf,
 };
 
 #define LTC2309_CHAN(_chan, _addr) {				\
@@ -80,6 +93,13 @@ enum ltc2309_channels {
 	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),	\
 }
 
+static const struct iio_chan_spec ltc2305_channels[] = {
+	LTC2309_CHAN(0, LTC2305_CH0),
+	LTC2309_CHAN(1, LTC2305_CH1),
+	LTC2309_DIFF_CHAN(0, 1, LTC2305_CH0_CH1),
+	LTC2309_DIFF_CHAN(1, 0, LTC2305_CH1_CH0),
+};
+
 static const struct iio_chan_spec ltc2309_channels[] = {
 	LTC2309_CHAN(0, LTC2309_CH0),
 	LTC2309_CHAN(1, LTC2309_CH1),
@@ -99,6 +119,26 @@ static const struct iio_chan_spec ltc2309_channels[] = {
 	LTC2309_DIFF_CHAN(7, 6, LTC2309_CH7_CH6),
 };
 
+struct ltc2309_chip_info {
+	const char *name;
+	unsigned int read_delay_us;
+	int num_channels;
+	const struct iio_chan_spec *channels __counted_by_ptr(num_channels);
+};
+
+static const struct ltc2309_chip_info ltc2305_chip_info = {
+	.name = "ltc2305",
+	.read_delay_us = 2,
+	.num_channels = ARRAY_SIZE(ltc2305_channels),
+	.channels = ltc2305_channels,
+};
+
+static const struct ltc2309_chip_info ltc2309_chip_info = {
+	.name = "ltc2309",
+	.num_channels = ARRAY_SIZE(ltc2309_channels),
+	.channels = ltc2309_channels,
+};
+
 static int ltc2309_read_raw_channel(struct ltc2309 *ltc2309,
 				    unsigned long address, int *val)
 {
@@ -116,6 +156,9 @@ static int ltc2309_read_raw_channel(struct ltc2309 *ltc2309,
 			ERR_PTR(ret));
 		return ret;
 	}
+
+	if (ltc2309->read_delay_us)
+		fsleep(ltc2309->read_delay_us);
 
 	ret = i2c_master_recv(ltc2309->client, (char *)&buf, 2);
 	if (ret < 0) {
@@ -158,6 +201,7 @@ static const struct iio_info ltc2309_info = {
 
 static int ltc2309_probe(struct i2c_client *client)
 {
+	const struct ltc2309_chip_info *chip_info;
 	struct iio_dev *indio_dev;
 	struct ltc2309 *ltc2309;
 	int ret;
@@ -167,13 +211,16 @@ static int ltc2309_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	ltc2309 = iio_priv(indio_dev);
+	chip_info = i2c_get_match_data(client);
+
 	ltc2309->dev = &indio_dev->dev;
 	ltc2309->client = client;
+	ltc2309->read_delay_us = chip_info->read_delay_us;
 
-	indio_dev->name = "ltc2309";
+	indio_dev->name = chip_info->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
-	indio_dev->channels = ltc2309_channels;
-	indio_dev->num_channels = ARRAY_SIZE(ltc2309_channels);
+	indio_dev->channels = chip_info->channels;
+	indio_dev->num_channels = chip_info->num_channels;
 	indio_dev->info = &ltc2309_info;
 
 	ret = devm_regulator_get_enable_read_voltage(&client->dev, "vref");
@@ -189,13 +236,15 @@ static int ltc2309_probe(struct i2c_client *client)
 }
 
 static const struct of_device_id ltc2309_of_match[] = {
-	{ .compatible = "lltc,ltc2309" },
+	{ .compatible = "lltc,ltc2305", .data = &ltc2305_chip_info },
+	{ .compatible = "lltc,ltc2309", .data = &ltc2309_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, ltc2309_of_match);
 
 static const struct i2c_device_id ltc2309_id[] = {
-	{ "ltc2309" },
+	{ .name = "ltc2305", .driver_data = (kernel_ulong_t)&ltc2305_chip_info },
+	{ .name = "ltc2309", .driver_data = (kernel_ulong_t)&ltc2309_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ltc2309_id);

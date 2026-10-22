@@ -12,6 +12,7 @@
 #include <linux/regmap.h>
 #include <linux/usb/typec_dp.h>
 #include <linux/usb/typec_mux.h>
+#include <linux/regulator/consumer.h>
 
 #define FSA4480_DEVICE_ID	0x00
  #define FSA4480_DEVICE_ID_VENDOR_ID	GENMASK(7, 6)
@@ -273,6 +274,10 @@ static int fsa4480_probe(struct i2c_client *client)
 	if (IS_ERR(fsa->regmap))
 		return dev_err_probe(dev, PTR_ERR(fsa->regmap), "failed to initialize regmap\n");
 
+	ret = devm_regulator_get_enable_optional(dev, "vcc");
+	if (ret && ret != -ENODEV)
+		return dev_err_probe(dev, ret, "Failed to get regulator\n");
+
 	ret = regmap_read(fsa->regmap, FSA4480_DEVICE_ID, &val);
 	if (ret)
 		return dev_err_probe(dev, -ENODEV, "FSA4480 not found\n");
@@ -331,7 +336,7 @@ static void fsa4480_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id fsa4480_table[] = {
-	{ "fsa4480" },
+	{ .name = "fsa4480" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, fsa4480_table);

@@ -12,7 +12,6 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/gpio.h>
 
 #include <linux/nfc.h>
 #include <net/nfc/hci.h>
@@ -277,7 +276,7 @@ static void microread_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id microread_i2c_id[] = {
-	{ MICROREAD_I2C_DRIVER_NAME },
+	{ .name = MICROREAD_I2C_DRIVER_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, microread_i2c_id);

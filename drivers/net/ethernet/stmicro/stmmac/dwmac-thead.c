@@ -37,16 +37,13 @@
 #define GMAC_GTXCLK_SEL			0x18
 #define  GMAC_GTXCLK_SEL_PLL		BIT(0)
 #define GMAC_INTF_CTRL			0x1c
-#define  PHY_INTF_MASK			BIT(0)
-#define  PHY_INTF_RGMII			FIELD_PREP(PHY_INTF_MASK, 1)
-#define  PHY_INTF_MII_GMII		FIELD_PREP(PHY_INTF_MASK, 0)
+#define  GMAC_INTF_MASK			BIT(0)
+#define  GMAC_INTF_RGMII		FIELD_PREP(GMAC_INTF_MASK, 1)
+#define  GMAC_INTF_MII_GMII		FIELD_PREP(GMAC_INTF_MASK, 0)
 #define GMAC_TXCLK_OEN			0x20
 #define  TXCLK_DIR_MASK			BIT(0)
 #define  TXCLK_DIR_OUTPUT		FIELD_PREP(TXCLK_DIR_MASK, 0)
 #define  TXCLK_DIR_INPUT		FIELD_PREP(TXCLK_DIR_MASK, 1)
-
-#define GMAC_GMII_RGMII_RATE	125000000
-#define GMAC_MII_RATE		25000000
 
 struct thead_dwmac {
 	struct plat_stmmacenet_data *plat;
@@ -59,19 +56,19 @@ static int thead_dwmac_set_phy_if(struct plat_stmmacenet_data *plat)
 	struct thead_dwmac *dwmac = plat->bsp_priv;
 	u32 phyif;
 
-	switch (plat->mac_interface) {
+	switch (plat->phy_interface) {
 	case PHY_INTERFACE_MODE_MII:
-		phyif = PHY_INTF_MII_GMII;
+		phyif = GMAC_INTF_MII_GMII;
 		break;
 	case PHY_INTERFACE_MODE_RGMII:
 	case PHY_INTERFACE_MODE_RGMII_ID:
 	case PHY_INTERFACE_MODE_RGMII_TXID:
 	case PHY_INTERFACE_MODE_RGMII_RXID:
-		phyif = PHY_INTF_RGMII;
+		phyif = GMAC_INTF_RGMII;
 		break;
 	default:
-		dev_err(dwmac->dev, "unsupported phy interface %d\n",
-			plat->mac_interface);
+		dev_err(dwmac->dev, "unsupported phy interface %s\n",
+			phy_modes(plat->phy_interface));
 		return -EINVAL;
 	}
 
@@ -84,7 +81,7 @@ static int thead_dwmac_set_txclk_dir(struct plat_stmmacenet_data *plat)
 	struct thead_dwmac *dwmac = plat->bsp_priv;
 	u32 txclk_dir;
 
-	switch (plat->mac_interface) {
+	switch (plat->phy_interface) {
 	case PHY_INTERFACE_MODE_MII:
 		txclk_dir = TXCLK_DIR_INPUT;
 		break;
@@ -95,8 +92,8 @@ static int thead_dwmac_set_txclk_dir(struct plat_stmmacenet_data *plat)
 		txclk_dir = TXCLK_DIR_OUTPUT;
 		break;
 	default:
-		dev_err(dwmac->dev, "unsupported phy interface %d\n",
-			plat->mac_interface);
+		dev_err(dwmac->dev, "unsupported phy interface %s\n",
+			phy_modes(plat->phy_interface));
 		return -EINVAL;
 	}
 
@@ -104,65 +101,60 @@ static int thead_dwmac_set_txclk_dir(struct plat_stmmacenet_data *plat)
 	return 0;
 }
 
-static void thead_dwmac_fix_speed(void *priv, unsigned int speed, unsigned int mode)
+static int thead_set_clk_tx_rate(void *bsp_priv, struct clk *clk_tx_i,
+				 phy_interface_t interface, int speed)
 {
+	struct thead_dwmac *dwmac = bsp_priv;
 	struct plat_stmmacenet_data *plat;
-	struct thead_dwmac *dwmac = priv;
 	unsigned long rate;
+	long tx_rate;
 	u32 div, reg;
 
 	plat = dwmac->plat;
 
-	switch (plat->mac_interface) {
+	switch (plat->phy_interface) {
 	/* For MII, rxc/txc is provided by phy */
 	case PHY_INTERFACE_MODE_MII:
-		return;
+		return 0;
 
 	case PHY_INTERFACE_MODE_RGMII:
 	case PHY_INTERFACE_MODE_RGMII_ID:
 	case PHY_INTERFACE_MODE_RGMII_RXID:
 	case PHY_INTERFACE_MODE_RGMII_TXID:
 		rate = clk_get_rate(plat->stmmac_clk);
-		if (!rate || rate % GMAC_GMII_RGMII_RATE != 0 ||
-		    rate % GMAC_MII_RATE != 0) {
-			dev_err(dwmac->dev, "invalid gmac rate %ld\n", rate);
-			return;
-		}
 
 		writel(0, dwmac->apb_base + GMAC_PLLCLK_DIV);
 
-		switch (speed) {
-		case SPEED_1000:
-			div = rate / GMAC_GMII_RGMII_RATE;
-			break;
-		case SPEED_100:
-			div = rate / GMAC_MII_RATE;
-			break;
-		case SPEED_10:
-			div = rate * 10 / GMAC_MII_RATE;
-			break;
-		default:
-			dev_err(dwmac->dev, "invalid speed %u\n", speed);
-			return;
+		tx_rate = rgmii_clock(speed);
+		if (tx_rate < 0) {
+			dev_err(dwmac->dev, "invalid speed %d\n", speed);
+			return tx_rate;
+		}
+
+		div = rate / tx_rate;
+		if (rate != tx_rate * div) {
+			dev_err(dwmac->dev, "invalid gmac rate %lu\n", rate);
+			return -EINVAL;
 		}
 
 		reg = FIELD_PREP(GMAC_PLLCLK_DIV_EN, 1) |
 		      FIELD_PREP(GMAC_PLLCLK_DIV_NUM, div);
 		writel(reg, dwmac->apb_base + GMAC_PLLCLK_DIV);
-		break;
+		return 0;
+
 	default:
-		dev_err(dwmac->dev, "unsupported phy interface %d\n",
-			plat->mac_interface);
-		return;
+		dev_err(dwmac->dev, "unsupported phy interface %s\n",
+			phy_modes(plat->phy_interface));
+		return -EINVAL;
 	}
 }
 
 static int thead_dwmac_enable_clk(struct plat_stmmacenet_data *plat)
 {
 	struct thead_dwmac *dwmac = plat->bsp_priv;
-	u32 reg;
+	u32 reg, div;
 
-	switch (plat->mac_interface) {
+	switch (plat->phy_interface) {
 	case PHY_INTERFACE_MODE_MII:
 		reg = GMAC_RX_CLK_EN | GMAC_TX_CLK_EN;
 		break;
@@ -172,14 +164,21 @@ static int thead_dwmac_enable_clk(struct plat_stmmacenet_data *plat)
 	case PHY_INTERFACE_MODE_RGMII_RXID:
 	case PHY_INTERFACE_MODE_RGMII_TXID:
 		/* use pll */
+		div = clk_get_rate(plat->stmmac_clk) / rgmii_clock(SPEED_1000);
+		reg = FIELD_PREP(GMAC_PLLCLK_DIV_EN, 1) |
+		      FIELD_PREP(GMAC_PLLCLK_DIV_NUM, div);
+
+		writel(0, dwmac->apb_base + GMAC_PLLCLK_DIV);
+		writel(reg, dwmac->apb_base + GMAC_PLLCLK_DIV);
+
 		writel(GMAC_GTXCLK_SEL_PLL, dwmac->apb_base + GMAC_GTXCLK_SEL);
 		reg = GMAC_TX_CLK_EN | GMAC_TX_CLK_N_EN | GMAC_TX_CLK_OUT_EN |
 		      GMAC_RX_CLK_EN | GMAC_RX_CLK_N_EN;
 		break;
 
 	default:
-		dev_err(dwmac->dev, "unsupported phy interface %d\n",
-			plat->mac_interface);
+		dev_err(dwmac->dev, "unsupported phy interface %s\n",
+			phy_modes(plat->phy_interface));
 		return -EINVAL;
 	}
 
@@ -187,7 +186,7 @@ static int thead_dwmac_enable_clk(struct plat_stmmacenet_data *plat)
 	return 0;
 }
 
-static int thead_dwmac_init(struct platform_device *pdev, void *priv)
+static int thead_dwmac_init(struct device *dev, void *priv)
 {
 	struct thead_dwmac *dwmac = priv;
 	unsigned int reg;
@@ -219,6 +218,7 @@ static int thead_dwmac_probe(struct platform_device *pdev)
 	struct stmmac_resources stmmac_res;
 	struct plat_stmmacenet_data *plat;
 	struct thead_dwmac *dwmac;
+	struct clk *apb_clk;
 	void __iomem *apb;
 	int ret;
 
@@ -231,6 +231,19 @@ static int thead_dwmac_probe(struct platform_device *pdev)
 	if (IS_ERR(plat))
 		return dev_err_probe(&pdev->dev, PTR_ERR(plat),
 				     "dt configuration failed\n");
+
+	/*
+	 * The APB clock is essential for accessing glue registers. However,
+	 * old devicetrees don't describe it correctly. We continue to probe
+	 * and emit a warning if it isn't present.
+	 */
+	apb_clk = devm_clk_get_enabled(&pdev->dev, "apb");
+	if (PTR_ERR(apb_clk) == -ENOENT)
+		dev_warn(&pdev->dev,
+			 "cannot get apb clock, link may break after speed changes\n");
+	else if (IS_ERR(apb_clk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(apb_clk),
+				     "failed to get apb clock\n");
 
 	dwmac = devm_kzalloc(&pdev->dev, sizeof(*dwmac), GFP_KERNEL);
 	if (!dwmac)
@@ -245,7 +258,7 @@ static int thead_dwmac_probe(struct platform_device *pdev)
 	dwmac->plat = plat;
 	dwmac->apb_base = apb;
 	plat->bsp_priv = dwmac;
-	plat->fix_mac_speed = thead_dwmac_fix_speed;
+	plat->set_clk_tx_rate = thead_set_clk_tx_rate;
 	plat->init = thead_dwmac_init;
 
 	return devm_stmmac_pltfr_probe(pdev, plat, &stmmac_res);

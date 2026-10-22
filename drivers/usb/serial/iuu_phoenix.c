@@ -6,7 +6,7 @@
 
  * Copyright (C) 2007 Alain Degreffe (eczema@ecze.com)
  *
- * Original code taken from iuutool (Copyright (C) 2006 Juan Carlos BorrÃ¡s)
+ * Original code taken from iuutool (Copyright (C) 2006 Juan Carlos Borrás)
  *
  *  And tested with help of WB Electronics
  */
@@ -14,13 +14,11 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/serial.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/spinlock.h>
-#include <linux/uaccess.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 #include "iuu_phoenix.h"
@@ -67,7 +65,7 @@ static int iuu_port_probe(struct usb_serial_port *port)
 	struct iuu_private *priv;
 	int ret;
 
-	priv = kzalloc(sizeof(struct iuu_private), GFP_KERNEL);
+	priv = kzalloc_obj(struct iuu_private);
 	if (!priv)
 		return -ENOMEM;
 

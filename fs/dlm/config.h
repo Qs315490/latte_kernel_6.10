@@ -17,13 +17,15 @@
 struct dlm_config_node {
 	int nodeid;
 	int weight;
+	bool gone;
 	int new;
 	uint32_t comm_seq;
+	unsigned int release_recover;
 };
 
 extern const struct rhashtable_params dlm_rhash_rsb_params;
 
-#define DLM_MAX_ADDR_COUNT 3
+#define DLM_MAX_ADDR_COUNT 8
 
 #define DLM_PROTO_TCP	0
 #define DLM_PROTO_SCTP	1

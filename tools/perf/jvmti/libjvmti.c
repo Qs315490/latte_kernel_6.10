@@ -98,7 +98,7 @@ get_line_numbers(jvmtiEnv *jvmti, const void *compile_info, jvmti_line_info_t **
 	/*
 	 * Phase 2 -- allocate big enough line table
 	 */
-	*tab = malloc(nr_total * sizeof(**tab));
+	*tab = calloc(nr_total, sizeof(**tab));
 	if (!*tab)
 		return JVMTI_ERROR_OUT_OF_MEMORY;
 
@@ -141,11 +141,11 @@ copy_class_filename(const char * class_sign, const char * file_name, char * resu
 	* Assume path name is class hierarchy, this is a common practice with Java programs
 	*/
 	if (*class_sign == 'L') {
-		int j, i = 0;
-		char *p = strrchr(class_sign, '/');
+		size_t j, i = 0;
+		const char *p = strrchr(class_sign, '/');
 		if (p) {
 			/* drop the 'L' prefix and copy up to the final '/' */
-			for (i = 0; i < (p - class_sign); i++)
+			for (i = 0; i < (size_t)(p - class_sign); i++)
 				result[i] = class_sign[i+1];
 		}
 		/*
@@ -262,11 +262,10 @@ compiled_method_load_cb(jvmtiEnv *jvmti,
 			}
 			nr_lines = 0;
 		} else if (nr_lines > 0) {
-			line_file_names = malloc(sizeof(char*) * nr_lines);
+			line_file_names = calloc(nr_lines, sizeof(char *));
 			if (!line_file_names) {
 				warnx("jvmti: cannot allocate space for line table method names");
 			} else {
-				memset(line_file_names, 0, sizeof(char*) * nr_lines);
 				ret = fill_source_filenames(jvmti, nr_lines, line_tab, line_file_names);
 				if (ret != JVMTI_ERROR_NONE) {
 					warnx("jvmti: fill_source_filenames failed");

@@ -434,7 +434,7 @@ static irqreturn_t gpio_keys_gpio_isr(int irq, void *dev_id)
 			      ms_to_ktime(bdata->software_debounce),
 			      HRTIMER_MODE_REL);
 	} else {
-		mod_delayed_work(system_wq,
+		mod_delayed_work(system_dfl_wq,
 				 &bdata->work,
 				 msecs_to_jiffies(bdata->software_debounce));
 	}
@@ -448,6 +448,8 @@ static enum hrtimer_restart gpio_keys_irq_timer(struct hrtimer *t)
 						      struct gpio_button_data,
 						      release_timer);
 	struct input_dev *input = bdata->input;
+
+	guard(spinlock_irqsave)(&bdata->lock);
 
 	if (bdata->key_pressed) {
 		input_report_key(input, *bdata->code, 0);
@@ -486,7 +488,7 @@ static irqreturn_t gpio_keys_irq_isr(int irq, void *dev_id)
 	if (bdata->release_delay)
 		hrtimer_start(&bdata->release_timer,
 			      ms_to_ktime(bdata->release_delay),
-			      HRTIMER_MODE_REL_HARD);
+			      HRTIMER_MODE_REL);
 out:
 	return IRQ_HANDLED;
 }
@@ -590,9 +592,8 @@ static int gpio_keys_setup_key(struct platform_device *pdev,
 
 		INIT_DELAYED_WORK(&bdata->work, gpio_keys_gpio_work_func);
 
-		hrtimer_init(&bdata->debounce_timer,
-			     CLOCK_REALTIME, HRTIMER_MODE_REL);
-		bdata->debounce_timer.function = gpio_keys_debounce_timer;
+		hrtimer_setup(&bdata->debounce_timer, gpio_keys_debounce_timer,
+			      CLOCK_REALTIME, HRTIMER_MODE_REL);
 
 		isr = gpio_keys_gpio_isr;
 		irqflags = IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING;
@@ -615,12 +616,19 @@ static int gpio_keys_setup_key(struct platform_device *pdev,
 			break;
 		}
 	} else {
-		if (!button->irq) {
-			dev_err(dev, "Found button without gpio or irq\n");
-			return -EINVAL;
-		}
+		if (button->irq) {
+			bdata->irq = button->irq;
+		} else {
+			irq = platform_get_irq_optional(pdev, idx);
+			if (irq < 0) {
+				error = irq;
+				return dev_err_probe(dev, error,
+						     "Unable to determine IRQ# for button #%d",
+						     idx);
+			}
 
-		bdata->irq = button->irq;
+			bdata->irq = irq;
+		}
 
 		if (button->type && button->type != EV_KEY) {
 			dev_err(dev, "Only EV_KEY allowed for IRQ buttons.\n");
@@ -628,9 +636,8 @@ static int gpio_keys_setup_key(struct platform_device *pdev,
 		}
 
 		bdata->release_delay = button->debounce_interval;
-		hrtimer_init(&bdata->release_timer,
-			     CLOCK_REALTIME, HRTIMER_MODE_REL_HARD);
-		bdata->release_timer.function = gpio_keys_irq_timer;
+		hrtimer_setup(&bdata->release_timer, gpio_keys_irq_timer,
+			      CLOCK_REALTIME, HRTIMER_MODE_REL);
 
 		isr = gpio_keys_irq_isr;
 		irqflags = 0;

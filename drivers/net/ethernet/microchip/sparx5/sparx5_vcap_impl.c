@@ -1930,7 +1930,6 @@ static void sparx5_vcap_admin_free(struct vcap_admin *admin)
 {
 	if (!admin)
 		return;
-	mutex_destroy(&admin->lock);
 	kfree(admin->cache.keystream);
 	kfree(admin->cache.maskstream);
 	kfree(admin->cache.actionstream);
@@ -1944,13 +1943,13 @@ sparx5_vcap_admin_alloc(struct sparx5 *sparx5, struct vcap_control *ctrl,
 {
 	struct vcap_admin *admin;
 
-	admin = kzalloc(sizeof(*admin), GFP_KERNEL);
+	admin = kzalloc_obj(*admin);
 	if (!admin)
 		return ERR_PTR(-ENOMEM);
 	INIT_LIST_HEAD(&admin->list);
 	INIT_LIST_HEAD(&admin->rules);
 	INIT_LIST_HEAD(&admin->enabled);
-	mutex_init(&admin->lock);
+	admin->vctrl = ctrl;
 	admin->vtype = cfg->vtype;
 	admin->vinst = cfg->vinst;
 	admin->ingress = cfg->ingress;
@@ -2047,7 +2046,7 @@ int sparx5_vcap_init(struct sparx5 *sparx5)
 	 *   - Initialize VCAP blocks
 	 *   - Configure port keysets
 	 */
-	ctrl = kzalloc(sizeof(*ctrl), GFP_KERNEL);
+	ctrl = kzalloc_obj(*ctrl);
 	if (!ctrl)
 		return -ENOMEM;
 
@@ -2059,6 +2058,7 @@ int sparx5_vcap_init(struct sparx5 *sparx5)
 	ctrl->ops = &sparx5_vcap_ops;
 
 	INIT_LIST_HEAD(&ctrl->list);
+	mutex_init(&ctrl->lock);
 	for (idx = 0; idx < ARRAY_SIZE(sparx5_vcap_inst_cfg); ++idx) {
 		cfg = &consts->vcaps_cfg[idx];
 		admin = sparx5_vcap_admin_alloc(sparx5, ctrl, cfg);
@@ -2083,7 +2083,7 @@ int sparx5_vcap_init(struct sparx5 *sparx5)
 	return err;
 }
 
-void sparx5_vcap_destroy(struct sparx5 *sparx5)
+void sparx5_vcap_deinit(struct sparx5 *sparx5)
 {
 	struct vcap_control *ctrl = sparx5->vcap_ctrl;
 	struct vcap_admin *admin, *admin_next;
@@ -2097,5 +2097,6 @@ void sparx5_vcap_destroy(struct sparx5 *sparx5)
 		list_del(&admin->list);
 		sparx5_vcap_admin_free(admin);
 	}
+	mutex_destroy(&ctrl->lock);
 	kfree(ctrl);
 }

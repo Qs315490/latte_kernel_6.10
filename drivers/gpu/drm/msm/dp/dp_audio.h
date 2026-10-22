@@ -8,8 +8,9 @@
 
 #include <linux/platform_device.h>
 
-#include "dp_catalog.h"
 #include <sound/hdmi-codec.h>
+
+struct drm_bridge;
 
 /**
  * struct msm_dp_audio
@@ -27,30 +28,13 @@ struct msm_dp_audio {
  * Creates and instance of dp audio.
  *
  * @pdev: caller's platform device instance.
- * @catalog: an instance of msm_dp_catalog module.
+ * @link_base: pointer to the msm_dp_link resource.
  *
  * Returns the error code in case of failure, otherwize
  * an instance of newly created msm_dp_module.
  */
 struct msm_dp_audio *msm_dp_audio_get(struct platform_device *pdev,
-			struct msm_dp_catalog *catalog);
-
-/**
- * msm_dp_register_audio_driver()
- *
- * Registers DP device with hdmi_codec interface.
- *
- * @dev: DP device instance.
- * @msm_dp_audio: an instance of msm_dp_audio module.
- *
- *
- * Returns the error code in case of failure, otherwise
- * zero on success.
- */
-int msm_dp_register_audio_driver(struct device *dev,
-		struct msm_dp_audio *msm_dp_audio);
-
-void msm_dp_unregister_audio_driver(struct device *dev, struct msm_dp_audio *msm_dp_audio);
+			      void __iomem *link_base);
 
 /**
  * msm_dp_audio_put()
@@ -61,10 +45,12 @@ void msm_dp_unregister_audio_driver(struct device *dev, struct msm_dp_audio *msm
  */
 void msm_dp_audio_put(struct msm_dp_audio *msm_dp_audio);
 
-int msm_dp_audio_hw_params(struct device *dev,
-	void *data,
-	struct hdmi_codec_daifmt *daifmt,
-	struct hdmi_codec_params *params);
+int msm_dp_audio_prepare(struct drm_bridge *bridge,
+			 struct drm_connector *connector,
+			 struct hdmi_codec_daifmt *daifmt,
+			 struct hdmi_codec_params *params);
+void msm_dp_audio_shutdown(struct drm_bridge *bridge,
+			   struct drm_connector *connector);
 
 #endif /* _DP_AUDIO_H_ */
 

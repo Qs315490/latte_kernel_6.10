@@ -69,8 +69,7 @@
 #define RV3032_CLKOUT2_FD_MSK		GENMASK(6, 5)
 #define RV3032_CLKOUT2_OS		BIT(7)
 
-#define RV3032_CTRL1_EERD		BIT(3)
-#define RV3032_CTRL1_WADA		BIT(5)
+#define RV3032_CTRL1_EERD		BIT(2)
 
 #define RV3032_CTRL2_STOP		BIT(0)
 #define RV3032_CTRL2_EIE		BIT(2)
@@ -377,7 +376,7 @@ static int rv3032_read_offset(struct device *dev, long *offset)
 	if (ret < 0)
 		return ret;
 
-	steps = sign_extend32(FIELD_GET(RV3032_OFFSET_MSK, value), 5);
+	steps = FIELD_GET_SIGNED(RV3032_OFFSET_MSK, value);
 
 	*offset = DIV_ROUND_CLOSEST(steps * OFFSET_STEP_PPT, 1000);
 
@@ -647,19 +646,24 @@ static unsigned long rv3032_clkout_recalc_rate(struct clk_hw *hw,
 	return clkout_xtal_rates[FIELD_GET(RV3032_CLKOUT2_FD_MSK, clkout)];
 }
 
-static long rv3032_clkout_round_rate(struct clk_hw *hw, unsigned long rate,
-				     unsigned long *prate)
+static int rv3032_clkout_determine_rate(struct clk_hw *hw,
+					struct clk_rate_request *req)
 {
 	int i, hfd;
 
-	if (rate < RV3032_HFD_STEP)
+	if (req->rate < RV3032_HFD_STEP)
 		for (i = 0; i < ARRAY_SIZE(clkout_xtal_rates); i++)
-			if (clkout_xtal_rates[i] <= rate)
-				return clkout_xtal_rates[i];
+			if (clkout_xtal_rates[i] <= req->rate) {
+				req->rate = clkout_xtal_rates[i];
 
-	hfd = DIV_ROUND_CLOSEST(rate, RV3032_HFD_STEP);
+				return 0;
+			}
 
-	return RV3032_HFD_STEP * clamp(hfd, 0, 8192);
+	hfd = DIV_ROUND_CLOSEST(req->rate, RV3032_HFD_STEP);
+
+	req->rate = RV3032_HFD_STEP * clamp(hfd, 0, 8192);
+
+	return 0;
 }
 
 static int rv3032_clkout_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -739,7 +743,7 @@ static const struct clk_ops rv3032_clkout_ops = {
 	.unprepare = rv3032_clkout_unprepare,
 	.is_prepared = rv3032_clkout_is_prepared,
 	.recalc_rate = rv3032_clkout_recalc_rate,
-	.round_rate = rv3032_clkout_round_rate,
+	.determine_rate = rv3032_clkout_determine_rate,
 	.set_rate = rv3032_clkout_set_rate,
 };
 
@@ -947,11 +951,6 @@ static int rv3032_probe(struct i2c_client *client)
 	if (!client->irq)
 		clear_bit(RTC_FEATURE_ALARM, rv3032->rtc->features);
 
-	ret = regmap_update_bits(rv3032->regmap, RV3032_CTRL1,
-				 RV3032_CTRL1_WADA, RV3032_CTRL1_WADA);
-	if (ret)
-		return ret;
-
 	rv3032_trickle_charger_setup(&client->dev, rv3032);
 
 	set_bit(RTC_FEATURE_BACKUP_SWITCH_MODE, rv3032->rtc->features);
@@ -968,8 +967,6 @@ static int rv3032_probe(struct i2c_client *client)
 	devm_rtc_nvmem_register(rv3032->rtc, &nvmem_cfg);
 	eeprom_cfg.priv = rv3032;
 	devm_rtc_nvmem_register(rv3032->rtc, &eeprom_cfg);
-
-	rv3032->rtc->max_user_freq = 1;
 
 #ifdef CONFIG_COMMON_CLK
 	rv3032_clkout_register_clk(rv3032, client);

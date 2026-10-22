@@ -21,18 +21,6 @@
 		stdout-path = "serial0:115200n8";
 	};
 
-	cpus {
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		cpu: cpu@0 {
-			device_type = "cpu";
-			compatible = "arm,cortex-a35";
-			reg = <0>;
-			next-level-cache = <&L2_0>;
-		};
-	};
-
 	memory@88200000 {
 		device_type = "memory";
 		reg = <0x88200000 0x77e00000>;
@@ -108,7 +96,6 @@
 			reg = <0x1a220000 0x1000>;
 			#address-cells = <1>;
 			#size-cells = <1>;
-			clock-frequency = <50000000>;
 			ranges;
 
 			frame@1a230000 {

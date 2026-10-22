@@ -10,7 +10,6 @@
 #include <linux/array_size.h>
 #include <linux/bitmap.h>
 #include <linux/cleanup.h>
-#include <linux/completion.h>
 #include <linux/configfs.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -24,7 +23,6 @@
 #include <linux/list.h>
 #include <linux/lockdep.h>
 #include <linux/minmax.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/notifier.h>
@@ -38,7 +36,8 @@
 #include <linux/types.h>
 
 #define GPIO_SIM_NGPIO_MAX	1024
-#define GPIO_SIM_PROP_MAX	4 /* Max 3 properties + sentinel. */
+#define GPIO_SIM_PROP_MAX	5 /* Max 4 properties + sentinel. */
+#define GPIO_SIM_HOG_PROP_MAX	5
 #define GPIO_SIM_NUM_ATTRS	3 /* value, pull and sentinel */
 
 static DEFINE_IDA(gpio_sim_ida);
@@ -119,12 +118,14 @@ static int gpio_sim_get(struct gpio_chip *gc, unsigned int offset)
 	return !!test_bit(offset, chip->value_map);
 }
 
-static void gpio_sim_set(struct gpio_chip *gc, unsigned int offset, int value)
+static int gpio_sim_set(struct gpio_chip *gc, unsigned int offset, int value)
 {
 	struct gpio_sim_chip *chip = gpiochip_get_data(gc);
 
 	scoped_guard(mutex, &chip->lock)
 		__assign_bit(offset, chip->value_map, value);
+
+	return 0;
 }
 
 static int gpio_sim_get_multiple(struct gpio_chip *gc,
@@ -138,14 +139,16 @@ static int gpio_sim_get_multiple(struct gpio_chip *gc,
 	return 0;
 }
 
-static void gpio_sim_set_multiple(struct gpio_chip *gc,
-				  unsigned long *mask, unsigned long *bits)
+static int gpio_sim_set_multiple(struct gpio_chip *gc,
+				 unsigned long *mask, unsigned long *bits)
 {
 	struct gpio_sim_chip *chip = gpiochip_get_data(gc);
 
 	scoped_guard(mutex, &chip->lock)
 		bitmap_replace(chip->value_map, chip->value_map, bits, mask,
 			       gc->ngpio);
+
+	return 0;
 }
 
 static int gpio_sim_direction_output(struct gpio_chip *gc,
@@ -257,8 +260,7 @@ static void gpio_sim_dbg_show(struct seq_file *seq, struct gpio_chip *gc)
 	guard(mutex)(&chip->lock);
 
 	for_each_hwgpio(gc, i, label)
-		seq_printf(seq, " gpio-%-3d (%s) %s,%s\n",
-			   gc->base + i,
+		seq_printf(seq, " gpio-%-3d (%s) %s,%s\n", i,
 			   label ?: "<unused>",
 			   test_bit(i, chip->direction_map) ? "input" :
 				test_bit(i, chip->value_map) ? "output-high" :
@@ -541,14 +543,9 @@ static struct platform_driver gpio_sim_driver = {
 };
 
 struct gpio_sim_device {
+	struct platform_device *pdev;
 	struct config_group group;
 
-	/*
-	 * If pdev is NULL, the device is 'pending' (waiting for configuration).
-	 * Once the pointer is assigned, the device has been created and the
-	 * item is 'live'.
-	 */
-	struct platform_device *pdev;
 	int id;
 
 	/*
@@ -562,45 +559,8 @@ struct gpio_sim_device {
 	 */
 	struct mutex lock;
 
-	/*
-	 * This is used to synchronously wait for the driver's probe to complete
-	 * and notify the user-space about any errors.
-	 */
-	struct notifier_block bus_notifier;
-	struct completion probe_completion;
-	bool driver_bound;
-
-	struct gpiod_hog *hogs;
-
 	struct list_head bank_list;
 };
-
-/* This is called with dev->lock already taken. */
-static int gpio_sim_bus_notifier_call(struct notifier_block *nb,
-				      unsigned long action, void *data)
-{
-	struct gpio_sim_device *simdev = container_of(nb,
-						      struct gpio_sim_device,
-						      bus_notifier);
-	struct device *dev = data;
-	char devname[32];
-
-	snprintf(devname, sizeof(devname), "gpio-sim.%u", simdev->id);
-
-	if (!device_match_name(dev, devname))
-		return NOTIFY_DONE;
-
-	if (action == BUS_NOTIFY_BOUND_DRIVER)
-		simdev->driver_bound = true;
-	else if (action == BUS_NOTIFY_DRIVER_NOT_BOUND)
-		simdev->driver_bound = false;
-	else
-		return NOTIFY_DONE;
-
-	complete(&simdev->probe_completion);
-
-	return NOTIFY_OK;
-}
 
 static struct gpio_sim_device *to_gpio_sim_device(struct config_item *item)
 {
@@ -664,6 +624,7 @@ struct gpio_sim_line {
 
 	unsigned int offset;
 	char *name;
+	bool valid;
 
 	/* There can only be one hog per line. */
 	struct gpio_sim_hog *hog;
@@ -690,6 +651,7 @@ struct gpio_sim_hog {
 
 	char *name;
 	int dir;
+	bool active_low;
 };
 
 static struct gpio_sim_hog *to_gpio_sim_hog(struct config_item *item)
@@ -732,9 +694,9 @@ static ssize_t gpio_sim_device_config_dev_name_show(struct config_item *item,
 
 	pdev = dev->pdev;
 	if (pdev)
-		return sprintf(page, "%s\n", dev_name(&pdev->dev));
+		return sysfs_emit(page, "%s\n", dev_name(&pdev->dev));
 
-	return sprintf(page, "gpio-sim.%d\n", dev->id);
+	return sysfs_emit(page, "gpio-sim.%d\n", dev->id);
 }
 
 CONFIGFS_ATTR_RO(gpio_sim_device_config_, dev_name);
@@ -748,7 +710,7 @@ gpio_sim_device_config_live_show(struct config_item *item, char *page)
 	scoped_guard(mutex, &dev->lock)
 		live = gpio_sim_device_is_live(dev);
 
-	return sprintf(page, "%c\n", live ? '1' : '0');
+	return sysfs_emit(page, "%c\n", live ? '1' : '0');
 }
 
 static unsigned int gpio_sim_get_line_names_size(struct gpio_sim_bank *bank)
@@ -779,109 +741,44 @@ gpio_sim_set_line_names(struct gpio_sim_bank *bank, char **line_names)
 	}
 }
 
-static void gpio_sim_remove_hogs(struct gpio_sim_device *dev)
+static unsigned int gpio_sim_get_reserved_ranges_size(struct gpio_sim_bank *bank)
 {
-	struct gpiod_hog *hog;
+	struct gpio_sim_line *line;
+	unsigned int size = 0;
 
-	if (!dev->hogs)
-		return;
+	list_for_each_entry(line, &bank->line_list, siblings) {
+		if (line->valid)
+			continue;
 
-	gpiod_remove_hogs(dev->hogs);
-
-	for (hog = dev->hogs; hog->chip_label; hog++) {
-		kfree(hog->chip_label);
-		kfree(hog->line_name);
+		size += 2;
 	}
 
-	kfree(dev->hogs);
-	dev->hogs = NULL;
+	return size;
 }
 
-static int gpio_sim_add_hogs(struct gpio_sim_device *dev)
+static void gpio_sim_set_reserved_ranges(struct gpio_sim_bank *bank,
+					 u32 *ranges)
 {
-	unsigned int num_hogs = 0, idx = 0;
-	struct gpio_sim_bank *bank;
 	struct gpio_sim_line *line;
-	struct gpiod_hog *hog;
+	int i = 0;
 
-	list_for_each_entry(bank, &dev->bank_list, siblings) {
-		list_for_each_entry(line, &bank->line_list, siblings) {
-			if (line->offset >= bank->num_lines)
-				continue;
+	list_for_each_entry(line, &bank->line_list, siblings) {
+		if (line->valid)
+			continue;
 
-			if (line->hog)
-				num_hogs++;
-		}
+		ranges[i++] = line->offset;
+		ranges[i++] = 1;
 	}
-
-	if (!num_hogs)
-		return 0;
-
-	/* Allocate one more for the sentinel. */
-	dev->hogs = kcalloc(num_hogs + 1, sizeof(*dev->hogs), GFP_KERNEL);
-	if (!dev->hogs)
-		return -ENOMEM;
-
-	list_for_each_entry(bank, &dev->bank_list, siblings) {
-		list_for_each_entry(line, &bank->line_list, siblings) {
-			if (line->offset >= bank->num_lines)
-				continue;
-
-			if (!line->hog)
-				continue;
-
-			hog = &dev->hogs[idx++];
-
-			/*
-			 * We need to make this string manually because at this
-			 * point the device doesn't exist yet and so dev_name()
-			 * is not available.
-			 */
-			if (gpio_sim_bank_has_label(bank))
-				hog->chip_label = kstrdup(bank->label,
-							  GFP_KERNEL);
-			else
-				hog->chip_label = kasprintf(GFP_KERNEL,
-							"gpio-sim.%u:%pfwP",
-							dev->id,
-							bank->swnode);
-			if (!hog->chip_label) {
-				gpio_sim_remove_hogs(dev);
-				return -ENOMEM;
-			}
-
-			/*
-			 * We need to duplicate this because the hog config
-			 * item can be removed at any time (and we can't block
-			 * it) and gpiolib doesn't make a deep copy of the hog
-			 * data.
-			 */
-			if (line->hog->name) {
-				hog->line_name = kstrdup(line->hog->name,
-							 GFP_KERNEL);
-				if (!hog->line_name) {
-					gpio_sim_remove_hogs(dev);
-					return -ENOMEM;
-				}
-			}
-
-			hog->chip_hwnum = line->offset;
-			hog->dflags = line->hog->dir;
-		}
-	}
-
-	gpiod_add_hogs(dev->hogs);
-
-	return 0;
 }
 
 static struct fwnode_handle *
 gpio_sim_make_bank_swnode(struct gpio_sim_bank *bank,
 			  struct fwnode_handle *parent)
 {
+	unsigned int prop_idx = 0, line_names_size, ranges_size;
 	struct property_entry properties[GPIO_SIM_PROP_MAX];
-	unsigned int prop_idx = 0, line_names_size;
 	char **line_names __free(kfree) = NULL;
+	u32 *ranges __free(kfree) = NULL;
 
 	memset(properties, 0, sizeof(properties));
 
@@ -905,7 +802,69 @@ gpio_sim_make_bank_swnode(struct gpio_sim_bank *bank,
 						line_names, line_names_size);
 	}
 
+	ranges_size = gpio_sim_get_reserved_ranges_size(bank);
+	if (ranges_size) {
+		ranges = kcalloc(ranges_size, sizeof(u32), GFP_KERNEL);
+		if (!ranges)
+			return ERR_PTR(-ENOMEM);
+
+		gpio_sim_set_reserved_ranges(bank, ranges);
+
+		properties[prop_idx++] = PROPERTY_ENTRY_U32_ARRAY_LEN(
+						"gpio-reserved-ranges",
+						ranges, ranges_size);
+	}
+
 	return fwnode_create_software_node(properties, parent);
+}
+
+static int gpio_sim_bank_add_hogs(struct gpio_sim_bank *bank)
+{
+	struct property_entry properties[GPIO_SIM_HOG_PROP_MAX];
+	struct fwnode_handle *swnode;
+	struct gpio_sim_line *line;
+	struct gpio_sim_hog *hog;
+	unsigned int idx;
+	u32 gpios[2];
+
+	list_for_each_entry(line, &bank->line_list, siblings) {
+		if (!line->hog)
+			continue;
+
+		hog = line->hog;
+
+		gpios[0] = line->offset;
+		gpios[1] = hog->active_low ? 1 : 0;
+
+		memset(properties, 0, sizeof(properties));
+
+		idx = 0;
+		properties[idx++] = PROPERTY_ENTRY_BOOL("gpio-hog");
+		properties[idx++] = PROPERTY_ENTRY_U32_ARRAY("gpios", gpios);
+		properties[idx++] = PROPERTY_ENTRY_STRING("line-name", hog->name);
+
+		switch (hog->dir) {
+		case GPIOD_IN:
+			properties[idx++] = PROPERTY_ENTRY_BOOL("input");
+			break;
+		case GPIOD_OUT_HIGH:
+			properties[idx++] = PROPERTY_ENTRY_BOOL("output-high");
+			break;
+		case GPIOD_OUT_LOW:
+			properties[idx++] = PROPERTY_ENTRY_BOOL("output-low");
+			break;
+		default:
+			/* Would have been validated at configfs store. */
+			WARN(1, "Unexpected hog direction value: %d", hog->dir);
+			return -EINVAL;
+		}
+
+		swnode = fwnode_create_software_node(properties, bank->swnode);
+		if (IS_ERR(swnode))
+			return PTR_ERR(swnode);
+	}
+
+	return 0;
 }
 
 static void gpio_sim_remove_swnode_recursive(struct fwnode_handle *swnode)
@@ -913,7 +872,7 @@ static void gpio_sim_remove_swnode_recursive(struct fwnode_handle *swnode)
 	struct fwnode_handle *child;
 
 	fwnode_for_each_child_node(swnode, child)
-		fwnode_remove_software_node(child);
+		gpio_sim_remove_swnode_recursive(child);
 
 	fwnode_remove_software_node(swnode);
 }
@@ -938,10 +897,10 @@ static bool gpio_sim_bank_labels_non_unique(struct gpio_sim_device *dev)
 static int gpio_sim_device_activate(struct gpio_sim_device *dev)
 {
 	struct platform_device_info pdevinfo;
-	struct fwnode_handle *swnode;
 	struct platform_device *pdev;
+	struct fwnode_handle *swnode;
 	struct gpio_sim_bank *bank;
-	int ret;
+	int ret = 0;
 
 	lockdep_assert_held(&dev->lock);
 
@@ -966,47 +925,42 @@ static int gpio_sim_device_activate(struct gpio_sim_device *dev)
 		bank->swnode = gpio_sim_make_bank_swnode(bank, swnode);
 		if (IS_ERR(bank->swnode)) {
 			ret = PTR_ERR(bank->swnode);
-			gpio_sim_remove_swnode_recursive(swnode);
-			return ret;
+			goto err_remove_swnode;
 		}
-	}
 
-	ret = gpio_sim_add_hogs(dev);
-	if (ret) {
-		gpio_sim_remove_swnode_recursive(swnode);
-		return ret;
+		ret = gpio_sim_bank_add_hogs(bank);
+		if (ret)
+			goto err_remove_swnode;
 	}
 
 	pdevinfo.name = "gpio-sim";
 	pdevinfo.fwnode = swnode;
 	pdevinfo.id = dev->id;
 
-	reinit_completion(&dev->probe_completion);
-	dev->driver_bound = false;
-	bus_register_notifier(&platform_bus_type, &dev->bus_notifier);
-
 	pdev = platform_device_register_full(&pdevinfo);
 	if (IS_ERR(pdev)) {
-		bus_unregister_notifier(&platform_bus_type, &dev->bus_notifier);
-		gpio_sim_remove_hogs(dev);
-		gpio_sim_remove_swnode_recursive(swnode);
-		return PTR_ERR(pdev);
+		ret = PTR_ERR(pdev);
+		goto err_remove_swnode;
 	}
 
-	wait_for_completion(&dev->probe_completion);
-	bus_unregister_notifier(&platform_bus_type, &dev->bus_notifier);
+	wait_for_device_probe();
 
-	if (!dev->driver_bound) {
-		/* Probe failed, check kernel log. */
-		platform_device_unregister(pdev);
-		gpio_sim_remove_hogs(dev);
-		gpio_sim_remove_swnode_recursive(swnode);
-		return -ENXIO;
+	scoped_guard(device, &pdev->dev) {
+		if (!device_is_bound(&pdev->dev)) {
+			ret = -ENXIO;
+			goto err_unregister_pdev;
+		}
 	}
 
 	dev->pdev = pdev;
-
 	return 0;
+
+err_unregister_pdev:
+	platform_device_unregister(pdev);
+err_remove_swnode:
+	gpio_sim_remove_swnode_recursive(swnode);
+
+	return ret;
 }
 
 static void gpio_sim_device_deactivate(struct gpio_sim_device *dev)
@@ -1017,9 +971,8 @@ static void gpio_sim_device_deactivate(struct gpio_sim_device *dev)
 
 	swnode = dev_fwnode(&dev->pdev->dev);
 	platform_device_unregister(dev->pdev);
-	gpio_sim_remove_hogs(dev);
-	gpio_sim_remove_swnode_recursive(swnode);
 	dev->pdev = NULL;
+	gpio_sim_remove_swnode_recursive(swnode);
 }
 
 static void
@@ -1105,7 +1058,7 @@ static int gpio_sim_emit_chip_name(struct device *dev, void *data)
 		return 0;
 
 	if (device_match_fwnode(dev, ctx->swnode))
-		return sprintf(ctx->page, "%s\n", dev_name(dev));
+		return sysfs_emit(ctx->page, "%s\n", dev_name(dev));
 
 	return 0;
 }
@@ -1123,7 +1076,7 @@ static ssize_t gpio_sim_bank_config_chip_name_show(struct config_item *item,
 		return device_for_each_child(&dev->pdev->dev, &ctx,
 					     gpio_sim_emit_chip_name);
 
-	return sprintf(page, "none\n");
+	return sysfs_emit(page, "none\n");
 }
 
 CONFIGFS_ATTR_RO(gpio_sim_bank_config_, chip_name);
@@ -1136,7 +1089,7 @@ gpio_sim_bank_config_label_show(struct config_item *item, char *page)
 
 	guard(mutex)(&dev->lock);
 
-	return sprintf(page, "%s\n", bank->label ?: "");
+	return sysfs_emit(page, "%s\n", bank->label ?: "");
 }
 
 static ssize_t gpio_sim_bank_config_label_store(struct config_item *item,
@@ -1171,7 +1124,7 @@ gpio_sim_bank_config_num_lines_show(struct config_item *item, char *page)
 
 	guard(mutex)(&dev->lock);
 
-	return sprintf(page, "%u\n", bank->num_lines);
+	return sysfs_emit(page, "%u\n", bank->num_lines);
 }
 
 static ssize_t
@@ -1217,7 +1170,7 @@ gpio_sim_line_config_name_show(struct config_item *item, char *page)
 
 	guard(mutex)(&dev->lock);
 
-	return sprintf(page, "%s\n", line->name ?: "");
+	return sysfs_emit(page, "%s\n", line->name ?: "");
 }
 
 static ssize_t gpio_sim_line_config_name_store(struct config_item *item,
@@ -1244,8 +1197,41 @@ static ssize_t gpio_sim_line_config_name_store(struct config_item *item,
 
 CONFIGFS_ATTR(gpio_sim_line_config_, name);
 
+static ssize_t
+gpio_sim_line_config_valid_show(struct config_item *item, char *page)
+{
+	struct gpio_sim_line *line = to_gpio_sim_line(item);
+	struct gpio_sim_device *dev = gpio_sim_line_get_device(line);
+
+	guard(mutex)(&dev->lock);
+
+	return sysfs_emit(page, "%c\n", line->valid ? '1' : '0');
+}
+
+static ssize_t gpio_sim_line_config_valid_store(struct config_item *item,
+						const char *page, size_t count)
+{
+	struct gpio_sim_line *line = to_gpio_sim_line(item);
+	struct gpio_sim_device *dev = gpio_sim_line_get_device(line);
+	bool valid;
+	int ret;
+
+	ret = kstrtobool(page, &valid);
+	if (ret)
+		return ret;
+
+	guard(mutex)(&dev->lock);
+
+	line->valid = valid;
+
+	return count;
+}
+
+CONFIGFS_ATTR(gpio_sim_line_config_, valid);
+
 static struct configfs_attribute *gpio_sim_line_config_attrs[] = {
 	&gpio_sim_line_config_attr_name,
+	&gpio_sim_line_config_attr_valid,
 	NULL
 };
 
@@ -1257,7 +1243,7 @@ static ssize_t gpio_sim_hog_config_name_show(struct config_item *item,
 
 	guard(mutex)(&dev->lock);
 
-	return sprintf(page, "%s\n", hog->name ?: "");
+	return sysfs_emit(page, "%s\n", hog->name ?: "");
 }
 
 static ssize_t gpio_sim_hog_config_name_store(struct config_item *item,
@@ -1311,7 +1297,7 @@ static ssize_t gpio_sim_hog_config_direction_show(struct config_item *item,
 		return -EINVAL;
 	}
 
-	return sprintf(page, "%s\n", repr);
+	return sysfs_emit(page, "%s\n", repr);
 }
 
 static ssize_t
@@ -1343,9 +1329,46 @@ gpio_sim_hog_config_direction_store(struct config_item *item,
 
 CONFIGFS_ATTR(gpio_sim_hog_config_, direction);
 
+static ssize_t gpio_sim_hog_config_active_low_show(struct config_item *item,
+						   char *page)
+{
+	struct gpio_sim_hog *hog = to_gpio_sim_hog(item);
+	struct gpio_sim_device *dev = gpio_sim_hog_get_device(hog);
+
+	guard(mutex)(&dev->lock);
+
+	return sysfs_emit(page, "%c\n", hog->active_low ? '1' : '0');
+}
+
+static ssize_t
+gpio_sim_hog_config_active_low_store(struct config_item *item,
+				     const char *page, size_t count)
+{
+	struct gpio_sim_hog *hog = to_gpio_sim_hog(item);
+	struct gpio_sim_device *dev = gpio_sim_hog_get_device(hog);
+	bool active_low;
+	int ret;
+
+	guard(mutex)(&dev->lock);
+
+	if (gpio_sim_device_is_live(dev))
+		return -EBUSY;
+
+	ret = kstrtobool(page, &active_low);
+	if (ret)
+		return ret;
+
+	hog->active_low = active_low;
+
+	return count;
+}
+
+CONFIGFS_ATTR(gpio_sim_hog_config_, active_low);
+
 static struct configfs_attribute *gpio_sim_hog_config_attrs[] = {
 	&gpio_sim_hog_config_attr_name,
 	&gpio_sim_hog_config_attr_direction,
+	&gpio_sim_hog_config_attr_active_low,
 	NULL
 };
 
@@ -1362,7 +1385,7 @@ static void gpio_sim_hog_config_item_release(struct config_item *item)
 	kfree(hog);
 }
 
-static struct configfs_item_operations gpio_sim_hog_config_item_ops = {
+static const struct configfs_item_operations gpio_sim_hog_config_item_ops = {
 	.release	= gpio_sim_hog_config_item_release,
 };
 
@@ -1384,7 +1407,7 @@ gpio_sim_line_config_make_hog_item(struct config_group *group, const char *name)
 
 	guard(mutex)(&dev->lock);
 
-	hog = kzalloc(sizeof(*hog), GFP_KERNEL);
+	hog = kzalloc_obj(*hog);
 	if (!hog)
 		return ERR_PTR(-ENOMEM);
 
@@ -1411,11 +1434,11 @@ static void gpio_sim_line_config_group_release(struct config_item *item)
 	kfree(line);
 }
 
-static struct configfs_item_operations gpio_sim_line_config_item_ops = {
+static const struct configfs_item_operations gpio_sim_line_config_item_ops = {
 	.release	= gpio_sim_line_config_group_release,
 };
 
-static struct configfs_group_operations gpio_sim_line_config_group_ops = {
+static const struct configfs_group_operations gpio_sim_line_config_group_ops = {
 	.make_item	= gpio_sim_line_config_make_hog_item,
 };
 
@@ -1445,7 +1468,7 @@ gpio_sim_bank_config_make_line_group(struct config_group *group,
 	if (gpio_sim_device_is_live(dev))
 		return ERR_PTR(-EBUSY);
 
-	line = kzalloc(sizeof(*line), GFP_KERNEL);
+	line = kzalloc_obj(*line);
 	if (!line)
 		return ERR_PTR(-ENOMEM);
 
@@ -1454,6 +1477,7 @@ gpio_sim_bank_config_make_line_group(struct config_group *group,
 
 	line->parent = bank;
 	line->offset = offset;
+	line->valid = true;
 	list_add_tail(&line->siblings, &bank->line_list);
 
 	return &line->group;
@@ -1471,11 +1495,11 @@ static void gpio_sim_bank_config_group_release(struct config_item *item)
 	kfree(bank);
 }
 
-static struct configfs_item_operations gpio_sim_bank_config_item_ops = {
+static const struct configfs_item_operations gpio_sim_bank_config_item_ops = {
 	.release	= gpio_sim_bank_config_group_release,
 };
 
-static struct configfs_group_operations gpio_sim_bank_config_group_ops = {
+static const struct configfs_group_operations gpio_sim_bank_config_group_ops = {
 	.make_group	= gpio_sim_bank_config_make_line_group,
 };
 
@@ -1498,7 +1522,7 @@ gpio_sim_device_config_make_bank_group(struct config_group *group,
 	if (gpio_sim_device_is_live(dev))
 		return ERR_PTR(-EBUSY);
 
-	bank = kzalloc(sizeof(*bank), GFP_KERNEL);
+	bank = kzalloc_obj(*bank);
 	if (!bank)
 		return ERR_PTR(-ENOMEM);
 
@@ -1526,11 +1550,11 @@ static void gpio_sim_device_config_group_release(struct config_item *item)
 	kfree(dev);
 }
 
-static struct configfs_item_operations gpio_sim_device_config_item_ops = {
+static const struct configfs_item_operations gpio_sim_device_config_item_ops = {
 	.release	= gpio_sim_device_config_group_release,
 };
 
-static struct configfs_group_operations gpio_sim_device_config_group_ops = {
+static const struct configfs_group_operations gpio_sim_device_config_group_ops = {
 	.make_group	= gpio_sim_device_config_make_bank_group,
 };
 
@@ -1546,8 +1570,7 @@ gpio_sim_config_make_device_group(struct config_group *group, const char *name)
 {
 	int id;
 
-	struct gpio_sim_device *dev __free(kfree) = kzalloc(sizeof(*dev),
-							    GFP_KERNEL);
+	struct gpio_sim_device *dev __free(kfree) = kzalloc_obj(*dev);
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -1561,13 +1584,10 @@ gpio_sim_config_make_device_group(struct config_group *group, const char *name)
 	mutex_init(&dev->lock);
 	INIT_LIST_HEAD(&dev->bank_list);
 
-	dev->bus_notifier.notifier_call = gpio_sim_bus_notifier_call;
-	init_completion(&dev->probe_completion);
-
 	return &no_free_ptr(dev)->group;
 }
 
-static struct configfs_group_operations gpio_sim_config_group_ops = {
+static const struct configfs_group_operations gpio_sim_config_group_ops = {
 	.make_group	= gpio_sim_config_make_device_group,
 };
 

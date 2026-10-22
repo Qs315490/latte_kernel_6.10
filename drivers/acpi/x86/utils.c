@@ -82,6 +82,18 @@ static const struct override_status_id override_status_ids[] = {
 	      }),
 
 	/*
+	 * Lenovo Yoga Book uses PWM2 for touch keyboard backlight control.
+	 * It needs to be enabled only for the Android device version (YB1-X90*
+	 * aka YETI-11); the Windows version (YB1-X91*) uses ACPI control
+	 * methods.
+	 */
+	PRESENT_ENTRY_HID("80862289", "2", INTEL_ATOM_AIRMONT, {
+		DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Intel Corporation"),
+		DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "CHERRYVIEW D1 PLATFORM"),
+		DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "YETI-11"),
+	      }),
+
+	/*
 	 * The INT0002 device is necessary to clear wakeup interrupt sources
 	 * on Cherry Trail devices, without it we get nobody cared IRQ msgs.
 	 */
@@ -374,7 +386,8 @@ static const struct dmi_system_id acpi_quirk_skip_dmi_ids[] = {
 			DMI_MATCH(DMI_PRODUCT_VERSION, "Blade3-10A-001"),
 		},
 		.driver_data = (void *)(ACPI_QUIRK_SKIP_I2C_CLIENTS |
-					ACPI_QUIRK_SKIP_ACPI_AC_AND_BATTERY),
+					ACPI_QUIRK_SKIP_ACPI_AC_AND_BATTERY |
+					ACPI_QUIRK_SKIP_GPIO_EVENT_HANDLERS),
 	},
 	{
 		/* Medion Lifetab S10346 */

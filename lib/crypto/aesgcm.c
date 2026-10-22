@@ -5,31 +5,10 @@
  * Copyright 2022 Google LLC
  */
 
-#include <linux/module.h>
-
-#include <crypto/algapi.h>
 #include <crypto/gcm.h>
-#include <crypto/ghash.h>
-
-#include <asm/irqflags.h>
-
-static void aesgcm_encrypt_block(const struct crypto_aes_ctx *ctx, void *dst,
-				 const void *src)
-{
-	unsigned long flags;
-
-	/*
-	 * In AES-GCM, both the GHASH key derivation and the CTR mode
-	 * encryption operate on known plaintext, making them susceptible to
-	 * timing attacks on the encryption key. The AES library already
-	 * mitigates this risk to some extent by pulling the entire S-box into
-	 * the caches before doing any substitutions, but this strategy is more
-	 * effective when running with interrupts disabled.
-	 */
-	local_irq_save(flags);
-	aes_encrypt(ctx, dst, src);
-	local_irq_restore(flags);
-}
+#include <crypto/utils.h>
+#include <linux/export.h>
+#include <linux/module.h>
 
 /**
  * aesgcm_expandkey - Expands the AES and GHASH keys for the AES-GCM key
@@ -46,32 +25,21 @@ static void aesgcm_encrypt_block(const struct crypto_aes_ctx *ctx, void *dst,
 int aesgcm_expandkey(struct aesgcm_ctx *ctx, const u8 *key,
 		     unsigned int keysize, unsigned int authsize)
 {
-	u8 kin[AES_BLOCK_SIZE] = {};
+	u8 h[AES_BLOCK_SIZE] = {};
 	int ret;
 
 	ret = crypto_gcm_check_authsize(authsize) ?:
-	      aes_expandkey(&ctx->aes_ctx, key, keysize);
+	      aes_prepareenckey(&ctx->aes_key, key, keysize);
 	if (ret)
 		return ret;
 
 	ctx->authsize = authsize;
-	aesgcm_encrypt_block(&ctx->aes_ctx, &ctx->ghash_key, kin);
-
+	aes_encrypt(&ctx->aes_key, h, h);
+	ghash_preparekey(&ctx->ghash_key, h);
+	memzero_explicit(h, sizeof(h));
 	return 0;
 }
 EXPORT_SYMBOL(aesgcm_expandkey);
-
-static void aesgcm_ghash(be128 *ghash, const be128 *key, const void *src,
-			 int len)
-{
-	while (len > 0) {
-		crypto_xor((u8 *)ghash, src, min(len, GHASH_BLOCK_SIZE));
-		gf128mul_lle(ghash, key);
-
-		src += GHASH_BLOCK_SIZE;
-		len -= GHASH_BLOCK_SIZE;
-	}
-}
 
 /**
  * aesgcm_mac - Generates the authentication tag using AES-GCM algorithm.
@@ -89,20 +57,33 @@ static void aesgcm_ghash(be128 *ghash, const be128 *key, const void *src,
 static void aesgcm_mac(const struct aesgcm_ctx *ctx, const u8 *src, int src_len,
 		       const u8 *assoc, int assoc_len, __be32 *ctr, u8 *authtag)
 {
-	be128 tail = { cpu_to_be64(assoc_len * 8), cpu_to_be64(src_len * 8) };
-	u8 buf[AES_BLOCK_SIZE];
-	be128 ghash = {};
+	static const u8 zeroes[GHASH_BLOCK_SIZE];
+	__be64 tail[2] = {
+		cpu_to_be64((u64)assoc_len * 8),
+		cpu_to_be64((u64)src_len * 8),
+	};
+	struct ghash_ctx ghash;
+	u8 ghash_out[AES_BLOCK_SIZE];
+	u8 enc_ctr[AES_BLOCK_SIZE];
 
-	aesgcm_ghash(&ghash, &ctx->ghash_key, assoc, assoc_len);
-	aesgcm_ghash(&ghash, &ctx->ghash_key, src, src_len);
-	aesgcm_ghash(&ghash, &ctx->ghash_key, &tail, sizeof(tail));
+	ghash_init(&ghash, &ctx->ghash_key);
+
+	ghash_update(&ghash, assoc, assoc_len);
+	ghash_update(&ghash, zeroes, -assoc_len & (GHASH_BLOCK_SIZE - 1));
+
+	ghash_update(&ghash, src, src_len);
+	ghash_update(&ghash, zeroes, -src_len & (GHASH_BLOCK_SIZE - 1));
+
+	ghash_update(&ghash, (const u8 *)&tail, sizeof(tail));
+
+	ghash_final(&ghash, ghash_out);
 
 	ctr[3] = cpu_to_be32(1);
-	aesgcm_encrypt_block(&ctx->aes_ctx, buf, ctr);
-	crypto_xor_cpy(authtag, buf, (u8 *)&ghash, ctx->authsize);
+	aes_encrypt(&ctx->aes_key, enc_ctr, (const u8 *)ctr);
+	crypto_xor_cpy(authtag, ghash_out, enc_ctr, ctx->authsize);
 
-	memzero_explicit(&ghash, sizeof(ghash));
-	memzero_explicit(buf, sizeof(buf));
+	memzero_explicit(ghash_out, sizeof(ghash_out));
+	memzero_explicit(enc_ctr, sizeof(enc_ctr));
 }
 
 static void aesgcm_crypt(const struct aesgcm_ctx *ctx, u8 *dst, const u8 *src,
@@ -120,7 +101,7 @@ static void aesgcm_crypt(const struct aesgcm_ctx *ctx, u8 *dst, const u8 *src,
 		 * len', this cannot happen, so no explicit test is necessary.
 		 */
 		ctr[3] = cpu_to_be32(n++);
-		aesgcm_encrypt_block(&ctx->aes_ctx, buf, ctr);
+		aes_encrypt(&ctx->aes_key, buf, (const u8 *)ctr);
 		crypto_xor_cpy(dst, src, buf, min(len, AES_BLOCK_SIZE));
 
 		dst += AES_BLOCK_SIZE;
@@ -199,25 +180,25 @@ MODULE_DESCRIPTION("Generic AES-GCM library");
 MODULE_AUTHOR("Ard Biesheuvel <ardb@kernel.org>");
 MODULE_LICENSE("GPL");
 
-#ifndef CONFIG_CRYPTO_MANAGER_DISABLE_TESTS
+#ifdef CONFIG_CRYPTO_SELFTESTS
 
 /*
  * Test code below. Vectors taken from crypto/testmgr.h
  */
 
-static const u8 __initconst ctext0[16] =
+static const u8 __initconst ctext0[16] __nonstring =
 	"\x58\xe2\xfc\xce\xfa\x7e\x30\x61"
 	"\x36\x7f\x1d\x57\xa4\xe7\x45\x5a";
 
 static const u8 __initconst ptext1[16];
 
-static const u8 __initconst ctext1[32] =
+static const u8 __initconst ctext1[32] __nonstring =
 	"\x03\x88\xda\xce\x60\xb6\xa3\x92"
 	"\xf3\x28\xc2\xb9\x71\xb2\xfe\x78"
 	"\xab\x6e\x47\xd4\x2c\xec\x13\xbd"
 	"\xf5\x3a\x67\xb2\x12\x57\xbd\xdf";
 
-static const u8 __initconst ptext2[64] =
+static const u8 __initconst ptext2[64] __nonstring =
 	"\xd9\x31\x32\x25\xf8\x84\x06\xe5"
 	"\xa5\x59\x09\xc5\xaf\xf5\x26\x9a"
 	"\x86\xa7\xa9\x53\x15\x34\xf7\xda"
@@ -227,7 +208,7 @@ static const u8 __initconst ptext2[64] =
 	"\xb1\x6a\xed\xf5\xaa\x0d\xe6\x57"
 	"\xba\x63\x7b\x39\x1a\xaf\xd2\x55";
 
-static const u8 __initconst ctext2[80] =
+static const u8 __initconst ctext2[80] __nonstring =
 	"\x42\x83\x1e\xc2\x21\x77\x74\x24"
 	"\x4b\x72\x21\xb7\x84\xd0\xd4\x9c"
 	"\xe3\xaa\x21\x2f\x2c\x02\xa4\xe0"
@@ -239,7 +220,7 @@ static const u8 __initconst ctext2[80] =
 	"\x4d\x5c\x2a\xf3\x27\xcd\x64\xa6"
 	"\x2c\xf3\x5a\xbd\x2b\xa6\xfa\xb4";
 
-static const u8 __initconst ptext3[60] =
+static const u8 __initconst ptext3[60] __nonstring =
 	"\xd9\x31\x32\x25\xf8\x84\x06\xe5"
 	"\xa5\x59\x09\xc5\xaf\xf5\x26\x9a"
 	"\x86\xa7\xa9\x53\x15\x34\xf7\xda"
@@ -249,7 +230,7 @@ static const u8 __initconst ptext3[60] =
 	"\xb1\x6a\xed\xf5\xaa\x0d\xe6\x57"
 	"\xba\x63\x7b\x39";
 
-static const u8 __initconst ctext3[76] =
+static const u8 __initconst ctext3[76] __nonstring =
 	"\x42\x83\x1e\xc2\x21\x77\x74\x24"
 	"\x4b\x72\x21\xb7\x84\xd0\xd4\x9c"
 	"\xe3\xaa\x21\x2f\x2c\x02\xa4\xe0"
@@ -261,17 +242,17 @@ static const u8 __initconst ctext3[76] =
 	"\x5b\xc9\x4f\xbc\x32\x21\xa5\xdb"
 	"\x94\xfa\xe9\x5a\xe7\x12\x1a\x47";
 
-static const u8 __initconst ctext4[16] =
+static const u8 __initconst ctext4[16] __nonstring =
 	"\xcd\x33\xb2\x8a\xc7\x73\xf7\x4b"
 	"\xa0\x0e\xd1\xf3\x12\x57\x24\x35";
 
-static const u8 __initconst ctext5[32] =
+static const u8 __initconst ctext5[32] __nonstring =
 	"\x98\xe7\x24\x7c\x07\xf0\xfe\x41"
 	"\x1c\x26\x7e\x43\x84\xb0\xf6\x00"
 	"\x2f\xf5\x8d\x80\x03\x39\x27\xab"
 	"\x8e\xf4\xd4\x58\x75\x14\xf0\xfb";
 
-static const u8 __initconst ptext6[64] =
+static const u8 __initconst ptext6[64] __nonstring =
 	"\xd9\x31\x32\x25\xf8\x84\x06\xe5"
 	"\xa5\x59\x09\xc5\xaf\xf5\x26\x9a"
 	"\x86\xa7\xa9\x53\x15\x34\xf7\xda"
@@ -281,7 +262,7 @@ static const u8 __initconst ptext6[64] =
 	"\xb1\x6a\xed\xf5\xaa\x0d\xe6\x57"
 	"\xba\x63\x7b\x39\x1a\xaf\xd2\x55";
 
-static const u8 __initconst ctext6[80] =
+static const u8 __initconst ctext6[80] __nonstring =
 	"\x39\x80\xca\x0b\x3c\x00\xe8\x41"
 	"\xeb\x06\xfa\xc4\x87\x2a\x27\x57"
 	"\x85\x9e\x1c\xea\xa6\xef\xd9\x84"
@@ -293,17 +274,17 @@ static const u8 __initconst ctext6[80] =
 	"\x99\x24\xa7\xc8\x58\x73\x36\xbf"
 	"\xb1\x18\x02\x4d\xb8\x67\x4a\x14";
 
-static const u8 __initconst ctext7[16] =
+static const u8 __initconst ctext7[16] __nonstring =
 	"\x53\x0f\x8a\xfb\xc7\x45\x36\xb9"
 	"\xa9\x63\xb4\xf1\xc4\xcb\x73\x8b";
 
-static const u8 __initconst ctext8[32] =
+static const u8 __initconst ctext8[32] __nonstring =
 	"\xce\xa7\x40\x3d\x4d\x60\x6b\x6e"
 	"\x07\x4e\xc5\xd3\xba\xf3\x9d\x18"
 	"\xd0\xd1\xc8\xa7\x99\x99\x6b\xf0"
 	"\x26\x5b\x98\xb5\xd4\x8a\xb9\x19";
 
-static const u8 __initconst ptext9[64] =
+static const u8 __initconst ptext9[64] __nonstring =
 	"\xd9\x31\x32\x25\xf8\x84\x06\xe5"
 	"\xa5\x59\x09\xc5\xaf\xf5\x26\x9a"
 	"\x86\xa7\xa9\x53\x15\x34\xf7\xda"
@@ -313,7 +294,7 @@ static const u8 __initconst ptext9[64] =
 	"\xb1\x6a\xed\xf5\xaa\x0d\xe6\x57"
 	"\xba\x63\x7b\x39\x1a\xaf\xd2\x55";
 
-static const u8 __initconst ctext9[80] =
+static const u8 __initconst ctext9[80] __nonstring =
 	"\x52\x2d\xc1\xf0\x99\x56\x7d\x07"
 	"\xf4\x7f\x37\xa3\x2a\x84\x42\x7d"
 	"\x64\x3a\x8c\xdc\xbf\xe5\xc0\xc9"
@@ -325,7 +306,7 @@ static const u8 __initconst ctext9[80] =
 	"\xb0\x94\xda\xc5\xd9\x34\x71\xbd"
 	"\xec\x1a\x50\x22\x70\xe3\xcc\x6c";
 
-static const u8 __initconst ptext10[60] =
+static const u8 __initconst ptext10[60] __nonstring =
 	"\xd9\x31\x32\x25\xf8\x84\x06\xe5"
 	"\xa5\x59\x09\xc5\xaf\xf5\x26\x9a"
 	"\x86\xa7\xa9\x53\x15\x34\xf7\xda"
@@ -335,7 +316,7 @@ static const u8 __initconst ptext10[60] =
 	"\xb1\x6a\xed\xf5\xaa\x0d\xe6\x57"
 	"\xba\x63\x7b\x39";
 
-static const u8 __initconst ctext10[76] =
+static const u8 __initconst ctext10[76] __nonstring =
 	"\x52\x2d\xc1\xf0\x99\x56\x7d\x07"
 	"\xf4\x7f\x37\xa3\x2a\x84\x42\x7d"
 	"\x64\x3a\x8c\xdc\xbf\xe5\xc0\xc9"
@@ -347,7 +328,7 @@ static const u8 __initconst ctext10[76] =
 	"\x76\xfc\x6e\xce\x0f\x4e\x17\x68"
 	"\xcd\xdf\x88\x53\xbb\x2d\x55\x1b";
 
-static const u8 __initconst ptext11[60] =
+static const u8 __initconst ptext11[60] __nonstring =
 	"\xd9\x31\x32\x25\xf8\x84\x06\xe5"
 	"\xa5\x59\x09\xc5\xaf\xf5\x26\x9a"
 	"\x86\xa7\xa9\x53\x15\x34\xf7\xda"
@@ -357,7 +338,7 @@ static const u8 __initconst ptext11[60] =
 	"\xb1\x6a\xed\xf5\xaa\x0d\xe6\x57"
 	"\xba\x63\x7b\x39";
 
-static const u8 __initconst ctext11[76] =
+static const u8 __initconst ctext11[76] __nonstring =
 	"\x39\x80\xca\x0b\x3c\x00\xe8\x41"
 	"\xeb\x06\xfa\xc4\x87\x2a\x27\x57"
 	"\x85\x9e\x1c\xea\xa6\xef\xd9\x84"
@@ -369,7 +350,7 @@ static const u8 __initconst ctext11[76] =
 	"\x25\x19\x49\x8e\x80\xf1\x47\x8f"
 	"\x37\xba\x55\xbd\x6d\x27\x61\x8c";
 
-static const u8 __initconst ptext12[719] =
+static const u8 __initconst ptext12[719] __nonstring =
 	"\x42\xc1\xcc\x08\x48\x6f\x41\x3f"
 	"\x2f\x11\x66\x8b\x2a\x16\xf0\xe0"
 	"\x58\x83\xf0\xc3\x70\x14\xc0\x5b"
@@ -461,7 +442,7 @@ static const u8 __initconst ptext12[719] =
 	"\x59\xfa\xfa\xaa\x44\x04\x01\xa7"
 	"\xa4\x78\xdb\x74\x3d\x8b\xb5";
 
-static const u8 __initconst ctext12[735] =
+static const u8 __initconst ctext12[735] __nonstring =
 	"\x84\x0b\xdb\xd5\xb7\xa8\xfe\x20"
 	"\xbb\xb1\x12\x7f\x41\xea\xb3\xc0"
 	"\xa2\xb4\x37\x19\x11\x58\xb6\x0b"
@@ -559,9 +540,9 @@ static struct {
 	const u8	*ptext;
 	const u8	*ctext;
 
-	u8		key[AES_MAX_KEY_SIZE];
-	u8		iv[GCM_AES_IV_SIZE];
-	u8		assoc[20];
+	u8		key[AES_MAX_KEY_SIZE] __nonstring;
+	u8		iv[GCM_AES_IV_SIZE] __nonstring;
+	u8		assoc[20] __nonstring;
 
 	int		klen;
 	int		clen;

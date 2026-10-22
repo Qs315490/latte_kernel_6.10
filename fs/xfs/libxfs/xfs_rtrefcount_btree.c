@@ -3,7 +3,7 @@
  * Copyright (c) 2021-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -156,8 +156,8 @@ xfs_rtrefcountbt_init_ptr_from_cur(
 	ptr->l = 0;
 }
 
-STATIC int64_t
-xfs_rtrefcountbt_key_diff(
+STATIC int
+xfs_rtrefcountbt_cmp_key_with_cur(
 	struct xfs_btree_cur		*cur,
 	const union xfs_btree_key	*key)
 {
@@ -167,11 +167,11 @@ xfs_rtrefcountbt_key_diff(
 
 	start = xfs_refcount_encode_startblock(irec->rc_startblock,
 			irec->rc_domain);
-	return (int64_t)be32_to_cpu(kp->rc_startblock) - start;
+	return cmp_int(be32_to_cpu(kp->rc_startblock), start);
 }
 
-STATIC int64_t
-xfs_rtrefcountbt_diff_two_keys(
+STATIC int
+xfs_rtrefcountbt_cmp_two_keys(
 	struct xfs_btree_cur		*cur,
 	const union xfs_btree_key	*k1,
 	const union xfs_btree_key	*k2,
@@ -179,8 +179,8 @@ xfs_rtrefcountbt_diff_two_keys(
 {
 	ASSERT(!mask || mask->refc.rc_startblock);
 
-	return (int64_t)be32_to_cpu(k1->refc.rc_startblock) -
-			be32_to_cpu(k2->refc.rc_startblock);
+	return cmp_int(be32_to_cpu(k1->refc.rc_startblock),
+		       be32_to_cpu(k2->refc.rc_startblock));
 }
 
 static xfs_failaddr_t
@@ -201,7 +201,7 @@ xfs_rtrefcountbt_verify(
 	if (fa)
 		return fa;
 	level = be16_to_cpu(block->bb_level);
-	if (level > mp->m_rtrefc_maxlevels)
+	if (level >= mp->m_rtrefc_maxlevels)
 		return __this_address;
 
 	return xfs_btree_fsblock_verify(bp, mp->m_rtrefc_mxr[level != 0]);
@@ -387,9 +387,9 @@ const struct xfs_btree_ops xfs_rtrefcountbt_ops = {
 	.init_high_key_from_rec	= xfs_rtrefcountbt_init_high_key_from_rec,
 	.init_rec_from_cur	= xfs_rtrefcountbt_init_rec_from_cur,
 	.init_ptr_from_cur	= xfs_rtrefcountbt_init_ptr_from_cur,
-	.key_diff		= xfs_rtrefcountbt_key_diff,
+	.cmp_key_with_cur	= xfs_rtrefcountbt_cmp_key_with_cur,
 	.buf_ops		= &xfs_rtrefcountbt_buf_ops,
-	.diff_two_keys		= xfs_rtrefcountbt_diff_two_keys,
+	.cmp_two_keys		= xfs_rtrefcountbt_cmp_two_keys,
 	.keys_inorder		= xfs_rtrefcountbt_keys_inorder,
 	.recs_inorder		= xfs_rtrefcountbt_recs_inorder,
 	.keys_contiguous	= xfs_rtrefcountbt_keys_contiguous,
@@ -602,7 +602,7 @@ xfs_rtrefcountbt_from_disk(
 	rblocklen = xfs_rtrefcount_broot_space(mp, dblock);
 
 	xfs_btree_init_block(mp, rblock, &xfs_rtrefcountbt_ops, 0, 0,
-			ip->i_ino);
+			I_INO(ip));
 
 	rblock->bb_level = dblock->bb_level;
 	rblock->bb_numrecs = dblock->bb_numrecs;
@@ -651,7 +651,7 @@ xfs_iformat_rtrefcount(
 	numrecs = be16_to_cpu(dfp->bb_numrecs);
 	level = be16_to_cpu(dfp->bb_level);
 
-	if (level > mp->m_rtrefc_maxlevels ||
+	if (level >= mp->m_rtrefc_maxlevels ||
 	    xfs_rtrefcount_droot_space_calc(level, numrecs) > dsize) {
 		xfs_inode_mark_sick(ip, XFS_SICK_INO_CORE);
 		return -EFSCORRUPTED;
@@ -751,7 +751,7 @@ xfs_rtrefcountbt_create(
 			xfs_rtrefcount_broot_space_calc(mp, 0, 0));
 	if (broot)
 		xfs_btree_init_block(mp, broot, &xfs_rtrefcountbt_ops, 0, 0,
-				ip->i_ino);
+				I_INO(ip));
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE | XFS_ILOG_DBROOT);
 	return 0;
 }

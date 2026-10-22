@@ -324,8 +324,6 @@ static int rx6110_probe(struct rx6110_data *rx6110, struct device *dev)
 	if (err)
 		return err;
 
-	rx6110->rtc->max_user_freq = 1;
-
 	return 0;
 }
 
@@ -451,7 +449,7 @@ static const struct acpi_device_id rx6110_i2c_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, rx6110_i2c_acpi_match);
 
 static const struct i2c_device_id rx6110_i2c_id[] = {
-	{ "rx6110" },
+	{ .name = "rx6110" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rx6110_i2c_id);

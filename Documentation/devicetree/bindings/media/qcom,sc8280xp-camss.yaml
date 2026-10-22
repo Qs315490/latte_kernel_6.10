@@ -143,6 +143,11 @@ properties:
                 minItems: 1
                 maxItems: 4
 
+              bus-type:
+                enum:
+                  - 1 # MEDIA_BUS_TYPE_CSI2_CPHY
+                  - 4 # MEDIA_BUS_TYPE_CSI2_DPHY
+
             required:
               - clock-lanes
               - data-lanes
@@ -165,6 +170,11 @@ properties:
               data-lanes:
                 minItems: 1
                 maxItems: 4
+
+              bus-type:
+                enum:
+                  - 1 # MEDIA_BUS_TYPE_CSI2_CPHY
+                  - 4 # MEDIA_BUS_TYPE_CSI2_DPHY
 
             required:
               - clock-lanes
@@ -189,6 +199,11 @@ properties:
                 minItems: 1
                 maxItems: 4
 
+              bus-type:
+                enum:
+                  - 1 # MEDIA_BUS_TYPE_CSI2_CPHY
+                  - 4 # MEDIA_BUS_TYPE_CSI2_DPHY
+
             required:
               - clock-lanes
               - data-lanes
@@ -211,6 +226,11 @@ properties:
               data-lanes:
                 minItems: 1
                 maxItems: 4
+
+              bus-type:
+                enum:
+                  - 1 # MEDIA_BUS_TYPE_CSI2_CPHY
+                  - 4 # MEDIA_BUS_TYPE_CSI2_DPHY
 
             required:
               - clock-lanes
@@ -244,11 +264,11 @@ properties:
 
   vdda-phy-supply:
     description:
-      Phandle to a regulator supply to PHY core block.
+      0.88V supply to CSIPHY IP blocks.
 
   vdda-pll-supply:
     description:
-      Phandle to 1.8V regulator supply to PHY refclk pll block.
+      1.2V supply to CSIPHY IP blocks.
 
 required:
   - clock-names
@@ -463,7 +483,6 @@ examples:
                           "vfe_lite3_csid",
                           "gcc_axi_hf",
                           "gcc_axi_sf";
-
 
             iommus = <&apps_smmu 0x2000 0x4e0>,
                      <&apps_smmu 0x2020 0x4e0>,

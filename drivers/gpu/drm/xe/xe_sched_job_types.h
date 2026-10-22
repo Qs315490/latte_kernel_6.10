@@ -18,16 +18,21 @@ struct dma_fence_chain;
  * struct xe_job_ptrs - Per hw engine instance data
  */
 struct xe_job_ptrs {
-	/** @lrc_fence: Pre-allocated uinitialized lrc fence.*/
+	/** @lrc_fence: Pre-allocated uninitialized lrc fence.*/
 	struct dma_fence *lrc_fence;
-	/** @chain_fence: Pre-allocated ninitialized fence chain node. */
+	/** @chain_fence: Pre-allocated uninitialized fence chain node. */
 	struct dma_fence_chain *chain_fence;
 	/** @batch_addr: Batch buffer address. */
 	u64 batch_addr;
+	/**
+	 * @head: The tail pointer of the LRC (so head pointer of job) when the
+	 * job was submitted
+	 */
+	u32 head;
 };
 
 /**
- * struct xe_sched_job - XE schedule job (batch buffer tracking)
+ * struct xe_sched_job - Xe schedule job (batch buffer tracking)
  */
 struct xe_sched_job {
 	/** @drm: base DRM scheduler job */
@@ -54,10 +59,18 @@ struct xe_sched_job {
 	u32 lrc_seqno;
 	/** @migrate_flush_flags: Additional flush flags for migration jobs */
 	u32 migrate_flush_flags;
+	/** @sample_timestamp: Sampling of job timestamp in TDR */
+	u64 sample_timestamp;
 	/** @ring_ops_flush_tlb: The ring ops need to flush TLB before payload. */
 	bool ring_ops_flush_tlb;
+	/** @ring_ops_force_reset: The ring ops need to trigger a reset before payload. */
+	bool ring_ops_force_reset;
 	/** @ggtt: mapped in ggtt. */
 	bool ggtt;
+	/** @restore_replay: job being replayed for restore */
+	bool restore_replay;
+	/** @last_replay: last job being replayed */
+	bool last_replay;
 	/** @ptrs: per instance pointers. */
 	struct xe_job_ptrs ptrs[];
 };

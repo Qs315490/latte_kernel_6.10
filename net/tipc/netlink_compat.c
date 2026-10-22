@@ -202,8 +202,7 @@ static int __tipc_nl_compat_dumpit(struct tipc_nl_compat_cmd_dump *cmd,
 		return -ENOMEM;
 	}
 
-	attrbuf = kcalloc(tipc_genl_family.maxattr + 1,
-			  sizeof(struct nlattr *), GFP_KERNEL);
+	attrbuf = kzalloc_objs(struct nlattr *, tipc_genl_family.maxattr + 1);
 	if (!attrbuf) {
 		err = -ENOMEM;
 		goto err_out;
@@ -222,6 +221,10 @@ static int __tipc_nl_compat_dumpit(struct tipc_nl_compat_cmd_dump *cmd,
 		int rem;
 
 		len = (*cmd->dumpit)(buf, &cb);
+		if (len < 0) {
+			err = len;
+			goto err_out;
+		}
 
 		nlmsg_for_each_msg(nlmsg, nlmsg_hdr(buf), len, rem) {
 			err = nlmsg_parse_deprecated(nlmsg, GENL_HDRLEN,
@@ -338,9 +341,7 @@ static int __tipc_nl_compat_doit(struct tipc_nl_compat_cmd_doit *cmd,
 	if (!trans_buf)
 		return -ENOMEM;
 
-	attrbuf = kmalloc_array(tipc_genl_family.maxattr + 1,
-				sizeof(struct nlattr *),
-				GFP_KERNEL);
+	attrbuf = kmalloc_objs(struct nlattr *, tipc_genl_family.maxattr + 1);
 	if (!attrbuf) {
 		err = -ENOMEM;
 		goto trans_out;

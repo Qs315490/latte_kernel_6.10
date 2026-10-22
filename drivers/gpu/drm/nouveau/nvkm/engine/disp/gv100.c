@@ -805,7 +805,7 @@ gv100_disp_caps_map(struct nvkm_object *object, void *argv, u32 argc,
 	struct gv100_disp_caps *caps = gv100_disp_caps(object);
 	struct nvkm_device *device = caps->disp->engine.subdev.device;
 	*type = NVKM_OBJECT_MAP_IO;
-	*addr = 0x640000 + device->func->resource_addr(device, 0);
+	*addr = 0x640000 + device->func->resource_addr(device, NVKM_BAR0_PRI);
 	*size = 0x1000;
 	return 0;
 }
@@ -822,7 +822,7 @@ gv100_disp_caps_new(const struct nvkm_oclass *oclass, void *argv, u32 argc,
 	struct nvkm_disp *disp = nvkm_udisp(oclass->parent);
 	struct gv100_disp_caps *caps;
 
-	if (!(caps = kzalloc(sizeof(*caps), GFP_KERNEL)))
+	if (!(caps = kzalloc_obj(*caps)))
 		return -ENOMEM;
 	*pobject = &caps->object;
 

@@ -2,6 +2,7 @@
 /* Copyright (C) 2024 Rivos Inc. */
 
 #include <linux/args.h>
+#include <linux/cfi_types.h>
 #include <linux/linkage.h>
 #include <asm/asm.h>
 
@@ -11,12 +12,12 @@
 
 #define WORD_SEW CONCATENATE(e, WORD_EEW)
 #define VEC_L CONCATENATE(vle, WORD_EEW).v
-#define VEC_S CONCATENATE(vle, WORD_EEW).v
+#define VEC_S CONCATENATE(vse, WORD_EEW).v
 
 /* void __riscv_copy_vec_words_unaligned(void *, const void *, size_t) */
 /* Performs a memcpy without aligning buffers, using word loads and stores. */
 /* Note: The size is truncated to a multiple of WORD_EEW */
-SYM_FUNC_START(__riscv_copy_vec_words_unaligned)
+SYM_TYPED_FUNC_START(__riscv_copy_vec_words_unaligned)
 	andi  a4, a2, ~(WORD_EEW-1)
 	beqz  a4, 2f
 	add   a3, a1, a4
@@ -38,7 +39,7 @@ SYM_FUNC_END(__riscv_copy_vec_words_unaligned)
 /* void __riscv_copy_vec_bytes_unaligned(void *, const void *, size_t) */
 /* Performs a memcpy without aligning buffers, using only byte accesses. */
 /* Note: The size is truncated to a multiple of 8 */
-SYM_FUNC_START(__riscv_copy_vec_bytes_unaligned)
+SYM_TYPED_FUNC_START(__riscv_copy_vec_bytes_unaligned)
 	andi a4, a2, ~(8-1)
 	beqz a4, 2f
 	add  a3, a1, a4

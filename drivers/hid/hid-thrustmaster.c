@@ -174,6 +174,7 @@ static void thrustmaster_interrupts(struct hid_device *hdev)
 	u8 ep_addr[2] = {b_ep, 0};
 
 	if (!usb_check_int_endpoints(usbif, ep_addr)) {
+		kfree(send_buf);
 		hid_err(hdev, "Unexpected non-int endpoint\n");
 		return;
 	}
@@ -307,7 +308,7 @@ static int thrustmaster_probe(struct hid_device *hdev, const struct hid_device_i
 	}
 
 	// Now we allocate the tm_wheel
-	tm_wheel = kzalloc(sizeof(struct tm_wheel), GFP_KERNEL);
+	tm_wheel = kzalloc_obj(struct tm_wheel);
 	if (!tm_wheel) {
 		ret = -ENOMEM;
 		goto error1;
@@ -327,7 +328,7 @@ static int thrustmaster_probe(struct hid_device *hdev, const struct hid_device_i
 		goto error3;
 	}
 
-	tm_wheel->response = kzalloc(sizeof(struct tm_wheel_response), GFP_KERNEL);
+	tm_wheel->response = kzalloc_obj(struct tm_wheel_response);
 	if (!tm_wheel->response) {
 		ret = -ENOMEM;
 		goto error4;

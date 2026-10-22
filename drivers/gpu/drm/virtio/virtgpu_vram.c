@@ -3,6 +3,8 @@
 
 #include <linux/dma-mapping.h>
 
+static DEFINE_MUTEX(map_lock);
+
 static void virtio_gpu_vram_free(struct drm_gem_object *obj)
 {
 	struct virtio_gpu_object *bo = gem_to_virtio_gpu_obj(obj);
@@ -37,9 +39,15 @@ static int virtio_gpu_vram_mmap(struct drm_gem_object *obj,
 	struct virtio_gpu_object *bo = gem_to_virtio_gpu_obj(obj);
 	struct virtio_gpu_object_vram *vram = to_virtio_gpu_vram(bo);
 	unsigned long vm_size = vma->vm_end - vma->vm_start;
+	unsigned long vm_end;
 
 	if (!(bo->blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE))
 		return -EINVAL;
+
+	virtio_gpu_vram_map_deferred(vram);
+
+	if (vram->map_state == STATE_INITIALIZING)
+		virtio_gpu_notify(vgdev);
 
 	wait_event(vgdev->resp_wq, vram->map_state != STATE_INITIALIZING);
 	if (vram->map_state != STATE_OK)
@@ -56,12 +64,14 @@ static int virtio_gpu_vram_mmap(struct drm_gem_object *obj,
 	else if (vram->map_info == VIRTIO_GPU_MAP_CACHE_UNCACHED)
 		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
-	/* Partial mappings of GEM buffers don't happen much in practice. */
-	if (vm_size != vram->vram_node.size)
+	if (check_add_overflow(vma->vm_pgoff << PAGE_SHIFT, vm_size, &vm_end))
+		return -EINVAL;
+
+	if (vm_end > vram->vram_node.size)
 		return -EINVAL;
 
 	ret = io_remap_pfn_range(vma, vma->vm_start,
-				 vram->vram_node.start >> PAGE_SHIFT,
+				 (vram->vram_node.start >> PAGE_SHIFT) + vma->vm_pgoff,
 				 vm_size, vma->vm_page_prot);
 	return ret;
 }
@@ -76,7 +86,7 @@ struct sg_table *virtio_gpu_vram_map_dma_buf(struct virtio_gpu_object *bo,
 	dma_addr_t addr;
 	int ret;
 
-	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
+	sgt = kzalloc_obj(*sgt);
 	if (!sgt)
 		return ERR_PTR(-ENOMEM);
 
@@ -190,7 +200,7 @@ int virtio_gpu_vram_create(struct virtio_gpu_device *vgdev,
 	struct virtio_gpu_object_vram *vram;
 	int ret;
 
-	vram = kzalloc(sizeof(*vram), GFP_KERNEL);
+	vram = kzalloc_obj(*vram);
 	if (!vram)
 		return -ENOMEM;
 
@@ -215,14 +225,27 @@ int virtio_gpu_vram_create(struct virtio_gpu_device *vgdev,
 
 	virtio_gpu_cmd_resource_create_blob(vgdev, &vram->base, params, NULL,
 					    0);
-	if (params->blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE) {
-		ret = virtio_gpu_vram_map(&vram->base);
-		if (ret) {
-			virtio_gpu_vram_free(obj);
-			return ret;
+	if (!(params->blob_hints & DRM_VIRTGPU_BLOB_FLAG_HINT_DEFER_MAPPING)) {
+		if (params->blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE) {
+			ret = virtio_gpu_vram_map(&vram->base);
+			if (ret) {
+				virtio_gpu_vram_free(obj);
+				return ret;
+			}
 		}
 	}
 
 	*bo_ptr = &vram->base;
 	return 0;
+}
+
+void virtio_gpu_vram_map_deferred(struct virtio_gpu_object_vram *vram)
+{
+	if (!(vram->base.blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE))
+		return;
+
+	mutex_lock(&map_lock);
+	if (!drm_mm_node_allocated(&vram->vram_node))
+		virtio_gpu_vram_map(&vram->base);
+	mutex_unlock(&map_lock);
 }

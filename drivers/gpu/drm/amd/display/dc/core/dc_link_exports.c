@@ -33,8 +33,9 @@
  * dc.h with detail interface documentation, then add function implementation
  * in this file which calls link functions.
  */
-#include "link.h"
+#include "link_service.h"
 #include "dce/dce_i2c.h"
+
 struct dc_link *dc_get_link_at_index(struct dc *dc, uint32_t link_index)
 {
 	if (link_index >= MAX_LINKS)
@@ -45,7 +46,7 @@ struct dc_link *dc_get_link_at_index(struct dc *dc, uint32_t link_index)
 
 void dc_get_edp_links(const struct dc *dc,
 		struct dc_link **edp_links,
-		int *edp_num)
+		unsigned int *edp_num)
 {
 	int i;
 
@@ -67,7 +68,7 @@ bool dc_get_edp_link_panel_inst(const struct dc *dc,
 		unsigned int *inst_out)
 {
 	struct dc_link *edp_links[MAX_NUM_EDP];
-	int edp_num, i;
+	unsigned int edp_num, i;
 
 	*inst_out = 0;
 	if (link->connector_signal != SIGNAL_TYPE_EDP)
@@ -125,6 +126,19 @@ uint32_t dc_link_bandwidth_kbps(
 	return link->dc->link_srv->dp_link_bandwidth_kbps(link, link_settings);
 }
 
+uint32_t dc_link_frl_bandwidth_kbps(const struct dc_link *link, enum hdmi_frl_link_rate link_rate)
+{
+	return link->dc->link_srv->frl_link_bandwidth_kbps(link_rate);
+}
+
+bool dc_link_frl_margin_check_uncompressed_video(
+		const struct dc_link *link,
+		struct frl_cap_chk_params_fixed31_32 *params,
+		struct frl_cap_chk_intermediates_fixed31_32 *inter)
+{
+	return link->dc->link_srv->frl_margin_check_uncompressed_video(params, inter);
+}
+
 uint32_t dc_link_required_hblank_size_bytes(
 	const struct dc_link *link,
 	struct dp_audio_bandwidth_params *audio_params)
@@ -143,11 +157,22 @@ void dc_restore_link_res_map(const struct dc *dc, uint32_t *map)
 	dc->link_srv->restore_res_map(dc, map);
 }
 
+void dc_link_wait_for_unlocked(struct dc_link *link)
+{
+	link->dc->link_srv->wait_for_unlocked(link);
+}
+
 bool dc_link_update_dsc_config(struct pipe_ctx *pipe_ctx)
 {
 	struct dc_link *link = pipe_ctx->stream->link;
 
 	return link->dc->link_srv->update_dsc_config(pipe_ctx);
+}
+
+struct ddc_service *
+dc_get_oem_i2c_device(struct dc *dc)
+{
+	return dc->res_pool->oem_device;
 }
 
 bool dc_is_oem_i2c_device_present(
@@ -275,7 +300,7 @@ unsigned int dc_dp_trace_get_link_loss_count(struct dc_link *link)
 struct dc_sink *dc_link_add_remote_sink(
 		struct dc_link *link,
 		const uint8_t *edid,
-		int len,
+		unsigned int len,
 		struct dc_sink_init_data *init_data)
 {
 	return link->dc->link_srv->add_remote_sink(link, edid, len, init_data);
@@ -338,6 +363,14 @@ enum dc_link_encoding_format dc_link_get_highest_encoding_format(const struct dc
 				DP_128b_132b_ENCODING)
 			return DC_LINK_ENCODING_DP_128b_132b;
 	} else if (dc_is_hdmi_signal(link->connector_signal)) {
+		const struct dc_hdmi_frl_link_settings *frl_link_settings =
+				&link->frl_verified_link_cap;
+
+		if (frl_link_settings->frl_link_rate == HDMI_FRL_LINK_RATE_DISABLE)
+			return DC_LINK_ENCODING_HDMI_TMDS;
+		else if (frl_link_settings->frl_link_rate >= HDMI_FRL_LINK_RATE_3GBPS &&
+				frl_link_settings->frl_link_rate <= HDMI_FRL_LINK_RATE_12GBPS)
+			return DC_LINK_ENCODING_HDMI_FRL;
 	}
 
 	return DC_LINK_ENCODING_UNSPECIFIED;
@@ -364,15 +397,10 @@ bool dc_link_should_enable_fec(const struct dc_link *link)
 	return link->dc->link_srv->dp_should_enable_fec(link);
 }
 
-int dc_link_dp_dpia_handle_usb4_bandwidth_allocation_for_link(
+void dc_link_dp_dpia_handle_usb4_bandwidth_allocation_for_link(
 		struct dc_link *link, int peak_bw)
 {
-	return link->dc->link_srv->dpia_handle_usb4_bandwidth_allocation_for_link(link, peak_bw);
-}
-
-void dc_link_handle_usb4_bw_alloc_response(struct dc_link *link, uint8_t bw, uint8_t result)
-{
-	link->dc->link_srv->dpia_handle_bw_alloc_response(link, bw, result);
+	link->dc->link_srv->dpia_handle_usb4_bandwidth_allocation_for_link(link, peak_bw);
 }
 
 bool dc_link_check_link_loss_status(
@@ -489,9 +517,50 @@ bool dc_link_get_replay_state(const struct dc_link *link, uint64_t *state)
 	return link->dc->link_srv->edp_get_replay_state(link, state);
 }
 
+bool dc_link_set_pr_enable(struct dc_link *link, bool enable)
+{
+	return link->dc->link_srv->dp_pr_enable(link, enable);
+}
+
+bool dc_link_update_pr_state(struct dc_link *link,
+		struct dmub_cmd_pr_update_state_data *update_state_data)
+{
+	return link->dc->link_srv->dp_pr_update_state(link, update_state_data);
+}
+
+bool dc_link_set_pr_general_cmd(struct dc_link *link,
+		struct dmub_cmd_pr_general_cmd_data *general_cmd_data)
+{
+	return link->dc->link_srv->dp_pr_set_general_cmd(link, general_cmd_data);
+}
+
+bool dc_link_get_pr_state(const struct dc_link *link, uint64_t *state)
+{
+	return link->dc->link_srv->dp_pr_get_state(link, state);
+}
+
 bool dc_link_wait_for_t12(struct dc_link *link)
 {
 	return link->dc->link_srv->edp_wait_for_t12(link);
+}
+
+bool dc_link_frl_poll_status_flag(struct dc_link *link)
+{
+	return link->dc->link_srv->hdmi_frl_poll_status_flag(link);
+}
+
+struct dc_hdmi_frl_link_settings *dc_link_get_frl_link_cap(
+		struct dc_link *link)
+{
+	return link->dc->link_srv->hdmi_frl_get_verified_link_cap(link);
+}
+
+void dc_link_set_preferred_frl_link_settings(struct dc *dc,
+		struct dc_hdmi_frl_link_settings *link_setting,
+		struct dc_hdmi_frl_link_training_overrides *lt_overrides,
+		struct dc_link *link)
+{
+	link->dc->link_srv->hdmi_frl_set_preferred_link_settings(dc, link_setting, lt_overrides, link);
 }
 
 bool dc_link_get_hpd_state(struct dc_link *link)
@@ -514,7 +583,14 @@ void dc_link_enable_hpd_filter(struct dc_link *link, bool enable)
 	link->dc->link_srv->enable_hpd_filter(link, enable);
 }
 
-bool dc_link_dp_dpia_validate(struct dc *dc, const struct dc_stream_state *streams, const unsigned int count)
+enum dc_status dc_link_validate_dp_tunneling_bandwidth(const struct dc *dc, const struct dc_state *new_ctx)
 {
-	return dc->link_srv->validate_dpia_bandwidth(streams, count);
+	return dc->link_srv->validate_dp_tunnel_bandwidth(dc, new_ctx);
+}
+
+void dc_link_get_alpm_support(struct dc_link *link,
+	bool *auxless_support,
+	bool *auxwake_support)
+{
+	link->dc->link_srv->edp_get_alpm_support(link, auxless_support, auxwake_support);
 }

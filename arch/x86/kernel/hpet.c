@@ -7,11 +7,12 @@
 #include <linux/cpu.h>
 #include <linux/irq.h>
 
-#include <asm/cpuid.h>
+#include <asm/cpuid/api.h>
 #include <asm/irq_remapping.h>
 #include <asm/hpet.h>
 #include <asm/time.h>
 #include <asm/mwait.h>
+#include <asm/msr.h>
 
 #undef  pr_fmt
 #define pr_fmt(fmt) "hpet: " fmt
@@ -543,7 +544,7 @@ static struct irq_domain *hpet_create_irq_domain(int hpet_id)
 	if (x86_vector_domain == NULL)
 		return NULL;
 
-	domain_info = kzalloc(sizeof(*domain_info), GFP_KERNEL);
+	domain_info = kzalloc_obj(*domain_info);
 	if (!domain_info)
 		return NULL;
 
@@ -853,7 +854,7 @@ static struct clocksource clocksource_hpet = {
 	.rating		= 250,
 	.read		= read_hpet,
 	.mask		= HPET_MASK,
-	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
+	.flags		= CLOCK_SOURCE_IS_CONTINUOUS | CLOCK_SOURCE_CALIBRATED,
 	.resume		= hpet_resume_counter,
 };
 
@@ -970,7 +971,7 @@ static bool __init hpet_is_pc10_damaged(void)
 		return false;
 
 	/* Check whether PC10 is enabled in PKG C-state limit */
-	rdmsrl(MSR_PKG_CST_CONFIG_CONTROL, pcfg);
+	rdmsrq(MSR_PKG_CST_CONFIG_CONTROL, pcfg);
 	if ((pcfg & 0xF) < 8)
 		return false;
 
@@ -1037,7 +1038,7 @@ int __init hpet_enable(void)
 	if (IS_ENABLED(CONFIG_HPET_EMULATE_RTC) && channels < 2)
 		goto out_nohpet;
 
-	hc = kcalloc(channels, sizeof(*hc), GFP_KERNEL);
+	hc = kzalloc_objs(*hc, channels);
 	if (!hc) {
 		pr_warn("Disabling HPET.\n");
 		goto out_nohpet;
@@ -1081,8 +1082,6 @@ int __init hpet_enable(void)
 	if (!hpet_counting())
 		goto out_nohpet;
 
-	if (tsc_clocksource_watchdog_disabled())
-		clocksource_hpet.flags |= CLOCK_SOURCE_MUST_VERIFY;
 	clocksource_register_hz(&clocksource_hpet, (u32)hpet_freq);
 
 	if (id & HPET_ID_LEGSUP) {

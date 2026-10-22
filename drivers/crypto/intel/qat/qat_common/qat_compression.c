@@ -46,12 +46,14 @@ static int qat_compression_free_instances(struct adf_accel_dev *accel_dev)
 	return 0;
 }
 
-struct qat_compression_instance *qat_compression_get_instance_node(int node)
+struct qat_compression_instance *qat_compression_get_instance_node(int node, int alg)
 {
 	struct qat_compression_instance *inst = NULL;
+	struct adf_hw_device_data *hw_data = NULL;
 	struct adf_accel_dev *accel_dev = NULL;
 	unsigned long best = ~0;
 	struct list_head *itr;
+	u32 caps, mask;
 
 	list_for_each(itr, adf_devmgr_get_head()) {
 		struct adf_accel_dev *tmp_dev;
@@ -60,6 +62,15 @@ struct qat_compression_instance *qat_compression_get_instance_node(int node)
 
 		tmp_dev = list_entry(itr, struct adf_accel_dev, list);
 		tmp_dev_node = dev_to_node(&GET_DEV(tmp_dev));
+
+		if (alg == QAT_ZSTD || alg == QAT_LZ4S) {
+			hw_data = tmp_dev->hw_device;
+			caps = hw_data->accel_capabilities_ext_mask;
+			mask = ADF_ACCEL_CAPABILITIES_EXT_ZSTD |
+			       ADF_ACCEL_CAPABILITIES_EXT_ZSTD_LZ4S;
+			if (!(caps & mask))
+				continue;
+		}
 
 		if ((node == tmp_dev_node || tmp_dev_node < 0) &&
 		    adf_dev_started(tmp_dev) && !list_empty(&tmp_dev->compression_list)) {
@@ -78,6 +89,16 @@ struct qat_compression_instance *qat_compression_get_instance_node(int node)
 			struct adf_accel_dev *tmp_dev;
 
 			tmp_dev = list_entry(itr, struct adf_accel_dev, list);
+
+			if (alg == QAT_ZSTD || alg == QAT_LZ4S) {
+				hw_data = tmp_dev->hw_device;
+				caps = hw_data->accel_capabilities_ext_mask;
+				mask = ADF_ACCEL_CAPABILITIES_EXT_ZSTD |
+				       ADF_ACCEL_CAPABILITIES_EXT_ZSTD_LZ4S;
+				if (!(caps & mask))
+					continue;
+			}
+
 			if (adf_dev_started(tmp_dev) &&
 			    !list_empty(&tmp_dev->compression_list)) {
 				accel_dev = tmp_dev;
@@ -144,7 +165,6 @@ static int qat_compression_create_instances(struct adf_accel_dev *accel_dev)
 		inst->id = i;
 		atomic_set(&inst->refctr, 0);
 		inst->accel_dev = accel_dev;
-		inst->build_deflate_ctx = GET_DC_OPS(accel_dev)->build_deflate_ctx;
 
 		snprintf(key, sizeof(key), ADF_DC "%d" ADF_RING_DC_BANK_NUM, i);
 		ret = adf_cfg_get_param_value(accel_dev, SEC, key, val);
@@ -197,7 +217,7 @@ static int qat_compression_alloc_dc_data(struct adf_accel_dev *accel_dev)
 	struct adf_dc_data *dc_data = NULL;
 	u8 *obuff = NULL;
 
-	dc_data = devm_kzalloc(dev, sizeof(*dc_data), GFP_KERNEL);
+	dc_data = kzalloc_node(sizeof(*dc_data), GFP_KERNEL, dev_to_node(dev));
 	if (!dc_data)
 		goto err;
 
@@ -205,7 +225,7 @@ static int qat_compression_alloc_dc_data(struct adf_accel_dev *accel_dev)
 	if (!obuff)
 		goto err;
 
-	obuff_p = dma_map_single(dev, obuff, ovf_buff_sz, DMA_FROM_DEVICE);
+	obuff_p = dma_map_single(dev, obuff, ovf_buff_sz, DMA_BIDIRECTIONAL);
 	if (unlikely(dma_mapping_error(dev, obuff_p)))
 		goto err;
 
@@ -233,9 +253,9 @@ static void qat_free_dc_data(struct adf_accel_dev *accel_dev)
 		return;
 
 	dma_unmap_single(dev, dc_data->ovf_buff_p, dc_data->ovf_buff_sz,
-			 DMA_FROM_DEVICE);
+			 DMA_BIDIRECTIONAL);
 	kfree_sensitive(dc_data->ovf_buff);
-	devm_kfree(dev, dc_data);
+	kfree(dc_data);
 	accel_dev->dc_data = NULL;
 }
 

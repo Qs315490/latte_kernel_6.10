@@ -3,7 +3,7 @@
  * Copyright (c) 2023-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -79,7 +79,7 @@ xchk_metapath_cleanup(
 
 	if (mpath->dp_ilock_flags)
 		xfs_iunlock(mpath->dp, mpath->dp_ilock_flags);
-	kfree(mpath->path);
+	kfree_const(mpath->path);
 }
 
 /* Set up a metadir path scan.  @path must be dynamically allocated. */
@@ -98,13 +98,13 @@ xchk_setup_metapath_scan(
 
 	error = xchk_install_live_inode(sc, ip);
 	if (error) {
-		kfree(path);
+		kfree_const(path);
 		return error;
 	}
 
-	mpath = kzalloc(sizeof(struct xchk_metapath), XCHK_GFP_FLAGS);
+	mpath = kzalloc_obj(struct xchk_metapath, XCHK_GFP_FLAGS);
 	if (!mpath) {
-		kfree(path);
+		kfree_const(path);
 		return -ENOMEM;
 	}
 
@@ -132,7 +132,7 @@ xchk_setup_metapath_rtdir(
 		return -ENOENT;
 
 	return xchk_setup_metapath_scan(sc, sc->mp->m_metadirip,
-			kasprintf(GFP_KERNEL, "rtgroups"), sc->mp->m_rtdirip);
+			kstrdup_const("rtgroups", GFP_KERNEL), sc->mp->m_rtdirip);
 }
 
 /* Scan a rtgroup inode under the /rtgroups directory. */
@@ -179,7 +179,7 @@ xchk_setup_metapath_quotadir(
 		return -ENOENT;
 
 	return xchk_setup_metapath_scan(sc, sc->mp->m_metadirip,
-			kstrdup("quota", GFP_KERNEL), qi->qi_dirip);
+			kstrdup_const("quota", GFP_KERNEL), qi->qi_dirip);
 }
 
 /* Scan a quota inode under the /quota directory. */
@@ -212,7 +212,7 @@ xchk_setup_metapath_dqinode(
 		return -ENOENT;
 
 	return xchk_setup_metapath_scan(sc, qi->qi_dirip,
-			kstrdup(xfs_dqinode_path(type), GFP_KERNEL), ip);
+			kstrdup_const(xfs_dqinode_path(type), GFP_KERNEL), ip);
 }
 #else
 # define xchk_setup_metapath_quotadir(...)	(-ENOENT)
@@ -314,13 +314,11 @@ xchk_metapath(
 
 	/* Parent required to do anything else. */
 	if (mpath->dp == NULL) {
-		xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+		xchk_ip_set_corrupt(sc, sc->ip);
 		return 0;
 	}
 
-	error = xchk_trans_alloc_empty(sc);
-	if (error)
-		return error;
+	xchk_trans_alloc_empty(sc);
 
 	error = xchk_metapath_ilock_both(mpath);
 	if (error)
@@ -331,15 +329,15 @@ xchk_metapath(
 	trace_xchk_metapath_lookup(sc, mpath->path, mpath->dp, ino);
 	if (error == -ENOENT) {
 		/* No directory entry at all */
-		xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+		xchk_ip_set_corrupt(sc, sc->ip);
 		error = 0;
 		goto out_ilock;
 	}
 	if (!xchk_fblock_xref_process_error(sc, XFS_DATA_FORK, 0, &error))
 		goto out_ilock;
-	if (ino != sc->ip->i_ino) {
+	if (ino != I_INO(sc->ip)) {
 		/* Pointing to wrong inode */
-		xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+		xchk_ip_set_corrupt(sc, sc->ip);
 	}
 
 out_ilock:
@@ -366,7 +364,7 @@ xrep_metapath_link(
 	else
 		mpath->du.ppargs = NULL;
 
-	trace_xrep_metapath_link(sc, mpath->path, mpath->dp, sc->ip->i_ino);
+	trace_xrep_metapath_link(sc, mpath->path, mpath->dp, I_INO(sc->ip));
 
 	return xfs_dir_add_child(sc->tp, mpath->link_resblks, &mpath->du);
 }
@@ -464,7 +462,7 @@ xrep_metapath_try_link(
 	if (error)
 		goto out_cancel;
 
-	if (ino == sc->ip->i_ino) {
+	if (ino == I_INO(sc->ip)) {
 		/* The dirent already points to @sc->ip; we're done. */
 		error = 0;
 		goto out_cancel;
@@ -532,7 +530,7 @@ xrep_metapath_try_unlink(
 	xfs_ino_t		ino;
 	int			error;
 
-	ASSERT(*alleged_child != sc->ip->i_ino);
+	ASSERT(*alleged_child != I_INO(sc->ip));
 
 	trace_xrep_metapath_try_unlink(sc, mpath->path, mpath->dp,
 			*alleged_child);
@@ -577,7 +575,7 @@ xrep_metapath_try_unlink(
 	if (error)
 		goto out_cancel;
 
-	if (ino == sc->ip->i_ino) {
+	if (ino == I_INO(sc->ip)) {
 		/* The dirent already points to @sc->ip; we're done. */
 		error = -EEXIST;
 		goto out_cancel;

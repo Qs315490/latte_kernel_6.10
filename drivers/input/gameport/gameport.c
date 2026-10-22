@@ -9,6 +9,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/export.h>
 #include <linux/stddef.h>
 #include <linux/module.h>
 #include <linux/io.h>
@@ -191,7 +192,7 @@ void gameport_stop_polling(struct gameport *gameport)
 	spin_lock(&gameport->timer_lock);
 
 	if (!--gameport->poll_cnt)
-		del_timer(&gameport->poll_timer);
+		timer_delete(&gameport->poll_timer);
 
 	spin_unlock(&gameport->timer_lock);
 }
@@ -199,7 +200,8 @@ EXPORT_SYMBOL(gameport_stop_polling);
 
 static void gameport_run_poll_handler(struct timer_list *t)
 {
-	struct gameport *gameport = from_timer(gameport, t, poll_timer);
+	struct gameport *gameport = timer_container_of(gameport, t,
+						       poll_timer);
 
 	gameport->poll_handler(gameport);
 	if (gameport->poll_cnt)
@@ -372,7 +374,7 @@ static int gameport_queue_event(void *object, struct module *owner,
 		}
 	}
 
-	event = kmalloc(sizeof(*event), GFP_ATOMIC);
+	event = kmalloc_obj(*event, GFP_ATOMIC);
 	if (!event) {
 		pr_err("Not enough memory to queue event %d\n", event_type);
 		retval = -ENOMEM;
@@ -847,7 +849,7 @@ EXPORT_SYMBOL(gameport_open);
 
 void gameport_close(struct gameport *gameport)
 {
-	del_timer_sync(&gameport->poll_timer);
+	timer_delete_sync(&gameport->poll_timer);
 	gameport->poll_handler = NULL;
 	gameport->poll_interval = 0;
 	gameport_set_drv(gameport, NULL);

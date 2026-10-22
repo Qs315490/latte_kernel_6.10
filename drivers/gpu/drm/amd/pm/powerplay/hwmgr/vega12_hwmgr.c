@@ -395,7 +395,7 @@ static int vega12_hwmgr_backend_init(struct pp_hwmgr *hwmgr)
 	struct vega12_hwmgr *data;
 	struct amdgpu_device *adev = hwmgr->adev;
 
-	data = kzalloc(sizeof(struct vega12_hwmgr), GFP_KERNEL);
+	data = kzalloc_obj(struct vega12_hwmgr);
 	if (data == NULL)
 		return -ENOMEM;
 
@@ -1419,7 +1419,7 @@ static int vega12_get_gpu_power(struct pp_hwmgr *hwmgr, uint32_t *query)
 	if (ret)
 		return ret;
 
-	*query = metrics_table.CurrSocketPower << 8;
+	*query = metrics_table.CurrSocketPower * MILLIWATT_PER_WATT;
 
 	return ret;
 }
@@ -1820,21 +1820,6 @@ static uint32_t vega12_get_fan_control_mode(struct pp_hwmgr *hwmgr)
 		return AMD_FAN_CTRL_MANUAL;
 	else
 		return AMD_FAN_CTRL_AUTO;
-}
-
-static int vega12_get_dal_power_level(struct pp_hwmgr *hwmgr,
-		struct amd_pp_simple_clock_info *info)
-{
-#if 0
-	struct phm_ppt_v2_information *table_info =
-			(struct phm_ppt_v2_information *)hwmgr->pptable;
-	struct phm_clock_and_voltage_limits *max_limits =
-			&table_info->max_clock_voltage_on_ac;
-
-	info->engine_max_clock = max_limits->sclk;
-	info->memory_max_clock = max_limits->mclk;
-#endif
-	return 0;
 }
 
 static int vega12_get_clock_ranges(struct pp_hwmgr *hwmgr,
@@ -2271,11 +2256,12 @@ static int vega12_get_current_pcie_link_speed(struct pp_hwmgr *hwmgr)
 	return link_speed[speed_level];
 }
 
-static int vega12_print_clock_levels(struct pp_hwmgr *hwmgr,
-		enum pp_clock_type type, char *buf)
+static int vega12_emit_clock_levels(struct pp_hwmgr *hwmgr,
+				    enum pp_clock_type type, char *buf,
+				    int *offset)
 {
-	int i, now, size = 0;
 	struct pp_clock_levels_with_latency clocks;
+	int i, now, size = *offset;
 
 	switch (type) {
 	case PP_SCLK:
@@ -2289,9 +2275,13 @@ static int vega12_print_clock_levels(struct pp_hwmgr *hwmgr,
 				"Attempt to get gfx clk levels Failed!",
 				return -1);
 		for (i = 0; i < clocks.num_levels; i++)
-			size += sprintf(buf + size, "%d: %uMhz %s\n",
-				i, clocks.data[i].clocks_in_khz / 1000,
-				(clocks.data[i].clocks_in_khz / 1000 == now / 100) ? "*" : "");
+			size += sysfs_emit_at(
+				buf, size, "%d: %uMhz %s\n", i,
+				clocks.data[i].clocks_in_khz / 1000,
+				(clocks.data[i].clocks_in_khz / 1000 ==
+				 now / 100) ?
+					"*" :
+					"");
 		break;
 
 	case PP_MCLK:
@@ -2305,9 +2295,13 @@ static int vega12_print_clock_levels(struct pp_hwmgr *hwmgr,
 				"Attempt to get memory clk levels Failed!",
 				return -1);
 		for (i = 0; i < clocks.num_levels; i++)
-			size += sprintf(buf + size, "%d: %uMhz %s\n",
-				i, clocks.data[i].clocks_in_khz / 1000,
-				(clocks.data[i].clocks_in_khz / 1000 == now / 100) ? "*" : "");
+			size += sysfs_emit_at(
+				buf, size, "%d: %uMhz %s\n", i,
+				clocks.data[i].clocks_in_khz / 1000,
+				(clocks.data[i].clocks_in_khz / 1000 ==
+				 now / 100) ?
+					"*" :
+					"");
 		break;
 
 	case PP_SOCCLK:
@@ -2323,9 +2317,12 @@ static int vega12_print_clock_levels(struct pp_hwmgr *hwmgr,
 				"Attempt to get soc clk levels Failed!",
 				return -1);
 		for (i = 0; i < clocks.num_levels; i++)
-			size += sprintf(buf + size, "%d: %uMhz %s\n",
-				i, clocks.data[i].clocks_in_khz / 1000,
-				(clocks.data[i].clocks_in_khz / 1000 == now) ? "*" : "");
+			size += sysfs_emit_at(
+				buf, size, "%d: %uMhz %s\n", i,
+				clocks.data[i].clocks_in_khz / 1000,
+				(clocks.data[i].clocks_in_khz / 1000 == now) ?
+					"*" :
+					"");
 		break;
 
 	case PP_DCEFCLK:
@@ -2341,9 +2338,12 @@ static int vega12_print_clock_levels(struct pp_hwmgr *hwmgr,
 				"Attempt to get dcef clk levels Failed!",
 				return -1);
 		for (i = 0; i < clocks.num_levels; i++)
-			size += sprintf(buf + size, "%d: %uMhz %s\n",
-				i, clocks.data[i].clocks_in_khz / 1000,
-				(clocks.data[i].clocks_in_khz / 1000 == now) ? "*" : "");
+			size += sysfs_emit_at(
+				buf, size, "%d: %uMhz %s\n", i,
+				clocks.data[i].clocks_in_khz / 1000,
+				(clocks.data[i].clocks_in_khz / 1000 == now) ?
+					"*" :
+					"");
 		break;
 
 	case PP_PCIE:
@@ -2352,7 +2352,10 @@ static int vega12_print_clock_levels(struct pp_hwmgr *hwmgr,
 	default:
 		break;
 	}
-	return size;
+
+	*offset = size;
+
+	return 0;
 }
 
 static int vega12_apply_clocks_adjust_rules(struct pp_hwmgr *hwmgr)
@@ -2945,13 +2948,12 @@ static const struct pp_hwmgr_func vega12_hwmgr_funcs = {
 	.set_fan_control_mode = vega12_set_fan_control_mode,
 	.get_fan_control_mode = vega12_get_fan_control_mode,
 	.read_sensor = vega12_read_sensor,
-	.get_dal_power_level = vega12_get_dal_power_level,
 	.get_clock_by_type_with_latency = vega12_get_clock_by_type_with_latency,
 	.get_clock_by_type_with_voltage = vega12_get_clock_by_type_with_voltage,
 	.set_watermarks_for_clocks_ranges = vega12_set_watermarks_for_clocks_ranges,
 	.display_clock_voltage_request = vega12_display_clock_voltage_request,
 	.force_clock_level = vega12_force_clock_level,
-	.print_clock_levels = vega12_print_clock_levels,
+	.emit_clock_levels = vega12_emit_clock_levels,
 	.apply_clocks_adjust_rules =
 		vega12_apply_clocks_adjust_rules,
 	.pre_display_config_changed =

@@ -30,48 +30,6 @@ void rtw_hal_data_deinit(struct adapter *padapter)
 	}
 }
 
-
-void dump_chip_info(struct hal_version	ChipVersion)
-{
-	char buf[128];
-	size_t cnt = 0;
-
-	cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "Chip Version Info: CHIP_8723B_%s_",
-			IS_NORMAL_CHIP(ChipVersion) ? "Normal_Chip" : "Test_Chip");
-
-	if (IS_CHIP_VENDOR_TSMC(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "TSMC_");
-	else if (IS_CHIP_VENDOR_UMC(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "UMC_");
-	else if (IS_CHIP_VENDOR_SMIC(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "SMIC_");
-
-	if (IS_A_CUT(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "A_CUT_");
-	else if (IS_B_CUT(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "B_CUT_");
-	else if (IS_C_CUT(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "C_CUT_");
-	else if (IS_D_CUT(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "D_CUT_");
-	else if (IS_E_CUT(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "E_CUT_");
-	else if (IS_I_CUT(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "I_CUT_");
-	else if (IS_J_CUT(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "J_CUT_");
-	else if (IS_K_CUT(ChipVersion))
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "K_CUT_");
-	else
-		cnt += scnprintf(buf + cnt, sizeof(buf) - cnt,
-				"UNKNOWN_CUT(%d)_", ChipVersion.CUTVersion);
-
-	cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "1T1R_");
-
-	cnt += scnprintf(buf + cnt, sizeof(buf) - cnt, "RomVer(%d)\n", ChipVersion.ROMVer);
-}
-
-
 #define	EEPROM_CHANNEL_PLAN_BY_HW_MASK	0x80
 
 /*
@@ -86,7 +44,7 @@ void dump_chip_info(struct hal_version	ChipVersion)
  *					BIT[6:0] Channel Plan
  *sw_channel_plan		channel plan from SW (registry/module param)
  *def_channel_plan	channel plan used when HW/SW both invalid
- *AutoLoadFail		efuse autoload fail or not
+ *auto_load_fail		efuse autoload fail or not
  *
  * Return:
  *Final channel plan decision
@@ -97,7 +55,7 @@ u8 hal_com_config_channel_plan(
 	u8 hw_channel_plan,
 	u8 sw_channel_plan,
 	u8 def_channel_plan,
-	bool AutoLoadFail
+	bool auto_load_fail
 )
 {
 	struct hal_com_data *pHalData;
@@ -107,10 +65,10 @@ u8 hal_com_config_channel_plan(
 	pHalData->bDisableSWChannelPlan = false;
 	chnlPlan = def_channel_plan;
 
-	if (0xFF == hw_channel_plan)
-		AutoLoadFail = true;
+	if (hw_channel_plan == 0xFF)
+		auto_load_fail = true;
 
-	if (!AutoLoadFail) {
+	if (!auto_load_fail) {
 		u8 hw_chnlPlan;
 
 		hw_chnlPlan = hw_channel_plan & (~EEPROM_CHANNEL_PLAN_BY_HW_MASK);
@@ -136,7 +94,7 @@ bool HAL_IsLegalChannel(struct adapter *adapter, u32 Channel)
 	bool bLegalChannel = true;
 
 	if ((Channel <= 14) && (Channel >= 1)) {
-		if (is_supported_24g(adapter->registrypriv.wireless_mode) == false)
+		if (!is_supported_24g(adapter->registrypriv.wireless_mode))
 			bLegalChannel = false;
 	} else {
 		bLegalChannel = false;
@@ -294,7 +252,6 @@ void HalSetBrateCfg(struct adapter *Adapter, u8 *mBratesOS, u16 *pBrateCfg)
 	u8 i, is_brate, brate;
 
 	for (i = 0; i < NDIS_802_11_LENGTH_RATES_EX; i++) {
-
 		is_brate = mBratesOS[i] & IEEE80211_BASIC_RATE_MASK;
 		brate = mBratesOS[i] & 0x7f;
 
@@ -378,7 +335,6 @@ static void _TwoOutPipeMapping(struct adapter *padapter, bool bWIFICfg)
 
 	} else { /* typical setting */
 
-
 		/* BK,	BE,	VI,	VO,	BCN,	CMD, MGT, HIGH, HCCA */
 		/*   1,		1,	0,	0,	0,	0,	0,	0,		0	}; */
 		/* 0:ep_0 num, 1:ep_1 num */
@@ -418,7 +374,6 @@ static void _ThreeOutPipeMapping(struct adapter *padapter, bool bWIFICfg)
 		pdvobjpriv->Queue2Pipe[7] = pdvobjpriv->RtOutPipe[0];/* TXCMD */
 
 	} else { /* typical setting */
-
 
 		/* 	BK,	BE,	VI,	VO,	BCN,	CMD, MGT, HIGH, HCCA */
 		/*   2,		2,	1,	0,	0,	0,	0,	0,		0	}; */
@@ -478,10 +433,10 @@ void rtw_init_hal_com_default_value(struct adapter *Adapter)
 }
 
 /*
-* C2H event format:
-* Field	 TRIGGER		CONTENT	   CMD_SEQ	CMD_LEN		 CMD_ID
-* BITS	 [127:120]	[119:16]      [15:8]		  [7:4]		   [3:0]
-*/
+ * C2H event format:
+ * Field	 TRIGGER		CONTENT	   CMD_SEQ	CMD_LEN		 CMD_ID
+ * BITS	 [127:120]	[119:16]      [15:8]		  [7:4]		   [3:0]
+ */
 
 void c2h_evt_clear(struct adapter *adapter)
 {
@@ -489,10 +444,10 @@ void c2h_evt_clear(struct adapter *adapter)
 }
 
 /*
-* C2H event format:
-* Field    TRIGGER    CMD_LEN    CONTENT    CMD_SEQ    CMD_ID
-* BITS    [127:120]   [119:112]    [111:16]	     [15:8]         [7:0]
-*/
+ * C2H event format:
+ * Field    TRIGGER    CMD_LEN    CONTENT    CMD_SEQ    CMD_ID
+ * BITS    [127:120]   [119:112]    [111:16]	     [15:8]         [7:0]
+ */
 s32 c2h_evt_read_88xx(struct adapter *adapter, u8 *buf)
 {
 	s32 ret = _FAIL;
@@ -526,9 +481,9 @@ s32 c2h_evt_read_88xx(struct adapter *adapter, u8 *buf)
 
 clear_evt:
 	/*
-	* Clear event to notify FW we have read the command.
-	* If this field isn't clear, the FW won't update the next command message.
-	*/
+	 * Clear event to notify FW we have read the command.
+	 * If this field isn't clear, the FW won't update the next command message.
+	 */
 	c2h_evt_clear(adapter);
 exit:
 	return ret;
@@ -569,21 +524,14 @@ void rtw_hal_update_sta_rate_mask(struct adapter *padapter, struct sta_info *pst
 	psta->init_rate = get_highest_rate_idx(tx_ra_bitmap)&0x3f;
 }
 
-void hw_var_port_switch(struct adapter *adapter)
-{
-}
-
 void SetHwReg(struct adapter *adapter, u8 variable, u8 *val)
 {
 	struct hal_com_data *hal_data = GET_HAL_DATA(adapter);
 	struct dm_odm_t *odm = &(hal_data->odmpriv);
 
 	switch (variable) {
-	case HW_VAR_PORT_SWITCH:
-		hw_var_port_switch(adapter);
-		break;
 	case HW_VAR_INIT_RTS_RATE:
-		rtw_warn_on(1);
+		WARN_ON(1);
 		break;
 	case HW_VAR_SEC_CFG:
 	{
@@ -612,7 +560,7 @@ void SetHwReg(struct adapter *adapter, u8 variable, u8 *val)
 		odm->SupportAbility = *((u32 *)val);
 		break;
 	case HW_VAR_DM_FUNC_OP:
-		if (*((u8 *)val) == true) {
+		if (*((u8 *)val)) {
 			/* save dm flag */
 			odm->BK_SupportAbility = odm->SupportAbility;
 		} else {
@@ -623,6 +571,7 @@ void SetHwReg(struct adapter *adapter, u8 variable, u8 *val)
 	case HW_VAR_DM_FUNC_SET:
 		if (*((u32 *)val) == DYNAMIC_ALL_FUNC_ENABLE) {
 			struct dm_priv *dm = &hal_data->dmpriv;
+
 			dm->DMFlag = dm->InitDMFlag;
 			odm->SupportAbility = dm->InitODMFlag;
 		} else {
@@ -631,9 +580,9 @@ void SetHwReg(struct adapter *adapter, u8 variable, u8 *val)
 		break;
 	case HW_VAR_DM_FUNC_CLR:
 		/*
-		* input is already a mask to clear function
-		* don't invert it again! George, Lucas@20130513
-		*/
+		 * input is already a mask to clear function
+		 * don't invert it again! George, Lucas@20130513
+		 */
 		odm->SupportAbility &= *((u32 *)val);
 		break;
 	case HW_VAR_AMPDU_MIN_SPACE:
@@ -668,71 +617,6 @@ void GetHwReg(struct adapter *adapter, u8 variable, u8 *val)
 			   FUNC_ADPT_ARG(adapter), variable);
 		break;
 	}
-}
-
-
-
-
-u8 SetHalDefVar(
-	struct adapter *adapter, enum hal_def_variable variable, void *value
-)
-{
-	struct hal_com_data *hal_data = GET_HAL_DATA(adapter);
-	struct dm_odm_t *odm = &(hal_data->odmpriv);
-	u8 bResult = _SUCCESS;
-
-	switch (variable) {
-	case HW_DEF_ODM_DBG_FLAG:
-		ODM_CmnInfoUpdate(odm, ODM_CMNINFO_DBG_COMP, *((u64 *)value));
-		break;
-	case HW_DEF_ODM_DBG_LEVEL:
-		ODM_CmnInfoUpdate(odm, ODM_CMNINFO_DBG_LEVEL, *((u32 *)value));
-		break;
-	case HAL_DEF_DBG_DM_FUNC:
-	{
-		u8 dm_func = *((u8 *)value);
-		struct dm_priv *dm = &hal_data->dmpriv;
-
-		if (dm_func == 0) { /* disable all dynamic func */
-			odm->SupportAbility = DYNAMIC_FUNC_DISABLE;
-		} else if (dm_func == 1) {/* disable DIG */
-			odm->SupportAbility  &= (~DYNAMIC_BB_DIG);
-		} else if (dm_func == 2) {/* disable High power */
-			odm->SupportAbility  &= (~DYNAMIC_BB_DYNAMIC_TXPWR);
-		} else if (dm_func == 3) {/* disable tx power tracking */
-			odm->SupportAbility  &= (~DYNAMIC_RF_CALIBRATION);
-		} else if (dm_func == 4) {/* disable BT coexistence */
-			dm->DMFlag &= (~DYNAMIC_FUNC_BT);
-		} else if (dm_func == 5) {/* disable antenna diversity */
-			odm->SupportAbility  &= (~DYNAMIC_BB_ANT_DIV);
-		} else if (dm_func == 6) {/* turn on all dynamic func */
-			if (!(odm->SupportAbility  & DYNAMIC_BB_DIG)) {
-				struct dig_t	*pDigTable = &odm->DM_DigTable;
-				pDigTable->CurIGValue = rtw_read8(adapter, 0xc50);
-			}
-			dm->DMFlag |= DYNAMIC_FUNC_BT;
-			odm->SupportAbility = DYNAMIC_ALL_FUNC_ENABLE;
-		}
-	}
-		break;
-	case HAL_DEF_DBG_DUMP_RXPKT:
-		hal_data->bDumpRxPkt = *((u8 *)value);
-		break;
-	case HAL_DEF_DBG_DUMP_TXPKT:
-		hal_data->bDumpTxPkt = *((u8 *)value);
-		break;
-	case HAL_DEF_ANT_DETECT:
-		hal_data->AntDetection = *((u8 *)value);
-		break;
-	default:
-		netdev_dbg(adapter->pnetdev,
-			   "%s: [WARNING] HAL_DEF_VARIABLE(%d) not defined!\n",
-			   __func__, variable);
-		bResult = _FAIL;
-		break;
-	}
-
-	return bResult;
 }
 
 u8 GetHalDefVar(
@@ -799,6 +683,7 @@ void SetHalODMVar(
 	case HAL_ODM_STA_INFO:
 		{
 			struct sta_info *psta = pValue1;
+
 			if (bSet) {
 				ODM_CmnInfoPtrArrayHook(podmpriv, ODM_CMNINFO_STA_STATUS, psta->mac_id, psta);
 			} else {
@@ -821,19 +706,6 @@ void SetHalODMVar(
 	}
 }
 
-
-bool eqNByte(u8 *str1, u8 *str2, u32 num)
-{
-	if (num == 0)
-		return false;
-	while (num > 0) {
-		num--;
-		if (str1[num] != str2[num])
-			return false;
-	}
-	return true;
-}
-
 bool GetU1ByteIntegerFromStringInDecimal(char *Str, u8 *pInt)
 {
 	u16 i = 0;
@@ -854,21 +726,8 @@ bool GetU1ByteIntegerFromStringInDecimal(char *Str, u8 *pInt)
 
 void rtw_hal_check_rxfifo_full(struct adapter *adapter)
 {
-	struct dvobj_priv *psdpriv = adapter->dvobj;
-	struct debug_priv *pdbgpriv = &psdpriv->drv_dbg;
-	int save_cnt = false;
-
 	/* switch counter to RX fifo */
 	rtw_write8(adapter, REG_RXERR_RPT+3, rtw_read8(adapter, REG_RXERR_RPT+3)|0xf0);
-	save_cnt = true;
-	/* todo: other chips */
-
-	if (save_cnt) {
-		/* rtw_write8(adapter, REG_RXERR_RPT+3, rtw_read8(adapter, REG_RXERR_RPT+3)|0xa0); */
-		pdbgpriv->dbg_rx_fifo_last_overflow = pdbgpriv->dbg_rx_fifo_curr_overflow;
-		pdbgpriv->dbg_rx_fifo_curr_overflow = rtw_read16(adapter, REG_RXERR_RPT);
-		pdbgpriv->dbg_rx_fifo_diff_overflow = pdbgpriv->dbg_rx_fifo_curr_overflow-pdbgpriv->dbg_rx_fifo_last_overflow;
-	}
 }
 
 static u32 Array_kfreemap[] = {
@@ -884,18 +743,20 @@ static u32 Array_kfreemap[] = {
 	0xfc, 0x0,
 };
 
+#define		REG_RF_BB_GAIN_OFFSET	0x7f
+//#define		RF_GAIN_OFFSET_MASK	0xfffff
+
 void rtw_bb_rf_gain_offset(struct adapter *padapter)
 {
 	u8 value = padapter->eeprompriv.EEPROMRFGainOffset;
-	u32 res, i = 0;
 	u32 *Array = Array_kfreemap;
 	u32 v1 = 0, v2 = 0, target = 0;
+	u32 i = 0;
 
-	if (value & BIT4) {
+	if (value & BIT(4)) {
 		if (padapter->eeprompriv.EEPROMRFGainVal != 0xff) {
-			res = rtw_hal_read_rfreg(padapter, RF_PATH_A, 0x7f, 0xffffffff);
-			res &= 0xfff87fff;
-			/* res &= 0xfff87fff; */
+			rtw_hal_read_rfreg(padapter, RF_PATH_A, 0x7f, 0xffffffff);
+
 			for (i = 0; i < ARRAY_SIZE(Array_kfreemap); i += 2) {
 				v1 = Array[i];
 				v2 = Array[i+1];
@@ -904,11 +765,9 @@ void rtw_bb_rf_gain_offset(struct adapter *padapter)
 					break;
 				}
 			}
-			PHY_SetRFReg(padapter, RF_PATH_A, REG_RF_BB_GAIN_OFFSET, BIT18|BIT17|BIT16|BIT15, target);
+			PHY_SetRFReg(padapter, RF_PATH_A, REG_RF_BB_GAIN_OFFSET, BIT(18)|BIT(17)|BIT(16)|BIT(15), target);
 
-			/* res |= (padapter->eeprompriv.EEPROMRFGainVal & 0x0f)<< 15; */
-			/* rtw_hal_write_rfreg(padapter, RF_PATH_A, REG_RF_BB_GAIN_OFFSET, RF_GAIN_OFFSET_MASK, res); */
-			res = rtw_hal_read_rfreg(padapter, RF_PATH_A, 0x7f, 0xffffffff);
+			rtw_hal_read_rfreg(padapter, RF_PATH_A, 0x7f, 0xffffffff);
 		}
 	}
 }

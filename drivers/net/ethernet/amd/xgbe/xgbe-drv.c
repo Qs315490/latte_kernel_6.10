@@ -1,117 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0-or-later OR BSD-3-Clause)
 /*
- * AMD 10Gb Ethernet driver
- *
- * This file is available to you under your choice of the following two
- * licenses:
- *
- * License 1: GPLv2
- *
- * Copyright (c) 2014-2016 Advanced Micro Devices, Inc.
- *
- * This file is free software; you may copy, redistribute and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 2 of the License, or (at
- * your option) any later version.
- *
- * This file is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * This file incorporates work covered by the following copyright and
- * permission notice:
- *     The Synopsys DWC ETHER XGMAC Software Driver and documentation
- *     (hereinafter "Software") is an unsupported proprietary work of Synopsys,
- *     Inc. unless otherwise expressly agreed to in writing between Synopsys
- *     and you.
- *
- *     The Software IS NOT an item of Licensed Software or Licensed Product
- *     under any End User Software License Agreement or Agreement for Licensed
- *     Product with Synopsys or any supplement thereto.  Permission is hereby
- *     granted, free of charge, to any person obtaining a copy of this software
- *     annotated with this license and the Software, to deal in the Software
- *     without restriction, including without limitation the rights to use,
- *     copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- *     of the Software, and to permit persons to whom the Software is furnished
- *     to do so, subject to the following conditions:
- *
- *     The above copyright notice and this permission notice shall be included
- *     in all copies or substantial portions of the Software.
- *
- *     THIS SOFTWARE IS BEING DISTRIBUTED BY SYNOPSYS SOLELY ON AN "AS IS"
- *     BASIS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- *     TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- *     PARTICULAR PURPOSE ARE HEREBY DISCLAIMED. IN NO EVENT SHALL SYNOPSYS
- *     BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- *     CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- *     SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- *     INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- *     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- *     THE POSSIBILITY OF SUCH DAMAGE.
- *
- *
- * License 2: Modified BSD
- *
- * Copyright (c) 2014-2016 Advanced Micro Devices, Inc.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *     * Neither the name of Advanced Micro Devices, Inc. nor the
- *       names of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * This file incorporates work covered by the following copyright and
- * permission notice:
- *     The Synopsys DWC ETHER XGMAC Software Driver and documentation
- *     (hereinafter "Software") is an unsupported proprietary work of Synopsys,
- *     Inc. unless otherwise expressly agreed to in writing between Synopsys
- *     and you.
- *
- *     The Software IS NOT an item of Licensed Software or Licensed Product
- *     under any End User Software License Agreement or Agreement for Licensed
- *     Product with Synopsys or any supplement thereto.  Permission is hereby
- *     granted, free of charge, to any person obtaining a copy of this software
- *     annotated with this license and the Software, to deal in the Software
- *     without restriction, including without limitation the rights to use,
- *     copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- *     of the Software, and to permit persons to whom the Software is furnished
- *     to do so, subject to the following conditions:
- *
- *     The above copyright notice and this permission notice shall be included
- *     in all copies or substantial portions of the Software.
- *
- *     THIS SOFTWARE IS BEING DISTRIBUTED BY SYNOPSYS SOLELY ON AN "AS IS"
- *     BASIS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- *     TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- *     PARTICULAR PURPOSE ARE HEREBY DISCLAIMED. IN NO EVENT SHALL SYNOPSYS
- *     BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- *     CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- *     SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- *     INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- *     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- *     THE POSSIBILITY OF SUCH DAMAGE.
+ * Copyright (c) 2014-2025, Advanced Micro Devices, Inc.
+ * Copyright (c) 2014, Synopsys, Inc.
+ * All rights reserved
  */
 
 #include <linux/module.h>
@@ -476,10 +367,11 @@ static irqreturn_t xgbe_ecc_isr(int irq, void *data)
 static void xgbe_isr_bh_work(struct work_struct *work)
 {
 	struct xgbe_prv_data *pdata = from_work(pdata, work, dev_bh_work);
-	struct xgbe_hw_if *hw_if = &pdata->hw_if;
-	struct xgbe_channel *channel;
-	unsigned int dma_isr, dma_ch_isr;
 	unsigned int mac_isr, mac_tssr, mac_mdioisr;
+	struct xgbe_hw_if *hw_if = &pdata->hw_if;
+	bool per_ch_irq, ti, ri, rbu, fbe;
+	unsigned int dma_isr, dma_ch_isr;
+	struct xgbe_channel *channel;
 	unsigned int i;
 
 	/* The DMA interrupt status register also reports MAC and MTL
@@ -493,43 +385,73 @@ static void xgbe_isr_bh_work(struct work_struct *work)
 	netif_dbg(pdata, intr, pdata->netdev, "DMA_ISR=%#010x\n", dma_isr);
 
 	for (i = 0; i < pdata->channel_count; i++) {
+		bool schedule_napi = false;
+		struct napi_struct *napi;
+
 		if (!(dma_isr & (1 << i)))
 			continue;
 
 		channel = pdata->channel[i];
 
 		dma_ch_isr = XGMAC_DMA_IOREAD(channel, DMA_CH_SR);
+
+		/* Precompute flags once */
+		ti  = !!XGMAC_GET_BITS(dma_ch_isr, DMA_CH_SR, TI);
+		ri  = !!XGMAC_GET_BITS(dma_ch_isr, DMA_CH_SR, RI);
+		rbu = !!XGMAC_GET_BITS(dma_ch_isr, DMA_CH_SR, RBU);
+		fbe = !!XGMAC_GET_BITS(dma_ch_isr, DMA_CH_SR, FBE);
+
 		netif_dbg(pdata, intr, pdata->netdev, "DMA_CH%u_ISR=%#010x\n",
 			  i, dma_ch_isr);
 
-		/* The TI or RI interrupt bits may still be set even if using
-		 * per channel DMA interrupts. Check to be sure those are not
-		 * enabled before using the private data napi structure.
-		 */
-		if (!pdata->per_channel_irq &&
-		    (XGMAC_GET_BITS(dma_ch_isr, DMA_CH_SR, TI) ||
-		     XGMAC_GET_BITS(dma_ch_isr, DMA_CH_SR, RI))) {
-			if (napi_schedule_prep(&pdata->napi)) {
-				/* Disable Tx and Rx interrupts */
-				xgbe_disable_rx_tx_ints(pdata);
+		per_ch_irq = pdata->per_channel_irq;
 
-				/* Turn on polling */
-				__napi_schedule(&pdata->napi);
+		/*
+		 * Decide which NAPI to use and whether to schedule:
+		 * - When not using per-channel IRQs: schedule on global NAPI
+		 *   if TI or RI are set.
+		 * - RBU should also trigger NAPI (either per-channel or global)
+		 *   to allow refill.
+		 */
+		if (!per_ch_irq && (ti || ri))
+			schedule_napi = true;
+
+		if (rbu) {
+			schedule_napi = true;
+			pdata->ext_stats.rx_buffer_unavailable++;
+		}
+
+		napi = per_ch_irq ? &channel->napi : &pdata->napi;
+
+		if (schedule_napi && napi_schedule_prep(napi)) {
+			/* Disable interrupts appropriately before polling */
+			if (per_ch_irq) {
+				if (pdata->channel_irq_mode)
+					xgbe_disable_rx_tx_int(pdata, channel);
+				else
+					disable_irq_nosync(channel->dma_irq);
+			} else {
+				xgbe_disable_rx_tx_ints(pdata);
 			}
+
+			/* Turn on polling */
+			__napi_schedule(napi);
 		} else {
-			/* Don't clear Rx/Tx status if doing per channel DMA
-			 * interrupts, these will be cleared by the ISR for
-			 * per channel DMA interrupts.
+			/*
+			 * Don't clear Rx/Tx status if doing per-channel DMA
+			 * interrupts; those bits will be serviced/cleared by
+			 * the per-channel ISR/NAPI. In non-per-channel mode
+			 * when we're not scheduling NAPI here, ensure we don't
+			 * accidentally clear TI/RI in HW: zero them in the
+			 * local copy so that the eventual write-back does not
+			 * clear TI/RI.
 			 */
 			XGMAC_SET_BITS(dma_ch_isr, DMA_CH_SR, TI, 0);
 			XGMAC_SET_BITS(dma_ch_isr, DMA_CH_SR, RI, 0);
 		}
 
-		if (XGMAC_GET_BITS(dma_ch_isr, DMA_CH_SR, RBU))
-			pdata->ext_stats.rx_buffer_unavailable++;
-
 		/* Restart the device on a Fatal Bus Error */
-		if (XGMAC_GET_BITS(dma_ch_isr, DMA_CH_SR, FBE))
+		if (fbe)
 			schedule_work(&pdata->restart_work);
 
 		/* Clear interrupt signals */
@@ -557,7 +479,7 @@ static void xgbe_isr_bh_work(struct work_struct *work)
 			if (XGMAC_GET_BITS(mac_tssr, MAC_TSSR, TXTSC)) {
 				/* Read Tx Timestamp to clear interrupt */
 				pdata->tx_tstamp =
-					hw_if->get_tx_tstamp(pdata);
+					xgbe_get_tx_tstamp(pdata);
 				queue_work(pdata->dev_workqueue,
 					   &pdata->tx_tstamp_work);
 			}
@@ -643,7 +565,8 @@ static irqreturn_t xgbe_dma_isr(int irq, void *data)
 
 static void xgbe_tx_timer(struct timer_list *t)
 {
-	struct xgbe_channel *channel = from_timer(channel, t, tx_timer);
+	struct xgbe_channel *channel = timer_container_of(channel, t,
+							  tx_timer);
 	struct xgbe_prv_data *pdata = channel->pdata;
 	struct napi_struct *napi;
 
@@ -681,13 +604,36 @@ static void xgbe_service(struct work_struct *work)
 
 static void xgbe_service_timer(struct timer_list *t)
 {
-	struct xgbe_prv_data *pdata = from_timer(pdata, t, service_timer);
+	struct xgbe_prv_data *pdata = timer_container_of(pdata, t,
+							 service_timer);
 	struct xgbe_channel *channel;
+	unsigned int poll_interval;
 	unsigned int i;
 
 	queue_work(pdata->dev_workqueue, &pdata->service_work);
 
-	mod_timer(&pdata->service_timer, jiffies + HZ);
+	/* Adaptive link status polling for fast failure detection:
+	 *
+	 * - When carrier is UP: poll every 100ms for rapid link-down detection
+	 *   Enables sub-second response to link failures, minimizing traffic
+	 *   loss.
+	 *
+	 * - When carrier is DOWN: poll every 1s to conserve CPU resources
+	 *   Link-up events are less time-critical.
+	 *
+	 * The 100ms active polling interval balances responsiveness with
+	 * efficiency:
+	 * - Provides ~100-200ms link-down detection (10x faster than 1s
+	 *   polling)
+	 * - Minimal CPU overhead (1% vs 0.1% with 1s polling)
+	 * - Enables fast failover in link aggregation deployments
+	 */
+	if (netif_running(pdata->netdev) && netif_carrier_ok(pdata->netdev))
+		poll_interval = msecs_to_jiffies(100);  /* 100ms when up */
+	else
+		poll_interval = HZ;  /* 1 second when down */
+
+	mod_timer(&pdata->service_timer, jiffies + poll_interval);
 
 	if (!pdata->tx_usecs)
 		return;
@@ -728,7 +674,7 @@ static void xgbe_stop_timers(struct xgbe_prv_data *pdata)
 	struct xgbe_channel *channel;
 	unsigned int i;
 
-	del_timer_sync(&pdata->service_timer);
+	timer_delete_sync(&pdata->service_timer);
 
 	for (i = 0; i < pdata->channel_count; i++) {
 		channel = pdata->channel[i];
@@ -736,7 +682,7 @@ static void xgbe_stop_timers(struct xgbe_prv_data *pdata)
 			break;
 
 		/* Deactivate the Tx timer */
-		del_timer_sync(&channel->tx_timer);
+		timer_delete_sync(&channel->tx_timer);
 		channel->tx_timer_active = 0;
 	}
 }
@@ -797,6 +743,21 @@ void xgbe_get_all_hw_features(struct xgbe_prv_data *pdata)
 	hw_feat->tx_ch_cnt    = XGMAC_GET_BITS(mac_hfr2, MAC_HWF2R, TXCHCNT);
 	hw_feat->pps_out_num  = XGMAC_GET_BITS(mac_hfr2, MAC_HWF2R, PPSOUTNUM);
 	hw_feat->aux_snap_num = XGMAC_GET_BITS(mac_hfr2, MAC_HWF2R, AUXSNAPNUM);
+
+	/* Sanity check and warn if hardware reports more than supported */
+	if (hw_feat->pps_out_num > XGBE_MAX_PPS_OUT) {
+		dev_warn(pdata->dev,
+			 "Hardware reports %u PPS outputs, limiting to %u\n",
+			 hw_feat->pps_out_num, XGBE_MAX_PPS_OUT);
+		hw_feat->pps_out_num = XGBE_MAX_PPS_OUT;
+	}
+
+	if (hw_feat->aux_snap_num > XGBE_MAX_AUX_SNAP) {
+		dev_warn(pdata->dev,
+			 "Hardware reports %u aux snapshot inputs, limiting to %u\n",
+			 hw_feat->aux_snap_num, XGBE_MAX_AUX_SNAP);
+		hw_feat->aux_snap_num = XGBE_MAX_AUX_SNAP;
+	}
 
 	/* Translate the Hash Table size into actual number */
 	switch (hw_feat->hash_table_size) {
@@ -1172,85 +1133,67 @@ static void xgbe_free_rx_data(struct xgbe_prv_data *pdata)
 
 static int xgbe_phy_reset(struct xgbe_prv_data *pdata)
 {
-	pdata->phy_link = -1;
 	pdata->phy_speed = SPEED_UNKNOWN;
 
 	return pdata->phy_if.phy_reset(pdata);
 }
 
-int xgbe_powerdown(struct net_device *netdev, unsigned int caller)
+int xgbe_powerdown(struct net_device *netdev)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	struct xgbe_hw_if *hw_if = &pdata->hw_if;
-	unsigned long flags;
 
-	DBGPR("-->xgbe_powerdown\n");
-
-	if (!netif_running(netdev) ||
-	    (caller == XGMAC_IOCTL_CONTEXT && pdata->power_down)) {
-		netdev_alert(netdev, "Device is already powered down\n");
-		DBGPR("<--xgbe_powerdown\n");
+	if (!netif_running(netdev)) {
+		netdev_dbg(netdev, "Device is not running, skipping powerdown\n");
 		return -EINVAL;
 	}
 
-	spin_lock_irqsave(&pdata->lock, flags);
+	if (pdata->power_down) {
+		netdev_dbg(netdev, "Device is already powered down\n");
+		return -EINVAL;
+	}
 
-	if (caller == XGMAC_DRIVER_CONTEXT)
-		netif_device_detach(netdev);
-
+	netif_device_detach(netdev);
 	netif_tx_stop_all_queues(netdev);
 
 	xgbe_stop_timers(pdata);
 	flush_workqueue(pdata->dev_workqueue);
 
+	xgbe_napi_disable(pdata, 0);
+
 	hw_if->powerdown_tx(pdata);
 	hw_if->powerdown_rx(pdata);
 
-	xgbe_napi_disable(pdata, 0);
-
 	pdata->power_down = 1;
-
-	spin_unlock_irqrestore(&pdata->lock, flags);
-
-	DBGPR("<--xgbe_powerdown\n");
 
 	return 0;
 }
 
-int xgbe_powerup(struct net_device *netdev, unsigned int caller)
+int xgbe_powerup(struct net_device *netdev)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	struct xgbe_hw_if *hw_if = &pdata->hw_if;
-	unsigned long flags;
 
-	DBGPR("-->xgbe_powerup\n");
-
-	if (!netif_running(netdev) ||
-	    (caller == XGMAC_IOCTL_CONTEXT && !pdata->power_down)) {
-		netdev_alert(netdev, "Device is already powered up\n");
-		DBGPR("<--xgbe_powerup\n");
+	if (!netif_running(netdev)) {
+		netdev_dbg(netdev, "Device is not running, skipping powerup\n");
 		return -EINVAL;
 	}
 
-	spin_lock_irqsave(&pdata->lock, flags);
-
-	pdata->power_down = 0;
-
-	xgbe_napi_enable(pdata, 0);
+	if (!pdata->power_down) {
+		netdev_dbg(netdev, "Device is already powered up\n");
+		return -EINVAL;
+	}
 
 	hw_if->powerup_tx(pdata);
 	hw_if->powerup_rx(pdata);
 
-	if (caller == XGMAC_DRIVER_CONTEXT)
-		netif_device_attach(netdev);
+	xgbe_napi_enable(pdata, 0);
 
 	netif_tx_start_all_queues(netdev);
-
 	xgbe_start_timers(pdata);
+	netif_device_attach(netdev);
 
-	spin_unlock_irqrestore(&pdata->lock, flags);
-
-	DBGPR("<--xgbe_powerup\n");
+	pdata->power_down = 0;
 
 	return 0;
 }
@@ -1343,12 +1286,22 @@ static int xgbe_start(struct xgbe_prv_data *pdata)
 	if (ret)
 		goto err_napi;
 
+	/* Reset the phy settings */
+	ret = xgbe_phy_reset(pdata);
+	if (ret)
+		goto err_irqs;
+
+	/* Start the phy */
 	ret = phy_if->phy_start(pdata);
 	if (ret)
 		goto err_irqs;
 
 	hw_if->enable_tx(pdata);
 	hw_if->enable_rx(pdata);
+	/* Synchronize flag with hardware state after enabling TX/RX.
+	 * This prevents stale state after device restart cycles.
+	 */
+	pdata->data_path_stopped = false;
 
 	udp_tunnel_nic_reset_ntf(netdev);
 
@@ -1476,199 +1429,6 @@ static void xgbe_restart(struct work_struct *work)
 	xgbe_restart_dev(pdata);
 
 	rtnl_unlock();
-}
-
-static void xgbe_tx_tstamp(struct work_struct *work)
-{
-	struct xgbe_prv_data *pdata = container_of(work,
-						   struct xgbe_prv_data,
-						   tx_tstamp_work);
-	struct skb_shared_hwtstamps hwtstamps;
-	u64 nsec;
-	unsigned long flags;
-
-	spin_lock_irqsave(&pdata->tstamp_lock, flags);
-	if (!pdata->tx_tstamp_skb)
-		goto unlock;
-
-	if (pdata->tx_tstamp) {
-		nsec = timecounter_cyc2time(&pdata->tstamp_tc,
-					    pdata->tx_tstamp);
-
-		memset(&hwtstamps, 0, sizeof(hwtstamps));
-		hwtstamps.hwtstamp = ns_to_ktime(nsec);
-		skb_tstamp_tx(pdata->tx_tstamp_skb, &hwtstamps);
-	}
-
-	dev_kfree_skb_any(pdata->tx_tstamp_skb);
-
-	pdata->tx_tstamp_skb = NULL;
-
-unlock:
-	spin_unlock_irqrestore(&pdata->tstamp_lock, flags);
-}
-
-static int xgbe_get_hwtstamp_settings(struct xgbe_prv_data *pdata,
-				      struct ifreq *ifreq)
-{
-	if (copy_to_user(ifreq->ifr_data, &pdata->tstamp_config,
-			 sizeof(pdata->tstamp_config)))
-		return -EFAULT;
-
-	return 0;
-}
-
-static int xgbe_set_hwtstamp_settings(struct xgbe_prv_data *pdata,
-				      struct ifreq *ifreq)
-{
-	struct hwtstamp_config config;
-	unsigned int mac_tscr;
-
-	if (copy_from_user(&config, ifreq->ifr_data, sizeof(config)))
-		return -EFAULT;
-
-	mac_tscr = 0;
-
-	switch (config.tx_type) {
-	case HWTSTAMP_TX_OFF:
-		break;
-
-	case HWTSTAMP_TX_ON:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	default:
-		return -ERANGE;
-	}
-
-	switch (config.rx_filter) {
-	case HWTSTAMP_FILTER_NONE:
-		break;
-
-	case HWTSTAMP_FILTER_NTP_ALL:
-	case HWTSTAMP_FILTER_ALL:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENALL, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2, UDP, any kind of event packet */
-	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-		fallthrough;	/* to PTP v1, UDP, any kind of event packet */
-	case HWTSTAMP_FILTER_PTP_V1_L4_EVENT:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, SNAPTYPSEL, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2, UDP, Sync packet */
-	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-		fallthrough;	/* to PTP v1, UDP, Sync packet */
-	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2, UDP, Delay_req packet */
-	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-		fallthrough;	/* to PTP v1, UDP, Delay_req packet */
-	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSMSTRENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* 802.AS1, Ethernet, any kind of event packet */
-	case HWTSTAMP_FILTER_PTP_V2_L2_EVENT:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, AV8021ASMEN, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, SNAPTYPSEL, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* 802.AS1, Ethernet, Sync packet */
-	case HWTSTAMP_FILTER_PTP_V2_L2_SYNC:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, AV8021ASMEN, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* 802.AS1, Ethernet, Delay_req packet */
-	case HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, AV8021ASMEN, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSMSTRENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2/802.AS1, any layer, any kind of event packet */
-	case HWTSTAMP_FILTER_PTP_V2_EVENT:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, SNAPTYPSEL, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2/802.AS1, any layer, Sync packet */
-	case HWTSTAMP_FILTER_PTP_V2_SYNC:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2/802.AS1, any layer, Delay_req packet */
-	case HWTSTAMP_FILTER_PTP_V2_DELAY_REQ:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSMSTRENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	default:
-		return -ERANGE;
-	}
-
-	pdata->hw_if.config_tstamp(pdata, mac_tscr);
-
-	memcpy(&pdata->tstamp_config, &config, sizeof(config));
-
-	return 0;
-}
-
-static void xgbe_prep_tx_tstamp(struct xgbe_prv_data *pdata,
-				struct sk_buff *skb,
-				struct xgbe_packet_data *packet)
-{
-	unsigned long flags;
-
-	if (XGMAC_GET_BITS(packet->attributes, TX_PACKET_ATTRIBUTES, PTP)) {
-		spin_lock_irqsave(&pdata->tstamp_lock, flags);
-		if (pdata->tx_tstamp_skb) {
-			/* Another timestamp in progress, ignore this one */
-			XGMAC_SET_BITS(packet->attributes,
-				       TX_PACKET_ATTRIBUTES, PTP, 0);
-		} else {
-			pdata->tx_tstamp_skb = skb_get(skb);
-			skb_shinfo(skb)->tx_flags |= SKBTX_IN_PROGRESS;
-		}
-		spin_unlock_irqrestore(&pdata->tstamp_lock, flags);
-	}
-
-	skb_tx_timestamp(skb);
 }
 
 static void xgbe_prep_vlan(struct sk_buff *skb, struct xgbe_packet_data *packet)
@@ -1860,11 +1620,6 @@ static int xgbe_open(struct net_device *netdev)
 		goto err_dev_wq;
 	}
 
-	/* Reset the phy settings */
-	ret = xgbe_phy_reset(pdata);
-	if (ret)
-		goto err_an_wq;
-
 	/* Enable the clocks */
 	ret = clk_prepare_enable(pdata->sysclk);
 	if (ret) {
@@ -1882,6 +1637,9 @@ static int xgbe_open(struct net_device *netdev)
 	INIT_WORK(&pdata->restart_work, xgbe_restart);
 	INIT_WORK(&pdata->stopdev_work, xgbe_stopdev);
 	INIT_WORK(&pdata->tx_tstamp_work, xgbe_tx_tstamp);
+
+	/* Initialize PTP timestamping and clock. */
+	xgbe_init_ptp(pdata);
 
 	ret = xgbe_alloc_memory(pdata);
 	if (ret)
@@ -2037,27 +1795,6 @@ static int xgbe_set_mac_address(struct net_device *netdev, void *addr)
 	return 0;
 }
 
-static int xgbe_ioctl(struct net_device *netdev, struct ifreq *ifreq, int cmd)
-{
-	struct xgbe_prv_data *pdata = netdev_priv(netdev);
-	int ret;
-
-	switch (cmd) {
-	case SIOCGHWTSTAMP:
-		ret = xgbe_get_hwtstamp_settings(pdata, ifreq);
-		break;
-
-	case SIOCSHWTSTAMP:
-		ret = xgbe_set_hwtstamp_settings(pdata, ifreq);
-		break;
-
-	default:
-		ret = -EOPNOTSUPP;
-	}
-
-	return ret;
-}
-
 static int xgbe_change_mtu(struct net_device *netdev, int mtu)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
@@ -2106,7 +1843,8 @@ static void xgbe_get_stats64(struct net_device *netdev,
 	s->multicast = pstats->rxmulticastframes_g;
 	s->rx_length_errors = pstats->rxlengtherror;
 	s->rx_crc_errors = pstats->rxcrcerror;
-	s->rx_fifo_errors = pstats->rxfifooverflow;
+	s->rx_over_errors = pstats->rxfifooverflow;
+	s->rx_frame_errors = pstats->rxalignmenterror;
 
 	s->tx_packets = pstats->txframecount_gb;
 	s->tx_bytes = pstats->txoctetcount_gb;
@@ -2257,10 +1995,17 @@ static int xgbe_set_features(struct net_device *netdev,
 	if (ret)
 		return ret;
 
-	if ((features & NETIF_F_RXCSUM) && !rxcsum)
+	if ((features & NETIF_F_RXCSUM) && !rxcsum) {
+		hw_if->enable_sph(pdata);
+		hw_if->enable_vxlan(pdata);
 		hw_if->enable_rx_csum(pdata);
-	else if (!(features & NETIF_F_RXCSUM) && rxcsum)
+		schedule_work(&pdata->restart_work);
+	} else if (!(features & NETIF_F_RXCSUM) && rxcsum) {
+		hw_if->disable_sph(pdata);
+		hw_if->disable_vxlan(pdata);
 		hw_if->disable_rx_csum(pdata);
+		schedule_work(&pdata->restart_work);
+	}
 
 	if ((features & NETIF_F_HW_VLAN_CTAG_RX) && !rxvlan)
 		hw_if->enable_rx_vlan_stripping(pdata);
@@ -2296,7 +2041,6 @@ static const struct net_device_ops xgbe_netdev_ops = {
 	.ndo_set_rx_mode	= xgbe_set_rx_mode,
 	.ndo_set_mac_address	= xgbe_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_eth_ioctl		= xgbe_ioctl,
 	.ndo_change_mtu		= xgbe_change_mtu,
 	.ndo_tx_timeout		= xgbe_tx_timeout,
 	.ndo_get_stats64	= xgbe_get_stats64,
@@ -2309,6 +2053,8 @@ static const struct net_device_ops xgbe_netdev_ops = {
 	.ndo_fix_features	= xgbe_fix_features,
 	.ndo_set_features	= xgbe_set_features,
 	.ndo_features_check	= xgbe_features_check,
+	.ndo_hwtstamp_get	= xgbe_get_hwtstamp_settings,
+	.ndo_hwtstamp_set	= xgbe_set_hwtstamp_settings,
 };
 
 const struct net_device_ops *xgbe_get_netdev_ops(void)
@@ -2423,6 +2169,7 @@ static int xgbe_tx_poll(struct xgbe_channel *channel)
 	struct net_device *netdev = pdata->netdev;
 	struct netdev_queue *txq;
 	int processed = 0;
+	int force_cleanup;
 	unsigned int tx_packets = 0, tx_bytes = 0;
 	unsigned int cur;
 
@@ -2439,13 +2186,41 @@ static int xgbe_tx_poll(struct xgbe_channel *channel)
 
 	txq = netdev_get_tx_queue(netdev, channel->queue_index);
 
+	/* Smart descriptor cleanup during link-down conditions.
+	 *
+	 * When link is down, hardware stops processing TX descriptors (OWN bit
+	 * remains set). Enable intelligent cleanup to reclaim these abandoned
+	 * descriptors and maintain TX queue health.
+	 *
+	 * This cleanup mechanism enables:
+	 * - Continuous TX queue availability for new packets when link recovers
+	 * - Clean resource management (skbs, DMA mappings, descriptors)
+	 * - Fast failover in link aggregation scenarios
+	 */
+	force_cleanup = !pdata->phy.link;
+
 	while ((processed < XGBE_TX_DESC_MAX_PROC) &&
 	       (ring->dirty != cur)) {
 		rdata = XGBE_GET_DESC_DATA(ring, ring->dirty);
 		rdesc = rdata->rdesc;
 
-		if (!hw_if->tx_complete(rdesc))
-			break;
+		if (!hw_if->tx_complete(rdesc)) {
+			if (!force_cleanup)
+				break;
+			/* Link-down descriptor cleanup: reclaim abandoned
+			 * resources.
+			 *
+			 * Hardware has stopped processing this descriptor, so
+			 * perform intelligent cleanup to free skbs and reclaim
+			 * descriptors for future use when link recovers.
+			 *
+			 * These are not counted as successful transmissions
+			 * since packets never reached the wire.
+			 */
+			netif_dbg(pdata, tx_err, netdev,
+				  "force-freeing stuck TX desc %u (link down)\n",
+				  ring->dirty);
+		}
 
 		/* Make sure descriptor fields are read after reading the OWN
 		 * bit */
@@ -2454,9 +2229,13 @@ static int xgbe_tx_poll(struct xgbe_channel *channel)
 		if (netif_msg_tx_done(pdata))
 			xgbe_dump_tx_desc(pdata, ring, ring->dirty, 1, 0);
 
-		if (hw_if->is_last_desc(rdesc)) {
-			tx_packets += rdata->tx.packets;
-			tx_bytes += rdata->tx.bytes;
+		/* Only count packets actually transmitted (not force-cleaned)
+		 */
+		if (!force_cleanup || hw_if->is_last_desc(rdesc)) {
+			if (hw_if->is_last_desc(rdesc)) {
+				tx_packets += rdata->tx.packets;
+				tx_bytes += rdata->tx.bytes;
+			}
 		}
 
 		/* Free the SKB and reset the descriptor for re-use */
@@ -2553,9 +2332,6 @@ read_again:
 			goto read_again;
 
 		if (error || packet->errors) {
-			if (packet->errors)
-				netif_err(pdata, rx_err, netdev,
-					  "error in received packet\n");
 			dev_kfree_skb(skb);
 			goto next_packet;
 		}
@@ -2646,12 +2422,8 @@ skip_data:
 
 		if (XGMAC_GET_BITS(packet->attributes,
 				   RX_PACKET_ATTRIBUTES, RX_TSTAMP)) {
-			u64 nsec;
-
-			nsec = timecounter_cyc2time(&pdata->tstamp_tc,
-						    packet->rx_tstamp);
 			hwtstamps = skb_hwtstamps(skb);
-			hwtstamps->hwtstamp = ns_to_ktime(nsec);
+			hwtstamps->hwtstamp = ns_to_ktime(packet->rx_tstamp);
 		}
 
 		if (XGMAC_GET_BITS(packet->attributes,

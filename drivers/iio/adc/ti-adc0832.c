@@ -8,7 +8,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/spi/spi.h>
 #include <linux/iio/iio.h>
 #include <linux/regulator/consumer.h>
@@ -225,8 +224,8 @@ static irqreturn_t adc0832_trigger_handler(int irq, void *p)
 		adc->data[i] = ret;
 		i++;
 	}
-	iio_push_to_buffers_with_timestamp(indio_dev, adc->data,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, adc->data, sizeof(adc->data),
+				    iio_get_time_ns(indio_dev));
 out:
 	mutex_unlock(&adc->lock);
 

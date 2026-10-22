@@ -144,46 +144,45 @@ static int kvm_vfio_file_add(struct kvm_device *dev, unsigned int fd)
 {
 	struct kvm_vfio *kv = dev->private;
 	struct kvm_vfio_file *kvf;
-	struct file *filp;
-	int ret = 0;
+	struct file *filp __free(fput) = NULL;
 
 	filp = fget(fd);
 	if (!filp)
 		return -EBADF;
 
 	/* Ensure the FD is a vfio FD. */
-	if (!kvm_vfio_file_is_valid(filp)) {
-		ret = -EINVAL;
-		goto out_fput;
-	}
+	if (!kvm_vfio_file_is_valid(filp))
+		return -EINVAL;
 
-	mutex_lock(&kv->lock);
+	guard(mutex)(&kv->lock);
 
 	list_for_each_entry(kvf, &kv->file_list, node) {
-		if (kvf->file == filp) {
-			ret = -EEXIST;
-			goto out_unlock;
-		}
+		if (kvf->file == filp)
+			return -EEXIST;
 	}
 
-	kvf = kzalloc(sizeof(*kvf), GFP_KERNEL_ACCOUNT);
-	if (!kvf) {
-		ret = -ENOMEM;
-		goto out_unlock;
-	}
+	kvf = kzalloc_obj(*kvf, GFP_KERNEL_ACCOUNT);
+	if (!kvf)
+		return -ENOMEM;
 
 	kvf->file = get_file(filp);
 	list_add_tail(&kvf->node, &kv->file_list);
 
-	kvm_arch_start_assignment(dev->kvm);
 	kvm_vfio_file_set_kvm(kvf->file, dev->kvm);
 	kvm_vfio_update_coherency(dev);
 
-out_unlock:
-	mutex_unlock(&kv->lock);
-out_fput:
-	fput(filp);
-	return ret;
+	return 0;
+}
+
+static void kvm_vfio_file_free(struct kvm_device *dev, struct kvm_vfio_file *kvf)
+{
+#ifdef CONFIG_SPAPR_TCE_IOMMU
+	kvm_spapr_tce_release_vfio_group(dev->kvm, kvf);
+#endif
+	kvm_vfio_file_set_kvm(kvf->file, NULL);
+	fput(kvf->file);
+	list_del(&kvf->node);
+	kfree(kvf);
 }
 
 static int kvm_vfio_file_del(struct kvm_device *dev, unsigned int fd)
@@ -191,35 +190,21 @@ static int kvm_vfio_file_del(struct kvm_device *dev, unsigned int fd)
 	struct kvm_vfio *kv = dev->private;
 	struct kvm_vfio_file *kvf;
 	CLASS(fd, f)(fd);
-	int ret;
 
 	if (fd_empty(f))
 		return -EBADF;
 
-	ret = -ENOENT;
-
-	mutex_lock(&kv->lock);
+	guard(mutex)(&kv->lock);
 
 	list_for_each_entry(kvf, &kv->file_list, node) {
-		if (kvf->file != fd_file(f))
-			continue;
-
-		list_del(&kvf->node);
-		kvm_arch_end_assignment(dev->kvm);
-#ifdef CONFIG_SPAPR_TCE_IOMMU
-		kvm_spapr_tce_release_vfio_group(dev->kvm, kvf);
-#endif
-		kvm_vfio_file_set_kvm(kvf->file, NULL);
-		fput(kvf->file);
-		kfree(kvf);
-		ret = 0;
-		break;
+		if (kvf->file == fd_file(f)) {
+			kvm_vfio_file_free(dev, kvf);
+			kvm_vfio_update_coherency(dev);
+			return 0;
+		}
 	}
 
-	kvm_vfio_update_coherency(dev);
-
-	mutex_unlock(&kv->lock);
-	return ret;
+	return -ENOENT;
 }
 
 #ifdef CONFIG_SPAPR_TCE_IOMMU
@@ -229,7 +214,6 @@ static int kvm_vfio_file_set_spapr_tce(struct kvm_device *dev,
 	struct kvm_vfio_spapr_tce param;
 	struct kvm_vfio *kv = dev->private;
 	struct kvm_vfio_file *kvf;
-	int ret;
 
 	if (copy_from_user(&param, arg, sizeof(struct kvm_vfio_spapr_tce)))
 		return -EFAULT;
@@ -238,9 +222,7 @@ static int kvm_vfio_file_set_spapr_tce(struct kvm_device *dev,
 	if (fd_empty(f))
 		return -EBADF;
 
-	ret = -ENOENT;
-
-	mutex_lock(&kv->lock);
+	guard(mutex)(&kv->lock);
 
 	list_for_each_entry(kvf, &kv->file_list, node) {
 		if (kvf->file != fd_file(f))
@@ -248,20 +230,15 @@ static int kvm_vfio_file_set_spapr_tce(struct kvm_device *dev,
 
 		if (!kvf->iommu_group) {
 			kvf->iommu_group = kvm_vfio_file_iommu_group(kvf->file);
-			if (WARN_ON_ONCE(!kvf->iommu_group)) {
-				ret = -EIO;
-				goto err_fdput;
-			}
+			if (WARN_ON_ONCE(!kvf->iommu_group))
+				return -EIO;
 		}
 
-		ret = kvm_spapr_tce_attach_iommu_group(dev->kvm, param.tablefd,
-						       kvf->iommu_group);
-		break;
+		return kvm_spapr_tce_attach_iommu_group(dev->kvm, param.tablefd,
+							kvf->iommu_group);
 	}
 
-err_fdput:
-	mutex_unlock(&kv->lock);
-	return ret;
+	return -ENOENT;
 }
 #endif
 
@@ -328,16 +305,8 @@ static void kvm_vfio_release(struct kvm_device *dev)
 	struct kvm_vfio *kv = dev->private;
 	struct kvm_vfio_file *kvf, *tmp;
 
-	list_for_each_entry_safe(kvf, tmp, &kv->file_list, node) {
-#ifdef CONFIG_SPAPR_TCE_IOMMU
-		kvm_spapr_tce_release_vfio_group(dev->kvm, kvf);
-#endif
-		kvm_vfio_file_set_kvm(kvf->file, NULL);
-		fput(kvf->file);
-		list_del(&kvf->node);
-		kfree(kvf);
-		kvm_arch_end_assignment(dev->kvm);
-	}
+	list_for_each_entry_safe(kvf, tmp, &kv->file_list, node)
+		kvm_vfio_file_free(dev, kvf);
 
 	kvm_vfio_update_coherency(dev);
 
@@ -367,7 +336,7 @@ static int kvm_vfio_create(struct kvm_device *dev, u32 type)
 		if (tmp->ops == &kvm_vfio_ops)
 			return -EBUSY;
 
-	kv = kzalloc(sizeof(*kv), GFP_KERNEL_ACCOUNT);
+	kv = kzalloc_obj(*kv, GFP_KERNEL_ACCOUNT);
 	if (!kv)
 		return -ENOMEM;
 

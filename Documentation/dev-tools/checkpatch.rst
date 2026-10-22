@@ -184,6 +184,13 @@ Available options:
    Override checking of perl version.  Runtime errors may be encountered after
    enabling this flag if the perl version does not meet the minimum specified.
 
+ - --spdx-cxx-comments
+
+   Don't force C comments ``/* */`` for SPDX license (required by old
+   toolchains), allow also C++ comments ``//``.
+
+   NOTE: it should *not* be used for Linux mainline.
+
  - --codespell
 
    Use the codespell dictionary for checking spelling errors.
@@ -209,6 +216,13 @@ Available options:
  - -h, --help, --version
 
    Display the help text.
+
+Configuration file
+==================
+
+Default configuration options can be stored in ``.checkpatch.conf``, search
+path: ``.:$HOME:.scripts`` or in a directory specified by ``$CHECKPATCH_CONFIG_DIR``
+environment variable (falling back to the default search path).
 
 Message Levels
 ==============
@@ -342,24 +356,6 @@ API usage
 
     See: https://www.kernel.org/doc/html/latest/RCU/whatisRCU.html#full-list-of-rcu-apis
 
-  **DEPRECATED_VARIABLE**
-    EXTRA_{A,C,CPP,LD}FLAGS are deprecated and should be replaced by the new
-    flags added via commit f77bf01425b1 ("kbuild: introduce ccflags-y,
-    asflags-y and ldflags-y").
-
-    The following conversion scheme maybe used::
-
-      EXTRA_AFLAGS    ->  asflags-y
-      EXTRA_CFLAGS    ->  ccflags-y
-      EXTRA_CPPFLAGS  ->  cppflags-y
-      EXTRA_LDFLAGS   ->  ldflags-y
-
-    See:
-
-      1. https://lore.kernel.org/lkml/20070930191054.GA15876@uranus.ravnborg.org/
-      2. https://lore.kernel.org/lkml/1313384834-24433-12-git-send-email-lacombar@gmail.com/
-      3. https://www.kernel.org/doc/html/latest/kbuild/makefiles.html#compilation-flags
-
   **DEVICE_ATTR_FUNCTIONS**
     The function names used in DEVICE_ATTR is unusual.
     Typically, the store and show functions are used with <attr>_store and
@@ -479,16 +475,9 @@ Comments
     line comments is::
 
       /*
-      * This is the preferred style
-      * for multi line comments.
-      */
-
-    The networking comment style is a bit different, with the first line
-    not empty like the former::
-
-      /* This is the preferred comment style
-      * for files in net/ and drivers/net/
-      */
+       * This is the preferred style
+       * for multi line comments.
+       */
 
     See: https://www.kernel.org/doc/html/latest/process/coding-style.html#commenting
 
@@ -513,6 +502,15 @@ Comments
 
     See: https://lore.kernel.org/lkml/20131006222342.GT19510@leaf/
 
+  **UNCOMMENTED_RGMII_MODE**
+    Historically, the RGMII PHY modes specified in Device Trees have been
+    used inconsistently, often referring to the usage of delays on the PHY
+    side rather than describing the board.
+
+    PHY modes "rgmii", "rgmii-rxid" and "rgmii-txid" modes require the clock
+    signal to be delayed on the PCB; this unusual configuration should be
+    described in a comment. If they are not (meaning that the delay is realized
+    internally in the MAC or PHY), "rgmii-id" is the correct PHY mode.
 
 Commit message
 --------------
@@ -617,6 +615,11 @@ Commit message
 
     See: https://www.kernel.org/doc/html/latest/process/submitting-patches.html#describe-your-changes
 
+  **BAD_COMMIT_SEPARATOR**
+    The commit separator is a single line with 3 dashes.
+    The regex match is '^---$'
+    Lines that start with 3 dashes and have more content on the same line
+    may confuse tools that apply patches.
 
 Comparison style
 ----------------
@@ -769,7 +772,7 @@ Macros, Attributes and Symbols
     sizeof(foo)/sizeof(foo[0]) for finding number of elements in an
     array.
 
-    The macro is defined in include/linux/kernel.h::
+    The macro is defined in include/linux/array_size.h::
 
       #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
@@ -1018,6 +1021,29 @@ Functions and Variables
 
       return bar;
 
+  **UNINITIALIZED_PTR_WITH_FREE**
+    Pointers with __free attribute should be declared at the place of use
+    and initialized (see include/linux/cleanup.h). In this case
+    declarations at the top of the function rule can be relaxed. Not doing
+    so may lead to undefined behavior as the memory assigned (garbage,
+    in case not initialized) to the pointer is freed automatically when
+    the pointer goes out of scope.
+
+    Also see: https://lore.kernel.org/lkml/58fd478f408a34b578ee8d949c5c4b4da4d4f41d.camel@HansenPartnership.com/
+
+    Example::
+
+      type var __free(free_func);
+      ... // var not used, but, in future someone might add a return here
+      var = malloc(var_size);
+      ...
+
+    should be initialized as::
+
+      ...
+      type var __free(free_func) = malloc(var_size);
+      ...
+
 
 Permissions
 -----------
@@ -1253,6 +1279,16 @@ Others
   **NOT_UNIFIED_DIFF**
     The patch file does not appear to be in unified-diff format.  Please
     regenerate the patch file before sending it to the maintainer.
+
+  **PLACEHOLDER_USE**
+    Detects unhandled placeholder text left in cover letters or commit headers/logs.
+    Common placeholders include lines like::
+
+      *** SUBJECT HERE ***
+      *** BLURB HERE ***
+
+    These typically come from autogenerated templates. Replace them with a proper
+    subject and description before sending.
 
   **PRINTF_0XDECIMAL**
     Prefixing 0x with decimal output is defective and should be corrected.

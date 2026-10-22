@@ -2,9 +2,10 @@
 #ifndef _LINUX_IRQDESC_H
 #define _LINUX_IRQDESC_H
 
-#include <linux/rcupdate.h>
+#include <linux/irq_work.h>
 #include <linux/kobject.h>
 #include <linux/mutex.h>
+#include <linux/rcupdate.h>
 
 /*
  * Core internal functions to deal with irq descriptors
@@ -30,6 +31,17 @@ struct irqstat {
 };
 
 /**
+ * struct irq_redirect - interrupt redirection metadata
+ * @work:	Harg irq_work item for handler execution on a different CPU
+ * @target_cpu:	CPU to run irq handler on in case the current CPU is not part
+ *		of the irq affinity mask
+ */
+struct irq_redirect {
+	struct irq_work	work;
+	unsigned int	target_cpu;
+};
+
+/**
  * struct irq_desc - interrupt descriptor
  * @irq_common_data:	per irq and chip data passed down to chip functions
  * @kstat_irqs:		irq stats per cpu
@@ -40,12 +52,13 @@ struct irqstat {
  * @depth:		disable-depth, for nested irq_disable() calls
  * @wake_depth:		enable depth, for multiple irq_set_irq_wake() callers
  * @tot_count:		stats field for non-percpu irqs
- * @irq_count:		stats field to detect stalled irqs
  * @last_unhandled:	aging timer for unhandled count
+ * @irq_count:		stats field to detect stalled irqs
  * @irqs_unhandled:	stats field for spurious unhandled interrupts
  * @threads_handled:	stats field for deferred spurious detection of threaded handlers
  * @threads_handled_last: comparator field for deferred spurious detection of threaded handlers
  * @lock:		locking for SMP
+ * @redirect:		Facility for redirecting interrupts via irq_work
  * @affinity_hint:	hint to user space for preferred irq affinity
  * @affinity_notify:	context for notification of affinity changes
  * @pending_mask:	pending rebalanced interrupts
@@ -57,6 +70,7 @@ struct irqstat {
  *			IRQF_NO_SUSPEND set
  * @force_resume_depth:	number of irqactions on a irq descriptor with
  *			IRQF_FORCE_RESUME set
+ * @refcnt:		Reference count mainly for /proc/interrupts
  * @rcu:		rcu head for delayed free
  * @kobj:		kobject used to represent this struct in sysfs
  * @request_mutex:	mutex to protect request/free before locking desc->lock
@@ -74,16 +88,16 @@ struct irq_desc {
 	unsigned int		core_internal_state__do_not_mess_with_it;
 	unsigned int		depth;		/* nested irq disables */
 	unsigned int		wake_depth;	/* nested wake enables */
-	unsigned int		tot_count;
-	unsigned int		irq_count;	/* For detecting broken IRQs */
+	unsigned long		tot_count;
 	unsigned long		last_unhandled;	/* Aging timer for unhandled count */
+	unsigned int		irq_count;	/* For detecting broken IRQs */
 	unsigned int		irqs_unhandled;
 	atomic_t		threads_handled;
 	int			threads_handled_last;
 	raw_spinlock_t		lock;
 	struct cpumask		*percpu_enabled;
-	const struct cpumask	*percpu_affinity;
 #ifdef CONFIG_SMP
+	struct irq_redirect	redirect;
 	const struct cpumask	*affinity_hint;
 	struct irq_affinity_notify *affinity_notify;
 #ifdef CONFIG_GENERIC_PENDING_IRQ
@@ -106,6 +120,7 @@ struct irq_desc {
 	struct dentry		*debugfs_file;
 	const char		*dev_name;
 #endif
+	rcuref_t		refcnt;
 #ifdef CONFIG_SPARSE_IRQ
 	struct rcu_head		rcu;
 	struct kobject		kobj;
@@ -183,9 +198,10 @@ int generic_handle_irq_safe(unsigned int irq);
  * and handle the result interrupt number. Return -EINVAL if
  * conversion failed.
  */
-int generic_handle_domain_irq(struct irq_domain *domain, unsigned int hwirq);
-int generic_handle_domain_irq_safe(struct irq_domain *domain, unsigned int hwirq);
-int generic_handle_domain_nmi(struct irq_domain *domain, unsigned int hwirq);
+int generic_handle_domain_irq(struct irq_domain *domain, irq_hw_number_t hwirq);
+int generic_handle_domain_irq_safe(struct irq_domain *domain, irq_hw_number_t hwirq);
+int generic_handle_domain_nmi(struct irq_domain *domain, irq_hw_number_t hwirq);
+bool generic_handle_demux_domain_irq(struct irq_domain *domain, irq_hw_number_t hwirq);
 #endif
 
 /* Test to see if a driver has successfully requested an irq */

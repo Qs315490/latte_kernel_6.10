@@ -109,7 +109,7 @@ static int is_elf(struct elfhdr *hdr, struct file *file)
 		return 0;
 	if (!elf_check_arch(hdr))
 		return 0;
-	if (!file->f_op->mmap)
+	if (!can_mmap_file(file))
 		return 0;
 	return 1;
 }
@@ -231,6 +231,10 @@ static int load_elf_fdpic_binary(struct linux_binprm *bprm)
 	for (i = 0; i < exec_params.hdr.e_phnum; i++, phdr++) {
 		switch (phdr->p_type) {
 		case PT_INTERP:
+			/* elf ABI allows only one interpreter */
+			if (interpreter_name)
+				continue;
+
 			retval = -ENOMEM;
 			if (phdr->p_filesz > PATH_MAX)
 				goto error;
@@ -595,6 +599,12 @@ static int create_elf_fdpic_tables(struct linux_binprm *bprm,
 #ifdef ELF_HWCAP2
 	nitems++;
 #endif
+#ifdef ELF_HWCAP3
+	nitems++;
+#endif
+#ifdef ELF_HWCAP4
+	nitems++;
+#endif
 
 	csp = sp;
 	sp -= nitems * 2 * sizeof(unsigned long);
@@ -761,7 +771,7 @@ static int elf_fdpic_map_file(struct elf_fdpic_params *params,
 	if (nloads == 0)
 		return -ELIBBAD;
 
-	loadmap = kzalloc(struct_size(loadmap, segs, nloads), GFP_KERNEL);
+	loadmap = kzalloc_flex(*loadmap, segs, nloads);
 	if (!loadmap)
 		return -ENOMEM;
 
@@ -911,7 +921,7 @@ static int elf_fdpic_map_file(struct elf_fdpic_params *params,
 	return 0;
 
 dynamic_error:
-	printk("ELF FDPIC %s with invalid DYNAMIC section (inode=%lu)\n",
+	printk("ELF FDPIC %s with invalid DYNAMIC section (inode=%llu)\n",
 	       what, file_inode(file)->i_ino);
 	return -ELIBBAD;
 }
@@ -1024,7 +1034,7 @@ static int elf_fdpic_map_file_by_direct_mmap(struct elf_fdpic_params *params,
 	/* deal with each load segment separately */
 	phdr = params->phdrs;
 	for (loop = 0; loop < params->hdr.e_phnum; loop++, phdr++) {
-		unsigned long maddr, disp, excess, excess1;
+		unsigned long maddr, disp, excess;
 		int prot = 0, flags;
 
 		if (phdr->p_type != PT_LOAD)
@@ -1120,9 +1130,10 @@ static int elf_fdpic_map_file_by_direct_mmap(struct elf_fdpic_params *params,
 		 *   extant in the file
 		 */
 		excess = phdr->p_memsz - phdr->p_filesz;
-		excess1 = PAGE_SIZE - ((maddr + phdr->p_filesz) & ~PAGE_MASK);
 
 #ifdef CONFIG_MMU
+		unsigned long excess1
+			= PAGE_SIZE - ((maddr + phdr->p_filesz) & ~PAGE_MASK);
 		if (excess > excess1) {
 			unsigned long xaddr = maddr + phdr->p_filesz + excess1;
 			unsigned long xmaddr;
@@ -1274,8 +1285,8 @@ static inline void fill_elf_note_phdr(struct elf_phdr *phdr, int sz, loff_t offs
 	return;
 }
 
-static inline void fill_note(struct memelfnote *note, const char *name, int type,
-		unsigned int sz, void *data)
+static inline void __fill_note(struct memelfnote *note, const char *name, int type,
+			       unsigned int sz, void *data)
 {
 	note->name = name;
 	note->type = type;
@@ -1283,6 +1294,9 @@ static inline void fill_note(struct memelfnote *note, const char *name, int type
 	note->data = data;
 	return;
 }
+
+#define fill_note(note, type, sz, data) \
+	__fill_note(note, NN_ ## type, NT_ ## type, sz, data)
 
 /*
  * fill up all the fields in prstatus from the given task struct, except
@@ -1387,7 +1401,7 @@ static struct elf_thread_status *elf_dump_thread_status(long signr, struct task_
 	struct elf_thread_status *t;
 	int i, ret;
 
-	t = kzalloc(sizeof(struct elf_thread_status), GFP_KERNEL);
+	t = kzalloc_obj(struct elf_thread_status);
 	if (!t)
 		return t;
 
@@ -1397,8 +1411,7 @@ static struct elf_thread_status *elf_dump_thread_status(long signr, struct task_
 	regset_get(p, &view->regsets[0],
 		   sizeof(t->prstatus.pr_reg), &t->prstatus.pr_reg);
 
-	fill_note(&t->notes[0], "CORE", NT_PRSTATUS, sizeof(t->prstatus),
-		  &t->prstatus);
+	fill_note(&t->notes[0], PRSTATUS, sizeof(t->prstatus), &t->prstatus);
 	t->num_notes++;
 	*sz += notesize(&t->notes[0]);
 
@@ -1415,8 +1428,7 @@ static struct elf_thread_status *elf_dump_thread_status(long signr, struct task_
 	}
 
 	if (t->prstatus.pr_fpvalid) {
-		fill_note(&t->notes[1], "CORE", NT_PRFPREG, sizeof(t->fpu),
-			  &t->fpu);
+		fill_note(&t->notes[1], PRFPREG, sizeof(t->fpu), &t->fpu);
 		t->num_notes++;
 		*sz += notesize(&t->notes[1]);
 	}
@@ -1484,10 +1496,10 @@ static int elf_fdpic_core_dump(struct coredump_params *cprm)
 	struct elf_thread_status *tmp;
 
 	/* alloc memory for large data structures: too large to be on stack */
-	elf = kmalloc(sizeof(*elf), GFP_KERNEL);
+	elf = kmalloc_obj(*elf);
 	if (!elf)
 		goto end_coredump;
-	psinfo = kmalloc(sizeof(*psinfo), GFP_KERNEL);
+	psinfo = kmalloc_obj(*psinfo);
 	if (!psinfo)
 		goto end_coredump;
 
@@ -1530,7 +1542,7 @@ static int elf_fdpic_core_dump(struct coredump_params *cprm)
 	 */
 
 	fill_psinfo(psinfo, current->group_leader, current->mm);
-	fill_note(&psinfo_note, "CORE", NT_PRPSINFO, sizeof(*psinfo), psinfo);
+	fill_note(&psinfo_note, PRPSINFO, sizeof(*psinfo), psinfo);
 	thread_status_size += notesize(&psinfo_note);
 
 	auxv = (elf_addr_t *) current->mm->saved_auxv;
@@ -1538,14 +1550,14 @@ static int elf_fdpic_core_dump(struct coredump_params *cprm)
 	do
 		i += 2;
 	while (auxv[i - 2] != AT_NULL);
-	fill_note(&auxv_note, "CORE", NT_AUXV, i * sizeof(elf_addr_t), auxv);
+	fill_note(&auxv_note, AUXV, i * sizeof(elf_addr_t), auxv);
 	thread_status_size += notesize(&auxv_note);
 
 	offset = sizeof(*elf);				/* ELF header */
 	offset += segs * sizeof(struct elf_phdr);	/* Program headers */
 
 	/* Write notes phdr entry */
-	phdr4note = kmalloc(sizeof(*phdr4note), GFP_KERNEL);
+	phdr4note = kmalloc_obj(*phdr4note);
 	if (!phdr4note)
 		goto end_coredump;
 
@@ -1560,7 +1572,7 @@ static int elf_fdpic_core_dump(struct coredump_params *cprm)
 	e_shoff = offset;
 
 	if (e_phnum == PN_XNUM) {
-		shdr4extnum = kmalloc(sizeof(*shdr4extnum), GFP_KERNEL);
+		shdr4extnum = kmalloc_obj(*shdr4extnum);
 		if (!shdr4extnum)
 			goto end_coredump;
 		fill_extnum_info(elf, shdr4extnum, e_shoff, segs);

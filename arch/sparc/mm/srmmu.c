@@ -350,7 +350,7 @@ pgtable_t pte_alloc_one(struct mm_struct *mm)
 	page = pfn_to_page(__nocache_pa((unsigned long)ptep) >> PAGE_SHIFT);
 	spin_lock(&mm->page_table_lock);
 	if (page_ref_inc_return(page) == 2 &&
-			!pagetable_pte_ctor(page_ptdesc(page))) {
+			!pagetable_pte_ctor(mm, page_ptdesc(page))) {
 		page_ref_dec(page);
 		ptep = NULL;
 	}
@@ -581,35 +581,6 @@ extern void swift_flush_tlb_range(struct vm_area_struct *vma,
 				  unsigned long start, unsigned long end);
 extern void swift_flush_tlb_page(struct vm_area_struct *vma, unsigned long page);
 
-#if 0  /* P3: deadwood to debug precise flushes on Swift. */
-void swift_flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
-{
-	int cctx, ctx1;
-
-	page &= PAGE_MASK;
-	if ((ctx1 = vma->vm_mm->context) != -1) {
-		cctx = srmmu_get_context();
-/* Is context # ever different from current context? P3 */
-		if (cctx != ctx1) {
-			printk("flush ctx %02x curr %02x\n", ctx1, cctx);
-			srmmu_set_context(ctx1);
-			swift_flush_page(page);
-			__asm__ __volatile__("sta %%g0, [%0] %1\n\t" : :
-					"r" (page), "i" (ASI_M_FLUSH_PROBE));
-			srmmu_set_context(cctx);
-		} else {
-			 /* Rm. prot. bits from virt. c. */
-			/* swift_flush_cache_all(); */
-			/* swift_flush_cache_page(vma, page); */
-			swift_flush_page(page);
-
-			__asm__ __volatile__("sta %%g0, [%0] %1\n\t" : :
-				"r" (page), "i" (ASI_M_FLUSH_PROBE));
-			/* same as above: srmmu_flush_tlb_page() */
-		}
-	}
-}
-#endif
 
 /*
  * The following are all MBUS based SRMMU modules, and therefore could
@@ -884,6 +855,13 @@ static void __init map_kernel(void)
 
 void (*poke_srmmu)(void) = NULL;
 
+void __init arch_zone_limits_init(unsigned long *max_zone_pfns)
+{
+	max_zone_pfns[ZONE_DMA] = max_low_pfn;
+	max_zone_pfns[ZONE_NORMAL] = max_low_pfn;
+	max_zone_pfns[ZONE_HIGHMEM] = highend_pfn;
+}
+
 void __init srmmu_paging_init(void)
 {
 	int i;
@@ -963,16 +941,6 @@ void __init srmmu_paging_init(void)
 	flush_tlb_all();
 
 	sparc_context_init(num_contexts);
-
-	{
-		unsigned long max_zone_pfn[MAX_NR_ZONES] = { 0 };
-
-		max_zone_pfn[ZONE_DMA] = max_low_pfn;
-		max_zone_pfn[ZONE_NORMAL] = max_low_pfn;
-		max_zone_pfn[ZONE_HIGHMEM] = highend_pfn;
-
-		free_area_init(max_zone_pfn);
-	}
 }
 
 void mmu_info(struct seq_file *m)

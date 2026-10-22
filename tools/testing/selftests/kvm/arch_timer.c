@@ -78,9 +78,9 @@ static void *test_vcpu_run(void *arg)
 	return NULL;
 }
 
-static uint32_t test_get_pcpu(void)
+static u32 test_get_pcpu(void)
 {
-	uint32_t pcpu;
+	u32 pcpu;
 	unsigned int nproc_conf;
 	cpu_set_t online_cpuset;
 
@@ -98,16 +98,11 @@ static uint32_t test_get_pcpu(void)
 static int test_migrate_vcpu(unsigned int vcpu_idx)
 {
 	int ret;
-	cpu_set_t cpuset;
-	uint32_t new_pcpu = test_get_pcpu();
-
-	CPU_ZERO(&cpuset);
-	CPU_SET(new_pcpu, &cpuset);
+	u32 new_pcpu = test_get_pcpu();
 
 	pr_debug("Migrating vCPU: %u to pCPU: %u\n", vcpu_idx, new_pcpu);
 
-	ret = pthread_setaffinity_np(pt_vcpu_run[vcpu_idx],
-				     sizeof(cpuset), &cpuset);
+	ret = __pin_task_to_cpu(pt_vcpu_run[vcpu_idx], new_pcpu);
 
 	/* Allow the error where the vCPU thread is already finished */
 	TEST_ASSERT(ret == 0 || ret == ESRCH,

@@ -70,7 +70,7 @@ config LCD_ILI9320
 	  then say y to include a power driver for it.
 
 config LCD_TDO24M
-	tristate "Toppoly TDO24M  and TDO35S LCD Panels support"
+	tristate "Toppoly TDO24M and TDO35S LCD Panels support"
 	depends on SPI_MASTER
 	help
 	  If you have a Toppoly TDO24M/TDO35S series LCD panel, say y here to
@@ -156,6 +156,14 @@ config BACKLIGHT_ATMEL_LCDC
 	  If in doubt, it's safe to enable this option; it doesn't kick
 	  in unless the board's description says it's wired that way.
 
+config BACKLIGHT_AW99706
+	tristate "Backlight Driver for Awinic AW99706"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  If you have a LCD backlight connected to the WLED output of AW99706
+	  WLED output, say Y here to enable this driver.
+
 config BACKLIGHT_EP93XX
 	tristate "Cirrus EP93xx Backlight Driver"
 	depends on FB_EP93XX
@@ -185,6 +193,7 @@ config BACKLIGHT_KTD253
 
 config BACKLIGHT_KTD2801
 	tristate "Backlight Driver for Kinetic KTD2801"
+	depends on GPIOLIB || COMPILE_TEST
 	select LEDS_EXPRESSWIRE
 	help
 	  Say Y to enable the backlight driver for the Kinetic KTD2801 1-wire
@@ -249,6 +258,17 @@ config BACKLIGHT_PWM
 	  If you have a LCD backlight adjustable by PWM, say Y to enable
 	  this driver.
 
+config BACKLIGHT_CGBC
+	tristate "Congatec Board Controller (CGBC) backlight support"
+	depends on MFD_CGBC
+	help
+	  Say Y here to enable support for LCD backlight control on Congatec
+	  x86-based boards via the CGBC (Congatec Board Controller).
+
+	  This driver provides backlight brightness control through the Linux
+	  backlight subsystem. It communicates with the board controller to
+	  adjust LCD backlight using PWM signals.
+
 config BACKLIGHT_DA903X
 	tristate "Backlight Driver for DA9030/DA9034 using WLED"
 	depends on PMIC_DA903X
@@ -261,6 +281,13 @@ config BACKLIGHT_DA9052
 	depends on PMIC_DA9052
 	help
 	  Enable the Backlight Driver for DA9052-BC and DA9053-AA/Bx PMICs.
+
+config BACKLIGHT_MAX25014
+	tristate "Backlight driver for Maxim MAX25014"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  If you are using a MAX25014 chip as a backlight driver say Y to enable it.
 
 config BACKLIGHT_MAX8925
 	tristate "Backlight driver for MAX8925"
@@ -289,6 +316,17 @@ config BACKLIGHT_APPLE
 	help
 	  If you have an Intel-based Apple say Y to enable a driver for its
 	  backlight.
+
+config BACKLIGHT_APPLE_DWI
+	tristate "Apple DWI 2-Wire Interface Backlight Driver"
+	depends on ARCH_APPLE || COMPILE_TEST
+	help
+	  Say Y to enable the backlight driver for backlight controllers
+	  attached via the Apple DWI 2-wire interface which is found in some
+	  Apple iPhones, iPads and iPod touches.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called apple_dwi_bl.
 
 config BACKLIGHT_QCOM_WLED
 	tristate "Qualcomm PMIC WLED Driver"
@@ -358,13 +396,6 @@ config BACKLIGHT_88PM860X
 	depends on MFD_88PM860X
 	help
 	  Say Y to enable the backlight driver for Marvell 88PM8606.
-
-config BACKLIGHT_PCF50633
-	tristate "Backlight driver for NXP PCF50633 MFD"
-	depends on MFD_PCF50633
-	help
-	  If you have a backlight driven by a NXP PCF50633 MFD, say Y here to
-	  enable its driver.
 
 config BACKLIGHT_AAT2870
 	tristate "AnalogicTech AAT2870 Backlight"

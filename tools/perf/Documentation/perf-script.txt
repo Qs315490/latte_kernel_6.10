@@ -98,8 +98,10 @@ OPTIONS
 
 -g::
 --gen-script=::
-        Generate perf-script.[ext] starter script for given language,
-        using current perf.data.
+	Generate a starter script. If a language is given then the
+        script is named perf-script.[ext] according to the
+        language. If a file path is given then python is used for
+        files ending '.py' and perl used for files ending '.pl'.
 
 --dlfilter=<file>::
 	Filter sample events using the given shared object file.
@@ -239,13 +241,22 @@ OPTIONS
 	i.e., -F "" is not allowed.
 
 	The brstack output includes branch related information with raw addresses using the
-	/v/v/v/v/cycles syntax in the following order:
-	FROM: branch source instruction
-	TO  : branch target instruction
-        M/P/-: M=branch target mispredicted or branch direction was mispredicted, P=target predicted or direction predicted, -=not supported
-	X/- : X=branch inside a transactional region, -=not in transaction region or not supported
-	A/- : A=TSX abort entry, -=not aborted region or not supported
-	cycles
+	FROM/TO/EVENT/INTX/ABORT/CYCLES/TYPE/SPEC syntax in the following order:
+	FROM  : branch source instruction
+	TO    : branch target instruction
+	EVENT : M=branch target or direction was mispredicted
+	        P=branch target or direction was predicted
+	        N=branch not-taken
+	        -=no event or not supported
+	INTX  : X=branch inside a transactional region
+	        -=branch not in transaction region or not supported
+	ABORT : A=TSX abort entry
+	        -=not aborted region or not supported
+	CYCLES: the number of cycles that have elapsed since the last branch was recorded
+	TYPE  : branch type: COND/UNCOND/IND/CALL/IND_CALL/RET etc.
+	        -=not supported
+	SPEC  : branch speculation info: SPEC_WRONG_PATH/NON_SPEC_CORRECT_PATH/SPEC_CORRECT_PATH
+	        -=not supported
 
 	The brstacksym is identical to brstack, except that the FROM and TO addresses are printed in a symbolic form if possible.
 
@@ -296,8 +307,11 @@ OPTIONS
 --kallsyms=<file>::
         kallsyms pathname
 
---symfs=<directory>::
-        Look for files with symbols relative to this directory.
+--symfs=<directory[,layout]>::
+        Look for files with symbols relative to this directory. The optional
+        layout can be 'hierarchy' (default, matches full path) or 'flat'
+        (only matches base name). This is useful when debug files are stored
+        in a flat directory structure.
 
 -G::
 --hide-call-graph::
@@ -517,6 +531,11 @@ include::itrace.txt[]
 	where it creates incorrect call stacks from incorrect matches.
 	The known limitations include exception handing such as
 	setjmp/longjmp will have calls/returns not match.
+
+--merge-callchains::
+	Enable merging deferred user callchains if available.  This is the
+	default behavior.  If you want to see separate CALLCHAIN_DEFERRED
+	records for some reason, use --no-merge-callchains explicitly.
 
 :GMEXAMPLECMD: script
 :GMEXAMPLESUBCMD:

@@ -28,6 +28,8 @@
 #include "dc.h"
 #include "core_types.h"
 #include "dmub_cmd.h"
+#include "dc_dmub_srv.h"
+#include "dmub/dmub_srv.h"
 
 #define TO_DMUB_ABM(abm)\
 	container_of(abm, struct dce_abm, base)
@@ -39,8 +41,7 @@ static unsigned int abm_feature_support(struct abm *abm, unsigned int panel_inst
 {
 	struct dc_context *dc = abm->ctx;
 	struct dc_link *edp_links[MAX_NUM_EDP];
-	int i;
-	int edp_num;
+	unsigned int i, edp_num;
 	unsigned int ret = ABM_FEATURE_NO_SUPPORT;
 
 	dc_get_edp_links(dc->dc, edp_links, &edp_num);
@@ -172,6 +173,7 @@ static bool dmub_abm_set_backlight_level_pwm_ex(struct abm *abm,
 		unsigned int controller_id,
 		unsigned int panel_inst)
 {
+	(void)controller_id;
 	bool ret = false;
 	unsigned int feature_support;
 
@@ -220,7 +222,7 @@ struct abm *dmub_abm_create(
 	const struct dce_abm_mask *abm_mask)
 {
 	if (ctx->dc->caps.dmcub_support) {
-		struct dce_abm *abm_dce = kzalloc(sizeof(*abm_dce), GFP_KERNEL);
+		struct dce_abm *abm_dce = kzalloc_obj(*abm_dce);
 
 		if (abm_dce == NULL) {
 			BREAK_TO_DEBUGGER();

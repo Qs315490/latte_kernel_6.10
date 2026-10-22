@@ -11,6 +11,7 @@
 #include <linux/exportfs.h>
 
 #include <linux/sunrpc/svcauth_gss.h>
+#include <crypto/utils.h>
 #include "nfsd.h"
 #include "vfs.h"
 #include "auth.h"
@@ -105,9 +106,12 @@ static __be32 nfsd_setuser_and_check_port(struct svc_rqst *rqstp,
 {
 	/* Check if the request originated from a secure port. */
 	if (rqstp && !nfsd_originating_port_ok(rqstp, cred, exp)) {
-		RPC_IFDEBUG(char buf[RPC_MAX_ADDRBUFLEN]);
-		dprintk("nfsd: request from insecure port %s!\n",
-		        svc_print_addr(rqstp, buf, sizeof(buf)));
+		if (IS_ENABLED(CONFIG_SUNRPC_DEBUG)) {
+			char buf[RPC_MAX_ADDRBUFLEN];
+
+			dprintk("nfsd: request from insecure port %s!\n",
+			        svc_print_addr(rqstp, buf, sizeof(buf)));
+		}
 		return nfserr_perm;
 	}
 
@@ -135,6 +139,57 @@ static inline __be32 check_pseudo_root(struct dentry *dentry,
 	if (unlikely(dentry != exp->ex_path.dentry))
 		return nfserr_stale;
 	return nfs_ok;
+}
+
+/* Size of a file handle MAC, in 4-octet words */
+#define FH_MAC_WORDS (sizeof(__le64) / 4)
+
+static bool fh_append_mac(struct svc_fh *fhp, struct net *net)
+{
+	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
+	struct knfsd_fh *fh = &fhp->fh_handle;
+	siphash_key_t *fh_key = nn->fh_key;
+	__le64 hash;
+
+	if (!fh_key)
+		goto out_no_key;
+	if (fh->fh_size + sizeof(hash) > fhp->fh_maxsize)
+		goto out_no_space;
+
+	hash = cpu_to_le64(siphash(&fh->fh_raw, fh->fh_size, fh_key));
+	memcpy(&fh->fh_raw[fh->fh_size], &hash, sizeof(hash));
+	fh->fh_size += sizeof(hash);
+	return true;
+
+out_no_key:
+	pr_warn_ratelimited("NFSD: unable to sign filehandles, fh_key not set.\n");
+	return false;
+
+out_no_space:
+	pr_warn_ratelimited("NFSD: unable to sign filehandles, fh_size %zu would be greater than fh_maxsize %d.\n",
+			    fh->fh_size + sizeof(hash), fhp->fh_maxsize);
+	return false;
+}
+
+/*
+ * Verify that the filehandle's MAC was hashed from this filehandle
+ * given the server's fh_key:
+ */
+static bool fh_verify_mac(struct svc_fh *fhp, struct net *net)
+{
+	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
+	struct knfsd_fh *fh = &fhp->fh_handle;
+	siphash_key_t *fh_key = nn->fh_key;
+	__le64 hash;
+
+	if (!fh_key) {
+		pr_warn_ratelimited("NFSD: unable to verify signed filehandles, fh_key not set.\n");
+		return false;
+	}
+
+	hash = cpu_to_le64(siphash(&fh->fh_raw, fh->fh_size - sizeof(hash),  fh_key));
+	return crypto_memneq(&fh->fh_raw[fh->fh_size - sizeof(hash)],
+					&hash, sizeof(hash)) == 0;
 }
 
 /*
@@ -172,6 +227,8 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 	if (len == 0)
 		return error;
 	if (fh->fh_fsid_type == FSID_MAJOR_MINOR) {
+		u32 *fsid = fh_fsid(fh);
+
 		/* deprecated, convert to type 3 */
 		len = key_len(FSID_ENCODE_DEV)/4;
 		fh->fh_fsid_type = FSID_ENCODE_DEV;
@@ -181,17 +238,17 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 		 * confuses sparse, so we must use __force here to
 		 * keep it from complaining.
 		 */
-		fh->fh_fsid[0] = new_encode_dev(MKDEV(ntohl((__force __be32)fh->fh_fsid[0]),
-						      ntohl((__force __be32)fh->fh_fsid[1])));
-		fh->fh_fsid[1] = fh->fh_fsid[2];
+		fsid[0] = new_encode_dev(MKDEV(ntohl((__force __be32)fsid[0]),
+					       ntohl((__force __be32)fsid[1])));
+		fsid[1] = fsid[2];
 	}
 	data_left -= len;
 	if (data_left < 0)
 		return error;
 	exp = rqst_exp_find(rqstp ? &rqstp->rq_chandle : NULL,
 			    net, client, gssclient,
-			    fh->fh_fsid_type, fh->fh_fsid);
-	fid = (struct fid *)(fh->fh_fsid + len);
+			    fh->fh_fsid_type, fh_fsid(fh));
+	fid = (struct fid *)(fh_fsid(fh) + len);
 
 	error = nfserr_stale;
 	if (IS_ERR(exp)) {
@@ -231,13 +288,21 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 	/*
 	 * Look up the dentry using the NFS file handle.
 	 */
-	error = nfserr_badhandle;
-
 	fileid_type = fh->fh_fileid_type;
+	error = nfserr_stale;
 
-	if (fileid_type == FILEID_ROOT)
+	if (fileid_type == FILEID_ROOT) {
+		/* We don't sign or verify the root, no per-file identity */
 		dentry = dget(exp->ex_path.dentry);
-	else {
+	} else {
+		if (exp->ex_flags & NFSEXP_SIGN_FH) {
+			if (!fh_verify_mac(fhp, net)) {
+				trace_nfsd_set_fh_dentry_badmac(rqstp, fhp, -ESTALE);
+				goto out;
+			}
+			data_left -= FH_MAC_WORDS;
+		}
+
 		dentry = exportfs_decode_fh_raw(exp->ex_path.mnt, fid,
 						data_left, fileid_type, 0,
 						nfsd_acceptable, exp);
@@ -253,6 +318,8 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 			}
 		}
 	}
+
+	error = nfserr_badhandle;
 	if (dentry == NULL)
 		goto out;
 	if (IS_ERR(dentry)) {
@@ -266,9 +333,6 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 		printk("nfsd: find_fh_dentry returned a DISCONNECTED directory: %pd2\n",
 				dentry);
 	}
-
-	fhp->fh_dentry = dentry;
-	fhp->fh_export = exp;
 
 	switch (fhp->fh_maxsize) {
 	case NFS4_FHSIZE:
@@ -290,6 +354,9 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 		if (exp->ex_flags & NFSEXP_V4ROOT)
 			goto out;
 	}
+
+	fhp->fh_dentry = dentry;
+	fhp->fh_export = exp;
 
 	return 0;
 out:
@@ -362,9 +429,29 @@ __fh_verify(struct svc_rqst *rqstp,
 	if (error)
 		goto out;
 
+	/*
+	 * If rqstp is NULL, this is a LOCALIO request which will only
+	 * ever use a filehandle/credential pair for which access has
+	 * been affirmed (by ACCESS or OPEN NFS requests) over the
+	 * wire.  Skip both the xprtsec policy and the security flavor
+	 * checks.
+	 */
+	if (!rqstp)
+		goto check_permissions;
+
 	if ((access & NFSD_MAY_NLM) && (exp->ex_flags & NFSEXP_NOAUTHNLM))
 		/* NLM is allowed to fully bypass authentication */
 		goto out;
+
+	/*
+	 * NLM is allowed to bypass the xprtsec policy check because lockd
+	 * doesn't support xprtsec.
+	 */
+	if (!(access & NFSD_MAY_NLM)) {
+		error = check_xprtsec_policy(exp, rqstp);
+		if (error)
+			goto out;
+	}
 
 	if (access & NFSD_MAY_BYPASS_GSS)
 		may_bypass_gss = true;
@@ -377,13 +464,13 @@ __fh_verify(struct svc_rqst *rqstp,
 			&& exp->ex_path.dentry == dentry)
 		may_bypass_gss = true;
 
-	error = check_nfsd_access(exp, rqstp, may_bypass_gss);
+	error = check_security_flavor(exp, rqstp, may_bypass_gss);
 	if (error)
 		goto out;
-	/* During LOCALIO call to fh_verify will be called with a NULL rqstp */
-	if (rqstp)
-		svc_xprt_set_valid(rqstp->rq_xprt);
 
+	svc_xprt_set_valid(rqstp->rq_xprt);
+
+check_permissions:
 	/* Finally, check access permissions. */
 	error = nfsd_permission(cred, exp, dentry, access);
 out:
@@ -463,7 +550,7 @@ static void _fh_update(struct svc_fh *fhp, struct svc_export *exp,
 {
 	if (dentry != exp->ex_path.dentry) {
 		struct fid *fid = (struct fid *)
-			(fhp->fh_handle.fh_fsid + fhp->fh_handle.fh_size/4 - 1);
+			(fh_fsid(&fhp->fh_handle) + fhp->fh_handle.fh_size/4 - 1);
 		int maxsize = (fhp->fh_maxsize - fhp->fh_handle.fh_size)/4;
 		int fh_flags = (exp->ex_flags & NFSEXP_NOSUBTREECHECK) ? 0 :
 				EXPORT_FH_CONNECTABLE;
@@ -473,6 +560,10 @@ static void _fh_update(struct svc_fh *fhp, struct svc_export *exp,
 		fhp->fh_handle.fh_fileid_type =
 			fileid_type > 0 ? fileid_type : FILEID_INVALID;
 		fhp->fh_handle.fh_size += maxsize * 4;
+
+		if (exp->ex_flags & NFSEXP_SIGN_FH)
+			if (!fh_append_mac(fhp, exp->cd->net))
+				fhp->fh_handle.fh_fileid_type = FILEID_INVALID;
 	} else {
 		fhp->fh_handle.fh_fileid_type = FILEID_ROOT;
 	}
@@ -579,9 +670,9 @@ fh_compose(struct svc_fh *fhp, struct svc_export *exp, struct dentry *dentry,
 	struct inode * inode = d_inode(dentry);
 	dev_t ex_dev = exp_sb(exp)->s_dev;
 
-	dprintk("nfsd: fh_compose(exp %02x:%02x/%ld %pd2, ino=%ld)\n",
+	dprintk("nfsd: fh_compose(exp %02x:%02x/%llu %pd2, ino=%llu)\n",
 		MAJOR(ex_dev), MINOR(ex_dev),
-		(long) d_inode(exp->ex_path.dentry)->i_ino,
+		d_inode(exp->ex_path.dentry)->i_ino,
 		dentry,
 		(inode ? inode->i_ino : 0));
 
@@ -614,7 +705,7 @@ fh_compose(struct svc_fh *fhp, struct svc_export *exp, struct dentry *dentry,
 	fhp->fh_handle.fh_auth_type = 0;
 
 	mk_fsid(fhp->fh_handle.fh_fsid_type,
-		fhp->fh_handle.fh_fsid,
+		fh_fsid(&fhp->fh_handle),
 		ex_dev,
 		d_inode(exp->ex_path.dentry)->i_ino,
 		exp->ex_fsid, exp->ex_uuid);
@@ -658,6 +749,33 @@ out_negative:
 	printk(KERN_ERR "fh_update: %pd2 still negative!\n",
 		dentry);
 	return nfserr_serverfault;
+}
+
+/**
+ * fh_getattr - Retrieve attributes on a local file
+ * @fhp: File handle of target file
+ * @stat: Caller-supplied kstat buffer to be filled in
+ *
+ * Returns nfs_ok on success, otherwise an NFS status code is
+ * returned.
+ */
+__be32 fh_getattr(const struct svc_fh *fhp, struct kstat *stat)
+{
+	struct path p = {
+		.mnt		= fhp->fh_export->ex_path.mnt,
+		.dentry		= fhp->fh_dentry,
+	};
+	struct inode *inode = d_inode(p.dentry);
+	u32 request_mask = STATX_BASIC_STATS;
+
+	if (S_ISREG(inode->i_mode))
+		request_mask |= (STATX_DIOALIGN | STATX_DIO_READ_ALIGN);
+
+	if (fhp->fh_maxsize == NFS4_FHSIZE)
+		request_mask |= (STATX_BTIME | STATX_CHANGE_COOKIE);
+
+	return nfserrno(vfs_getattr(&p, stat, request_mask,
+				    AT_STATX_SYNC_AS_STAT));
 }
 
 /**

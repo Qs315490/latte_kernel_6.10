@@ -245,12 +245,12 @@ static void rt721_sdca_jack_preset(struct rt721_sdca_priv *rt721)
 	regmap_write(rt721->mbq_regmap, 0x5b10007, 0x2000);
 	regmap_write(rt721->mbq_regmap, 0x5B10017, 0x1b0f);
 	rt_sdca_index_write(rt721->mbq_regmap, RT721_CBJ_CTRL,
-		RT721_CBJ_A0_GAT_CTRL1, 0x2a02);
+		RT721_CBJ_A0_GAT_CTRL1, 0x2205);
 	rt_sdca_index_write(rt721->mbq_regmap, RT721_CAP_PORT_CTRL,
 		RT721_HP_AMP_2CH_CAL4, 0xa105);
 	rt_sdca_index_write(rt721->mbq_regmap, RT721_VENDOR_ANA_CTL,
 		RT721_UAJ_TOP_TCON14, 0x3b33);
-	regmap_write(rt721->mbq_regmap, 0x310400, 0x3023);
+	regmap_write(rt721->mbq_regmap, 0x310400, 0x3043);
 	rt_sdca_index_write(rt721->mbq_regmap, RT721_VENDOR_ANA_CTL,
 		RT721_UAJ_TOP_TCON14, 0x3f33);
 	rt_sdca_index_write(rt721->mbq_regmap, RT721_VENDOR_ANA_CTL,
@@ -278,7 +278,13 @@ static void rt721_sdca_jack_preset(struct rt721_sdca_priv *rt721)
 		RT721_ENT_FLOAT_CTL1, 0x4040);
 	rt_sdca_index_write(rt721->mbq_regmap, RT721_HDA_SDCA_FLOAT,
 		RT721_ENT_FLOAT_CTL4, 0x1201);
+	rt_sdca_index_write(rt721->mbq_regmap, RT721_BOOST_CTRL,
+		RT721_BST_4CH_TOP_GATING_CTRL1, 0x002a);
 	regmap_write(rt721->regmap, 0x2f58, 0x07);
+
+	regmap_write(rt721->regmap, 0x2f51, 0x00);
+	rt_sdca_index_write(rt721->mbq_regmap, RT721_HDA_SDCA_FLOAT,
+		RT721_MISC_CTL, 0x0004);
 }
 
 static void rt721_sdca_jack_init(struct rt721_sdca_priv *rt721)
@@ -327,7 +333,6 @@ static int rt721_sdca_set_jack_detect(struct snd_soc_component *component,
 
 	rt721_sdca_jack_init(rt721);
 
-	pm_runtime_mark_last_busy(component->dev);
 	pm_runtime_put_autosuspend(component->dev);
 
 	return 0;
@@ -430,6 +435,7 @@ static int rt721_sdca_set_gain_get(struct snd_kcontrol *kcontrol,
 	unsigned int read_l, read_r, ctl_l = 0, ctl_r = 0;
 	unsigned int adc_vol_flag = 0;
 	const unsigned int interval_offset = 0xc0;
+	const unsigned int tendA = 0x200;
 	const unsigned int tendB = 0xa00;
 
 	if (strstr(ucontrol->id.name, "FU1E Capture Volume") ||
@@ -439,9 +445,16 @@ static int rt721_sdca_set_gain_get(struct snd_kcontrol *kcontrol,
 	regmap_read(rt721->mbq_regmap, mc->reg, &read_l);
 	regmap_read(rt721->mbq_regmap, mc->rreg, &read_r);
 
-	if (mc->shift == 8) /* boost gain */
+	if (mc->shift == 8) {
+		/* boost gain */
 		ctl_l = read_l / tendB;
-	else {
+	} else if (mc->shift == 1) {
+		/* FU33 boost gain */
+		if (read_l == 0x8000 || read_l == 0xfe00)
+			ctl_l = 0;
+		else
+			ctl_l = read_l / tendA + 1;
+	} else {
 		if (adc_vol_flag)
 			ctl_l = mc->max - (((0x1e00 - read_l) & 0xffff) / interval_offset);
 		else
@@ -449,9 +462,16 @@ static int rt721_sdca_set_gain_get(struct snd_kcontrol *kcontrol,
 	}
 
 	if (read_l != read_r) {
-		if (mc->shift == 8) /* boost gain */
+		if (mc->shift == 8) {
+			/* boost gain */
 			ctl_r = read_r / tendB;
-		else { /* ADC/DAC gain */
+		} else if (mc->shift == 1) {
+			/* FU33 boost gain */
+			if (read_r == 0x8000 || read_r == 0xfe00)
+				ctl_r = 0;
+			else
+				ctl_r = read_r / tendA + 1;
+		} else { /* ADC/DAC gain */
 			if (adc_vol_flag)
 				ctl_r = mc->max - (((0x1e00 - read_r) & 0xffff) / interval_offset);
 			else
@@ -726,8 +746,7 @@ static const struct snd_kcontrol_new rt721_sdca_controls[] = {
 static int rt721_sdca_adc_mux_get(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_dapm_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_kcontrol_to_component(kcontrol);
 	struct rt721_sdca_priv *rt721 = snd_soc_component_get_drvdata(component);
 	unsigned int val = 0, mask_sft, mask;
 
@@ -766,10 +785,8 @@ static int rt721_sdca_adc_mux_get(struct snd_kcontrol *kcontrol,
 static int rt721_sdca_adc_mux_put(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_dapm_kcontrol_component(kcontrol);
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_dapm_kcontrol_dapm(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_kcontrol_to_component(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
 	struct rt721_sdca_priv *rt721 = snd_soc_component_get_drvdata(component);
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	unsigned int *item = ucontrol->value.enumerated.item;
@@ -1533,7 +1550,6 @@ int rt721_sdca_io_init(struct device *dev, struct sdw_slave *slave)
 	/* Mark Slave initialization complete */
 	rt721->hw_init = true;
 
-	pm_runtime_mark_last_busy(&slave->dev);
 	pm_runtime_put_autosuspend(&slave->dev);
 
 	dev_dbg(&slave->dev, "%s hw_init complete\n", __func__);

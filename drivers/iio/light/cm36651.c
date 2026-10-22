@@ -683,7 +683,7 @@ static int cm36651_probe(struct i2c_client *client)
 
 	ret = iio_device_register(indio_dev);
 	if (ret) {
-		dev_err(&client->dev, "%s: regist device failed\n", __func__);
+		dev_err(&client->dev, "%s: register device failed\n", __func__);
 		goto error_free_irq;
 	}
 
@@ -713,7 +713,7 @@ static void cm36651_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id cm36651_id[] = {
-	{ "cm36651" },
+	{ .name = "cm36651" },
 	{ }
 };
 

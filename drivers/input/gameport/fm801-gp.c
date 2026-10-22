@@ -68,7 +68,7 @@ static int fm801_gp_probe(struct pci_dev *pci, const struct pci_device_id *id)
 	struct gameport *port;
 	int error;
 
-	gp = kzalloc(sizeof(*gp), GFP_KERNEL);
+	gp = kzalloc_obj(*gp);
 	port = gameport_allocate_port();
 	if (!gp || !port) {
 		printk(KERN_ERR "fm801-gp: Memory allocation failed\n");
@@ -125,8 +125,8 @@ static void fm801_gp_remove(struct pci_dev *pci)
 }
 
 static const struct pci_device_id fm801_gp_id_table[] = {
-	{ PCI_VENDOR_ID_FORTEMEDIA, PCI_DEVICE_ID_FM801_GP, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0  },
-	{ 0 }
+	{ PCI_VDEVICE(FORTEMEDIA, PCI_DEVICE_ID_FM801_GP) },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, fm801_gp_id_table);
 

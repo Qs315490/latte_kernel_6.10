@@ -20,12 +20,12 @@
 
 #include "../../../../include/uapi/linux/pcitest.h"
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 
 #define pci_ep_ioctl(cmd, arg)			\
 ({						\
 	ret = ioctl(self->fd, cmd, arg);	\
-	ret = ret < 0 ? -errno : 0;		\
+	ret = ret < 0 ? -errno : ret;		\
 })
 
 static const char *test_device = "/dev/pci-endpoint-test.0";
@@ -65,6 +65,31 @@ TEST_F(pci_ep_bar, BAR_TEST)
 	int ret;
 
 	pci_ep_ioctl(PCITEST_BAR, variant->barno);
+	if (ret == -ENODATA)
+		SKIP(return, "BAR is disabled");
+	if (ret == -ENOBUFS)
+		SKIP(return, "BAR is reserved");
+	EXPECT_FALSE(ret) TH_LOG("Test failed for BAR%d", variant->barno);
+}
+
+TEST_F(pci_ep_bar, BAR_SUBRANGE_TEST)
+{
+	int ret;
+
+	pci_ep_ioctl(PCITEST_SET_IRQTYPE, PCITEST_IRQ_TYPE_AUTO);
+	ASSERT_EQ(0, ret) TH_LOG("Can't set AUTO IRQ type");
+
+	pci_ep_ioctl(PCITEST_BAR_SUBRANGE, variant->barno);
+	if (ret == -ENODATA)
+		SKIP(return, "BAR is disabled");
+	if (ret == -EBUSY)
+		SKIP(return, "BAR is test register space");
+	if (ret == -EOPNOTSUPP)
+		SKIP(return, "Subrange map is not supported");
+	if (ret == -ENOBUFS)
+		SKIP(return, "BAR is reserved");
+	if (ret == -ENOSPC)
+		SKIP(return, "Not enough inbound windows");
 	EXPECT_FALSE(ret) TH_LOG("Test failed for BAR%d", variant->barno);
 }
 
@@ -97,8 +122,11 @@ TEST_F(pci_ep_basic, LEGACY_IRQ_TEST)
 {
 	int ret;
 
-	pci_ep_ioctl(PCITEST_SET_IRQTYPE, 0);
+	pci_ep_ioctl(PCITEST_SET_IRQTYPE, PCITEST_IRQ_TYPE_INTX);
 	ASSERT_EQ(0, ret) TH_LOG("Can't set Legacy IRQ type");
+
+	pci_ep_ioctl(PCITEST_GET_IRQTYPE, 0);
+	ASSERT_EQ(PCITEST_IRQ_TYPE_INTX, ret) TH_LOG("Can't get Legacy IRQ type");
 
 	pci_ep_ioctl(PCITEST_LEGACY_IRQ, 0);
 	EXPECT_FALSE(ret) TH_LOG("Test failed for Legacy IRQ");
@@ -108,11 +136,16 @@ TEST_F(pci_ep_basic, MSI_TEST)
 {
 	int ret, i;
 
-	pci_ep_ioctl(PCITEST_SET_IRQTYPE, 1);
+	pci_ep_ioctl(PCITEST_SET_IRQTYPE, PCITEST_IRQ_TYPE_MSI);
 	ASSERT_EQ(0, ret) TH_LOG("Can't set MSI IRQ type");
+
+	pci_ep_ioctl(PCITEST_GET_IRQTYPE, 0);
+	ASSERT_EQ(PCITEST_IRQ_TYPE_MSI, ret) TH_LOG("Can't get MSI IRQ type");
 
 	for (i = 1; i <= 32; i++) {
 		pci_ep_ioctl(PCITEST_MSI, i);
+		if (ret == -EINVAL)
+			SKIP(return, "MSI%d is disabled", i);
 		EXPECT_FALSE(ret) TH_LOG("Test failed for MSI%d", i);
 	}
 }
@@ -121,11 +154,16 @@ TEST_F(pci_ep_basic, MSIX_TEST)
 {
 	int ret, i;
 
-	pci_ep_ioctl(PCITEST_SET_IRQTYPE, 2);
+	pci_ep_ioctl(PCITEST_SET_IRQTYPE, PCITEST_IRQ_TYPE_MSIX);
 	ASSERT_EQ(0, ret) TH_LOG("Can't set MSI-X IRQ type");
+
+	pci_ep_ioctl(PCITEST_GET_IRQTYPE, 0);
+	ASSERT_EQ(PCITEST_IRQ_TYPE_MSIX, ret) TH_LOG("Can't get MSI-X IRQ type");
 
 	for (i = 1; i <= 2048; i++) {
 		pci_ep_ioctl(PCITEST_MSIX, i);
+		if (ret == -EINVAL)
+			SKIP(return, "MSI-X%d is disabled", i);
 		EXPECT_FALSE(ret) TH_LOG("Test failed for MSI-X%d", i);
 	}
 }
@@ -170,8 +208,8 @@ TEST_F(pci_ep_data_transfer, READ_TEST)
 	if (variant->use_dma)
 		param.flags = PCITEST_FLAGS_USE_DMA;
 
-	pci_ep_ioctl(PCITEST_SET_IRQTYPE, 1);
-	ASSERT_EQ(0, ret) TH_LOG("Can't set MSI IRQ type");
+	pci_ep_ioctl(PCITEST_SET_IRQTYPE, PCITEST_IRQ_TYPE_AUTO);
+	ASSERT_EQ(0, ret) TH_LOG("Can't set AUTO IRQ type");
 
 	for (i = 0; i < ARRAY_SIZE(test_size); i++) {
 		param.size = test_size[i];
@@ -189,8 +227,8 @@ TEST_F(pci_ep_data_transfer, WRITE_TEST)
 	if (variant->use_dma)
 		param.flags = PCITEST_FLAGS_USE_DMA;
 
-	pci_ep_ioctl(PCITEST_SET_IRQTYPE, 1);
-	ASSERT_EQ(0, ret) TH_LOG("Can't set MSI IRQ type");
+	pci_ep_ioctl(PCITEST_SET_IRQTYPE, PCITEST_IRQ_TYPE_AUTO);
+	ASSERT_EQ(0, ret) TH_LOG("Can't set AUTO IRQ type");
 
 	for (i = 0; i < ARRAY_SIZE(test_size); i++) {
 		param.size = test_size[i];
@@ -208,8 +246,8 @@ TEST_F(pci_ep_data_transfer, COPY_TEST)
 	if (variant->use_dma)
 		param.flags = PCITEST_FLAGS_USE_DMA;
 
-	pci_ep_ioctl(PCITEST_SET_IRQTYPE, 1);
-	ASSERT_EQ(0, ret) TH_LOG("Can't set MSI IRQ type");
+	pci_ep_ioctl(PCITEST_SET_IRQTYPE, PCITEST_IRQ_TYPE_AUTO);
+	ASSERT_EQ(0, ret) TH_LOG("Can't set AUTO IRQ type");
 
 	for (i = 0; i < ARRAY_SIZE(test_size); i++) {
 		param.size = test_size[i];
@@ -217,5 +255,35 @@ TEST_F(pci_ep_data_transfer, COPY_TEST)
 		EXPECT_FALSE(ret) TH_LOG("Test failed for size (%ld)",
 					 test_size[i]);
 	}
+}
+
+FIXTURE(pcie_ep_doorbell)
+{
+	int fd;
+};
+
+FIXTURE_SETUP(pcie_ep_doorbell)
+{
+	self->fd = open(test_device, O_RDWR);
+
+	ASSERT_NE(-1, self->fd) TH_LOG("Can't open PCI Endpoint Test device");
+};
+
+FIXTURE_TEARDOWN(pcie_ep_doorbell)
+{
+	close(self->fd);
+};
+
+TEST_F(pcie_ep_doorbell, DOORBELL_TEST)
+{
+	int ret;
+
+	pci_ep_ioctl(PCITEST_SET_IRQTYPE, PCITEST_IRQ_TYPE_AUTO);
+	ASSERT_EQ(0, ret) TH_LOG("Can't set AUTO IRQ type");
+
+	pci_ep_ioctl(PCITEST_DOORBELL, 0);
+	if (ret == -EOPNOTSUPP)
+		SKIP(return, "Doorbell test is not supported");
+	EXPECT_FALSE(ret) TH_LOG("Test failed for Doorbell\n");
 }
 TEST_HARNESS_MAIN

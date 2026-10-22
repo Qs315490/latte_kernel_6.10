@@ -34,7 +34,6 @@ static int hws_context_pools_init(struct mlx5hws_context *ctx)
 
 	/* Create an STC pool per FT type */
 	pool_attr.pool_type = MLX5HWS_POOL_TYPE_STC;
-	pool_attr.flags = MLX5HWS_POOL_FLAGS_FOR_STC_POOL;
 	max_log_sz = min(MLX5HWS_POOL_STC_LOG_SZ, ctx->caps->stc_alloc_log_max);
 	pool_attr.alloc_log_sz = max(max_log_sz, ctx->caps->stc_alloc_log_gran);
 
@@ -159,10 +158,16 @@ static int hws_context_init_hws(struct mlx5hws_context *ctx,
 	if (ret)
 		goto pools_uninit;
 
+	ret = mlx5hws_action_ste_pool_init(ctx);
+	if (ret)
+		goto close_queues;
+
 	INIT_LIST_HEAD(&ctx->tbl_list);
 
 	return 0;
 
+close_queues:
+	mlx5hws_send_queues_close(ctx);
 pools_uninit:
 	hws_context_pools_uninit(ctx);
 uninit_pd:
@@ -175,6 +180,7 @@ static void hws_context_uninit_hws(struct mlx5hws_context *ctx)
 	if (!(ctx->flags & MLX5HWS_CONTEXT_FLAG_HWS_SUPPORT))
 		return;
 
+	mlx5hws_action_ste_pool_uninit(ctx);
 	mlx5hws_send_queues_close(ctx);
 	hws_context_pools_uninit(ctx);
 	hws_context_uninit_pd(ctx);
@@ -186,7 +192,7 @@ struct mlx5hws_context *mlx5hws_context_open(struct mlx5_core_dev *mdev,
 	struct mlx5hws_context *ctx;
 	int ret;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return NULL;
 
@@ -195,7 +201,7 @@ struct mlx5hws_context *mlx5hws_context_open(struct mlx5_core_dev *mdev,
 	mutex_init(&ctx->ctrl_lock);
 	xa_init(&ctx->peer_ctx_xa);
 
-	ctx->caps = kzalloc(sizeof(*ctx->caps), GFP_KERNEL);
+	ctx->caps = kzalloc_obj(*ctx->caps);
 	if (!ctx->caps)
 		goto free_ctx;
 

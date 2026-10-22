@@ -74,8 +74,6 @@ int sun_partition(struct parsed_partitions *state)
 
 	p = label->partitions;
 	if (be16_to_cpu(label->magic) != SUN_LABEL_MAGIC) {
-/*		printk(KERN_INFO "Dev %s Sun disklabel: bad magic %04x\n",
-		       state->disk->disk_name, be16_to_cpu(label->magic)); */
 		put_dev_sector(sect);
 		return 0;
 	}
@@ -123,7 +121,7 @@ int sun_partition(struct parsed_partitions *state)
 		}
 		slot++;
 	}
-	strlcat(state->pp_buf, "\n", PAGE_SIZE);
+	seq_buf_puts(&state->pp_buf, "\n");
 	put_dev_sector(sect);
 	return 1;
 }

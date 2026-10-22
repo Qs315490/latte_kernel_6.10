@@ -4,9 +4,11 @@
  */
 
 #include <drm/drm_file.h>
+#include <linux/pm_runtime.h>
 
 #include "ivpu_drv.h"
 #include "ivpu_gem.h"
+#include "ivpu_hw.h"
 #include "ivpu_jsm_msg.h"
 #include "ivpu_ms.h"
 #include "ivpu_pm.h"
@@ -36,23 +38,28 @@ int ivpu_ms_start_ioctl(struct drm_device *dev, void *data, struct drm_file *fil
 	struct drm_ivpu_metric_streamer_start *args = data;
 	struct ivpu_device *vdev = file_priv->vdev;
 	struct ivpu_ms_instance *ms;
-	u64 single_buff_size;
 	u32 sample_size;
+	u64 buf_size;
 	int ret;
 
 	if (!args->metric_group_mask || !args->read_period_samples ||
 	    args->sampling_period_ns < MS_MIN_SAMPLE_PERIOD_NS)
 		return -EINVAL;
 
+	ret = ivpu_rpm_get(vdev);
+	if (ret < 0)
+		return ret;
+
 	mutex_lock(&file_priv->ms_lock);
 
 	if (get_instance_by_mask(file_priv, args->metric_group_mask)) {
-		ivpu_err(vdev, "Instance already exists (mask %#llx)\n", args->metric_group_mask);
+		ivpu_dbg(vdev, IOCTL, "Instance already exists (mask %#llx)\n",
+			 args->metric_group_mask);
 		ret = -EALREADY;
 		goto unlock;
 	}
 
-	ms = kzalloc(sizeof(*ms), GFP_KERNEL);
+	ms = kzalloc_obj(*ms);
 	if (!ms) {
 		ret = -ENOMEM;
 		goto unlock;
@@ -64,12 +71,18 @@ int ivpu_ms_start_ioctl(struct drm_device *dev, void *data, struct drm_file *fil
 	if (ret)
 		goto err_free_ms;
 
-	single_buff_size = sample_size *
-		((u64)args->read_period_samples * MS_READ_PERIOD_MULTIPLIER);
-	ms->bo = ivpu_bo_create_global(vdev, PAGE_ALIGN(single_buff_size * MS_NUM_BUFFERS),
-				       DRM_IVPU_BO_CACHED | DRM_IVPU_BO_MAPPABLE);
+	buf_size = PAGE_ALIGN((u64)args->read_period_samples * sample_size *
+			      MS_READ_PERIOD_MULTIPLIER * MS_NUM_BUFFERS);
+	if (buf_size > ivpu_hw_range_size(&vdev->hw->ranges.global)) {
+		ivpu_dbg(vdev, IOCTL, "Requested MS buffer size %llu exceeds range size %llu\n",
+			 buf_size, ivpu_hw_range_size(&vdev->hw->ranges.global));
+		ret = -EINVAL;
+		goto err_free_ms;
+	}
+
+	ms->bo = ivpu_bo_create_global(vdev, buf_size, DRM_IVPU_BO_CACHED | DRM_IVPU_BO_MAPPABLE);
 	if (!ms->bo) {
-		ivpu_err(vdev, "Failed to allocate MS buffer (size %llu)\n", single_buff_size);
+		ivpu_dbg(vdev, IOCTL, "Failed to allocate MS buffer (size %llu)\n", buf_size);
 		ret = -ENOMEM;
 		goto err_free_ms;
 	}
@@ -96,6 +109,8 @@ err_free_ms:
 	kfree(ms);
 unlock:
 	mutex_unlock(&file_priv->ms_lock);
+
+	ivpu_rpm_put(vdev);
 	return ret;
 }
 
@@ -160,11 +175,16 @@ int ivpu_ms_get_data_ioctl(struct drm_device *dev, void *data, struct drm_file *
 	if (!args->metric_group_mask)
 		return -EINVAL;
 
+	ret = ivpu_rpm_get(vdev);
+	if (ret < 0)
+		return ret;
+
 	mutex_lock(&file_priv->ms_lock);
 
 	ms = get_instance_by_mask(file_priv, args->metric_group_mask);
 	if (!ms) {
-		ivpu_err(vdev, "Instance doesn't exist for mask: %#llx\n", args->metric_group_mask);
+		ivpu_dbg(vdev, IOCTL, "Instance doesn't exist for mask: %#llx\n",
+			 args->metric_group_mask);
 		ret = -EINVAL;
 		goto unlock;
 	}
@@ -187,6 +207,7 @@ int ivpu_ms_get_data_ioctl(struct drm_device *dev, void *data, struct drm_file *
 unlock:
 	mutex_unlock(&file_priv->ms_lock);
 
+	ivpu_rpm_put(vdev);
 	return ret;
 }
 
@@ -204,10 +225,16 @@ int ivpu_ms_stop_ioctl(struct drm_device *dev, void *data, struct drm_file *file
 {
 	struct ivpu_file_priv *file_priv = file->driver_priv;
 	struct drm_ivpu_metric_streamer_stop *args = data;
+	struct ivpu_device *vdev = file_priv->vdev;
 	struct ivpu_ms_instance *ms;
+	int ret;
 
 	if (!args->metric_group_mask)
 		return -EINVAL;
+
+	ret = ivpu_rpm_get(vdev);
+	if (ret < 0)
+		return ret;
 
 	mutex_lock(&file_priv->ms_lock);
 
@@ -217,6 +244,7 @@ int ivpu_ms_stop_ioctl(struct drm_device *dev, void *data, struct drm_file *file
 
 	mutex_unlock(&file_priv->ms_lock);
 
+	ivpu_rpm_put(vdev);
 	return ms ? 0 : -EINVAL;
 }
 
@@ -263,6 +291,13 @@ int ivpu_ms_get_info_ioctl(struct drm_device *dev, void *data, struct drm_file *
 	if (ret)
 		goto unlock;
 
+	if (info_size > ivpu_bo_size(bo)) {
+		ivpu_warn_ratelimited(vdev, "MS info overflow: %#llx > %#zx\n",
+				      info_size, ivpu_bo_size(bo));
+		ret = -EOVERFLOW;
+		goto unlock;
+	}
+
 	if (args->buffer_size < info_size) {
 		ret = -ENOSPC;
 		goto unlock;
@@ -281,6 +316,9 @@ unlock:
 void ivpu_ms_cleanup(struct ivpu_file_priv *file_priv)
 {
 	struct ivpu_ms_instance *ms, *tmp;
+	struct ivpu_device *vdev = file_priv->vdev;
+
+	pm_runtime_get_sync(vdev->drm.dev);
 
 	mutex_lock(&file_priv->ms_lock);
 
@@ -293,6 +331,8 @@ void ivpu_ms_cleanup(struct ivpu_file_priv *file_priv)
 		free_instance(file_priv, ms);
 
 	mutex_unlock(&file_priv->ms_lock);
+
+	pm_runtime_put_autosuspend(vdev->drm.dev);
 }
 
 void ivpu_ms_cleanup_all(struct ivpu_device *vdev)

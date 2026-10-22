@@ -674,7 +674,7 @@ struct port_info {
 	struct cxgb_fcoe fcoe;
 #endif /* CONFIG_CHELSIO_T4_FCOE */
 	bool rxtstamp;  /* Enable TS */
-	struct hwtstamp_config tstamp_config;
+	struct kernel_hwtstamp_config tstamp_config;
 	bool ptp_enable;
 	struct sched_table *sched_tbl;
 	u32 eth_flags;
@@ -1211,9 +1211,6 @@ struct adapter {
 	struct timer_list flower_stats_timer;
 	struct work_struct flower_stats_work;
 
-	/* Ethtool Dump */
-	struct ethtool_dump eth_dump;
-
 	/* HMA */
 	struct hma_data hma;
 
@@ -1233,6 +1230,10 @@ struct adapter {
 
 	/* Ethtool n-tuple */
 	struct cxgb4_ethtool_filter *ethtool_filters;
+
+	/* Ethtool Dump */
+	/* Must be last - ends in a flex-array member. */
+	struct ethtool_dump eth_dump;
 };
 
 /* Support for "sched-class" command to allow a TX Scheduling Class to be
@@ -1315,7 +1316,7 @@ struct ch_sched_flowc {
  * (value, mask) tuples.  The associated ingress packet field matches the
  * tuple when ((field & mask) == value).  (Thus a wildcard "don't care" field
  * rule can be constructed by specifying a tuple of (0, 0).)  A filter rule
- * matches an ingress packet when all of the individual individual field
+ * matches an ingress packet when all of the individual field
  * matching rules are true.
  *
  * Partial field masks are always valid, however, while it may be easy to

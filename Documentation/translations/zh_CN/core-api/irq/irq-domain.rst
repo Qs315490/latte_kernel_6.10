@@ -60,8 +60,6 @@ irq_domain和一个hwirq号作为参数。 如果hwirq的映射还不存在，�
 
 - irq_find_mapping()返回给定域和hwirq的Linux IRQ号，如果没有映射则返回0。
 
-- irq_linear_revmap()现与irq_find_mapping()相同，已被废弃。
-
 - generic_handle_domain_irq()处理一个由域和hwirq号描述的中断。
 
 请注意，irq域的查找必须发生在与RCU读临界区兼容的上下文中。
@@ -83,7 +81,6 @@ irq_domain映射的类型
 
 ::
 
-	irq_domain_add_linear()
 	irq_domain_create_linear()
 
 线性反向映射维护了一个固定大小的表，该表以hwirq号为索引。 当一个hwirq被映射
@@ -104,7 +101,6 @@ irq_domain_add_linear()和irq_domain_create_linear()在功能上是等价的，
 
 ::
 
-	irq_domain_add_tree()
 	irq_domain_create_tree()
 
 irq_domain维护着从hwirq号到Linux IRQ的radix的树状映射。 当一个hwirq被映射时，
@@ -113,10 +109,6 @@ irq_domain维护着从hwirq号到Linux IRQ的radix的树状映射。 当一个hw
 如果hwirq号可以非常大，树状映射是一个很好的选择，因为它不需要分配一个和最大hwirq
 号一样大的表。 缺点是，hwirq到IRQ号的查找取决于表中有多少条目。
 
-irq_domain_add_tree()和irq_domain_create_tree()在功能上是等价的，除了第一
-个参数不同——前者接受一个Open Firmware特定的 'struct device_node' ，而后者接受
-一个更通用的抽象 'struct fwnode_handle' 。
-
 很少有驱动应该需要这个映射。
 
 无映射
@@ -124,7 +116,7 @@ irq_domain_add_tree()和irq_domain_create_tree()在功能上是等价的，除�
 
 ::
 
-	irq_domain_add_nomap()
+	irq_domain_create_nomap()
 
 当硬件中的hwirq号是可编程的时候，就可以采用无映射类型。 在这种情况下，最好将
 Linux IRQ号编入硬件本身，这样就不需要映射了。 调用irq_create_direct_mapping()
@@ -138,8 +130,6 @@ Linux IRQ号编入硬件本身，这样就不需要映射了。 调用irq_create
 
 ::
 
-	irq_domain_add_simple()
-	irq_domain_add_legacy()
 	irq_domain_create_simple()
 	irq_domain_create_legacy()
 

@@ -393,7 +393,7 @@ static bool tipc_mon_add_peer(struct tipc_monitor *mon, u32 addr,
 	struct tipc_peer *self = mon->self;
 	struct tipc_peer *cur, *prev, *p;
 
-	p = kzalloc(sizeof(*p), GFP_ATOMIC);
+	p = kzalloc_obj(*p, GFP_ATOMIC);
 	*peer = p;
 	if (!p)
 		return false;
@@ -630,7 +630,7 @@ void tipc_mon_get_state(struct net *net, u32 addr,
 
 static void mon_timeout(struct timer_list *t)
 {
-	struct tipc_monitor *mon = from_timer(mon, t, timer);
+	struct tipc_monitor *mon = timer_container_of(mon, t, timer);
 	struct tipc_peer *self;
 	int best_member_cnt = dom_size(mon->peer_cnt) - 1;
 
@@ -654,9 +654,9 @@ int tipc_mon_create(struct net *net, int bearer_id)
 	if (tn->monitors[bearer_id])
 		return 0;
 
-	mon = kzalloc(sizeof(*mon), GFP_ATOMIC);
-	self = kzalloc(sizeof(*self), GFP_ATOMIC);
-	dom = kzalloc(sizeof(*dom), GFP_ATOMIC);
+	mon = kzalloc_obj(*mon, GFP_ATOMIC);
+	self = kzalloc_obj(*self, GFP_ATOMIC);
+	dom = kzalloc_obj(*dom, GFP_ATOMIC);
 	if (!mon || !self || !dom) {
 		kfree(mon);
 		kfree(self);
@@ -716,7 +716,8 @@ void tipc_mon_reinit_self(struct net *net)
 		if (!mon)
 			continue;
 		write_lock_bh(&mon->lock);
-		mon->self->addr = tipc_own_addr(net);
+		if (mon->self)
+			mon->self->addr = tipc_own_addr(net);
 		write_unlock_bh(&mon->lock);
 	}
 }

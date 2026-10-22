@@ -7,6 +7,7 @@
 
 #include "linked_list.skel.h"
 #include "linked_list_fail.skel.h"
+#include "linked_list_peek.skel.h"
 
 static char log_buf[1024 * 1024];
 
@@ -71,7 +72,7 @@ static struct {
 	{ "new_null_ret", "R0 invalid mem access 'ptr_or_null_'" },
 	{ "obj_new_acq", "Unreleased reference id=" },
 	{ "use_after_drop", "invalid mem access 'scalar'" },
-	{ "ptr_walk_scalar", "type=scalar expected=percpu_ptr_" },
+	{ "ptr_walk_scalar", "type=rdonly_untrusted_mem expected=percpu_ptr_" },
 	{ "direct_read_lock", "direct access to bpf_spin_lock is disallowed" },
 	{ "direct_write_lock", "direct access to bpf_spin_lock is disallowed" },
 	{ "direct_read_head", "direct access to bpf_list_head is disallowed" },
@@ -80,18 +81,18 @@ static struct {
 	{ "direct_write_node", "direct access to bpf_list_node is disallowed" },
 	{ "use_after_unlock_push_front", "invalid mem access 'scalar'" },
 	{ "use_after_unlock_push_back", "invalid mem access 'scalar'" },
-	{ "double_push_front", "arg#1 expected pointer to allocated object" },
-	{ "double_push_back", "arg#1 expected pointer to allocated object" },
+	{ "double_push_front", "R2 expected pointer to allocated object" },
+	{ "double_push_back", "R2 expected pointer to allocated object" },
 	{ "no_node_value_type", "bpf_list_node not found at offset=0" },
 	{ "incorrect_value_type",
 	  "operation on bpf_list_head expects arg#1 bpf_list_node at offset=48 in struct foo, "
 	  "but arg is at offset=0 in struct bar" },
-	{ "incorrect_node_var_off", "variable ptr_ access var_off=(0x0; 0xffffffff) disallowed" },
+	{ "incorrect_node_var_off", "variable ptr_ access var_off=(0x0; 0x1ffffffff) disallowed" },
 	{ "incorrect_node_off1", "bpf_list_node not found at offset=49" },
 	{ "incorrect_node_off2", "arg#1 offset=0, but expected bpf_list_node at offset=48 in struct foo" },
 	{ "no_head_type", "bpf_list_head not found at offset=0" },
 	{ "incorrect_head_var_off1", "R1 doesn't have constant offset" },
-	{ "incorrect_head_var_off2", "variable ptr_ access var_off=(0x0; 0xffffffff) disallowed" },
+	{ "incorrect_head_var_off2", "variable ptr_ access var_off=(0x0; 0x1ffffffff) disallowed" },
 	{ "incorrect_head_off1", "bpf_list_head not found at offset=25" },
 	{ "incorrect_head_off2", "bpf_list_head not found at offset=1" },
 	{ "pop_front_off", "off 48 doesn't point to 'struct bpf_spin_lock' that is at 40" },
@@ -130,13 +131,14 @@ end:
 	linked_list_fail__destroy(skel);
 }
 
-static void clear_fields(struct bpf_map *map)
+static void clear_fields(struct bpf_program *prog)
 {
-	char buf[24];
-	int key = 0;
+	LIBBPF_OPTS(bpf_test_run_opts, opts);
+	int ret;
 
-	memset(buf, 0xff, sizeof(buf));
-	ASSERT_OK(bpf_map__update_elem(map, &key, sizeof(key), buf, sizeof(buf), 0), "check_and_free_fields");
+	ret = bpf_prog_test_run_opts(bpf_program__fd(prog), &opts);
+	ASSERT_OK(ret, "clear_fields");
+	ASSERT_OK(opts.retval, "clear_fields retval");
 }
 
 enum {
@@ -169,31 +171,31 @@ static void test_linked_list_success(int mode, bool leave_in_map)
 	ASSERT_OK(ret, "map_list_push_pop");
 	ASSERT_OK(opts.retval, "map_list_push_pop retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.array_map);
+		clear_fields(skel->progs.clear_map_list);
 
 	ret = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.inner_map_list_push_pop), &opts);
 	ASSERT_OK(ret, "inner_map_list_push_pop");
 	ASSERT_OK(opts.retval, "inner_map_list_push_pop retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.inner_map);
+		clear_fields(skel->progs.clear_inner_map_list);
 
 	ret = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.global_list_push_pop), &opts);
 	ASSERT_OK(ret, "global_list_push_pop");
 	ASSERT_OK(opts.retval, "global_list_push_pop retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.bss_A);
+		clear_fields(skel->progs.clear_global_list);
 
 	ret = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.global_list_push_pop_nested), &opts);
 	ASSERT_OK(ret, "global_list_push_pop_nested");
 	ASSERT_OK(opts.retval, "global_list_push_pop_nested retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.bss_A);
+		clear_fields(skel->progs.clear_global_nested_list);
 
 	ret = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.global_list_array_push_pop), &opts);
 	ASSERT_OK(ret, "global_list_array_push_pop");
 	ASSERT_OK(opts.retval, "global_list_array_push_pop retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.bss_A);
+		clear_fields(skel->progs.clear_global_array_list);
 
 	if (mode == PUSH_POP)
 		goto end;
@@ -203,19 +205,19 @@ ppm:
 	ASSERT_OK(ret, "map_list_push_pop_multiple");
 	ASSERT_OK(opts.retval, "map_list_push_pop_multiple retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.array_map);
+		clear_fields(skel->progs.clear_map_list);
 
 	ret = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.inner_map_list_push_pop_multiple), &opts);
 	ASSERT_OK(ret, "inner_map_list_push_pop_multiple");
 	ASSERT_OK(opts.retval, "inner_map_list_push_pop_multiple retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.inner_map);
+		clear_fields(skel->progs.clear_inner_map_list);
 
 	ret = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.global_list_push_pop_multiple), &opts);
 	ASSERT_OK(ret, "global_list_push_pop_multiple");
 	ASSERT_OK(opts.retval, "global_list_push_pop_multiple retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.bss_A);
+		clear_fields(skel->progs.clear_global_list);
 
 	if (mode == PUSH_POP_MULT)
 		goto end;
@@ -225,19 +227,19 @@ lil:
 	ASSERT_OK(ret, "map_list_in_list");
 	ASSERT_OK(opts.retval, "map_list_in_list retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.array_map);
+		clear_fields(skel->progs.clear_map_list);
 
 	ret = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.inner_map_list_in_list), &opts);
 	ASSERT_OK(ret, "inner_map_list_in_list");
 	ASSERT_OK(opts.retval, "inner_map_list_in_list retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.inner_map);
+		clear_fields(skel->progs.clear_inner_map_list);
 
 	ret = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.global_list_in_list), &opts);
 	ASSERT_OK(ret, "global_list_in_list");
 	ASSERT_OK(opts.retval, "global_list_in_list retval");
 	if (!leave_in_map)
-		clear_fields(skel->maps.bss_A);
+		clear_fields(skel->progs.clear_global_list);
 end:
 	linked_list__destroy(skel);
 }
@@ -804,4 +806,9 @@ void test_linked_list(void)
 	test_linked_list_success(LIST_IN_LIST, false);
 	test_linked_list_success(LIST_IN_LIST, true);
 	test_linked_list_success(TEST_ALL, false);
+}
+
+void test_linked_list_peek(void)
+{
+	RUN_TESTS(linked_list_peek);
 }

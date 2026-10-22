@@ -227,7 +227,8 @@ vxfs_bmap_typed(struct inode *ip, long iblock)
 			return 0;
 		}
 		default:
-			BUG();
+			WARN_ON_ONCE(1);
+			return 0;
 		}
 	}
 
@@ -260,12 +261,12 @@ vxfs_bmap1(struct inode *ip, long iblock)
 	if (VXFS_ISIMMED(vip))
 		goto unsupp;
 
-	printk(KERN_WARNING "vxfs: inode %ld has no valid orgtype (%x)\n",
+	printk(KERN_WARNING "vxfs: inode %llu has no valid orgtype (%x)\n",
 			ip->i_ino, vip->vii_orgtype);
 	BUG();
 
 unsupp:
-	printk(KERN_WARNING "vxfs: inode %ld has an unsupported orgtype (%x)\n",
+	printk(KERN_WARNING "vxfs: inode %llu has an unsupported orgtype (%x)\n",
 			ip->i_ino, vip->vii_orgtype);
 	return 0;
 }

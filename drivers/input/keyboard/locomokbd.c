@@ -194,7 +194,7 @@ static irqreturn_t locomokbd_interrupt(int irq, void *dev_id)
  */
 static void locomokbd_timer_callback(struct timer_list *t)
 {
-	struct locomokbd *locomokbd = from_timer(locomokbd, t, timer);
+	struct locomokbd *locomokbd = timer_container_of(locomokbd, t, timer);
 
 	locomokbd_scankeyboard(locomokbd);
 }
@@ -224,7 +224,7 @@ static int locomokbd_probe(struct locomo_dev *dev)
 	struct input_dev *input_dev;
 	int i, err;
 
-	locomokbd = kzalloc(sizeof(*locomokbd), GFP_KERNEL);
+	locomokbd = kzalloc_obj(*locomokbd);
 	input_dev = input_allocate_device();
 	if (!locomokbd || !input_dev) {
 		err = -ENOMEM;

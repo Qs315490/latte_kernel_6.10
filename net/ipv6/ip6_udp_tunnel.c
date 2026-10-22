@@ -40,7 +40,7 @@ int udp_sock_create6(struct net *net, struct udp_port_cfg *cfg,
 	memcpy(&udp6_addr.sin6_addr, &cfg->local_ip6,
 	       sizeof(udp6_addr.sin6_addr));
 	udp6_addr.sin6_port = cfg->local_udp_port;
-	err = kernel_bind(sock, (struct sockaddr *)&udp6_addr,
+	err = kernel_bind(sock, (struct sockaddr_unsized *)&udp6_addr,
 			  sizeof(udp6_addr));
 	if (err < 0)
 		goto error;
@@ -52,7 +52,7 @@ int udp_sock_create6(struct net *net, struct udp_port_cfg *cfg,
 		       sizeof(udp6_addr.sin6_addr));
 		udp6_addr.sin6_port = cfg->peer_udp_port;
 		err = kernel_connect(sock,
-				     (struct sockaddr *)&udp6_addr,
+				     (struct sockaddr_unsized *)&udp6_addr,
 				     sizeof(udp6_addr), 0);
 	}
 	if (err < 0)
@@ -74,13 +74,14 @@ error:
 }
 EXPORT_SYMBOL_GPL(udp_sock_create6);
 
-int udp_tunnel6_xmit_skb(struct dst_entry *dst, struct sock *sk,
-			 struct sk_buff *skb,
-			 struct net_device *dev,
-			 const struct in6_addr *saddr,
-			 const struct in6_addr *daddr,
-			 __u8 prio, __u8 ttl, __be32 label,
-			 __be16 src_port, __be16 dst_port, bool nocheck)
+void udp_tunnel6_xmit_skb(struct dst_entry *dst, struct sock *sk,
+			  struct sk_buff *skb,
+			  struct net_device *dev,
+			  const struct in6_addr *saddr,
+			  const struct in6_addr *daddr,
+			  __u8 prio, __u8 ttl, __be32 label,
+			  __be16 src_port, __be16 dst_port, bool nocheck,
+			  u16 ip6cb_flags)
 {
 	struct udphdr *uh;
 	struct ipv6hdr *ip6h;
@@ -108,8 +109,7 @@ int udp_tunnel6_xmit_skb(struct dst_entry *dst, struct sock *sk,
 	ip6h->daddr	  = *daddr;
 	ip6h->saddr	  = *saddr;
 
-	ip6tunnel_xmit(sk, skb, dev);
-	return 0;
+	ip6tunnel_xmit(sk, skb, dev, ip6cb_flags);
 }
 EXPORT_SYMBOL_GPL(udp_tunnel6_xmit_skb);
 
@@ -118,7 +118,7 @@ EXPORT_SYMBOL_GPL(udp_tunnel6_xmit_skb);
  *      @skb: Packet for which lookup is done
  *      @dev: Tunnel device
  *      @net: Network namespace of tunnel device
- *      @sock: Socket which provides route info
+ *      @sk: Socket which provides route info
  *      @oif: Index of the output interface
  *      @saddr: Memory to store the src ip address
  *      @key: Tunnel information
@@ -135,7 +135,7 @@ EXPORT_SYMBOL_GPL(udp_tunnel6_xmit_skb);
 struct dst_entry *udp_tunnel6_dst_lookup(struct sk_buff *skb,
 					 struct net_device *dev,
 					 struct net *net,
-					 struct socket *sock,
+					 struct sock *sk,
 					 int oif,
 					 struct in6_addr *saddr,
 					 const struct ip_tunnel_key *key,
@@ -162,13 +162,12 @@ struct dst_entry *udp_tunnel6_dst_lookup(struct sk_buff *skb,
 	fl6.fl6_dport = dport;
 	fl6.flowlabel = ip6_make_flowinfo(dsfield, key->label);
 
-	dst = ipv6_stub->ipv6_dst_lookup_flow(net, sock->sk, &fl6,
-					      NULL);
+	dst = ip6_dst_lookup_flow(net, sk, &fl6, NULL);
 	if (IS_ERR(dst)) {
 		netdev_dbg(dev, "no route to %pI6\n", &fl6.daddr);
 		return ERR_PTR(-ENETUNREACH);
 	}
-	if (dst->dev == dev) { /* is this necessary? */
+	if (dst_dev(dst) == dev) { /* is this necessary? */
 		netdev_dbg(dev, "circular route to %pI6\n", &fl6.daddr);
 		dst_release(dst);
 		return ERR_PTR(-ELOOP);

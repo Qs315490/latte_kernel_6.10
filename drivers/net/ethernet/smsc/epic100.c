@@ -26,8 +26,6 @@
 */
 
 #define DRV_NAME        "epic100"
-#define DRV_VERSION     "2.1"
-#define DRV_RELDATE     "Sept 11, 2006"
 
 /* The user-configurable values.
    These may be modified when a driver module is loaded.*/
@@ -88,12 +86,6 @@ static int rx_copybreak;
 #include <asm/io.h>
 #include <linux/uaccess.h>
 #include <asm/byteorder.h>
-
-/* These identify the driver base version and may not be removed. */
-static char version[] =
-DRV_NAME ".c:v1.11 1/7/2001 Written by Donald Becker <becker@scyld.com>";
-static char version2[] =
-"  (unofficial 2.4.x kernel port, version " DRV_VERSION ", " DRV_RELDATE ")";
 
 MODULE_AUTHOR("Donald Becker <becker@scyld.com>");
 MODULE_DESCRIPTION("SMC 83c170 EPIC series Ethernet driver");
@@ -174,11 +166,19 @@ static const struct epic_chip_info pci_id_tbl[] = {
 
 
 static const struct pci_device_id epic_pci_tbl[] = {
-	{ 0x10B8, 0x0005, 0x1092, 0x0AB4, 0, 0, SMSC_83C170_0 },
-	{ 0x10B8, 0x0005, PCI_ANY_ID, PCI_ANY_ID, 0, 0, SMSC_83C170 },
-	{ 0x10B8, 0x0006, PCI_ANY_ID, PCI_ANY_ID,
-	  PCI_CLASS_NETWORK_ETHERNET << 8, 0xffff00, SMSC_83C175 },
-	{ 0,}
+	{
+		PCI_DEVICE_SUB(0x10B8, 0x0005, 0x1092, 0x0AB4),
+		.driver_data = SMSC_83C170_0,
+	}, {
+		PCI_DEVICE(0x10B8, 0x0005),
+		.driver_data = SMSC_83C170,
+	}, {
+		PCI_DEVICE(0x10B8, 0x0006),
+		.class = PCI_CLASS_NETWORK_ETHERNET << 8,
+		.class_mask = 0xffff00,
+		.driver_data = SMSC_83C175,
+	},
+	{ }
 };
 MODULE_DEVICE_TABLE (pci, epic_pci_tbl);
 
@@ -328,11 +328,6 @@ static int epic_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	__le16 addr[ETH_ALEN / 2];
 	void *ring_space;
 	dma_addr_t ring_dma;
-
-/* when built into the kernel, we only print version if device is found */
-#ifndef MODULE
-	pr_info_once("%s%s\n", version, version2);
-#endif
 
 	card_idx++;
 
@@ -850,7 +845,7 @@ static void check_media(struct net_device *dev)
 
 static void epic_timer(struct timer_list *t)
 {
-	struct epic_private *ep = from_timer(ep, t, timer);
+	struct epic_private *ep = timer_container_of(ep, t, timer);
 	struct net_device *dev = ep->mii.dev;
 	void __iomem *ioaddr = ep->ioaddr;
 	int next_tick = 5*HZ;
@@ -1292,7 +1287,7 @@ static int epic_close(struct net_device *dev)
 		netdev_dbg(dev, "Shutting down ethercard, status was %2.2x.\n",
 			   er32(INTSTAT));
 
-	del_timer_sync(&ep->timer);
+	timer_delete_sync(&ep->timer);
 
 	epic_disable_int(dev, ep);
 
@@ -1393,7 +1388,6 @@ static void netdev_get_drvinfo (struct net_device *dev, struct ethtool_drvinfo *
 	struct epic_private *np = netdev_priv(dev);
 
 	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
-	strscpy(info->version, DRV_VERSION, sizeof(info->version));
 	strscpy(info->bus_info, pci_name(np->pci_dev), sizeof(info->bus_info));
 }
 
@@ -1564,23 +1558,4 @@ static struct pci_driver epic_driver = {
 	.driver.pm	= &epic_pm_ops,
 };
 
-
-static int __init epic_init (void)
-{
-/* when a module, this is printed whether or not devices are found in probe */
-#ifdef MODULE
-	pr_info("%s%s\n", version, version2);
-#endif
-
-	return pci_register_driver(&epic_driver);
-}
-
-
-static void __exit epic_cleanup (void)
-{
-	pci_unregister_driver (&epic_driver);
-}
-
-
-module_init(epic_init);
-module_exit(epic_cleanup);
+module_pci_driver(epic_driver);

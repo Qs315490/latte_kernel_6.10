@@ -29,7 +29,7 @@
 #include "hw_shared.h"
 #include "dc_hw_types.h"
 #include "fixed31_32.h"
-#include "spl/dc_spl_types.h"
+#include "sspl/dc_spl_types.h"
 
 #define CSC_TEMPERATURE_MATRIX_SIZE 12
 
@@ -160,7 +160,7 @@ struct scaler_data {
 	struct scaling_ratios ratios;
 	struct scl_inits inits;
 	struct sharpness_adj sharpness;
-	enum pixel_format format;
+	enum dc_pixel_format format;
 	struct line_buffer_params lb_params;
 	// Below struct holds the scaler values to program hw registers
 	struct dscl_prog_data dscl_prog_data;

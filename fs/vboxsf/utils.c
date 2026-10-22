@@ -11,6 +11,7 @@
 #include <linux/sizes.h>
 #include <linux/pagemap.h>
 #include <linux/vfs.h>
+#include <linux/fileattr.h>
 #include "vfsmod.h"
 
 struct inode *vboxsf_new_inode(struct super_block *sb)
@@ -478,7 +479,7 @@ static struct vboxsf_dir_buf *vboxsf_dir_buf_alloc(struct list_head *list)
 {
 	struct vboxsf_dir_buf *b;
 
-	b = kmalloc(sizeof(*b), GFP_KERNEL);
+	b = kmalloc_obj(*b);
 	if (!b)
 		return NULL;
 
@@ -507,7 +508,7 @@ struct vboxsf_dir_info *vboxsf_dir_info_alloc(void)
 {
 	struct vboxsf_dir_info *p;
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kmalloc_obj(*p);
 	if (!p)
 		return NULL;
 
@@ -566,4 +567,33 @@ int vboxsf_dir_read_all(struct vboxsf_sbi *sbi, struct vboxsf_dir_info *sf_d,
 		err = 0;
 
 	return err;
+}
+
+int vboxsf_query_case_sensitive(struct vboxsf_sbi *sbi)
+{
+	struct shfl_volinfo volinfo = {};
+	u32 buf_len;
+	int err;
+
+	buf_len = sizeof(volinfo);
+	err = vboxsf_fsinfo(sbi->root, 0, SHFL_INFO_GET | SHFL_INFO_VOLUME,
+			    &buf_len, &volinfo);
+	if (err)
+		return err;
+	if (buf_len < sizeof(volinfo))
+		return 0;
+
+	sbi->case_insensitive = !volinfo.properties.case_sensitive;
+	return 0;
+}
+
+int vboxsf_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
+{
+	struct vboxsf_sbi *sbi = VBOXSF_SBI(dentry->d_sb);
+
+	if (sbi->case_insensitive) {
+		fa->fsx_xflags |= FS_XFLAG_CASEFOLD;
+		fa->flags |= FS_CASEFOLD_FL;
+	}
+	return 0;
 }

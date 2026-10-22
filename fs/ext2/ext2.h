@@ -114,8 +114,6 @@ struct ext2_sb_info {
 	 */
 	spinlock_t s_lock;
 	struct mb_cache *s_ea_block_cache;
-	struct dax_device *s_daxdev;
-	u64 s_dax_part_off;
 };
 
 static inline spinlock_t *
@@ -357,7 +355,6 @@ struct ext2_inode {
  */
 #define	EXT2_VALID_FS			0x0001	/* Unmounted cleanly */
 #define	EXT2_ERROR_FS			0x0002	/* Errors detected */
-#define	EFSCORRUPTED			EUCLEAN	/* Filesystem is corrupted */
 
 /*
  * Mount flags
@@ -368,16 +365,15 @@ struct ext2_inode {
 #define EXT2_MOUNT_ERRORS_CONT		0x000010  /* Continue on errors */
 #define EXT2_MOUNT_ERRORS_RO		0x000020  /* Remount fs ro on errors */
 #define EXT2_MOUNT_ERRORS_PANIC		0x000040  /* Panic on errors */
+#define EXT2_MOUNT_ERRORS_MASK		0x000070
 #define EXT2_MOUNT_MINIX_DF		0x000080  /* Mimics the Minix statfs */
 #define EXT2_MOUNT_NOBH			0x000100  /* No buffer_heads */
 #define EXT2_MOUNT_NO_UID32		0x000200  /* Disable 32-bit UIDs */
 #define EXT2_MOUNT_XATTR_USER		0x004000  /* Extended user attributes */
 #define EXT2_MOUNT_POSIX_ACL		0x008000  /* POSIX Access Control Lists */
-#define EXT2_MOUNT_XIP			0x010000  /* Obsolete, use DAX */
 #define EXT2_MOUNT_USRQUOTA		0x020000  /* user quota */
 #define EXT2_MOUNT_GRPQUOTA		0x040000  /* group quota */
 #define EXT2_MOUNT_RESERVATION		0x080000  /* Preallocation */
-#define EXT2_MOUNT_DAX			0x100000  /* Direct Access */
 
 
 #define clear_opt(o, opt)		o &= ~EXT2_MOUNT_##opt
@@ -676,6 +672,7 @@ struct ext2_inode_info {
 #ifdef CONFIG_QUOTA
 	struct dquot __rcu *i_dquot[MAXQUOTAS];
 #endif
+	struct mapping_metadata_bhs i_metadata_bhs;
 };
 
 /*
@@ -749,9 +746,9 @@ extern int ext2_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		       u64 start, u64 len);
 
 /* ioctl.c */
-extern int ext2_fileattr_get(struct dentry *dentry, struct fileattr *fa);
+extern int ext2_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
 extern int ext2_fileattr_set(struct mnt_idmap *idmap,
-			     struct dentry *dentry, struct fileattr *fa);
+			     struct dentry *dentry, struct file_kattr *fa);
 extern long ext2_ioctl(struct file *, unsigned int, unsigned long);
 extern long ext2_compat_ioctl(struct file *, unsigned int, unsigned long);
 

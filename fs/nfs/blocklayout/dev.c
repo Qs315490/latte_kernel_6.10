@@ -257,10 +257,11 @@ static bool bl_map_stripe(struct pnfs_block_dev *dev, u64 offset,
 	struct pnfs_block_dev *child;
 	u64 chunk;
 	u32 chunk_idx;
+	u64 disk_chunk;
 	u64 disk_offset;
 
 	chunk = div_u64(offset, dev->chunk_size);
-	div_u64_rem(chunk, dev->nr_children, &chunk_idx);
+	disk_chunk = div_u64_rem(chunk, dev->nr_children, &chunk_idx);
 
 	if (chunk_idx >= dev->nr_children) {
 		dprintk("%s: invalid chunk idx %d (%lld/%lld)\n",
@@ -273,7 +274,7 @@ static bool bl_map_stripe(struct pnfs_block_dev *dev, u64 offset,
 	offset = chunk * dev->chunk_size;
 
 	/* disk offset of the stripe */
-	disk_offset = div_u64(offset, dev->nr_children);
+	disk_offset = disk_chunk * dev->chunk_size;
 
 	child = &dev->children[chunk_idx];
 	child->map(child, disk_offset, map);
@@ -369,11 +370,14 @@ bl_open_path(struct pnfs_block_volume *v, const char *prefix)
 	if (!devname)
 		return ERR_PTR(-ENOMEM);
 
-	bdev_file = bdev_file_open_by_path(devname, BLK_OPEN_READ | BLK_OPEN_WRITE,
-					NULL, NULL);
+	bdev_file = bdev_file_open_by_path(devname,
+			BLK_OPEN_READ | BLK_OPEN_WRITE, NULL, NULL);
 	if (IS_ERR(bdev_file)) {
 		dprintk("failed to open device %s (%ld)\n",
 			devname, PTR_ERR(bdev_file));
+	} else {
+		pr_info("pNFS: using block device %s\n",
+			file_bdev(bdev_file)->bd_disk->disk_name);
 	}
 
 	kfree(devname);
@@ -416,8 +420,10 @@ bl_parse_scsi(struct nfs_server *server, struct pnfs_block_dev *d,
 	d->map = bl_map_simple;
 	d->pr_key = v->scsi.pr_key;
 
-	if (d->len == 0)
-		return -ENODEV;
+	if (d->len == 0) {
+		error = -ENODEV;
+		goto out_blkdev_put;
+	}
 
 	ops = bdev->bd_disk->fops->pr_ops;
 	if (!ops) {
@@ -458,8 +464,8 @@ bl_parse_concat(struct nfs_server *server, struct pnfs_block_dev *d,
 	u64 len = 0;
 	int ret, i;
 
-	d->children = kcalloc(v->concat.volumes_count,
-			sizeof(struct pnfs_block_dev), gfp_mask);
+	d->children = kzalloc_objs(struct pnfs_block_dev,
+				   v->concat.volumes_count, gfp_mask);
 	if (!d->children)
 		return -ENOMEM;
 
@@ -487,8 +493,8 @@ bl_parse_stripe(struct nfs_server *server, struct pnfs_block_dev *d,
 	u64 len = 0;
 	int ret, i;
 
-	d->children = kcalloc(v->stripe.volumes_count,
-			sizeof(struct pnfs_block_dev), gfp_mask);
+	d->children = kzalloc_objs(struct pnfs_block_dev,
+				   v->stripe.volumes_count, gfp_mask);
 	if (!d->children)
 		return -ENOMEM;
 
@@ -540,24 +546,23 @@ bl_alloc_deviceid_node(struct nfs_server *server, struct pnfs_device *pdev,
 	struct pnfs_block_dev *top;
 	struct xdr_stream xdr;
 	struct xdr_buf buf;
-	struct page *scratch;
+	struct folio *scratch;
 	int nr_volumes, ret, i;
 	__be32 *p;
 
-	scratch = alloc_page(gfp_mask);
+	scratch = folio_alloc(gfp_mask, 0);
 	if (!scratch)
 		goto out;
 
 	xdr_init_decode_pages(&xdr, &buf, pdev->pages, pdev->pglen);
-	xdr_set_scratch_page(&xdr, scratch);
+	xdr_set_scratch_folio(&xdr, scratch);
 
 	p = xdr_inline_decode(&xdr, sizeof(__be32));
 	if (!p)
 		goto out_free_scratch;
 	nr_volumes = be32_to_cpup(p++);
 
-	volumes = kcalloc(nr_volumes, sizeof(struct pnfs_block_volume),
-			  gfp_mask);
+	volumes = kzalloc_objs(struct pnfs_block_volume, nr_volumes, gfp_mask);
 	if (!volumes)
 		goto out_free_scratch;
 
@@ -567,7 +572,7 @@ bl_alloc_deviceid_node(struct nfs_server *server, struct pnfs_device *pdev,
 			goto out_free_volumes;
 	}
 
-	top = kzalloc(sizeof(*top), gfp_mask);
+	top = kzalloc_obj(*top, gfp_mask);
 	if (!top)
 		goto out_free_volumes;
 
@@ -581,7 +586,7 @@ bl_alloc_deviceid_node(struct nfs_server *server, struct pnfs_device *pdev,
 out_free_volumes:
 	kfree(volumes);
 out_free_scratch:
-	__free_page(scratch);
+	folio_put(scratch);
 out:
 	return node;
 }

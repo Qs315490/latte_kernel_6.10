@@ -28,7 +28,7 @@ static irqreturn_t evtchnl_interrupt_req(int irq, void *dev_id)
 	if (unlikely(channel->state != EVTCHNL_STATE_CONNECTED))
 		return IRQ_HANDLED;
 
-	mutex_lock(&channel->ring_io_lock);
+	guard(mutex)(&channel->ring_io_lock);
 
 again:
 	rp = channel->u.req.ring.sring->rsp_prod;
@@ -80,7 +80,6 @@ again:
 		channel->u.req.ring.sring->rsp_event = i + 1;
 	}
 
-	mutex_unlock(&channel->ring_io_lock);
 	return IRQ_HANDLED;
 }
 
@@ -93,13 +92,16 @@ static irqreturn_t evtchnl_interrupt_evt(int irq, void *dev_id)
 	if (unlikely(channel->state != EVTCHNL_STATE_CONNECTED))
 		return IRQ_HANDLED;
 
-	mutex_lock(&channel->ring_io_lock);
+	guard(mutex)(&channel->ring_io_lock);
+
+	if (unlikely(channel->state != EVTCHNL_STATE_CONNECTED))
+		return IRQ_HANDLED;
 
 	prod = page->in_prod;
 	/* Ensure we see ring contents up to prod. */
 	virt_rmb();
 	if (prod == page->in_cons)
-		goto out;
+		return IRQ_HANDLED;
 
 	/*
 	 * Assume that the backend is trusted to always write sane values
@@ -125,8 +127,6 @@ static irqreturn_t evtchnl_interrupt_evt(int irq, void *dev_id)
 	/* Ensure ring contents. */
 	virt_wmb();
 
-out:
-	mutex_unlock(&channel->ring_io_lock);
 	return IRQ_HANDLED;
 }
 
@@ -270,9 +270,8 @@ int xen_snd_front_evtchnl_create_all(struct xen_snd_front_info *front_info,
 	int d, ret = 0;
 
 	front_info->evt_pairs =
-			kcalloc(num_streams,
-				sizeof(struct xen_snd_front_evtchnl_pair),
-				GFP_KERNEL);
+			kzalloc_objs(struct xen_snd_front_evtchnl_pair,
+				     num_streams);
 	if (!front_info->evt_pairs)
 		return -ENOMEM;
 
@@ -434,8 +433,8 @@ fail_to_end:
 	return ret;
 }
 
-void xen_snd_front_evtchnl_pair_set_connected(struct xen_snd_front_evtchnl_pair *evt_pair,
-					      bool is_connected)
+void xen_snd_front_evtchnl_set_connected(struct xen_snd_front_evtchnl *channel,
+					 bool is_connected)
 {
 	enum xen_snd_front_evtchnl_state state;
 
@@ -444,23 +443,30 @@ void xen_snd_front_evtchnl_pair_set_connected(struct xen_snd_front_evtchnl_pair 
 	else
 		state = EVTCHNL_STATE_DISCONNECTED;
 
-	mutex_lock(&evt_pair->req.ring_io_lock);
-	evt_pair->req.state = state;
-	mutex_unlock(&evt_pair->req.ring_io_lock);
+	scoped_guard(mutex, &channel->ring_io_lock) {
+		channel->state = state;
+	}
+}
 
-	mutex_lock(&evt_pair->evt.ring_io_lock);
-	evt_pair->evt.state = state;
-	mutex_unlock(&evt_pair->evt.ring_io_lock);
+void xen_snd_front_evtchnl_pair_set_connected(struct xen_snd_front_evtchnl_pair *evt_pair,
+					      bool is_connected)
+{
+	xen_snd_front_evtchnl_set_connected(&evt_pair->req, is_connected);
+	xen_snd_front_evtchnl_set_connected(&evt_pair->evt, is_connected);
 }
 
 void xen_snd_front_evtchnl_pair_clear(struct xen_snd_front_evtchnl_pair *evt_pair)
 {
-	mutex_lock(&evt_pair->req.ring_io_lock);
-	evt_pair->req.evt_next_id = 0;
-	mutex_unlock(&evt_pair->req.ring_io_lock);
+	scoped_guard(mutex, &evt_pair->req.ring_io_lock) {
+		evt_pair->req.evt_next_id = 0;
+	}
 
-	mutex_lock(&evt_pair->evt.ring_io_lock);
-	evt_pair->evt.evt_next_id = 0;
-	mutex_unlock(&evt_pair->evt.ring_io_lock);
+	scoped_guard(mutex, &evt_pair->evt.ring_io_lock) {
+		evt_pair->evt.evt_id = 0;
+		/* Drop obsolete events queued for the previous stream instance. */
+		evt_pair->evt.u.evt.page->in_cons =
+			evt_pair->evt.u.evt.page->in_prod;
+		/* Ensure the consumer index is visible before stream reuse. */
+		virt_wmb();
+	}
 }
-

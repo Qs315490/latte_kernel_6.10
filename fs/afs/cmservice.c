@@ -139,49 +139,6 @@ bool afs_cm_incoming_call(struct afs_call *call)
 }
 
 /*
- * Find the server record by peer address and record a probe to the cache
- * manager from a server.
- */
-static int afs_find_cm_server_by_peer(struct afs_call *call)
-{
-	struct sockaddr_rxrpc srx;
-	struct afs_server *server;
-	struct rxrpc_peer *peer;
-
-	peer = rxrpc_kernel_get_call_peer(call->net->socket, call->rxcall);
-
-	server = afs_find_server(call->net, peer);
-	if (!server) {
-		trace_afs_cm_no_server(call, &srx);
-		return 0;
-	}
-
-	call->server = server;
-	return 0;
-}
-
-/*
- * Find the server record by server UUID and record a probe to the cache
- * manager from a server.
- */
-static int afs_find_cm_server_by_uuid(struct afs_call *call,
-				      struct afs_uuid *uuid)
-{
-	struct afs_server *server;
-
-	rcu_read_lock();
-	server = afs_find_server_by_uuid(call->net, call->request);
-	rcu_read_unlock();
-	if (!server) {
-		trace_afs_cm_no_server_u(call, call->request);
-		return 0;
-	}
-
-	call->server = server;
-	return 0;
-}
-
-/*
  * Clean up a cache manager call.
  */
 static void afs_cm_destructor(struct afs_call *call)
@@ -271,9 +228,8 @@ static int afs_deliver_cb_callback(struct afs_call *call)
 			return ret;
 
 		_debug("unmarshall FID array");
-		call->request = kcalloc(call->count,
-					sizeof(struct afs_callback_break),
-					GFP_KERNEL);
+		call->request = kzalloc_objs(struct afs_callback_break,
+					     call->count);
 		if (!call->request)
 			return -ENOMEM;
 
@@ -322,10 +278,7 @@ static int afs_deliver_cb_callback(struct afs_call *call)
 
 	if (!afs_check_call_state(call, AFS_CALL_SV_REPLYING))
 		return afs_io_error(call, afs_io_error_cm_reply);
-
-	/* we'll need the file server record as that tells us which set of
-	 * vnodes to operate upon */
-	return afs_find_cm_server_by_peer(call);
+	return 0;
 }
 
 /*
@@ -349,18 +302,10 @@ static void SRXAFSCB_InitCallBackState(struct work_struct *work)
  */
 static int afs_deliver_cb_init_call_back_state(struct afs_call *call)
 {
-	int ret;
-
 	_enter("");
 
 	afs_extract_discard(call, 0);
-	ret = afs_extract_data(call, false);
-	if (ret < 0)
-		return ret;
-
-	/* we'll need the file server record as that tells us which set of
-	 * vnodes to operate upon */
-	return afs_find_cm_server_by_peer(call);
+	return afs_extract_data(call, false);
 }
 
 /*
@@ -372,8 +317,6 @@ static int afs_deliver_cb_init_call_back_state3(struct afs_call *call)
 	unsigned loop;
 	__be32 *b;
 	int ret;
-
-	_enter("");
 
 	_enter("{%u}", call->unmarshall);
 
@@ -391,12 +334,11 @@ static int afs_deliver_cb_init_call_back_state3(struct afs_call *call)
 		ret = afs_extract_data(call, false);
 		switch (ret) {
 		case 0:		break;
-		case -EAGAIN:	return 0;
 		default:	return ret;
 		}
 
 		_debug("unmarshall UUID");
-		call->request = kmalloc(sizeof(struct afs_uuid), GFP_KERNEL);
+		call->request = kmalloc_obj(struct afs_uuid);
 		if (!call->request)
 			return -ENOMEM;
 
@@ -421,9 +363,18 @@ static int afs_deliver_cb_init_call_back_state3(struct afs_call *call)
 	if (!afs_check_call_state(call, AFS_CALL_SV_REPLYING))
 		return afs_io_error(call, afs_io_error_cm_reply);
 
-	/* we'll need the file server record as that tells us which set of
-	 * vnodes to operate upon */
-	return afs_find_cm_server_by_uuid(call, call->request);
+	if (!call->server) {
+		trace_afs_cm_no_server_u(call, call->request);
+		return 0;
+	}
+
+	if (memcmp(call->request, &call->server->_uuid, sizeof(call->server->_uuid)) != 0) {
+		pr_notice("Callback UUID does not match fileserver UUID\n");
+		trace_afs_cm_no_server_u(call, call->request);
+		return 0;
+	}
+
+	return 0;
 }
 
 /*
@@ -455,7 +406,7 @@ static int afs_deliver_cb_probe(struct afs_call *call)
 
 	if (!afs_check_call_state(call, AFS_CALL_SV_REPLYING))
 		return afs_io_error(call, afs_io_error_cm_reply);
-	return afs_find_cm_server_by_peer(call);
+	return 0;
 }
 
 /*
@@ -504,12 +455,11 @@ static int afs_deliver_cb_probe_uuid(struct afs_call *call)
 		ret = afs_extract_data(call, false);
 		switch (ret) {
 		case 0:		break;
-		case -EAGAIN:	return 0;
 		default:	return ret;
 		}
 
 		_debug("unmarshall UUID");
-		call->request = kmalloc(sizeof(struct afs_uuid), GFP_KERNEL);
+		call->request = kmalloc_obj(struct afs_uuid);
 		if (!call->request)
 			return -ENOMEM;
 
@@ -533,7 +483,7 @@ static int afs_deliver_cb_probe_uuid(struct afs_call *call)
 
 	if (!afs_check_call_state(call, AFS_CALL_SV_REPLYING))
 		return afs_io_error(call, afs_io_error_cm_reply);
-	return afs_find_cm_server_by_peer(call);
+	return 0;
 }
 
 /*
@@ -593,7 +543,7 @@ static int afs_deliver_cb_tell_me_about_yourself(struct afs_call *call)
 
 	if (!afs_check_call_state(call, AFS_CALL_SV_REPLYING))
 		return afs_io_error(call, afs_io_error_cm_reply);
-	return afs_find_cm_server_by_peer(call);
+	return 0;
 }
 
 /*
@@ -641,9 +591,8 @@ static int afs_deliver_yfs_cb_callback(struct afs_call *call)
 			return ret;
 
 		_debug("unmarshall FID array");
-		call->request = kcalloc(call->count,
-					sizeof(struct afs_callback_break),
-					GFP_KERNEL);
+		call->request = kzalloc_objs(struct afs_callback_break,
+					     call->count);
 		if (!call->request)
 			return -ENOMEM;
 
@@ -667,9 +616,5 @@ static int afs_deliver_yfs_cb_callback(struct afs_call *call)
 
 	if (!afs_check_call_state(call, AFS_CALL_SV_REPLYING))
 		return afs_io_error(call, afs_io_error_cm_reply);
-
-	/* We'll need the file server record as that tells us which set of
-	 * vnodes to operate upon.
-	 */
-	return afs_find_cm_server_by_peer(call);
+	return 0;
 }

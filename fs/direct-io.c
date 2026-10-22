@@ -502,12 +502,8 @@ static blk_status_t dio_bio_complete(struct dio *dio, struct bio *bio)
 	const enum req_op dio_op = dio->opf & REQ_OP_MASK;
 	bool should_dirty = dio_op == REQ_OP_READ && dio->should_dirty;
 
-	if (err) {
-		if (err == BLK_STS_AGAIN && (bio->bi_opf & REQ_NOWAIT))
-			dio->io_error = -EAGAIN;
-		else
-			dio->io_error = -EIO;
-	}
+	if (err)
+		dio->io_error = -EIO;
 
 	if (dio->is_async && should_dirty) {
 		bio_check_pages_dirty(bio);	/* transfers ownership */
@@ -996,7 +992,7 @@ do_holes:
 					dio_unpin_page(dio, page);
 					goto out;
 				}
-				zero_user(page, from, 1 << blkbits);
+				memzero_page(page, from, 1 << blkbits);
 				sdio->block_in_file++;
 				from += 1 << blkbits;
 				dio->result += 1 << blkbits;
@@ -1083,8 +1079,8 @@ static inline int drop_refcount(struct dio *dio)
  * The locking rules are governed by the flags parameter:
  *  - if the flags value contains DIO_LOCKING we use a fancy locking
  *    scheme for dumb filesystems.
- *    For writes this function is called under i_mutex and returns with
- *    i_mutex held, for reads, i_mutex is not held on entry, but it is
+ *    For writes this function is called under i_rwsem and returns with
+ *    i_rwsem held, for reads, i_rwsem is not held on entry, but it is
  *    taken and dropped again before returning.
  *  - if the flags value does NOT contain DIO_LOCKING we don't use any
  *    internal locking but rather rely on the filesystem to synchronize
@@ -1094,7 +1090,7 @@ static inline int drop_refcount(struct dio *dio)
  * counter before starting direct I/O, and decrement it once we are done.
  * Truncate can wait for it to reach zero to provide exclusion.  It is
  * expected that filesystem provide exclusion between new direct I/O
- * and truncates.  For DIO_LOCKING filesystems this is done by i_mutex,
+ * and truncates.  For DIO_LOCKING filesystems this is done by i_rwsem,
  * but other filesystems need to take care of this on their own.
  *
  * NOTE: if you pass "sdio" to anything by pointer make sure that function
@@ -1178,13 +1174,10 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 		dio->is_async = true;
 
 	dio->inode = inode;
-	if (iov_iter_rw(iter) == WRITE) {
+	if (iov_iter_rw(iter) == WRITE)
 		dio->opf = REQ_OP_WRITE | REQ_SYNC | REQ_IDLE;
-		if (iocb->ki_flags & IOCB_NOWAIT)
-			dio->opf |= REQ_NOWAIT;
-	} else {
+	else
 		dio->opf = REQ_OP_READ;
-	}
 
 	/*
 	 * For AIO O_(D)SYNC writes we need to defer completions to a workqueue
@@ -1279,7 +1272,7 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 
 	/*
 	 * All block lookups have been performed. For READ requests
-	 * we can let i_mutex go now that its achieved its purpose
+	 * we can let i_rwsem go now that its achieved its purpose
 	 * of protecting us from looking up uninitialized blocks.
 	 */
 	if (iov_iter_rw(iter) == READ && (dio->flags & DIO_LOCKING))

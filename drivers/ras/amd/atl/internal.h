@@ -17,8 +17,8 @@
 #include <linux/bitops.h>
 #include <linux/ras.h>
 
-#include <asm/amd_nb.h>
-#include <asm/amd_node.h>
+#include <asm/amd/nb.h>
+#include <asm/amd/node.h>
 
 #include "reg_fields.h"
 
@@ -138,7 +138,8 @@ struct df_flags {
 	__u8	legacy_ficaa		: 1,
 		socket_id_shift_quirk	: 1,
 		heterogeneous		: 1,
-		__reserved_0		: 5;
+		prm_only		: 1,
+		__reserved_0		: 4;
 };
 
 struct df_config {
@@ -283,6 +284,9 @@ unsigned long convert_umc_mca_addr_to_sys_addr(struct atl_err *err);
 u64 add_base_and_hole(struct addr_ctx *ctx, u64 addr);
 u64 remove_base_and_hole(struct addr_ctx *ctx, u64 addr);
 
+/* GUIDs for PRM handlers */
+extern const guid_t norm_to_sys_guid;
+
 #ifdef CONFIG_AMD_ATL_PRM
 unsigned long prm_umc_norm_to_sys_addr(u8 socket_id, u64 umc_bank_inst_id, unsigned long addr);
 #else
@@ -361,5 +365,8 @@ static inline void atl_debug_on_bad_intlv_mode(struct addr_ctx *ctx)
 {
 	atl_debug(ctx, "Unrecognized interleave mode: %u", ctx->map.intlv_mode);
 }
+
+#define MI300_UMC_MCA_COL	GENMASK(5, 1)
+#define MI300_UMC_MCA_ROW13	BIT(23)
 
 #endif /* __AMD_ATL_INTERNAL_H__ */

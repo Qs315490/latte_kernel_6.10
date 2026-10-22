@@ -104,6 +104,9 @@ struct imx_media_buffer {
 struct imx_media_video_dev {
 	struct video_device *vfd;
 
+	/* the pipeline object */
+	struct media_pipeline pipe;
+
 	/* the user format */
 	struct v4l2_pix_format fmt;
 	/* the compose rectangle */
@@ -144,9 +147,6 @@ struct imx_media_pad_vdev {
 struct imx_media_dev {
 	struct media_device md;
 	struct v4l2_device  v4l2_dev;
-
-	/* the pipeline object */
-	struct media_pipeline pipe;
 
 	struct mutex mutex; /* protect elements below */
 
@@ -223,6 +223,7 @@ int imx_media_alloc_dma_buf(struct device *dev,
 			    int size);
 
 int imx_media_pipeline_set_stream(struct imx_media_dev *imxmd,
+				  struct imx_media_video_dev *vdev,
 				  struct media_entity *entity,
 				  bool on);
 
@@ -231,7 +232,7 @@ int imx_media_probe_complete(struct v4l2_async_notifier *notifier);
 struct imx_media_dev *imx_media_dev_init(struct device *dev,
 					 const struct media_device_ops *ops);
 int imx_media_dev_notifier_register(struct imx_media_dev *imxmd,
-			    const struct v4l2_async_notifier_operations *ops);
+				    const struct v4l2_async_notifier_operations *ops);
 
 /* imx-media-fim.c */
 struct imx_media_fim;

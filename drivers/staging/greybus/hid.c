@@ -201,7 +201,7 @@ static void gb_hid_init_report(struct gb_hid *ghid, struct hid_report *report)
 	 * we just need to setup the input fields, so using
 	 * hid_report_raw_event is safe.
 	 */
-	hid_report_raw_event(ghid->hid, report->type, ghid->inbuf, size, 1);
+	hid_report_raw_event(ghid->hid, report->type, ghid->inbuf, ghid->bufsize, size, 1);
 }
 
 static void gb_hid_init_reports(struct gb_hid *ghid)
@@ -434,7 +434,7 @@ static int gb_hid_probe(struct gb_bundle *bundle,
 	if (cport_desc->protocol_id != GREYBUS_PROTOCOL_HID)
 		return -ENODEV;
 
-	ghid = kzalloc(sizeof(*ghid), GFP_KERNEL);
+	ghid = kzalloc_obj(*ghid);
 	if (!ghid)
 		return -ENOMEM;
 

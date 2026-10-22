@@ -153,6 +153,10 @@ enum rtase_registers {
 #define RTASE_FORCE_TXFLOW_EN BIT(10)
 #define RTASE_RX_CHKSUM       BIT(5)
 
+	RTASE_GPHY_STD_00 = 0x6024,
+#define RTASE_RXFLOW_EN BIT(7)
+#define RTASE_TXFLOW_EN BIT(6)
+
 	RTASE_Q0_RX_DESC_ADDR0 = 0x00E4,
 	RTASE_Q0_RX_DESC_ADDR4 = 0x00E8,
 	RTASE_Q1_RX_DESC_ADDR0 = 0x4000,
@@ -170,6 +174,7 @@ enum rtase_registers {
 #define RTASE_TC_MODE_MASK GENMASK(11, 10)
 
 	RTASE_TOKSEL      = 0x2046,
+	RTASE_TXQCRDT_0   = 0x2500,
 	RTASE_RFIFONFULL  = 0x4406,
 	RTASE_INT_MITI_TX = 0x0A00,
 	RTASE_INT_MITI_RX = 0x0A80,
@@ -185,6 +190,12 @@ enum rtase_desc_status_bit {
 enum rtase_sw_flag_content {
 	RTASE_SWF_MSI_ENABLED  = BIT(1),
 	RTASE_SWF_MSIX_ENABLED = BIT(2),
+};
+
+enum rtase_parse_result {
+	RTASE_PARSE_OK,
+	RTASE_PARSE_SKIP,
+	RTASE_PARSE_DROP,
 };
 
 #define RSVD_MASK 0x3FFFC000
@@ -240,7 +251,7 @@ union rtase_rx_desc {
 #define RTASE_RX_RES        BIT(20)
 #define RTASE_RX_RUNT       BIT(19)
 #define RTASE_RX_RWT        BIT(18)
-#define RTASE_RX_CRC        BIT(16)
+#define RTASE_RX_CRC        BIT(17)
 #define RTASE_RX_V6F        BIT(31)
 #define RTASE_RX_V4F        BIT(30)
 #define RTASE_RX_UDPT       BIT(29)
@@ -258,6 +269,12 @@ union rtase_rx_desc {
 #define RTASE_TX_START_THRS     (2 * RTASE_TX_STOP_THRS)
 #define RTASE_VLAN_TAG_MASK     GENMASK(15, 0)
 #define RTASE_RX_PKT_SIZE_MASK  GENMASK(13, 0)
+
+/* txqos hardware definitions */
+#define RTASE_1T_CLOCK            64
+#define RTASE_1T_POWER            10000000
+#define RTASE_IDLESLOPE_INT_SHIFT 25
+#define RTASE_IDLESLOPE_INT_MASK  GENMASK(31, 25)
 
 #define RTASE_IVEC_NAME_SIZE (IFNAMSIZ + 10)
 
@@ -281,6 +298,7 @@ struct rtase_ring {
 	u32 cur_idx;
 	u32 dirty_idx;
 	u16 index;
+	u8 type;
 
 	struct sk_buff *skbuff[RTASE_NUM_DESC];
 	void *data_buf[RTASE_NUM_DESC];
@@ -292,6 +310,13 @@ struct rtase_ring {
 	struct list_head ring_entry;
 	int (*ring_handler)(struct rtase_ring *ring, int budget);
 	u64 alloc_fail;
+};
+
+struct rtase_txqos {
+	int hicredit;
+	int locredit;
+	int idleslope;
+	int sendslope;
 };
 
 struct rtase_stats {
@@ -313,6 +338,7 @@ struct rtase_private {
 
 	struct page_pool *page_pool;
 	struct rtase_ring tx_ring[RTASE_NUM_TX_QUEUE];
+	struct rtase_txqos tx_qos[RTASE_NUM_TX_QUEUE];
 	struct rtase_ring rx_ring[RTASE_NUM_RX_QUEUE];
 	struct rtase_counters *tally_vaddr;
 	dma_addr_t tally_paddr;
@@ -342,5 +368,7 @@ struct rtase_private {
 #define RTASE_TCPHO_MASK GENMASK(24, 18)
 
 #define RTASE_MSS_MASK GENMASK(28, 18)
+
+#define RTASE_MIN_PAD_LEN 47
 
 #endif /* RTASE_H */

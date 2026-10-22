@@ -6,15 +6,15 @@
  *    Author(s): Gerald Schaefer <gerald.schaefer@de.ibm.com>
  */
 
-#define KMSG_COMPONENT "hugetlb"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "hugetlb: " fmt
 
-#include <asm/pgalloc.h>
+#include <linux/cpufeature.h>
 #include <linux/mm.h>
 #include <linux/hugetlb.h>
 #include <linux/mman.h>
 #include <linux/sched/mm.h>
 #include <linux/security.h>
+#include <asm/pgalloc.h>
 
 /*
  * If the bit selected by single-bit bitmask "a" is set within "x", move
@@ -135,29 +135,6 @@ static inline pte_t __rste_to_pte(unsigned long rste)
 	return __pte(pteval);
 }
 
-static void clear_huge_pte_skeys(struct mm_struct *mm, unsigned long rste)
-{
-	struct folio *folio;
-	unsigned long size, paddr;
-
-	if (!mm_uses_skeys(mm) ||
-	    rste & _SEGMENT_ENTRY_INVALID)
-		return;
-
-	if ((rste & _REGION_ENTRY_TYPE_MASK) == _REGION_ENTRY_TYPE_R3) {
-		folio = page_folio(pud_page(__pud(rste)));
-		size = PUD_SIZE;
-		paddr = rste & PUD_MASK;
-	} else {
-		folio = page_folio(pmd_page(__pmd(rste)));
-		size = PMD_SIZE;
-		paddr = rste & PMD_MASK;
-	}
-
-	if (!test_and_set_bit(PG_arch_1, &folio->flags))
-		__storage_key_init_range(paddr, paddr + size);
-}
-
 void __set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 		     pte_t *ptep, pte_t pte)
 {
@@ -166,14 +143,13 @@ void __set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 	rste = __pte_to_rste(pte);
 
 	/* Set correct table type for 2G hugepages */
-	if ((pte_val(*ptep) & _REGION_ENTRY_TYPE_MASK) == _REGION_ENTRY_TYPE_R3) {
+	if ((pte_val(ptep_get(ptep)) & _REGION_ENTRY_TYPE_MASK) == _REGION_ENTRY_TYPE_R3) {
 		if (likely(pte_present(pte)))
 			rste |= _REGION3_ENTRY_LARGE;
 		rste |= _REGION_ENTRY_TYPE_R3;
 	} else if (likely(pte_present(pte)))
 		rste |= _SEGMENT_ENTRY_LARGE;
 
-	clear_huge_pte_skeys(mm, rste);
 	set_pte(ptep, __pte(rste));
 }
 
@@ -185,7 +161,7 @@ void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 
 pte_t huge_ptep_get(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 {
-	return __rste_to_pte(pte_val(*ptep));
+	return __rste_to_pte(pte_val(ptep_get(ptep)));
 }
 
 pte_t __huge_ptep_get_and_clear(struct mm_struct *mm,
@@ -195,7 +171,7 @@ pte_t __huge_ptep_get_and_clear(struct mm_struct *mm,
 	pmd_t *pmdp = (pmd_t *) ptep;
 	pud_t *pudp = (pud_t *) ptep;
 
-	if ((pte_val(*ptep) & _REGION_ENTRY_TYPE_MASK) == _REGION_ENTRY_TYPE_R3)
+	if ((pte_val(ptep_get(ptep)) & _REGION_ENTRY_TYPE_MASK) == _REGION_ENTRY_TYPE_R3)
 		pudp_xchg_direct(mm, addr, pudp, __pud(_REGION3_ENTRY_EMPTY));
 	else
 		pmdp_xchg_direct(mm, addr, pmdp, __pmd(_SEGMENT_ENTRY_EMPTY));
@@ -233,13 +209,13 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 	pmd_t *pmdp = NULL;
 
 	pgdp = pgd_offset(mm, addr);
-	if (pgd_present(*pgdp)) {
+	if (pgd_present(pgdp_get(pgdp))) {
 		p4dp = p4d_offset(pgdp, addr);
-		if (p4d_present(*p4dp)) {
+		if (p4d_present(p4dp_get(p4dp))) {
 			pudp = pud_offset(p4dp, addr);
 			if (sz == PUD_SIZE)
 				return (pte_t *)pudp;
-			if (pud_present(*pudp))
+			if (pud_present(pudp_get(pudp)))
 				pmdp = pmd_offset(pudp, addr);
 		}
 	}
@@ -248,10 +224,18 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 
 bool __init arch_hugetlb_valid_size(unsigned long size)
 {
-	if (MACHINE_HAS_EDAT1 && size == PMD_SIZE)
+	if (cpu_has_edat1() && size == PMD_SIZE)
 		return true;
-	else if (MACHINE_HAS_EDAT2 && size == PUD_SIZE)
+	else if (cpu_has_edat2() && size == PUD_SIZE)
 		return true;
 	else
 		return false;
+}
+
+unsigned int __init arch_hugetlb_cma_order(void)
+{
+	if (cpu_has_edat2())
+		return PUD_SHIFT - PAGE_SHIFT;
+
+	return 0;
 }

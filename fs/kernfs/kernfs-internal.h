@@ -26,9 +26,8 @@ struct kernfs_iattrs {
 	struct timespec64	ia_mtime;
 	struct timespec64	ia_ctime;
 
-	struct simple_xattrs	xattrs;
-	atomic_t		nr_user_xattrs;
-	atomic_t		user_xattr_size;
+	struct list_head	xattrs;
+	struct simple_xattr_limits xattr_limits;
 };
 
 struct kernfs_root {
@@ -38,6 +37,7 @@ struct kernfs_root {
 
 	/* private fields, do not use outside kernfs proper */
 	struct idr		ino_idr;
+	spinlock_t		kernfs_idr_lock;	/* root->ino_idr */
 	u32			last_id_lowbits;
 	u32			id_highbits;
 	struct kernfs_syscall_ops *syscall_ops;
@@ -50,7 +50,12 @@ struct kernfs_root {
 	struct rw_semaphore	kernfs_iattr_rwsem;
 	struct rw_semaphore	kernfs_supers_rwsem;
 
+	/* kn->parent and kn->name */
+	rwlock_t		kernfs_rename_lock;
+
 	struct rcu_head		rcu;
+
+	struct simple_xattr_cache xa_cache;
 };
 
 /* +1 to avoid triggering overflow warning when negating it */
@@ -64,11 +69,14 @@ struct kernfs_root {
  *
  * Return: the kernfs_root @kn belongs to.
  */
-static inline struct kernfs_root *kernfs_root(struct kernfs_node *kn)
+static inline struct kernfs_root *kernfs_root(const struct kernfs_node *kn)
 {
+	const struct kernfs_node *knp;
 	/* if parent exists, it's always a dir; otherwise, @sd is a dir */
-	if (kn->parent)
-		kn = kn->parent;
+	guard(rcu)();
+	knp = rcu_dereference(kn->__parent);
+	if (knp)
+		kn = knp;
 	return kn->dir.root;
 }
 
@@ -90,12 +98,44 @@ struct kernfs_super_info {
 	 * instance.  If multiple tags become necessary, make the following
 	 * an array and compare kernfs_node tag against every entry.
 	 */
-	const void		*ns;
+	const struct ns_common	*ns;
 
 	/* anchored at kernfs_root->supers, protected by kernfs_rwsem */
 	struct list_head	node;
 };
 #define kernfs_info(SB) ((struct kernfs_super_info *)(SB->s_fs_info))
+
+static inline bool kernfs_root_is_locked(const struct kernfs_node *kn)
+{
+	return lockdep_is_held(&kernfs_root(kn)->kernfs_rwsem);
+}
+
+static inline bool kernfs_rename_is_locked(const struct kernfs_node *kn)
+{
+	return lockdep_is_held(&kernfs_root(kn)->kernfs_rename_lock);
+}
+
+static inline const char *kernfs_rcu_name(const struct kernfs_node *kn)
+{
+	return rcu_dereference_check(kn->name, kernfs_root_is_locked(kn));
+}
+
+static inline struct kernfs_node *kernfs_parent(const struct kernfs_node *kn)
+{
+	/*
+	 * The kernfs_node::__parent remains valid within a RCU section. The kn
+	 * can be reparented (and renamed) which changes the entry. This can be
+	 * avoided by locking kernfs_root::kernfs_rwsem or
+	 * kernfs_root::kernfs_rename_lock.
+	 * Both locks can be used to obtain a reference on __parent. Once the
+	 * reference count reaches 0 then the node is about to be freed
+	 * and can not be renamed (or become a different parent) anymore.
+	 */
+	return rcu_dereference_check(kn->__parent,
+				     kernfs_root_is_locked(kn) ||
+				     kernfs_rename_is_locked(kn) ||
+				     !atomic_read(&kn->count));
+}
 
 static inline struct kernfs_node *kernfs_dentry_node(struct dentry *dentry)
 {
@@ -173,4 +213,24 @@ extern const struct inode_operations kernfs_symlink_iops;
  * kernfs locks
  */
 extern struct kernfs_global_locks *kernfs_locks;
+
+/* Hashed mutex helpers - protect per-node data structures */
+static inline struct mutex *kernfs_node_lock_ptr(struct kernfs_node *kn)
+{
+	int idx = hash_ptr(kn, NR_KERNFS_LOCK_BITS);
+
+	return &kernfs_locks->node_mutex[idx];
+}
+
+static inline struct mutex *kernfs_node_lock(struct kernfs_node *kn)
+{
+	struct mutex *lock = kernfs_node_lock_ptr(kn);
+
+	mutex_lock(lock);
+	return lock;
+}
+
+DEFINE_CLASS(kernfs_node_lock, struct mutex *,
+	     mutex_unlock(_T), kernfs_node_lock(kn), struct kernfs_node *kn)
+
 #endif	/* __KERNFS_INTERNAL_H */

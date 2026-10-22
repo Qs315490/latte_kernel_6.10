@@ -11,7 +11,6 @@
 #include <linux/slab.h>
 #include <linux/xattr.h>
 #include "cifsfs.h"
-#include "cifspdu.h"
 #include "cifsglob.h"
 #include "cifsproto.h"
 #include "cifs_debug.h"
@@ -31,6 +30,8 @@
  * secure, replaced by SMB2 (then even more highly secure SMB3) many years ago
  */
 #define SMB3_XATTR_CIFS_ACL "system.smb3_acl" /* DACL only */
+#define SMB3_XATTR_CIFS_NTSD_SACL "system.smb3_ntsd_sacl" /* SACL only */
+#define SMB3_XATTR_CIFS_NTSD_OWNER "system.smb3_ntsd_owner" /* owner only */
 #define SMB3_XATTR_CIFS_NTSD "system.smb3_ntsd" /* owner plus DACL */
 #define SMB3_XATTR_CIFS_NTSD_FULL "system.smb3_ntsd_full" /* owner/DACL/SACL */
 #define SMB3_XATTR_ATTRIB "smb3.dosattrib"  /* full name: user.smb3.dosattrib */
@@ -38,6 +39,7 @@
 /* BB need to add server (Samba e.g) support for security and trusted prefix */
 
 enum { XATTR_USER, XATTR_CIFS_ACL, XATTR_ACL_ACCESS, XATTR_ACL_DEFAULT,
+	XATTR_CIFS_NTSD_SACL, XATTR_CIFS_NTSD_OWNER,
 	XATTR_CIFS_NTSD, XATTR_CIFS_NTSD_FULL };
 
 static int cifs_attrib_set(unsigned int xid, struct cifs_tcon *pTcon,
@@ -147,7 +149,7 @@ static int cifs_xattr_set(const struct xattr_handler *handler,
 			break;
 		}
 
-		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_XATTR)
+		if (cifs_sb_flags(cifs_sb) & CIFS_MOUNT_NO_XATTR)
 			goto out;
 
 		if (pTcon->ses->server->ops->set_EA) {
@@ -160,6 +162,8 @@ static int cifs_xattr_set(const struct xattr_handler *handler,
 		break;
 
 	case XATTR_CIFS_ACL:
+	case XATTR_CIFS_NTSD_SACL:
+	case XATTR_CIFS_NTSD_OWNER:
 	case XATTR_CIFS_NTSD:
 	case XATTR_CIFS_NTSD_FULL: {
 		struct smb_ntsd *pacl;
@@ -173,7 +177,6 @@ static int cifs_xattr_set(const struct xattr_handler *handler,
 			memcpy(pacl, value, size);
 			if (pTcon->ses->server->ops->set_acl) {
 				int aclflags = 0;
-				rc = 0;
 
 				switch (handler->flags) {
 				case XATTR_CIFS_NTSD_FULL:
@@ -186,6 +189,13 @@ static int cifs_xattr_set(const struct xattr_handler *handler,
 					aclflags = (CIFS_ACL_OWNER |
 						    CIFS_ACL_GROUP |
 						    CIFS_ACL_DACL);
+					break;
+				case XATTR_CIFS_NTSD_OWNER:
+					aclflags = (CIFS_ACL_OWNER |
+						    CIFS_ACL_GROUP);
+					break;
+				case XATTR_CIFS_NTSD_SACL:
+					aclflags = CIFS_ACL_SACL;
 					break;
 				case XATTR_CIFS_ACL:
 				default:
@@ -262,7 +272,7 @@ static int cifs_xattr_get(const struct xattr_handler *handler,
 			  struct dentry *dentry, struct inode *inode,
 			  const char *name, void *value, size_t size)
 {
-	ssize_t rc = -EOPNOTSUPP;
+	int rc = -EOPNOTSUPP;
 	unsigned int xid;
 	struct super_block *sb = dentry->d_sb;
 	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
@@ -299,7 +309,7 @@ static int cifs_xattr_get(const struct xattr_handler *handler,
 			break;
 		}
 
-		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_XATTR)
+		if (cifs_sb_flags(cifs_sb) & CIFS_MOUNT_NO_XATTR)
 			goto out;
 
 		if (pTcon->ses->server->ops->query_all_EAs)
@@ -308,6 +318,8 @@ static int cifs_xattr_get(const struct xattr_handler *handler,
 		break;
 
 	case XATTR_CIFS_ACL:
+	case XATTR_CIFS_NTSD_SACL:
+	case XATTR_CIFS_NTSD_OWNER:
 	case XATTR_CIFS_NTSD:
 	case XATTR_CIFS_NTSD_FULL: {
 		/*
@@ -320,16 +332,29 @@ static int cifs_xattr_get(const struct xattr_handler *handler,
 		if (pTcon->ses->server->ops->get_acl == NULL)
 			goto out; /* rc already EOPNOTSUPP */
 
-		if (handler->flags == XATTR_CIFS_NTSD_FULL) {
+		switch (handler->flags) {
+		case XATTR_CIFS_NTSD_FULL:
+			extra_info = OWNER_SECINFO | GROUP_SECINFO | DACL_SECINFO | SACL_SECINFO;
+			break;
+		case XATTR_CIFS_NTSD:
+			extra_info = OWNER_SECINFO | GROUP_SECINFO | DACL_SECINFO;
+			break;
+		case XATTR_CIFS_NTSD_OWNER:
+			extra_info = OWNER_SECINFO | GROUP_SECINFO;
+			break;
+		case XATTR_CIFS_NTSD_SACL:
 			extra_info = SACL_SECINFO;
-		} else {
-			extra_info = 0;
+			break;
+		case XATTR_CIFS_ACL:
+		default:
+			extra_info = DACL_SECINFO;
+			break;
 		}
 		pacl = pTcon->ses->server->ops->get_acl(cifs_sb,
 				inode, full_path, &acllen, extra_info);
 		if (IS_ERR(pacl)) {
 			rc = PTR_ERR(pacl);
-			cifs_dbg(VFS, "%s: error %zd getting sec desc\n",
+			cifs_dbg(VFS, "%s: error %d getting sec desc\n",
 				 __func__, rc);
 		} else {
 			if (value) {
@@ -371,9 +396,9 @@ ssize_t cifs_listxattr(struct dentry *direntry, char *data, size_t buf_size)
 	void *page;
 
 	if (unlikely(cifs_forced_shutdown(cifs_sb)))
-		return -EIO;
+		return smb_EIO(smb_eio_trace_forced_shutdown);
 
-	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_XATTR)
+	if (cifs_sb_flags(cifs_sb) & CIFS_MOUNT_NO_XATTR)
 		return -EOPNOTSUPP;
 
 	tlink = cifs_sb_tlink(cifs_sb);
@@ -441,6 +466,20 @@ static const struct xattr_handler smb3_acl_xattr_handler = {
 	.set = cifs_xattr_set,
 };
 
+static const struct xattr_handler smb3_ntsd_sacl_xattr_handler = {
+	.name = SMB3_XATTR_CIFS_NTSD_SACL,
+	.flags = XATTR_CIFS_NTSD_SACL,
+	.get = cifs_xattr_get,
+	.set = cifs_xattr_set,
+};
+
+static const struct xattr_handler smb3_ntsd_owner_xattr_handler = {
+	.name = SMB3_XATTR_CIFS_NTSD_OWNER,
+	.flags = XATTR_CIFS_NTSD_OWNER,
+	.get = cifs_xattr_get,
+	.set = cifs_xattr_set,
+};
+
 static const struct xattr_handler cifs_cifs_ntsd_xattr_handler = {
 	.name = CIFS_XATTR_CIFS_NTSD,
 	.flags = XATTR_CIFS_NTSD,
@@ -486,6 +525,8 @@ const struct xattr_handler * const cifs_xattr_handlers[] = {
 	&cifs_os2_xattr_handler,
 	&cifs_cifs_acl_xattr_handler,
 	&smb3_acl_xattr_handler, /* alias for above since avoiding "cifs" */
+	&smb3_ntsd_sacl_xattr_handler,
+	&smb3_ntsd_owner_xattr_handler,
 	&cifs_cifs_ntsd_xattr_handler,
 	&smb3_ntsd_xattr_handler, /* alias for above since avoiding "cifs" */
 	&cifs_cifs_ntsd_full_xattr_handler,

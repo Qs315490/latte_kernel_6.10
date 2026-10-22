@@ -295,7 +295,7 @@ nouveau_drm_debugfs_init(struct drm_minor *minor)
 int
 nouveau_debugfs_init(struct nouveau_drm *drm)
 {
-	drm->debugfs = kzalloc(sizeof(*drm->debugfs), GFP_KERNEL);
+	drm->debugfs = kzalloc_obj(*drm->debugfs);
 	if (!drm->debugfs)
 		return -ENOMEM;
 
@@ -314,14 +314,10 @@ nouveau_debugfs_fini(struct nouveau_drm *drm)
 	drm->debugfs = NULL;
 }
 
-int
+void
 nouveau_module_debugfs_init(void)
 {
 	nouveau_debugfs_root = debugfs_create_dir("nouveau", NULL);
-	if (IS_ERR(nouveau_debugfs_root))
-		return PTR_ERR(nouveau_debugfs_root);
-
-	return 0;
 }
 
 void

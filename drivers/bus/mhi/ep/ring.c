@@ -49,7 +49,7 @@ static int __mhi_ep_cache_ring(struct mhi_ep_ring *ring, size_t end)
 		buf_info.dev_addr = &ring->ring_cache[start];
 
 		ret = mhi_cntrl->read_sync(mhi_cntrl, &buf_info);
-		if (ret < 0)
+		if (ret)
 			return ret;
 	} else {
 		buf_info.size = (ring->ring_size - start) * sizeof(struct mhi_ring_element);
@@ -57,7 +57,7 @@ static int __mhi_ep_cache_ring(struct mhi_ep_ring *ring, size_t end)
 		buf_info.dev_addr = &ring->ring_cache[start];
 
 		ret = mhi_cntrl->read_sync(mhi_cntrl, &buf_info);
-		if (ret < 0)
+		if (ret)
 			return ret;
 
 		if (end) {
@@ -66,7 +66,7 @@ static int __mhi_ep_cache_ring(struct mhi_ep_ring *ring, size_t end)
 			buf_info.size = end * sizeof(struct mhi_ring_element);
 
 			ret = mhi_cntrl->read_sync(mhi_cntrl, &buf_info);
-			if (ret < 0)
+			if (ret)
 				return ret;
 		}
 	}
@@ -131,19 +131,23 @@ int mhi_ep_ring_add_element(struct mhi_ep_ring *ring, struct mhi_ring_element *e
 	}
 
 	old_offset = ring->rd_offset;
-	mhi_ep_ring_inc_index(ring);
 
 	dev_dbg(dev, "Adding an element to ring at offset (%zu)\n", ring->rd_offset);
+	buf_info.host_addr = ring->rbase + (old_offset * sizeof(*el));
+	buf_info.dev_addr = el;
+	buf_info.size = sizeof(*el);
+
+	ret = mhi_cntrl->write_sync(mhi_cntrl, &buf_info);
+	if (ret)
+		return ret;
+
+	mhi_ep_ring_inc_index(ring);
 
 	/* Update rp in ring context */
 	rp = cpu_to_le64(ring->rd_offset * sizeof(*el) + ring->rbase);
 	memcpy_toio((void __iomem *) &ring->ring_ctx->generic.rp, &rp, sizeof(u64));
 
-	buf_info.host_addr = ring->rbase + (old_offset * sizeof(*el));
-	buf_info.dev_addr = el;
-	buf_info.size = sizeof(*el);
-
-	return mhi_cntrl->write_sync(mhi_cntrl, &buf_info);
+	return ret;
 }
 
 void mhi_ep_ring_init(struct mhi_ep_ring *ring, enum mhi_ep_ring_type type, u32 id)
@@ -201,7 +205,8 @@ int mhi_ep_ring_start(struct mhi_ep_cntrl *mhi_cntrl, struct mhi_ep_ring *ring,
 	ring->wr_offset = mhi_ep_ring_addr2offset(ring, le64_to_cpu(val));
 
 	/* Allocate ring cache memory for holding the copy of host ring */
-	ring->ring_cache = kcalloc(ring->ring_size, sizeof(struct mhi_ring_element), GFP_KERNEL);
+	ring->ring_cache = kzalloc_objs(struct mhi_ring_element,
+					ring->ring_size);
 	if (!ring->ring_cache)
 		return -ENOMEM;
 

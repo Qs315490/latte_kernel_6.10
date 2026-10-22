@@ -68,6 +68,8 @@
  *   nlmsg_for_each_msg()		loop over all messages
  *   nlmsg_validate()			validate netlink message incl. attrs
  *   nlmsg_for_each_attr()		loop over all attributes
+ *   nlmsg_for_each_attr_type()		loop over all attributes with the
+ *					given type
  *
  * Misc:
  *   nlmsg_report()			report back to application?
@@ -118,6 +120,7 @@
  *   nla_nest_start(skb, type)		start a nested attribute
  *   nla_nest_end(skb, nla)		finalize a nested attribute
  *   nla_nest_cancel(skb, nla)		cancel nested attribute construction
+ *   nla_put_empty_nest(skb, type)	create an empty nest
  *
  * Attribute Length Calculations:
  *   nla_attr_size(payload)		length of attribute w/o padding
@@ -320,7 +323,13 @@ enum nla_policy_validation {
  *    All other            Unused - but note that it's a union
  *
  * Meaning of `validate' field, use via NLA_POLICY_VALIDATE_FN:
+ *    NLA_U8, NLA_U16,
+ *    NLA_U32, NLA_U64,
+ *    NLA_S8, NLA_S16,
+ *    NLA_S32, NLA_S64,
+ *    NLA_MSECS,
  *    NLA_BINARY           Validation function called for the attribute.
+ *
  *    All other            Unused - but note that it's a union
  *
  * Example:
@@ -608,6 +617,22 @@ static inline void *nlmsg_data(const struct nlmsghdr *nlh)
 static inline int nlmsg_len(const struct nlmsghdr *nlh)
 {
 	return nlh->nlmsg_len - NLMSG_HDRLEN;
+}
+
+/**
+ * nlmsg_payload - message payload if the data fits in the len
+ * @nlh: netlink message header
+ * @len: struct length
+ *
+ * Returns: The netlink message payload/data if the length is sufficient,
+ * otherwise NULL.
+ */
+static inline void *nlmsg_payload(const struct nlmsghdr *nlh, size_t len)
+{
+	if (nlh->nlmsg_len < nlmsg_msg_size(len))
+		return NULL;
+
+	return nlmsg_data(nlh);
 }
 
 /**
@@ -942,6 +967,18 @@ static inline u32 nlmsg_seq(const struct nlmsghdr *nlh)
 #define nlmsg_for_each_attr(pos, nlh, hdrlen, rem) \
 	nla_for_each_attr(pos, nlmsg_attrdata(nlh, hdrlen), \
 			  nlmsg_attrlen(nlh, hdrlen), rem)
+
+/**
+ * nlmsg_for_each_attr_type - iterate over a stream of attributes
+ * @pos: loop counter, set to the current attribute
+ * @type: required attribute type for @pos
+ * @nlh: netlink message header
+ * @hdrlen: length of the family specific header
+ * @rem: initialized to len, holds bytes currently remaining in stream
+ */
+#define nlmsg_for_each_attr_type(pos, type, nlh, hdrlen, rem) \
+	nlmsg_for_each_attr(pos, nlh, hdrlen, rem) \
+		if (nla_type(pos) == type)
 
 /**
  * nlmsg_put - Add a new netlink message to an skb
@@ -2223,8 +2260,30 @@ static inline struct nlattr *nla_nest_start(struct sk_buff *skb, int attrtype)
  */
 static inline int nla_nest_end(struct sk_buff *skb, struct nlattr *start)
 {
-	start->nla_len = skb_tail_pointer(skb) - (unsigned char *)start;
+	unsigned long diff = skb_tail_pointer(skb) - (unsigned char *)start;
+
+	DEBUG_NET_WARN_ON_ONCE(diff > U16_MAX);
+	start->nla_len = diff;
 	return skb->len;
+}
+
+/**
+ * nla_nest_end_safe - Validate and finalize nesting of attributes
+ * @skb: socket buffer the attributes are stored in
+ * @start: container attribute
+ *
+ * Corrects the container attribute header to include all appended
+ * attributes.
+ *
+ * Returns: the total data length of the skb, or -EMSGSIZE if the
+ * nested attribute length exceeds U16_MAX.
+ */
+static inline int nla_nest_end_safe(struct sk_buff *skb, struct nlattr *start)
+{
+	if (skb_tail_pointer(skb) - (unsigned char *)start > U16_MAX)
+		return -EMSGSIZE;
+
+	return nla_nest_end(skb, start);
 }
 
 /**
@@ -2238,6 +2297,20 @@ static inline int nla_nest_end(struct sk_buff *skb, struct nlattr *start)
 static inline void nla_nest_cancel(struct sk_buff *skb, struct nlattr *start)
 {
 	nlmsg_trim(skb, start);
+}
+
+/**
+ * nla_put_empty_nest - Create an empty nest
+ * @skb: socket buffer the message is stored in
+ * @attrtype: attribute type of the container
+ *
+ * This function is a helper for creating empty nests.
+ *
+ * Returns: 0 when successful or -EMSGSIZE on failure.
+ */
+static inline int nla_put_empty_nest(struct sk_buff *skb, int attrtype)
+{
+	return nla_nest_start(skb, attrtype) ? 0 : -EMSGSIZE;
 }
 
 /**

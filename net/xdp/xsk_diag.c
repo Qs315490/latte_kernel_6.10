@@ -92,7 +92,7 @@ static int xsk_diag_put_stats(const struct xdp_sock *xs, struct sk_buff *nlskb)
 static int xsk_diag_fill(struct sock *sk, struct sk_buff *nlskb,
 			 struct xdp_diag_req *req,
 			 struct user_namespace *user_ns,
-			 u32 portid, u32 seq, u32 flags, int sk_ino)
+			 u32 portid, u32 seq, u32 flags, u64 sk_ino)
 {
 	struct xdp_sock *xs = xdp_sk(sk);
 	struct xdp_diag_msg *msg;
@@ -119,7 +119,7 @@ static int xsk_diag_fill(struct sock *sk, struct sk_buff *nlskb,
 
 	if ((req->xdiag_show & XDP_SHOW_INFO) &&
 	    nla_put_u32(nlskb, XDP_DIAG_UID,
-			from_kuid_munged(user_ns, sock_i_uid(sk))))
+			from_kuid_munged(user_ns, sk_uid(sk))))
 		goto out_nlmsg_trim;
 
 	if ((req->xdiag_show & XDP_SHOW_RING_CFG) &&

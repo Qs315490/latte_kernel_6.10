@@ -53,7 +53,7 @@
 #define PM8XXX_GPIO_PHYSICAL_OFFSET	1
 
 /* custom pinconf parameters */
-#define PM8XXX_QCOM_DRIVE_STRENGH      (PIN_CONFIG_END + 1)
+#define PM8XXX_QCOM_DRIVE_STRENGTH     (PIN_CONFIG_END + 1)
 #define PM8XXX_QCOM_PULL_UP_STRENGTH   (PIN_CONFIG_END + 2)
 
 /**
@@ -97,13 +97,13 @@ struct pm8xxx_gpio {
 };
 
 static const struct pinconf_generic_params pm8xxx_gpio_bindings[] = {
-	{"qcom,drive-strength",		PM8XXX_QCOM_DRIVE_STRENGH,	0},
+	{"qcom,drive-strength",		PM8XXX_QCOM_DRIVE_STRENGTH,	0},
 	{"qcom,pull-up-strength",	PM8XXX_QCOM_PULL_UP_STRENGTH,	0},
 };
 
 #ifdef CONFIG_DEBUG_FS
 static const struct pin_config_item pm8xxx_conf_items[ARRAY_SIZE(pm8xxx_gpio_bindings)] = {
-	PCONFDUMP(PM8XXX_QCOM_DRIVE_STRENGH, "drive-strength", NULL, true),
+	PCONFDUMP(PM8XXX_QCOM_DRIVE_STRENGTH, "drive-strength", NULL, true),
 	PCONFDUMP(PM8XXX_QCOM_PULL_UP_STRENGTH,  "pull up strength", NULL, true),
 };
 #endif
@@ -282,7 +282,7 @@ static int pm8xxx_pin_config_get(struct pinctrl_dev *pctldev,
 			return -EINVAL;
 		arg = 1;
 		break;
-	case PIN_CONFIG_OUTPUT:
+	case PIN_CONFIG_LEVEL:
 		if (pin->mode & PM8XXX_GPIO_MODE_OUTPUT)
 			arg = pin->output_value;
 		else
@@ -291,7 +291,7 @@ static int pm8xxx_pin_config_get(struct pinctrl_dev *pctldev,
 	case PIN_CONFIG_POWER_SOURCE:
 		arg = pin->power_source;
 		break;
-	case PM8XXX_QCOM_DRIVE_STRENGH:
+	case PM8XXX_QCOM_DRIVE_STRENGTH:
 		arg = pin->output_strength;
 		break;
 	case PIN_CONFIG_DRIVE_PUSH_PULL:
@@ -364,7 +364,7 @@ static int pm8xxx_pin_config_set(struct pinctrl_dev *pctldev,
 			pin->mode = PM8XXX_GPIO_MODE_INPUT;
 			banks |= BIT(0) | BIT(1);
 			break;
-		case PIN_CONFIG_OUTPUT:
+		case PIN_CONFIG_LEVEL:
 			pin->mode = PM8XXX_GPIO_MODE_OUTPUT;
 			pin->output_value = !!arg;
 			banks |= BIT(0) | BIT(1);
@@ -373,7 +373,7 @@ static int pm8xxx_pin_config_set(struct pinctrl_dev *pctldev,
 			pin->power_source = arg;
 			banks |= BIT(0);
 			break;
-		case PM8XXX_QCOM_DRIVE_STRENGH:
+		case PM8XXX_QCOM_DRIVE_STRENGTH:
 			if (arg > PMIC_GPIO_STRENGTH_LOW) {
 				dev_err(pctrl->dev, "invalid drive strength\n");
 				return -EINVAL;
@@ -507,7 +507,8 @@ static int pm8xxx_gpio_get(struct gpio_chip *chip, unsigned offset)
 	return ret;
 }
 
-static void pm8xxx_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+static int pm8xxx_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			   int value)
 {
 	struct pm8xxx_gpio *pctrl = gpiochip_get_data(chip);
 	struct pm8xxx_pin_data *pin = pctrl->desc.pins[offset].drv_data;
@@ -519,7 +520,7 @@ static void pm8xxx_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 	val |= pin->open_drain << 1;
 	val |= pin->output_value;
 
-	pm8xxx_write_bank(pctrl, pin, 1, val);
+	return pm8xxx_write_bank(pctrl, pin, 1, val);
 }
 
 static int pm8xxx_gpio_of_xlate(struct gpio_chip *chip,

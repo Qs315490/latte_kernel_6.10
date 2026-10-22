@@ -64,7 +64,6 @@ enum mac_version {
 	/* support for RTL_GIGA_MAC_VER_50 has been removed */
 	RTL_GIGA_MAC_VER_51,
 	RTL_GIGA_MAC_VER_52,
-	RTL_GIGA_MAC_VER_53,
 	/* support for RTL_GIGA_MAC_VER_60 has been removed */
 	RTL_GIGA_MAC_VER_61,
 	RTL_GIGA_MAC_VER_63,
@@ -72,8 +71,10 @@ enum mac_version {
 	RTL_GIGA_MAC_VER_65,
 	RTL_GIGA_MAC_VER_66,
 	RTL_GIGA_MAC_VER_70,
-	RTL_GIGA_MAC_VER_71,
-	RTL_GIGA_MAC_NONE
+	RTL_GIGA_MAC_VER_80,
+	RTL_GIGA_MAC_NONE,
+	RTL_GIGA_MAC_VER_LAST = RTL_GIGA_MAC_NONE - 1,
+	RTL_GIGA_MAC_VER_EXTENDED
 };
 
 struct rtl8169_private;

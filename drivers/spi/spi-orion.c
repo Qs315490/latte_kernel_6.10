@@ -648,14 +648,12 @@ static int orion_spi_probe(struct platform_device *pdev)
 	struct orion_spi *spi;
 	struct resource *r;
 	unsigned long tclk_hz;
-	int status = 0;
 	struct device_node *np;
+	int status;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*spi));
-	if (host == NULL) {
-		dev_dbg(&pdev->dev, "host allocation failed\n");
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*spi));
+	if (host == NULL)
 		return -ENOMEM;
-	}
 
 	if (pdev->id != -1)
 		host->bus_num = pdev->id;
@@ -689,17 +687,14 @@ static int orion_spi_probe(struct platform_device *pdev)
 	spi->devdata = devdata;
 
 	spi->clk = devm_clk_get_enabled(&pdev->dev, NULL);
-	if (IS_ERR(spi->clk)) {
-		status = PTR_ERR(spi->clk);
-		goto out;
-	}
+	if (IS_ERR(spi->clk))
+		return PTR_ERR(spi->clk);
 
 	/* The following clock is only used by some SoCs */
 	spi->axi_clk = devm_clk_get(&pdev->dev, "axi");
-	if (PTR_ERR(spi->axi_clk) == -EPROBE_DEFER) {
-		status = -EPROBE_DEFER;
-		goto out;
-	}
+	if (PTR_ERR(spi->axi_clk) == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
+
 	if (!IS_ERR(spi->axi_clk))
 		clk_prepare_enable(spi->axi_clk);
 
@@ -774,25 +769,29 @@ static int orion_spi_probe(struct platform_device *pdev)
 	pm_runtime_set_active(&pdev->dev);
 	pm_runtime_use_autosuspend(&pdev->dev);
 	pm_runtime_set_autosuspend_delay(&pdev->dev, SPI_AUTOSUSPEND_TIMEOUT);
+	pm_runtime_get_noresume(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
 	status = orion_spi_reset(spi);
 	if (status < 0)
 		goto out_rel_pm;
 
-	host->dev.of_node = pdev->dev.of_node;
 	status = spi_register_controller(host);
 	if (status < 0)
 		goto out_rel_pm;
 
-	return status;
+	pm_runtime_put_autosuspend(&pdev->dev);
+
+	return 0;
 
 out_rel_pm:
 	pm_runtime_disable(&pdev->dev);
+	pm_runtime_put_noidle(&pdev->dev);
+	pm_runtime_set_suspended(&pdev->dev);
+	pm_runtime_dont_use_autosuspend(&pdev->dev);
 out_rel_axi_clk:
 	clk_disable_unprepare(spi->axi_clk);
-out:
-	spi_controller_put(host);
+
 	return status;
 }
 
@@ -802,11 +801,15 @@ static void orion_spi_remove(struct platform_device *pdev)
 	struct spi_controller *host = platform_get_drvdata(pdev);
 	struct orion_spi *spi = spi_controller_get_devdata(host);
 
+	spi_unregister_controller(host);
+
 	pm_runtime_get_sync(&pdev->dev);
 	clk_disable_unprepare(spi->axi_clk);
 
-	spi_unregister_controller(host);
 	pm_runtime_disable(&pdev->dev);
+	pm_runtime_put_noidle(&pdev->dev);
+	pm_runtime_set_suspended(&pdev->dev);
+	pm_runtime_dont_use_autosuspend(&pdev->dev);
 }
 
 MODULE_ALIAS("platform:" DRIVER_NAME);

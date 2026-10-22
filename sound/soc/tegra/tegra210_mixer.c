@@ -7,7 +7,7 @@
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -73,7 +73,7 @@ static const struct tegra210_mixer_gain_params gain_params = {
 	{ 0, 0, 0x400, 0x8000000 },
 };
 
-static int __maybe_unused tegra210_mixer_runtime_suspend(struct device *dev)
+static int tegra210_mixer_runtime_suspend(struct device *dev)
 {
 	struct tegra210_mixer *mixer = dev_get_drvdata(dev);
 
@@ -83,7 +83,7 @@ static int __maybe_unused tegra210_mixer_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused tegra210_mixer_runtime_resume(struct device *dev)
+static int tegra210_mixer_runtime_resume(struct device *dev)
 {
 	struct tegra210_mixer *mixer = dev_get_drvdata(dev);
 
@@ -149,12 +149,19 @@ static int tegra210_mixer_configure_gain(struct snd_soc_component *cmpnt,
 
 	/* Write duration parameters */
 	for (i = 0; i < NUM_DURATION_PARMS; i++) {
-		int val;
+		u32 val;
 
-		if (instant_gain)
+		if (instant_gain) {
 			val = 1;
-		else
-			val = gain_params.duration[i];
+		} else {
+			if (i == DURATION_N3_ID)
+				val = mixer->duration[id];
+			else if (i == DURATION_INV_N3_ID)
+				val = div_u64(BIT_ULL(31 + TEGRA210_MIXER_PRESCALAR),
+					      mixer->duration[id]);
+			else
+				val = gain_params.duration[i];
+		}
 
 		err = tegra210_mixer_write_ram(mixer,
 					       REG_DURATION_PARAM(reg, i),
@@ -173,12 +180,222 @@ rpm_put:
 	return err;
 }
 
+static int tegra210_mixer_fade_duration_info(struct snd_kcontrol *kcontrol,
+					     struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = 1;
+	uinfo->value.integer.min = TEGRA210_MIXER_FADE_DURATION_MIN;
+	uinfo->value.integer.max = TEGRA210_MIXER_FADE_DURATION_MAX;
+
+	return 0;
+}
+
+static int tegra210_mixer_get_fade_duration(struct snd_kcontrol *kcontrol,
+					    struct snd_ctl_elem_value *ucontrol)
+{
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct tegra210_mixer *mixer = snd_soc_component_get_drvdata(cmpnt);
+
+	ucontrol->value.integer.value[0] = mixer->duration[mc->reg];
+
+	return 0;
+}
+
+static int tegra210_mixer_put_fade_duration(struct snd_kcontrol *kcontrol,
+					    struct snd_ctl_elem_value *ucontrol)
+{
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct tegra210_mixer *mixer = snd_soc_component_get_drvdata(cmpnt);
+	unsigned int id = mc->reg;
+	long duration = ucontrol->value.integer.value[0];
+
+	if (duration < (long)TEGRA210_MIXER_FADE_DURATION_MIN ||
+	    duration > TEGRA210_MIXER_FADE_DURATION_MAX)
+		return -EINVAL;
+
+	if (mixer->duration[id] == duration)
+		return 0;
+
+	mixer->duration[id] = duration;
+	mixer->fade_pending[id] = true;
+
+	return 1;
+}
+
+static int tegra210_mixer_get_fade_gain(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct tegra210_mixer *mixer = snd_soc_component_get_drvdata(cmpnt);
+
+	ucontrol->value.integer.value[0] = mixer->fade_gain[mc->reg];
+
+	return 0;
+}
+
+static int tegra210_mixer_put_fade_gain(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct tegra210_mixer *mixer = snd_soc_component_get_drvdata(cmpnt);
+	unsigned int id = mc->reg;
+
+	if (ucontrol->value.integer.value[0] < 0 ||
+	    ucontrol->value.integer.value[0] > TEGRA210_MIXER_GAIN_MAX)
+		return -EINVAL;
+
+	if (mixer->fade_gain[id] == ucontrol->value.integer.value[0])
+		return 0;
+
+	mixer->fade_gain[id] = ucontrol->value.integer.value[0];
+	mixer->fade_pending[id] = true;
+
+	return 1;
+}
+
+static int tegra210_mixer_get_fade_switch(struct snd_kcontrol *kcontrol,
+					  struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = 0;
+
+	return 0;
+}
+
+static int tegra210_mixer_put_fade_switch(struct snd_kcontrol *kcontrol,
+					  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct tegra210_mixer *mixer = snd_soc_component_get_drvdata(cmpnt);
+	int id, err, changed = 0;
+
+	err = pm_runtime_resume_and_get(cmpnt->dev);
+	if (err < 0)
+		return err;
+
+	/* Switch off: disable sample count for all active fades */
+	if (!ucontrol->value.integer.value[0]) {
+		for (id = 0; id < TEGRA210_MIXER_RX_MAX; id++) {
+			if (!mixer->in_fade[id])
+				continue;
+
+			regmap_update_bits(mixer->regmap,
+					   MIXER_REG(TEGRA210_MIXER_RX1_CTRL,
+						     id),
+					   TEGRA210_MIXER_SAMPLE_COUNT_ENABLE,
+					   0);
+			mixer->in_fade[id] = false;
+			changed = 1;
+		}
+
+		pm_runtime_put(cmpnt->dev);
+		return changed;
+	}
+
+	/* Stop active fades on pending streams before reconfiguring */
+	for (id = 0; id < TEGRA210_MIXER_RX_MAX; id++) {
+		if (!mixer->fade_pending[id])
+			continue;
+
+		if (mixer->in_fade[id]) {
+			regmap_update_bits(mixer->regmap,
+					   MIXER_REG(TEGRA210_MIXER_RX1_CTRL,
+						     id),
+					   TEGRA210_MIXER_SAMPLE_COUNT_ENABLE,
+					   0);
+			mixer->in_fade[id] = false;
+		}
+
+		mixer->gain_value[id] = mixer->fade_gain[id];
+		err = tegra210_mixer_configure_gain(cmpnt, id, false);
+		if (err) {
+			dev_err(cmpnt->dev,
+				"Failed to configure fade for RX%d\n", id + 1);
+			pm_runtime_put(cmpnt->dev);
+			return err;
+		}
+
+		changed = 1;
+	}
+
+	if (!changed) {
+		pm_runtime_put(cmpnt->dev);
+		return 0;
+	}
+
+	/* Enable sample count for all pending streams */
+	for (id = 0; id < TEGRA210_MIXER_RX_MAX; id++) {
+		if (!mixer->fade_pending[id])
+			continue;
+
+		err = regmap_update_bits(mixer->regmap,
+					 MIXER_REG(TEGRA210_MIXER_RX1_CTRL, id),
+					 TEGRA210_MIXER_SAMPLE_COUNT_ENABLE,
+					 TEGRA210_MIXER_SAMPLE_COUNT_ENABLE);
+		if (err) {
+			dev_err(cmpnt->dev,
+				"Failed to enable sample count for RX%d\n",
+				id + 1);
+			pm_runtime_put(cmpnt->dev);
+			return err;
+		}
+
+		mixer->in_fade[id] = true;
+		mixer->fade_pending[id] = false;
+	}
+
+	pm_runtime_put(cmpnt->dev);
+
+	return 1;
+}
+
+static int tegra210_mixer_get_fade_status(struct snd_kcontrol *kcontrol,
+					  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct tegra210_mixer *mixer = snd_soc_component_get_drvdata(cmpnt);
+	u32 count;
+	int id, err;
+
+	err = pm_runtime_resume_and_get(cmpnt->dev);
+	if (err < 0)
+		return err;
+
+	for (id = 0; id < TEGRA210_MIXER_RX_MAX; id++) {
+		if (!mixer->in_fade[id]) {
+			ucontrol->value.integer.value[id] = TEGRA210_MIXER_FADE_IDLE;
+			continue;
+		}
+
+		regmap_read(mixer->regmap,
+			    MIXER_REG(TEGRA210_MIXER_RX1_SAMPLE_COUNT, id),
+			    &count);
+
+		if (count >= mixer->duration[id])
+			ucontrol->value.integer.value[id] = TEGRA210_MIXER_FADE_IDLE;
+		else
+			ucontrol->value.integer.value[id] = TEGRA210_MIXER_FADE_ACTIVE;
+	}
+
+	pm_runtime_put(cmpnt->dev);
+
+	return 0;
+}
+
 static int tegra210_mixer_get_gain(struct snd_kcontrol *kcontrol,
 				   struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct tegra210_mixer *mixer = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int reg = mc->reg;
 	unsigned int i;
@@ -197,7 +414,7 @@ static int tegra210_mixer_apply_gain(struct snd_kcontrol *kcontrol,
 {
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct tegra210_mixer *mixer = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int reg = mc->reg, id;
 	int err;
@@ -396,14 +613,44 @@ ADDER_CTRL_DECL(adder3, TEGRA210_MIXER_TX3_ADDER_CONFIG);
 ADDER_CTRL_DECL(adder4, TEGRA210_MIXER_TX4_ADDER_CONFIG);
 ADDER_CTRL_DECL(adder5, TEGRA210_MIXER_TX5_ADDER_CONFIG);
 
+static int tegra210_mixer_fade_status_info(struct snd_kcontrol *kcontrol,
+					   struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = TEGRA210_MIXER_RX_MAX;
+	uinfo->value.integer.min = TEGRA210_MIXER_FADE_IDLE;
+	uinfo->value.integer.max = TEGRA210_MIXER_FADE_ACTIVE;
+
+	return 0;
+}
+
+#define FADE_CTRL(id)							\
+	{								\
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,			\
+		.name = "RX" #id " Fade Duration",			\
+		.info = tegra210_mixer_fade_duration_info,		\
+		.get = tegra210_mixer_get_fade_duration,			\
+		.put = tegra210_mixer_put_fade_duration,			\
+		.private_value = SOC_SINGLE_VALUE((id) - 1, 0,		\
+				TEGRA210_MIXER_FADE_DURATION_MIN,	\
+				TEGRA210_MIXER_FADE_DURATION_MAX,	\
+				0, 0),					\
+	},								\
+	SOC_SINGLE_EXT("RX" #id " Fade Gain", (id) - 1, 0,		\
+		       TEGRA210_MIXER_GAIN_MAX, 0,			\
+		       tegra210_mixer_get_fade_gain,			\
+		       tegra210_mixer_put_fade_gain),
+
 #define GAIN_CTRL(id)	\
 	SOC_SINGLE_EXT("RX" #id " Gain Volume",			\
 		       MIXER_GAIN_CFG_RAM_ADDR((id) - 1), 0,	\
-		       0x20000, 0, tegra210_mixer_get_gain,	\
+		       TEGRA210_MIXER_GAIN_MAX, 0,		\
+		       tegra210_mixer_get_gain,			\
 		       tegra210_mixer_put_gain),		\
 	SOC_SINGLE_EXT("RX" #id " Instant Gain Volume",		\
 		       MIXER_GAIN_CFG_RAM_ADDR((id) - 1), 0,	\
-		       0x20000, 0, tegra210_mixer_get_gain,	\
+		       TEGRA210_MIXER_GAIN_MAX, 0,		\
+		       tegra210_mixer_get_gain,			\
 		       tegra210_mixer_put_instant_gain),
 
 /* Volume controls for all MIXER inputs */
@@ -418,6 +665,28 @@ static const struct snd_kcontrol_new tegra210_mixer_gain_ctls[] = {
 	GAIN_CTRL(8)
 	GAIN_CTRL(9)
 	GAIN_CTRL(10)
+
+	FADE_CTRL(1)
+	FADE_CTRL(2)
+	FADE_CTRL(3)
+	FADE_CTRL(4)
+	FADE_CTRL(5)
+	FADE_CTRL(6)
+	FADE_CTRL(7)
+	FADE_CTRL(8)
+	FADE_CTRL(9)
+	FADE_CTRL(10)
+	SOC_SINGLE_EXT("Fade Switch", SND_SOC_NOPM, 0, 1, 0,
+		       tegra210_mixer_get_fade_switch,
+		       tegra210_mixer_put_fade_switch),
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Fade Status",
+		.info = tegra210_mixer_fade_status_info,
+		.access = SNDRV_CTL_ELEM_ACCESS_READ |
+			  SNDRV_CTL_ELEM_ACCESS_VOLATILE,
+		.get = tegra210_mixer_get_fade_status,
+	},
 };
 
 static const struct snd_soc_dapm_widget tegra210_mixer_widgets[] = {
@@ -579,6 +848,7 @@ static bool tegra210_mixer_volatile_reg(struct device *dev,
 	case TEGRA210_MIXER_GAIN_CFG_RAM_DATA:
 	case TEGRA210_MIXER_PEAKM_RAM_CTRL:
 	case TEGRA210_MIXER_PEAKM_RAM_DATA:
+	case TEGRA210_MIXER_RX1_SAMPLE_COUNT:
 		return true;
 	default:
 		return false;
@@ -608,6 +878,7 @@ static const struct regmap_config tegra210_mixer_regmap_config = {
 	.precious_reg		= tegra210_mixer_precious_reg,
 	.reg_defaults		= tegra210_mixer_reg_defaults,
 	.num_reg_defaults	= ARRAY_SIZE(tegra210_mixer_reg_defaults),
+	.reg_default_cb		= regmap_default_zero_cb,
 	.cache_type		= REGCACHE_FLAT,
 };
 
@@ -631,8 +902,11 @@ static int tegra210_mixer_platform_probe(struct platform_device *pdev)
 	dev_set_drvdata(dev, mixer);
 
 	/* Use default gain value for all MIXER inputs */
-	for (i = 0; i < TEGRA210_MIXER_RX_MAX; i++)
+	for (i = 0; i < TEGRA210_MIXER_RX_MAX; i++) {
 		mixer->gain_value[i] = gain_params.gain_value;
+		mixer->fade_gain[i] = gain_params.gain_value;
+		mixer->duration[i] = gain_params.duration[DURATION_N3_ID];
+	}
 
 	regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(regs))
@@ -640,20 +914,18 @@ static int tegra210_mixer_platform_probe(struct platform_device *pdev)
 
 	mixer->regmap = devm_regmap_init_mmio(dev, regs,
 					      &tegra210_mixer_regmap_config);
-	if (IS_ERR(mixer->regmap)) {
-		dev_err(dev, "regmap init failed\n");
-		return PTR_ERR(mixer->regmap);
-	}
+	if (IS_ERR(mixer->regmap))
+		return dev_err_probe(dev, PTR_ERR(mixer->regmap),
+				     "regmap init failed\n");
 
 	regcache_cache_only(mixer->regmap, true);
 
 	err = devm_snd_soc_register_component(dev, &tegra210_mixer_cmpnt,
 					      tegra210_mixer_dais,
 					      ARRAY_SIZE(tegra210_mixer_dais));
-	if (err) {
-		dev_err(dev, "can't register MIXER component, err: %d\n", err);
-		return err;
-	}
+	if (err)
+		return dev_err_probe(dev, err,
+				     "can't register MIXER component\n");
 
 	pm_runtime_enable(dev);
 
@@ -666,17 +938,16 @@ static void tegra210_mixer_platform_remove(struct platform_device *pdev)
 }
 
 static const struct dev_pm_ops tegra210_mixer_pm_ops = {
-	SET_RUNTIME_PM_OPS(tegra210_mixer_runtime_suspend,
-			   tegra210_mixer_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	RUNTIME_PM_OPS(tegra210_mixer_runtime_suspend,
+		       tegra210_mixer_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver tegra210_mixer_driver = {
 	.driver = {
 		.name = "tegra210_mixer",
 		.of_match_table = tegra210_mixer_of_match,
-		.pm = &tegra210_mixer_pm_ops,
+		.pm = pm_ptr(&tegra210_mixer_pm_ops),
 	},
 	.probe = tegra210_mixer_platform_probe,
 	.remove = tegra210_mixer_platform_remove,

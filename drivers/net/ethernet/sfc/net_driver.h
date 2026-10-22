@@ -15,7 +15,7 @@
 #include <linux/ethtool.h>
 #include <linux/if_vlan.h>
 #include <linux/timer.h>
-#include <linux/mdio.h>
+#include <linux/mii.h>
 #include <linux/list.h>
 #include <linux/pci.h>
 #include <linux/device.h>
@@ -404,7 +404,6 @@ struct efx_rx_page_state {
  * @old_rx_packets: Value of @rx_packets as of last efx_init_rx_queue()
  * @old_rx_bytes: Value of @rx_bytes as of last efx_init_rx_queue()
  * @xdp_rxq_info: XDP specific RX queue information.
- * @xdp_rxq_info_valid: Is xdp_rxq_info valid data?.
  */
 struct efx_rx_queue {
 	struct efx_nic *efx;
@@ -443,7 +442,6 @@ struct efx_rx_queue {
 	unsigned long old_rx_packets;
 	unsigned long old_rx_bytes;
 	struct xdp_rxq_info xdp_rxq_info;
-	bool xdp_rxq_info_valid;
 };
 
 enum efx_sync_events_state {
@@ -956,8 +954,6 @@ struct efx_mae;
  * @stats_buffer: DMA buffer for statistics
  * @phy_type: PHY type
  * @phy_data: PHY private data (including PHY-specific stats)
- * @mdio: PHY MDIO interface
- * @mdio_bus: PHY MDIO bus ID (only used by Siena)
  * @phy_mode: PHY operating mode. Serialised by @mac_lock.
  * @link_advertising: Autonegotiation advertising flags
  * @fec_config: Forward Error Correction configuration flags.  For bit positions
@@ -1006,6 +1002,7 @@ struct efx_mae;
  * @dl_port: devlink port associated with the PF
  * @mem_bar: The BAR that is mapped into membase.
  * @reg_base: Offset from the start of the bar to the function control window.
+ * @reflash_mutex: Mutex for serialising firmware reflash operations.
  * @monitor_work: Hardware monitor workitem
  * @biu_lock: BIU (bus interface unit) lock
  * @last_irq_cpu: Last CPU to handle a possible test interrupt.  This
@@ -1131,8 +1128,6 @@ struct efx_nic {
 
 	unsigned int phy_type;
 	void *phy_data;
-	struct mdio_if_info mdio;
-	unsigned int mdio_bus;
 	enum efx_phy_mode phy_mode;
 
 	__ETHTOOL_DECLARE_LINK_MODE_MASK(link_advertising);
@@ -1191,6 +1186,7 @@ struct efx_nic {
 	struct devlink_port *dl_port;
 	unsigned int mem_bar;
 	u32 reg_base;
+	struct mutex reflash_mutex;
 
 	/* The following fields may be written more often */
 
@@ -1383,6 +1379,8 @@ struct efx_udp_tunnel {
  * @can_rx_scatter: NIC is able to scatter packets to multiple buffers
  * @always_rx_scatter: NIC will always scatter packets to multiple buffers
  * @option_descriptors: NIC supports TX option descriptors
+ * @flash_auto_partition: firmware flash uses AUTO partition, driver does
+ *	not need to perform image parsing
  * @min_interrupt_mode: Lowest capability interrupt mode supported
  *	from &enum efx_int_mode.
  * @timer_period_max: Maximum period of interrupt timer (in ticks)
@@ -1559,6 +1557,7 @@ struct efx_nic_type {
 	bool can_rx_scatter;
 	bool always_rx_scatter;
 	bool option_descriptors;
+	bool flash_auto_partition;
 	unsigned int min_interrupt_mode;
 	unsigned int timer_period_max;
 	netdev_features_t offload_features;

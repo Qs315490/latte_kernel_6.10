@@ -25,7 +25,7 @@ static struct fscache_cache *fscache_alloc_cache(const char *name)
 {
 	struct fscache_cache *cache;
 
-	cache = kzalloc(sizeof(*cache), GFP_KERNEL);
+	cache = kzalloc_obj(*cache);
 	if (cache) {
 		if (name) {
 			cache->name = kstrdup(name, GFP_KERNEL);
@@ -372,7 +372,7 @@ void fscache_withdraw_cache(struct fscache_cache *cache)
 EXPORT_SYMBOL(fscache_withdraw_cache);
 
 #ifdef CONFIG_PROC_FS
-static const char fscache_cache_states[NR__FSCACHE_CACHE_STATE] = "-PAEW";
+static const char fscache_cache_states[NR__FSCACHE_CACHE_STATE] __nonstring = "-PAEW";
 
 /*
  * Generate a list of caches in /proc/fs/fscache/caches

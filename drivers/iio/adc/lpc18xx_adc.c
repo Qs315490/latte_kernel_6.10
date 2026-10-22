@@ -17,7 +17,6 @@
 #include <linux/iio/driver.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
@@ -188,7 +187,7 @@ static int lpc18xx_adc_probe(struct platform_device *pdev)
 
 static const struct of_device_id lpc18xx_adc_match[] = {
 	{ .compatible = "nxp,lpc1850-adc" },
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(of, lpc18xx_adc_match);
 

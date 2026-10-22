@@ -42,6 +42,12 @@ config USB_XHCI_PCI
 	depends on USB_PCI
 	default y
 
+config USB_XHCI_PCI_PROM21
+	tristate
+	depends on USB_XHCI_PCI
+	default USB_XHCI_PCI if SENSORS_PROM21_XHCI != n
+	select AUXILIARY_BUS
+
 config USB_XHCI_PCI_RENESAS
 	tristate "Support for additional Renesas xHCI controller with firmware"
 	depends on USB_XHCI_PCI
@@ -71,7 +77,7 @@ config USB_XHCI_HISTB
 config USB_XHCI_MTK
 	tristate "xHCI support for MediaTek SoCs"
 	select MFD_SYSCON
-	depends on (MIPS && SOC_MT7621) || ARCH_MEDIATEK || COMPILE_TEST
+	depends on (MIPS && SOC_MT7621) || ARCH_MEDIATEK || ARCH_AIROHA || COMPILE_TEST
 	help
 	  Say 'Y' to enable the support for the xHCI host controller
 	  found in MediaTek SoCs.
@@ -93,7 +99,7 @@ config USB_XHCI_RCAR
 	default ARCH_RENESAS
 	help
 	  Say 'Y' to enable the support for the xHCI host controller
-	  found in Renesas R-Car ARM SoCs.
+	  found in Renesas R-Car and RZ/G3E alike ARM SoCs.
 
 config USB_XHCI_RZV2M
 	bool "xHCI support for Renesas RZ/V2M SoC"
@@ -103,6 +109,15 @@ config USB_XHCI_RZV2M
 	help
 	  Say 'Y' to enable the support for the xHCI host controller
 	  found in Renesas RZ/V2M SoC.
+
+config USB_XHCI_SIDEBAND
+	bool "xHCI support for sideband"
+	help
+	  Say 'Y' to enable the support for the xHCI sideband capability.
+	  Provide a mechanism for a sideband datapath for payload associated
+	  with audio class endpoints. This allows for an audio DSP to use
+	  xHCI USB endpoints directly, allowing CPU to sleep while playing
+	  audio.
 
 config USB_XHCI_TEGRA
 	tristate "xHCI support for NVIDIA Tegra SoCs"
@@ -225,7 +240,7 @@ config USB_EHCI_HCD_OMAP
 	tristate "EHCI support for OMAP3 and later chips"
 	depends on ARCH_OMAP || COMPILE_TEST
 	depends on NOP_USB_XCEIV
-	default y
+	default ARCH_OMAP
 	help
 	  Enables support for the on-chip EHCI controller on
 	  OMAP3 and later chips.
@@ -373,18 +388,6 @@ config USB_ISP116X_HCD
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called isp116x-hcd.
-
-config USB_ISP1362_HCD
-	tristate "ISP1362 HCD support"
-	depends on HAS_IOPORT
-	depends on COMPILE_TEST # nothing uses this
-	help
-	  Supports the Philips ISP1362 chip as a host controller
-
-	  This driver does not support isochronous transfers.
-
-	  To compile this driver as a module, choose M here: the
-	  module will be called isp1362-hcd.
 
 config USB_MAX3421_HCD
 	tristate "MAX3421 HCD (USB-over-SPI) support"
@@ -607,7 +610,7 @@ config USB_UHCI_ASPEED
 
 config USB_FHCI_HCD
 	tristate "Freescale QE USB Host Controller support"
-	depends on OF_GPIO && QE_GPIO && QUICC_ENGINE
+	depends on QE_GPIO && QUICC_ENGINE
 	select FSL_GTM
 	select QE_USB
 	help

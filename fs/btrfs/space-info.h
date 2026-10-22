@@ -21,7 +21,24 @@ struct btrfs_block_group;
  * The higher the level, the more methods we try to reclaim space.
  */
 enum btrfs_reserve_flush_enum {
-	/* If we are in the transaction, we can't flush anything.*/
+	/*
+	 * Used when we can't flush or don't need:
+	 *
+	 * 1) We are holding a transaction handle open, so we can't flush as
+	 *    that could deadlock.
+	 *
+	 * 2) For a nowait write we don't want to block when reserving delalloc.
+	 *
+	 * 3) Joining a transaction or attaching a transaction, we don't want
+	 *    to wait and we don't need to reserve anything (any needed space
+	 *    was reserved before in a dedicated block reserve, or we rely on
+	 *    the global block reserve, see btrfs_init_root_block_rsv()).
+	 *
+	 * 4) Starting a transaction when we don't need to reserve space, as
+	 *    we don't need it because we previously reserved in a dedicated
+	 *    block reserve or rely on the global block reserve, like the above
+	 *    case.
+	 */
 	BTRFS_RESERVE_NO_FLUSH,
 
 	/*
@@ -61,6 +78,17 @@ enum btrfs_reserve_flush_enum {
 	BTRFS_RESERVE_FLUSH_ALL_STEAL,
 
 	/*
+	 * This is for relocation on zoned filesystems only. We need to use
+	 * priority flushing for this, because otherwise we can deadlock on
+	 * waiting for a ticket, that cannot be granted, because we cannot do
+	 * any allocations.
+	 *
+	 * Apart from being specific to zoned relocation, it is equal to
+	 * BTRFS_FLUSH_FREE_SPACE_INODE.
+	 */
+	BTRFS_RESERVE_FLUSH_ZONED_RELOCATION,
+
+	/*
 	 * This is for btrfs_use_block_rsv only.  We have exhausted our block
 	 * rsv and our global block rsv.  This can happen for things like
 	 * delalloc where we are overwriting a lot of extents with a single
@@ -96,10 +124,21 @@ enum btrfs_flush_state {
 	RUN_DELAYED_IPUTS	= 10,
 	COMMIT_TRANS		= 11,
 	RESET_ZONES		= 12,
+	RECLAIM_ZONES		= 13,
 };
 
+enum btrfs_space_info_sub_group {
+	BTRFS_SUB_GROUP_PRIMARY,
+	BTRFS_SUB_GROUP_DATA_RELOC,
+	BTRFS_SUB_GROUP_TREELOG,
+};
+
+#define BTRFS_SPACE_INFO_SUB_GROUP_MAX 1
 struct btrfs_space_info {
 	struct btrfs_fs_info *fs_info;
+	struct btrfs_space_info *parent;
+	struct btrfs_space_info *sub_group[BTRFS_SPACE_INFO_SUB_GROUP_MAX];
+	int subgroup_id;
 	spinlock_t lock;
 
 	u64 total_bytes;	/* total bytes in the space,
@@ -132,11 +171,11 @@ struct btrfs_space_info {
 				   flushing. The value is >> clamp, so turns
 				   out to be a 2^clamp divisor. */
 
-	unsigned int full:1;	/* indicates that we cannot allocate any more
+	bool full;		/* indicates that we cannot allocate any more
 				   chunks for this space */
-	unsigned int chunk_alloc:1;	/* set if we are allocating a chunk */
+	bool chunk_alloc;	/* set if we are allocating a chunk */
 
-	unsigned int flush:1;		/* set if we are trying to make space */
+	bool flush;		/* set if we are trying to make space */
 
 	unsigned int force_alloc;	/* set if we need to force a chunk
 					   alloc for this space */
@@ -214,14 +253,6 @@ struct btrfs_space_info {
 	s64 reclaimable_bytes;
 };
 
-struct reserve_ticket {
-	u64 bytes;
-	int error;
-	bool steal;
-	struct list_head list;
-	wait_queue_head_t wait;
-};
-
 static inline bool btrfs_mixed_space_info(const struct btrfs_space_info *space_info)
 {
 	return ((space_info->flags & BTRFS_BLOCK_GROUP_METADATA) &&
@@ -256,28 +287,33 @@ DECLARE_SPACE_INFO_UPDATE(bytes_may_use, "space_info");
 DECLARE_SPACE_INFO_UPDATE(bytes_pinned, "pinned");
 DECLARE_SPACE_INFO_UPDATE(bytes_zone_unusable, "zone_unusable");
 
+static inline u64 btrfs_space_info_used(const struct btrfs_space_info *s_info,
+					bool may_use_included)
+{
+	lockdep_assert_held(&s_info->lock);
+
+	return s_info->bytes_used + s_info->bytes_reserved +
+		s_info->bytes_pinned + s_info->bytes_readonly +
+		s_info->bytes_zone_unusable +
+		(may_use_included ? s_info->bytes_may_use : 0);
+}
+
 int btrfs_init_space_info(struct btrfs_fs_info *fs_info);
 void btrfs_add_bg_to_space_info(struct btrfs_fs_info *info,
 				struct btrfs_block_group *block_group);
 void btrfs_update_space_info_chunk_size(struct btrfs_space_info *space_info,
 					u64 chunk_size);
-struct btrfs_space_info *btrfs_find_space_info(struct btrfs_fs_info *info,
+struct btrfs_space_info *btrfs_find_space_info(const struct btrfs_fs_info *info,
 					       u64 flags);
-u64 __pure btrfs_space_info_used(const struct btrfs_space_info *s_info,
-			  bool may_use_included);
 void btrfs_clear_space_info_full(struct btrfs_fs_info *info);
-void btrfs_dump_space_info(struct btrfs_fs_info *fs_info,
-			   struct btrfs_space_info *info, u64 bytes,
-			   int dump_block_groups);
-int btrfs_reserve_metadata_bytes(struct btrfs_fs_info *fs_info,
-				 struct btrfs_space_info *space_info,
+void btrfs_dump_space_info(struct btrfs_space_info *info, u64 bytes,
+			   bool dump_block_groups);
+int btrfs_reserve_metadata_bytes(struct btrfs_space_info *space_info,
 				 u64 orig_bytes,
 				 enum btrfs_reserve_flush_enum flush);
-void btrfs_try_granting_tickets(struct btrfs_fs_info *fs_info,
-				struct btrfs_space_info *space_info);
-int btrfs_can_overcommit(struct btrfs_fs_info *fs_info,
-			 const struct btrfs_space_info *space_info, u64 bytes,
-			 enum btrfs_reserve_flush_enum flush);
+void btrfs_try_granting_tickets(struct btrfs_space_info *space_info);
+bool btrfs_can_overcommit(const struct btrfs_space_info *space_info, u64 bytes,
+			  enum btrfs_reserve_flush_enum flush);
 
 static inline void btrfs_space_info_free_bytes_may_use(
 				struct btrfs_space_info *space_info,
@@ -285,10 +321,10 @@ static inline void btrfs_space_info_free_bytes_may_use(
 {
 	spin_lock(&space_info->lock);
 	btrfs_space_info_update_bytes_may_use(space_info, -num_bytes);
-	btrfs_try_granting_tickets(space_info->fs_info, space_info);
+	btrfs_try_granting_tickets(space_info);
 	spin_unlock(&space_info->lock);
 }
-int btrfs_reserve_data_bytes(struct btrfs_fs_info *fs_info, u64 bytes,
+int btrfs_reserve_data_bytes(struct btrfs_space_info *space_info, u64 bytes,
 			     enum btrfs_reserve_flush_enum flush);
 void btrfs_dump_space_info_for_trans_abort(struct btrfs_fs_info *fs_info);
 void btrfs_init_async_reclaim_work(struct btrfs_fs_info *fs_info);
@@ -296,9 +332,24 @@ u64 btrfs_account_ro_block_groups_free_space(struct btrfs_space_info *sinfo);
 
 void btrfs_space_info_update_reclaimable(struct btrfs_space_info *space_info, s64 bytes);
 void btrfs_set_periodic_reclaim_ready(struct btrfs_space_info *space_info, bool ready);
-bool btrfs_should_periodic_reclaim(struct btrfs_space_info *space_info);
 int btrfs_calc_reclaim_threshold(const struct btrfs_space_info *space_info);
 void btrfs_reclaim_sweep(const struct btrfs_fs_info *fs_info);
 void btrfs_return_free_space(struct btrfs_space_info *space_info, u64 len);
+
+static inline const char *btrfs_space_info_type_str(const struct btrfs_space_info *space_info)
+{
+	switch (space_info->flags) {
+	case BTRFS_BLOCK_GROUP_SYSTEM:
+		return "SYSTEM";
+	case BTRFS_BLOCK_GROUP_METADATA | BTRFS_BLOCK_GROUP_DATA:
+		return "DATA+METADATA";
+	case BTRFS_BLOCK_GROUP_DATA:
+		return "DATA";
+	case BTRFS_BLOCK_GROUP_METADATA:
+		return "METADATA";
+	default:
+		return "UNKNOWN";
+	}
+}
 
 #endif /* BTRFS_SPACE_INFO_H */

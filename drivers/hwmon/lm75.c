@@ -14,7 +14,7 @@
 #include <linux/i3c/device.h>
 #include <linux/hwmon.h>
 #include <linux/err.h>
-#include <linux/of.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/util_macros.h>
 #include <linux/regulator/consumer.h>
@@ -39,6 +39,7 @@ enum lm75_type {		/* keep sorted in alphabetical order */
 	max6626,
 	max31725,
 	mcp980x,
+	p3t1750,
 	p3t1755,
 	pct2075,
 	stds75,
@@ -107,6 +108,7 @@ static const unsigned short normal_i2c[] = { 0x48, 0x49, 0x4a, 0x4b, 0x4c,
 #define PCT2075_REG_IDLE	0x04
 
 struct lm75_data {
+	const char *label;
 	struct regmap			*regmap;
 	u16				orig_conf;
 	u8				resolution;	/* In bits, 9 to 16 */
@@ -121,7 +123,9 @@ struct lm75_data {
 
 static const u8 lm75_sample_set_masks[] = { 0 << 5, 1 << 5, 2 << 5, 3 << 5 };
 
-#define LM75_SAMPLE_CLEAR_MASK	(3 << 5)
+#define LM75_ALERT_POLARITY_HIGH_8_BIT	(BIT(2))
+#define LM75_ALERT_POLARITY_HIGH_16_BIT	(BIT(2) << 8)
+#define LM75_SAMPLE_CLEAR_MASK		(3 << 5)
 
 /* The structure below stores the configuration values of the supported devices.
  * In case of being supported multiple configurations, the default one must
@@ -135,7 +139,7 @@ static const struct lm75_params device_params[] = {
 	},
 	[as6200] = {
 		.config_reg_16bits = true,
-		.set_mask = 0x94C0,	/* 8 sample/s, 4 CF, positive polarity */
+		.set_mask = 0xC010,	/* 8 sample/s, 4 CF */
 		.default_resolution = 12,
 		.default_sample_time = 125,
 		.num_sample_times = 4,
@@ -222,6 +226,13 @@ static const struct lm75_params device_params[] = {
 		.default_resolution = 9,
 		.default_sample_time = MSEC_PER_SEC / 18,
 	},
+	[p3t1750] = {
+		.clr_mask = 1 << 1 | 1 << 7,	/* disable SMBAlert and one-shot */
+		.default_resolution = 12,
+		.default_sample_time = 55,
+		.num_sample_times = 4,
+		.sample_times = (unsigned int []){ 28, 55, 110, 220 },
+	},
 	[p3t1755] = {
 		.clr_mask = 1 << 1 | 1 << 7,	/* disable SMBAlert and one-shot */
 		.default_resolution = 12,
@@ -277,8 +288,8 @@ static const struct lm75_params device_params[] = {
 	},
 	[tmp112] = {
 		.config_reg_16bits = true,
-		.set_mask = 0x60C0,	/* 12-bit mode, 8 samples / second */
-		.clr_mask = 1 << 15,	/* no one-shot mode*/
+		.set_mask = 0xC060,	/* 12-bit mode, 8 samples / second */
+		.clr_mask = 1 << 7,	/* no one-shot mode*/
 		.default_resolution = 12,
 		.default_sample_time = 125,
 		.num_sample_times = 4,
@@ -344,7 +355,7 @@ static inline int lm75_write_config(struct lm75_data *data, u16 set_mask,
 				    u16 clr_mask)
 {
 	return regmap_update_bits(data->regmap, LM75_REG_CONF,
-				  clr_mask | LM75_SHUTDOWN, set_mask);
+				  clr_mask | set_mask | LM75_SHUTDOWN, set_mask);
 }
 
 static irqreturn_t lm75_alarm_handler(int irq, void *private)
@@ -353,6 +364,16 @@ static irqreturn_t lm75_alarm_handler(int irq, void *private)
 
 	hwmon_notify_event(hwmon_dev, hwmon_temp, hwmon_temp_alarm, 0);
 	return IRQ_HANDLED;
+}
+
+static int lm75_read_string(struct device *dev, enum hwmon_sensor_types type,
+			    u32 attr, int channel, const char **str)
+{
+	struct lm75_data *data = dev_get_drvdata(dev);
+
+	*str = data->label;
+
+	return 0;
 }
 
 static int lm75_read(struct device *dev, enum hwmon_sensor_types type,
@@ -397,7 +418,7 @@ static int lm75_read(struct device *dev, enum hwmon_sensor_types type,
 			switch (data->kind) {
 			case as6200:
 			case tmp112:
-				*val = (regval >> 13) & 0x1;
+				*val = !!(regval & BIT(13)) == !!(regval & BIT(2));
 				break;
 			default:
 				return -EINVAL;
@@ -520,18 +541,25 @@ static umode_t lm75_is_visible(const void *data, enum hwmon_sensor_types type,
 			if (config_data->params->num_sample_times > 1)
 				return 0644;
 			return 0444;
+		default:
+			break;
 		}
 		break;
 	case hwmon_temp:
 		switch (attr) {
 		case hwmon_temp_input:
 			return 0444;
+		case hwmon_temp_label:
+		/* Hide label node if label is not provided */
+			return config_data->label ? 0444 : 0;
 		case hwmon_temp_max:
 		case hwmon_temp_max_hyst:
 			return 0644;
 		case hwmon_temp_alarm:
 			if (config_data->params->alarm)
 				return 0444;
+			break;
+		default:
 			break;
 		}
 		break;
@@ -545,13 +573,14 @@ static const struct hwmon_channel_info * const lm75_info[] = {
 	HWMON_CHANNEL_INFO(chip,
 			   HWMON_C_REGISTER_TZ | HWMON_C_UPDATE_INTERVAL),
 	HWMON_CHANNEL_INFO(temp,
-			   HWMON_T_INPUT | HWMON_T_MAX | HWMON_T_MAX_HYST |
+			   HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX | HWMON_T_MAX_HYST |
 			   HWMON_T_ALARM),
 	NULL
 };
 
 static const struct hwmon_ops lm75_hwmon_ops = {
 	.is_visible = lm75_is_visible,
+	.read_string = lm75_read_string,
 	.read = lm75_read,
 	.write = lm75_write,
 };
@@ -613,7 +642,7 @@ static int lm75_i3c_reg_read(void *context, unsigned int reg, unsigned int *val)
 {
 	struct i3c_device *i3cdev = context;
 	struct lm75_data *data = i3cdev_get_drvdata(i3cdev);
-	struct i3c_priv_xfer xfers[] = {
+	struct i3c_xfer xfers[] = {
 		{
 			.rnw = false,
 			.len = 1,
@@ -622,7 +651,7 @@ static int lm75_i3c_reg_read(void *context, unsigned int reg, unsigned int *val)
 		{
 			.rnw = true,
 			.len = 2,
-			.data.out = data->val_buf,
+			.data.in = data->val_buf,
 		},
 	};
 	int ret;
@@ -632,7 +661,7 @@ static int lm75_i3c_reg_read(void *context, unsigned int reg, unsigned int *val)
 	if (reg == LM75_REG_CONF && !data->params->config_reg_16bits)
 		xfers[1].len--;
 
-	ret = i3c_device_do_priv_xfers(i3cdev, xfers, 2);
+	ret = i3c_device_do_xfers(i3cdev, xfers, 2, I3C_SDR);
 	if (ret < 0)
 		return ret;
 
@@ -650,7 +679,7 @@ static int lm75_i3c_reg_write(void *context, unsigned int reg, unsigned int val)
 {
 	struct i3c_device *i3cdev = context;
 	struct lm75_data *data = i3cdev_get_drvdata(i3cdev);
-	struct i3c_priv_xfer xfers[] = {
+	struct i3c_xfer xfers[] = {
 		{
 			.rnw = false,
 			.len = 3,
@@ -672,7 +701,7 @@ static int lm75_i3c_reg_write(void *context, unsigned int reg, unsigned int val)
 		data->val_buf[2] = val & 0xff;
 	}
 
-	return i3c_device_do_priv_xfers(i3cdev, xfers, 1);
+	return i3c_device_do_xfers(i3cdev, xfers, 1, I3C_SDR);
 }
 
 static const struct regmap_bus lm75_i3c_regmap_bus = {
@@ -702,6 +731,7 @@ static void lm75_remove(void *data)
 static int lm75_generic_probe(struct device *dev, const char *name,
 			      enum lm75_type kind, int irq, struct regmap *regmap)
 {
+	u16 clr_mask, pol_mask, set_mask;
 	struct device *hwmon_dev;
 	struct lm75_data *data;
 	int status, err;
@@ -712,6 +742,9 @@ static int lm75_generic_probe(struct device *dev, const char *name,
 
 	/* needed by custom regmap callbacks */
 	dev_set_drvdata(dev, data);
+
+	/* Save the connected input label if available */
+	device_property_read_string(dev, "label", &data->label);
 
 	data->kind = kind;
 	data->regmap = regmap;
@@ -736,8 +769,18 @@ static int lm75_generic_probe(struct device *dev, const char *name,
 		return err;
 	data->orig_conf = status;
 
-	err = lm75_write_config(data, data->params->set_mask,
-				data->params->clr_mask);
+	/* Enforce polarity active-low (default) or active-high (devicetree) */
+	if (!data->params->config_reg_16bits)
+		pol_mask = LM75_ALERT_POLARITY_HIGH_8_BIT;
+	else
+		pol_mask = LM75_ALERT_POLARITY_HIGH_16_BIT;
+
+	clr_mask = data->params->clr_mask | pol_mask;
+	set_mask = data->params->set_mask & ~pol_mask;
+	if (device_property_read_bool(dev, "ti,alert-polarity-active-high"))
+		set_mask |= pol_mask;
+
+	err = lm75_write_config(data, set_mask, clr_mask);
 	if (err)
 		return err;
 
@@ -790,36 +833,37 @@ static int lm75_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm75_i2c_ids[] = {
-	{ "adt75", adt75, },
-	{ "as6200", as6200, },
-	{ "at30ts74", at30ts74, },
-	{ "ds1775", ds1775, },
-	{ "ds75", ds75, },
-	{ "ds7505", ds7505, },
-	{ "g751", g751, },
-	{ "lm75", lm75, },
-	{ "lm75a", lm75a, },
-	{ "lm75b", lm75b, },
-	{ "max6625", max6625, },
-	{ "max6626", max6626, },
-	{ "max31725", max31725, },
-	{ "max31726", max31725, },
-	{ "mcp980x", mcp980x, },
-	{ "p3t1755", p3t1755, },
-	{ "pct2075", pct2075, },
-	{ "stds75", stds75, },
-	{ "stlm75", stlm75, },
-	{ "tcn75", tcn75, },
-	{ "tmp100", tmp100, },
-	{ "tmp101", tmp101, },
-	{ "tmp105", tmp105, },
-	{ "tmp112", tmp112, },
-	{ "tmp175", tmp175, },
-	{ "tmp275", tmp275, },
-	{ "tmp75", tmp75, },
-	{ "tmp75b", tmp75b, },
-	{ "tmp75c", tmp75c, },
-	{ "tmp1075", tmp1075, },
+	{ .name = "adt75", .driver_data = adt75 },
+	{ .name = "as6200", .driver_data = as6200 },
+	{ .name = "at30ts74", .driver_data = at30ts74 },
+	{ .name = "ds1775", .driver_data = ds1775 },
+	{ .name = "ds75", .driver_data = ds75 },
+	{ .name = "ds7505", .driver_data = ds7505 },
+	{ .name = "g751", .driver_data = g751 },
+	{ .name = "lm75", .driver_data = lm75 },
+	{ .name = "lm75a", .driver_data = lm75a },
+	{ .name = "lm75b", .driver_data = lm75b },
+	{ .name = "max6625", .driver_data = max6625 },
+	{ .name = "max6626", .driver_data = max6626 },
+	{ .name = "max31725", .driver_data = max31725 },
+	{ .name = "max31726", .driver_data = max31725 },
+	{ .name = "mcp980x", .driver_data = mcp980x },
+	{ .name = "p3t1750", .driver_data = p3t1750 },
+	{ .name = "p3t1755", .driver_data = p3t1755 },
+	{ .name = "pct2075", .driver_data = pct2075 },
+	{ .name = "stds75", .driver_data = stds75 },
+	{ .name = "stlm75", .driver_data = stlm75 },
+	{ .name = "tcn75", .driver_data = tcn75 },
+	{ .name = "tmp100", .driver_data = tmp100 },
+	{ .name = "tmp101", .driver_data = tmp101 },
+	{ .name = "tmp105", .driver_data = tmp105 },
+	{ .name = "tmp112", .driver_data = tmp112 },
+	{ .name = "tmp175", .driver_data = tmp175 },
+	{ .name = "tmp275", .driver_data = tmp275 },
+	{ .name = "tmp75", .driver_data = tmp75 },
+	{ .name = "tmp75b", .driver_data = tmp75b },
+	{ .name = "tmp75c", .driver_data = tmp75c },
+	{ .name = "tmp1075", .driver_data = tmp1075 },
 	{ /* LIST END */ }
 };
 MODULE_DEVICE_TABLE(i2c, lm75_i2c_ids);
@@ -855,7 +899,7 @@ static int lm75_i3c_probe(struct i3c_device *i3cdev)
 	return lm75_generic_probe(dev, id_data->name, id_data->type, 0, regmap);
 }
 
-static const struct of_device_id __maybe_unused lm75_of_match[] = {
+static const struct of_device_id lm75_of_match[] = {
 	{
 		.compatible = "adi,adt75",
 		.data = (void *)adt75
@@ -915,6 +959,10 @@ static const struct of_device_id __maybe_unused lm75_of_match[] = {
 	{
 		.compatible = "maxim,mcp980x",
 		.data = (void *)mcp980x
+	},
+	{
+		.compatible = "nxp,p3t1750",
+		.data = (void *)p3t1750
 	},
 	{
 		.compatible = "nxp,p3t1755",
@@ -1104,7 +1152,7 @@ static struct i2c_driver lm75_i2c_driver = {
 	.class		= I2C_CLASS_HWMON,
 	.driver = {
 		.name	= "lm75",
-		.of_match_table = of_match_ptr(lm75_of_match),
+		.of_match_table = lm75_of_match,
 		.pm	= LM75_DEV_PM_OPS,
 	},
 	.probe		= lm75_i2c_probe,

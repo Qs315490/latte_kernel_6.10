@@ -50,12 +50,6 @@
 
 #include "fib_lookup.h"
 
-static struct hlist_head *fib_info_hash;
-static struct hlist_head *fib_info_laddrhash;
-static unsigned int fib_info_hash_size;
-static unsigned int fib_info_hash_bits;
-static unsigned int fib_info_cnt;
-
 /* for_nexthops and change_nexthops only used when nexthop object
  * is not set in a fib_info. The logic within can reference fib_nh.
  */
@@ -213,7 +207,6 @@ void fib_nh_common_release(struct fib_nh_common *nhc)
 	rt_fibinfo_free(&nhc->nhc_rth_input);
 	free_nh_exceptions(nhc);
 }
-EXPORT_SYMBOL_GPL(fib_nh_common_release);
 
 void fib_nh_release(struct net *net, struct fib_nh *fib_nh)
 {
@@ -258,8 +251,7 @@ void fib_release_info(struct fib_info *fi)
 	ASSERT_RTNL();
 	if (fi && refcount_dec_and_test(&fi->fib_treeref)) {
 		hlist_del(&fi->fib_hash);
-
-		fib_info_cnt--;
+		fi->fib_net->ipv4.fib_info_cnt--;
 
 		if (fi->fib_prefsrc)
 			hlist_del(&fi->fib_lhash);
@@ -335,11 +327,12 @@ static unsigned int fib_info_hashfn_1(int init_val, u8 protocol, u8 scope,
 static unsigned int fib_info_hashfn_result(const struct net *net,
 					   unsigned int val)
 {
-	return hash_32(val ^ net_hash_mix(net), fib_info_hash_bits);
+	return hash_32(val ^ net_hash_mix(net), net->ipv4.fib_info_hash_bits);
 }
 
-static inline unsigned int fib_info_hashfn(struct fib_info *fi)
+static struct hlist_head *fib_info_hash_bucket(struct fib_info *fi)
 {
+	struct net *net = fi->fib_net;
 	unsigned int val;
 
 	val = fib_info_hashfn_1(fi->fib_nhs, fi->fib_protocol,
@@ -354,7 +347,69 @@ static inline unsigned int fib_info_hashfn(struct fib_info *fi)
 		} endfor_nexthops(fi)
 	}
 
-	return fib_info_hashfn_result(fi->fib_net, val);
+	return &net->ipv4.fib_info_hash[fib_info_hashfn_result(net, val)];
+}
+
+static struct hlist_head *fib_info_laddrhash_bucket(const struct net *net,
+						    __be32 val)
+{
+	unsigned int hash_bits = net->ipv4.fib_info_hash_bits;
+	u32 slot;
+
+	slot = hash_32(net_hash_mix(net) ^ (__force u32)val, hash_bits);
+
+	return &net->ipv4.fib_info_hash[(1 << hash_bits) + slot];
+}
+
+static struct hlist_head *fib_info_hash_alloc(unsigned int hash_bits)
+{
+	/* The second half is used for prefsrc */
+	return kvzalloc_objs(struct hlist_head, (1 << hash_bits) * 2);
+}
+
+static void fib_info_hash_free(struct hlist_head *head)
+{
+	kvfree(head);
+}
+
+static void fib_info_hash_grow(struct net *net)
+{
+	unsigned int old_size = 1 << net->ipv4.fib_info_hash_bits;
+	struct hlist_head *new_info_hash, *old_info_hash;
+	unsigned int i;
+
+	if (net->ipv4.fib_info_cnt < old_size)
+		return;
+
+	new_info_hash = fib_info_hash_alloc(net->ipv4.fib_info_hash_bits + 1);
+	if (!new_info_hash)
+		return;
+
+	old_info_hash = net->ipv4.fib_info_hash;
+	net->ipv4.fib_info_hash = new_info_hash;
+	net->ipv4.fib_info_hash_bits += 1;
+
+	for (i = 0; i < old_size; i++) {
+		struct hlist_head *head = &old_info_hash[i];
+		struct hlist_node *n;
+		struct fib_info *fi;
+
+		hlist_for_each_entry_safe(fi, n, head, fib_hash)
+			hlist_add_head(&fi->fib_hash, fib_info_hash_bucket(fi));
+	}
+
+	for (i = 0; i < old_size; i++) {
+		struct hlist_head *lhead = &old_info_hash[old_size + i];
+		struct hlist_node *n;
+		struct fib_info *fi;
+
+		hlist_for_each_entry_safe(fi, n, lhead, fib_lhash)
+			hlist_add_head(&fi->fib_lhash,
+				       fib_info_laddrhash_bucket(fi->fib_net,
+								 fi->fib_prefsrc));
+	}
+
+	fib_info_hash_free(old_info_hash);
 }
 
 /* no metrics, only nexthop id */
@@ -370,13 +425,12 @@ static struct fib_info *fib_find_info_nh(struct net *net,
 				 (__force u32)cfg->fc_prefsrc,
 				 cfg->fc_priority);
 	hash = fib_info_hashfn_result(net, hash);
-	head = &fib_info_hash[hash];
+	head = &net->ipv4.fib_info_hash[hash];
 
 	hlist_for_each_entry(fi, head, fib_hash) {
-		if (!net_eq(fi->fib_net, net))
-			continue;
 		if (!fi->nh || fi->nh->id != cfg->fc_nh_id)
 			continue;
+
 		if (cfg->fc_protocol == fi->fib_protocol &&
 		    cfg->fc_scope == fi->fib_scope &&
 		    cfg->fc_prefsrc == fi->fib_prefsrc &&
@@ -392,18 +446,13 @@ static struct fib_info *fib_find_info_nh(struct net *net,
 
 static struct fib_info *fib_find_info(struct fib_info *nfi)
 {
-	struct hlist_head *head;
+	struct hlist_head *head = fib_info_hash_bucket(nfi);
 	struct fib_info *fi;
-	unsigned int hash;
-
-	hash = fib_info_hashfn(nfi);
-	head = &fib_info_hash[hash];
 
 	hlist_for_each_entry(fi, head, fib_hash) {
-		if (!net_eq(fi->fib_net, nfi->fib_net))
-			continue;
 		if (fi->fib_nhs != nfi->fib_nhs)
 			continue;
+
 		if (nfi->fib_protocol == fi->fib_protocol &&
 		    nfi->fib_scope == fi->fib_scope &&
 		    nfi->fib_prefsrc == fi->fib_prefsrc &&
@@ -441,6 +490,34 @@ int ip_fib_check_default(__be32 gw, struct net_device *dev)
 	return -1;
 }
 
+static size_t fib_nexthop_nlmsg_size(const struct fib_nh_common *nhc,
+				     bool skip_oif)
+{
+	size_t nhsize = 0;
+
+	switch (nhc->nhc_gw_family) {
+	case AF_INET:
+		nhsize += nla_total_size(4); /* RTA_GATEWAY */
+		break;
+	case AF_INET6:
+		nhsize += nla_total_size(sizeof(struct rtvia) +
+					 sizeof(struct in6_addr));
+		break;
+	}
+
+	if (!skip_oif && nhc->nhc_dev)
+		nhsize += nla_total_size(4); /* RTA_OIF */
+
+	if (nhc->nhc_lwtstate) {
+		/* RTA_ENCAP */
+		nhsize += lwtunnel_get_encap_size(nhc->nhc_lwtstate);
+		/* RTA_ENCAP_TYPE */
+		nhsize += nla_total_size(2);
+	}
+
+	return nhsize;
+}
+
 size_t fib_nlmsg_size(struct fib_info *fi)
 {
 	size_t payload = NLMSG_ALIGN(sizeof(struct rtmsg))
@@ -458,32 +535,35 @@ size_t fib_nlmsg_size(struct fib_info *fi)
 		payload += nla_total_size(4); /* RTA_NH_ID */
 
 	if (nhs) {
-		size_t nh_encapsize = 0;
-		/* Also handles the special case nhs == 1 */
-
-		/* each nexthop is packed in an attribute */
-		size_t nhsize = nla_total_size(sizeof(struct rtnexthop));
+		size_t mpsize = 0;
 		unsigned int i;
 
-		/* may contain flow and gateway attribute */
-		nhsize += 2 * nla_total_size(4);
-
-		/* grab encap info */
 		for (i = 0; i < fib_info_num_path(fi); i++) {
 			struct fib_nh_common *nhc = fib_info_nhc(fi, i);
+			size_t nhsize;
 
-			if (nhc->nhc_lwtstate) {
-				/* RTA_ENCAP_TYPE */
-				nh_encapsize += lwtunnel_get_encap_size(
-						nhc->nhc_lwtstate);
-				/* RTA_ENCAP */
-				nh_encapsize +=  nla_total_size(2);
+			nhsize = fib_nexthop_nlmsg_size(nhc, nhs != 1);
+
+			if (nhs != 1)
+				nhsize += NLA_ALIGN(sizeof(struct rtnexthop));
+
+#ifdef CONFIG_IP_ROUTE_CLASSID
+			if (nhc->nhc_family == AF_INET) {
+				struct fib_nh *nh;
+
+				nh = container_of(nhc, struct fib_nh, nh_common);
+				if (nh->nh_tclassid)
+					nhsize += nla_total_size(4);
 			}
+#endif
+			if (nhs == 1)
+				payload += nhsize;
+			else
+				mpsize += nhsize;
 		}
 
-		/* all nexthops are packed in a nested attribute */
-		payload += nla_total_size((nhs * nhsize) + nh_encapsize);
-
+		if (nhs != 1)
+			payload += nla_total_size(mpsize);
 	}
 
 	return payload;
@@ -535,9 +615,8 @@ static int fib_detect_death(struct fib_info *fi, int order,
 
 	if (likely(nhc->nhc_gw_family == AF_INET))
 		n = neigh_lookup(&arp_tbl, &nhc->nhc_gw.ipv4, nhc->nhc_dev);
-	else if (nhc->nhc_gw_family == AF_INET6)
-		n = neigh_lookup(ipv6_stub->nd_tbl, &nhc->nhc_gw.ipv6,
-				 nhc->nhc_dev);
+	else if (IS_ENABLED(CONFIG_IPV6) && nhc->nhc_gw_family == AF_INET6)
+		n = neigh_lookup(&nd_tbl, &nhc->nhc_gw.ipv6, nhc->nhc_dev);
 	else
 		n = NULL;
 
@@ -574,11 +653,6 @@ int fib_nh_common_init(struct net *net, struct fib_nh_common *nhc,
 	if (encap) {
 		struct lwtunnel_state *lwtstate;
 
-		if (encap_type == LWTUNNEL_ENCAP_NONE) {
-			NL_SET_ERR_MSG(extack, "LWT encap type not specified");
-			err = -EINVAL;
-			goto lwt_failure;
-		}
 		err = lwtunnel_build_state(net, encap_type, encap,
 					   nhc->nhc_family, cfg, &lwtstate,
 					   extack);
@@ -595,7 +669,6 @@ lwt_failure:
 	nhc->nhc_pcpu_rth_output = NULL;
 	return err;
 }
-EXPORT_SYMBOL_GPL(fib_nh_common_init);
 
 int fib_nh_init(struct net *net, struct fib_nh *nh,
 		struct fib_config *cfg, int nh_weight,
@@ -1038,7 +1111,7 @@ static int fib_check_nh_v6_gw(struct net *net, struct fib_nh *nh,
 	struct fib6_nh fib6_nh = {};
 	int err;
 
-	err = ipv6_stub->fib6_nh_init(net, &fib6_nh, &cfg, GFP_KERNEL, extack);
+	err = fib6_nh_init(net, &fib6_nh, &cfg, GFP_KERNEL, extack);
 	if (!err) {
 		nh->fib_nh_dev = fib6_nh.fib_nh_dev;
 		netdev_hold(nh->fib_nh_dev, &nh->fib_nh_dev_tracker,
@@ -1046,7 +1119,7 @@ static int fib_check_nh_v6_gw(struct net *net, struct fib_nh *nh,
 		nh->fib_nh_oif = nh->fib_nh_dev->ifindex;
 		nh->fib_nh_scope = RT_SCOPE_LINK;
 
-		ipv6_stub->fib6_nh_release(&fib6_nh);
+		fib6_nh_release(&fib6_nh);
 	}
 
 	return err;
@@ -1239,64 +1312,6 @@ int fib_check_nh(struct net *net, struct fib_nh *nh, u32 table, u8 scope,
 	return err;
 }
 
-static struct hlist_head *
-fib_info_laddrhash_bucket(const struct net *net, __be32 val)
-{
-	u32 slot = hash_32(net_hash_mix(net) ^ (__force u32)val,
-			   fib_info_hash_bits);
-
-	return &fib_info_laddrhash[slot];
-}
-
-static void fib_info_hash_move(struct hlist_head *new_info_hash,
-			       struct hlist_head *new_laddrhash,
-			       unsigned int new_size)
-{
-	struct hlist_head *old_info_hash, *old_laddrhash;
-	unsigned int old_size = fib_info_hash_size;
-	unsigned int i;
-
-	ASSERT_RTNL();
-	old_info_hash = fib_info_hash;
-	old_laddrhash = fib_info_laddrhash;
-	fib_info_hash_size = new_size;
-	fib_info_hash_bits = ilog2(new_size);
-
-	for (i = 0; i < old_size; i++) {
-		struct hlist_head *head = &fib_info_hash[i];
-		struct hlist_node *n;
-		struct fib_info *fi;
-
-		hlist_for_each_entry_safe(fi, n, head, fib_hash) {
-			struct hlist_head *dest;
-			unsigned int new_hash;
-
-			new_hash = fib_info_hashfn(fi);
-			dest = &new_info_hash[new_hash];
-			hlist_add_head(&fi->fib_hash, dest);
-		}
-	}
-	fib_info_hash = new_info_hash;
-
-	fib_info_laddrhash = new_laddrhash;
-	for (i = 0; i < old_size; i++) {
-		struct hlist_head *lhead = &old_laddrhash[i];
-		struct hlist_node *n;
-		struct fib_info *fi;
-
-		hlist_for_each_entry_safe(fi, n, lhead, fib_lhash) {
-			struct hlist_head *ldest;
-
-			ldest = fib_info_laddrhash_bucket(fi->fib_net,
-							  fi->fib_prefsrc);
-			hlist_add_head(&fi->fib_lhash, ldest);
-		}
-	}
-
-	kvfree(old_info_hash);
-	kvfree(old_laddrhash);
-}
-
 __be32 fib_info_update_nhc_saddr(struct net *net, struct fib_nh_common *nhc,
 				 unsigned char scope)
 {
@@ -1409,32 +1424,14 @@ struct fib_info *fib_create_info(struct fib_config *cfg,
 	}
 #endif
 
-	err = -ENOBUFS;
+	fib_info_hash_grow(net);
 
-	if (fib_info_cnt >= fib_info_hash_size) {
-		unsigned int new_size = fib_info_hash_size << 1;
-		struct hlist_head *new_info_hash;
-		struct hlist_head *new_laddrhash;
-		size_t bytes;
-
-		if (!new_size)
-			new_size = 16;
-		bytes = (size_t)new_size * sizeof(struct hlist_head *);
-		new_info_hash = kvzalloc(bytes, GFP_KERNEL);
-		new_laddrhash = kvzalloc(bytes, GFP_KERNEL);
-		if (!new_info_hash || !new_laddrhash) {
-			kvfree(new_info_hash);
-			kvfree(new_laddrhash);
-		} else {
-			fib_info_hash_move(new_info_hash, new_laddrhash, new_size);
-		}
-		if (!fib_info_hash_size)
-			goto failure;
+	fi = kzalloc_flex(*fi, fib_nh, nhs);
+	if (!fi) {
+		err = -ENOBUFS;
+		goto failure;
 	}
 
-	fi = kzalloc(struct_size(fi, fib_nh, nhs), GFP_KERNEL);
-	if (!fi)
-		goto failure;
 	fi->fib_metrics = ip_fib_metrics_init(cfg->fc_mx, cfg->fc_mx_len, extack);
 	if (IS_ERR(fi->fib_metrics)) {
 		err = PTR_ERR(fi->fib_metrics);
@@ -1571,9 +1568,9 @@ link_it:
 	refcount_set(&fi->fib_treeref, 1);
 	refcount_set(&fi->fib_clntref, 1);
 
-	fib_info_cnt++;
-	hlist_add_head(&fi->fib_hash,
-		       &fib_info_hash[fib_info_hashfn(fi)]);
+	net->ipv4.fib_info_cnt++;
+	hlist_add_head(&fi->fib_hash, fib_info_hash_bucket(fi));
+
 	if (fi->fib_prefsrc) {
 		struct hlist_head *head;
 
@@ -1665,8 +1662,7 @@ int fib_nexthop_info(struct sk_buff *skb, const struct fib_nh_common *nhc,
 	    nla_put_u32(skb, RTA_OIF, nhc->nhc_dev->ifindex))
 		goto nla_put_failure;
 
-	if (nhc->nhc_lwtstate &&
-	    lwtunnel_fill_encap(skb, nhc->nhc_lwtstate,
+	if (lwtunnel_fill_encap(skb, nhc->nhc_lwtstate,
 				RTA_ENCAP, RTA_ENCAP_TYPE) < 0)
 		goto nla_put_failure;
 
@@ -1675,7 +1671,6 @@ int fib_nexthop_info(struct sk_buff *skb, const struct fib_nh_common *nhc,
 nla_put_failure:
 	return -EMSGSIZE;
 }
-EXPORT_SYMBOL_GPL(fib_nexthop_info);
 
 #if IS_ENABLED(CONFIG_IP_ROUTE_MULTIPATH) || IS_ENABLED(CONFIG_IPV6)
 int fib_add_nexthop(struct sk_buff *skb, const struct fib_nh_common *nhc,
@@ -1708,7 +1703,6 @@ int fib_add_nexthop(struct sk_buff *skb, const struct fib_nh_common *nhc,
 nla_put_failure:
 	return -EMSGSIZE;
 }
-EXPORT_SYMBOL_GPL(fib_add_nexthop);
 #endif
 
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
@@ -1855,7 +1849,7 @@ int fib_sync_down_addr(struct net_device *dev, __be32 local)
 	struct fib_info *fi;
 	int ret = 0;
 
-	if (!fib_info_laddrhash || local == 0)
+	if (!local)
 		return 0;
 
 	head = fib_info_laddrhash_bucket(net, local);
@@ -1901,42 +1895,30 @@ static int call_fib_nh_notifiers(struct fib_nh *nh,
 	return NOTIFY_DONE;
 }
 
-/* Update the PMTU of exceptions when:
- * - the new MTU of the first hop becomes smaller than the PMTU
- * - the old MTU was the same as the PMTU, and it limited discovery of
- *   larger MTUs on the path. With that limit raised, we can now
- *   discover larger MTUs
- * A special case is locked exceptions, for which the PMTU is smaller
- * than the minimal accepted PMTU:
- * - if the new MTU is greater than the PMTU, don't make any change
- * - otherwise, unlock and set PMTU
+/* Walk the exceptions of a nexthop after its first hop MTU changed. The
+ * chain is RCU protected here, while fnhe_update_pmtu() takes fnhe_lock
+ * for the update of each entry.
  */
 void fib_nhc_update_mtu(struct fib_nh_common *nhc, u32 new, u32 orig)
 {
 	struct fnhe_hash_bucket *bucket;
 	int i;
 
-	bucket = rcu_dereference_protected(nhc->nhc_exceptions, 1);
+	rcu_read_lock();
+	bucket = rcu_dereference(nhc->nhc_exceptions);
 	if (!bucket)
-		return;
+		goto out;
 
 	for (i = 0; i < FNHE_HASH_SIZE; i++) {
 		struct fib_nh_exception *fnhe;
 
-		for (fnhe = rcu_dereference_protected(bucket[i].chain, 1);
+		for (fnhe = rcu_dereference(bucket[i].chain);
 		     fnhe;
-		     fnhe = rcu_dereference_protected(fnhe->fnhe_next, 1)) {
-			if (fnhe->fnhe_mtu_locked) {
-				if (new <= fnhe->fnhe_pmtu) {
-					fnhe->fnhe_pmtu = new;
-					fnhe->fnhe_mtu_locked = false;
-				}
-			} else if (new < fnhe->fnhe_pmtu ||
-				   orig == fnhe->fnhe_pmtu) {
-				fnhe->fnhe_pmtu = new;
-			}
-		}
+		     fnhe = rcu_dereference(fnhe->fnhe_next))
+			fnhe_update_pmtu(fnhe, new, orig);
 	}
+out:
+	rcu_read_unlock();
 }
 
 void fib_sync_mtu(struct net_device *dev, u32 orig_mtu)
@@ -2118,7 +2100,7 @@ int fib_sync_up(struct net_device *dev, unsigned char nh_flags)
 		return 0;
 
 	if (nh_flags & RTNH_F_DEAD) {
-		unsigned int flags = dev_get_flags(dev);
+		unsigned int flags = netif_get_flags(dev);
 
 		if (flags & (IFF_RUNNING | IFF_LOWER_UP))
 			nh_flags |= RTNH_F_LINKDOWN;
@@ -2179,9 +2161,10 @@ static bool fib_good_nh(const struct fib_nh *nh)
 		if (likely(nh->fib_nh_gw_family == AF_INET))
 			n = __ipv4_neigh_lookup_noref(nh->fib_nh_dev,
 						   (__force u32)nh->fib_nh_gw4);
-		else if (nh->fib_nh_gw_family == AF_INET6)
-			n = __ipv6_neigh_lookup_noref_stub(nh->fib_nh_dev,
-							   &nh->fib_nh_gw6);
+		else if (IS_ENABLED(CONFIG_IPV6) &&
+			 nh->fib_nh_gw_family == AF_INET6)
+			n = __ipv6_neigh_lookup_noref(nh->fib_nh_dev,
+						      &nh->fib_nh_gw6);
 		else
 			n = NULL;
 		if (n)
@@ -2193,34 +2176,46 @@ static bool fib_good_nh(const struct fib_nh *nh)
 	return !!(state & NUD_VALID);
 }
 
-void fib_select_multipath(struct fib_result *res, int hash)
+void fib_select_multipath(struct fib_result *res, int hash,
+			  const struct flowi4 *fl4)
 {
 	struct fib_info *fi = res->fi;
 	struct net *net = fi->fib_net;
-	bool first = false;
+	bool use_neigh;
+	int score = -1;
+	__be32 saddr;
 
 	if (unlikely(res->fi->nh)) {
 		nexthop_path_fib_result(res, hash);
 		return;
 	}
 
-	change_nexthops(fi) {
-		if (READ_ONCE(net->ipv4.sysctl_fib_multipath_use_neigh)) {
-			if (!fib_good_nh(nexthop_nh))
-				continue;
-			if (!first) {
-				res->nh_sel = nhsel;
-				res->nhc = &nexthop_nh->nh_common;
-				first = true;
-			}
-		}
+	use_neigh = READ_ONCE(net->ipv4.sysctl_fib_multipath_use_neigh);
+	saddr = fl4 ? fl4->saddr : 0;
 
-		if (hash > atomic_read(&nexthop_nh->fib_nh_upper_bound))
+	change_nexthops(fi) {
+		int nh_upper_bound, nh_score = 0;
+
+		/* Nexthops without a carrier are assigned an upper bound of
+		 * minus one when "ignore_routes_with_linkdown" is set.
+		 */
+		nh_upper_bound = atomic_read(&nexthop_nh->fib_nh_upper_bound);
+		if (nh_upper_bound == -1 ||
+		    (use_neigh && !fib_good_nh(nexthop_nh)))
 			continue;
 
-		res->nh_sel = nhsel;
-		res->nhc = &nexthop_nh->nh_common;
-		return;
+		if (saddr && nexthop_nh->nh_saddr == saddr)
+			nh_score += 2;
+		if (hash <= nh_upper_bound)
+			nh_score++;
+		if (score < nh_score) {
+			res->nh_sel = nhsel;
+			res->nhc = &nexthop_nh->nh_common;
+			if (nh_score == 3 || (!saddr && nh_score == 1))
+				return;
+			score = nh_score;
+		}
+
 	} endfor_nexthops(fi);
 }
 #endif
@@ -2235,7 +2230,7 @@ void fib_select_path(struct net *net, struct fib_result *res,
 	if (fib_info_num_path(res->fi) > 1) {
 		int h = fib_multipath_hash(net, fl4, skb, NULL);
 
-		fib_select_multipath(res, h);
+		fib_select_multipath(res, h, fl4);
 	}
 	else
 #endif
@@ -2256,4 +2251,23 @@ check_saddr:
 		else
 			fl4->saddr = inet_select_addr(l3mdev, 0, RT_SCOPE_LINK);
 	}
+}
+
+int __net_init fib4_semantics_init(struct net *net)
+{
+	unsigned int hash_bits = 4;
+
+	net->ipv4.fib_info_hash = fib_info_hash_alloc(hash_bits);
+	if (!net->ipv4.fib_info_hash)
+		return -ENOMEM;
+
+	net->ipv4.fib_info_hash_bits = hash_bits;
+	net->ipv4.fib_info_cnt = 0;
+
+	return 0;
+}
+
+void __net_exit fib4_semantics_exit(struct net *net)
+{
+	fib_info_hash_free(net->ipv4.fib_info_hash);
 }

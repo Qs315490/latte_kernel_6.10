@@ -13,7 +13,6 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/timekeeping.h>
-#include <linux/mod_devicetable.h>
 
 #define PM8916_PERPH_TYPE 0x04
 #define PM8916_BMS_VM_TYPE 0x020D
@@ -167,15 +166,6 @@ static int pm8916_bms_vm_battery_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return -EINVAL;
 
-	irq = platform_get_irq_byname(pdev, "fifo");
-	if (irq < 0)
-		return irq;
-
-	ret = devm_request_threaded_irq(dev, irq, NULL, pm8916_bms_vm_fifo_update_done_irq,
-					IRQF_ONESHOT, "pm8916_vm_bms", bat);
-	if (ret)
-		return ret;
-
 	ret = regmap_bulk_read(bat->regmap, bat->reg + PM8916_PERPH_TYPE, &tmp, 2);
 	if (ret)
 		goto comm_error;
@@ -210,7 +200,7 @@ static int pm8916_bms_vm_battery_probe(struct platform_device *pdev)
 	bat->vbat_now = bat->last_ocv;
 
 	psy_cfg.drv_data = bat;
-	psy_cfg.of_node = dev->of_node;
+	psy_cfg.fwnode = dev_fwnode(dev);
 
 	bat->battery = devm_power_supply_register(dev, &pm8916_bms_vm_battery_psy_desc, &psy_cfg);
 	if (IS_ERR(bat->battery))
@@ -219,6 +209,15 @@ static int pm8916_bms_vm_battery_probe(struct platform_device *pdev)
 	ret = power_supply_get_battery_info(bat->battery, &bat->info);
 	if (ret)
 		return dev_err_probe(dev, ret, "Unable to get battery info\n");
+
+	irq = platform_get_irq_byname(pdev, "fifo");
+	if (irq < 0)
+		return irq;
+
+	ret = devm_request_threaded_irq(dev, irq, NULL, pm8916_bms_vm_fifo_update_done_irq,
+					IRQF_ONESHOT, "pm8916_vm_bms", bat);
+	if (ret)
+		return ret;
 
 	platform_set_drvdata(pdev, bat);
 

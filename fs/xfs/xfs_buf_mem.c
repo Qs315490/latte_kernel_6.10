@@ -3,7 +3,7 @@
  * Copyright (c) 2023-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_buf.h"
 #include "xfs_buf_mem.h"
@@ -58,11 +58,11 @@ xmbuf_alloc(
 	struct xfs_buftarg	*btp;
 	int			error;
 
-	btp = kzalloc(struct_size(btp, bt_cache, 1), GFP_KERNEL);
+	btp = kzalloc_obj(*btp);
 	if (!btp)
 		return -ENOMEM;
 
-	file = shmem_kernel_file_setup(descr, 0, 0);
+	file = shmem_kernel_file_setup(descr, 0, EMPTY_VMA_FLAGS);
 	if (IS_ERR(file)) {
 		error = PTR_ERR(file);
 		goto out_free_btp;
@@ -74,16 +74,12 @@ xmbuf_alloc(
 
 	/*
 	 * We don't want to bother with kmapping data during repair, so don't
-	 * allow highmem pages to back this mapping.
+	 * allow highmem folios to back this mapping.
 	 */
 	mapping_set_gfp_mask(inode->i_mapping, GFP_KERNEL);
 
 	/* ensure all writes are below EOF to avoid pagecache zeroing */
 	i_size_write(inode, inode->i_sb->s_maxbytes);
-
-	error = xfs_buf_cache_init(btp->bt_cache);
-	if (error)
-		goto out_file;
 
 	/* Initialize buffer target */
 	btp->bt_mount = mp;
@@ -95,15 +91,13 @@ xmbuf_alloc(
 
 	error = xfs_init_buftarg(btp, XMBUF_BLOCKSIZE, descr);
 	if (error)
-		goto out_bcache;
+		goto out_file;
 
 	trace_xmbuf_create(btp);
 
 	*btpp = btp;
 	return 0;
 
-out_bcache:
-	xfs_buf_cache_destroy(btp->bt_cache);
 out_file:
 	fput(file);
 out_free_btp:
@@ -122,19 +116,17 @@ xmbuf_free(
 	trace_xmbuf_free(btp);
 
 	xfs_destroy_buftarg(btp);
-	xfs_buf_cache_destroy(btp->bt_cache);
 	fput(btp->bt_file);
 	kfree(btp);
 }
 
-/* Directly map a shmem page into the buffer cache. */
+/* Directly map a shmem folio into the buffer cache. */
 int
-xmbuf_map_page(
+xmbuf_map_backing_mem(
 	struct xfs_buf		*bp)
 {
 	struct inode		*inode = file_inode(bp->b_target->bt_file);
 	struct folio		*folio = NULL;
-	struct page		*page;
 	loff_t                  pos = BBTOB(xfs_buf_daddr(bp));
 	int			error;
 
@@ -159,37 +151,15 @@ xmbuf_map_page(
 		return -EIO;
 	}
 
-	page = folio_file_page(folio, pos >> PAGE_SHIFT);
-
 	/*
-	 * Mark the page dirty so that it won't be reclaimed once we drop the
-	 * (potentially last) reference in xmbuf_unmap_page.
+	 * Mark the folio dirty so that it won't be reclaimed once we drop the
+	 * (potentially last) reference in xfs_buf_free.
 	 */
-	set_page_dirty(page);
-	unlock_page(page);
+	folio_set_dirty(folio);
+	folio_unlock(folio);
 
-	bp->b_addr = page_address(page);
-	bp->b_pages = bp->b_page_array;
-	bp->b_pages[0] = page;
-	bp->b_page_count = 1;
+	bp->b_addr = folio_address(folio) + offset_in_folio(folio, pos);
 	return 0;
-}
-
-/* Unmap a shmem page that was mapped into the buffer cache. */
-void
-xmbuf_unmap_page(
-	struct xfs_buf		*bp)
-{
-	struct page		*page = bp->b_pages[0];
-
-	ASSERT(xfs_buftarg_is_mem(bp->b_target));
-
-	put_page(page);
-
-	bp->b_addr = NULL;
-	bp->b_pages[0] = NULL;
-	bp->b_pages = NULL;
-	bp->b_page_count = 0;
 }
 
 /* Is this a valid daddr within the buftarg? */
@@ -205,7 +175,7 @@ xmbuf_verify_daddr(
 	return daddr < (inode->i_sb->s_maxbytes >> BBSHIFT);
 }
 
-/* Discard the page backing this buffer. */
+/* Discard the folio backing this buffer. */
 static void
 xmbuf_stale(
 	struct xfs_buf		*bp)
@@ -220,7 +190,7 @@ xmbuf_stale(
 }
 
 /*
- * Finalize a buffer -- discard the backing page if it's stale, or run the
+ * Finalize a buffer -- discard the backing folio if it's stale, or run the
  * write verifier to detect problems.
  */
 int

@@ -308,7 +308,7 @@ u32 intel_engine_context_size(struct intel_gt *gt, u8 class)
 			/*
 			 * There is a discrepancy here between the size reported
 			 * by the register and the size of the context layout
-			 * in the docs. Both are described as authorative!
+			 * in the docs. Both are described as authoritative!
 			 *
 			 * The discrepancy is on the order of a few cachelines,
 			 * but the total is under one page (4k), which is our
@@ -471,7 +471,7 @@ static int intel_engine_setup(struct intel_gt *gt, enum intel_engine_id id,
 	if (GEM_DEBUG_WARN_ON(gt->engine_class[info->class][info->instance]))
 		return -EINVAL;
 
-	engine = kzalloc(sizeof(*engine), GFP_KERNEL);
+	engine = kzalloc_obj(*engine);
 	if (!engine)
 		return -ENOMEM;
 
@@ -677,7 +677,7 @@ void intel_engines_release(struct intel_gt *gt)
 	 * in case we aborted before completely initialising the engines.
 	 */
 	GEM_BUG_ON(intel_gt_pm_is_awake(gt));
-	if (!INTEL_INFO(gt->i915)->gpu_reset_clobbers_display)
+	if (!intel_gt_gpu_reset_clobbers_display(gt))
 		intel_gt_reset_all_engines(gt);
 
 	/* Decouple the backend; but keep the layout for late GPU resets */
@@ -769,9 +769,8 @@ static void engine_mask_apply_media_fuses(struct intel_gt *gt)
 	if (MEDIA_VER_FULL(i915) < IP_VER(12, 55))
 		media_fuse = ~media_fuse;
 
-	vdbox_mask = media_fuse & GEN11_GT_VDBOX_DISABLE_MASK;
-	vebox_mask = (media_fuse & GEN11_GT_VEBOX_DISABLE_MASK) >>
-		      GEN11_GT_VEBOX_DISABLE_SHIFT;
+	vdbox_mask = REG_FIELD_GET(GEN11_GT_VDBOX_DISABLE_MASK, media_fuse);
+	vebox_mask = REG_FIELD_GET(GEN11_GT_VEBOX_DISABLE_MASK, media_fuse);
 
 	if (MEDIA_VER_FULL(i915) >= IP_VER(12, 55)) {
 		fuse1 = intel_uncore_read(gt->uncore, HSW_PAVP_FUSE1);
@@ -845,7 +844,7 @@ static void engine_mask_apply_compute_fuses(struct intel_gt *gt)
  * Note that we have a catch-22 situation where we need to be able to access
  * the blitter forcewake domain to read the engine fuses, but at the same time
  * we need to know which engines are available on the system to know which
- * forcewake domains are present. We solve this by intializing the forcewake
+ * forcewake domains are present. We solve this by initializing the forcewake
  * domains based on the full engine mask in the platform capabilities before
  * calling this function and pruning the domains for fused-off engines
  * afterwards.
@@ -964,9 +963,6 @@ int intel_engines_init_mmio(struct intel_gt *gt)
 	drm_WARN_ON(&i915->drm, engine_mask &
 		    GENMASK(BITS_PER_TYPE(mask) - 1, I915_NUM_ENGINES));
 
-	if (i915_inject_probe_failure(i915))
-		return -ENODEV;
-
 	for (class = 0; class < MAX_ENGINE_CLASS + 1; ++class) {
 		setup_logical_ids(gt, logical_ids, class);
 
@@ -1008,6 +1004,7 @@ cleanup:
 	intel_engines_free(gt);
 	return err;
 }
+ALLOW_ERROR_INJECTION(intel_engines_init_mmio, ERRNO);
 
 void intel_engine_init_execlists(struct intel_engine_cs *engine)
 {
@@ -1236,7 +1233,7 @@ static int intel_engine_init_tlb_invalidation(struct intel_engine_cs *engine)
 	     engine->class == VIDEO_ENHANCEMENT_CLASS ||
 	     engine->class == COMPUTE_CLASS ||
 	     engine->class == OTHER_CLASS))
-		engine->tlb_inv.request = _MASKED_BIT_ENABLE(val);
+		engine->tlb_inv.request = REG_MASKED_FIELD_ENABLE(val);
 	else
 		engine->tlb_inv.request = val;
 
@@ -1314,7 +1311,7 @@ static int measure_breadcrumb_dw(struct intel_context *ce)
 
 	GEM_BUG_ON(!engine->gt->scratch);
 
-	frame = kzalloc(sizeof(*frame), GFP_KERNEL);
+	frame = kzalloc_obj(*frame);
 	if (!frame)
 		return -ENOMEM;
 
@@ -1411,7 +1408,7 @@ create_ggtt_bind_context(struct intel_engine_cs *engine)
 
 	/*
 	 * MI_UPDATE_GTT can insert up to 511 PTE entries and there could be multiple
-	 * bind requets at a time so get a bigger ring.
+	 * bind requests at a time so get a bigger ring.
 	 */
 	return intel_engine_create_pinned_context(engine, engine->gt->vm, SZ_512K,
 						  I915_GEM_HWS_GGTT_BIND_ADDR,
@@ -1533,7 +1530,7 @@ int intel_engines_init(struct intel_gt *gt)
 
 /**
  * intel_engine_cleanup_common - cleans up the engine state created by
- *                                the common initiailizers.
+ *                                the common initializers.
  * @engine: Engine to cleanup.
  *
  * This cleans up everything created by the common helpers.
@@ -1631,7 +1628,7 @@ static int __intel_engine_stop_cs(struct intel_engine_cs *engine,
 	const i915_reg_t mode = RING_MI_MODE(engine->mmio_base);
 	int err;
 
-	intel_uncore_write_fw(uncore, mode, _MASKED_BIT_ENABLE(STOP_RING));
+	intel_uncore_write_fw(uncore, mode, REG_MASKED_FIELD_ENABLE(STOP_RING));
 
 	/*
 	 * Wa_22011802037: Prior to doing a reset, ensure CS is
@@ -1639,7 +1636,7 @@ static int __intel_engine_stop_cs(struct intel_engine_cs *engine,
 	 */
 	if (intel_engine_reset_needs_wa_22011802037(engine->gt))
 		intel_uncore_write_fw(uncore, RING_MODE_GEN7(engine->mmio_base),
-				      _MASKED_BIT_ENABLE(GEN12_GFX_PREFETCH_DISABLE));
+				      REG_MASKED_FIELD_ENABLE(GEN12_GFX_PREFETCH_DISABLE));
 
 	err = __intel_wait_for_register_fw(engine->uncore, mode,
 					   MODE_IDLE, MODE_IDLE,
@@ -1695,7 +1692,7 @@ void intel_engine_cancel_stop_cs(struct intel_engine_cs *engine)
 {
 	ENGINE_TRACE(engine, "\n");
 
-	ENGINE_WRITE_FW(engine, RING_MI_MODE, _MASKED_BIT_DISABLE(STOP_RING));
+	ENGINE_WRITE_FW(engine, RING_MI_MODE, REG_MASKED_FIELD_DISABLE(STOP_RING));
 }
 
 static u32 __cs_pending_mi_force_wakes(struct intel_engine_cs *engine)
@@ -1970,7 +1967,8 @@ void intel_engines_reset_default_submission(struct intel_gt *gt)
 		if (engine->sanitize)
 			engine->sanitize(engine);
 
-		engine->set_default_submission(engine);
+		if (engine->set_default_submission)
+			engine->set_default_submission(engine);
 	}
 }
 
@@ -2554,7 +2552,7 @@ void xehp_enable_ccs_engines(struct intel_engine_cs *engine)
 		return;
 
 	intel_uncore_write(engine->uncore, GEN12_RCU_MODE,
-			   _MASKED_BIT_ENABLE(GEN12_RCU_MODE_CCS_ENABLE));
+			   REG_MASKED_FIELD_ENABLE(GEN12_RCU_MODE_CCS_ENABLE));
 }
 
 #if IS_ENABLED(CONFIG_DRM_I915_SELFTEST)

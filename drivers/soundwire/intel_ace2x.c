@@ -11,13 +11,404 @@
 #include <linux/soundwire/sdw_registers.h>
 #include <linux/soundwire/sdw.h>
 #include <linux/soundwire/sdw_intel.h>
+#include <linux/string_choices.h>
 #include <sound/hdaudio.h>
 #include <sound/hda-mlink.h>
+#include <sound/hda-sdw-bpt.h>
 #include <sound/hda_register.h>
 #include <sound/pcm_params.h>
 #include "cadence_master.h"
 #include "bus.h"
 #include "intel.h"
+
+static int sdw_slave_bpt_stream_add(struct sdw_slave *slave, struct sdw_stream_runtime *stream)
+{
+	struct sdw_stream_config sconfig = {0};
+	struct sdw_port_config pconfig = {0};
+	int ret;
+
+	/* arbitrary configuration */
+	sconfig.frame_rate = 16000;
+	sconfig.ch_count = 1;
+	sconfig.bps = 32; /* this is required for BPT/BRA */
+	sconfig.direction = SDW_DATA_DIR_RX;
+	sconfig.type = SDW_STREAM_BPT;
+
+	pconfig.num = 0;
+	pconfig.ch_mask = BIT(0);
+
+	ret = sdw_stream_add_slave(slave, &sconfig, &pconfig, 1, stream);
+	if (ret)
+		dev_err(&slave->dev, "%s: failed: %d\n", __func__, ret);
+
+	return ret;
+}
+
+#define READ_PDI1_MIN_SIZE	12
+
+static int intel_ace2x_bpt_open_stream(struct sdw_intel *sdw, struct sdw_slave *slave,
+				       struct sdw_bpt_msg *msg)
+{
+	struct sdw_cdns *cdns = &sdw->cdns;
+	struct sdw_bus *bus = &cdns->bus;
+	struct sdw_master_prop *prop = &bus->prop;
+	struct sdw_stream_runtime *stream;
+	struct sdw_stream_config sconfig;
+	struct sdw_port_config *pconfig;
+	unsigned int pdi0_buf_size_pre_frame;
+	unsigned int pdi1_buf_size_pre_frame;
+	unsigned int pdi0_buffer_size_;
+	unsigned int pdi1_buffer_size_;
+	unsigned int pdi0_buffer_size;
+	unsigned int tx_dma_bandwidth;
+	unsigned int pdi1_buffer_size;
+	unsigned int rx_dma_bandwidth;
+	unsigned int fake_num_frames;
+	unsigned int data_per_frame;
+	unsigned int tx_total_bytes;
+	struct sdw_cdns_pdi *pdi0;
+	struct sdw_cdns_pdi *pdi1;
+	unsigned int rx_alignment;
+	unsigned int tx_alignment;
+	unsigned int num_frames_;
+	unsigned int num_frames;
+	unsigned int fake_size;
+	unsigned int tx_pad;
+	unsigned int rx_pad;
+	int command;
+	int ret1;
+	int ret;
+	int dir;
+	int len;
+	int i;
+
+	if (cdns->bus.bpt_stream) {
+		dev_err(cdns->dev, "%s: BPT stream already exists\n", __func__);
+		return -EAGAIN;
+	}
+
+	stream = sdw_alloc_stream("BPT", SDW_STREAM_BPT);
+	if (!stream)
+		return -ENOMEM;
+
+	cdns->bus.bpt_stream = stream;
+
+	ret = sdw_slave_bpt_stream_add(slave, stream);
+	if (ret < 0)
+		goto release_stream;
+
+	/* handle PDI0 first */
+	dir = SDW_DATA_DIR_TX;
+
+	pdi0 = sdw_cdns_alloc_pdi(cdns, &cdns->pcm, 1,  dir, 0);
+	if (!pdi0) {
+		dev_err(cdns->dev, "%s: sdw_cdns_alloc_pdi0 failed\n", __func__);
+		ret = -EINVAL;
+		goto remove_slave;
+	}
+
+	sdw_cdns_config_stream(cdns, 1, dir, pdi0);
+
+	/* handle PDI1  */
+	dir = SDW_DATA_DIR_RX;
+
+	pdi1 = sdw_cdns_alloc_pdi(cdns, &cdns->pcm, 1,  dir, 1);
+	if (!pdi1) {
+		dev_err(cdns->dev, "%s: sdw_cdns_alloc_pdi1 failed\n", __func__);
+		ret = -EINVAL;
+		goto remove_slave;
+	}
+
+	sdw_cdns_config_stream(cdns, 1, dir, pdi1);
+
+	/*
+	 * the port config direction, number of channels and frame
+	 * rate is totally arbitrary
+	 */
+	sconfig.direction = dir;
+	sconfig.ch_count = 1;
+	sconfig.frame_rate = 16000;
+	sconfig.type = SDW_STREAM_BPT;
+	sconfig.bps = 32; /* this is required for BPT/BRA */
+
+	/* Port configuration */
+	pconfig = kzalloc_objs(*pconfig, 2);
+	if (!pconfig) {
+		ret =  -ENOMEM;
+		goto remove_slave;
+	}
+
+	for (i = 0; i < 2 /* num_pdi */; i++) {
+		pconfig[i].num = i;
+		pconfig[i].ch_mask = 1;
+	}
+
+	ret = sdw_stream_add_master(&cdns->bus, &sconfig, pconfig, 2, stream);
+	kfree(pconfig);
+
+	if (ret < 0) {
+		dev_err(cdns->dev, "add master to stream failed:%d\n", ret);
+		goto remove_slave;
+	}
+
+	ret = sdw_prepare_stream(cdns->bus.bpt_stream);
+	if (ret < 0)
+		goto remove_master;
+
+	command = (msg->flags & SDW_MSG_FLAG_WRITE) ? 0 : 1;
+
+	ret = sdw_cdns_bpt_find_bandwidth(command, cdns->bus.params.row,
+					  cdns->bus.params.col,
+					  prop->default_frame_rate,
+					  &tx_dma_bandwidth, &rx_dma_bandwidth);
+	if (ret < 0)
+		goto deprepare_stream;
+
+	len = 0;
+	pdi0_buffer_size = 0;
+	pdi1_buffer_size = 0;
+	num_frames = 0;
+	/* Add up pdi buffer size and frame numbers of each BPT sections */
+	for (i = 0; i < msg->sections; i++) {
+		ret = sdw_cdns_bpt_find_buffer_sizes(command, cdns->bus.params.row,
+						     cdns->bus.params.col,
+						     msg->sec[i].len, SDW_BPT_MSG_MAX_BYTES,
+						     &data_per_frame, &pdi0_buffer_size_,
+						     &pdi1_buffer_size_, &num_frames_);
+		if (ret < 0)
+			goto deprepare_stream;
+
+		len += msg->sec[i].len;
+		pdi0_buffer_size += pdi0_buffer_size_;
+		pdi1_buffer_size += pdi1_buffer_size_;
+		num_frames += num_frames_;
+	}
+
+	sdw->bpt_ctx.pdi0_buffer_size = pdi0_buffer_size;
+	sdw->bpt_ctx.pdi1_buffer_size = pdi1_buffer_size;
+	sdw->bpt_ctx.num_frames = num_frames;
+	sdw->bpt_ctx.data_per_frame = data_per_frame;
+
+	rx_alignment = hda_sdw_bpt_get_buf_size_alignment(rx_dma_bandwidth);
+	tx_alignment = hda_sdw_bpt_get_buf_size_alignment(tx_dma_bandwidth);
+
+	if (command) { /* read */
+		/* Get buffer size of a full frame */
+		ret = sdw_cdns_bpt_find_buffer_sizes(command, cdns->bus.params.row,
+						     cdns->bus.params.col,
+						     data_per_frame, SDW_BPT_MSG_MAX_BYTES,
+						     &data_per_frame, &pdi0_buf_size_pre_frame,
+						     &pdi1_buf_size_pre_frame, &fake_num_frames);
+		if (ret < 0)
+			goto deprepare_stream;
+
+		/* find fake pdi1 buffer size */
+		rx_pad = rx_alignment - (pdi1_buffer_size % rx_alignment);
+		while (rx_pad <= READ_PDI1_MIN_SIZE)
+			rx_pad += rx_alignment;
+
+		pdi1_buffer_size += rx_pad;
+		/* It is fine if we request more than enough byte to read */
+		fake_num_frames = DIV_ROUND_UP(rx_pad, pdi1_buf_size_pre_frame);
+		fake_size = fake_num_frames * data_per_frame;
+
+		/* find fake pdi0 buffer size */
+		pdi0_buffer_size += (fake_num_frames * pdi0_buf_size_pre_frame);
+		tx_pad = tx_alignment - (pdi0_buffer_size % tx_alignment);
+		pdi0_buffer_size += tx_pad;
+	} else { /* write */
+		/*
+		 * For the write command, the rx data block is 4, and the rx buffer size of a frame
+		 * is 8. So the rx buffer size (pdi0_buffer_size) is always a multiple of rx
+		 * alignment.
+		 */
+		tx_pad = tx_alignment - (pdi0_buffer_size % tx_alignment);
+		pdi0_buffer_size += tx_pad;
+	}
+
+	dev_dbg(cdns->dev, "Message len %d transferred in %d frames (%d per frame)\n",
+		len, num_frames, data_per_frame);
+	dev_dbg(cdns->dev, "sizes pdi0 %d pdi1 %d tx_bandwidth %d rx_bandwidth %d\n",
+		pdi0_buffer_size, pdi1_buffer_size, tx_dma_bandwidth, rx_dma_bandwidth);
+
+	ret = hda_sdw_bpt_open(cdns->dev->parent, /* PCI device */
+			       sdw->instance, &sdw->bpt_ctx.bpt_tx_stream,
+			       &sdw->bpt_ctx.dmab_tx_bdl, pdi0_buffer_size, tx_dma_bandwidth,
+			       &sdw->bpt_ctx.bpt_rx_stream, &sdw->bpt_ctx.dmab_rx_bdl,
+			       pdi1_buffer_size, rx_dma_bandwidth);
+	if (ret < 0) {
+		dev_err(cdns->dev, "%s: hda_sdw_bpt_open failed %d\n", __func__, ret);
+		goto deprepare_stream;
+	}
+
+	if (!command) {
+		ret = sdw_cdns_prepare_write_dma_buffer(msg->dev_num, msg->sec, msg->sections,
+							data_per_frame,
+							sdw->bpt_ctx.dmab_tx_bdl.area,
+							pdi0_buffer_size, &tx_total_bytes);
+	} else {
+		ret = sdw_cdns_prepare_read_dma_buffer(msg->dev_num, msg->sec, msg->sections,
+						       data_per_frame,
+						       sdw->bpt_ctx.dmab_tx_bdl.area,
+						       pdi0_buffer_size, &tx_total_bytes,
+						       fake_size);
+	}
+
+	if (!ret)
+		return 0;
+
+	dev_err(cdns->dev, "%s: sdw_prepare_%s_dma_buffer failed %d\n",
+		__func__, str_read_write(command), ret);
+
+	ret1 = hda_sdw_bpt_close(cdns->dev->parent, /* PCI device */
+				 sdw->instance,
+				 sdw->bpt_ctx.bpt_tx_stream, &sdw->bpt_ctx.dmab_tx_bdl,
+				 sdw->bpt_ctx.bpt_rx_stream, &sdw->bpt_ctx.dmab_rx_bdl);
+	if (ret1 < 0)
+		dev_err(cdns->dev, "%s:  hda_sdw_bpt_close failed: ret %d\n",
+			__func__, ret1);
+
+deprepare_stream:
+	sdw_deprepare_stream(cdns->bus.bpt_stream);
+
+remove_master:
+	ret1 = sdw_stream_remove_master(&cdns->bus, cdns->bus.bpt_stream);
+	if (ret1 < 0)
+		dev_err(cdns->dev, "%s: remove master failed: %d\n",
+			__func__, ret1);
+
+remove_slave:
+	ret1 = sdw_stream_remove_slave(slave, cdns->bus.bpt_stream);
+	if (ret1 < 0)
+		dev_err(cdns->dev, "%s: remove slave failed: %d\n",
+			__func__, ret1);
+
+release_stream:
+	sdw_release_stream(cdns->bus.bpt_stream);
+	cdns->bus.bpt_stream = NULL;
+
+	return ret;
+}
+
+static void intel_ace2x_bpt_close_stream(struct sdw_intel *sdw, struct sdw_slave *slave,
+					 struct sdw_bpt_msg *msg)
+{
+	struct sdw_cdns *cdns = &sdw->cdns;
+	int ret;
+
+	ret = hda_sdw_bpt_close(cdns->dev->parent /* PCI device */, sdw->instance,
+				sdw->bpt_ctx.bpt_tx_stream,
+				&sdw->bpt_ctx.dmab_tx_bdl, sdw->bpt_ctx.bpt_rx_stream,
+				&sdw->bpt_ctx.dmab_rx_bdl);
+	if (ret < 0)
+		dev_err(cdns->dev, "%s:  hda_sdw_bpt_close failed: ret %d\n",
+			__func__, ret);
+
+	ret = sdw_deprepare_stream(cdns->bus.bpt_stream);
+	if (ret < 0)
+		dev_err(cdns->dev, "%s: sdw_deprepare_stream failed: ret %d\n",
+			__func__, ret);
+
+	ret = sdw_stream_remove_master(&cdns->bus, cdns->bus.bpt_stream);
+	if (ret < 0)
+		dev_err(cdns->dev, "%s: remove master failed: %d\n",
+			__func__, ret);
+
+	ret = sdw_stream_remove_slave(slave, cdns->bus.bpt_stream);
+	if (ret < 0)
+		dev_err(cdns->dev, "%s: remove slave failed: %d\n",
+			__func__, ret);
+
+	sdw_release_stream(cdns->bus.bpt_stream);
+	cdns->bus.bpt_stream = NULL;
+}
+
+#define INTEL_BPT_MSG_BYTE_MIN 16
+
+static int intel_ace2x_bpt_send_async(struct sdw_intel *sdw, struct sdw_slave *slave,
+				      struct sdw_bpt_msg *msg)
+{
+	struct sdw_cdns *cdns = &sdw->cdns;
+	int len = 0;
+	int ret;
+	int i;
+
+	for (i = 0; i < msg->sections; i++)
+		len += msg->sec[i].len;
+
+	if (len < INTEL_BPT_MSG_BYTE_MIN) {
+		dev_err(cdns->dev, "BPT message length %d is less than the minimum bytes %d\n",
+			len, INTEL_BPT_MSG_BYTE_MIN);
+		return -EINVAL;
+	}
+
+	dev_dbg(cdns->dev, "BPT Transfer start\n");
+
+	ret = intel_ace2x_bpt_open_stream(sdw, slave, msg);
+	if (ret < 0)
+		return ret;
+
+	ret = hda_sdw_bpt_send_async(cdns->dev->parent, /* PCI device */
+				     sdw->bpt_ctx.bpt_tx_stream, sdw->bpt_ctx.bpt_rx_stream);
+	if (ret < 0) {
+		dev_err(cdns->dev, "%s:   hda_sdw_bpt_send_async failed: %d\n",
+			__func__, ret);
+
+		intel_ace2x_bpt_close_stream(sdw, slave, msg);
+
+		return ret;
+	}
+
+	ret = sdw_enable_stream(cdns->bus.bpt_stream);
+	if (ret < 0) {
+		dev_err(cdns->dev, "%s: sdw_stream_enable failed: %d\n",
+			__func__, ret);
+		intel_ace2x_bpt_close_stream(sdw, slave, msg);
+	}
+
+	return ret;
+}
+
+static int intel_ace2x_bpt_wait(struct sdw_intel *sdw, struct sdw_slave *slave,
+				struct sdw_bpt_msg *msg)
+{
+	struct sdw_cdns *cdns = &sdw->cdns;
+	int ret;
+
+	dev_dbg(cdns->dev, "BPT Transfer wait\n");
+
+	ret = hda_sdw_bpt_wait(cdns->dev->parent, /* PCI device */
+			       sdw->bpt_ctx.bpt_tx_stream, sdw->bpt_ctx.bpt_rx_stream);
+	if (ret < 0)
+		dev_err(cdns->dev, "%s: hda_sdw_bpt_wait failed: %d\n", __func__, ret);
+
+	ret = sdw_disable_stream(cdns->bus.bpt_stream);
+	if (ret < 0) {
+		dev_err(cdns->dev, "%s: sdw_stream_enable failed: %d\n",
+			__func__, ret);
+		goto err;
+	}
+
+	if (msg->flags & SDW_MSG_FLAG_WRITE) {
+		ret = sdw_cdns_check_write_response(cdns->dev, sdw->bpt_ctx.dmab_rx_bdl.area,
+						    sdw->bpt_ctx.pdi1_buffer_size,
+						    sdw->bpt_ctx.num_frames);
+		if (ret < 0)
+			dev_err(cdns->dev, "%s: BPT Write failed %d\n", __func__, ret);
+	} else {
+		ret = sdw_cdns_check_read_response(cdns->dev, sdw->bpt_ctx.dmab_rx_bdl.area,
+						   sdw->bpt_ctx.pdi1_buffer_size,
+						   msg->sec, msg->sections, sdw->bpt_ctx.num_frames,
+						   sdw->bpt_ctx.data_per_frame);
+		if (ret < 0)
+			dev_err(cdns->dev, "%s: BPT Read failed %d\n", __func__, ret);
+	}
+
+err:
+	intel_ace2x_bpt_close_stream(sdw, slave, msg);
+
+	return ret;
+}
 
 /*
  * shim vendor-specific (vs) ops
@@ -364,8 +755,7 @@ static int intel_hw_params(struct snd_pcm_substream *substream,
 	sconfig.bps = snd_pcm_format_width(params_format(params));
 
 	/* Port configuration */
-	struct sdw_port_config *pconfig __free(kfree) = kzalloc(sizeof(*pconfig),
-								GFP_KERNEL);
+	struct sdw_port_config *pconfig __free(kfree) = kzalloc_obj(*pconfig);
 	if (!pconfig)
 		return -ENOMEM;
 
@@ -507,19 +897,6 @@ static int intel_trigger(struct snd_pcm_substream *substream, int cmd, struct sn
 	}
 
 	switch (cmd) {
-	case SNDRV_PCM_TRIGGER_SUSPEND:
-
-		/*
-		 * The .prepare callback is used to deal with xruns and resume operations.
-		 * In the case of xruns, the DMAs and SHIM registers cannot be touched,
-		 * but for resume operations the DMAs and SHIM registers need to be initialized.
-		 * the .trigger callback is used to track the suspend case only.
-		 */
-
-		dai_runtime->suspended = true;
-
-		break;
-
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		dai_runtime->paused = true;
 		break;
@@ -543,8 +920,34 @@ static const struct snd_soc_dai_ops intel_pcm_dai_ops = {
 	.get_stream = intel_get_sdw_stream,
 };
 
+static int intel_component_dais_suspend(struct snd_soc_component *component)
+{
+	struct snd_soc_dai *dai;
+
+	/*
+	 * Mark all open streams as suspended.
+	 * Open streams at this point can be in SUSPENDED, PAUSED or STOPPED
+	 * state and during prepare the DMAs and SHIM registers need to be
+	 * initialized for them.
+	 * The STOPPED state is a special corner case which can happen if audio
+	 * experiences xrun at suspend time.
+	 */
+	for_each_component_dais(component, dai) {
+		struct sdw_cdns *cdns = snd_soc_dai_get_drvdata(dai);
+		struct sdw_cdns_dai_runtime *dai_runtime;
+
+		dai_runtime = cdns->dai_runtime_array[dai->id];
+
+		if (dai_runtime)
+			dai_runtime->suspended = true;
+	}
+
+	return 0;
+}
+
 static const struct snd_soc_component_driver dai_component = {
 	.name			= "soundwire",
+	.suspend		= intel_component_dais_suspend,
 };
 
 /*
@@ -753,7 +1156,11 @@ const struct sdw_intel_hw_ops sdw_intel_lnl_hw_ops = {
 	.sync_check_cmdsync_unlocked = intel_check_cmdsync_unlocked,
 
 	.program_sdi = intel_program_sdi,
+
+	.bpt_send_async = intel_ace2x_bpt_send_async,
+	.bpt_wait = intel_ace2x_bpt_wait,
 };
 EXPORT_SYMBOL_NS(sdw_intel_lnl_hw_ops, "SOUNDWIRE_INTEL");
 
 MODULE_IMPORT_NS("SND_SOC_SOF_HDA_MLINK");
+MODULE_IMPORT_NS("SND_SOC_SOF_INTEL_HDA_SDW_BPT");

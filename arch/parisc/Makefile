@@ -39,7 +39,9 @@ endif
 
 export LD_BFD
 
-# Set default 32 bits cross compilers for vdso
+# Set default 32 bits cross compilers for vdso.
+# This means that for 64BIT, both the 64-bit tools and the 32-bit tools
+# need to be in the path.
 CC_ARCHES_32 = hppa hppa2.0 hppa1.1
 CC_SUFFIXES  = linux linux-gnu unknown-linux-gnu suse-linux
 CROSS32_COMPILE := $(call cc-cross-prefix, \
@@ -139,7 +141,7 @@ palo lifimage: vmlinuz
 	fi
 	@if test ! -f "$(PALOCONF)"; then \
 		cp $(srctree)/arch/parisc/defpalo.conf $(objtree)/palo.conf; \
-		echo 'A generic palo config file ($(objree)/palo.conf) has been created for you.'; \
+		echo 'A generic palo config file ($(objtree)/palo.conf) has been created for you.'; \
 		echo 'You should check it and re-run "make palo".'; \
 		echo 'WARNING: the "lifimage" file is now placed in this directory by default!'; \
 		false; \
@@ -172,13 +174,21 @@ ifeq ($(KBUILD_EXTMOD),)
 # this hack.
 prepare: vdso_prepare
 vdso_prepare: prepare0
-	$(if $(CONFIG_64BIT),$(Q)$(MAKE) \
-		$(build)=arch/parisc/kernel/vdso64 include/generated/vdso64-offsets.h)
+ifdef CONFIG_64BIT
+	$(Q)$(MAKE) $(build)=arch/parisc/kernel/vdso64 include/generated/vdso64-offsets.h
+	$(if $(CONFIG_COMPAT),$(Q)$(MAKE) \
+		$(build)=arch/parisc/kernel/vdso32 include/generated/vdso32-offsets.h)
+else
 	$(Q)$(MAKE) $(build)=arch/parisc/kernel/vdso32 include/generated/vdso32-offsets.h
 endif
+endif
 
+ifdef CONFIG_64BIT
+vdso-install-y			+= arch/parisc/kernel/vdso64/vdso64.so
+vdso-install-$(CONFIG_COMPAT)	+= arch/parisc/kernel/vdso32/vdso32.so
+else
 vdso-install-y			+= arch/parisc/kernel/vdso32/vdso32.so
-vdso-install-$(CONFIG_64BIT)	+= arch/parisc/kernel/vdso64/vdso64.so
+endif
 
 install: KBUILD_IMAGE := vmlinux
 zinstall: KBUILD_IMAGE := vmlinuz

@@ -15,8 +15,6 @@
 #include <linux/iio/sysfs.h>
 #include <linux/iio/dac/max517.h>
 
-#define MAX517_DRV_NAME	"max517"
-
 /* Commands */
 #define COMMAND_CHANNEL0	0x00
 #define COMMAND_CHANNEL1	0x01 /* for MAX518 and MAX519 */
@@ -189,18 +187,18 @@ static int max517_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max517_id[] = {
-	{ "max517", ID_MAX517 },
-	{ "max518", ID_MAX518 },
-	{ "max519", ID_MAX519 },
-	{ "max520", ID_MAX520 },
-	{ "max521", ID_MAX521 },
+	{ .name = "max517", .driver_data = ID_MAX517 },
+	{ .name = "max518", .driver_data = ID_MAX518 },
+	{ .name = "max519", .driver_data = ID_MAX519 },
+	{ .name = "max520", .driver_data = ID_MAX520 },
+	{ .name = "max521", .driver_data = ID_MAX521 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max517_id);
 
 static struct i2c_driver max517_driver = {
 	.driver = {
-		.name	= MAX517_DRV_NAME,
+		.name	= "max517",
 		.pm	= pm_sleep_ptr(&max517_pm_ops),
 	},
 	.probe		= max517_probe,

@@ -24,7 +24,7 @@ prerequisite()
 		exit $ksft_skip
 	fi
 
-	if ! ls $SYSFS/devices/system/cpu/cpu* > /dev/null 2>&1; then
+	if ! ls $SYSFS/devices/system/cpu/cpu*/online > /dev/null 2>&1; then
 		echo $msg cpu hotplug is not supported >&2
 		exit $ksft_skip
 	fi
@@ -67,7 +67,7 @@ hotpluggable_cpus()
 	done
 }
 
-hotplaggable_offline_cpus()
+hotpluggable_offline_cpus()
 {
 	hotpluggable_cpus 0
 }
@@ -151,7 +151,7 @@ offline_cpu_expect_fail()
 
 online_all_hot_pluggable_cpus()
 {
-	for cpu in `hotplaggable_offline_cpus`; do
+	for cpu in `hotpluggable_offline_cpus`; do
 		online_cpu_expect_success $cpu
 	done
 }

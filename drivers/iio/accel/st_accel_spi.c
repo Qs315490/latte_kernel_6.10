@@ -9,7 +9,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/spi/spi.h>
 #include <linux/iio/iio.h>
 
@@ -108,7 +107,7 @@ static const struct of_device_id st_accel_of_match[] = {
 		.compatible = "st,iis328dq",
 		.data = IIS328DQ_ACCEL_DEV_NAME,
 	},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, st_accel_of_match);
 
@@ -167,7 +166,7 @@ static const struct spi_device_id st_accel_id_table[] = {
 	{ LIS302DL_ACCEL_DEV_NAME },
 	{ LSM303C_ACCEL_DEV_NAME },
 	{ IIS328DQ_ACCEL_DEV_NAME },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, st_accel_id_table);
 

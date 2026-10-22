@@ -190,7 +190,7 @@ static int ohci_urb_enqueue (
 	}
 
 	/* allocate the private part of the URB */
-	urb_priv = kzalloc(struct_size(urb_priv, td, size), mem_flags);
+	urb_priv = kzalloc_flex(*urb_priv, td, size, mem_flags);
 	if (!urb_priv)
 		return -ENOMEM;
 	INIT_LIST_HEAD (&urb_priv->pending);
@@ -746,7 +746,8 @@ static int ohci_start(struct usb_hcd *hcd)
  */
 static void io_watchdog_func(struct timer_list *t)
 {
-	struct ohci_hcd	*ohci = from_timer(ohci, t, io_watchdog);
+	struct ohci_hcd	*ohci = timer_container_of(ohci, t,
+							  io_watchdog);
 	bool		takeback_all_pending = false;
 	u32		status;
 	u32		head;
@@ -1003,7 +1004,7 @@ static void ohci_stop (struct usb_hcd *hcd)
 
 	if (quirk_nec(ohci))
 		flush_work(&ohci->nec_work);
-	del_timer_sync(&ohci->io_watchdog);
+	timer_delete_sync(&ohci->io_watchdog);
 	ohci->prev_frame_no = IO_WATCHDOG_OFF;
 
 	ohci_writel (ohci, OHCI_INTR_MIE, &ohci->regs->intrdisable);
@@ -1281,7 +1282,6 @@ static int __init ohci_hcd_mod_init(void)
 
 	pr_debug ("%s: block sizes: ed %zd td %zd\n", hcd_name,
 		sizeof (struct ed), sizeof (struct td));
-	set_bit(USB_OHCI_LOADED, &usb_hcds_loaded);
 
 	ohci_debug_root = debugfs_create_dir("ohci", usb_debug_root);
 
@@ -1331,7 +1331,6 @@ static int __init ohci_hcd_mod_init(void)
 	debugfs_remove(ohci_debug_root);
 	ohci_debug_root = NULL;
 
-	clear_bit(USB_OHCI_LOADED, &usb_hcds_loaded);
 	return retval;
 }
 module_init(ohci_hcd_mod_init);
@@ -1351,7 +1350,6 @@ static void __exit ohci_hcd_mod_exit(void)
 	ps3_ohci_driver_unregister(&PS3_SYSTEM_BUS_DRIVER);
 #endif
 	debugfs_remove(ohci_debug_root);
-	clear_bit(USB_OHCI_LOADED, &usb_hcds_loaded);
 }
 module_exit(ohci_hcd_mod_exit);
 

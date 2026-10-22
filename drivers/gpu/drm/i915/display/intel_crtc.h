@@ -13,7 +13,6 @@ enum pipe;
 struct drm_device;
 struct drm_display_mode;
 struct drm_file;
-struct drm_i915_private;
 struct drm_pending_vblank_event;
 struct intel_atomic_state;
 struct intel_crtc;
@@ -38,7 +37,7 @@ void intel_crtc_arm_vblank_event(struct intel_crtc_state *crtc_state);
 void intel_crtc_prepare_vblank_event(struct intel_crtc_state *crtc_state,
 				     struct drm_pending_vblank_event **event);
 u32 intel_crtc_max_vblank_count(const struct intel_crtc_state *crtc_state);
-int intel_crtc_init(struct drm_i915_private *dev_priv, enum pipe pipe);
+int intel_crtc_init(struct intel_display *display);
 int intel_crtc_get_pipe_from_crtc_id_ioctl(struct drm_device *dev, void *data,
 					   struct drm_file *file_priv);
 struct intel_crtc_state *intel_crtc_state_alloc(struct intel_crtc *crtc);
@@ -52,11 +51,22 @@ void intel_pipe_update_start(struct intel_atomic_state *state,
 void intel_pipe_update_end(struct intel_atomic_state *state,
 			   struct intel_crtc *crtc);
 void intel_wait_for_vblank_workers(struct intel_atomic_state *state);
-struct intel_crtc *intel_first_crtc(struct drm_i915_private *i915);
+struct intel_crtc *intel_first_crtc(struct intel_display *display);
 struct intel_crtc *intel_crtc_for_pipe(struct intel_display *display,
 				       enum pipe pipe);
-void intel_wait_for_vblank_if_active(struct drm_i915_private *i915,
+void intel_wait_for_vblank_if_active(struct intel_display *display,
 				     enum pipe pipe);
 void intel_crtc_wait_for_next_vblank(struct intel_crtc *crtc);
+
+bool intel_any_crtc_enable_changed(struct intel_atomic_state *state);
+bool intel_crtc_enable_changed(const struct intel_crtc_state *old_crtc_state,
+			       const struct intel_crtc_state *new_crtc_state);
+bool intel_any_crtc_active_changed(struct intel_atomic_state *state);
+bool intel_crtc_active_changed(const struct intel_crtc_state *old_crtc_state,
+			       const struct intel_crtc_state *new_crtc_state);
+
+unsigned int intel_crtc_bw_num_active_planes(const struct intel_crtc_state *crtc_state);
+unsigned int intel_crtc_bw_data_rate(const struct intel_crtc_state *crtc_state);
+int intel_crtc_bw_min_cdclk(const struct intel_crtc_state *crtc_state);
 
 #endif

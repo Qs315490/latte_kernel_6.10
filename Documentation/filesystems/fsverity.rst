@@ -185,8 +185,7 @@ FS_IOC_ENABLE_VERITY can fail with the following errors:
 - ``ENOKEY``: the ".fs-verity" keyring doesn't contain the certificate
   needed to verify the builtin signature
 - ``ENOPKG``: fs-verity recognizes the hash algorithm, but it's not
-  available in the kernel's crypto API as currently configured (e.g.
-  for SHA-512, missing CONFIG_CRYPTO_SHA512).
+  available in the kernel as currently configured
 - ``ENOTTY``: this type of filesystem does not implement fs-verity
 - ``EOPNOTSUPP``: the kernel was not configured with fs-verity
   support; or the filesystem superblock has not had the 'verity'
@@ -248,11 +247,17 @@ FS_IOC_READ_VERITY_METADATA
 The FS_IOC_READ_VERITY_METADATA ioctl reads verity metadata from a
 verity file.  This ioctl is available since Linux v5.12.
 
-This ioctl allows writing a server program that takes a verity file
-and serves it to a client program, such that the client can do its own
-fs-verity compatible verification of the file.  This only makes sense
-if the client doesn't trust the server and if the server needs to
-provide the storage for the client.
+This ioctl is useful for cases where the verity verification should be
+performed somewhere other than the currently running kernel.
+
+One example is a server program that takes a verity file and serves it
+to a client program, such that the client can do its own fs-verity
+compatible verification of the file.  This only makes sense if the
+client doesn't trust the server and if the server needs to provide the
+storage for the client.
+
+Another example is copying verity metadata when creating filesystem
+images in userspace (such as with ``mkfs.ext4 -d``).
 
 This is a fairly specialized use case, and most fs-verity users won't
 need this ioctl.
@@ -335,6 +340,22 @@ Since Linux v5.5, the statx() system call sets STATX_ATTR_VERITY if
 the file has fs-verity enabled.  This can perform better than
 FS_IOC_GETFLAGS and FS_IOC_MEASURE_VERITY because it doesn't require
 opening the file, and opening verity files can be expensive.
+
+FS_IOC_FSGETXATTR
+-----------------
+
+Since Linux v7.0, the FS_IOC_FSGETXATTR ioctl sets FS_XFLAG_VERITY (0x00020000)
+in the returned flags when the file has verity enabled. Note that this attribute
+cannot be set with FS_IOC_FSSETXATTR as enabling verity requires input
+parameters. See FS_IOC_ENABLE_VERITY.
+
+file_getattr
+------------
+
+Since Linux v7.0, the file_getattr() syscall sets FS_XFLAG_VERITY (0x00020000)
+in the returned flags when the file has verity enabled. Note that this attribute
+cannot be set with file_setattr() as enabling verity requires input parameters.
+See FS_IOC_ENABLE_VERITY.
 
 .. _accessing_verity_files:
 

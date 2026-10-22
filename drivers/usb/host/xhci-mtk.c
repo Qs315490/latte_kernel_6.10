@@ -185,9 +185,9 @@ static void xhci_mtk_rxfifo_depth_set(struct xhci_hcd_mtk *mtk)
 		return;
 
 	value = readl(hcd->regs + HSCH_CFG1);
-	value &= ~SCH3_RXFIFO_DEPTH_MASK;
-	value |= FIELD_PREP(SCH3_RXFIFO_DEPTH_MASK,
-			    SCH_FIFO_TO_KB(mtk->rxfifo_depth) - 1);
+	FIELD_MODIFY(SCH3_RXFIFO_DEPTH_MASK, &value,
+		     SCH_FIFO_TO_KB(mtk->rxfifo_depth) - 1);
+
 	writel(value, hcd->regs + HSCH_CFG1);
 }
 
@@ -670,7 +670,6 @@ static int xhci_mtk_probe(struct platform_device *pdev)
 	}
 
 	device_enable_async_suspend(dev);
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 	pm_runtime_forbid(dev);
 
@@ -746,10 +745,10 @@ static int __maybe_unused xhci_mtk_suspend(struct device *dev)
 
 	xhci_dbg(xhci, "%s: stop port polling\n", __func__);
 	clear_bit(HCD_FLAG_POLL_RH, &hcd->flags);
-	del_timer_sync(&hcd->rh_timer);
+	timer_delete_sync(&hcd->rh_timer);
 	if (shared_hcd) {
 		clear_bit(HCD_FLAG_POLL_RH, &shared_hcd->flags);
-		del_timer_sync(&shared_hcd->rh_timer);
+		timer_delete_sync(&shared_hcd->rh_timer);
 	}
 
 	ret = xhci_mtk_host_disable(mtk);

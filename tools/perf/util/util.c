@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+#include "perf.h"
 #include "util.h"
 #include "debug.h"
 #include "event.h"
@@ -75,8 +76,6 @@ bool sysctl__nmi_watchdog_enabled(void)
 
 	return nmi_watchdog;
 }
-
-bool test_attr__enabled;
 
 bool exclude_GH_default;
 
@@ -257,6 +256,54 @@ static int rm_rf_kcore_dir(const char *path)
 	return 0;
 }
 
+void cpumask_to_cpulist(char *cpumask, char *cpulist)
+{
+	int i, j, bm_size, nbits;
+	int len = strlen(cpumask);
+	unsigned long *bm;
+	char cpus[MAX_NR_CPUS];
+
+	for (i = 0; i < len; i++) {
+		if (cpumask[i] == ',') {
+			for (j = i; j < len; j++)
+				cpumask[j] = cpumask[j + 1];
+		}
+	}
+
+	len = strlen(cpumask);
+	bm_size = (len + 15) / 16;
+	nbits = bm_size * 64;
+	if (nbits <= 0)
+		return;
+
+	bm = calloc(bm_size, sizeof(unsigned long));
+	if (!bm)
+		goto free_bm;
+
+	for (i = 0; i < bm_size; i++) {
+		char blk[17];
+		int blklen = len > 16 ? 16 : len;
+
+		strncpy(blk, cpumask + len - blklen, blklen);
+		blk[blklen] = '\0';
+		bm[i] = strtoul(blk, NULL, 16);
+		cpumask[len - blklen] = '\0';
+		len = strlen(cpumask);
+	}
+
+	bitmap_scnprintf(bm, nbits, cpus, sizeof(cpus));
+	strcpy(cpulist, cpus);
+
+free_bm:
+	free(bm);
+}
+
+void print_separator2(int pre_dash_cnt, const char *s, int post_dash_cnt)
+{
+	printf("%.*s%s%.*s\n", pre_dash_cnt, graph_dotted_line, s, post_dash_cnt,
+	       graph_dotted_line);
+}
+
 int rm_rf_perf_data(const char *path)
 {
 	const char *pat[] = {
@@ -372,11 +419,21 @@ out:
 
 char *perf_exe(char *buf, int len)
 {
-	int n = readlink("/proc/self/exe", buf, len);
+	int n;
+
+	if (len <= 0)
+		return buf;
+
+	n = readlink("/proc/self/exe", buf, len - 1);
 	if (n > 0) {
 		buf[n] = 0;
 		return buf;
 	}
+	if (len < (int)sizeof("perf")) {
+		buf[0] = '\0';
+		return buf;
+	}
+
 	return strcpy(buf, "perf");
 }
 
@@ -498,3 +555,11 @@ int scandirat(int dirfd, const char *dirp,
 	return err;
 }
 #endif
+
+/* basename version that takes a const input string */
+const char *perf_basename(const char *path)
+{
+	const char *base = strrchr(path, '/');
+
+	return base ? base + 1 : path;
+}

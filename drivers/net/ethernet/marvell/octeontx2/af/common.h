@@ -39,7 +39,7 @@ struct qmem {
 	void            *base;
 	dma_addr_t	iova;
 	int		alloc_sz;
-	u16		entry_sz;
+	u32		entry_sz;
 	u8		align;
 	u32		qsize;
 };
@@ -176,10 +176,6 @@ enum nix_scheduler {
 #define NIX_TX_ACTIONOP_UCAST_CHAN	(0x2ull)
 #define NIX_TX_ACTIONOP_MCAST		(0x3ull)
 #define NIX_TX_ACTIONOP_DROP_VIOL	(0x5ull)
-
-#define NPC_MCAM_KEY_X1			0
-#define NPC_MCAM_KEY_X2			1
-#define NPC_MCAM_KEY_X4			2
 
 #define NIX_INTFX_RX(a)			(0x0ull | (a) << 1)
 #define NIX_INTFX_TX(a)			(0x1ull | (a) << 1)

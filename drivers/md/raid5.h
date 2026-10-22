@@ -38,7 +38,7 @@
  *  Clean -> Dirty  - on compute_parity to satisfy write/sync (RECONSTRUCT or RMW)
  *
  * The Want->Empty, Want->Clean, Dirty->Clean, transitions
- * all happen in b_end_io at interrupt time.
+ * all happen in end_io at interrupt time.
  * Each sets the Uptodate bit before releasing the Lock bit.
  * This leaves one multi-stage transition:
  *    Want->Dirty->Clean
@@ -64,7 +64,7 @@
  * together, but we are not guaranteed of that so we allow for more.
  *
  * If a buffer is on the read list when the associated cache buffer is
- * Uptodate, the data is copied into the read buffer and it's b_end_io
+ * Uptodate, the data is copied into the read buffer and it's end_io
  * routine is called.  This may happen in the end_request routine only
  * if the buffer has just successfully been read.  end_request should
  * remove the buffers from the list and then set the Uptodate bit on
@@ -76,7 +76,7 @@
  * into the cache buffer, which is then marked dirty, and moved onto a
  * third list, the written list (bh_written).  Once both the parity
  * block and the cached buffer are successfully written, any buffer on
- * a written list can be returned with b_end_io.
+ * a written list can be returned with end_io.
  *
  * The write list and read list both act as fifos.  The read list,
  * write list and written list are protected by the device_lock.
@@ -640,7 +640,6 @@ struct r5conf {
 					    * (fresh device added).
 					    * Cleared when a sync completes.
 					    */
-	int			recovery_disabled;
 	/* per cpu variables */
 	struct raid5_percpu __percpu *percpu;
 	int scribble_disks;
@@ -690,6 +689,10 @@ struct r5conf {
 	struct list_head	pending_list;
 	int			pending_data_cnt;
 	struct r5pending_data	*next_pending_data;
+	bool			raid5_discard_unsupported;
+
+	mempool_t		*ctx_pool;
+	int			ctx_size;
 };
 
 #if PAGE_SIZE == DEFAULT_STRIPE_SIZE
@@ -799,7 +802,6 @@ raid5_get_dev_page(struct stripe_head *sh, int disk_idx)
 }
 #endif
 
-void md_raid5_kick_device(struct r5conf *conf);
 int raid5_set_cache_size(struct mddev *mddev, int size);
 sector_t raid5_compute_blocknr(struct stripe_head *sh, int i, int previous);
 void raid5_release_stripe(struct stripe_head *sh);

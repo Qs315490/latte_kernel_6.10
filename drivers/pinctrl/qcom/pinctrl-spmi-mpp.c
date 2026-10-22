@@ -370,7 +370,7 @@ static int pmic_mpp_config_get(struct pinctrl_dev *pctldev,
 			return -EINVAL;
 		arg = 1;
 		break;
-	case PIN_CONFIG_OUTPUT:
+	case PIN_CONFIG_LEVEL:
 		arg = pad->out_value;
 		break;
 	case PMIC_MPP_CONF_DTEST_SELECTOR:
@@ -447,7 +447,7 @@ static int pmic_mpp_config_set(struct pinctrl_dev *pctldev, unsigned int pin,
 		case PIN_CONFIG_INPUT_ENABLE:
 			pad->input_enabled = arg ? true : false;
 			break;
-		case PIN_CONFIG_OUTPUT:
+		case PIN_CONFIG_LEVEL:
 			pad->output_enabled = true;
 			pad->out_value = arg;
 			break;
@@ -576,7 +576,7 @@ static int pmic_mpp_direction_output(struct gpio_chip *chip,
 	struct pmic_mpp_state *state = gpiochip_get_data(chip);
 	unsigned long config;
 
-	config = pinconf_to_config_packed(PIN_CONFIG_OUTPUT, val);
+	config = pinconf_to_config_packed(PIN_CONFIG_LEVEL, val);
 
 	return pmic_mpp_config_set(state->ctrl, pin, &config, 1);
 }
@@ -600,14 +600,14 @@ static int pmic_mpp_get(struct gpio_chip *chip, unsigned pin)
 	return !!pad->out_value;
 }
 
-static void pmic_mpp_set(struct gpio_chip *chip, unsigned pin, int value)
+static int pmic_mpp_set(struct gpio_chip *chip, unsigned int pin, int value)
 {
 	struct pmic_mpp_state *state = gpiochip_get_data(chip);
 	unsigned long config;
 
-	config = pinconf_to_config_packed(PIN_CONFIG_OUTPUT, value);
+	config = pinconf_to_config_packed(PIN_CONFIG_LEVEL, value);
 
-	pmic_mpp_config_set(state->ctrl, pin, &config, 1);
+	return pmic_mpp_config_set(state->ctrl, pin, &config, 1);
 }
 
 static int pmic_mpp_of_xlate(struct gpio_chip *chip,

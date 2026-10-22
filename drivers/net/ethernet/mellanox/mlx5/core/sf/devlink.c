@@ -31,9 +31,6 @@ struct mlx5_sf_table {
 	struct mlx5_core_dev *dev; /* To refer from notifier context. */
 	struct xarray function_ids; /* function id based lookup. */
 	struct mutex sf_state_lock; /* Serializes sf state among user cmds & vhca event handler. */
-	struct notifier_block esw_nb;
-	struct notifier_block vhca_nb;
-	struct notifier_block mdev_nb;
 };
 
 static struct mlx5_sf *
@@ -73,7 +70,7 @@ mlx5_sf_alloc(struct mlx5_sf_table *table, struct mlx5_eswitch *esw,
 		goto id_err;
 	}
 
-	sf = kzalloc(sizeof(*sf), GFP_KERNEL);
+	sf = kzalloc_obj(*sf);
 	if (!sf) {
 		err = -ENOMEM;
 		goto alloc_err;
@@ -248,8 +245,10 @@ static int mlx5_sf_add(struct mlx5_core_dev *dev, struct mlx5_sf_table *table,
 	if (IS_ERR(sf))
 		return PTR_ERR(sf);
 
+	mlx5_esw_reps_block(esw);
 	err = mlx5_eswitch_load_sf_vport(esw, sf->hw_fn_id, MLX5_VPORT_UC_ADDR_CHANGE,
 					 &sf->dl_port, new_attr->controller, new_attr->sfnum);
+	mlx5_esw_reps_unblock(esw);
 	if (err)
 		goto esw_err;
 	*dl_port = &sf->dl_port.dl_port;
@@ -266,6 +265,8 @@ static int
 mlx5_sf_new_check_attr(struct mlx5_core_dev *dev, const struct devlink_port_new_attrs *new_attr,
 		       struct netlink_ext_ack *extack)
 {
+	u32 controller;
+
 	if (new_attr->flavour != DEVLINK_PORT_FLAVOUR_PCI_SF) {
 		NL_SET_ERR_MSG_MOD(extack, "Driver supports only SF port addition");
 		return -EOPNOTSUPP;
@@ -285,7 +286,9 @@ mlx5_sf_new_check_attr(struct mlx5_core_dev *dev, const struct devlink_port_new_
 		NL_SET_ERR_MSG_MOD(extack, "External controller is unsupported");
 		return -EOPNOTSUPP;
 	}
-	if (new_attr->pfnum != mlx5_get_dev_index(dev)) {
+	controller = new_attr->controller_valid ? new_attr->controller : 0;
+	if (new_attr->pfnum !=
+	    mlx5_esw_sf_controller_to_pfnum(dev, controller)) {
 		NL_SET_ERR_MSG_MOD(extack, "Invalid pfnum supplied");
 		return -EOPNOTSUPP;
 	}
@@ -307,10 +310,6 @@ int mlx5_devlink_sf_port_new(struct devlink *devlink,
 	struct mlx5_sf_table *table = dev->priv.sf_table;
 	int err;
 
-	err = mlx5_sf_new_check_attr(dev, new_attr, extack);
-	if (err)
-		return err;
-
 	if (!mlx5_sf_table_supported(dev)) {
 		NL_SET_ERR_MSG_MOD(extack, "SF ports are not supported.");
 		return -EOPNOTSUPP;
@@ -321,6 +320,10 @@ int mlx5_devlink_sf_port_new(struct devlink *devlink,
 				   "SF ports are only supported in eswitch switchdev mode.");
 		return -EOPNOTSUPP;
 	}
+
+	err = mlx5_sf_new_check_attr(dev, new_attr, extack);
+	if (err)
+		return err;
 
 	return mlx5_sf_add(dev, table, new_attr, extack, dl_port);
 }
@@ -370,7 +373,10 @@ int mlx5_devlink_sf_port_del(struct devlink *devlink,
 	struct mlx5_sf_table *table = dev->priv.sf_table;
 	struct mlx5_sf *sf = mlx5_sf_by_dl_port(dl_port);
 
+	mlx5_esw_reps_block(dev->priv.eswitch);
 	mlx5_sf_del(table, sf);
+	mlx5_esw_reps_unblock(dev->priv.eswitch);
+
 	return 0;
 }
 
@@ -391,10 +397,15 @@ static bool mlx5_sf_state_update_check(const struct mlx5_sf *sf, u8 new_state)
 
 static int mlx5_sf_vhca_event(struct notifier_block *nb, unsigned long opcode, void *data)
 {
-	struct mlx5_sf_table *table = container_of(nb, struct mlx5_sf_table, vhca_nb);
+	struct mlx5_core_dev *dev = container_of(nb, struct mlx5_core_dev,
+						 priv.sf_table_vhca_nb);
+	struct mlx5_sf_table *table = dev->priv.sf_table;
 	const struct mlx5_vhca_state_event *event = data;
 	bool update = false;
 	struct mlx5_sf *sf;
+
+	if (!table)
+		return 0;
 
 	mutex_lock(&table->sf_state_lock);
 	sf = mlx5_sf_lookup_by_function_id(table, event->function_id);
@@ -407,7 +418,7 @@ static int mlx5_sf_vhca_event(struct notifier_block *nb, unsigned long opcode, v
 	update = mlx5_sf_state_update_check(sf, event->new_vhca_state);
 	if (update)
 		sf->hw_state = event->new_vhca_state;
-	trace_mlx5_sf_update_state(table->dev, sf->port_index, sf->controller,
+	trace_mlx5_sf_update_state(dev, sf->port_index, sf->controller,
 				   sf->hw_fn_id, sf->hw_state);
 unlock:
 	mutex_unlock(&table->sf_state_lock);
@@ -425,12 +436,16 @@ static void mlx5_sf_del_all(struct mlx5_sf_table *table)
 
 static int mlx5_sf_esw_event(struct notifier_block *nb, unsigned long event, void *data)
 {
-	struct mlx5_sf_table *table = container_of(nb, struct mlx5_sf_table, esw_nb);
+	struct mlx5_core_dev *dev = container_of(nb, struct mlx5_core_dev,
+						 priv.sf_table_esw_nb);
 	const struct mlx5_esw_event_info *mode = data;
+
+	if (!dev->priv.sf_table)
+		return 0;
 
 	switch (mode->new_mode) {
 	case MLX5_ESWITCH_LEGACY:
-		mlx5_sf_del_all(table);
+		mlx5_sf_del_all(dev->priv.sf_table);
 		break;
 	default:
 		break;
@@ -441,14 +456,15 @@ static int mlx5_sf_esw_event(struct notifier_block *nb, unsigned long event, voi
 
 static int mlx5_sf_mdev_event(struct notifier_block *nb, unsigned long event, void *data)
 {
-	struct mlx5_sf_table *table = container_of(nb, struct mlx5_sf_table, mdev_nb);
+	struct mlx5_core_dev *dev = container_of(nb, struct mlx5_core_dev,
+						 priv.sf_table_mdev_nb);
 	struct mlx5_sf_peer_devlink_event_ctx *event_ctx = data;
+	struct mlx5_sf_table *table = dev->priv.sf_table;
 	int ret = NOTIFY_DONE;
 	struct mlx5_sf *sf;
 
-	if (event != MLX5_DRIVER_EVENT_SF_PEER_DEVLINK)
+	if (!table || event != MLX5_DRIVER_EVENT_SF_PEER_DEVLINK)
 		return NOTIFY_DONE;
-
 
 	mutex_lock(&table->sf_state_lock);
 	sf = mlx5_sf_lookup_by_function_id(table, event_ctx->fn_id);
@@ -464,15 +480,45 @@ out:
 	return ret;
 }
 
+int mlx5_sf_notifiers_init(struct mlx5_core_dev *dev)
+{
+	int err;
+
+	if (mlx5_core_is_sf(dev))
+		return 0;
+
+	dev->priv.sf_table_esw_nb.notifier_call = mlx5_sf_esw_event;
+	err = mlx5_esw_event_notifier_register(dev, &dev->priv.sf_table_esw_nb);
+	if (err)
+		return err;
+
+	dev->priv.sf_table_vhca_nb.notifier_call = mlx5_sf_vhca_event;
+	err = mlx5_vhca_event_notifier_register(dev,
+						&dev->priv.sf_table_vhca_nb);
+	if (err)
+		goto vhca_err;
+
+	dev->priv.sf_table_mdev_nb.notifier_call = mlx5_sf_mdev_event;
+	err = mlx5_blocking_notifier_register(dev, &dev->priv.sf_table_mdev_nb);
+	if (err)
+		goto mdev_err;
+
+	return 0;
+mdev_err:
+	mlx5_vhca_event_notifier_unregister(dev, &dev->priv.sf_table_vhca_nb);
+vhca_err:
+	mlx5_esw_event_notifier_unregister(dev, &dev->priv.sf_table_esw_nb);
+	return err;
+}
+
 int mlx5_sf_table_init(struct mlx5_core_dev *dev)
 {
 	struct mlx5_sf_table *table;
-	int err;
 
 	if (!mlx5_sf_table_supported(dev) || !mlx5_vhca_event_supported(dev))
 		return 0;
 
-	table = kzalloc(sizeof(*table), GFP_KERNEL);
+	table = kzalloc_obj(*table);
 	if (!table)
 		return -ENOMEM;
 
@@ -480,28 +526,18 @@ int mlx5_sf_table_init(struct mlx5_core_dev *dev)
 	table->dev = dev;
 	xa_init(&table->function_ids);
 	dev->priv.sf_table = table;
-	table->esw_nb.notifier_call = mlx5_sf_esw_event;
-	err = mlx5_esw_event_notifier_register(dev->priv.eswitch, &table->esw_nb);
-	if (err)
-		goto reg_err;
-
-	table->vhca_nb.notifier_call = mlx5_sf_vhca_event;
-	err = mlx5_vhca_event_notifier_register(table->dev, &table->vhca_nb);
-	if (err)
-		goto vhca_err;
-
-	table->mdev_nb.notifier_call = mlx5_sf_mdev_event;
-	mlx5_blocking_notifier_register(dev, &table->mdev_nb);
 
 	return 0;
+}
 
-vhca_err:
-	mlx5_esw_event_notifier_unregister(dev->priv.eswitch, &table->esw_nb);
-reg_err:
-	mutex_destroy(&table->sf_state_lock);
-	kfree(table);
-	dev->priv.sf_table = NULL;
-	return err;
+void mlx5_sf_notifiers_cleanup(struct mlx5_core_dev *dev)
+{
+	if (mlx5_core_is_sf(dev))
+		return;
+
+	mlx5_blocking_notifier_unregister(dev, &dev->priv.sf_table_mdev_nb);
+	mlx5_vhca_event_notifier_unregister(dev, &dev->priv.sf_table_vhca_nb);
+	mlx5_esw_event_notifier_unregister(dev, &dev->priv.sf_table_esw_nb);
 }
 
 void mlx5_sf_table_cleanup(struct mlx5_core_dev *dev)
@@ -511,10 +547,46 @@ void mlx5_sf_table_cleanup(struct mlx5_core_dev *dev)
 	if (!table)
 		return;
 
-	mlx5_blocking_notifier_unregister(dev, &table->mdev_nb);
-	mlx5_vhca_event_notifier_unregister(table->dev, &table->vhca_nb);
-	mlx5_esw_event_notifier_unregister(dev->priv.eswitch, &table->esw_nb);
 	mutex_destroy(&table->sf_state_lock);
 	WARN_ON(!xa_empty(&table->function_ids));
 	kfree(table);
+}
+
+bool mlx5_sf_table_empty(const struct mlx5_core_dev *dev)
+{
+	struct mlx5_sf_table *table = dev->priv.sf_table;
+
+	if (!table)
+		return true;
+
+	return xa_empty(&table->function_ids);
+}
+
+void mlx5_sf_table_esw_changed_event_handler(struct mlx5_core_dev *dev)
+{
+	struct mlx5_sf_table *table = dev->priv.sf_table;
+	unsigned long index;
+	struct mlx5_sf *sf;
+
+	trace_mlx5_sf_host_pf_disabled(dev);
+
+	if (!table)
+		return;
+
+	mutex_lock(&table->sf_state_lock);
+	xa_for_each(&table->function_ids, index, sf) {
+		if (!sf->controller)
+			continue;
+
+		if (sf->hw_state == MLX5_VHCA_STATE_IN_USE)
+			sf->hw_state = MLX5_VHCA_STATE_ACTIVE;
+		else if (sf->hw_state == MLX5_VHCA_STATE_TEARDOWN_REQUEST)
+			sf->hw_state = MLX5_VHCA_STATE_ALLOCATED;
+		else
+			continue;
+		trace_mlx5_sf_update_state(table->dev, sf->port_index,
+					   sf->controller, sf->hw_fn_id,
+					   sf->hw_state);
+	}
+	mutex_unlock(&table->sf_state_lock);
 }

@@ -7,6 +7,8 @@
 #include <linux/list_sort.h>
 #include <linux/llist.h>
 
+#include <drm/drm_print.h>
+
 #include "i915_drv.h"
 #include "intel_engine.h"
 #include "intel_engine_user.h"
@@ -257,7 +259,7 @@ void intel_engines_driver_register(struct drm_i915_private *i915)
 		p = &prev->rb_right;
 	}
 
-	if (IS_ENABLED(CONFIG_DRM_I915_SELFTESTS) &&
+	if (IS_ENABLED(CONFIG_DRM_I915_SELFTEST) &&
 	    IS_ENABLED(CONFIG_DRM_I915_DEBUG_GEM)) {
 		struct intel_engine_cs *engine;
 		unsigned int isolation;

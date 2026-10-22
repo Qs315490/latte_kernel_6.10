@@ -17,6 +17,7 @@
 #include <linux/kfifo.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
+#include <linux/overflow.h>
 #include "hid_bpf_dispatch.h"
 
 const struct hid_ops *hid_ops;
@@ -24,7 +25,8 @@ EXPORT_SYMBOL(hid_ops);
 
 u8 *
 dispatch_hid_bpf_device_event(struct hid_device *hdev, enum hid_report_type type, u8 *data,
-			      u32 *size, int interrupt, u64 source, bool from_bpf)
+			      size_t *buf_size, u32 *size, int interrupt, u64 source,
+			      bool from_bpf)
 {
 	struct hid_bpf_ctx_kern ctx_kern = {
 		.ctx = {
@@ -37,6 +39,9 @@ dispatch_hid_bpf_device_event(struct hid_device *hdev, enum hid_report_type type
 	};
 	struct hid_bpf_ops *e;
 	int ret;
+
+	if (unlikely(hdev->bpf.destroyed))
+		return ERR_PTR(-ENODEV);
 
 	if (type >= HID_REPORT_TYPES)
 		return ERR_PTR(-EINVAL);
@@ -71,6 +76,7 @@ dispatch_hid_bpf_device_event(struct hid_device *hdev, enum hid_report_type type
 		*size = ret;
 	}
 
+	*buf_size = ctx_kern.ctx.allocated_size;
 	return ctx_kern.data;
 }
 EXPORT_SYMBOL_GPL(dispatch_hid_bpf_device_event);
@@ -92,6 +98,9 @@ int dispatch_hid_bpf_raw_requests(struct hid_device *hdev,
 	};
 	struct hid_bpf_ops *e;
 	int ret, idx;
+
+	if (unlikely(hdev->bpf.destroyed))
+		return -ENODEV;
 
 	if (rtype >= HID_REPORT_TYPES)
 		return -EINVAL;
@@ -129,6 +138,9 @@ int dispatch_hid_bpf_output_report(struct hid_device *hdev,
 	};
 	struct hid_bpf_ops *e;
 	int ret, idx;
+
+	if (unlikely(hdev->bpf.destroyed))
+		return -ENODEV;
 
 	idx = srcu_read_lock(&hdev->bpf.srcu);
 	list_for_each_entry_srcu(e, &hdev->bpf.prog_list, list,
@@ -285,13 +297,12 @@ __bpf_kfunc __u8 *
 hid_bpf_get_data(struct hid_bpf_ctx *ctx, unsigned int offset, const size_t rdwr_buf_size)
 {
 	struct hid_bpf_ctx_kern *ctx_kern;
-
-	if (!ctx)
-		return NULL;
+	size_t end;
 
 	ctx_kern = container_of(ctx, struct hid_bpf_ctx_kern, ctx);
 
-	if (rdwr_buf_size + offset > ctx->allocated_size)
+	if (check_add_overflow(rdwr_buf_size, offset, &end) ||
+	    end > ctx->allocated_size)
 		return NULL;
 
 	return ctx_kern->data + offset;
@@ -314,7 +325,7 @@ hid_bpf_allocate_context(unsigned int hid_id)
 	if (IS_ERR(hdev))
 		return NULL;
 
-	ctx_kern = kzalloc(sizeof(*ctx_kern), GFP_KERNEL);
+	ctx_kern = kzalloc_obj(*ctx_kern);
 	if (!ctx_kern) {
 		hid_put_device(hdev);
 		return NULL;
@@ -355,7 +366,7 @@ __hid_bpf_hw_check_params(struct hid_bpf_ctx *ctx, __u8 *buf, size_t *buf__sz,
 	u32 report_len;
 
 	/* check arguments */
-	if (!ctx || !hid_ops || !buf)
+	if (!hid_ops)
 		return -EINVAL;
 
 	switch (rtype) {
@@ -438,6 +449,8 @@ hid_bpf_hw_request(struct hid_bpf_ctx *ctx, __u8 *buf, size_t buf__sz,
 					      (u64)(long)ctx,
 					      true); /* prevent infinite recursions */
 
+	if (ret > size)
+		ret = size;
 	if (ret > 0)
 		memcpy(buf, dma_data, ret);
 
@@ -497,7 +510,7 @@ __hid_bpf_input_report(struct hid_bpf_ctx *ctx, enum hid_report_type type, u8 *b
 	if (ret)
 		return ret;
 
-	return hid_ops->hid_input_report(ctx->hid, type, buf, size, 0, (u64)(long)ctx, true,
+	return hid_ops->hid_input_report(ctx->hid, type, buf, size, size, 0, (u64)(long)ctx, true,
 					 lock_already_taken);
 }
 

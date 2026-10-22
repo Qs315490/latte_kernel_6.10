@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * Header for the Direct Rendering Manager
  *
@@ -11,25 +12,6 @@
  * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
  * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
- * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
- * OTHER DEALINGS IN THE SOFTWARE.
  */
 
 #ifndef _DRM_H_
@@ -597,32 +579,63 @@ struct drm_set_version {
 	int drm_dd_minor;
 };
 
-/* DRM_IOCTL_GEM_CLOSE ioctl argument type */
+/**
+ * struct drm_gem_close - Argument for &DRM_IOCTL_GEM_CLOSE ioctl.
+ * @handle: Handle of the object to be closed.
+ * @pad: Padding.
+ *
+ * Releases the handle to an mm object.
+ */
 struct drm_gem_close {
-	/** Handle of the object to be closed. */
 	__u32 handle;
 	__u32 pad;
 };
 
-/* DRM_IOCTL_GEM_FLINK ioctl argument type */
+/**
+ * struct drm_gem_flink - Argument for &DRM_IOCTL_GEM_FLINK ioctl.
+ * @handle: Handle for the object being named.
+ * @name: Returned global name.
+ *
+ * Create a global name for an object, returning the name.
+ *
+ * Note that the name does not hold a reference; when the object
+ * is freed, the name goes away.
+ */
 struct drm_gem_flink {
-	/** Handle for the object being named */
 	__u32 handle;
-
-	/** Returned global name */
 	__u32 name;
 };
 
-/* DRM_IOCTL_GEM_OPEN ioctl argument type */
+/**
+ * struct drm_gem_open - Argument for &DRM_IOCTL_GEM_OPEN ioctl.
+ * @name: Name of object being opened.
+ * @handle: Returned handle for the object.
+ * @size: Returned size of the object
+ *
+ * Open an object using the global name, returning a handle and the size.
+ *
+ * This handle (of course) holds a reference to the object, so the object
+ * will not go away until the handle is deleted.
+ */
 struct drm_gem_open {
-	/** Name of object being opened */
 	__u32 name;
-
-	/** Returned handle for the object */
 	__u32 handle;
-
-	/** Returned size of the object */
 	__u64 size;
+};
+
+/**
+ * struct drm_gem_change_handle - Argument for &DRM_IOCTL_GEM_CHANGE_HANDLE ioctl.
+ * @handle: The handle of a gem object.
+ * @new_handle: An available gem handle.
+ *
+ * This ioctl changes the handle of a GEM object to the specified one.
+ * The new handle must be unused. On success the old handle is closed
+ * and all further IOCTL should refer to the new handle only.
+ * Calls to DRM_IOCTL_PRIME_FD_TO_HANDLE will return the new handle.
+ */
+struct drm_gem_change_handle {
+	__u32 handle;
+	__u32 new_handle;
 };
 
 /**
@@ -875,6 +888,21 @@ struct drm_get_cap {
  */
 #define DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT	6
 
+/**
+ * DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE
+ *
+ * If set to 1 the DRM core will allow setting the COLOR_PIPELINE
+ * property on a &drm_plane, as well as drm_colorop properties.
+ *
+ * Setting of these plane properties will be rejected when this client
+ * cap is set:
+ * - COLOR_ENCODING
+ * - COLOR_RANGE
+ *
+ * The client must enable &DRM_CLIENT_CAP_ATOMIC first.
+ */
+#define DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE	7
+
 /* DRM_IOCTL_SET_CLIENT_CAP ioctl argument type */
 struct drm_set_client_cap {
 	__u64 capability;
@@ -905,13 +933,17 @@ struct drm_syncobj_destroy {
 };
 
 #define DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE (1 << 0)
+#define DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_TIMELINE         (1 << 1)
 #define DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE (1 << 0)
+#define DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_TIMELINE         (1 << 1)
 struct drm_syncobj_handle {
 	__u32 handle;
 	__u32 flags;
 
 	__s32 fd;
 	__u32 pad;
+
+	__u64 point;
 };
 
 struct drm_syncobj_transfer {
@@ -1273,6 +1305,13 @@ extern "C" {
  */
 #define DRM_IOCTL_MODE_GETFB2		DRM_IOWR(0xCE, struct drm_mode_fb_cmd2)
 
+/**
+ * DRM_IOCTL_SYNCOBJ_EVENTFD - Register an eventfd to be signalled by a syncobj.
+ *
+ * This can be used to integrate a syncobj in an event loop.
+ *
+ * The IOCTL argument is a struct drm_syncobj_eventfd.
+ */
 #define DRM_IOCTL_SYNCOBJ_EVENTFD	DRM_IOWR(0xCF, struct drm_syncobj_eventfd)
 
 /**
@@ -1304,6 +1343,14 @@ extern "C" {
  * The call will fail if the name contains whitespaces or non-printable chars.
  */
 #define DRM_IOCTL_SET_CLIENT_NAME	DRM_IOWR(0xD1, struct drm_set_client_name)
+
+/**
+ * DRM_IOCTL_GEM_CHANGE_HANDLE - Move an object to a different handle
+ *
+ * Some applications (notably CRIU) need objects to have specific gem handles.
+ * This ioctl changes the object at one gem handle to use a new gem handle.
+ */
+#define DRM_IOCTL_GEM_CHANGE_HANDLE    DRM_IOWR(0xD2, struct drm_gem_change_handle)
 
 /*
  * Device specific ioctls should only be in their respective headers

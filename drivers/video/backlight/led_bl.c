@@ -9,6 +9,7 @@
 #include <linux/backlight.h>
 #include <linux/leds.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 
 struct led_bl_data {
@@ -89,7 +90,7 @@ static int led_bl_get_leds(struct device *dev,
 		return -EINVAL;
 	}
 
-	leds = devm_kzalloc(dev, sizeof(struct led_classdev *) * nb_leds,
+	leds = devm_kcalloc(dev, nb_leds, sizeof(struct led_classdev *),
 			    GFP_KERNEL);
 	if (!leds)
 		return -ENOMEM;
@@ -137,7 +138,7 @@ static int led_bl_parse_levels(struct device *dev,
 		unsigned int db;
 		u32 *levels = NULL;
 
-		levels = devm_kzalloc(dev, sizeof(u32) * num_levels,
+		levels = devm_kcalloc(dev, num_levels, sizeof(u32),
 				      GFP_KERNEL);
 		if (!levels)
 			return -ENOMEM;
@@ -210,6 +211,19 @@ static int led_bl_probe(struct platform_device *pdev)
 	}
 
 	for (i = 0; i < priv->nb_leds; i++) {
+		struct device_link *link;
+
+		link = device_link_add(&pdev->dev, priv->leds[i]->dev->parent,
+				       DL_FLAG_AUTOREMOVE_CONSUMER);
+		if (!link) {
+			dev_err(&pdev->dev, "Failed to add devlink (consumer %s, supplier %s)\n",
+				dev_name(&pdev->dev), dev_name(priv->leds[i]->dev->parent));
+			backlight_device_unregister(priv->bl_dev);
+			return -EINVAL;
+		}
+	}
+
+	for (i = 0; i < priv->nb_leds; i++) {
 		mutex_lock(&priv->leds[i]->led_access);
 		led_sysfs_disable(priv->leds[i]);
 		mutex_unlock(&priv->leds[i]->led_access);
@@ -229,8 +243,11 @@ static void led_bl_remove(struct platform_device *pdev)
 	backlight_device_unregister(bl);
 
 	led_bl_power_off(priv);
-	for (i = 0; i < priv->nb_leds; i++)
+	for (i = 0; i < priv->nb_leds; i++) {
+		mutex_lock(&priv->leds[i]->led_access);
 		led_sysfs_enable(priv->leds[i]);
+		mutex_unlock(&priv->leds[i]->led_access);
+	}
 }
 
 static const struct of_device_id led_bl_of_match[] = {

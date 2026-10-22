@@ -111,7 +111,7 @@ struct platform_device *of_device_alloc(struct device_node *np,
 
 	/* Populate the resource table */
 	if (num_reg) {
-		res = kcalloc(num_reg, sizeof(*res), GFP_KERNEL);
+		res = kzalloc_objs(*res, num_reg);
 		if (!res) {
 			platform_device_put(dev);
 			return NULL;
@@ -334,7 +334,7 @@ static int of_platform_bus_create(struct device_node *bus,
 	int rc = 0;
 
 	/* Make sure it has a compatible property */
-	if (strict && (!of_get_property(bus, "compatible", NULL))) {
+	if (strict && (!of_property_present(bus, "compatible"))) {
 		pr_debug("%s() - skipping %pOF, no compatible prop\n",
 			 __func__, bus);
 		return 0;
@@ -394,7 +394,6 @@ int of_platform_bus_probe(struct device_node *root,
 			  const struct of_device_id *matches,
 			  struct device *parent)
 {
-	struct device_node *child;
 	int rc = 0;
 
 	root = root ? of_node_get(root) : of_find_node_by_path("/");
@@ -407,13 +406,13 @@ int of_platform_bus_probe(struct device_node *root,
 	/* Do a self check of bus type, if there's a match, create children */
 	if (of_match_node(matches, root)) {
 		rc = of_platform_bus_create(root, matches, NULL, parent, false);
-	} else for_each_child_of_node(root, child) {
-		if (!of_match_node(matches, child))
-			continue;
-		rc = of_platform_bus_create(child, matches, NULL, parent, false);
-		if (rc) {
-			of_node_put(child);
-			break;
+	} else {
+		for_each_child_of_node_scoped(root, child) {
+			if (!of_match_node(matches, child))
+				continue;
+			rc = of_platform_bus_create(child, matches, NULL, parent, false);
+			if (rc)
+				break;
 		}
 	}
 
@@ -501,7 +500,7 @@ static const struct of_device_id reserved_mem_matches[] = {
 
 static int __init of_platform_default_populate_init(void)
 {
-	struct device_node *node;
+	struct device_node *node, *reserved;
 
 	device_links_supplier_sync_state_pause();
 
@@ -536,8 +535,8 @@ static int __init of_platform_default_populate_init(void)
 		 * ignore errors for the rest.
 		 */
 		for_each_node_by_type(node, "display") {
-			if (!of_get_property(node, "linux,opened", NULL) ||
-			    !of_get_property(node, "linux,boot-display", NULL))
+			if (!of_property_read_bool(node, "linux,opened") ||
+			    !of_property_read_bool(node, "linux,boot-display"))
 				continue;
 			dev = of_platform_device_create(node, "of-display", NULL);
 			of_node_put(node);
@@ -551,7 +550,7 @@ static int __init of_platform_default_populate_init(void)
 			char buf[14];
 			const char *of_display_format = "of-display.%d";
 
-			if (!of_get_property(node, "linux,opened", NULL) || node == boot_display)
+			if (!of_property_read_bool(node, "linux,opened") || node == boot_display)
 				continue;
 			ret = snprintf(buf, sizeof(buf), of_display_format, display_number++);
 			if (ret < sizeof(buf))
@@ -564,12 +563,18 @@ static int __init of_platform_default_populate_init(void)
 		 * platform_devices for every node in /reserved-memory with a
 		 * "compatible",
 		 */
-		for_each_matching_node(node, reserved_mem_matches)
-			of_platform_device_create(node, NULL, NULL);
+		reserved = of_find_node_by_path("/reserved-memory");
+		if (reserved) {
+			for_each_child_of_node(reserved, node) {
+				if (of_match_node(reserved_mem_matches, node))
+					of_platform_device_create(node, NULL, NULL);
+			}
+			of_node_put(reserved);
+		}
 
 		node = of_find_node_by_path("/firmware");
 		if (node) {
-			of_platform_populate(node, NULL, NULL, NULL);
+			of_platform_default_populate(node, NULL, NULL);
 			of_node_put(node);
 		}
 
@@ -739,11 +744,6 @@ static int of_platform_notify(struct notifier_block *nb,
 		if (of_node_check_flag(rd->dn, OF_POPULATED))
 			return NOTIFY_OK;
 
-		/*
-		 * Clear the flag before adding the device so that fw_devlink
-		 * doesn't skip adding consumers to this device.
-		 */
-		rd->dn->fwnode.flags &= ~FWNODE_FLAG_NOT_DEVICE;
 		/* pdev_parent may be NULL when no bus platform device */
 		pdev_parent = of_find_device_by_node(parent);
 		pdev = of_platform_device_create(rd->dn, NULL,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2020-2024 Intel Corporation
+ * Copyright (C) 2020-2026 Intel Corporation
  */
 
 #include <linux/firmware.h>
@@ -17,15 +17,10 @@
 #include "ivpu_ipc.h"
 #include "ivpu_pm.h"
 
-#define FW_GLOBAL_MEM_START	(2ull * SZ_1G)
-#define FW_GLOBAL_MEM_END	(3ull * SZ_1G)
-#define FW_SHARED_MEM_SIZE	SZ_256M /* Must be aligned to FW_SHARED_MEM_ALIGNMENT */
-#define FW_SHARED_MEM_ALIGNMENT	SZ_128K /* VPU MTRR limitation */
-#define FW_RUNTIME_MAX_SIZE	SZ_512M
 #define FW_SHAVE_NN_MAX_SIZE	SZ_2M
-#define FW_RUNTIME_MIN_ADDR	(FW_GLOBAL_MEM_START)
-#define FW_RUNTIME_MAX_ADDR	(FW_GLOBAL_MEM_END - FW_SHARED_MEM_SIZE)
 #define FW_FILE_IMAGE_OFFSET	(VPU_FW_HEADER_SIZE + FW_VERSION_HEADER_SIZE)
+#define FW_PREEMPT_BUF_MIN_SIZE SZ_4K
+#define FW_PREEMPT_BUF_MAX_SIZE SZ_32M
 
 #define WATCHDOG_MSS_REDIRECT	32
 #define WATCHDOG_NCE_REDIRECT	33
@@ -55,18 +50,20 @@ static struct {
 	int gen;
 	const char *name;
 } fw_names[] = {
-	{ IVPU_HW_IP_37XX, "vpu_37xx.bin" },
+	{ IVPU_HW_IP_37XX, "intel/vpu/vpu_37xx_v1.bin" },
 	{ IVPU_HW_IP_37XX, "intel/vpu/vpu_37xx_v0.0.bin" },
-	{ IVPU_HW_IP_40XX, "vpu_40xx.bin" },
+	{ IVPU_HW_IP_40XX, "intel/vpu/vpu_40xx_v1.bin" },
 	{ IVPU_HW_IP_40XX, "intel/vpu/vpu_40xx_v0.0.bin" },
-	{ IVPU_HW_IP_50XX, "vpu_50xx.bin" },
+	{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v1.bin" },
 	{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v0.0.bin" },
+	{ IVPU_HW_IP_60XX, "intel/vpu/vpu_60xx_v1.bin" },
 };
 
 /* Production fw_names from the table above */
-MODULE_FIRMWARE("intel/vpu/vpu_37xx_v0.0.bin");
-MODULE_FIRMWARE("intel/vpu/vpu_40xx_v0.0.bin");
-MODULE_FIRMWARE("intel/vpu/vpu_50xx_v0.0.bin");
+MODULE_FIRMWARE("intel/vpu/vpu_37xx_v1.bin");
+MODULE_FIRMWARE("intel/vpu/vpu_40xx_v1.bin");
+MODULE_FIRMWARE("intel/vpu/vpu_50xx_v1.bin");
+MODULE_FIRMWARE("intel/vpu/vpu_60xx_v1.bin");
 
 static int ivpu_fw_request(struct ivpu_device *vdev)
 {
@@ -131,9 +128,14 @@ ivpu_fw_check_api_ver_lt(struct ivpu_device *vdev, const struct vpu_firmware_hea
 	return false;
 }
 
-static bool is_within_range(u64 addr, size_t size, u64 range_start, size_t range_size)
+bool ivpu_is_within_range(u64 addr, size_t size, struct ivpu_addr_range *range)
 {
-	if (addr < range_start || addr + size > range_start + range_size)
+	u64 addr_end;
+
+	if (!range || check_add_overflow(addr, size, &addr_end))
+		return false;
+
+	if (addr < range->start || addr_end > range->end)
 		return false;
 
 	return true;
@@ -142,17 +144,71 @@ static bool is_within_range(u64 addr, size_t size, u64 range_start, size_t range
 static u32
 ivpu_fw_sched_mode_select(struct ivpu_device *vdev, const struct vpu_firmware_header *fw_hdr)
 {
+	if (ivpu_hw_ip_gen(vdev) >= IVPU_HW_IP_60XX &&
+	    ivpu_sched_mode == VPU_SCHEDULING_MODE_OS) {
+		ivpu_warn(vdev, "OS sched mode is not supported, using HW mode\n");
+		return VPU_SCHEDULING_MODE_HW;
+	}
+
 	if (ivpu_sched_mode != IVPU_SCHED_MODE_AUTO)
 		return ivpu_sched_mode;
 
-	return VPU_SCHEDULING_MODE_OS;
+	if (IVPU_FW_CHECK_API_VER_LT(vdev, fw_hdr, JSM, 3, 24))
+		return VPU_SCHEDULING_MODE_OS;
+
+	return VPU_SCHEDULING_MODE_HW;
+}
+
+static void
+ivpu_preemption_config_parse(struct ivpu_device *vdev, const struct vpu_firmware_header *fw_hdr)
+{
+	struct ivpu_fw_info *fw = vdev->fw;
+	u32 primary_preempt_buf_size, secondary_preempt_buf_size;
+
+	if (fw_hdr->preemption_buffer_1_max_size)
+		primary_preempt_buf_size = fw_hdr->preemption_buffer_1_max_size;
+	else
+		primary_preempt_buf_size = fw_hdr->preemption_buffer_1_size;
+
+	if (fw_hdr->preemption_buffer_2_max_size)
+		secondary_preempt_buf_size = fw_hdr->preemption_buffer_2_max_size;
+	else
+		secondary_preempt_buf_size = fw_hdr->preemption_buffer_2_size;
+
+	ivpu_dbg(vdev, FW_BOOT, "Preemption buffer size, primary: %u, secondary: %u\n",
+		 primary_preempt_buf_size, secondary_preempt_buf_size);
+
+	if (primary_preempt_buf_size < FW_PREEMPT_BUF_MIN_SIZE ||
+	    secondary_preempt_buf_size < FW_PREEMPT_BUF_MIN_SIZE) {
+		ivpu_warn(vdev, "Preemption buffers size too small\n");
+		return;
+	}
+
+	if (primary_preempt_buf_size > FW_PREEMPT_BUF_MAX_SIZE ||
+	    secondary_preempt_buf_size > FW_PREEMPT_BUF_MAX_SIZE) {
+		ivpu_warn(vdev, "Preemption buffers size too big\n");
+		return;
+	}
+
+	if (fw->sched_mode != VPU_SCHEDULING_MODE_HW)
+		return;
+
+	if (ivpu_test_mode & IVPU_TEST_MODE_MIP_DISABLE)
+		return;
+
+	vdev->fw->primary_preempt_buf_size = ALIGN(primary_preempt_buf_size, PAGE_SIZE);
+	vdev->fw->secondary_preempt_buf_size = ALIGN(secondary_preempt_buf_size, PAGE_SIZE);
 }
 
 static int ivpu_fw_parse(struct ivpu_device *vdev)
 {
 	struct ivpu_fw_info *fw = vdev->fw;
 	const struct vpu_firmware_header *fw_hdr = (const void *)fw->file->data;
-	u64 runtime_addr, image_load_addr, runtime_size, image_size;
+	struct ivpu_addr_range fw_image_range;
+	u64 boot_params_addr, boot_params_size;
+	u64 fw_version_addr, fw_version_size;
+	u64 runtime_addr, runtime_size;
+	u64 image_load_addr, image_size;
 
 	if (fw->file->size <= FW_FILE_IMAGE_OFFSET) {
 		ivpu_err(vdev, "Firmware file is too small: %zu\n", fw->file->size);
@@ -164,18 +220,37 @@ static int ivpu_fw_parse(struct ivpu_device *vdev)
 		return -EINVAL;
 	}
 
-	runtime_addr = fw_hdr->boot_params_load_address;
-	runtime_size = fw_hdr->runtime_size;
-	image_load_addr = fw_hdr->image_load_address;
-	image_size = fw_hdr->image_size;
+	boot_params_addr = fw_hdr->boot_params_load_address;
+	boot_params_size = SZ_4K;
 
-	if (runtime_addr < FW_RUNTIME_MIN_ADDR || runtime_addr > FW_RUNTIME_MAX_ADDR) {
-		ivpu_err(vdev, "Invalid firmware runtime address: 0x%llx\n", runtime_addr);
+	if (!ivpu_is_within_range(boot_params_addr, boot_params_size, &vdev->hw->ranges.runtime)) {
+		ivpu_err(vdev, "Invalid boot params address: 0x%llx\n", boot_params_addr);
 		return -EINVAL;
 	}
 
-	if (runtime_size < fw->file->size || runtime_size > FW_RUNTIME_MAX_SIZE) {
-		ivpu_err(vdev, "Invalid firmware runtime size: %llu\n", runtime_size);
+	fw_version_addr = fw_hdr->firmware_version_load_address;
+	fw_version_size = ALIGN(fw_hdr->firmware_version_size, SZ_4K);
+
+	if (fw_version_size != SZ_4K) {
+		ivpu_err(vdev, "Invalid firmware version size: %u\n",
+			 fw_hdr->firmware_version_size);
+		return -EINVAL;
+	}
+
+	if (!ivpu_is_within_range(fw_version_addr, fw_version_size, &vdev->hw->ranges.runtime)) {
+		ivpu_err(vdev, "Invalid firmware version address: 0x%llx\n", fw_version_addr);
+		return -EINVAL;
+	}
+
+	runtime_addr = fw_hdr->image_load_address;
+	runtime_size = fw_hdr->runtime_size - boot_params_size - fw_version_size;
+
+	image_load_addr = fw_hdr->image_load_address;
+	image_size = fw_hdr->image_size;
+
+	if (!ivpu_is_within_range(runtime_addr, runtime_size, &vdev->hw->ranges.runtime)) {
+		ivpu_err(vdev, "Invalid firmware runtime address: 0x%llx and size %llu\n",
+			 runtime_addr, runtime_size);
 		return -EINVAL;
 	}
 
@@ -184,10 +259,33 @@ static int ivpu_fw_parse(struct ivpu_device *vdev)
 		return -EINVAL;
 	}
 
-	if (image_load_addr < runtime_addr ||
-	    image_load_addr + image_size > runtime_addr + runtime_size) {
-		ivpu_err(vdev, "Invalid firmware load address size: 0x%llx and size %llu\n",
+	if (!PAGE_ALIGNED(runtime_addr)) {
+		ivpu_err(vdev, "Runtime address 0x%llx not page aligned\n", runtime_addr);
+		return -EINVAL;
+	}
+
+	if (!PAGE_ALIGNED(runtime_size)) {
+		ivpu_err(vdev, "Runtime size %llu not page aligned\n", runtime_size);
+		return -EINVAL;
+	}
+
+	if (runtime_size < image_size) {
+		ivpu_err(vdev, "Runtime size too small: %llu, image size: %llu\n",
+			 runtime_size, image_size);
+		return -EINVAL;
+	}
+
+	if (!ivpu_is_within_range(image_load_addr, image_size, &vdev->hw->ranges.runtime)) {
+		ivpu_err(vdev, "Invalid firmware load address: 0x%llx and size %llu\n",
 			 image_load_addr, image_size);
+		return -EINVAL;
+	}
+
+	if (ivpu_hw_range_init(vdev, &fw_image_range, image_load_addr, image_size))
+		return -EINVAL;
+
+	if (!ivpu_is_within_range(fw_hdr->entry_point, SZ_4K, &fw_image_range)) {
+		ivpu_err(vdev, "Invalid entry point: 0x%llx\n", fw_hdr->entry_point);
 		return -EINVAL;
 	}
 
@@ -196,11 +294,6 @@ static int ivpu_fw_parse(struct ivpu_device *vdev)
 		return -EINVAL;
 	}
 
-	if (fw_hdr->entry_point < image_load_addr ||
-	    fw_hdr->entry_point >= image_load_addr + image_size) {
-		ivpu_err(vdev, "Invalid entry point: 0x%llx\n", fw_hdr->entry_point);
-		return -EINVAL;
-	}
 	ivpu_dbg(vdev, FW_BOOT, "Header version: 0x%x, format 0x%x\n",
 		 fw_hdr->header_version, fw_hdr->image_format);
 
@@ -214,14 +307,16 @@ static int ivpu_fw_parse(struct ivpu_device *vdev)
 	if (IVPU_FW_CHECK_API_COMPAT(vdev, fw_hdr, JSM, 3))
 		return -EINVAL;
 
+	fw->boot_params_addr = boot_params_addr;
+	fw->boot_params_size = boot_params_size;
+	fw->fw_version_addr = fw_version_addr;
+	fw->fw_version_size = fw_version_size;
 	fw->runtime_addr = runtime_addr;
 	fw->runtime_size = runtime_size;
 	fw->image_load_offset = image_load_addr - runtime_addr;
 	fw->image_size = image_size;
 	fw->shave_nn_size = PAGE_ALIGN(fw_hdr->shave_nn_fw_size);
-
 	fw->cold_boot_entry_point = fw_hdr->entry_point;
-	fw->entry_point = fw->cold_boot_entry_point;
 
 	fw->trace_level = min_t(u32, ivpu_fw_log_level, IVPU_FW_LOG_FATAL);
 	fw->trace_destination_mask = VPU_TRACE_DESTINATION_VERBOSE_TRACING;
@@ -230,14 +325,15 @@ static int ivpu_fw_parse(struct ivpu_device *vdev)
 	fw->dvfs_mode = 0;
 
 	fw->sched_mode = ivpu_fw_sched_mode_select(vdev, fw_hdr);
-	fw->primary_preempt_buf_size = fw_hdr->preemption_buffer_1_size;
-	fw->secondary_preempt_buf_size = fw_hdr->preemption_buffer_2_size;
 	ivpu_info(vdev, "Scheduler mode: %s\n", fw->sched_mode ? "HW" : "OS");
 
-	if (fw_hdr->ro_section_start_address && !is_within_range(fw_hdr->ro_section_start_address,
-								 fw_hdr->ro_section_size,
-								 fw_hdr->image_load_address,
-								 fw_hdr->image_size)) {
+	ivpu_preemption_config_parse(vdev, fw_hdr);
+	ivpu_dbg(vdev, FW_BOOT, "Mid-inference preemption %s supported\n",
+		 ivpu_fw_preempt_buf_size(vdev) ? "is" : "is not");
+
+	if (fw_hdr->ro_section_start_address &&
+	    !ivpu_is_within_range(fw_hdr->ro_section_start_address, fw_hdr->ro_section_size,
+				  &fw_image_range)) {
 		ivpu_err(vdev, "Invalid read-only section: start address 0x%llx, size %u\n",
 			 fw_hdr->ro_section_start_address, fw_hdr->ro_section_size);
 		return -EINVAL;
@@ -246,12 +342,18 @@ static int ivpu_fw_parse(struct ivpu_device *vdev)
 	fw->read_only_addr = fw_hdr->ro_section_start_address;
 	fw->read_only_size = fw_hdr->ro_section_size;
 
-	ivpu_dbg(vdev, FW_BOOT, "Size: file %lu image %u runtime %u shavenn %u\n",
-		 fw->file->size, fw->image_size, fw->runtime_size, fw->shave_nn_size);
-	ivpu_dbg(vdev, FW_BOOT, "Address: runtime 0x%llx, load 0x%llx, entry point 0x%llx\n",
-		 fw->runtime_addr, image_load_addr, fw->entry_point);
+	ivpu_dbg(vdev, FW_BOOT, "Boot params: address 0x%llx, size %llu\n",
+		 fw->boot_params_addr, fw->boot_params_size);
+	ivpu_dbg(vdev, FW_BOOT, "FW version:  address 0x%llx, size %llu\n",
+		 fw->fw_version_addr, fw->fw_version_size);
+	ivpu_dbg(vdev, FW_BOOT, "Runtime:     address 0x%llx, size %u\n",
+		 fw->runtime_addr, fw->runtime_size);
+	ivpu_dbg(vdev, FW_BOOT, "Image load offset: 0x%llx, size %u\n",
+		 fw->image_load_offset, fw->image_size);
 	ivpu_dbg(vdev, FW_BOOT, "Read-only section: address 0x%llx, size %u\n",
 		 fw->read_only_addr, fw->read_only_size);
+	ivpu_dbg(vdev, FW_BOOT, "FW cold boot entry point: 0x%llx\n", fw->cold_boot_entry_point);
+	ivpu_dbg(vdev, FW_BOOT, "SHAVE NN size: %u\n", fw->shave_nn_size);
 
 	return 0;
 }
@@ -261,56 +363,34 @@ static void ivpu_fw_release(struct ivpu_device *vdev)
 	release_firmware(vdev->fw->file);
 }
 
-/* Initialize workarounds that depend on FW version */
-static void
-ivpu_fw_init_wa(struct ivpu_device *vdev)
-{
-	const struct vpu_firmware_header *fw_hdr = (const void *)vdev->fw->file->data;
-
-	if (IVPU_FW_CHECK_API_VER_LT(vdev, fw_hdr, BOOT, 3, 17) ||
-	    (ivpu_test_mode & IVPU_TEST_MODE_D0I3_MSG_DISABLE))
-		vdev->wa.disable_d0i3_msg = true;
-
-	/* Force enable the feature for testing purposes */
-	if (ivpu_test_mode & IVPU_TEST_MODE_D0I3_MSG_ENABLE)
-		vdev->wa.disable_d0i3_msg = false;
-
-	IVPU_PRINT_WA(disable_d0i3_msg);
-}
-
-static int ivpu_fw_update_global_range(struct ivpu_device *vdev)
-{
-	struct ivpu_fw_info *fw = vdev->fw;
-	u64 start = ALIGN(fw->runtime_addr + fw->runtime_size, FW_SHARED_MEM_ALIGNMENT);
-	u64 size = FW_SHARED_MEM_SIZE;
-
-	if (start + size > FW_GLOBAL_MEM_END) {
-		ivpu_err(vdev, "No space for shared region, start %lld, size %lld\n", start, size);
-		return -EINVAL;
-	}
-
-	ivpu_hw_range_init(&vdev->hw->ranges.global, start, size);
-	return 0;
-}
 
 static int ivpu_fw_mem_init(struct ivpu_device *vdev)
 {
 	struct ivpu_fw_info *fw = vdev->fw;
-	struct ivpu_addr_range fw_range;
 	int log_verb_size;
 	int ret;
 
-	ret = ivpu_fw_update_global_range(vdev);
-	if (ret)
-		return ret;
+	fw->mem_bp = ivpu_bo_create_runtime(vdev, fw->boot_params_addr, fw->boot_params_size,
+					    DRM_IVPU_BO_WC | DRM_IVPU_BO_MAPPABLE);
+	if (!fw->mem_bp) {
+		ivpu_err(vdev, "Failed to create firmware boot params memory buffer\n");
+		return -ENOMEM;
+	}
 
-	fw_range.start = fw->runtime_addr;
-	fw_range.end = fw->runtime_addr + fw->runtime_size;
-	fw->mem = ivpu_bo_create(vdev, &vdev->gctx, &fw_range, fw->runtime_size,
-				 DRM_IVPU_BO_WC | DRM_IVPU_BO_MAPPABLE);
+	fw->mem_fw_ver = ivpu_bo_create_runtime(vdev, fw->fw_version_addr, fw->fw_version_size,
+						DRM_IVPU_BO_WC | DRM_IVPU_BO_MAPPABLE);
+	if (!fw->mem_fw_ver) {
+		ivpu_err(vdev, "Failed to create firmware version memory buffer\n");
+		ret = -ENOMEM;
+		goto err_free_bp;
+	}
+
+	fw->mem = ivpu_bo_create_runtime(vdev, fw->runtime_addr, fw->runtime_size,
+					 DRM_IVPU_BO_WC | DRM_IVPU_BO_MAPPABLE);
 	if (!fw->mem) {
 		ivpu_err(vdev, "Failed to create firmware runtime memory buffer\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_free_fw_ver;
 	}
 
 	ret = ivpu_mmu_context_set_pages_ro(vdev, &vdev->gctx, fw->read_only_addr,
@@ -359,6 +439,10 @@ err_free_log_crit:
 	ivpu_bo_free(fw->mem_log_crit);
 err_free_fw_mem:
 	ivpu_bo_free(fw->mem);
+err_free_fw_ver:
+	ivpu_bo_free(fw->mem_fw_ver);
+err_free_bp:
+	ivpu_bo_free(fw->mem_bp);
 	return ret;
 }
 
@@ -374,10 +458,14 @@ static void ivpu_fw_mem_fini(struct ivpu_device *vdev)
 	ivpu_bo_free(fw->mem_log_verb);
 	ivpu_bo_free(fw->mem_log_crit);
 	ivpu_bo_free(fw->mem);
+	ivpu_bo_free(fw->mem_fw_ver);
+	ivpu_bo_free(fw->mem_bp);
 
 	fw->mem_log_verb = NULL;
 	fw->mem_log_crit = NULL;
 	fw->mem = NULL;
+	fw->mem_fw_ver = NULL;
+	fw->mem_bp = NULL;
 }
 
 int ivpu_fw_init(struct ivpu_device *vdev)
@@ -391,8 +479,6 @@ int ivpu_fw_init(struct ivpu_device *vdev)
 	ret = ivpu_fw_parse(vdev);
 	if (ret)
 		goto err_fw_release;
-
-	ivpu_fw_init_wa(vdev);
 
 	ret = ivpu_fw_mem_init(vdev);
 	if (ret)
@@ -470,11 +556,6 @@ static void ivpu_fw_boot_params_print(struct ivpu_device *vdev, struct vpu_boot_
 	ivpu_dbg(vdev, FW_BOOT, "boot_params.cache_defaults[VPU_BOOT_L2_CACHE_CFG_NN].cfg = 0x%x\n",
 		 boot_params->cache_defaults[VPU_BOOT_L2_CACHE_CFG_NN].cfg);
 
-	ivpu_dbg(vdev, FW_BOOT, "boot_params.global_memory_allocator_base = 0x%llx\n",
-		 boot_params->global_memory_allocator_base);
-	ivpu_dbg(vdev, FW_BOOT, "boot_params.global_memory_allocator_size = 0x%x\n",
-		 boot_params->global_memory_allocator_size);
-
 	ivpu_dbg(vdev, FW_BOOT, "boot_params.shave_nn_fw_base = 0x%llx\n",
 		 boot_params->shave_nn_fw_base);
 
@@ -482,10 +563,6 @@ static void ivpu_fw_boot_params_print(struct ivpu_device *vdev, struct vpu_boot_
 		 boot_params->watchdog_irq_mss);
 	ivpu_dbg(vdev, FW_BOOT, "boot_params.watchdog_irq_nce = 0x%x\n",
 		 boot_params->watchdog_irq_nce);
-	ivpu_dbg(vdev, FW_BOOT, "boot_params.host_to_vpu_irq = 0x%x\n",
-		 boot_params->host_to_vpu_irq);
-	ivpu_dbg(vdev, FW_BOOT, "boot_params.job_done_irq = 0x%x\n",
-		 boot_params->job_done_irq);
 
 	ivpu_dbg(vdev, FW_BOOT, "boot_params.host_version_id = 0x%x\n",
 		 boot_params->host_version_id);
@@ -531,6 +608,11 @@ static void ivpu_fw_boot_params_print(struct ivpu_device *vdev, struct vpu_boot_
 		 boot_params->d0i3_entry_vpu_ts);
 	ivpu_dbg(vdev, FW_BOOT, "boot_params.system_time_us = %llu\n",
 		 boot_params->system_time_us);
+	ivpu_dbg(vdev, FW_BOOT, "boot_params.power_profile = 0x%x\n",
+		 boot_params->power_profile);
+	ivpu_dbg(vdev, FW_BOOT, "boot_params.vpu_uses_ecc_mca_signal = 0x%x\n",
+		 boot_params->vpu_uses_ecc_mca_signal);
+	ivpu_dbg(vdev, FW_BOOT, "boot_params.boot_type = 0x%x\n", boot_params->boot_type);
 }
 
 void ivpu_fw_boot_params_setup(struct ivpu_device *vdev, struct vpu_boot_params *boot_params)
@@ -538,7 +620,7 @@ void ivpu_fw_boot_params_setup(struct ivpu_device *vdev, struct vpu_boot_params 
 	struct ivpu_bo *ipc_mem_rx = vdev->ipc->mem_rx;
 
 	/* In case of warm boot only update variable params */
-	if (!ivpu_fw_is_cold_boot(vdev)) {
+	if (ivpu_fw_is_warm_boot(vdev)) {
 		boot_params->d0i3_residency_time_us =
 			ktime_us_delta(ktime_get_boottime(), vdev->hw->d0i3_entry_host_ts);
 		boot_params->d0i3_entry_vpu_ts = vdev->hw->d0i3_entry_vpu_ts;
@@ -550,18 +632,18 @@ void ivpu_fw_boot_params_setup(struct ivpu_device *vdev, struct vpu_boot_params 
 			 boot_params->d0i3_entry_vpu_ts);
 		ivpu_dbg(vdev, FW_BOOT, "boot_params.system_time_us = %llu\n",
 			 boot_params->system_time_us);
+		ivpu_dbg(vdev, FW_BOOT, "boot_params.boot_type = 0x%x\n", boot_params->boot_type);
 
 		boot_params->save_restore_ret_address = 0;
-		vdev->pm->is_warmboot = true;
+		boot_params->boot_type = VPU_BOOT_TYPE_WARMBOOT;
 		wmb(); /* Flush WC buffers after writing save_restore_ret_address */
 		return;
 	}
 
-	vdev->pm->is_warmboot = false;
-
+	memset(boot_params, 0, sizeof(*boot_params));
+	boot_params->boot_type = VPU_BOOT_TYPE_COLDBOOT;
 	boot_params->magic = VPU_BOOT_PARAMS_MAGIC;
 	boot_params->vpu_id = to_pci_dev(vdev->drm.dev)->bus->number;
-	boot_params->frequency = ivpu_hw_pll_freq_get(vdev);
 
 	/*
 	 * This param is a debug firmware feature.  It switches default clock
@@ -627,10 +709,13 @@ void ivpu_fw_boot_params_setup(struct ivpu_device *vdev, struct vpu_boot_params 
 	if (vdev->fw->sched_mode == VPU_SCHEDULING_MODE_HW)
 		boot_params->vpu_focus_present_timer_ms = IVPU_FOCUS_PRESENT_TIMER_MS;
 	boot_params->dvfs_mode = vdev->fw->dvfs_mode;
-	if (!IVPU_WA(disable_d0i3_msg))
-		boot_params->d0i3_delayed_entry = 1;
+	boot_params->d0i3_delayed_entry = 1;
 	boot_params->d0i3_residency_time_us = 0;
 	boot_params->d0i3_entry_vpu_ts = 0;
+	if (IVPU_WA(disable_d0i2))
+		boot_params->power_profile |= BIT(1);
+	boot_params->vpu_uses_ecc_mca_signal =
+		ivpu_hw_uses_ecc_mca_signal(vdev) ? VPU_BOOT_MCA_ECC_BOTH : 0;
 
 	boot_params->system_time_us = ktime_to_us(ktime_get_real());
 	wmb(); /* Flush WC buffers after writing bootparams */

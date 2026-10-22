@@ -140,7 +140,6 @@ static int als31300_get_measure(struct als31300_data *data,
 	*z = ALS31300_DATA_Z_GET(buf);
 
 out:
-	pm_runtime_mark_last_busy(data->dev);
 	pm_runtime_put_autosuspend(data->dev);
 
 	return ret;
@@ -156,7 +155,6 @@ static int als31300_read_raw(struct iio_dev *indio_dev,
 	int ret;
 
 	switch (mask) {
-	case IIO_CHAN_INFO_PROCESSED:
 	case IIO_CHAN_INFO_RAW:
 		ret = als31300_get_measure(data, &t, &x, &y, &z);
 		if (ret)
@@ -245,8 +243,7 @@ static irqreturn_t als31300_trigger_handler(int irq, void *p)
 	scan.channels[0] = x;
 	scan.channels[1] = y;
 	scan.channels[2] = z;
-	iio_push_to_buffers_with_timestamp(indio_dev, &scan,
-					   pf->timestamp);
+	iio_push_to_buffers_with_ts(indio_dev, &scan, sizeof(scan), pf->timestamp);
 
 trigger_out:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -374,7 +371,7 @@ static int als31300_probe(struct i2c_client *i2c)
 
 	ret = devm_add_action_or_reset(dev, als31300_power_down, data);
 	if (ret)
-		return dev_err_probe(dev, ret, "failed to add powerdown action\n");
+		return ret;
 
 	indio_dev->info = &als31300_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -402,7 +399,6 @@ static int als31300_probe(struct i2c_client *i2c)
 	pm_runtime_set_autosuspend_delay(dev, 200);
 	pm_runtime_use_autosuspend(dev);
 
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 
 	ret = devm_iio_device_register(dev, indio_dev);
@@ -457,7 +453,7 @@ static const struct i2c_device_id als31300_id[] = {
 		.name = "als31300-2000",
 		.driver_data = (kernel_ulong_t)&al31300_variant_2000,
 	},
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, als31300_id);
 
@@ -474,7 +470,7 @@ static const struct of_device_id als31300_of_match[] = {
 		.compatible = "allegromicro,als31300-2000",
 		.data = &al31300_variant_2000,
 	},
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(of, als31300_of_match);
 

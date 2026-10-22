@@ -19,6 +19,7 @@ properties:
       - enum:
           - nvidia,tegra210-adma
           - nvidia,tegra186-adma
+          - nvidia,tegra264-adma
       - items:
           - enum:
               - nvidia,tegra234-adma
@@ -45,7 +46,7 @@ properties:
       Should contain all of the per-channel DMA interrupts in
       ascending order with respect to the DMA channel index.
     minItems: 1
-    maxItems: 32
+    maxItems: 64
 
   clocks:
     description: Must contain one entry for the ADMA module clock
@@ -85,6 +86,8 @@ allOf:
         reg:
           items:
             - description: Full address space range of DMA registers.
+        interrupts:
+          maxItems: 22
 
   - if:
       properties:
@@ -92,6 +95,18 @@ allOf:
           contains:
             enum:
               - nvidia,tegra186-adma
+    then:
+      properties:
+        interrupts:
+          maxItems: 32
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - nvidia,tegra186-adma
+              - nvidia,tegra264-adma
     then:
       anyOf:
         - properties:

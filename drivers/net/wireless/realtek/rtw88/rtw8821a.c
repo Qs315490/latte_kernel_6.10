@@ -865,12 +865,14 @@ static const struct rtw_chip_ops rtw8821a_ops = {
 	.query_phy_status	= rtw8821a_query_phy_status,
 	.set_channel		= rtw88xxa_set_channel,
 	.mac_init		= NULL,
+	.mac_postinit		= NULL,
 	.read_rf		= rtw88xxa_phy_read_rf,
 	.write_rf		= rtw_phy_write_rf_reg_sipi,
 	.set_antenna		= NULL,
 	.set_tx_power_index	= rtw88xxa_set_tx_power_index,
 	.cfg_ldo25		= rtw8821a_cfg_ldo25,
 	.efuse_grant		= rtw88xxa_efuse_grant,
+	.set_ampdu_factor	= NULL,
 	.false_alarm_statistics	= rtw88xxa_false_alarm_statistics,
 	.phy_calibration	= rtw8821a_phy_calibration,
 	.cck_pd_set		= rtw88xxa_phy_cck_pd_set,
@@ -996,7 +998,12 @@ static const struct coex_table_para table_sant_8821a[] = {
 	{0x66556655, 0x66556655},
 	{0x66556aaa, 0x6a5a6aaa}, /* case-30 */
 	{0xffffffff, 0x5aaa5aaa},
-	{0x56555555, 0x5a5a5aaa}
+	{0x56555555, 0x5a5a5aaa},
+	{0xdaffdaff, 0xdaffdaff},
+	{0xddffddff, 0xddffddff},
+	{0xe5555555, 0xe5555555}, /* case-35 */
+	{0xea5a5a5a, 0xea5a5a5a},
+	{0xea6a6a6a, 0xea6a6a6a},
 };
 
 /* Non-Shared-Antenna Coex Table */
@@ -1137,7 +1144,7 @@ const struct rtw_chip_info rtw8821a_hw_spec = {
 	.ops = &rtw8821a_ops,
 	.id = RTW_CHIP_TYPE_8821A,
 	.fw_name = "rtw88/rtw8821a_fw.bin",
-	.wlan_cpu = RTW_WCPU_11N,
+	.wlan_cpu = RTW_WCPU_8051,
 	.tx_pkt_desc_sz = 40,
 	.tx_buf_desc_sz = 16,
 	.rx_pkt_desc_sz = 24,
@@ -1175,6 +1182,7 @@ const struct rtw_chip_info rtw8821a_hw_spec = {
 	.rfe_defs = rtw8821a_rfe_defs,
 	.rfe_defs_size = ARRAY_SIZE(rtw8821a_rfe_defs),
 	.rx_ldpc = false,
+	.amsdu_in_ampdu = true,
 	.hw_feature_report = false,
 	.c2h_ra_report_size = 4,
 	.old_datarate_fb_limit = true,

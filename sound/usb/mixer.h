@@ -44,7 +44,7 @@ struct usb_mixer_interface {
 	void (*private_suspend)(struct usb_mixer_interface *mixer);
 };
 
-#define MAX_CHANNELS	16	/* max logical channels */
+#define MAX_CHANNELS	64	/* max logical channels */
 
 enum {
 	USB_MIXER_BOOLEAN,
@@ -81,7 +81,7 @@ struct usb_mixer_elem_list {
 struct usb_mixer_elem_info {
 	struct usb_mixer_elem_list head;
 	unsigned int control;	/* CS or ICN (high byte) */
-	unsigned int cmask; /* channel mask bitmap: 0 = master */
+	u64 cmask; /* channel mask bitmap: 0 = master */
 	unsigned int idx_off; /* Control index offset */
 	unsigned int ch_readonly;
 	unsigned int master_readonly;
@@ -94,6 +94,7 @@ struct usb_mixer_elem_info {
 	int cache_val[MAX_CHANNELS];
 	u8 initialized;
 	u8 min_mute;
+	u8 get_cur_broken;
 	void *private_data;
 };
 

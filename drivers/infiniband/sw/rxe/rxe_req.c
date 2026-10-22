@@ -5,7 +5,6 @@
  */
 
 #include <linux/skbuff.h>
-#include <crypto/hash.h>
 
 #include "rxe.h"
 #include "rxe_loc.h"
@@ -98,11 +97,13 @@ static void req_retry(struct rxe_qp *qp)
 
 void rnr_nak_timer(struct timer_list *t)
 {
-	struct rxe_qp *qp = from_timer(qp, t, rnr_nak_timer);
+	struct rxe_qp *qp = timer_container_of(qp, t, rnr_nak_timer);
 	unsigned long flags;
 
 	rxe_dbg_qp(qp, "nak timer fired\n");
 
+	if (!rxe_get(qp))
+		return;
 	spin_lock_irqsave(&qp->state_lock, flags);
 	if (qp->valid) {
 		/* request a send queue retry */
@@ -111,6 +112,7 @@ void rnr_nak_timer(struct timer_list *t)
 		rxe_sched_task(&qp->send_task);
 	}
 	spin_unlock_irqrestore(&qp->state_lock, flags);
+	rxe_put(qp);
 }
 
 static void req_check_sq_drain_done(struct rxe_qp *qp)

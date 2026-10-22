@@ -7,11 +7,10 @@
  * Author: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
  */
 
-#include <linux/device.h>
+#include <linux/device/devres.h>
 #include <linux/err.h>
 #include <linux/gfp_types.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
 
@@ -28,14 +27,14 @@ static const struct of_device_id st_lsm9ds0_of_match[] = {
 		.compatible = "st,lsm9ds0-imu",
 		.data = LSM9DS0_IMU_DEV_NAME,
 	},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, st_lsm9ds0_of_match);
 
 static const struct spi_device_id st_lsm9ds0_id_table[] = {
 	{ LSM303D_IMU_DEV_NAME },
 	{ LSM9DS0_IMU_DEV_NAME },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, st_lsm9ds0_id_table);
 

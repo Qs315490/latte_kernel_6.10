@@ -59,6 +59,7 @@ struct inet_skb_parm {
 #define IPSKB_L3SLAVE		BIT(7)
 #define IPSKB_NOPOLICY		BIT(8)
 #define IPSKB_MULTIPATH		BIT(9)
+#define IPSKB_MCROUTE		BIT(10)
 
 	u16			frag_max_size;
 };
@@ -92,14 +93,15 @@ static inline void ipcm_init(struct ipcm_cookie *ipcm)
 static inline void ipcm_init_sk(struct ipcm_cookie *ipcm,
 				const struct inet_sock *inet)
 {
-	ipcm_init(ipcm);
+	*ipcm = (struct ipcm_cookie) {
+		.tos = READ_ONCE(inet->tos),
+	};
 
-	ipcm->sockc.mark = READ_ONCE(inet->sk.sk_mark);
-	ipcm->sockc.priority = READ_ONCE(inet->sk.sk_priority);
-	ipcm->sockc.tsflags = READ_ONCE(inet->sk.sk_tsflags);
+	sockcm_init(&ipcm->sockc, &inet->sk);
+
 	ipcm->oif = READ_ONCE(inet->sk.sk_bound_dev_if);
 	ipcm->addr = inet->inet_saddr;
-	ipcm->protocol = inet->inet_num;
+	ipcm->protocol = READ_ONCE(inet->inet_num);
 }
 
 #define IPCB(skb) ((struct inet_skb_parm*)((skb)->cb))
@@ -166,6 +168,7 @@ void ip_list_rcv(struct list_head *head, struct packet_type *pt,
 int ip_local_deliver(struct sk_buff *skb);
 void ip_protocol_deliver_rcu(struct net *net, struct sk_buff *skb, int proto);
 int ip_mr_input(struct sk_buff *skb);
+int ip_mr_output(struct net *net, struct sock *sk, struct sk_buff *skb);
 int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb);
 int ip_mc_output(struct net *net, struct sock *sk, struct sk_buff *skb);
 int ip_do_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
@@ -257,16 +260,9 @@ static inline u8 ip_sendmsg_scope(const struct inet_sock *inet,
 	return RT_SCOPE_UNIVERSE;
 }
 
-static inline __u8 get_rttos(struct ipcm_cookie* ipc, struct inet_sock *inet)
-{
-	u8 dsfield = ipc->tos != -1 ? ipc->tos : READ_ONCE(inet->tos);
-
-	return dsfield & INET_DSCP_MASK;
-}
-
 /* datagram.c */
-int __ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
-int ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
+int __ip4_datagram_connect(struct sock *sk, struct sockaddr_unsized *uaddr, int addr_len);
+int ip4_datagram_connect(struct sock *sk, struct sockaddr_unsized *uaddr, int addr_len);
 
 void ip4_datagram_release_cb(struct sock *sk);
 
@@ -330,11 +326,12 @@ static inline u64 snmp_fold_field64(void __percpu *mib, int offt, size_t syncp_o
 }
 #endif
 
-#define snmp_get_cpu_field64_batch(buff64, stats_list, mib_statistic, offset) \
+#define snmp_get_cpu_field64_batch_cnt(buff64, stats_list, cnt,	\
+				       mib_statistic, offset)	\
 { \
 	int i, c; \
 	for_each_possible_cpu(c) { \
-		for (i = 0; stats_list[i].name; i++) \
+		for (i = 0; i < cnt; i++) \
 			buff64[i] += snmp_get_cpu_field64( \
 					mib_statistic, \
 					c, stats_list[i].entry, \
@@ -342,11 +339,11 @@ static inline u64 snmp_fold_field64(void __percpu *mib, int offt, size_t syncp_o
 	} \
 }
 
-#define snmp_get_cpu_field_batch(buff, stats_list, mib_statistic) \
+#define snmp_get_cpu_field_batch_cnt(buff, stats_list, cnt, mib_statistic) \
 { \
 	int i, c; \
 	for_each_possible_cpu(c) { \
-		for (i = 0; stats_list[i].name; i++) \
+		for (i = 0; i < cnt; i++) \
 			buff[i] += snmp_get_cpu_field( \
 						mib_statistic, \
 						c, stats_list[i].entry); \
@@ -363,7 +360,7 @@ static inline void inet_get_local_port_range(const struct net *net, int *low, in
 bool inet_sk_get_local_port_range(const struct sock *sk, int *low, int *high);
 
 #ifdef CONFIG_SYSCTL
-static inline bool inet_is_local_reserved_port(struct net *net, unsigned short port)
+static inline bool inet_is_local_reserved_port(const struct net *net, unsigned short port)
 {
 	if (!net->ipv4.sysctl_local_reserved_ports)
 		return false;
@@ -471,17 +468,19 @@ static inline unsigned int ip_dst_mtu_maybe_forward(const struct dst_entry *dst,
 						    bool forwarding)
 {
 	const struct rtable *rt = dst_rtable(dst);
+	const struct net_device *dev;
 	unsigned int mtu, res;
 	struct net *net;
 
 	rcu_read_lock();
 
-	net = dev_net_rcu(dst->dev);
+	dev = dst_dev_rcu(dst);
+	net = dev_net_rcu(dev);
 	if (READ_ONCE(net->ipv4.sysctl_ip_fwd_use_pmtu) ||
 	    ip_mtu_locked(dst) ||
 	    !forwarding) {
 		mtu = rt->rt_pmtu;
-		if (mtu && time_before(jiffies, rt->dst.expires))
+		if (mtu && time_before(jiffies, READ_ONCE(rt->dst.expires)))
 			goto out;
 	}
 
@@ -490,7 +489,7 @@ static inline unsigned int ip_dst_mtu_maybe_forward(const struct dst_entry *dst,
 	if (mtu)
 		goto out;
 
-	mtu = READ_ONCE(dst->dev->mtu);
+	mtu = READ_ONCE(dev->mtu);
 
 	if (unlikely(ip_mtu_locked(dst))) {
 		if (rt->rt_uses_gateway && mtu > 576)
@@ -510,16 +509,17 @@ out:
 static inline unsigned int ip_skb_dst_mtu(struct sock *sk,
 					  const struct sk_buff *skb)
 {
+	const struct dst_entry *dst = skb_dst(skb);
 	unsigned int mtu;
 
 	if (!sk || !sk_fullsock(sk) || ip_sk_use_pmtu(sk)) {
 		bool forwarding = IPCB(skb)->flags & IPSKB_FORWARDED;
 
-		return ip_dst_mtu_maybe_forward(skb_dst(skb), forwarding);
+		return ip_dst_mtu_maybe_forward(dst, forwarding);
 	}
 
-	mtu = min(READ_ONCE(skb_dst(skb)->dev->mtu), IP_MAX_MTU);
-	return mtu - lwtunnel_headroom(skb_dst(skb)->lwtstate, mtu);
+	mtu = min(READ_ONCE(dst_dev(dst)->mtu), IP_MAX_MTU);
+	return mtu - lwtunnel_headroom(dst->lwtstate, mtu);
 }
 
 struct dst_metrics *ip_fib_metrics_init(struct nlattr *fc_mx, int fc_mx_len,
@@ -804,7 +804,7 @@ int ip_getsockopt(struct sock *sk, int level, int optname, char __user *optval,
 int ip_ra_control(struct sock *sk, unsigned char on,
 		  void (*destructor)(struct sock *));
 
-int ip_recv_error(struct sock *sk, struct msghdr *msg, int len, int *addr_len);
+int ip_recv_error(struct sock *sk, struct msghdr *msg, int len);
 void ip_icmp_error(struct sock *sk, struct sk_buff *skb, int err, __be16 port,
 		   u32 info, u8 *payload);
 void ip_local_error(struct sock *sk, int err, __be32 daddr, __be16 dport,

@@ -5,8 +5,11 @@
 #define _ICE_ADAPTER_H_
 
 #include <linux/types.h>
+#include <linux/mutex.h>
 #include <linux/spinlock_types.h>
 #include <linux/refcount_types.h>
+
+#include "ice_type.h"
 
 struct pci_dev;
 struct ice_pf;
@@ -27,22 +30,31 @@ struct ice_port_list {
 
 /**
  * struct ice_adapter - PCI adapter resources shared across PFs
+ * @refcount: Reference count. struct ice_pf objects hold the references.
  * @ptp_gltsyn_time_lock: Spinlock protecting access to the GLTSYN_TIME
  *                        register of the PTP clock.
- * @refcount: Reference count. struct ice_pf objects hold the references.
+ * @txq_ctx_lock: Spinlock protecting access to the GLCOMM_QTX_CNTX_CTL register
+ * @cpi_phy_lock: Per-PHY mutex serializing CPI REQ/ACK transactions.
+ *               Index 0 = PHY0, index 1 = PHY1. Used on E825C devices.
  * @ctrl_pf: Control PF of the adapter
  * @ports: Ports list
+ * @index: 64-bit index cached for collision detection on 32bit systems
  */
 struct ice_adapter {
 	refcount_t refcount;
 	/* For access to the GLTSYN_TIME register */
 	spinlock_t ptp_gltsyn_time_lock;
+	/* For access to GLCOMM_QTX_CNTX_CTL register */
+	spinlock_t txq_ctx_lock;
+	/* Serialize CPI REQ/ACK transactions per PHY (E825C only) */
+	struct mutex cpi_phy_lock[ICE_E825_MAX_PHYS];
 
 	struct ice_pf *ctrl_pf;
 	struct ice_port_list ports;
+	u64 index;
 };
 
-struct ice_adapter *ice_adapter_get(const struct pci_dev *pdev);
-void ice_adapter_put(const struct pci_dev *pdev);
+struct ice_adapter *ice_adapter_get(struct pci_dev *pdev);
+void ice_adapter_put(struct pci_dev *pdev);
 
 #endif /* _ICE_ADAPTER_H */

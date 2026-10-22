@@ -48,7 +48,8 @@
 /*
  * Nuvoton devices.
  */
-#define SIO_NCT6126D_ID		0xD283  /* NCT6126D chipset ID */
+#define SIO_NCT6126D_VER_A_ID		0xD283  /* NCT6126D version A chipset ID */
+#define SIO_NCT6126D_VER_B_ID		0xD284  /* NCT6126D version B chipset ID */
 
 #define SIO_LD_GPIO_NUVOTON	0x07	/* GPIO logical device */
 
@@ -159,7 +160,8 @@ static int f7188x_gpio_direction_in(struct gpio_chip *chip, unsigned offset);
 static int f7188x_gpio_get(struct gpio_chip *chip, unsigned offset);
 static int f7188x_gpio_direction_out(struct gpio_chip *chip,
 				     unsigned offset, int value);
-static void f7188x_gpio_set(struct gpio_chip *chip, unsigned offset, int value);
+static int f7188x_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			   int value);
 static int f7188x_gpio_set_config(struct gpio_chip *chip, unsigned offset,
 				  unsigned long config);
 
@@ -391,7 +393,8 @@ static int f7188x_gpio_direction_out(struct gpio_chip *chip,
 	return 0;
 }
 
-static void f7188x_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+static int f7188x_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			   int value)
 {
 	int err;
 	struct f7188x_gpio_bank *bank = gpiochip_get_data(chip);
@@ -400,7 +403,8 @@ static void f7188x_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 
 	err = superio_enter(sio->addr);
 	if (err)
-		return;
+		return err;
+
 	superio_select(sio->addr, sio->device);
 
 	data_out = superio_inb(sio->addr, f7188x_gpio_data_out(bank->regbase));
@@ -411,6 +415,8 @@ static void f7188x_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 	superio_outb(sio->addr, f7188x_gpio_data_out(bank->regbase), data_out);
 
 	superio_exit(sio->addr);
+
+	return 0;
 }
 
 static int f7188x_gpio_set_config(struct gpio_chip *chip, unsigned offset,
@@ -559,7 +565,8 @@ static int __init f7188x_find(int addr, struct f7188x_sio *sio)
 	case SIO_F81865_ID:
 		sio->type = f81865;
 		break;
-	case SIO_NCT6126D_ID:
+	case SIO_NCT6126D_VER_A_ID:
+	case SIO_NCT6126D_VER_B_ID:
 		sio->device = SIO_LD_GPIO_NUVOTON;
 		sio->type = nct6126d;
 		break;

@@ -35,7 +35,6 @@
 		.io_reg = REG_BASE + 0x4 + REG_SIZE * id,		\
 		.intr_cfg_reg = REG_BASE + 0x8 + REG_SIZE * id,		\
 		.intr_status_reg = REG_BASE + 0xc + REG_SIZE * id,	\
-		.intr_target_reg = REG_BASE + 0x8 + REG_SIZE * id,	\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
@@ -61,7 +60,6 @@
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -812,7 +810,7 @@ static const char * const ss_switch_groups[] = {
 };
 
 static const struct pinfunction msm8976_functions[] = {
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(blsp_spi1),
 	MSM_PIN_FUNCTION(smb_int),
 	MSM_PIN_FUNCTION(blsp_i2c1),
@@ -1089,6 +1087,7 @@ static const struct of_device_id msm8976_pinctrl_of_match[] = {
 	{ .compatible = "qcom,msm8976-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, msm8976_pinctrl_of_match);
 
 static struct platform_driver msm8976_pinctrl_driver = {
 	.driver = {
@@ -1096,7 +1095,6 @@ static struct platform_driver msm8976_pinctrl_driver = {
 		.of_match_table = msm8976_pinctrl_of_match,
 	},
 	.probe = msm8976_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init msm8976_pinctrl_init(void)
@@ -1113,4 +1111,3 @@ module_exit(msm8976_pinctrl_exit);
 
 MODULE_DESCRIPTION("Qualcomm msm8976 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, msm8976_pinctrl_of_match);

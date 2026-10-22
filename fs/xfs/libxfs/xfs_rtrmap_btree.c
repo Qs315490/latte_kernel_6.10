@@ -3,7 +3,7 @@
  * Copyright (c) 2018-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -185,38 +185,22 @@ static inline uint64_t offset_keymask(uint64_t offset)
 	return offset & ~XFS_RMAP_OFF_UNWRITTEN;
 }
 
-STATIC int64_t
-xfs_rtrmapbt_key_diff(
+STATIC int
+xfs_rtrmapbt_cmp_key_with_cur(
 	struct xfs_btree_cur		*cur,
 	const union xfs_btree_key	*key)
 {
 	struct xfs_rmap_irec		*rec = &cur->bc_rec.r;
 	const struct xfs_rmap_key	*kp = &key->rmap;
-	__u64				x, y;
-	int64_t				d;
 
-	d = (int64_t)be32_to_cpu(kp->rm_startblock) - rec->rm_startblock;
-	if (d)
-		return d;
-
-	x = be64_to_cpu(kp->rm_owner);
-	y = rec->rm_owner;
-	if (x > y)
-		return 1;
-	else if (y > x)
-		return -1;
-
-	x = offset_keymask(be64_to_cpu(kp->rm_offset));
-	y = offset_keymask(xfs_rmap_irec_offset_pack(rec));
-	if (x > y)
-		return 1;
-	else if (y > x)
-		return -1;
-	return 0;
+	return cmp_int(be32_to_cpu(kp->rm_startblock), rec->rm_startblock) ?:
+	       cmp_int(be64_to_cpu(kp->rm_owner), rec->rm_owner) ?:
+	       cmp_int(offset_keymask(be64_to_cpu(kp->rm_offset)),
+		       offset_keymask(xfs_rmap_irec_offset_pack(rec)));
 }
 
-STATIC int64_t
-xfs_rtrmapbt_diff_two_keys(
+STATIC int
+xfs_rtrmapbt_cmp_two_keys(
 	struct xfs_btree_cur		*cur,
 	const union xfs_btree_key	*k1,
 	const union xfs_btree_key	*k2,
@@ -224,36 +208,31 @@ xfs_rtrmapbt_diff_two_keys(
 {
 	const struct xfs_rmap_key	*kp1 = &k1->rmap;
 	const struct xfs_rmap_key	*kp2 = &k2->rmap;
-	int64_t				d;
-	__u64				x, y;
+	int				d;
 
 	/* Doesn't make sense to mask off the physical space part */
 	ASSERT(!mask || mask->rmap.rm_startblock);
 
-	d = (int64_t)be32_to_cpu(kp1->rm_startblock) -
-		     be32_to_cpu(kp2->rm_startblock);
+	d = cmp_int(be32_to_cpu(kp1->rm_startblock),
+		    be32_to_cpu(kp2->rm_startblock));
 	if (d)
 		return d;
 
 	if (!mask || mask->rmap.rm_owner) {
-		x = be64_to_cpu(kp1->rm_owner);
-		y = be64_to_cpu(kp2->rm_owner);
-		if (x > y)
-			return 1;
-		else if (y > x)
-			return -1;
+		d = cmp_int(be64_to_cpu(kp1->rm_owner),
+			    be64_to_cpu(kp2->rm_owner));
+		if (d)
+			return d;
 	}
 
 	if (!mask || mask->rmap.rm_offset) {
 		/* Doesn't make sense to allow offset but not owner */
 		ASSERT(!mask || mask->rmap.rm_owner);
 
-		x = offset_keymask(be64_to_cpu(kp1->rm_offset));
-		y = offset_keymask(be64_to_cpu(kp2->rm_offset));
-		if (x > y)
-			return 1;
-		else if (y > x)
-			return -1;
+		d = cmp_int(offset_keymask(be64_to_cpu(kp1->rm_offset)),
+			    offset_keymask(be64_to_cpu(kp2->rm_offset)));
+		if (d)
+			return d;
 	}
 
 	return 0;
@@ -511,9 +490,9 @@ const struct xfs_btree_ops xfs_rtrmapbt_ops = {
 	.init_high_key_from_rec	= xfs_rtrmapbt_init_high_key_from_rec,
 	.init_rec_from_cur	= xfs_rtrmapbt_init_rec_from_cur,
 	.init_ptr_from_cur	= xfs_rtrmapbt_init_ptr_from_cur,
-	.key_diff		= xfs_rtrmapbt_key_diff,
+	.cmp_key_with_cur	= xfs_rtrmapbt_cmp_key_with_cur,
 	.buf_ops		= &xfs_rtrmapbt_buf_ops,
-	.diff_two_keys		= xfs_rtrmapbt_diff_two_keys,
+	.cmp_two_keys		= xfs_rtrmapbt_cmp_two_keys,
 	.keys_inorder		= xfs_rtrmapbt_keys_inorder,
 	.recs_inorder		= xfs_rtrmapbt_recs_inorder,
 	.keys_contiguous	= xfs_rtrmapbt_keys_contiguous,
@@ -620,9 +599,9 @@ const struct xfs_btree_ops xfs_rtrmapbt_mem_ops = {
 	.init_high_key_from_rec	= xfs_rtrmapbt_init_high_key_from_rec,
 	.init_rec_from_cur	= xfs_rtrmapbt_init_rec_from_cur,
 	.init_ptr_from_cur	= xfbtree_init_ptr_from_cur,
-	.key_diff		= xfs_rtrmapbt_key_diff,
+	.cmp_key_with_cur	= xfs_rtrmapbt_cmp_key_with_cur,
 	.buf_ops		= &xfs_rtrmapbt_mem_buf_ops,
-	.diff_two_keys		= xfs_rtrmapbt_diff_two_keys,
+	.cmp_two_keys		= xfs_rtrmapbt_cmp_two_keys,
 	.keys_inorder		= xfs_rtrmapbt_keys_inorder,
 	.recs_inorder		= xfs_rtrmapbt_recs_inorder,
 	.keys_contiguous	= xfs_rtrmapbt_keys_contiguous,
@@ -860,7 +839,7 @@ xfs_rtrmapbt_from_disk(
 	unsigned int		numrecs;
 	unsigned int		maxrecs;
 
-	xfs_btree_init_block(mp, rblock, &xfs_rtrmapbt_ops, 0, 0, ip->i_ino);
+	xfs_btree_init_block(mp, rblock, &xfs_rtrmapbt_ops, 0, 0, I_INO(ip));
 
 	rblock->bb_level = dblock->bb_level;
 	rblock->bb_numrecs = dblock->bb_numrecs;
@@ -1002,7 +981,7 @@ xfs_rtrmapbt_create(
 	broot = xfs_broot_realloc(ifp, xfs_rtrmap_broot_space_calc(mp, 0, 0));
 	if (broot)
 		xfs_btree_init_block(mp, broot, &xfs_rtrmapbt_ops, 0, 0,
-				ip->i_ino);
+				I_INO(ip));
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE | XFS_ILOG_DBROOT);
 
 	return 0;
@@ -1032,4 +1011,23 @@ xfs_rtrmapbt_init_rtsb(
 	error = xfs_rmap_map_raw(cur, &rmap);
 	xfs_btree_del_cursor(cur, error);
 	return error;
+}
+
+/*
+ * Return the highest rgbno currently tracked by the rmap for this rtg.
+ */
+xfs_rgblock_t
+xfs_rtrmap_highest_rgbno(
+	struct xfs_rtgroup	*rtg)
+{
+	struct xfs_btree_block	*block = rtg_rmap(rtg)->i_df.if_broot;
+	union xfs_btree_key	key = {};
+	struct xfs_btree_cur	*cur;
+
+	if (block->bb_numrecs == 0)
+		return NULLRGBLOCK;
+	cur = xfs_rtrmapbt_init_cursor(NULL, rtg);
+	xfs_btree_get_keys(cur, block, &key);
+	xfs_btree_del_cursor(cur, XFS_BTREE_NOERROR);
+	return be32_to_cpu(key.__rmap_bigkey[1].rm_startblock);
 }

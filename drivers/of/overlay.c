@@ -84,6 +84,12 @@ static int devicetree_state_flags;
 #define DTSF_APPLY_FAIL		0x01
 #define DTSF_REVERT_FAIL	0x02
 
+static int of_prop_val_eq(const struct property *p1, const struct property *p2)
+{
+	return p1->length == p2->length &&
+	       !memcmp(p1->value, p2->value, (size_t)p1->length);
+}
+
 /*
  * If a changeset apply or revert encounters an error, an attempt will
  * be made to undo partial changes, but may fail.  If the undo fails
@@ -129,7 +135,7 @@ static BLOCKING_NOTIFIER_HEAD(overlay_notify_chain);
  * @nb:		Notifier block to register
  *
  * Register for notification on overlay operations on device tree nodes. The
- * reported actions definied by @of_reconfig_change. The notifier callback
+ * reported actions defined by @of_reconfig_change. The notifier callback
  * furthermore receives a pointer to the affected device tree node.
  *
  * Note that a notifier callback is not supposed to store pointers to a device
@@ -177,6 +183,15 @@ static int overlay_notify(struct overlay_changeset *ovcs,
 	}
 
 	return 0;
+}
+
+static void overlay_fw_devlink_refresh(struct overlay_changeset *ovcs)
+{
+	for (int i = 0; i < ovcs->count; i++) {
+		struct device_node *np = ovcs->fragments[i].target;
+
+		fw_devlink_refresh_fwnode(of_fwnode_handle(np));
+	}
 }
 
 /*
@@ -242,7 +257,7 @@ static struct property *dup_and_fixup_symbol_prop(
 		return NULL;
 	target_path_len = strlen(target_path);
 
-	new_prop = kzalloc(sizeof(*new_prop), GFP_KERNEL);
+	new_prop = kzalloc_obj(*new_prop);
 	if (!new_prop)
 		goto err_free_target_path;
 
@@ -252,8 +267,8 @@ static struct property *dup_and_fixup_symbol_prop(
 	if (!new_prop->name || !new_prop->value)
 		goto err_free_new_prop;
 
-	strcpy(new_prop->value, target_path);
-	strcpy(new_prop->value + target_path_len, path_tail);
+	memcpy(new_prop->value, target_path, target_path_len);
+	memcpy(new_prop->value + target_path_len, path_tail, path_tail_len);
 
 	of_property_set_flag(new_prop, OF_DYNAMIC);
 
@@ -304,9 +319,7 @@ static int add_changeset_property(struct overlay_changeset *ovcs,
 	int ret = 0;
 
 	if (target->in_livetree)
-		if (!of_prop_cmp(overlay_prop->name, "name") ||
-		    !of_prop_cmp(overlay_prop->name, "phandle") ||
-		    !of_prop_cmp(overlay_prop->name, "linux,phandle"))
+		if (is_pseudo_property(overlay_prop->name))
 			return 0;
 
 	if (target->in_livetree)
@@ -780,7 +793,7 @@ static int init_overlay_changeset(struct overlay_changeset *ovcs,
 		of_node_put(node);
 	}
 
-	fragments = kcalloc(cnt, sizeof(*fragments), GFP_KERNEL);
+	fragments = kzalloc_objs(*fragments, cnt);
 	if (!fragments) {
 		ret = -ENOMEM;
 		goto err_out;
@@ -947,6 +960,12 @@ static int of_overlay_apply(struct overlay_changeset *ovcs,
 		pr_err("overlay apply changeset entry notify error %d\n", ret);
 	/* notify failure is not fatal, continue */
 
+	/*
+	 * Needs to happen after changeset notify to give the listeners a chance
+	 * to finish creating all the devices they need to create.
+	 */
+	overlay_fw_devlink_refresh(ovcs);
+
 	ret_tmp = overlay_notify(ovcs, OF_OVERLAY_POST_APPLY);
 	if (ret_tmp)
 		if (!ret)
@@ -1005,7 +1024,7 @@ int of_overlay_fdt_apply(const void *overlay_fdt, u32 overlay_fdt_size,
 	if (overlay_fdt_size < size)
 		return -EINVAL;
 
-	ovcs = kzalloc(sizeof(*ovcs), GFP_KERNEL);
+	ovcs = kzalloc_obj(*ovcs);
 	if (!ovcs)
 		return -ENOMEM;
 
@@ -1185,6 +1204,9 @@ int of_overlay_remove(int *ovcs_id)
 {
 	struct overlay_changeset *ovcs;
 	int ret, ret_apply, ret_tmp;
+
+	if (*ovcs_id == 0)
+		return 0;
 
 	if (devicetree_corrupt()) {
 		pr_err("suspect devicetree state, refuse to remove overlay\n");

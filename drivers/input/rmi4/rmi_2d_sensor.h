@@ -7,6 +7,9 @@
 #ifndef _RMI_2D_SENSOR_H
 #define _RMI_2D_SENSOR_H
 
+#include <linux/rmi.h>
+#include <linux/types.h>
+
 enum rmi_2d_sensor_object_type {
 	RMI_2D_OBJECT_NONE,
 	RMI_2D_OBJECT_FINGER,
@@ -53,8 +56,8 @@ struct rmi_2d_sensor {
 	u16 max_y;
 	u8 nbr_fingers;
 	u8 *data_pkt;
-	int pkt_size;
-	int attn_size;
+	u32 pkt_size;
+	u32 attn_size;
 	bool topbuttonpad;
 	enum rmi_sensor_type sensor_type;
 	struct input_dev *input;

@@ -8,6 +8,7 @@
  */
 
 #include <linux/list.h>
+#include <linux/cred.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <keys/user-type.h>
@@ -24,20 +25,14 @@ static const struct cred *spnego_cred;
 static int
 cifs_spnego_key_instantiate(struct key *key, struct key_preparsed_payload *prep)
 {
-	char *payload;
-	int ret;
+	char *payload = kmemdup(prep->data, prep->datalen, GFP_KERNEL);
 
-	ret = -ENOMEM;
-	payload = kmemdup(prep->data, prep->datalen, GFP_KERNEL);
 	if (!payload)
-		goto error;
+		return -ENOMEM;
 
 	/* attach the data */
 	key->payload.data[0] = payload;
-	ret = 0;
-
-error:
-	return ret;
+	return 0;
 }
 
 static void
@@ -46,12 +41,27 @@ cifs_spnego_key_destroy(struct key *key)
 	kfree(key->payload.data[0]);
 }
 
+static int
+cifs_spnego_key_vet_description(const char *description)
+{
+	/*
+	 * cifs.spnego descriptions are authority-bearing inputs to cifs.upcall.
+	 * They are only valid when produced by CIFS while using the private
+	 * spnego_cred installed below.  Do not let userspace create this type
+	 * of key through request_key(2)/add_key(2), since the helper treats
+	 * pid/uid/creduid/upcall_target as kernel-originating fields.
+	 */
+	if (current_cred() != spnego_cred)
+		return -EPERM;
+	return 0;
+}
 
 /*
  * keytype for CIFS spnego keys
  */
 struct key_type cifs_spnego_key_type = {
 	.name		= "cifs.spnego",
+	.vet_description = cifs_spnego_key_vet_description,
 	.instantiate	= cifs_spnego_key_instantiate,
 	.destroy	= cifs_spnego_key_destroy,
 	.describe	= user_describe,
@@ -96,7 +106,6 @@ cifs_get_spnego_key(struct cifs_ses *sesInfo,
 	size_t desc_len;
 	struct key *spnego_key;
 	const char *hostname = server->hostname;
-	const struct cred *saved_cred;
 
 	/* length of fields (with semicolons): ver=0xyz ip4=ipaddress
 	   host=hostname sec=mechanism uid=0xFF user=username */
@@ -124,60 +133,49 @@ cifs_get_spnego_key(struct cifs_ses *sesInfo,
 	dp = description;
 	/* start with version and hostname portion of UNC string */
 	spnego_key = ERR_PTR(-EINVAL);
-	sprintf(dp, "ver=0x%x;host=%s;", CIFS_SPNEGO_UPCALL_VERSION,
-		hostname);
-	dp = description + strlen(description);
+	dp += sprintf(dp, "ver=0x%x;host=%s;", CIFS_SPNEGO_UPCALL_VERSION,
+		      hostname);
 
 	/* add the server address */
 	if (server->dstaddr.ss_family == AF_INET)
-		sprintf(dp, "ip4=%pI4", &sa->sin_addr);
+		dp += sprintf(dp, "ip4=%pI4", &sa->sin_addr);
 	else if (server->dstaddr.ss_family == AF_INET6)
-		sprintf(dp, "ip6=%pI6", &sa6->sin6_addr);
+		dp += sprintf(dp, "ip6=%pI6", &sa6->sin6_addr);
 	else
 		goto out;
 
-	dp = description + strlen(description);
-
 	/* for now, only sec=krb5 and sec=mskrb5 and iakerb are valid */
 	if (server->sec_kerberos)
-		sprintf(dp, ";sec=krb5");
+		dp += sprintf(dp, ";sec=krb5");
 	else if (server->sec_mskerberos)
-		sprintf(dp, ";sec=mskrb5");
+		dp += sprintf(dp, ";sec=mskrb5");
 	else if (server->sec_iakerb)
-		sprintf(dp, ";sec=iakerb");
+		dp += sprintf(dp, ";sec=iakerb");
 	else {
 		cifs_dbg(VFS, "unknown or missing server auth type, use krb5\n");
-		sprintf(dp, ";sec=krb5");
+		dp += sprintf(dp, ";sec=krb5");
 	}
 
-	dp = description + strlen(description);
-	sprintf(dp, ";uid=0x%x",
-		from_kuid_munged(&init_user_ns, sesInfo->linux_uid));
+	dp += sprintf(dp, ";uid=0x%x",
+		      from_kuid_munged(&init_user_ns, sesInfo->linux_uid));
 
-	dp = description + strlen(description);
-	sprintf(dp, ";creduid=0x%x",
+	dp += sprintf(dp, ";creduid=0x%x",
 		from_kuid_munged(&init_user_ns, sesInfo->cred_uid));
 
-	if (sesInfo->user_name) {
-		dp = description + strlen(description);
-		sprintf(dp, ";user=%s", sesInfo->user_name);
-	}
+	if (sesInfo->user_name)
+		dp += sprintf(dp, ";user=%s", sesInfo->user_name);
 
-	dp = description + strlen(description);
-	sprintf(dp, ";pid=0x%x", current->pid);
+	dp += sprintf(dp, ";pid=0x%x", current->pid);
 
-	if (sesInfo->upcall_target == UPTARGET_MOUNT) {
-		dp = description + strlen(description);
-		sprintf(dp, ";upcall_target=mount");
-	} else {
-		dp = description + strlen(description);
-		sprintf(dp, ";upcall_target=app");
-	}
+	if (sesInfo->upcall_target == UPTARGET_MOUNT)
+		dp += sprintf(dp, ";upcall_target=mount");
+	else
+		dp += sprintf(dp, ";upcall_target=app");
 
 	cifs_dbg(FYI, "key description = %s\n", description);
-	saved_cred = override_creds(spnego_cred);
-	spnego_key = request_key(&cifs_spnego_key_type, description, "");
-	revert_creds(saved_cred);
+	scoped_with_creds(spnego_cred)
+		spnego_key = request_key(&cifs_spnego_key_type, description, "");
+	trace_smb3_kerberos_auth(server, sesInfo, PTR_ERR_OR_ZERO(spnego_key));
 
 #ifdef CONFIG_CIFS_DEBUG2
 	if (cifsFYI && !IS_ERR(spnego_key)) {

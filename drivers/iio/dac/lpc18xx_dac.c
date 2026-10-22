@@ -16,7 +16,6 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
@@ -179,7 +178,7 @@ static void lpc18xx_dac_remove(struct platform_device *pdev)
 
 static const struct of_device_id lpc18xx_dac_match[] = {
 	{ .compatible = "nxp,lpc1850-dac" },
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(of, lpc18xx_dac_match);
 

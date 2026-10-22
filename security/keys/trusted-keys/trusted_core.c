@@ -12,8 +12,10 @@
 #include <keys/trusted_caam.h>
 #include <keys/trusted_dcp.h>
 #include <keys/trusted_tpm.h>
+#include <keys/trusted_pkwm.h>
 #include <linux/capability.h>
 #include <linux/err.h>
+#include <linux/hex.h>
 #include <linux/init.h>
 #include <linux/key-type.h>
 #include <linux/module.h>
@@ -29,9 +31,15 @@ static char *trusted_rng = "default";
 module_param_named(rng, trusted_rng, charp, 0);
 MODULE_PARM_DESC(rng, "Select trusted key RNG");
 
+#ifdef CONFIG_TRUSTED_KEYS_DEBUG
+bool trusted_debug;
+module_param_named(debug, trusted_debug, bool, 0);
+MODULE_PARM_DESC(debug, "Enable trusted keys debug traces (default: 0)");
+#endif
+
 static char *trusted_key_source;
 module_param_named(source, trusted_key_source, charp, 0);
-MODULE_PARM_DESC(source, "Select trusted keys source (tpm, tee, caam or dcp)");
+MODULE_PARM_DESC(source, "Select trusted keys source (tpm, tee, caam, dcp or pkwm)");
 
 static const struct trusted_key_source trusted_key_sources[] = {
 #if defined(CONFIG_TRUSTED_KEYS_TPM)
@@ -46,6 +54,9 @@ static const struct trusted_key_source trusted_key_sources[] = {
 #if defined(CONFIG_TRUSTED_KEYS_DCP)
 	{ "dcp", &dcp_trusted_key_ops },
 #endif
+#if defined(CONFIG_TRUSTED_KEYS_PKWM)
+	{ "pkwm", &pkwm_trusted_key_ops },
+#endif
 };
 
 DEFINE_STATIC_CALL_NULL(trusted_key_seal, *trusted_key_sources[0].ops->seal);
@@ -54,7 +65,7 @@ DEFINE_STATIC_CALL_NULL(trusted_key_unseal,
 DEFINE_STATIC_CALL_NULL(trusted_key_get_random,
 			*trusted_key_sources[0].ops->get_random);
 static void (*trusted_key_exit)(void);
-static unsigned char migratable;
+static unsigned char migratable __ro_after_init;
 
 enum {
 	Opt_err,
@@ -129,7 +140,7 @@ static struct trusted_key_payload *trusted_payload_alloc(struct key *key)
 	ret = key_payload_reserve(key, sizeof(*p));
 	if (ret < 0)
 		goto err;
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc_obj(*p);
 	if (!p)
 		goto err;
 
@@ -157,7 +168,7 @@ static int trusted_instantiate(struct key *key,
 	int key_cmd;
 	size_t key_len;
 
-	if (datalen <= 0 || datalen > 32767 || !prep->data)
+	if (datalen == 0 || datalen > 32767 || !prep->data)
 		return -EINVAL;
 
 	orig_datablob = datablob = kmalloc(datalen + 1, GFP_KERNEL);
@@ -240,7 +251,7 @@ static int trusted_update(struct key *key, struct key_preparsed_payload *prep)
 	p = key->payload.data[0];
 	if (!p->migratable)
 		return -EPERM;
-	if (datalen <= 0 || datalen > 32767 || !prep->data)
+	if (datalen == 0 || datalen > 32767 || !prep->data)
 		return -EINVAL;
 
 	orig_datablob = datablob = kmalloc(datalen + 1, GFP_KERNEL);

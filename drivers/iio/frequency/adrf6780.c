@@ -13,7 +13,6 @@
 #include <linux/device.h>
 #include <linux/iio/iio.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/spi/spi.h>
 
 #include <linux/unaligned.h>
@@ -188,8 +187,11 @@ static int adrf6780_read_adc_raw(struct adrf6780_state *st, unsigned int *read_v
 	if (ret)
 		goto exit;
 
-	/* Recommended delay for the ADC to be ready*/
-	usleep_range(200, 250);
+	/*
+	 * Per ADRF6780 datasheet (Rev. D, page 23, ADC section),
+	 * wait approximately 200 us for the ADC to be ready.
+	 */
+	fsleep(200);
 
 	ret = __adrf6780_spi_read(st, ADRF6780_REG_ADC_OUTPUT, read_val);
 	if (ret)
@@ -346,23 +348,21 @@ static const struct iio_chan_spec adrf6780_channels[] = {
 static int adrf6780_reset(struct adrf6780_state *st)
 {
 	int ret;
-	struct spi_device *spi = st->spi;
+	struct device *dev = &st->spi->dev;
 
 	ret = __adrf6780_spi_update_bits(st, ADRF6780_REG_CONTROL,
 					 ADRF6780_SOFT_RESET_MSK,
 					 FIELD_PREP(ADRF6780_SOFT_RESET_MSK, 1));
-	if (ret) {
-		dev_err(&spi->dev, "ADRF6780 SPI software reset failed.\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "ADRF6780 SPI software reset failed.\n");
 
 	ret = __adrf6780_spi_update_bits(st, ADRF6780_REG_CONTROL,
 					 ADRF6780_SOFT_RESET_MSK,
 					 FIELD_PREP(ADRF6780_SOFT_RESET_MSK, 0));
-	if (ret) {
-		dev_err(&spi->dev, "ADRF6780 SPI software reset disable failed.\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "ADRF6780 SPI software reset disable failed.\n");
 
 	return 0;
 }
@@ -371,7 +371,7 @@ static int adrf6780_init(struct adrf6780_state *st)
 {
 	int ret;
 	unsigned int chip_id, enable_reg, enable_reg_msk;
-	struct spi_device *spi = st->spi;
+	struct device *dev = &st->spi->dev;
 
 	/* Perform a software reset */
 	ret = adrf6780_reset(st);
@@ -383,10 +383,9 @@ static int adrf6780_init(struct adrf6780_state *st)
 		return ret;
 
 	chip_id = FIELD_GET(ADRF6780_CHIP_ID_MSK, chip_id);
-	if (chip_id != ADRF6780_CHIP_ID) {
-		dev_err(&spi->dev, "ADRF6780 Invalid Chip ID.\n");
-		return -EINVAL;
-	}
+	if (chip_id != ADRF6780_CHIP_ID)
+		return dev_err_probe(dev, -EINVAL,
+				     "ADRF6780 Invalid Chip ID.\n");
 
 	enable_reg_msk = ADRF6780_VGA_BUFFER_EN_MSK |
 			ADRF6780_DETECTOR_EN_MSK |
@@ -426,18 +425,18 @@ static int adrf6780_init(struct adrf6780_state *st)
 
 static void adrf6780_properties_parse(struct adrf6780_state *st)
 {
-	struct spi_device *spi = st->spi;
+	struct device *dev = &st->spi->dev;
 
-	st->vga_buff_en = device_property_read_bool(&spi->dev, "adi,vga-buff-en");
-	st->lo_buff_en = device_property_read_bool(&spi->dev, "adi,lo-buff-en");
-	st->if_mode_en = device_property_read_bool(&spi->dev, "adi,if-mode-en");
-	st->iq_mode_en = device_property_read_bool(&spi->dev, "adi,iq-mode-en");
-	st->lo_x2_en = device_property_read_bool(&spi->dev, "adi,lo-x2-en");
-	st->lo_ppf_en = device_property_read_bool(&spi->dev, "adi,lo-ppf-en");
-	st->lo_en = device_property_read_bool(&spi->dev, "adi,lo-en");
-	st->uc_bias_en = device_property_read_bool(&spi->dev, "adi,uc-bias-en");
-	st->lo_sideband = device_property_read_bool(&spi->dev, "adi,lo-sideband");
-	st->vdet_out_en = device_property_read_bool(&spi->dev, "adi,vdet-out-en");
+	st->vga_buff_en = device_property_read_bool(dev, "adi,vga-buff-en");
+	st->lo_buff_en = device_property_read_bool(dev, "adi,lo-buff-en");
+	st->if_mode_en = device_property_read_bool(dev, "adi,if-mode-en");
+	st->iq_mode_en = device_property_read_bool(dev, "adi,iq-mode-en");
+	st->lo_x2_en = device_property_read_bool(dev, "adi,lo-x2-en");
+	st->lo_ppf_en = device_property_read_bool(dev, "adi,lo-ppf-en");
+	st->lo_en = device_property_read_bool(dev, "adi,lo-en");
+	st->uc_bias_en = device_property_read_bool(dev, "adi,uc-bias-en");
+	st->lo_sideband = device_property_read_bool(dev, "adi,lo-sideband");
+	st->vdet_out_en = device_property_read_bool(dev, "adi,vdet-out-en");
 }
 
 static void adrf6780_powerdown(void *data)
@@ -450,9 +449,10 @@ static int adrf6780_probe(struct spi_device *spi)
 {
 	struct iio_dev *indio_dev;
 	struct adrf6780_state *st;
+	struct device *dev = &spi->dev;
 	int ret;
 
-	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	indio_dev = devm_iio_device_alloc(dev, sizeof(*st));
 	if (!indio_dev)
 		return -ENOMEM;
 
@@ -467,9 +467,9 @@ static int adrf6780_probe(struct spi_device *spi)
 
 	adrf6780_properties_parse(st);
 
-	st->clkin = devm_clk_get_enabled(&spi->dev, "lo_in");
+	st->clkin = devm_clk_get_enabled(dev, "lo_in");
 	if (IS_ERR(st->clkin))
-		return dev_err_probe(&spi->dev, PTR_ERR(st->clkin),
+		return dev_err_probe(dev, PTR_ERR(st->clkin),
 				     "failed to get the LO input clock\n");
 
 	mutex_init(&st->lock);
@@ -478,22 +478,22 @@ static int adrf6780_probe(struct spi_device *spi)
 	if (ret)
 		return ret;
 
-	ret = devm_add_action_or_reset(&spi->dev, adrf6780_powerdown, st);
+	ret = devm_add_action_or_reset(dev, adrf6780_powerdown, st);
 	if (ret)
 		return ret;
 
-	return devm_iio_device_register(&spi->dev, indio_dev);
+	return devm_iio_device_register(dev, indio_dev);
 }
 
 static const struct spi_device_id adrf6780_id[] = {
 	{ "adrf6780", 0 },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, adrf6780_id);
 
 static const struct of_device_id adrf6780_of_match[] = {
 	{ .compatible = "adi,adrf6780" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, adrf6780_of_match);
 

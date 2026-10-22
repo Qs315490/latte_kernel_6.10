@@ -8,6 +8,12 @@
 	model = "Rockchip RK3036 KylinBoard";
 	compatible = "rockchip,rk3036-kylin", "rockchip,rk3036";
 
+	aliases {
+		mmc0 = &emmc;
+		mmc1 = &sdmmc;
+		mmc2 = &sdio;
+	};
+
 	chosen {
 		stdout-path = "serial2:115200n8";
 	};
@@ -96,8 +102,6 @@
 
 &emac {
 	phy = <&phy0>;
-	phy-reset-duration = <10>; /* millisecond */
-	phy-reset-gpios = <&gpio2 RK_PC6 GPIO_ACTIVE_LOW>; /* PHY_RST */
 	pinctrl-names = "default";
 	pinctrl-0 = <&emac_xfer>, <&emac_mdio>;
 	status = "okay";
@@ -108,6 +112,8 @@
 
 		phy0: ethernet-phy@0 {
 			reg = <0>;
+			reset-gpios = <&gpio2 RK_PC6 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <10000>;
 		};
 	};
 };
@@ -379,6 +385,18 @@
 };
 
 &usb_otg {
+	status = "okay";
+};
+
+&usb2phy {
+	status = "okay";
+};
+
+&usb2phy_host {
+	status = "okay";
+};
+
+&usb2phy_otg {
 	status = "okay";
 };
 

@@ -418,7 +418,7 @@ static struct scx200_acb_iface *scx200_create_iface(const char *text,
 	struct scx200_acb_iface *iface;
 	struct i2c_adapter *adapter;
 
-	iface = kzalloc(sizeof(*iface), GFP_KERNEL);
+	iface = kzalloc_obj(*iface);
 	if (!iface)
 		return NULL;
 
@@ -500,10 +500,8 @@ static int scx200_probe(struct platform_device *pdev)
 	struct resource *res;
 
 	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
-	if (!res) {
-		dev_err(&pdev->dev, "can't fetch device resource info\n");
-		return -ENODEV;
-	}
+	if (!res)
+		return dev_err_probe(&pdev->dev, -ENODEV, "can't fetch device resource info\n");
 
 	iface = scx200_create_dev("CS5535", res->start, 0, &pdev->dev);
 	if (!iface)

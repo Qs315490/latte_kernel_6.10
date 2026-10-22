@@ -8,26 +8,26 @@
 
 #include <linux/types.h>
 
-#include "i915_reg_defs.h"
+#include "intel_display_reg_defs.h"
 
 enum port;
-struct drm_atomic_state;
+struct drm_atomic_commit;
 struct drm_connector;
-struct drm_i915_private;
+struct intel_display;
 
 #ifdef I915
-bool g4x_hdmi_init(struct drm_i915_private *dev_priv,
-		   i915_reg_t hdmi_reg, enum port port);
+bool g4x_hdmi_init(struct intel_display *display,
+		   intel_reg_t hdmi_reg, enum port port);
 int g4x_hdmi_connector_atomic_check(struct drm_connector *connector,
-				    struct drm_atomic_state *state);
+				    struct drm_atomic_commit *state);
 #else
-static inline bool g4x_hdmi_init(struct drm_i915_private *dev_priv,
-				 i915_reg_t hdmi_reg, int port)
+static inline bool g4x_hdmi_init(struct intel_display *display,
+				 intel_reg_t hdmi_reg, int port)
 {
 	return false;
 }
 static inline int g4x_hdmi_connector_atomic_check(struct drm_connector *connector,
-						  struct drm_atomic_state *state)
+						  struct drm_atomic_commit *state)
 {
 	return 0;
 }

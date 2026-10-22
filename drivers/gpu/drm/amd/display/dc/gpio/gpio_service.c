@@ -58,7 +58,7 @@ struct gpio_service *dal_gpio_service_create(
 	struct gpio_service *service;
 	int32_t index_of_id;
 
-	service = kzalloc(sizeof(struct gpio_service), GFP_KERNEL);
+	service = kzalloc_obj(struct gpio_service);
 
 	if (!service) {
 		BREAK_TO_DEBUGGER();
@@ -411,6 +411,20 @@ enum dc_irq_source dal_irq_get_rx_source(
 	}
 }
 
+enum dc_irq_source dal_irq_get_read_request(
+	const struct gpio *irq)
+{
+	enum gpio_id id = dal_gpio_get_id(irq);
+
+	switch (id) {
+	case GPIO_ID_HPD:
+		return (enum dc_irq_source)(DC_IRQ_SOURCE_DCI2C_RR_DDC1 +
+			dal_gpio_get_enum(irq));
+	default:
+		return DC_IRQ_SOURCE_INVALID;
+	}
+}
+
 enum gpio_result dal_irq_setup_hpd_filter(
 	struct gpio *irq,
 	struct gpio_hpd_config *config)
@@ -484,7 +498,7 @@ struct ddc *dal_gpio_create_ddc(
 	if (!service->translate.funcs->offset_to_id(offset, mask, &id, &en))
 		return NULL;
 
-	ddc = kzalloc(sizeof(struct ddc), GFP_KERNEL);
+	ddc = kzalloc_obj(struct ddc);
 
 	if (!ddc) {
 		BREAK_TO_DEBUGGER();
@@ -632,6 +646,9 @@ failure:
 enum gpio_ddc_line dal_ddc_get_line(
 	const struct ddc *ddc)
 {
+	if (!ddc)
+		return GPIO_DDC_LINE_UNKNOWN;
+
 	return (enum gpio_ddc_line)dal_gpio_get_enum(ddc->pin_data);
 }
 

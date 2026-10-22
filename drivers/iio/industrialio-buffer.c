@@ -228,8 +228,10 @@ static ssize_t iio_buffer_write(struct file *filp, const char __user *buf,
 	written = 0;
 	add_wait_queue(&rb->pollq, &wait);
 	do {
-		if (!indio_dev->info)
-			return -ENODEV;
+		if (!indio_dev->info) {
+			ret = -ENODEV;
+			break;
+		}
 
 		if (!iio_buffer_space_available(rb)) {
 			if (signal_pending(current)) {
@@ -748,7 +750,7 @@ static int iio_storage_bytes_for_si(struct iio_dev *indio_dev,
 	bytes = scan_type->storagebits / 8;
 
 	if (scan_type->repeat > 1)
-		bytes *= scan_type->repeat;
+		bytes *= roundup_pow_of_two(scan_type->repeat);
 
 	return bytes;
 }
@@ -762,7 +764,9 @@ static int iio_storage_bytes_for_timestamp(struct iio_dev *indio_dev)
 }
 
 static int iio_compute_scan_bytes(struct iio_dev *indio_dev,
-				  const unsigned long *mask, bool timestamp)
+				  const unsigned long *mask, bool timestamp,
+				  unsigned int *scan_bytes,
+				  unsigned int *timestamp_offset)
 {
 	unsigned int bytes = 0;
 	int length, i, largest = 0;
@@ -784,12 +788,17 @@ static int iio_compute_scan_bytes(struct iio_dev *indio_dev,
 			return length;
 
 		bytes = ALIGN(bytes, length);
+
+		if (timestamp_offset)
+			*timestamp_offset = bytes;
+
 		bytes += length;
 		largest = max(largest, length);
 	}
 
-	bytes = ALIGN(bytes, largest);
-	return bytes;
+	*scan_bytes = ALIGN(bytes, largest);
+
+	return 0;
 }
 
 static void iio_buffer_activate(struct iio_dev *indio_dev,
@@ -834,18 +843,23 @@ static int iio_buffer_disable(struct iio_buffer *buffer,
 	return buffer->access->disable(buffer, indio_dev);
 }
 
-static void iio_buffer_update_bytes_per_datum(struct iio_dev *indio_dev,
-					      struct iio_buffer *buffer)
+static int iio_buffer_update_bytes_per_datum(struct iio_dev *indio_dev,
+					     struct iio_buffer *buffer)
 {
 	unsigned int bytes;
+	int ret;
 
 	if (!buffer->access->set_bytes_per_datum)
-		return;
+		return 0;
 
-	bytes = iio_compute_scan_bytes(indio_dev, buffer->scan_mask,
-				       buffer->scan_timestamp);
+	ret = iio_compute_scan_bytes(indio_dev, buffer->scan_mask,
+				     buffer->scan_timestamp, &bytes, NULL);
+	if (ret)
+		return ret;
 
 	buffer->access->set_bytes_per_datum(buffer, bytes);
+
+	return 0;
 }
 
 static int iio_buffer_request_update(struct iio_dev *indio_dev,
@@ -853,7 +867,10 @@ static int iio_buffer_request_update(struct iio_dev *indio_dev,
 {
 	int ret;
 
-	iio_buffer_update_bytes_per_datum(indio_dev, buffer);
+	ret = iio_buffer_update_bytes_per_datum(indio_dev, buffer);
+	if (ret)
+		return ret;
+
 	if (buffer->access->request_update) {
 		ret = buffer->access->request_update(buffer);
 		if (ret) {
@@ -880,6 +897,7 @@ struct iio_device_config {
 	unsigned int watermark;
 	const unsigned long *scan_mask;
 	unsigned int scan_bytes;
+	unsigned int scan_timestamp_offset;
 	bool scan_timestamp;
 };
 
@@ -896,6 +914,7 @@ static int iio_verify_update(struct iio_dev *indio_dev,
 	struct iio_buffer *buffer;
 	bool scan_timestamp;
 	unsigned int modes;
+	int ret;
 
 	if (insert_buffer &&
 	    bitmap_empty(insert_buffer->scan_mask, masklength)) {
@@ -983,8 +1002,12 @@ static int iio_verify_update(struct iio_dev *indio_dev,
 		scan_mask = compound_mask;
 	}
 
-	config->scan_bytes = iio_compute_scan_bytes(indio_dev,
-						    scan_mask, scan_timestamp);
+	ret = iio_compute_scan_bytes(indio_dev, scan_mask, scan_timestamp,
+				     &config->scan_bytes,
+				     &config->scan_timestamp_offset);
+	if (ret)
+		return ret;
+
 	config->scan_mask = scan_mask;
 	config->scan_timestamp = scan_timestamp;
 
@@ -1024,7 +1047,7 @@ static int iio_buffer_add_demux(struct iio_buffer *buffer,
 	    (*p)->to + (*p)->length == out_loc) {
 		(*p)->length += length;
 	} else {
-		*p = kmalloc(sizeof(**p), GFP_KERNEL);
+		*p = kmalloc_obj(**p);
 		if (!(*p))
 			return -ENOMEM;
 		(*p)->from = in_loc;
@@ -1139,6 +1162,7 @@ static int iio_enable_buffers(struct iio_dev *indio_dev,
 	indio_dev->active_scan_mask = config->scan_mask;
 	ACCESS_PRIVATE(indio_dev, scan_timestamp) = config->scan_timestamp;
 	indio_dev->scan_bytes = config->scan_bytes;
+	ACCESS_PRIVATE(indio_dev, scan_timestamp_offset) = config->scan_timestamp_offset;
 	iio_dev_opaque->currentmode = config->mode;
 
 	iio_update_demux(indio_dev);
@@ -1478,7 +1502,7 @@ static struct attribute *iio_buffer_wrap_attr(struct iio_buffer *buffer,
 	struct device_attribute *dattr = to_dev_attr(attr);
 	struct iio_dev_attr *iio_attr;
 
-	iio_attr = kzalloc(sizeof(*iio_attr), GFP_KERNEL);
+	iio_attr = kzalloc_obj(*iio_attr);
 	if (!iio_attr)
 		return NULL;
 
@@ -1507,7 +1531,7 @@ static int iio_buffer_register_legacy_sysfs_groups(struct iio_dev *indio_dev,
 	struct attribute **attrs;
 	int ret;
 
-	attrs = kcalloc(buffer_attrcount + 1, sizeof(*attrs), GFP_KERNEL);
+	attrs = kzalloc_objs(*attrs, buffer_attrcount + 1);
 	if (!attrs)
 		return -ENOMEM;
 
@@ -1521,7 +1545,7 @@ static int iio_buffer_register_legacy_sysfs_groups(struct iio_dev *indio_dev,
 	if (ret)
 		goto error_free_buffer_attrs;
 
-	attrs = kcalloc(scan_el_attrcount + 1, sizeof(*attrs), GFP_KERNEL);
+	attrs = kzalloc_objs(*attrs, scan_el_attrcount + 1);
 	if (!attrs) {
 		ret = -ENOMEM;
 		goto error_free_buffer_attrs;
@@ -1563,9 +1587,7 @@ static void iio_buffer_dmabuf_release(struct kref *ref)
 	struct iio_buffer *buffer = priv->buffer;
 	struct dma_buf *dmabuf = attach->dmabuf;
 
-	dma_resv_lock(dmabuf->resv, NULL);
-	dma_buf_unmap_attachment(attach, priv->sgt, priv->dir);
-	dma_resv_unlock(dmabuf->resv);
+	dma_buf_unmap_attachment_unlocked(attach, priv->sgt, priv->dir);
 
 	buffer->access->detach_dmabuf(buffer, priv->block);
 
@@ -1623,19 +1645,28 @@ static int iio_dma_resv_lock(struct dma_buf *dmabuf, bool nonblock)
 	return 0;
 }
 
+static struct device *iio_buffer_get_dma_dev(const struct iio_dev *indio_dev,
+					     struct iio_buffer *buffer)
+{
+	if (buffer->access->get_dma_dev)
+		return buffer->access->get_dma_dev(buffer);
+
+	return indio_dev->dev.parent;
+}
+
 static struct dma_buf_attachment *
 iio_buffer_find_attachment(struct iio_dev_buffer_pair *ib,
 			   struct dma_buf *dmabuf, bool nonblock)
 {
-	struct device *dev = ib->indio_dev->dev.parent;
 	struct iio_buffer *buffer = ib->buffer;
+	struct device *dma_dev = iio_buffer_get_dma_dev(ib->indio_dev, buffer);
 	struct dma_buf_attachment *attach = NULL;
 	struct iio_dmabuf_priv *priv;
 
 	guard(mutex)(&buffer->dmabufs_mutex);
 
 	list_for_each_entry(priv, &buffer->dmabufs, entry) {
-		if (priv->attach->dev == dev
+		if (priv->attach->dev == dma_dev
 		    && priv->attach->dmabuf == dmabuf) {
 			attach = priv->attach;
 			break;
@@ -1653,6 +1684,7 @@ static int iio_buffer_attach_dmabuf(struct iio_dev_buffer_pair *ib,
 {
 	struct iio_dev *indio_dev = ib->indio_dev;
 	struct iio_buffer *buffer = ib->buffer;
+	struct device *dma_dev = iio_buffer_get_dma_dev(indio_dev, buffer);
 	struct dma_buf_attachment *attach;
 	struct iio_dmabuf_priv *priv, *each;
 	struct dma_buf *dmabuf;
@@ -1666,7 +1698,7 @@ static int iio_buffer_attach_dmabuf(struct iio_dev_buffer_pair *ib,
 	if (copy_from_user(&fd, user_fd, sizeof(fd)))
 		return -EFAULT;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -1679,7 +1711,7 @@ static int iio_buffer_attach_dmabuf(struct iio_dev_buffer_pair *ib,
 		goto err_free_priv;
 	}
 
-	attach = dma_buf_attach(dmabuf, indio_dev->dev.parent);
+	attach = dma_buf_attach(dmabuf, dma_dev);
 	if (IS_ERR(attach)) {
 		err = PTR_ERR(attach);
 		goto err_dmabuf_put;
@@ -1719,7 +1751,7 @@ static int iio_buffer_attach_dmabuf(struct iio_dev_buffer_pair *ib,
 	 * combo. If we do, refuse to attach.
 	 */
 	list_for_each_entry(each, &buffer->dmabufs, entry) {
-		if (each->attach->dev == indio_dev->dev.parent
+		if (each->attach->dev == dma_dev
 		    && each->attach->dmabuf == dmabuf) {
 			/*
 			 * We unlocked the reservation object, so going through
@@ -1758,6 +1790,7 @@ static int iio_buffer_detach_dmabuf(struct iio_dev_buffer_pair *ib,
 {
 	struct iio_buffer *buffer = ib->buffer;
 	struct iio_dev *indio_dev = ib->indio_dev;
+	struct device *dma_dev = iio_buffer_get_dma_dev(indio_dev, buffer);
 	struct iio_dmabuf_priv *priv;
 	struct dma_buf *dmabuf;
 	int dmabuf_fd, ret = -EPERM;
@@ -1772,7 +1805,7 @@ static int iio_buffer_detach_dmabuf(struct iio_dev_buffer_pair *ib,
 	guard(mutex)(&buffer->dmabufs_mutex);
 
 	list_for_each_entry(priv, &buffer->dmabufs, entry) {
-		if (priv->attach->dev == indio_dev->dev.parent
+		if (priv->attach->dev == dma_dev
 		    && priv->attach->dmabuf == dmabuf) {
 			list_del(&priv->entry);
 
@@ -1853,7 +1886,7 @@ static int iio_buffer_enqueue_dmabuf(struct iio_dev_buffer_pair *ib,
 
 	priv = attach->importer_priv;
 
-	fence = kmalloc(sizeof(*fence), GFP_KERNEL);
+	fence = kmalloc_obj(*fence);
 	if (!fence) {
 		ret = -ENOMEM;
 		goto err_attachment_put;
@@ -1898,6 +1931,7 @@ static int iio_buffer_enqueue_dmabuf(struct iio_dev_buffer_pair *ib,
 
 	dma_resv_add_fence(dmabuf->resv, &fence->base,
 			   dma_to_ram ? DMA_RESV_USAGE_WRITE : DMA_RESV_USAGE_READ);
+	dma_fence_put(&fence->base);
 	dma_resv_unlock(dmabuf->resv);
 
 	cookie = dma_fence_begin_signalling();
@@ -2026,7 +2060,7 @@ static long iio_device_buffer_getfd(struct iio_dev *indio_dev, unsigned long arg
 		goto error_iio_dev_put;
 	}
 
-	ib = kzalloc(sizeof(*ib), GFP_KERNEL);
+	ib = kzalloc_obj(*ib);
 	if (!ib) {
 		ret = -ENOMEM;
 		goto error_clear_busy_bit;
@@ -2173,7 +2207,7 @@ static int __iio_buffer_alloc_sysfs_and_mask(struct iio_buffer *buffer,
 	}
 
 	attrn = buffer_attrcount + scan_el_attrcount;
-	attr = kcalloc(attrn + 1, sizeof(*attr), GFP_KERNEL);
+	attr = kzalloc_objs(*attr, attrn + 1);
 	if (!attr) {
 		ret = -ENOMEM;
 		goto error_free_scan_mask;
@@ -2372,6 +2406,9 @@ static int iio_push_to_buffer(struct iio_buffer *buffer, const void *data)
  * iio_push_to_buffers() - push to a registered buffer.
  * @indio_dev:		iio_dev structure for device.
  * @data:		Full scan.
+ *
+ * Context: Any context.
+ * Return: 0 on success, negative error code on failure.
  */
 int iio_push_to_buffers(struct iio_dev *indio_dev, const void *data)
 {
@@ -2401,13 +2438,18 @@ EXPORT_SYMBOL_GPL(iio_push_to_buffers);
  * not require space for the timestamp, or 8 byte alignment of data.
  * It does however require an allocation on first call and additional
  * copies on all calls, so should be avoided if possible.
+ *
+ * Context: May sleep.
+ * Return: 0 on success, negative error code on failure.
  */
 int iio_push_to_buffers_with_ts_unaligned(struct iio_dev *indio_dev,
 					  const void *data,
 					  size_t data_sz,
-					  int64_t timestamp)
+					  s64 timestamp)
 {
 	struct iio_dev_opaque *iio_dev_opaque = to_iio_dev_opaque(indio_dev);
+
+	might_sleep();
 
 	/*
 	 * Conservative estimate - we can always safely copy the minimum

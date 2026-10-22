@@ -301,7 +301,7 @@ static struct ata_port_operations artop6210_ops = {
 	.cable_detect		= ata_cable_40wire,
 	.set_piomode		= artop6210_set_piomode,
 	.set_dmamode		= artop6210_set_dmamode,
-	.prereset		= artop62x0_pre_reset,
+	.reset.prereset		= artop62x0_pre_reset,
 	.qc_defer		= artop6210_qc_defer,
 };
 
@@ -310,7 +310,7 @@ static struct ata_port_operations artop6260_ops = {
 	.cable_detect		= artop6260_cable_detect,
 	.set_piomode		= artop6260_set_piomode,
 	.set_dmamode		= artop6260_set_dmamode,
-	.prereset		= artop62x0_pre_reset,
+	.reset.prereset		= artop62x0_pre_reset,
 };
 
 static void atp8xx_fixup(struct pci_dev *pdev)
@@ -421,12 +421,11 @@ static int artop_init_one (struct pci_dev *pdev, const struct pci_device_id *id)
 }
 
 static const struct pci_device_id artop_pci_tbl[] = {
-	{ PCI_VDEVICE(ARTOP, 0x0005), 0 },
-	{ PCI_VDEVICE(ARTOP, 0x0006), 1 },
-	{ PCI_VDEVICE(ARTOP, 0x0007), 1 },
-	{ PCI_VDEVICE(ARTOP, 0x0008), 2 },
-	{ PCI_VDEVICE(ARTOP, 0x0009), 2 },
-
+	{ PCI_VDEVICE(ARTOP, 0x0005), .driver_data = 0 },
+	{ PCI_VDEVICE(ARTOP, 0x0006), .driver_data = 1 },
+	{ PCI_VDEVICE(ARTOP, 0x0007), .driver_data = 1 },
+	{ PCI_VDEVICE(ARTOP, 0x0008), .driver_data = 2 },
+	{ PCI_VDEVICE(ARTOP, 0x0009), .driver_data = 2 },
 	{ }	/* terminate list */
 };
 

@@ -4,10 +4,12 @@
 #include <linux/phy.h>
 #include <linux/phy_link_topology.h>
 #include <linux/ptp_clock_kernel.h>
+#include <net/netdev_lock.h>
 
-#include "netlink.h"
-#include "common.h"
+#include "../core/dev.h"
 #include "bitset.h"
+#include "common.h"
+#include "netlink.h"
 #include "ts.h"
 
 struct tsinfo_req_info {
@@ -69,7 +71,9 @@ int ts_parse_hwtst_provider(const struct nlattr *nest,
 }
 
 static int
-tsinfo_parse_request(struct ethnl_req_info *req_base, struct nlattr **tb,
+tsinfo_parse_request(struct ethnl_req_info *req_base,
+		     const struct genl_info *info,
+		     struct nlattr **tb,
 		     struct netlink_ext_ack *extack)
 {
 	struct tsinfo_req_info *req = TSINFO_REQINFO(req_base);
@@ -79,6 +83,11 @@ tsinfo_parse_request(struct ethnl_req_info *req_base, struct nlattr **tb,
 
 	if (!tb[ETHTOOL_A_TSINFO_HWTSTAMP_PROVIDER])
 		return 0;
+
+	if (req_base->flags & ETHTOOL_FLAG_STATS) {
+		NL_SET_ERR_MSG(extack, "can't query statistics for a provider");
+		return -EOPNOTSUPP;
+	}
 
 	return ts_parse_hwtst_provider(tb[ETHTOOL_A_TSINFO_HWTSTAMP_PROVIDER],
 				       &req->hwprov_desc, extack, &mod);
@@ -158,6 +167,12 @@ static int tsinfo_reply_size(const struct ethnl_req_info *req_base,
 		len += nla_total_size(sizeof(u32));	/* _TSINFO_PHC_INDEX */
 		/* _TSINFO_HWTSTAMP_PROVIDER */
 		len += nla_total_size(0) + 2 * nla_total_size(sizeof(u32));
+	}
+	if (ts_info->phc_source) {
+		len += nla_total_size(sizeof(u32));	/* _TSINFO_HWTSTAMP_SOURCE */
+		if (ts_info->phc_phyindex)
+			/* _TSINFO_HWTSTAMP_PHYINDEX */
+			len += nla_total_size(sizeof(u32));
 	}
 	if (req_base->flags & ETHTOOL_FLAG_STATS)
 		len += nla_total_size(0) + /* _TSINFO_STATS */
@@ -258,6 +273,16 @@ static int tsinfo_fill_reply(struct sk_buff *skb,
 
 		nla_nest_end(skb, nest);
 	}
+	if (ts_info->phc_source) {
+		if (nla_put_u32(skb, ETHTOOL_A_TSINFO_HWTSTAMP_SOURCE,
+				ts_info->phc_source))
+			return -EMSGSIZE;
+
+		if (ts_info->phc_phyindex &&
+		    nla_put_u32(skb, ETHTOOL_A_TSINFO_HWTSTAMP_PHYINDEX,
+				ts_info->phc_phyindex))
+			return -EMSGSIZE;
+	}
 	if (req_base->flags & ETHTOOL_FLAG_STATS &&
 	    tsinfo_put_stats(skb, &data->stats))
 		return -EMSGSIZE;
@@ -345,6 +370,11 @@ static int ethnl_tsinfo_dump_one_phydev(struct sk_buff *skb,
 	if (ret < 0)
 		goto err;
 
+	if (reply_data->ts_info.phc_index >= 0) {
+		reply_data->ts_info.phc_source = HWTSTAMP_SOURCE_PHYLIB;
+		reply_data->ts_info.phc_phyindex = phydev->phyindex;
+	}
+
 	ret = ethnl_tsinfo_end_dump(skb, dev, req_info, reply_data, ehdr);
 	if (ret < 0)
 		goto err;
@@ -378,16 +408,16 @@ static int ethnl_tsinfo_dump_one_netdev(struct sk_buff *skb,
 			continue;
 
 		ehdr = ethnl_tsinfo_prepare_dump(skb, dev, reply_data, cb);
-		if (IS_ERR(ehdr)) {
-			ret = PTR_ERR(ehdr);
-			goto err;
-		}
+		if (IS_ERR(ehdr))
+			return PTR_ERR(ehdr);
 
 		reply_data->ts_info.phc_qualifier = ctx->pos_phcqualifier;
 		ret = ops->get_ts_info(dev, &reply_data->ts_info);
 		if (ret < 0)
 			goto err;
 
+		if (reply_data->ts_info.phc_index >= 0)
+			reply_data->ts_info.phc_source = HWTSTAMP_SOURCE_NETDEV;
 		ret = ethnl_tsinfo_end_dump(skb, dev, req_info, reply_data,
 					    ehdr);
 		if (ret < 0)
@@ -444,25 +474,25 @@ int ethnl_tsinfo_dumpit(struct sk_buff *skb, struct netlink_callback *cb)
 {
 	struct ethnl_tsinfo_dump_ctx *ctx = (void *)cb->ctx;
 	struct net *net = sock_net(skb->sk);
-	struct net_device *dev;
 	int ret = 0;
 
-	rtnl_lock();
 	if (ctx->req_info->base.dev) {
-		ret = ethnl_tsinfo_dump_one_net_topo(skb,
-						     ctx->req_info->base.dev,
-						     cb);
-	} else {
-		for_each_netdev_dump(net, dev, ctx->pos_ifindex) {
-			ret = ethnl_tsinfo_dump_one_net_topo(skb, dev, cb);
-			if (ret < 0 && ret != -EOPNOTSUPP)
-				break;
-			ctx->pos_phyindex = 0;
-			ctx->netdev_dump_done = false;
-			ctx->pos_phcqualifier = HWTSTAMP_PROVIDER_QUALIFIER_PRECISE;
-		}
+		struct net_device *dev = ctx->req_info->base.dev;
+
+		netdev_lock_ops_compat(dev);
+		ret = ethnl_tsinfo_dump_one_net_topo(skb, dev, cb);
+		netdev_unlock_ops_compat(dev);
+		return ret;
 	}
-	rtnl_unlock();
+
+	for_each_netdev_lock_ops_compat_scoped(net, dev, ctx->pos_ifindex) {
+		ret = ethnl_tsinfo_dump_one_net_topo(skb, dev, cb);
+		if (ret < 0 && ret != -EOPNOTSUPP)
+			break;
+		ctx->pos_phyindex = 0;
+		ctx->netdev_dump_done = false;
+		ctx->pos_phcqualifier = HWTSTAMP_PROVIDER_QUALIFIER_PRECISE;
+	}
 
 	return ret;
 }
@@ -478,10 +508,10 @@ int ethnl_tsinfo_start(struct netlink_callback *cb)
 
 	BUILD_BUG_ON(sizeof(*ctx) > sizeof(cb->ctx));
 
-	req_info = kzalloc(sizeof(*req_info), GFP_KERNEL);
+	req_info = kzalloc_obj(*req_info);
 	if (!req_info)
 		return -ENOMEM;
-	reply_data = kzalloc(sizeof(*reply_data), GFP_KERNEL);
+	reply_data = kzalloc_obj(*reply_data);
 	if (!reply_data) {
 		ret = -ENOMEM;
 		goto free_req_info;
@@ -494,6 +524,12 @@ int ethnl_tsinfo_start(struct netlink_callback *cb)
 	if (ret < 0)
 		goto free_reply_data;
 
+	if (req_info->base.flags & ETHTOOL_FLAG_STATS) {
+		NL_SET_ERR_MSG(cb->extack, "stats not supported in dump");
+		ret = -EOPNOTSUPP;
+		goto err_dev_put;
+	}
+
 	ctx->req_info = req_info;
 	ctx->reply_data = reply_data;
 	ctx->pos_ifindex = 0;
@@ -503,6 +539,8 @@ int ethnl_tsinfo_start(struct netlink_callback *cb)
 
 	return 0;
 
+err_dev_put:
+	ethnl_parse_header_dev_put(&req_info->base);
 free_reply_data:
 	kfree(reply_data);
 free_req_info:

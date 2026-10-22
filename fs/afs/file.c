@@ -19,7 +19,7 @@
 #include <trace/events/netfs.h>
 #include "internal.h"
 
-static int afs_file_mmap(struct file *file, struct vm_area_struct *vma);
+static int afs_file_mmap_prepare(struct vm_area_desc *desc);
 
 static ssize_t afs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter);
 static ssize_t afs_file_splice_read(struct file *in, loff_t *ppos,
@@ -28,6 +28,8 @@ static ssize_t afs_file_splice_read(struct file *in, loff_t *ppos,
 static void afs_vm_open(struct vm_area_struct *area);
 static void afs_vm_close(struct vm_area_struct *area);
 static vm_fault_t afs_vm_map_pages(struct vm_fault *vmf, pgoff_t start_pgoff, pgoff_t end_pgoff);
+static int afs_mapped(unsigned long start, unsigned long end, pgoff_t pgoff,
+		      const struct file *file, void **vm_private_data);
 
 const struct file_operations afs_file_operations = {
 	.open		= afs_open,
@@ -35,7 +37,7 @@ const struct file_operations afs_file_operations = {
 	.llseek		= generic_file_llseek,
 	.read_iter	= afs_file_read_iter,
 	.write_iter	= netfs_file_write_iter,
-	.mmap		= afs_file_mmap,
+	.mmap_prepare	= afs_file_mmap_prepare,
 	.splice_read	= afs_file_splice_read,
 	.splice_write	= iter_file_splice_write,
 	.fsync		= afs_fsync,
@@ -61,6 +63,7 @@ const struct address_space_operations afs_file_aops = {
 };
 
 static const struct vm_operations_struct afs_vm_ops = {
+	.mapped		= afs_mapped,
 	.open		= afs_vm_open,
 	.close		= afs_vm_close,
 	.fault		= filemap_fault,
@@ -86,7 +89,7 @@ int afs_cache_wb_key(struct afs_vnode *vnode, struct afs_file *af)
 {
 	struct afs_wb_key *wbk, *p;
 
-	wbk = kzalloc(sizeof(struct afs_wb_key), GFP_KERNEL);
+	wbk = kzalloc_obj(struct afs_wb_key);
 	if (!wbk)
 		return -ENOMEM;
 	refcount_set(&wbk->usage, 2);
@@ -130,7 +133,7 @@ int afs_open(struct inode *inode, struct file *file)
 		goto error;
 	}
 
-	af = kzalloc(sizeof(*af), GFP_KERNEL);
+	af = kzalloc_obj(*af);
 	if (!af) {
 		ret = -ENOMEM;
 		goto error_key;
@@ -424,19 +427,33 @@ static void afs_free_request(struct netfs_io_request *rreq)
 	afs_put_wb_key(rreq->netfs_priv2);
 }
 
-static void afs_update_i_size(struct inode *inode, loff_t new_i_size)
+/*
+ * Set the file size and block count, taking ->cb_lock and ->i_lock to maintain
+ * coherency and prevent 64-bit tearing on 32-bit arches.
+ *
+ * Also, estimate the number of 512 bytes blocks used, rounded up to nearest 1K
+ * for consistency with other AFS clients.
+ */
+void afs_set_i_size(struct afs_vnode *vnode, loff_t new_i_size)
 {
-	struct afs_vnode *vnode = AFS_FS_I(inode);
+	struct inode *inode = &vnode->netfs.inode;
 	loff_t i_size;
 
 	write_seqlock(&vnode->cb_lock);
-	i_size = i_size_read(&vnode->netfs.inode);
+	spin_lock(&inode->i_lock);
+	i_size = i_size_read(inode);
 	if (new_i_size > i_size) {
-		i_size_write(&vnode->netfs.inode, new_i_size);
-		inode_set_bytes(&vnode->netfs.inode, new_i_size);
+		i_size_write(inode, new_i_size);
+		inode_set_bytes(inode, round_up(new_i_size, 1024));
 	}
+	spin_unlock(&inode->i_lock);
 	write_sequnlock(&vnode->cb_lock);
 	fscache_update_cookie(afs_vnode_cache(vnode), NULL, &new_i_size);
+}
+
+static void afs_update_i_size(struct inode *inode, loff_t new_i_size)
+{
+	afs_set_i_size(AFS_FS_I(inode), new_i_size);
 }
 
 static void afs_netfs_invalidate_cache(struct netfs_io_request *wreq)
@@ -492,34 +509,47 @@ static void afs_drop_open_mmap(struct afs_vnode *vnode)
 /*
  * Handle setting up a memory mapping on an AFS file.
  */
-static int afs_file_mmap(struct file *file, struct vm_area_struct *vma)
+static int afs_file_mmap_prepare(struct vm_area_desc *desc)
 {
-	struct afs_vnode *vnode = AFS_FS_I(file_inode(file));
 	int ret;
 
-	afs_add_open_mmap(vnode);
+	ret = generic_file_mmap_prepare(desc);
+	if (ret)
+		return ret;
 
-	ret = generic_file_mmap(file, vma);
-	if (ret == 0)
-		vma->vm_ops = &afs_vm_ops;
-	else
-		afs_drop_open_mmap(vnode);
+	desc->vm_ops = &afs_vm_ops;
 	return ret;
+}
+
+static int afs_mapped(unsigned long start, unsigned long end, pgoff_t pgoff,
+		      const struct file *file, void **vm_private_data)
+{
+	struct afs_vnode *vnode = AFS_FS_I(file_inode(file));
+
+	afs_add_open_mmap(vnode);
+	return 0;
 }
 
 static void afs_vm_open(struct vm_area_struct *vma)
 {
-	afs_add_open_mmap(AFS_FS_I(file_inode(vma->vm_file)));
+	struct file *file = vma->vm_file;
+	struct afs_vnode *vnode = AFS_FS_I(file_inode(file));
+
+	afs_add_open_mmap(vnode);
 }
 
 static void afs_vm_close(struct vm_area_struct *vma)
 {
-	afs_drop_open_mmap(AFS_FS_I(file_inode(vma->vm_file)));
+	struct file *file = vma->vm_file;
+	struct afs_vnode *vnode = AFS_FS_I(file_inode(file));
+
+	afs_drop_open_mmap(vnode);
 }
 
 static vm_fault_t afs_vm_map_pages(struct vm_fault *vmf, pgoff_t start_pgoff, pgoff_t end_pgoff)
 {
-	struct afs_vnode *vnode = AFS_FS_I(file_inode(vmf->vma->vm_file));
+	struct file *file = vmf->vma->vm_file;
+	struct afs_vnode *vnode = AFS_FS_I(file_inode(file));
 
 	if (afs_check_validity(vnode))
 		return filemap_map_pages(vmf, start_pgoff, end_pgoff);

@@ -40,6 +40,7 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/raid/pq.h>
+#include <linux/raid/pq_tables.h>
 
 #include "dmaengine.h"
 
@@ -1699,7 +1700,7 @@ static int sba_probe(struct platform_device *pdev)
 	/* Prealloc channel resource */
 	ret = sba_prealloc_channel_resources(sba);
 	if (ret)
-		goto fail_free_mchan;
+		goto fail_put_mbox;
 
 	/* Check availability of debugfs */
 	if (!debugfs_initialized())
@@ -1729,6 +1730,8 @@ skip_debugfs:
 fail_free_resources:
 	debugfs_remove_recursive(sba->root);
 	sba_freeup_channel_resources(sba);
+fail_put_mbox:
+	put_device(sba->mbox_dev);
 fail_free_mchan:
 	mbox_free_channel(sba->mchan);
 	return ret;
@@ -1743,6 +1746,8 @@ static void sba_remove(struct platform_device *pdev)
 	debugfs_remove_recursive(sba->root);
 
 	sba_freeup_channel_resources(sba);
+
+	put_device(sba->mbox_dev);
 
 	mbox_free_channel(sba->mchan);
 }

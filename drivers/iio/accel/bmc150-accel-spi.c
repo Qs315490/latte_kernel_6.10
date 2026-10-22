@@ -5,7 +5,6 @@
  */
 
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
@@ -48,7 +47,7 @@ static const struct acpi_device_id bmc150_accel_acpi_match[] = {
 	{"BMC150A"},
 	{"BMI055A"},
 	{"BSBA0150"},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, bmc150_accel_acpi_match);
 
@@ -62,7 +61,7 @@ static const struct spi_device_id bmc150_accel_id[] = {
 	{"bmc150_accel"},
 	{"bmc156_accel", BOSCH_BMC156},
 	{"bmi055_accel"},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, bmc150_accel_id);
 

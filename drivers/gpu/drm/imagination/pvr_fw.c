@@ -17,6 +17,7 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_managed.h>
 #include <drm/drm_mm.h>
+#include <drm/drm_print.h>
 #include <linux/clk.h>
 #include <linux/firmware.h>
 #include <linux/math.h>
@@ -50,9 +51,8 @@ pvr_fw_find_layout_entry(struct pvr_device *pvr_dev, enum pvr_fw_section_id id)
 {
 	const struct pvr_fw_layout_entry *layout_entries = pvr_dev->fw_dev.layout_entries;
 	u32 num_layout_entries = pvr_dev->fw_dev.header->layout_entry_num;
-	u32 entry;
 
-	for (entry = 0; entry < num_layout_entries; entry++) {
+	for (u32 entry = 0; entry < num_layout_entries; entry++) {
 		if (layout_entries[entry].id == id)
 			return &layout_entries[entry];
 	}
@@ -65,9 +65,8 @@ pvr_fw_find_private_data(struct pvr_device *pvr_dev)
 {
 	const struct pvr_fw_layout_entry *layout_entries = pvr_dev->fw_dev.layout_entries;
 	u32 num_layout_entries = pvr_dev->fw_dev.header->layout_entry_num;
-	u32 entry;
 
-	for (entry = 0; entry < num_layout_entries; entry++) {
+	for (u32 entry = 0; entry < num_layout_entries; entry++) {
 		if (layout_entries[entry].id == META_PRIVATE_DATA ||
 		    layout_entries[entry].id == MIPS_PRIVATE_DATA ||
 		    layout_entries[entry].id == RISCV_PRIVATE_DATA)
@@ -97,7 +96,6 @@ pvr_fw_validate(struct pvr_device *pvr_dev)
 	const u8 *fw = firmware->data;
 	u32 fw_offset = firmware->size - SZ_4K;
 	u32 layout_table_size;
-	u32 entry;
 
 	if (firmware->size < SZ_4K || (firmware->size % FW_BLOCK_SIZE))
 		return -EINVAL;
@@ -144,7 +142,7 @@ pvr_fw_validate(struct pvr_device *pvr_dev)
 		return -EINVAL;
 
 	layout_entries = (const struct pvr_fw_layout_entry *)&fw[fw_offset];
-	for (entry = 0; entry < header->layout_entry_num; entry++) {
+	for (u32 entry = 0; entry < header->layout_entry_num; entry++) {
 		u32 start_addr = layout_entries[entry].base_addr;
 		u32 end_addr = start_addr + layout_entries[entry].alloc_size;
 
@@ -233,13 +231,12 @@ pvr_fw_find_mmu_segment(struct pvr_device *pvr_dev, u32 addr, u32 size, void *fw
 	const struct pvr_fw_layout_entry *layout_entries = pvr_dev->fw_dev.layout_entries;
 	u32 num_layout_entries = pvr_dev->fw_dev.header->layout_entry_num;
 	u32 end_addr = addr + size;
-	int entry = 0;
 
 	/* Ensure requested range is not zero, and size is not causing addr to overflow. */
 	if (end_addr <= addr)
 		return -EINVAL;
 
-	for (entry = 0; entry < num_layout_entries; entry++) {
+	for (int entry = 0; entry < num_layout_entries; entry++) {
 		u32 entry_start_addr = layout_entries[entry].base_addr;
 		u32 entry_end_addr = entry_start_addr + layout_entries[entry].alloc_size;
 
@@ -441,6 +438,9 @@ fw_runtime_cfg_init(void *cpu_ptr, void *priv)
 	runtime_cfg->active_pm_latency_persistant = true;
 	WARN_ON(PVR_FEATURE_VALUE(pvr_dev, num_clusters,
 				  &runtime_cfg->default_dusts_num_init) != 0);
+
+	/* Keep watchdog timer disabled. */
+	runtime_cfg->wdg_period_us = 0;
 }
 
 static void
@@ -663,7 +663,7 @@ pvr_fw_process(struct pvr_device *pvr_dev)
 		return PTR_ERR(fw_code_ptr);
 	}
 
-	if (pvr_dev->fw_dev.defs->has_fixed_data_addr()) {
+	if (pvr_dev->fw_dev.defs->has_fixed_data_addr) {
 		u32 base_addr = private_data->base_addr & pvr_dev->fw_dev.fw_heap_info.offset_mask;
 
 		fw_data_ptr =
@@ -732,7 +732,7 @@ pvr_fw_process(struct pvr_device *pvr_dev)
 					       fw_mem->core_data, fw_mem->core_code_alloc_size);
 
 	if (err)
-		goto err_free_fw_core_data_obj;
+		goto err_free_kdata;
 
 	memcpy(fw_code_ptr, fw_mem->code, fw_mem->code_alloc_size);
 	memcpy(fw_data_ptr, fw_mem->data, fw_mem->data_alloc_size);
@@ -742,10 +742,14 @@ pvr_fw_process(struct pvr_device *pvr_dev)
 		memcpy(fw_core_data_ptr, fw_mem->core_data, fw_mem->core_data_alloc_size);
 
 	/* We're finished with the firmware section memory on the CPU, unmap. */
-	if (fw_core_data_ptr)
+	if (fw_core_data_ptr) {
 		pvr_fw_object_vunmap(fw_mem->core_data_obj);
-	if (fw_core_code_ptr)
+		fw_core_data_ptr = NULL;
+	}
+	if (fw_core_code_ptr) {
 		pvr_fw_object_vunmap(fw_mem->core_code_obj);
+		fw_core_code_ptr = NULL;
+	}
 	pvr_fw_object_vunmap(fw_mem->data_obj);
 	fw_data_ptr = NULL;
 	pvr_fw_object_vunmap(fw_mem->code_obj);
@@ -753,7 +757,7 @@ pvr_fw_process(struct pvr_device *pvr_dev)
 
 	err = pvr_fw_create_fwif_connection_ctl(pvr_dev);
 	if (err)
-		goto err_free_fw_core_data_obj;
+		goto err_free_kdata;
 
 	return 0;
 
@@ -763,13 +767,16 @@ err_free_kdata:
 	kfree(fw_mem->data);
 	kfree(fw_mem->code);
 
-err_free_fw_core_data_obj:
 	if (fw_core_data_ptr)
-		pvr_fw_object_unmap_and_destroy(fw_mem->core_data_obj);
+		pvr_fw_object_vunmap(fw_mem->core_data_obj);
+	if (fw_mem->core_data_obj)
+		pvr_fw_object_destroy(fw_mem->core_data_obj);
 
 err_free_fw_core_code_obj:
 	if (fw_core_code_ptr)
-		pvr_fw_object_unmap_and_destroy(fw_mem->core_code_obj);
+		pvr_fw_object_vunmap(fw_mem->core_code_obj);
+	if (fw_mem->core_code_obj)
+		pvr_fw_object_destroy(fw_mem->core_code_obj);
 
 err_free_fw_data_obj:
 	if (fw_data_ptr)
@@ -836,6 +843,12 @@ pvr_fw_cleanup(struct pvr_device *pvr_dev)
 	struct pvr_fw_mem *fw_mem = &pvr_dev->fw_dev.mem;
 
 	pvr_fw_fini_fwif_connection_ctl(pvr_dev);
+
+	kfree(fw_mem->core_data);
+	kfree(fw_mem->core_code);
+	kfree(fw_mem->data);
+	kfree(fw_mem->code);
+
 	if (fw_mem->core_code_obj)
 		pvr_fw_object_destroy(fw_mem->core_code_obj);
 	if (fw_mem->core_data_obj)
@@ -926,17 +939,21 @@ pvr_fw_validate_init_device_info(struct pvr_device *pvr_dev)
 int
 pvr_fw_init(struct pvr_device *pvr_dev)
 {
+	static const struct pvr_fw_defs *fw_defs[PVR_FW_PROCESSOR_TYPE_COUNT] = {
+		[PVR_FW_PROCESSOR_TYPE_META] = &pvr_fw_defs_meta,
+		[PVR_FW_PROCESSOR_TYPE_MIPS] = &pvr_fw_defs_mips,
+		[PVR_FW_PROCESSOR_TYPE_RISCV] = &pvr_fw_defs_riscv,
+	};
+
 	u32 kccb_size_log2 = ROGUE_FWIF_KCCB_NUMCMDS_LOG2_DEFAULT;
 	u32 kccb_rtn_size = (1 << kccb_size_log2) * sizeof(*pvr_dev->kccb.rtn);
 	struct pvr_fw_device *fw_dev = &pvr_dev->fw_dev;
 	int err;
 
-	if (fw_dev->processor_type == PVR_FW_PROCESSOR_TYPE_META)
-		fw_dev->defs = &pvr_fw_defs_meta;
-	else if (fw_dev->processor_type == PVR_FW_PROCESSOR_TYPE_MIPS)
-		fw_dev->defs = &pvr_fw_defs_mips;
-	else
+	if (fw_dev->processor_type >= PVR_FW_PROCESSOR_TYPE_COUNT)
 		return -EINVAL;
+
+	fw_dev->defs = fw_defs[fw_dev->processor_type];
 
 	err = fw_dev->defs->init(pvr_dev);
 	if (err)
@@ -987,7 +1004,7 @@ pvr_fw_init(struct pvr_device *pvr_dev)
 		goto err_fw_stop;
 	}
 
-	fw_dev->booted = true;
+	WRITE_ONCE(fw_dev->initialised, true);
 
 	return 0;
 
@@ -1027,7 +1044,7 @@ pvr_fw_fini(struct pvr_device *pvr_dev)
 {
 	struct pvr_fw_device *fw_dev = &pvr_dev->fw_dev;
 
-	fw_dev->booted = false;
+	WRITE_ONCE(fw_dev->initialised, false);
 
 	pvr_fw_destroy_structures(pvr_dev);
 	pvr_fw_object_unmap_and_destroy(pvr_dev->kccb.rtn_obj);
@@ -1255,7 +1272,7 @@ pvr_fw_object_create_and_map_common(struct pvr_device *pvr_dev, size_t size,
 	/* %DRM_PVR_BO_PM_FW_PROTECT is implicit for FW objects. */
 	flags |= DRM_PVR_BO_PM_FW_PROTECT;
 
-	fw_obj = kzalloc(sizeof(*fw_obj), GFP_KERNEL);
+	fw_obj = kzalloc_obj(*fw_obj);
 	if (!fw_obj)
 		return ERR_PTR(-ENOMEM);
 
@@ -1441,6 +1458,15 @@ void pvr_fw_object_get_fw_addr_offset(struct pvr_fw_object *fw_obj, u32 offset, 
 	struct pvr_device *pvr_dev = to_pvr_device(gem_from_pvr_gem(pvr_obj)->dev);
 
 	*fw_addr_out = pvr_dev->fw_dev.defs->get_fw_addr_with_offset(fw_obj, offset);
+}
+
+u64
+pvr_fw_obj_get_gpu_addr(struct pvr_fw_object *fw_obj)
+{
+	struct pvr_device *pvr_dev = to_pvr_device(gem_from_pvr_gem(fw_obj->gem)->dev);
+	struct pvr_fw_device *fw_dev = &pvr_dev->fw_dev;
+
+	return fw_dev->fw_heap_info.gpu_addr + fw_obj->fw_addr_offset;
 }
 
 /*

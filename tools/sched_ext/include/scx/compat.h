@@ -8,6 +8,7 @@
 #define __SCX_COMPAT_H
 
 #include <bpf/btf.h>
+#include <bpf/libbpf.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -106,13 +107,27 @@ static inline bool __COMPAT_struct_has_field(const char *type, const char *field
 	return false;
 }
 
-#define SCX_OPS_SWITCH_PARTIAL							\
-	__COMPAT_ENUM_OR_ZERO("scx_ops_flags", "SCX_OPS_SWITCH_PARTIAL")
+#define SCX_OPS_FLAG(name) __COMPAT_ENUM_OR_ZERO("scx_ops_flags", #name)
+
+#define SCX_OPS_KEEP_BUILTIN_IDLE SCX_OPS_FLAG(SCX_OPS_KEEP_BUILTIN_IDLE)
+#define SCX_OPS_ENQ_LAST SCX_OPS_FLAG(SCX_OPS_ENQ_LAST)
+#define SCX_OPS_ENQ_EXITING  SCX_OPS_FLAG(SCX_OPS_ENQ_EXITING)
+#define SCX_OPS_SWITCH_PARTIAL SCX_OPS_FLAG(SCX_OPS_SWITCH_PARTIAL)
+#define SCX_OPS_ENQ_MIGRATION_DISABLED SCX_OPS_FLAG(SCX_OPS_ENQ_MIGRATION_DISABLED)
+#define SCX_OPS_ALLOW_QUEUED_WAKEUP SCX_OPS_FLAG(SCX_OPS_ALLOW_QUEUED_WAKEUP)
+#define SCX_OPS_BUILTIN_IDLE_PER_NODE SCX_OPS_FLAG(SCX_OPS_BUILTIN_IDLE_PER_NODE)
+#define SCX_OPS_ALWAYS_ENQ_IMMED SCX_OPS_FLAG(SCX_OPS_ALWAYS_ENQ_IMMED)
+
+#define SCX_PICK_IDLE_FLAG(name) __COMPAT_ENUM_OR_ZERO("scx_pick_idle_cpu_flags", #name)
+
+#define SCX_PICK_IDLE_CORE SCX_PICK_IDLE_FLAG(SCX_PICK_IDLE_CORE)
+#define SCX_PICK_IDLE_IN_NODE SCX_PICK_IDLE_FLAG(SCX_PICK_IDLE_IN_NODE)
 
 static inline long scx_hotplug_seq(void)
 {
 	int fd;
 	char buf[32];
+	char *endptr;
 	ssize_t len;
 	long val;
 
@@ -125,20 +140,41 @@ static inline long scx_hotplug_seq(void)
 	buf[len] = 0;
 	close(fd);
 
-	val = strtoul(buf, NULL, 10);
-	SCX_BUG_ON(val < 0, "invalid num hotplug events: %lu", val);
+	errno = 0;
+	val = strtoul(buf, &endptr, 10);
+	SCX_BUG_ON(errno == ERANGE || endptr == buf ||
+		   (*endptr != '\n' && *endptr != '\0'), "invalid num hotplug events: %ld", val);
 
 	return val;
 }
 
 /*
- * struct sched_ext_ops can change over time. If compat.bpf.h::SCX_OPS_DEFINE()
- * is used to define ops and compat.h::SCX_OPS_LOAD/ATTACH() are used to load
- * and attach it, backward compatibility is automatically maintained where
- * reasonable.
+ * Open the sched_ext_ops skeleton.
+ *
+ * struct sched_ext_ops can change over time. Two complementary mechanisms
+ * keep BPF schedulers built against newer headers running on older kernels:
+ *
+ * 1. Load-time fix-up (this macro). For each optional ops callback or field
+ *    added to struct sched_ext_ops, an explicit stanza below probes the
+ *    running kernel's BTF via __COMPAT_struct_has_field() and, if the field
+ *    is missing, clears it in the in-memory struct_ops (with a warning to
+ *    stderr) before load. Handles additive changes - a new stanza must be
+ *    added here for each new optional field.
+ *
+ * 2. Multi-variant struct_ops via compat.bpf.h::SCX_OPS_DEFINE(). That
+ *    macro can be expanded to emit several variants of struct sched_ext_ops,
+ *    and SCX_OPS_LOAD()/ATTACH() can pick the right one based on what the
+ *    kernel supports. Needed when an existing operation has to change
+ *    incompatibly (e.g. a callback signature changes); the load-time
+ *    fix-up above only handles purely additive changes.
  *
  * ec7e3b0463e1 ("implement-ops") in https://github.com/sched-ext/sched_ext is
  * the current minimum required kernel version.
+ *
+ * COMPAT:
+ * - v6.17: ops.cgroup_set_bandwidth()
+ * - v6.19: ops.cgroup_set_idle()
+ * - v7.1:  ops.sub_attach(), ops.sub_detach(), ops.sub_cgroup_id
  */
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
@@ -150,18 +186,76 @@ static inline long scx_hotplug_seq(void)
 	SCX_BUG_ON(!__skel, "Could not open " #__scx_name);			\
 	__skel->struct_ops.__ops_name->hotplug_seq = scx_hotplug_seq();		\
 	SCX_ENUM_INIT(__skel);							\
+	if (__skel->struct_ops.__ops_name->cgroup_set_bandwidth &&		\
+	    !__COMPAT_struct_has_field("sched_ext_ops", "cgroup_set_bandwidth")) { \
+		fprintf(stderr, "WARNING: kernel doesn't support ops.cgroup_set_bandwidth()\n"); \
+		__skel->struct_ops.__ops_name->cgroup_set_bandwidth = NULL;	\
+	}									\
+	if (__skel->struct_ops.__ops_name->cgroup_set_idle &&			\
+	    !__COMPAT_struct_has_field("sched_ext_ops", "cgroup_set_idle")) { \
+		fprintf(stderr, "WARNING: kernel doesn't support ops.cgroup_set_idle()\n"); \
+		__skel->struct_ops.__ops_name->cgroup_set_idle = NULL;	\
+	}									\
+	if (__skel->struct_ops.__ops_name->sub_attach &&			\
+	    !__COMPAT_struct_has_field("sched_ext_ops", "sub_attach")) {	\
+		fprintf(stderr, "WARNING: kernel doesn't support ops.sub_attach()\n"); \
+		__skel->struct_ops.__ops_name->sub_attach = NULL;		\
+	}									\
+	if (__skel->struct_ops.__ops_name->sub_detach &&			\
+	    !__COMPAT_struct_has_field("sched_ext_ops", "sub_detach")) {	\
+		fprintf(stderr, "WARNING: kernel doesn't support ops.sub_detach()\n"); \
+		__skel->struct_ops.__ops_name->sub_detach = NULL;		\
+	}									\
+	if (__skel->struct_ops.__ops_name->sub_cgroup_id > 0 &&		\
+	    !__COMPAT_struct_has_field("sched_ext_ops", "sub_cgroup_id")) { \
+		fprintf(stderr, "WARNING: kernel doesn't support ops.sub_cgroup_id\n"); \
+		__skel->struct_ops.__ops_name->sub_cgroup_id = 0;		\
+	}									\
 	__skel; 								\
 })
 
+/*
+ * Associate non-struct_ops BPF programs with the scheduler's struct_ops map so
+ * that scx_prog_sched() can determine which scheduler a BPF program belongs
+ * to. Requires libbpf >= 1.7.
+ */
+#if LIBBPF_MAJOR_VERSION > 1 ||							\
+	(LIBBPF_MAJOR_VERSION == 1 && LIBBPF_MINOR_VERSION >= 7)
+static inline void __scx_ops_assoc_prog(struct bpf_program *prog,
+					struct bpf_map *map,
+					const char *ops_name)
+{
+	s32 err = bpf_program__assoc_struct_ops(prog, map, NULL);
+	if (err)
+		fprintf(stderr,
+			"ERROR: Failed to associate %s with %s: %d\n",
+			bpf_program__name(prog), ops_name, err);
+}
+#else
+static inline void __scx_ops_assoc_prog(struct bpf_program *prog,
+					struct bpf_map *map,
+					const char *ops_name)
+{
+}
+#endif
+
+/* See SCX_OPS_OPEN() above for backward-compatibility handling. */
 #define SCX_OPS_LOAD(__skel, __ops_name, __scx_name, __uei_name) ({		\
+	struct bpf_program *__prog;						\
 	UEI_SET_SIZE(__skel, __ops_name, __uei_name);				\
 	SCX_BUG_ON(__scx_name##__load((__skel)), "Failed to load skel");	\
+	bpf_object__for_each_program(__prog, (__skel)->obj) {			\
+		if (bpf_program__type(__prog) == BPF_PROG_TYPE_STRUCT_OPS)	\
+			continue;						\
+		__scx_ops_assoc_prog(__prog, (__skel)->maps.__ops_name,		\
+				     #__ops_name);				\
+	}									\
 })
 
 /*
  * New versions of bpftool now emit additional link placeholders for BPF maps,
  * and set up BPF skeleton in such a way that libbpf will auto-attach BPF maps
- * automatically, assumming libbpf is recent enough (v1.5+). Old libbpf will do
+ * automatically, assuming libbpf is recent enough (v1.5+). Old libbpf will do
  * nothing with those links and won't attempt to auto-attach maps.
  *
  * To maintain compatibility with older libbpf while avoiding trying to attach

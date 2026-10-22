@@ -104,6 +104,8 @@ enum aafs_prof_type {
 #define prof_dir(X) ((X)->dents[AAFS_PROF_DIR])
 #define prof_child_dir(X) ((X)->dents[AAFS_PROF_PROFS])
 
+int aa_create_aafs(void);
+
 void __aa_bump_ns_revision(struct aa_ns *ns);
 void __aafs_profile_rmdir(struct aa_profile *profile);
 void __aafs_profile_migrate_dents(struct aa_profile *old,
@@ -118,6 +120,8 @@ struct aa_loaddata;
 #ifdef CONFIG_SECURITY_APPARMOR_EXPORT_BINARY
 void __aa_fs_remove_rawdata(struct aa_loaddata *rawdata);
 int __aa_fs_create_rawdata(struct aa_ns *ns, struct aa_loaddata *rawdata);
+void __aa_remove_rawdata_symlink_dents(struct aa_profile *profile);
+int __aa_create_rawdata_symlink_dents(struct aa_profile *profile);
 #else
 static inline void __aa_fs_remove_rawdata(struct aa_loaddata *rawdata)
 {
@@ -126,6 +130,16 @@ static inline void __aa_fs_remove_rawdata(struct aa_loaddata *rawdata)
 
 static inline int __aa_fs_create_rawdata(struct aa_ns *ns,
 					 struct aa_loaddata *rawdata)
+{
+	return 0;
+}
+
+static inline void __aa_remove_rawdata_symlink_dents(struct aa_profile *profile)
+{
+	/* empty stub */
+}
+
+static inline int __aa_create_rawdata_symlink_dents(struct aa_profile *profile)
 {
 	return 0;
 }

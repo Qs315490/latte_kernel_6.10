@@ -32,6 +32,8 @@
 #include <linux/pm_runtime.h>
 #include <linux/scatterlist.h>
 #include <linux/string.h>
+#include <linux/sysfs.h>
+#include <linux/workqueue.h>
 
 #include "omap-crypto.h"
 #include "omap-aes.h"
@@ -221,7 +223,7 @@ static void omap_aes_dma_out_callback(void *data)
 	struct omap_aes_dev *dd = data;
 
 	/* dma_lch_out - completed */
-	tasklet_schedule(&dd->done_task);
+	queue_work(system_bh_wq, &dd->done_task);
 }
 
 static int omap_aes_dma_init(struct omap_aes_dev *dd)
@@ -400,7 +402,6 @@ static void omap_aes_finish_req(struct omap_aes_dev *dd, int err)
 
 	crypto_finalize_skcipher_request(dd->engine, req, err);
 
-	pm_runtime_mark_last_busy(dd->dev);
 	pm_runtime_put_autosuspend(dd->dev);
 }
 
@@ -495,9 +496,9 @@ static void omap_aes_copy_ivout(struct omap_aes_dev *dd, u8 *ivbuf)
 		((u32 *)ivbuf)[i] = omap_aes_read(dd, AES_REG_IV(dd, i));
 }
 
-static void omap_aes_done_task(unsigned long data)
+static void omap_aes_done_task(struct work_struct *t)
 {
-	struct omap_aes_dev *dd = (struct omap_aes_dev *)data;
+	struct omap_aes_dev *dd = from_work(dd, t, done_task);
 
 	pr_debug("enter done_task\n");
 
@@ -926,7 +927,7 @@ static irqreturn_t omap_aes_irq(int irq, void *dev_id)
 
 		if (!dd->total)
 			/* All bytes read! */
-			tasklet_schedule(&dd->done_task);
+			queue_work(system_bh_wq, &dd->done_task);
 		else
 			/* Enable DATA_IN interrupt for next block */
 			omap_aes_write(dd, AES_REG_IRQ_ENABLE(dd), 0x2);
@@ -1042,7 +1043,7 @@ static ssize_t queue_len_show(struct device *dev, struct device_attribute *attr,
 {
 	struct omap_aes_dev *dd = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", dd->engine->queue.max_qlen);
+	return sysfs_emit(buf, "%d\n", dd->engine->queue.max_qlen);
 }
 
 static ssize_t queue_len_store(struct device *dev,
@@ -1086,10 +1087,21 @@ static struct attribute *omap_aes_attrs[] = {
 	&dev_attr_fallback.attr,
 	NULL,
 };
+ATTRIBUTE_GROUPS(omap_aes);
 
-static const struct attribute_group omap_aes_attr_group = {
-	.attrs = omap_aes_attrs,
-};
+static void omap_aes_unregister_algs(const struct omap_aes_pdata *pdata)
+{
+	struct omap_aes_algs_info *alg_info;
+	int i;
+
+	for (i = pdata->algs_info_size - 1; i >= 0; i--) {
+		alg_info = &pdata->algs_info[i];
+
+		crypto_engine_unregister_skciphers(alg_info->algs_list,
+						   alg_info->registered);
+		alg_info->registered = 0;
+	}
+}
 
 static int omap_aes_probe(struct platform_device *pdev)
 {
@@ -1144,7 +1156,7 @@ static int omap_aes_probe(struct platform_device *pdev)
 		 (reg & dd->pdata->major_mask) >> dd->pdata->major_shift,
 		 (reg & dd->pdata->minor_mask) >> dd->pdata->minor_shift);
 
-	tasklet_init(&dd->done_task, omap_aes_done_task, (unsigned long)dd);
+	INIT_WORK(&dd->done_task, omap_aes_done_task);
 
 	err = omap_aes_dma_init(dd);
 	if (err == -EPROBE_DEFER) {
@@ -1215,23 +1227,13 @@ static int omap_aes_probe(struct platform_device *pdev)
 		}
 	}
 
-	err = sysfs_create_group(&dev->kobj, &omap_aes_attr_group);
-	if (err) {
-		dev_err(dev, "could not create sysfs device attrs\n");
-		goto err_aead_algs;
-	}
-
 	return 0;
 err_aead_algs:
-	for (i = dd->pdata->aead_algs_info->registered - 1; i >= 0; i--) {
-		aalg = &dd->pdata->aead_algs_info->algs_list[i];
-		crypto_engine_unregister_aead(aalg);
-	}
+	crypto_engine_unregister_aeads(dd->pdata->aead_algs_info->algs_list,
+				       dd->pdata->aead_algs_info->registered);
+	dd->pdata->aead_algs_info->registered = 0;
 err_algs:
-	for (i = dd->pdata->algs_info_size - 1; i >= 0; i--)
-		for (j = dd->pdata->algs_info[i].registered - 1; j >= 0; j--)
-			crypto_engine_unregister_skcipher(
-					&dd->pdata->algs_info[i].algs_list[j]);
+	omap_aes_unregister_algs(dd->pdata);
 
 err_engine:
 	if (dd->engine)
@@ -1239,7 +1241,7 @@ err_engine:
 
 	omap_aes_dma_cleanup(dd);
 err_irq:
-	tasklet_kill(&dd->done_task);
+	cancel_work_sync(&dd->done_task);
 err_pm_disable:
 	pm_runtime_disable(dev);
 err_res:
@@ -1252,33 +1254,22 @@ err_data:
 static void omap_aes_remove(struct platform_device *pdev)
 {
 	struct omap_aes_dev *dd = platform_get_drvdata(pdev);
-	struct aead_engine_alg *aalg;
-	int i, j;
 
 	spin_lock_bh(&list_lock);
 	list_del(&dd->list);
 	spin_unlock_bh(&list_lock);
 
-	for (i = dd->pdata->algs_info_size - 1; i >= 0; i--)
-		for (j = dd->pdata->algs_info[i].registered - 1; j >= 0; j--) {
-			crypto_engine_unregister_skcipher(
-					&dd->pdata->algs_info[i].algs_list[j]);
-			dd->pdata->algs_info[i].registered--;
-		}
+	omap_aes_unregister_algs(dd->pdata);
 
-	for (i = dd->pdata->aead_algs_info->registered - 1; i >= 0; i--) {
-		aalg = &dd->pdata->aead_algs_info->algs_list[i];
-		crypto_engine_unregister_aead(aalg);
-		dd->pdata->aead_algs_info->registered--;
-	}
+	crypto_engine_unregister_aeads(dd->pdata->aead_algs_info->algs_list,
+				       dd->pdata->aead_algs_info->registered);
+	dd->pdata->aead_algs_info->registered = 0;
 
 	crypto_engine_exit(dd->engine);
 
-	tasklet_kill(&dd->done_task);
+	cancel_work_sync(&dd->done_task);
 	omap_aes_dma_cleanup(dd);
 	pm_runtime_disable(dd->dev);
-
-	sysfs_remove_group(&dd->dev->kobj, &omap_aes_attr_group);
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -1304,6 +1295,7 @@ static struct platform_driver omap_aes_driver = {
 		.name	= "omap-aes",
 		.pm	= &omap_aes_pm_ops,
 		.of_match_table	= omap_aes_of_match,
+		.dev_groups = omap_aes_groups,
 	},
 };
 

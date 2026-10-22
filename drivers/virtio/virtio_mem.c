@@ -1243,7 +1243,7 @@ static int virtio_mem_fake_offline(struct virtio_mem *vm, unsigned long pfn,
 		if (atomic_read(&vm->config_changed))
 			return -EAGAIN;
 
-		rc = alloc_contig_range(pfn, pfn + nr_pages, MIGRATE_MOVABLE,
+		rc = alloc_contig_range(pfn, pfn + nr_pages, ACR_FLAGS_NONE,
 					GFP_KERNEL);
 		if (rc == -ENOMEM)
 			/* whoops, out of memory */
@@ -2940,7 +2940,7 @@ static int virtio_mem_probe(struct virtio_device *vdev)
 	BUILD_BUG_ON(sizeof(struct virtio_mem_req) != 24);
 	BUILD_BUG_ON(sizeof(struct virtio_mem_resp) != 10);
 
-	vdev->priv = vm = kzalloc(sizeof(*vm), GFP_KERNEL);
+	vdev->priv = vm = kzalloc_obj(*vm);
 	if (!vm)
 		return -ENOMEM;
 
@@ -2950,8 +2950,8 @@ static int virtio_mem_probe(struct virtio_device *vdev)
 	mutex_init(&vm->hotplug_mutex);
 	INIT_LIST_HEAD(&vm->next);
 	spin_lock_init(&vm->removal_lock);
-	hrtimer_init(&vm->retry_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	vm->retry_timer.function = virtio_mem_timer_expired;
+	hrtimer_setup(&vm->retry_timer, virtio_mem_timer_expired, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL);
 	vm->retry_timer_ms = VIRTIO_MEM_RETRY_TIMER_MIN_MS;
 	vm->in_kdump = is_kdump_kernel();
 
@@ -2975,6 +2975,7 @@ static int virtio_mem_probe(struct virtio_device *vdev)
 out_del_vq:
 	vdev->config->del_vqs(vdev);
 out_free_vm:
+	mutex_destroy(&vm->hotplug_mutex);
 	kfree(vm);
 	vdev->priv = NULL;
 
@@ -3067,6 +3068,7 @@ static void virtio_mem_remove(struct virtio_device *vdev)
 	virtio_reset_device(vdev);
 	vdev->config->del_vqs(vdev);
 
+	mutex_destroy(&vm->hotplug_mutex);
 	kfree(vm);
 	vdev->priv = NULL;
 }

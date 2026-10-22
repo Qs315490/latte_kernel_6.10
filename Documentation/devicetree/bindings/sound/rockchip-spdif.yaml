@@ -31,6 +31,11 @@ properties:
               - rockchip,rk3288-spdif
               - rockchip,rk3308-spdif
           - const: rockchip,rk3066-spdif
+      - items:
+          - enum:
+              - rockchip,rk3576-spdif
+              - rockchip,rk3588-spdif
+          - const: rockchip,rk3568-spdif
 
   reg:
     maxItems: 1
@@ -40,8 +45,8 @@ properties:
 
   clocks:
     items:
-      - description: clock for SPDIF bus
       - description: clock for SPDIF controller
+      - description: clock for SPDIF bus
 
   clock-names:
     items:
@@ -65,6 +70,9 @@ properties:
 
   "#sound-dai-cells":
     const: 0
+
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
 
 required:
   - compatible

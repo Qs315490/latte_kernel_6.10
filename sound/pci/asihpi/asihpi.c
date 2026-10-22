@@ -518,7 +518,7 @@ static void snd_card_asihpi_pcm_timer_stop(struct snd_pcm_substream *substream)
 	struct snd_card_asihpi_pcm *dpcm = runtime->private_data;
 
 	dpcm->respawn_timer = 0;
-	del_timer(&dpcm->timer);
+	timer_delete(&dpcm->timer);
 }
 
 static void snd_card_asihpi_pcm_int_start(struct snd_pcm_substream *substream)
@@ -709,7 +709,7 @@ static inline unsigned int modulo_min(unsigned int a, unsigned int b,
 */
 static void snd_card_asihpi_timer_function(struct timer_list *t)
 {
-	struct snd_card_asihpi_pcm *dpcm = from_timer(dpcm, t, timer);
+	struct snd_card_asihpi_pcm *dpcm = timer_container_of(dpcm, t, timer);
 	struct snd_pcm_substream *substream = dpcm->substream;
 	struct snd_card_asihpi *card = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime;
@@ -975,19 +975,19 @@ static int snd_card_asihpi_playback_open(struct snd_pcm_substream *substream)
 	struct snd_pcm_hardware snd_card_asihpi_playback;
 	int err;
 
-	dpcm = kzalloc(sizeof(*dpcm), GFP_KERNEL);
+	dpcm = kzalloc_obj(*dpcm);
 	if (dpcm == NULL)
 		return -ENOMEM;
 
 	err = hpi_outstream_open(card->hpi->adapter->index,
 			      substream->number, &dpcm->h_stream);
 	hpi_handle_error(err);
-	if (err)
+	if (err) {
 		kfree(dpcm);
-	if (err == HPI_ERROR_OBJ_ALREADY_OPEN)
-		return -EBUSY;
-	if (err)
+		if (err == HPI_ERROR_OBJ_ALREADY_OPEN)
+			return -EBUSY;
 		return -EIO;
+	}
 
 	/*? also check ASI5000 samplerate source
 	    If external, only support external rate.
@@ -1145,7 +1145,7 @@ static int snd_card_asihpi_capture_open(struct snd_pcm_substream *substream)
 	struct snd_pcm_hardware snd_card_asihpi_capture;
 	int err;
 
-	dpcm = kzalloc(sizeof(*dpcm), GFP_KERNEL);
+	dpcm = kzalloc_obj(*dpcm);
 	if (dpcm == NULL)
 		return -ENOMEM;
 
@@ -1156,12 +1156,12 @@ static int snd_card_asihpi_capture_open(struct snd_pcm_substream *substream)
 	err = hpi_handle_error(
 	    hpi_instream_open(card->hpi->adapter->index,
 			     substream->number, &dpcm->h_stream));
-	if (err)
+	if (err) {
 		kfree(dpcm);
-	if (err == HPI_ERROR_OBJ_ALREADY_OPEN)
-		return -EBUSY;
-	if (err)
+		if (err == HPI_ERROR_OBJ_ALREADY_OPEN)
+			return -EBUSY;
 		return -EIO;
+	}
 
 	timer_setup(&dpcm->timer, snd_card_asihpi_timer_function, 0);
 	dpcm->substream = substream;
@@ -1257,7 +1257,7 @@ static int snd_card_asihpi_pcm_new(struct snd_card_asihpi *asihpi, int device)
 
 	pcm->private_data = asihpi;
 	pcm->info_flags = 0;
-	strcpy(pcm->name, "Asihpi PCM");
+	strscpy(pcm->name, "Asihpi PCM");
 
 	/*? do we want to emulate MMAP for non-BBM cards?
 	Jack doesn't work with ALSAs MMAP emulation - WHY NOT? */
@@ -1362,6 +1362,7 @@ static void asihpi_ctl_init(struct snd_kcontrol_new *snd_control,
 				struct hpi_control *hpi_ctl,
 				char *name)
 {
+	int len;
 	char *dir;
 	memset(snd_control, 0, sizeof(*snd_control));
 	snd_control->name = hpi_ctl->name;
@@ -1384,23 +1385,30 @@ static void asihpi_ctl_init(struct snd_kcontrol_new *snd_control,
 		dir = "Playback "; /* PCM Playback source, or  output node */
 
 	if (hpi_ctl->src_node_type && hpi_ctl->dst_node_type)
-		sprintf(hpi_ctl->name, "%s %d %s %d %s%s",
-			asihpi_src_names[hpi_ctl->src_node_type],
-			hpi_ctl->src_node_index,
-			asihpi_dst_names[hpi_ctl->dst_node_type],
-			hpi_ctl->dst_node_index,
-			dir, name);
+		len = snprintf(hpi_ctl->name, sizeof(hpi_ctl->name),
+			       "%s %d %s %d %s%s",
+			       asihpi_src_names[hpi_ctl->src_node_type],
+			       hpi_ctl->src_node_index,
+			       asihpi_dst_names[hpi_ctl->dst_node_type],
+			       hpi_ctl->dst_node_index,
+			       dir, name);
 	else if (hpi_ctl->dst_node_type) {
-		sprintf(hpi_ctl->name, "%s %d %s%s",
-		asihpi_dst_names[hpi_ctl->dst_node_type],
-		hpi_ctl->dst_node_index,
-		dir, name);
+		len = snprintf(hpi_ctl->name, sizeof(hpi_ctl->name),
+			       "%s %d %s%s",
+			       asihpi_dst_names[hpi_ctl->dst_node_type],
+			       hpi_ctl->dst_node_index,
+			       dir, name);
 	} else {
-		sprintf(hpi_ctl->name, "%s %d %s%s",
-		asihpi_src_names[hpi_ctl->src_node_type],
-		hpi_ctl->src_node_index,
-		dir, name);
+		len = snprintf(hpi_ctl->name, sizeof(hpi_ctl->name),
+			       "%s %d %s%s",
+			       asihpi_src_names[hpi_ctl->src_node_type],
+			       hpi_ctl->src_node_index,
+			       dir, name);
 	}
+
+	if (len >= sizeof(hpi_ctl->name))
+		pr_err("asihpi: truncated control name: %s\n",
+		       hpi_ctl->name);
 }
 
 /*------------------------------------------------------------
@@ -2300,8 +2308,7 @@ static const char * const sampleclock_sources[] = {
 static int snd_asihpi_clksrc_info(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_info *uinfo)
 {
-	struct snd_card_asihpi *asihpi =
-			(struct snd_card_asihpi *)(kcontrol->private_data);
+	struct snd_card_asihpi *asihpi = snd_kcontrol_chip(kcontrol);
 	struct clk_cache *clkcache = &asihpi->cc;
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
 	uinfo->count = 1;
@@ -2311,7 +2318,7 @@ static int snd_asihpi_clksrc_info(struct snd_kcontrol *kcontrol,
 		uinfo->value.enumerated.item =
 				uinfo->value.enumerated.items - 1;
 
-	strcpy(uinfo->value.enumerated.name,
+	strscpy(uinfo->value.enumerated.name,
 	       clkcache->s[uinfo->value.enumerated.item].name);
 	return 0;
 }
@@ -2319,8 +2326,7 @@ static int snd_asihpi_clksrc_info(struct snd_kcontrol *kcontrol,
 static int snd_asihpi_clksrc_get(struct snd_kcontrol *kcontrol,
 				 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_card_asihpi *asihpi =
-			(struct snd_card_asihpi *)(kcontrol->private_data);
+	struct snd_card_asihpi *asihpi = snd_kcontrol_chip(kcontrol);
 	struct clk_cache *clkcache = &asihpi->cc;
 	u32 h_control = kcontrol->private_value;
 	u16 source, srcindex = 0;
@@ -2347,8 +2353,7 @@ static int snd_asihpi_clksrc_get(struct snd_kcontrol *kcontrol,
 static int snd_asihpi_clksrc_put(struct snd_kcontrol *kcontrol,
 				 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_card_asihpi *asihpi =
-			(struct snd_card_asihpi *)(kcontrol->private_data);
+	struct snd_card_asihpi *asihpi = snd_kcontrol_chip(kcontrol);
 	struct clk_cache *clkcache = &asihpi->cc;
 	unsigned int item;
 	int change;
@@ -2533,7 +2538,7 @@ static int snd_card_asihpi_mixer_new(struct snd_card_asihpi *asihpi)
 	if (snd_BUG_ON(!asihpi))
 		return -EINVAL;
 	card = asihpi->card;
-	strcpy(card->mixername, "Asihpi Mixer");
+	strscpy(card->mixername, "Asihpi Mixer");
 
 	err =
 	    hpi_mixer_open(asihpi->hpi->adapter->index,
@@ -2744,7 +2749,7 @@ static int snd_asihpi_hpi_new(struct snd_card_asihpi *asihpi, int device)
 	err = snd_hwdep_new(asihpi->card, "HPI", device, &hw);
 	if (err < 0)
 		return err;
-	strcpy(hw->name, "asihpi (HPI)");
+	strscpy(hw->name, "asihpi (HPI)");
 	hw->iface = SNDRV_HWDEP_IFACE_LAST;
 	hw->ops.open = snd_asihpi_hpi_open;
 	hw->ops.ioctl = snd_asihpi_hpi_ioctl;
@@ -2892,7 +2897,7 @@ static int snd_asihpi_probe(struct pci_dev *pci_dev,
 	    by enable_hwdep  module param*/
 	snd_asihpi_hpi_new(asihpi, 0);
 
-	strcpy(card->driver, "ASIHPI");
+	strscpy(card->driver, "ASIHPI");
 
 	sprintf(card->shortname, "AudioScience ASI%4X",
 			asihpi->hpi->adapter->type);
@@ -2928,13 +2933,16 @@ static void snd_asihpi_remove(struct pci_dev *pci_dev)
 }
 
 static const struct pci_device_id asihpi_pci_tbl[] = {
-	{HPI_PCI_VENDOR_ID_TI, HPI_PCI_DEV_ID_DSP6205,
-		HPI_PCI_VENDOR_ID_AUDIOSCIENCE, PCI_ANY_ID, 0, 0,
-		(kernel_ulong_t)HPI_6205},
-	{HPI_PCI_VENDOR_ID_TI, HPI_PCI_DEV_ID_PCI2040,
-		HPI_PCI_VENDOR_ID_AUDIOSCIENCE, PCI_ANY_ID, 0, 0,
-		(kernel_ulong_t)HPI_6000},
-	{0,}
+	{
+		PCI_DEVICE_SUB(HPI_PCI_VENDOR_ID_TI, HPI_PCI_DEV_ID_DSP6205,
+			       HPI_PCI_VENDOR_ID_AUDIOSCIENCE, PCI_ANY_ID),
+		.driver_data = (kernel_ulong_t)HPI_6205,
+	}, {
+		PCI_DEVICE_SUB(HPI_PCI_VENDOR_ID_TI, HPI_PCI_DEV_ID_PCI2040,
+			       HPI_PCI_VENDOR_ID_AUDIOSCIENCE, PCI_ANY_ID),
+		.driver_data = (kernel_ulong_t)HPI_6000,
+	},
+	{}
 };
 MODULE_DEVICE_TABLE(pci, asihpi_pci_tbl);
 

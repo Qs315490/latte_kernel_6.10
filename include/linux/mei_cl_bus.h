@@ -7,7 +7,7 @@
 
 #include <linux/device.h>
 #include <linux/uuid.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/mei_cl.h>
 
 struct mei_cl_device;
 struct mei_device;
@@ -97,8 +97,6 @@ ssize_t mei_cldev_send(struct mei_cl_device *cldev, const u8 *buf,
 ssize_t mei_cldev_send_timeout(struct mei_cl_device *cldev, const u8 *buf,
 			       size_t length, unsigned long timeout);
 ssize_t mei_cldev_recv(struct mei_cl_device *cldev, u8 *buf, size_t length);
-ssize_t mei_cldev_recv_nonblock(struct mei_cl_device *cldev, u8 *buf,
-				size_t length);
 ssize_t mei_cldev_recv_timeout(struct mei_cl_device *cldev, u8 *buf, size_t length,
 			       unsigned long timeout);
 ssize_t mei_cldev_send_vtag(struct mei_cl_device *cldev, const u8 *buf,
@@ -107,8 +105,6 @@ ssize_t mei_cldev_send_vtag_timeout(struct mei_cl_device *cldev, const u8 *buf,
 				    size_t length, u8 vtag, unsigned long timeout);
 ssize_t mei_cldev_recv_vtag(struct mei_cl_device *cldev, u8 *buf, size_t length,
 			    u8 *vtag);
-ssize_t mei_cldev_recv_nonblock_vtag(struct mei_cl_device *cldev, u8 *buf,
-				     size_t length, u8 *vtag);
 ssize_t mei_cldev_recv_vtag_timeout(struct mei_cl_device *cldev, u8 *buf, size_t length,
 			    u8 *vtag, unsigned long timeout);
 
@@ -118,6 +114,7 @@ int mei_cldev_register_notif_cb(struct mei_cl_device *cldev,
 
 const uuid_le *mei_cldev_uuid(const struct mei_cl_device *cldev);
 u8 mei_cldev_ver(const struct mei_cl_device *cldev);
+size_t mei_cldev_mtu(const struct mei_cl_device *cldev);
 
 void *mei_cldev_get_drvdata(const struct mei_cl_device *cldev);
 void mei_cldev_set_drvdata(struct mei_cl_device *cldev, void *data);

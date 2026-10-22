@@ -117,7 +117,7 @@ llsec_key_alloc(const struct ieee802154_llsec_key *template)
 	struct mac802154_llsec_key *key;
 	int i;
 
-	key = kzalloc(sizeof(*key), GFP_KERNEL);
+	key = kzalloc_obj(*key);
 	if (!key)
 		return NULL;
 
@@ -241,7 +241,7 @@ int mac802154_llsec_key_add(struct mac802154_llsec *sec,
 		break;
 	}
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new);
 	if (!new)
 		return -ENOMEM;
 
@@ -369,7 +369,7 @@ int mac802154_llsec_dev_add(struct mac802154_llsec *sec,
 	     llsec_dev_find_long(sec, dev->hwaddr))
 		return -EEXIST;
 
-	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kmalloc_obj(*entry);
 	if (!entry)
 		return -ENOMEM;
 
@@ -441,7 +441,7 @@ int mac802154_llsec_devkey_add(struct mac802154_llsec *sec,
 	if (llsec_devkey_find(dev, &key->key_id))
 		return -EEXIST;
 
-	devkey = kmalloc(sizeof(*devkey), GFP_KERNEL);
+	devkey = kmalloc_obj(*devkey);
 	if (!devkey)
 		return -ENOMEM;
 
@@ -500,7 +500,7 @@ int mac802154_llsec_seclevel_add(struct mac802154_llsec *sec,
 	if (llsec_find_seclevel(sec, sl))
 		return -EEXIST;
 
-	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kmalloc_obj(*entry);
 	if (!entry)
 		return -ENOMEM;
 
@@ -710,6 +710,7 @@ int mac802154_llsec_encrypt(struct mac802154_llsec *sec, struct sk_buff *skb)
 {
 	struct ieee802154_hdr hdr;
 	int rc, authlen, hlen;
+	struct sk_buff *trailer;
 	struct mac802154_llsec_key *key;
 	u32 frame_ctr;
 
@@ -768,6 +769,12 @@ int mac802154_llsec_encrypt(struct mac802154_llsec *sec, struct sk_buff *skb)
 
 	skb->mac_len = ieee802154_hdr_push(skb, &hdr);
 	skb_reset_mac_header(skb);
+
+	rc = skb_cow_data(skb, 0, &trailer);
+	if (rc < 0) {
+		llsec_key_put(key);
+		return rc;
+	}
 
 	rc = llsec_do_encrypt(skb, sec, &hdr, key);
 	llsec_key_put(key);
@@ -884,6 +891,11 @@ llsec_do_decrypt_auth(struct sk_buff *skb, const struct mac802154_llsec *sec,
 	data = skb_mac_header(skb) + skb->mac_len;
 	datalen = skb_tail_pointer(skb) - data;
 
+	if (datalen < authlen) {
+		kfree_sensitive(req);
+		return -EBADMSG;
+	}
+
 	sg_init_one(&sg, skb_mac_header(skb), assoclen + datalen);
 
 	if (!(hdr->sec.level & IEEE802154_SCF_SECLEVEL_ENC)) {
@@ -908,6 +920,13 @@ llsec_do_decrypt(struct sk_buff *skb, const struct mac802154_llsec *sec,
 		 const struct ieee802154_hdr *hdr,
 		 struct mac802154_llsec_key *key, __le64 dev_addr)
 {
+	struct sk_buff *trailer;
+	int err;
+
+	err = skb_cow_data(skb, 0, &trailer);
+	if (err < 0)
+		return err;
+
 	if (hdr->sec.level == IEEE802154_SCF_SECLEVEL_ENC)
 		return llsec_do_decrypt_unauth(skb, sec, hdr, key, dev_addr);
 	else
@@ -925,7 +944,7 @@ llsec_update_devkey_record(struct mac802154_llsec_device *dev,
 	if (!devkey) {
 		struct mac802154_llsec_device_key *next;
 
-		next = kzalloc(sizeof(*devkey), GFP_ATOMIC);
+		next = kzalloc_obj(*devkey, GFP_ATOMIC);
 		if (!next)
 			return -ENOMEM;
 

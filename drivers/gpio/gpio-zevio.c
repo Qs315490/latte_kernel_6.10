@@ -9,7 +9,6 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/slab.h>
@@ -64,14 +63,14 @@ static inline u32 zevio_gpio_port_get(struct zevio_gpio *c, unsigned pin,
 					unsigned port_offset)
 {
 	unsigned section_offset = ((pin >> 3) & 3)*ZEVIO_GPIO_SECTION_SIZE;
-	return readl(IOMEM(c->regs + section_offset + port_offset));
+	return readl(c->regs + section_offset + port_offset);
 }
 
 static inline void zevio_gpio_port_set(struct zevio_gpio *c, unsigned pin,
 					unsigned port_offset, u32 val)
 {
 	unsigned section_offset = ((pin >> 3) & 3)*ZEVIO_GPIO_SECTION_SIZE;
-	writel(val, IOMEM(c->regs + section_offset + port_offset));
+	writel(val, c->regs + section_offset + port_offset);
 }
 
 /* Functions for struct gpio_chip */
@@ -91,7 +90,7 @@ static int zevio_gpio_get(struct gpio_chip *chip, unsigned pin)
 	return (val >> ZEVIO_GPIO_BIT(pin)) & 0x1;
 }
 
-static void zevio_gpio_set(struct gpio_chip *chip, unsigned pin, int value)
+static int zevio_gpio_set(struct gpio_chip *chip, unsigned int pin, int value)
 {
 	struct zevio_gpio *controller = gpiochip_get_data(chip);
 	u32 val;
@@ -105,6 +104,8 @@ static void zevio_gpio_set(struct gpio_chip *chip, unsigned pin, int value)
 
 	zevio_gpio_port_set(controller, pin, ZEVIO_GPIO_OUTPUT, val);
 	spin_unlock(&controller->lock);
+
+	return 0;
 }
 
 static int zevio_gpio_direction_input(struct gpio_chip *chip, unsigned pin)

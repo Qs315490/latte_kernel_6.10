@@ -7,6 +7,7 @@
 
 #include <linux/interrupt.h>
 #include <linux/bitfield.h>
+#include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/device.h>
@@ -19,7 +20,6 @@
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 #include <linux/units.h>
 
@@ -38,7 +38,7 @@
 #define AD7192_REG_CONF		2 /* Configuration Register  (RW, 24-bit) */
 #define AD7192_REG_DATA		3 /* Data Register	     (RO, 24/32-bit) */
 #define AD7192_REG_ID		4 /* ID Register	     (RO, 8-bit) */
-#define AD7192_REG_GPOCON	5 /* GPOCON Register	     (RO, 8-bit) */
+#define AD7192_REG_GPOCON	5 /* GPOCON Register	     (RW, 8-bit) */
 #define AD7192_REG_OFFSET	6 /* Offset Register	     (RW, 16-bit */
 				  /* (AD7792)/24-bit (AD7192)) */
 #define AD7192_REG_FULLSALE	7 /* Full-Scale Register */
@@ -256,6 +256,9 @@ static ssize_t ad7192_write_syscalib(struct iio_dev *indio_dev,
 	if (ret)
 		return ret;
 
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
+
 	temp = st->syscalib_mode[chan->channel];
 	if (sys_calib) {
 		if (temp == AD7192_SYSCALIB_ZERO_SCALE)
@@ -265,6 +268,8 @@ static ssize_t ad7192_write_syscalib(struct iio_dev *indio_dev,
 			ret = ad_sd_calibrate(&st->sd, AD7192_MODE_CAL_SYS_FULL,
 					      chan->address);
 	}
+
+	iio_device_release_direct(indio_dev);
 
 	return ret ? ret : len;
 }
@@ -570,7 +575,12 @@ static int ad7192_setup(struct iio_dev *indio_dev, struct device *dev)
 	ret = ad_sd_reset(&st->sd);
 	if (ret < 0)
 		return ret;
-	usleep_range(500, 1000); /* Wait for at least 500us */
+
+	/*
+	 * Per AD7192 datasheet (Rev. A, page 34, RESET section), allow
+	 * 500 us after a reset before accessing on-chip registers.
+	 */
+	fsleep(500);
 
 	/* write/read test for device presence */
 	ret = ad_sd_read_reg(&st->sd, AD7192_REG_ID, 1, &id);
@@ -693,9 +703,8 @@ static ssize_t ad7192_set(struct device *dev,
 	if (ret < 0)
 		return ret;
 
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret)
-		return ret;
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
 
 	switch ((u32)this_attr->address) {
 	case AD7192_REG_GPOCON:
@@ -718,7 +727,7 @@ static ssize_t ad7192_set(struct device *dev,
 		ret = -EINVAL;
 	}
 
-	iio_device_release_direct_mode(indio_dev);
+	iio_device_release_direct(indio_dev);
 
 	return ret ? ret : len;
 }
@@ -945,82 +954,83 @@ static int ad7192_read_raw(struct iio_dev *indio_dev,
 	return -EINVAL;
 }
 
+static int __ad7192_write_raw(struct iio_dev *indio_dev,
+			      struct iio_chan_spec const *chan,
+			      int val,
+			      int val2,
+			      long mask)
+{
+	struct ad7192_state *st = iio_priv(indio_dev);
+	int i, div;
+	unsigned int tmp;
+
+	guard(mutex)(&st->lock);
+
+	switch (mask) {
+	case IIO_CHAN_INFO_SCALE:
+		for (i = 0; i < ARRAY_SIZE(st->scale_avail); i++) {
+			if (val2 != st->scale_avail[i][1])
+				continue;
+
+			tmp = st->conf;
+			st->conf &= ~AD7192_CONF_GAIN_MASK;
+			st->conf |= FIELD_PREP(AD7192_CONF_GAIN_MASK, i);
+			if (tmp == st->conf)
+				return 0;
+			ad_sd_write_reg(&st->sd, AD7192_REG_CONF, 3, st->conf);
+			ad7192_calibrate_all(st);
+			return 0;
+		}
+		return -EINVAL;
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		if (!val)
+			return -EINVAL;
+
+		div = st->fclk / (val * ad7192_get_f_order(st) * 1024);
+		if (div < 1 || div > 1023)
+			return -EINVAL;
+
+		st->mode &= ~AD7192_MODE_RATE_MASK;
+		st->mode |= FIELD_PREP(AD7192_MODE_RATE_MASK, div);
+		ad_sd_write_reg(&st->sd, AD7192_REG_MODE, 3, st->mode);
+		ad7192_update_filter_freq_avail(st);
+		return 0;
+	case IIO_CHAN_INFO_LOW_PASS_FILTER_3DB_FREQUENCY:
+		return ad7192_set_3db_filter_freq(st, val, val2 / 1000);
+	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
+		for (i = 0; i < ARRAY_SIZE(st->oversampling_ratio_avail); i++) {
+			if (val != st->oversampling_ratio_avail[i])
+				continue;
+
+			tmp = st->mode;
+			st->mode &= ~AD7192_MODE_AVG_MASK;
+			st->mode |= FIELD_PREP(AD7192_MODE_AVG_MASK, i);
+			if (tmp == st->mode)
+				return 0;
+			ad_sd_write_reg(&st->sd, AD7192_REG_MODE, 3, st->mode);
+			ad7192_update_filter_freq_avail(st);
+			return 0;
+		}
+		return -EINVAL;
+	default:
+		return -EINVAL;
+	}
+}
+
 static int ad7192_write_raw(struct iio_dev *indio_dev,
 			    struct iio_chan_spec const *chan,
 			    int val,
 			    int val2,
 			    long mask)
 {
-	struct ad7192_state *st = iio_priv(indio_dev);
-	int ret, i, div;
-	unsigned int tmp;
+	int ret;
 
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret)
-		return ret;
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
 
-	mutex_lock(&st->lock);
+	ret = __ad7192_write_raw(indio_dev, chan, val, val2, mask);
 
-	switch (mask) {
-	case IIO_CHAN_INFO_SCALE:
-		ret = -EINVAL;
-		for (i = 0; i < ARRAY_SIZE(st->scale_avail); i++)
-			if (val2 == st->scale_avail[i][1]) {
-				ret = 0;
-				tmp = st->conf;
-				st->conf &= ~AD7192_CONF_GAIN_MASK;
-				st->conf |= FIELD_PREP(AD7192_CONF_GAIN_MASK, i);
-				if (tmp == st->conf)
-					break;
-				ad_sd_write_reg(&st->sd, AD7192_REG_CONF,
-						3, st->conf);
-				ad7192_calibrate_all(st);
-				break;
-			}
-		break;
-	case IIO_CHAN_INFO_SAMP_FREQ:
-		if (!val) {
-			ret = -EINVAL;
-			break;
-		}
-
-		div = st->fclk / (val * ad7192_get_f_order(st) * 1024);
-		if (div < 1 || div > 1023) {
-			ret = -EINVAL;
-			break;
-		}
-
-		st->mode &= ~AD7192_MODE_RATE_MASK;
-		st->mode |= FIELD_PREP(AD7192_MODE_RATE_MASK, div);
-		ad_sd_write_reg(&st->sd, AD7192_REG_MODE, 3, st->mode);
-		ad7192_update_filter_freq_avail(st);
-		break;
-	case IIO_CHAN_INFO_LOW_PASS_FILTER_3DB_FREQUENCY:
-		ret = ad7192_set_3db_filter_freq(st, val, val2 / 1000);
-		break;
-	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
-		ret = -EINVAL;
-		for (i = 0; i < ARRAY_SIZE(st->oversampling_ratio_avail); i++)
-			if (val == st->oversampling_ratio_avail[i]) {
-				ret = 0;
-				tmp = st->mode;
-				st->mode &= ~AD7192_MODE_AVG_MASK;
-				st->mode |= FIELD_PREP(AD7192_MODE_AVG_MASK, i);
-				if (tmp == st->mode)
-					break;
-				ad_sd_write_reg(&st->sd, AD7192_REG_MODE,
-						3, st->mode);
-				break;
-			}
-		ad7192_update_filter_freq_avail(st);
-		break;
-	default:
-		ret = -EINVAL;
-	}
-
-	mutex_unlock(&st->lock);
-
-	iio_device_release_direct_mode(indio_dev);
+	iio_device_release_direct(indio_dev);
 
 	return ret;
 }
@@ -1396,9 +1406,6 @@ static int ad7192_probe(struct spi_device *spi)
 	st->int_vref_mv = ret == -ENODEV ? avdd_mv : ret / MILLI;
 
 	st->chip_info = spi_get_device_match_data(spi);
-	if (!st->chip_info)
-		return -ENODEV;
-
 	indio_dev->name = st->chip_info->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = st->chip_info->info;

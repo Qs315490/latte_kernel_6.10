@@ -1314,7 +1314,7 @@ static int mxl692_probe(struct i2c_client *client)
 	struct mxl692_dev *dev;
 	int ret = 0;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev) {
 		ret = -ENOMEM;
 		dev_dbg(&client->dev, "kzalloc() failed\n");
@@ -1346,8 +1346,8 @@ static void mxl692_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mxl692_id_table[] = {
-	{ "mxl692" },
-	{}
+	{ .name = "mxl692" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mxl692_id_table);
 

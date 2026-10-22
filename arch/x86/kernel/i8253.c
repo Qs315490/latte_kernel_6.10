@@ -31,7 +31,7 @@ struct clock_event_device *global_clock_event;
  */
 static bool __init use_pit(void)
 {
-	if (!IS_ENABLED(CONFIG_X86_TSC) || !boot_cpu_has(X86_FEATURE_TSC))
+	if (!boot_cpu_has(X86_FEATURE_TSC))
 		return true;
 
 	/* This also returns true when APIC is disabled */
@@ -46,7 +46,8 @@ bool __init pit_timer_init(void)
 		 * VMMs otherwise steal CPU time just to pointlessly waggle
 		 * the (masked) IRQ.
 		 */
-		clockevent_i8253_disable();
+		scoped_guard(irq)
+			clockevent_i8253_disable();
 		return false;
 	}
 	clockevent_i8253_init(true);

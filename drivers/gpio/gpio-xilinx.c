@@ -45,8 +45,7 @@
  * struct xgpio_instance - Stores information about GPIO device
  * @gc: GPIO chip
  * @regs: register block
- * @hw_map: GPIO pin mapping on hardware side
- * @sw_map: GPIO pin mapping on software side
+ * @map: GPIO pin mapping on hardware side
  * @state: GPIO write state shadow register
  * @last_irq_read: GPIO read state register from last interrupt
  * @dir: GPIO direction shadow register
@@ -60,8 +59,7 @@
 struct xgpio_instance {
 	struct gpio_chip gc;
 	void __iomem *regs;
-	DECLARE_BITMAP(hw_map, 64);
-	DECLARE_BITMAP(sw_map, 64);
+	DECLARE_BITMAP(map, 64);
 	DECLARE_BITMAP(state, 64);
 	DECLARE_BITMAP(last_irq_read, 64);
 	DECLARE_BITMAP(dir, 64);
@@ -72,33 +70,6 @@ struct xgpio_instance {
 	DECLARE_BITMAP(falling_edge, 64);
 	struct clk *clk;
 };
-
-static inline int xgpio_from_bit(struct xgpio_instance *chip, int bit)
-{
-	return bitmap_bitremap(bit, chip->hw_map, chip->sw_map, 64);
-}
-
-static inline int xgpio_to_bit(struct xgpio_instance *chip, int gpio)
-{
-	return bitmap_bitremap(gpio, chip->sw_map, chip->hw_map, 64);
-}
-
-static inline u32 xgpio_get_value32(const unsigned long *map, int bit)
-{
-	const size_t index = BIT_WORD(bit);
-	const unsigned long offset = (bit % BITS_PER_LONG) & BIT(5);
-
-	return (map[index] >> offset) & 0xFFFFFFFFul;
-}
-
-static inline void xgpio_set_value32(unsigned long *map, int bit, u32 v)
-{
-	const size_t index = BIT_WORD(bit);
-	const unsigned long offset = (bit % BITS_PER_LONG) & BIT(5);
-
-	map[index] &= ~(0xFFFFFFFFul << offset);
-	map[index] |= (unsigned long)v << offset;
-}
 
 static inline int xgpio_regoffset(struct xgpio_instance *chip, int ch)
 {
@@ -115,20 +86,23 @@ static inline int xgpio_regoffset(struct xgpio_instance *chip, int ch)
 static void xgpio_read_ch(struct xgpio_instance *chip, int reg, int bit, unsigned long *a)
 {
 	void __iomem *addr = chip->regs + reg + xgpio_regoffset(chip, bit / 32);
+	unsigned long value = xgpio_readreg(addr);
 
-	xgpio_set_value32(a, bit, xgpio_readreg(addr));
+	bitmap_write(a, value, round_down(bit, 32), 32);
 }
 
 static void xgpio_write_ch(struct xgpio_instance *chip, int reg, int bit, unsigned long *a)
 {
 	void __iomem *addr = chip->regs + reg + xgpio_regoffset(chip, bit / 32);
+	unsigned long value = bitmap_read(a, round_down(bit, 32), 32);
 
-	xgpio_writereg(addr, xgpio_get_value32(a, bit));
+	xgpio_writereg(addr, value);
 }
 
 static void xgpio_read_ch_all(struct xgpio_instance *chip, int reg, unsigned long *a)
 {
-	int bit, lastbit = xgpio_to_bit(chip, chip->gc.ngpio - 1);
+	unsigned long lastbit = find_nth_bit(chip->map, 64, chip->gc.ngpio - 1);
+	int bit;
 
 	for (bit = 0; bit <= lastbit ; bit += 32)
 		xgpio_read_ch(chip, reg, bit, a);
@@ -136,7 +110,8 @@ static void xgpio_read_ch_all(struct xgpio_instance *chip, int reg, unsigned lon
 
 static void xgpio_write_ch_all(struct xgpio_instance *chip, int reg, unsigned long *a)
 {
-	int bit, lastbit = xgpio_to_bit(chip, chip->gc.ngpio - 1);
+	unsigned long lastbit = find_nth_bit(chip->map, 64, chip->gc.ngpio - 1);
+	int bit;
 
 	for (bit = 0; bit <= lastbit ; bit += 32)
 		xgpio_write_ch(chip, reg, bit, a);
@@ -156,7 +131,7 @@ static void xgpio_write_ch_all(struct xgpio_instance *chip, int reg, unsigned lo
 static int xgpio_get(struct gpio_chip *gc, unsigned int gpio)
 {
 	struct xgpio_instance *chip = gpiochip_get_data(gc);
-	int bit = xgpio_to_bit(chip, gpio);
+	unsigned long bit = find_nth_bit(chip->map, 64, gpio);
 	DECLARE_BITMAP(state, 64);
 
 	xgpio_read_ch(chip, XGPIO_DATA_OFFSET, bit, state);
@@ -173,11 +148,11 @@ static int xgpio_get(struct gpio_chip *gc, unsigned int gpio)
  * This function writes the specified value in to the specified signal of the
  * GPIO device.
  */
-static void xgpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
+static int xgpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
 {
 	unsigned long flags;
 	struct xgpio_instance *chip = gpiochip_get_data(gc);
-	int bit = xgpio_to_bit(chip, gpio);
+	unsigned long bit = find_nth_bit(chip->map, 64, gpio);
 
 	raw_spin_lock_irqsave(&chip->gpio_lock, flags);
 
@@ -187,6 +162,8 @@ static void xgpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
 	xgpio_write_ch(chip, XGPIO_DATA_OFFSET, bit, chip->state);
 
 	raw_spin_unlock_irqrestore(&chip->gpio_lock, flags);
+
+	return 0;
 }
 
 /**
@@ -198,8 +175,8 @@ static void xgpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
  * This function writes the specified values into the specified signals of the
  * GPIO devices.
  */
-static void xgpio_set_multiple(struct gpio_chip *gc, unsigned long *mask,
-			       unsigned long *bits)
+static int xgpio_set_multiple(struct gpio_chip *gc, unsigned long *mask,
+			      unsigned long *bits)
 {
 	DECLARE_BITMAP(hw_mask, 64);
 	DECLARE_BITMAP(hw_bits, 64);
@@ -207,8 +184,8 @@ static void xgpio_set_multiple(struct gpio_chip *gc, unsigned long *mask,
 	unsigned long flags;
 	struct xgpio_instance *chip = gpiochip_get_data(gc);
 
-	bitmap_remap(hw_mask, mask, chip->sw_map, chip->hw_map, 64);
-	bitmap_remap(hw_bits, bits, chip->sw_map, chip->hw_map, 64);
+	bitmap_scatter(hw_mask, mask, chip->map, 64);
+	bitmap_scatter(hw_bits, bits, chip->map, 64);
 
 	raw_spin_lock_irqsave(&chip->gpio_lock, flags);
 
@@ -219,6 +196,8 @@ static void xgpio_set_multiple(struct gpio_chip *gc, unsigned long *mask,
 	bitmap_copy(chip->state, state, 64);
 
 	raw_spin_unlock_irqrestore(&chip->gpio_lock, flags);
+
+	return 0;
 }
 
 /**
@@ -234,7 +213,7 @@ static int xgpio_dir_in(struct gpio_chip *gc, unsigned int gpio)
 {
 	unsigned long flags;
 	struct xgpio_instance *chip = gpiochip_get_data(gc);
-	int bit = xgpio_to_bit(chip, gpio);
+	unsigned long bit = find_nth_bit(chip->map, 64, gpio);
 
 	raw_spin_lock_irqsave(&chip->gpio_lock, flags);
 
@@ -263,7 +242,7 @@ static int xgpio_dir_out(struct gpio_chip *gc, unsigned int gpio, int val)
 {
 	unsigned long flags;
 	struct xgpio_instance *chip = gpiochip_get_data(gc);
-	int bit = xgpio_to_bit(chip, gpio);
+	unsigned long bit = find_nth_bit(chip->map, 64, gpio);
 
 	raw_spin_lock_irqsave(&chip->gpio_lock, flags);
 
@@ -307,7 +286,7 @@ static void xgpio_free(struct gpio_chip *chip, unsigned int offset)
 	pm_runtime_put(chip->parent);
 }
 
-static int __maybe_unused xgpio_suspend(struct device *dev)
+static int xgpio_suspend(struct device *dev)
 {
 	struct xgpio_instance *gpio = dev_get_drvdata(dev);
 	struct irq_data *data = irq_get_irq_data(gpio->irq);
@@ -348,7 +327,7 @@ static void xgpio_irq_ack(struct irq_data *irq_data)
 {
 }
 
-static int __maybe_unused xgpio_resume(struct device *dev)
+static int xgpio_resume(struct device *dev)
 {
 	struct xgpio_instance *gpio = dev_get_drvdata(dev);
 	struct irq_data *data = irq_get_irq_data(gpio->irq);
@@ -364,7 +343,7 @@ static int __maybe_unused xgpio_resume(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused xgpio_runtime_suspend(struct device *dev)
+static int xgpio_runtime_suspend(struct device *dev)
 {
 	struct xgpio_instance *gpio = dev_get_drvdata(dev);
 
@@ -373,7 +352,7 @@ static int __maybe_unused xgpio_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused xgpio_runtime_resume(struct device *dev)
+static int xgpio_runtime_resume(struct device *dev)
 {
 	struct xgpio_instance *gpio = dev_get_drvdata(dev);
 
@@ -381,9 +360,8 @@ static int __maybe_unused xgpio_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops xgpio_dev_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(xgpio_suspend, xgpio_resume)
-	SET_RUNTIME_PM_OPS(xgpio_runtime_suspend,
-			   xgpio_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(xgpio_suspend, xgpio_resume)
+	RUNTIME_PM_OPS(xgpio_runtime_suspend, xgpio_runtime_resume, NULL)
 };
 
 /**
@@ -395,14 +373,15 @@ static void xgpio_irq_mask(struct irq_data *irq_data)
 	unsigned long flags;
 	struct xgpio_instance *chip = irq_data_get_irq_chip_data(irq_data);
 	int irq_offset = irqd_to_hwirq(irq_data);
-	int bit = xgpio_to_bit(chip, irq_offset);
+	unsigned long bit = find_nth_bit(chip->map, 64, irq_offset), enable;
 	u32 mask = BIT(bit / 32), temp;
 
 	raw_spin_lock_irqsave(&chip->gpio_lock, flags);
 
 	__clear_bit(bit, chip->enable);
 
-	if (xgpio_get_value32(chip->enable, bit) == 0) {
+	enable = bitmap_read(chip->enable, round_down(bit, 32), 32);
+	if (enable == 0) {
 		/* Disable per channel interrupt */
 		temp = xgpio_readreg(chip->regs + XGPIO_IPIER_OFFSET);
 		temp &= ~mask;
@@ -422,17 +401,15 @@ static void xgpio_irq_unmask(struct irq_data *irq_data)
 	unsigned long flags;
 	struct xgpio_instance *chip = irq_data_get_irq_chip_data(irq_data);
 	int irq_offset = irqd_to_hwirq(irq_data);
-	int bit = xgpio_to_bit(chip, irq_offset);
-	u32 old_enable = xgpio_get_value32(chip->enable, bit);
+	unsigned long bit = find_nth_bit(chip->map, 64, irq_offset), enable;
 	u32 mask = BIT(bit / 32), val;
 
 	gpiochip_enable_irq(&chip->gc, irq_offset);
 
 	raw_spin_lock_irqsave(&chip->gpio_lock, flags);
 
-	__set_bit(bit, chip->enable);
-
-	if (old_enable == 0) {
+	enable = bitmap_read(chip->enable, round_down(bit, 32), 32);
+	if (enable == 0) {
 		/* Clear any existing per-channel interrupts */
 		val = xgpio_readreg(chip->regs + XGPIO_IPISR_OFFSET);
 		val &= mask;
@@ -446,6 +423,8 @@ static void xgpio_irq_unmask(struct irq_data *irq_data)
 		val |= mask;
 		xgpio_writereg(chip->regs + XGPIO_IPIER_OFFSET, val);
 	}
+
+	__set_bit(bit, chip->enable);
 
 	raw_spin_unlock_irqrestore(&chip->gpio_lock, flags);
 }
@@ -462,7 +441,7 @@ static int xgpio_set_irq_type(struct irq_data *irq_data, unsigned int type)
 {
 	struct xgpio_instance *chip = irq_data_get_irq_chip_data(irq_data);
 	int irq_offset = irqd_to_hwirq(irq_data);
-	int bit = xgpio_to_bit(chip, irq_offset);
+	unsigned long bit = find_nth_bit(chip->map, 64, irq_offset);
 
 	/*
 	 * The Xilinx GPIO hardware provides a single interrupt status
@@ -502,10 +481,10 @@ static void xgpio_irqhandler(struct irq_desc *desc)
 	struct irq_chip *irqchip = irq_desc_get_chip(desc);
 	DECLARE_BITMAP(rising, 64);
 	DECLARE_BITMAP(falling, 64);
-	DECLARE_BITMAP(all, 64);
+	DECLARE_BITMAP(hw, 64);
+	DECLARE_BITMAP(sw, 64);
 	int irq_offset;
 	u32 status;
-	u32 bit;
 
 	status = xgpio_readreg(chip->regs + XGPIO_IPISR_OFFSET);
 	xgpio_writereg(chip->regs + XGPIO_IPISR_OFFSET, status);
@@ -514,29 +493,26 @@ static void xgpio_irqhandler(struct irq_desc *desc)
 
 	raw_spin_lock(&chip->gpio_lock);
 
-	xgpio_read_ch_all(chip, XGPIO_DATA_OFFSET, all);
+	xgpio_read_ch_all(chip, XGPIO_DATA_OFFSET, hw);
 
-	bitmap_complement(rising, chip->last_irq_read, 64);
-	bitmap_and(rising, rising, all, 64);
+	bitmap_andnot(rising, hw, chip->last_irq_read, 64);
 	bitmap_and(rising, rising, chip->enable, 64);
 	bitmap_and(rising, rising, chip->rising_edge, 64);
 
-	bitmap_complement(falling, all, 64);
-	bitmap_and(falling, falling, chip->last_irq_read, 64);
+	bitmap_andnot(falling, chip->last_irq_read, hw, 64);
 	bitmap_and(falling, falling, chip->enable, 64);
 	bitmap_and(falling, falling, chip->falling_edge, 64);
 
-	bitmap_copy(chip->last_irq_read, all, 64);
-	bitmap_or(all, rising, falling, 64);
+	bitmap_copy(chip->last_irq_read, hw, 64);
+	bitmap_or(hw, rising, falling, 64);
 
 	raw_spin_unlock(&chip->gpio_lock);
 
 	dev_dbg(gc->parent, "IRQ rising %*pb falling %*pb\n", 64, rising, 64, falling);
 
-	for_each_set_bit(bit, all, 64) {
-		irq_offset = xgpio_from_bit(chip, bit);
+	bitmap_gather(sw, hw, chip->map, 64);
+	for_each_set_bit(irq_offset, sw, 64)
 		generic_handle_domain_irq(gc->irq.domain, irq_offset);
-	}
 
 	chained_irq_exit(irqchip, desc);
 }
@@ -613,17 +589,14 @@ static int xgpio_probe(struct platform_device *pdev)
 	if (width[1] > 32)
 		return -EINVAL;
 
-	/* Setup software pin mapping */
-	bitmap_set(chip->sw_map, 0, width[0] + width[1]);
-
 	/* Setup hardware pin mapping */
-	bitmap_set(chip->hw_map,  0, width[0]);
-	bitmap_set(chip->hw_map, 32, width[1]);
+	bitmap_set(chip->map,  0, width[0]);
+	bitmap_set(chip->map, 32, width[1]);
 
 	raw_spin_lock_init(&chip->gpio_lock);
 
 	chip->gc.base = -1;
-	chip->gc.ngpio = bitmap_weight(chip->hw_map, 64);
+	chip->gc.ngpio = bitmap_weight(chip->map, 64);
 	chip->gc.parent = dev;
 	chip->gc.direction_input = xgpio_dir_in;
 	chip->gc.direction_output = xgpio_dir_out;
@@ -706,7 +679,7 @@ static struct platform_driver xgpio_plat_driver = {
 	.driver		= {
 			.name = "gpio-xilinx",
 			.of_match_table	= xgpio_of_match,
-			.pm = &xgpio_dev_pm_ops,
+			.pm = pm_ptr(&xgpio_dev_pm_ops),
 	},
 };
 

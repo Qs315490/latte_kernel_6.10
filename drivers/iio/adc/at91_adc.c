@@ -171,7 +171,7 @@ struct at91_adc_trigger {
 };
 
 /**
- * struct at91_adc_reg_desc - Various informations relative to registers
+ * struct at91_adc_reg_desc - Various information relative to registers
  * @channel_base:	Base offset for the channel data registers
  * @drdy_mask:		Mask of the DRDY field in the relevant registers
  *			(Interruptions registers mostly)
@@ -231,7 +231,7 @@ struct at91_adc_state {
 	struct iio_trigger	**trig;
 	bool			use_external;
 	u32			vref_mv;
-	u32			res;		/* resolution used for convertions */
+	u32			res;		/* resolution used for conversions */
 	wait_queue_head_t	wq_data_avail;
 	const struct at91_adc_caps	*caps;
 
@@ -304,7 +304,7 @@ static void handle_adc_eoc_trigger(int irq, struct iio_dev *idev)
 	}
 }
 
-static int at91_ts_sample(struct iio_dev *idev)
+static void at91_ts_sample(struct iio_dev *idev)
 {
 	struct at91_adc_state *st = iio_priv(idev);
 	unsigned int xscale, yscale, reg, z1, z2;
@@ -323,7 +323,7 @@ static int at91_ts_sample(struct iio_dev *idev)
 	xscale = (reg >> 16) & xyz_mask;
 	if (xscale == 0) {
 		dev_err(&idev->dev, "Error: xscale == 0!\n");
-		return -1;
+		return;
 	}
 	x /= xscale;
 
@@ -334,7 +334,7 @@ static int at91_ts_sample(struct iio_dev *idev)
 	yscale = (reg >> 16) & xyz_mask;
 	if (yscale == 0) {
 		dev_err(&idev->dev, "Error: yscale == 0!\n");
-		return -1;
+		return;
 	}
 	y /= yscale;
 
@@ -363,8 +363,6 @@ static int at91_ts_sample(struct iio_dev *idev)
 	} else {
 		dev_dbg(&idev->dev, "pressure too low: not reporting\n");
 	}
-
-	return 0;
 }
 
 static irqreturn_t at91_adc_rl_interrupt(int irq, void *private)
@@ -483,7 +481,7 @@ static irqreturn_t at91_adc_9x5_interrupt(int irq, void *private)
 static int at91_adc_channel_init(struct iio_dev *idev)
 {
 	struct at91_adc_state *st = iio_priv(idev);
-	struct iio_chan_spec *chan_array, *timestamp;
+	struct iio_chan_spec *chan_array;
 	int bit, idx = 0;
 	unsigned long rsvd_mask = 0;
 
@@ -521,14 +519,8 @@ static int at91_adc_channel_init(struct iio_dev *idev)
 		chan->info_mask_separate = BIT(IIO_CHAN_INFO_RAW);
 		idx++;
 	}
-	timestamp = chan_array + idx;
 
-	timestamp->type = IIO_TIMESTAMP;
-	timestamp->channel = -1;
-	timestamp->scan_index = idx;
-	timestamp->scan_type.sign = 's';
-	timestamp->scan_type.realbits = 64;
-	timestamp->scan_type.storagebits = 64;
+	chan_array[idx] = IIO_CHAN_SOFT_TIMESTAMP(idx);
 
 	idev->channels = chan_array;
 	return idev->num_channels;
@@ -1226,7 +1218,7 @@ static const struct at91_adc_trigger at91sam9260_triggers[] = {
 	{ .name = "external", .value = 0xd, .is_external = true },
 };
 
-static struct at91_adc_caps at91sam9260_caps = {
+static const struct at91_adc_caps at91sam9260_caps = {
 	.calc_startup_ticks = calc_startup_ticks_9260,
 	.num_channels = 4,
 	.low_res_bits = 8,
@@ -1250,7 +1242,7 @@ static const struct at91_adc_trigger at91sam9x5_triggers[] = {
 	{ .name = "continuous", .value = 0x6 },
 };
 
-static struct at91_adc_caps at91sam9rl_caps = {
+static const struct at91_adc_caps at91sam9rl_caps = {
 	.has_ts = true,
 	.calc_startup_ticks = calc_startup_ticks_9260,	/* same as 9260 */
 	.num_channels = 6,
@@ -1268,7 +1260,7 @@ static struct at91_adc_caps at91sam9rl_caps = {
 	.trigger_number = ARRAY_SIZE(at91sam9x5_triggers),
 };
 
-static struct at91_adc_caps at91sam9g45_caps = {
+static const struct at91_adc_caps at91sam9g45_caps = {
 	.has_ts = true,
 	.calc_startup_ticks = calc_startup_ticks_9260,	/* same as 9260 */
 	.num_channels = 8,
@@ -1286,7 +1278,7 @@ static struct at91_adc_caps at91sam9g45_caps = {
 	.trigger_number = ARRAY_SIZE(at91sam9x5_triggers),
 };
 
-static struct at91_adc_caps at91sam9x5_caps = {
+static const struct at91_adc_caps at91sam9x5_caps = {
 	.has_ts = true,
 	.has_tsmr = true,
 	.ts_filter_average = 3,
@@ -1308,7 +1300,7 @@ static struct at91_adc_caps at91sam9x5_caps = {
 	.trigger_number = ARRAY_SIZE(at91sam9x5_triggers),
 };
 
-static struct at91_adc_caps sama5d3_caps = {
+static const struct at91_adc_caps sama5d3_caps = {
 	.has_ts = true,
 	.has_tsmr = true,
 	.ts_filter_average = 3,

@@ -5,7 +5,6 @@
  *
  ******************************************************************************/
 
-
 #ifndef	__HALDMOUTSRC_H__
 #define __HALDMOUTSRC_H__
 
@@ -174,7 +173,6 @@ struct swat_t { /* _SW_Antenna_Switch_ */
 
 /* Remove Edca by YuChen */
 
-
 struct odm_rate_adaptive {
 	u8 Type;				/*  DM_Type_ByFW/DM_Type_ByDriver */
 	u8 LdpcThres;			/*  if RSSI > LdpcThres => switch from LPDC to BCC */
@@ -202,14 +200,7 @@ struct odm_rate_adaptive {
 /*  */
 /*  Declare for common info */
 /*  */
-#define MAX_PATH_NUM_92CS		2
-#define MAX_PATH_NUM_8188E		1
-#define MAX_PATH_NUM_8192E		2
 #define MAX_PATH_NUM_8723B		1
-#define MAX_PATH_NUM_8812A		2
-#define MAX_PATH_NUM_8821A		1
-#define MAX_PATH_NUM_8814A		4
-#define MAX_PATH_NUM_8822B		2
 
 #define IQK_THRESHOLD			8
 #define DPK_THRESHOLD			4
@@ -362,30 +353,30 @@ enum { /* _ODM_Support_Ability_Definition */
 	/*  */
 	/*  BB ODM section BIT 0-15 */
 	/*  */
-	ODM_BB_DIG			= BIT0,
-	ODM_BB_RA_MASK			= BIT1,
-	ODM_BB_DYNAMIC_TXPWR		= BIT2,
-	ODM_BB_FA_CNT			= BIT3,
-	ODM_BB_RSSI_MONITOR		= BIT4,
-	ODM_BB_CCK_PD			= BIT5,
-	ODM_BB_ANT_DIV			= BIT6,
-	ODM_BB_PWR_SAVE			= BIT7,
-	ODM_BB_PWR_TRAIN		= BIT8,
-	ODM_BB_RATE_ADAPTIVE		= BIT9,
-	ODM_BB_PATH_DIV			= BIT10,
-	ODM_BB_PSD			= BIT11,
-	ODM_BB_RXHP			= BIT12,
-	ODM_BB_ADAPTIVITY		= BIT13,
-	ODM_BB_CFO_TRACKING		= BIT14,
+	ODM_BB_DIG			= BIT(0),
+	ODM_BB_RA_MASK			= BIT(1),
+	ODM_BB_DYNAMIC_TXPWR		= BIT(2),
+	ODM_BB_FA_CNT			= BIT(3),
+	ODM_BB_RSSI_MONITOR		= BIT(4),
+	ODM_BB_CCK_PD			= BIT(5),
+	ODM_BB_ANT_DIV			= BIT(6),
+	ODM_BB_PWR_SAVE			= BIT(7),
+	ODM_BB_PWR_TRAIN		= BIT(8),
+	ODM_BB_RATE_ADAPTIVE		= BIT(9),
+	ODM_BB_PATH_DIV			= BIT(10),
+	ODM_BB_PSD			= BIT(11),
+	ODM_BB_RXHP			= BIT(12),
+	ODM_BB_ADAPTIVITY		= BIT(13),
+	ODM_BB_CFO_TRACKING		= BIT(14),
 
 	/*  MAC DM section BIT 16-23 */
-	ODM_MAC_EDCA_TURBO		= BIT16,
-	ODM_MAC_EARLY_MODE		= BIT17,
+	ODM_MAC_EDCA_TURBO		= BIT(16),
+	ODM_MAC_EARLY_MODE		= BIT(17),
 
 	/*  RF ODM section BIT 24-31 */
-	ODM_RF_TX_PWR_TRACK		= BIT24,
-	ODM_RF_RX_GAIN_TRACK	= BIT25,
-	ODM_RF_CALIBRATION		= BIT26,
+	ODM_RF_TX_PWR_TRACK		= BIT(24),
+	ODM_RF_RX_GAIN_TRACK	= BIT(25),
+	ODM_RF_CALIBRATION		= BIT(26),
 };
 
 /* 	ODM_CMNINFO_INTERFACE */
@@ -396,7 +387,7 @@ enum { /* tag_ODM_Support_Interface_Definition */
 
 /*  ODM_CMNINFO_IC_TYPE */
 enum { /* tag_ODM_Support_IC_Type_Definition */
-	ODM_RTL8723B	=	BIT8,
+	ODM_RTL8723B	=	BIT(8),
 };
 
 /* ODM_CMNINFO_CUT_VER */
@@ -441,10 +432,10 @@ enum { /* tag_ODM_RF_Type_Definition */
 /*  ODM_CMNINFO_WM_MODE */
 enum { /* tag_Wireless_Mode_Definition */
 	ODM_WM_UNKNOWN    = 0x0,
-	ODM_WM_B          = BIT0,
-	ODM_WM_G          = BIT1,
-	ODM_WM_N24G       = BIT3,
-	ODM_WM_AUTO       = BIT5,
+	ODM_WM_B          = BIT(0),
+	ODM_WM_G          = BIT(1),
+	ODM_WM_N24G       = BIT(3),
+	ODM_WM_AUTO       = BIT(5),
 };
 
 /*  ODM_CMNINFO_BW */
@@ -657,10 +648,6 @@ struct ant_detected_info {
 /*  2011/09/22 MH Copy from SD4 defined structure. We use to support PHY DM integration. */
 /*  */
 struct dm_odm_t { /* DM_Out_Source_Dynamic_Mechanism_Structure */
-	/* struct timer_list	FastAntTrainingTimer; */
-	/*  */
-	/* 	Add for different team use temporarily */
-	/*  */
 	struct adapter *Adapter;		/*  For CE/NIC team */
 	/*  WHen you use Adapter or priv pointer, you must make sure the pointer is ready. */
 	bool odm_ready;
@@ -679,17 +666,6 @@ struct dm_odm_t { /* DM_Out_Source_Dynamic_Mechanism_Structure */
 	u8 RFPathRxEnable;		/*  ODM_CMNINFO_RFPATH_ENABLE */
 	u8 ControlChannel;
 /*  ODM HANDLE, DRIVER NEEDS NOT TO HOOK------ */
-
-/* REMOVED COMMON INFO---------- */
-	/* u8 		PseudoMacPhyMode; */
-	/* bool			*BTCoexist; */
-	/* bool			PseudoBtCoexist; */
-	/* u8 		OPMode; */
-	/* bool			bAPMode; */
-	/* bool			bClientMode; */
-	/* bool			bAdHocMode; */
-	/* bool			bSlaveOfDMSP; */
-/* REMOVED COMMON INFO---------- */
 
 /* 1  COMMON INFORMATION */
 
@@ -773,7 +749,6 @@ struct dm_odm_t { /* DM_Out_Source_Dynamic_Mechanism_Structure */
 	u8 *pAntennaTest;
 	bool *pbNet_closed;
 	u8 *mp_mode;
-	/* u8 	*pAidMap; */
 	u8 *pu1ForcedIgiLb;
 /*  For 8723B IQK----------- */
 	bool *pIs1Antenna;
@@ -872,18 +847,9 @@ struct dm_odm_t { /* DM_Out_Source_Dynamic_Mechanism_Structure */
 
 	/*  Latest packet phy info (ODM write) */
 	struct odm_phy_dbg_info PhyDbgInfo;
-	/* PHY_INFO_88E		PhyInfo; */
 
 	/*  Latest packet phy info (ODM write) */
 	struct odm_mac_status_info *pMacInfo;
-	/* MAC_INFO_88E		MacInfo; */
-
-	/*  Different Team independent structure?? */
-
-	/*  */
-	/* TX_RTP_CMN		TX_retrpo; */
-	/* TX_RTP_88E		TX_retrpo; */
-	/* TX_RTP_8195		TX_retrpo; */
 
 	/*  */
 	/* ODM Structure */
@@ -909,15 +875,6 @@ struct dm_odm_t { /* DM_Out_Source_Dynamic_Mechanism_Structure */
 	/*  */
 
 	/* common */
-	/* u8 DM_Type; */
-	/* u8    PSD_Report_RXHP[80];    Add By Gary */
-	/* u8    PSD_func_flag;                Add By Gary */
-	/* for DIG */
-	/* u8 bDMInitialGainEnable; */
-	/* u8 binitialized;  for dm_initial_gain_Multi_STA use. */
-	/* for Antenna diversity */
-	/* u8 AntDivCfg; 0:OFF , 1:ON, 2:by efuse */
-	/* PSTA_INFO_T RSSI_target; */
 
 	bool *pbDriverStopped;
 	bool *pbDriverIsGoingToPnpSetPowerSleep;
@@ -985,7 +942,7 @@ struct dm_odm_t { /* DM_Out_Source_Dynamic_Mechanism_Structure */
 	#endif
 };
 
- enum odm_rf_content {
+enum odm_rf_content {
 	odm_radioa_txt = 0x1000,
 	odm_radiob_txt = 0x1001,
 	odm_radioc_txt = 0x1002,
@@ -1015,10 +972,6 @@ enum ODM_FW_Config_Type {
 	CONFIG_FW_AP_WoWLAN,
 	CONFIG_FW_BT,
 };
-
-#ifdef REMOVE_PACK
-#pragma pack()
-#endif
 
 /* include "odm_function.h" */
 
@@ -1080,15 +1033,9 @@ enum { /* tag_RF_Type_Definition */
 /*  */
 /*  Extern Global Variables. */
 /*  */
-extern	u32 OFDMSwingTable[OFDM_TABLE_SIZE];
-extern	u8 CCKSwingTable_Ch1_Ch13[CCK_TABLE_SIZE][8];
-extern	u8 CCKSwingTable_Ch14[CCK_TABLE_SIZE][8];
-
 extern	u32 OFDMSwingTable_New[OFDM_TABLE_SIZE];
 extern	u8 CCKSwingTable_Ch1_Ch13_New[CCK_TABLE_SIZE][8];
 extern	u8 CCKSwingTable_Ch14_New[CCK_TABLE_SIZE][8];
-
-extern  u32 TxScalingTable_Jaguar[TXSCALE_TABLE_SIZE];
 
 /*  */
 /*  check Sta pointer valid or not */

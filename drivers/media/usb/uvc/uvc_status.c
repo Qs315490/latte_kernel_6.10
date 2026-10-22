@@ -62,7 +62,8 @@ static int uvc_input_init(struct uvc_device *dev)
 	__set_bit(EV_KEY, input->evbit);
 	__set_bit(KEY_CAMERA, input->keybit);
 
-	if ((ret = input_register_device(input)) < 0)
+	ret = input_register_device(input);
+	if (ret < 0)
 		goto error;
 
 	dev->input = input;
@@ -215,7 +216,7 @@ static void uvc_status_complete(struct urb *urb)
 		return;
 
 	default:
-		dev_warn(&dev->udev->dev,
+		dev_warn(&dev->intf->dev,
 			 "Non-zero status (%d) in status completion handler.\n",
 			 urb->status);
 		return;
@@ -247,7 +248,7 @@ static void uvc_status_complete(struct urb *urb)
 	urb->interval = dev->int_ep->desc.bInterval;
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0)
-		dev_err(&dev->udev->dev,
+		dev_err(&dev->intf->dev,
 			"Failed to resubmit status URB (%d).\n", ret);
 }
 
@@ -262,7 +263,7 @@ int uvc_status_init(struct uvc_device *dev)
 	if (ep == NULL)
 		return 0;
 
-	dev->status = kzalloc(sizeof(*dev->status), GFP_KERNEL);
+	dev->status = kzalloc_obj(*dev->status);
 	if (!dev->status)
 		return -ENOMEM;
 
@@ -315,6 +316,16 @@ static int uvc_status_start(struct uvc_device *dev, gfp_t flags)
 	if (!dev->int_urb)
 		return 0;
 
+	/*
+	 * If the previous uvc_status_stop() call was from the async work,
+	 * the work may still be running. Wait for it to finish before we submit
+	 * the urb.
+	 */
+	flush_work(&dev->async_ctrl.work);
+
+	/* Clear the flush status if we were previously stopped. */
+	smp_store_release(&dev->flush_status, false);
+
 	return usb_submit_urb(dev->int_urb, flags);
 }
 
@@ -336,6 +347,15 @@ static void uvc_status_stop(struct uvc_device *dev)
 	smp_store_release(&dev->flush_status, true);
 
 	/*
+	 * If we are called from the event work function, the URB is guaranteed
+	 * to not be in flight as it has completed and has not been resubmitted.
+	 * There's no need to cancel the work (which would deadlock), or to kill
+	 * the URB.
+	 */
+	if (current_work() == &w->work)
+		return;
+
+	/*
 	 * Cancel any pending asynchronous work. If any status event was queued,
 	 * process it synchronously.
 	 */
@@ -353,15 +373,6 @@ static void uvc_status_stop(struct uvc_device *dev)
 	 */
 	if (cancel_work_sync(&w->work))
 		uvc_ctrl_status_event(w->chain, w->ctrl, w->data);
-
-	/*
-	 * From this point, there are no events on the queue and the status URB
-	 * is dead. No events will be queued until uvc_status_start() is called.
-	 * The barrier is needed to make sure that flush_status is visible to
-	 * uvc_ctrl_status_event_work() when uvc_status_start() will be called
-	 * again.
-	 */
-	smp_store_release(&dev->flush_status, false);
 }
 
 int uvc_status_resume(struct uvc_device *dev)

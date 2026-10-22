@@ -12,7 +12,6 @@
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/types.h>
 
@@ -171,7 +170,7 @@ static int sps30_i2c_read_meas(struct sps30_state *state, __be32 *meas, size_t n
 	if (!sps30_i2c_meas_ready(state))
 		return -ETIMEDOUT;
 
-	return sps30_i2c_command(state, SPS30_I2C_READ_MEAS, NULL, 0, meas, sizeof(num) * num);
+	return sps30_i2c_command(state, SPS30_I2C_READ_MEAS, NULL, 0, meas, sizeof(*meas) * num);
 }
 
 static int sps30_i2c_clean_fan(struct sps30_state *state)
@@ -232,7 +231,7 @@ static int sps30_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sps30_i2c_id[] = {
-	{ "sps30" },
+	{ .name = "sps30" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sps30_i2c_id);

@@ -32,6 +32,7 @@
 #include "../of_memory.h"
 
 #include "mc.h"
+#include "tegra-emc-common.h"
 
 #define EMC_INTSTATUS				0x000
 #define EMC_INTMASK				0x004
@@ -182,18 +183,6 @@ struct emc_timing {
 	u32 data[ARRAY_SIZE(emc_timing_registers)];
 };
 
-enum emc_rate_request_type {
-	EMC_RATE_DEVFREQ,
-	EMC_RATE_DEBUG,
-	EMC_RATE_ICC,
-	EMC_RATE_TYPE_MAX,
-};
-
-struct emc_rate_request {
-	unsigned long min_rate;
-	unsigned long max_rate;
-};
-
 struct tegra_emc {
 	struct device *dev;
 	struct tegra_mc *mc;
@@ -212,14 +201,7 @@ struct tegra_emc {
 		unsigned long max_rate;
 	} debugfs;
 
-	/*
-	 * There are multiple sources in the EMC driver which could request
-	 * a min/max clock rate, these rates are contained in this array.
-	 */
-	struct emc_rate_request requested_rate[EMC_RATE_TYPE_MAX];
-
-	/* protect shared rate-change code path */
-	struct mutex rate_lock;
+	struct tegra_emc_rate_requests reqs;
 
 	struct devfreq_simple_ondemand_data ondemand_data;
 
@@ -232,7 +214,7 @@ struct tegra_emc {
 	bool mrr_error;
 };
 
-static irqreturn_t tegra_emc_isr(int irq, void *data)
+static irqreturn_t tegra20_emc_isr(int irq, void *data)
 {
 	struct tegra_emc *emc = data;
 	u32 intmask = EMC_REFRESH_OVERFLOW_INT;
@@ -253,8 +235,8 @@ static irqreturn_t tegra_emc_isr(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static struct emc_timing *tegra_emc_find_timing(struct tegra_emc *emc,
-						unsigned long rate)
+static struct emc_timing *tegra20_emc_find_timing(struct tegra_emc *emc,
+						  unsigned long rate)
 {
 	struct emc_timing *timing = NULL;
 	unsigned int i;
@@ -276,7 +258,7 @@ static struct emc_timing *tegra_emc_find_timing(struct tegra_emc *emc,
 
 static int emc_prepare_timing_change(struct tegra_emc *emc, unsigned long rate)
 {
-	struct emc_timing *timing = tegra_emc_find_timing(emc, rate);
+	struct emc_timing *timing = tegra20_emc_find_timing(emc, rate);
 	unsigned int i;
 
 	if (!timing)
@@ -321,8 +303,8 @@ static int emc_complete_timing_change(struct tegra_emc *emc, bool flush)
 	return 0;
 }
 
-static int tegra_emc_clk_change_notify(struct notifier_block *nb,
-				       unsigned long msg, void *data)
+static int tegra20_emc_clk_change_notify(struct notifier_block *nb,
+					 unsigned long msg, void *data)
 {
 	struct tegra_emc *emc = container_of(nb, struct tegra_emc, clk_nb);
 	struct clk_notifier_data *cnd = data;
@@ -407,8 +389,8 @@ static int cmp_timings(const void *_a, const void *_b)
 	return 0;
 }
 
-static int tegra_emc_load_timings_from_dt(struct tegra_emc *emc,
-					  struct device_node *node)
+static int tegra20_emc_load_timings_from_dt(struct tegra_emc *emc,
+					    struct device_node *node)
 {
 	struct emc_timing *timing;
 	int child_count;
@@ -452,7 +434,7 @@ static int tegra_emc_load_timings_from_dt(struct tegra_emc *emc,
 }
 
 static struct device_node *
-tegra_emc_find_node_by_ram_code(struct tegra_emc *emc)
+tegra20_emc_find_node_by_ram_code(struct tegra_emc *emc)
 {
 	struct device *dev = emc->dev;
 	struct device_node *np;
@@ -710,83 +692,6 @@ static long emc_round_rate(unsigned long rate,
 	return timing->rate;
 }
 
-static void tegra_emc_rate_requests_init(struct tegra_emc *emc)
-{
-	unsigned int i;
-
-	for (i = 0; i < EMC_RATE_TYPE_MAX; i++) {
-		emc->requested_rate[i].min_rate = 0;
-		emc->requested_rate[i].max_rate = ULONG_MAX;
-	}
-}
-
-static int emc_request_rate(struct tegra_emc *emc,
-			    unsigned long new_min_rate,
-			    unsigned long new_max_rate,
-			    enum emc_rate_request_type type)
-{
-	struct emc_rate_request *req = emc->requested_rate;
-	unsigned long min_rate = 0, max_rate = ULONG_MAX;
-	unsigned int i;
-	int err;
-
-	/* select minimum and maximum rates among the requested rates */
-	for (i = 0; i < EMC_RATE_TYPE_MAX; i++, req++) {
-		if (i == type) {
-			min_rate = max(new_min_rate, min_rate);
-			max_rate = min(new_max_rate, max_rate);
-		} else {
-			min_rate = max(req->min_rate, min_rate);
-			max_rate = min(req->max_rate, max_rate);
-		}
-	}
-
-	if (min_rate > max_rate) {
-		dev_err_ratelimited(emc->dev, "%s: type %u: out of range: %lu %lu\n",
-				    __func__, type, min_rate, max_rate);
-		return -ERANGE;
-	}
-
-	/*
-	 * EMC rate-changes should go via OPP API because it manages voltage
-	 * changes.
-	 */
-	err = dev_pm_opp_set_rate(emc->dev, min_rate);
-	if (err)
-		return err;
-
-	emc->requested_rate[type].min_rate = new_min_rate;
-	emc->requested_rate[type].max_rate = new_max_rate;
-
-	return 0;
-}
-
-static int emc_set_min_rate(struct tegra_emc *emc, unsigned long rate,
-			    enum emc_rate_request_type type)
-{
-	struct emc_rate_request *req = &emc->requested_rate[type];
-	int ret;
-
-	mutex_lock(&emc->rate_lock);
-	ret = emc_request_rate(emc, rate, req->max_rate, type);
-	mutex_unlock(&emc->rate_lock);
-
-	return ret;
-}
-
-static int emc_set_max_rate(struct tegra_emc *emc, unsigned long rate,
-			    enum emc_rate_request_type type)
-{
-	struct emc_rate_request *req = &emc->requested_rate[type];
-	int ret;
-
-	mutex_lock(&emc->rate_lock);
-	ret = emc_request_rate(emc, req->min_rate, rate, type);
-	mutex_unlock(&emc->rate_lock);
-
-	return ret;
-}
-
 /*
  * debugfs interface
  *
@@ -812,7 +717,7 @@ static int emc_set_max_rate(struct tegra_emc *emc, unsigned long rate,
  *       valid range.
  */
 
-static bool tegra_emc_validate_rate(struct tegra_emc *emc, unsigned long rate)
+static bool tegra20_emc_validate_rate(struct tegra_emc *emc, unsigned long rate)
 {
 	unsigned int i;
 
@@ -823,7 +728,7 @@ static bool tegra_emc_validate_rate(struct tegra_emc *emc, unsigned long rate)
 	return false;
 }
 
-static int tegra_emc_debug_available_rates_show(struct seq_file *s, void *data)
+static int tegra20_emc_debug_available_rates_show(struct seq_file *s, void *data)
 {
 	struct tegra_emc *emc = s->private;
 	const char *prefix = "";
@@ -838,9 +743,9 @@ static int tegra_emc_debug_available_rates_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-DEFINE_SHOW_ATTRIBUTE(tegra_emc_debug_available_rates);
+DEFINE_SHOW_ATTRIBUTE(tegra20_emc_debug_available_rates);
 
-static int tegra_emc_debug_min_rate_get(void *data, u64 *rate)
+static int tegra20_emc_debug_min_rate_get(void *data, u64 *rate)
 {
 	struct tegra_emc *emc = data;
 
@@ -849,15 +754,15 @@ static int tegra_emc_debug_min_rate_get(void *data, u64 *rate)
 	return 0;
 }
 
-static int tegra_emc_debug_min_rate_set(void *data, u64 rate)
+static int tegra20_emc_debug_min_rate_set(void *data, u64 rate)
 {
 	struct tegra_emc *emc = data;
 	int err;
 
-	if (!tegra_emc_validate_rate(emc, rate))
+	if (!tegra20_emc_validate_rate(emc, rate))
 		return -EINVAL;
 
-	err = emc_set_min_rate(emc, rate, EMC_RATE_DEBUG);
+	err = tegra_emc_set_min_rate(&emc->reqs, rate, TEGRA_EMC_RATE_DEBUG);
 	if (err < 0)
 		return err;
 
@@ -866,11 +771,11 @@ static int tegra_emc_debug_min_rate_set(void *data, u64 rate)
 	return 0;
 }
 
-DEFINE_SIMPLE_ATTRIBUTE(tegra_emc_debug_min_rate_fops,
-			tegra_emc_debug_min_rate_get,
-			tegra_emc_debug_min_rate_set, "%llu\n");
+DEFINE_SIMPLE_ATTRIBUTE(tegra20_emc_debug_min_rate_fops,
+			tegra20_emc_debug_min_rate_get,
+			tegra20_emc_debug_min_rate_set, "%llu\n");
 
-static int tegra_emc_debug_max_rate_get(void *data, u64 *rate)
+static int tegra20_emc_debug_max_rate_get(void *data, u64 *rate)
 {
 	struct tegra_emc *emc = data;
 
@@ -879,15 +784,15 @@ static int tegra_emc_debug_max_rate_get(void *data, u64 *rate)
 	return 0;
 }
 
-static int tegra_emc_debug_max_rate_set(void *data, u64 rate)
+static int tegra20_emc_debug_max_rate_set(void *data, u64 rate)
 {
 	struct tegra_emc *emc = data;
 	int err;
 
-	if (!tegra_emc_validate_rate(emc, rate))
+	if (!tegra20_emc_validate_rate(emc, rate))
 		return -EINVAL;
 
-	err = emc_set_max_rate(emc, rate, EMC_RATE_DEBUG);
+	err = tegra_emc_set_max_rate(&emc->reqs, rate, TEGRA_EMC_RATE_DEBUG);
 	if (err < 0)
 		return err;
 
@@ -896,11 +801,11 @@ static int tegra_emc_debug_max_rate_set(void *data, u64 rate)
 	return 0;
 }
 
-DEFINE_SIMPLE_ATTRIBUTE(tegra_emc_debug_max_rate_fops,
-			tegra_emc_debug_max_rate_get,
-			tegra_emc_debug_max_rate_set, "%llu\n");
+DEFINE_SIMPLE_ATTRIBUTE(tegra20_emc_debug_max_rate_fops,
+			tegra20_emc_debug_max_rate_get,
+			tegra20_emc_debug_max_rate_set, "%llu\n");
 
-static void tegra_emc_debugfs_init(struct tegra_emc *emc)
+static void tegra20_emc_debugfs_init(struct tegra_emc *emc)
 {
 	struct device *dev = emc->dev;
 	unsigned int i;
@@ -933,11 +838,11 @@ static void tegra_emc_debugfs_init(struct tegra_emc *emc)
 	emc->debugfs.root = debugfs_create_dir("emc", NULL);
 
 	debugfs_create_file("available_rates", 0444, emc->debugfs.root,
-			    emc, &tegra_emc_debug_available_rates_fops);
+			    emc, &tegra20_emc_debug_available_rates_fops);
 	debugfs_create_file("min_rate", 0644, emc->debugfs.root,
-			    emc, &tegra_emc_debug_min_rate_fops);
+			    emc, &tegra20_emc_debug_min_rate_fops);
 	debugfs_create_file("max_rate", 0644, emc->debugfs.root,
-			    emc, &tegra_emc_debug_max_rate_fops);
+			    emc, &tegra20_emc_debug_max_rate_fops);
 }
 
 static inline struct tegra_emc *
@@ -958,7 +863,7 @@ emc_of_icc_xlate_extended(const struct of_phandle_args *spec, void *data)
 		if (node->id != TEGRA_ICC_EMEM)
 			continue;
 
-		ndata = kzalloc(sizeof(*ndata), GFP_KERNEL);
+		ndata = kzalloc_obj(*ndata);
 		if (!ndata)
 			return ERR_PTR(-ENOMEM);
 
@@ -993,14 +898,14 @@ static int emc_icc_set(struct icc_node *src, struct icc_node *dst)
 	do_div(rate, dram_data_bus_width_bytes);
 	rate = min_t(u64, rate, U32_MAX);
 
-	err = emc_set_min_rate(emc, rate, EMC_RATE_ICC);
+	err = tegra_emc_set_min_rate(&emc->reqs, rate, TEGRA_EMC_RATE_ICC);
 	if (err)
 		return err;
 
 	return 0;
 }
 
-static int tegra_emc_interconnect_init(struct tegra_emc *emc)
+static int tegra20_emc_interconnect_init(struct tegra_emc *emc)
 {
 	const struct tegra_mc_soc *soc;
 	struct icc_node *node;
@@ -1022,10 +927,8 @@ static int tegra_emc_interconnect_init(struct tegra_emc *emc)
 
 	/* create External Memory Controller node */
 	node = icc_node_create(TEGRA_ICC_EMC);
-	if (IS_ERR(node)) {
-		err = PTR_ERR(node);
-		goto err_msg;
-	}
+	if (IS_ERR(node))
+		return PTR_ERR(node);
 
 	node->name = "External Memory Controller";
 	icc_node_add(node, &emc->provider);
@@ -1053,57 +956,52 @@ static int tegra_emc_interconnect_init(struct tegra_emc *emc)
 
 remove_nodes:
 	icc_nodes_remove(&emc->provider);
-err_msg:
-	dev_err(emc->dev, "failed to initialize ICC: %d\n", err);
 
-	return err;
+	return dev_err_probe(emc->dev, err, "failed to initialize ICC\n");
 }
 
-static void devm_tegra_emc_unset_callback(void *data)
+static void devm_tegra20_emc_unset_callback(void *data)
 {
 	tegra20_clk_set_emc_round_callback(NULL, NULL);
 }
 
-static void devm_tegra_emc_unreg_clk_notifier(void *data)
+static void devm_tegra20_emc_unreg_clk_notifier(void *data)
 {
 	struct tegra_emc *emc = data;
 
 	clk_notifier_unregister(emc->clk, &emc->clk_nb);
 }
 
-static int tegra_emc_init_clk(struct tegra_emc *emc)
+static int tegra20_emc_init_clk(struct tegra_emc *emc)
 {
 	int err;
 
 	tegra20_clk_set_emc_round_callback(emc_round_rate, emc);
 
-	err = devm_add_action_or_reset(emc->dev, devm_tegra_emc_unset_callback,
+	err = devm_add_action_or_reset(emc->dev, devm_tegra20_emc_unset_callback,
 				       NULL);
 	if (err)
 		return err;
 
 	emc->clk = devm_clk_get(emc->dev, NULL);
-	if (IS_ERR(emc->clk)) {
-		dev_err(emc->dev, "failed to get EMC clock: %pe\n", emc->clk);
-		return PTR_ERR(emc->clk);
-	}
+	if (IS_ERR(emc->clk))
+		return dev_err_probe(emc->dev, PTR_ERR(emc->clk),
+				     "failed to get EMC clock\n");
 
 	err = clk_notifier_register(emc->clk, &emc->clk_nb);
-	if (err) {
-		dev_err(emc->dev, "failed to register clk notifier: %d\n", err);
-		return err;
-	}
+	if (err)
+		return dev_err_probe(emc->dev, err, "failed to register clk notifier\n");
 
 	err = devm_add_action_or_reset(emc->dev,
-				       devm_tegra_emc_unreg_clk_notifier, emc);
+				       devm_tegra20_emc_unreg_clk_notifier, emc);
 	if (err)
 		return err;
 
 	return 0;
 }
 
-static int tegra_emc_devfreq_target(struct device *dev, unsigned long *freq,
-				    u32 flags)
+static int tegra20_emc_devfreq_target(struct device *dev, unsigned long *freq,
+				      u32 flags)
 {
 	struct tegra_emc *emc = dev_get_drvdata(dev);
 	struct dev_pm_opp *opp;
@@ -1118,11 +1016,11 @@ static int tegra_emc_devfreq_target(struct device *dev, unsigned long *freq,
 	rate = dev_pm_opp_get_freq(opp);
 	dev_pm_opp_put(opp);
 
-	return emc_set_min_rate(emc, rate, EMC_RATE_DEVFREQ);
+	return tegra_emc_set_min_rate(&emc->reqs, rate, TEGRA_EMC_RATE_DEVFREQ);
 }
 
-static int tegra_emc_devfreq_get_dev_status(struct device *dev,
-					    struct devfreq_dev_status *stat)
+static int tegra20_emc_devfreq_get_dev_status(struct device *dev,
+					      struct devfreq_dev_status *stat)
 {
 	struct tegra_emc *emc = dev_get_drvdata(dev);
 
@@ -1144,13 +1042,13 @@ static int tegra_emc_devfreq_get_dev_status(struct device *dev,
 	return 0;
 }
 
-static struct devfreq_dev_profile tegra_emc_devfreq_profile = {
+static struct devfreq_dev_profile tegra20_emc_devfreq_profile = {
 	.polling_ms = 30,
-	.target = tegra_emc_devfreq_target,
-	.get_dev_status = tegra_emc_devfreq_get_dev_status,
+	.target = tegra20_emc_devfreq_target,
+	.get_dev_status = tegra20_emc_devfreq_get_dev_status,
 };
 
-static int tegra_emc_devfreq_init(struct tegra_emc *emc)
+static int tegra20_emc_devfreq_init(struct tegra_emc *emc)
 {
 	struct devfreq *devfreq;
 
@@ -1172,18 +1070,17 @@ static int tegra_emc_devfreq_init(struct tegra_emc *emc)
 	writel_relaxed(0x00000000, emc->regs + EMC_STAT_LLMC_CONTROL);
 	writel_relaxed(0xffffffff, emc->regs + EMC_STAT_PWR_CLOCK_LIMIT);
 
-	devfreq = devm_devfreq_add_device(emc->dev, &tegra_emc_devfreq_profile,
+	devfreq = devm_devfreq_add_device(emc->dev, &tegra20_emc_devfreq_profile,
 					  DEVFREQ_GOV_SIMPLE_ONDEMAND,
 					  &emc->ondemand_data);
-	if (IS_ERR(devfreq)) {
-		dev_err(emc->dev, "failed to initialize devfreq: %pe", devfreq);
-		return PTR_ERR(devfreq);
-	}
+	if (IS_ERR(devfreq))
+		return dev_err_probe(emc->dev, PTR_ERR(devfreq),
+				     "failed to initialize devfreq\n");
 
 	return 0;
 }
 
-static int tegra_emc_probe(struct platform_device *pdev)
+static int tegra20_emc_probe(struct platform_device *pdev)
 {
 	struct tegra_core_opp_params opp_params = {};
 	struct device_node *np;
@@ -1191,17 +1088,14 @@ static int tegra_emc_probe(struct platform_device *pdev)
 	int irq, err;
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "please update your device tree\n");
+	if (irq < 0)
 		return irq;
-	}
 
 	emc = devm_kzalloc(&pdev->dev, sizeof(*emc), GFP_KERNEL);
 	if (!emc)
 		return -ENOMEM;
 
-	mutex_init(&emc->rate_lock);
-	emc->clk_nb.notifier_call = tegra_emc_clk_change_notify;
+	emc->clk_nb.notifier_call = tegra20_emc_clk_change_notify;
 	emc->dev = &pdev->dev;
 
 	emc->regs = devm_platform_ioremap_resource(pdev, 0);
@@ -1212,22 +1106,22 @@ static int tegra_emc_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
-	np = tegra_emc_find_node_by_ram_code(emc);
+	np = tegra20_emc_find_node_by_ram_code(emc);
 	if (np) {
-		err = tegra_emc_load_timings_from_dt(emc, np);
+		err = tegra20_emc_load_timings_from_dt(emc, np);
 		of_node_put(np);
 		if (err)
 			return err;
 	}
 
-	err = devm_request_irq(&pdev->dev, irq, tegra_emc_isr, 0,
+	err = devm_request_irq(&pdev->dev, irq, tegra20_emc_isr, 0,
 			       dev_name(&pdev->dev), emc);
 	if (err) {
 		dev_err(&pdev->dev, "failed to request IRQ: %d\n", err);
 		return err;
 	}
 
-	err = tegra_emc_init_clk(emc);
+	err = tegra20_emc_init_clk(emc);
 	if (err)
 		return err;
 
@@ -1238,10 +1132,10 @@ static int tegra_emc_probe(struct platform_device *pdev)
 		return err;
 
 	platform_set_drvdata(pdev, emc);
-	tegra_emc_rate_requests_init(emc);
-	tegra_emc_debugfs_init(emc);
-	tegra_emc_interconnect_init(emc);
-	tegra_emc_devfreq_init(emc);
+	tegra_emc_rate_requests_init(&emc->reqs, &pdev->dev);
+	tegra20_emc_debugfs_init(emc);
+	tegra20_emc_interconnect_init(emc);
+	tegra20_emc_devfreq_init(emc);
 
 	/*
 	 * Don't allow the kernel module to be unloaded. Unloading adds some
@@ -1253,22 +1147,22 @@ static int tegra_emc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static const struct of_device_id tegra_emc_of_match[] = {
+static const struct of_device_id tegra20_emc_of_match[] = {
 	{ .compatible = "nvidia,tegra20-emc", },
 	{},
 };
-MODULE_DEVICE_TABLE(of, tegra_emc_of_match);
+MODULE_DEVICE_TABLE(of, tegra20_emc_of_match);
 
-static struct platform_driver tegra_emc_driver = {
-	.probe = tegra_emc_probe,
+static struct platform_driver tegra20_emc_driver = {
+	.probe = tegra20_emc_probe,
 	.driver = {
 		.name = "tegra20-emc",
-		.of_match_table = tegra_emc_of_match,
+		.of_match_table = tegra20_emc_of_match,
 		.suppress_bind_attrs = true,
 		.sync_state = icc_sync_state,
 	},
 };
-module_platform_driver(tegra_emc_driver);
+module_platform_driver(tegra20_emc_driver);
 
 MODULE_AUTHOR("Dmitry Osipenko <digetx@gmail.com>");
 MODULE_DESCRIPTION("NVIDIA Tegra20 EMC driver");

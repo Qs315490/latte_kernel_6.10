@@ -3,12 +3,14 @@
  * Copyright © 2023 Intel Corporation
  */
 
-#include <drm/intel/pciids.h>
-#include <drm/drm_color_mgmt.h>
 #include <linux/pci.h>
 
-#include "i915_drv.h"
-#include "i915_reg.h"
+#include <drm/drm_color_mgmt.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_print.h>
+#include <drm/intel/pciids.h>
+#include <drm/intel/step.h>
+
 #include "intel_cx0_phy_regs.h"
 #include "intel_de.h"
 #include "intel_display.h"
@@ -16,9 +18,10 @@
 #include "intel_display_params.h"
 #include "intel_display_power.h"
 #include "intel_display_reg_defs.h"
+#include "intel_display_regs.h"
 #include "intel_display_types.h"
+#include "intel_display_wa.h"
 #include "intel_fbc.h"
-#include "intel_step.h"
 
 __diag_push();
 __diag_ignore_all("-Woverride-init", "Allow field initialization overrides for display info");
@@ -1351,10 +1354,29 @@ static const struct intel_display_device_info xe2_lpd_display = {
 	.__runtime_defaults.has_dbuf_overlap_detection = true,
 };
 
+static const struct intel_display_device_info wcl_display = {
+	XE_LPDP_FEATURES,
+
+	.__runtime_defaults.cpu_transcoder_mask =
+		BIT(TRANSCODER_A) | BIT(TRANSCODER_B) | BIT(TRANSCODER_C),
+	.__runtime_defaults.pipe_mask =
+		BIT(PIPE_A) | BIT(PIPE_B) | BIT(PIPE_C),
+	.__runtime_defaults.fbc_mask =
+		BIT(INTEL_FBC_A) | BIT(INTEL_FBC_B) | BIT(INTEL_FBC_C),
+	.__runtime_defaults.port_mask =
+		BIT(PORT_A) | BIT(PORT_B) | BIT(PORT_TC1) | BIT(PORT_TC2),
+};
+
 static const struct intel_display_device_info xe2_hpd_display = {
 	XE_LPDP_FEATURES,
 	.__runtime_defaults.port_mask = BIT(PORT_A) |
 		BIT(PORT_TC1) | BIT(PORT_TC2) | BIT(PORT_TC3) | BIT(PORT_TC4),
+};
+
+static const u16 mtl_u_ids[] = {
+	INTEL_MTL_U_IDS(ID),
+	INTEL_ARL_U_IDS(ID),
+	0
 };
 
 /*
@@ -1364,6 +1386,13 @@ static const struct intel_display_device_info xe2_hpd_display = {
  */
 static const struct platform_desc mtl_desc = {
 	PLATFORM(meteorlake),
+	.subplatforms = (const struct subplatform_desc[]) {
+		{
+			SUBPLATFORM(meteorlake, u),
+			.pciidlist = mtl_u_ids,
+		},
+		{},
+	}
 };
 
 static const struct platform_desc lnl_desc = {
@@ -1375,8 +1404,24 @@ static const struct platform_desc bmg_desc = {
 	PLATFORM_GROUP(dgfx),
 };
 
+static const u16 wcl_ids[] = {
+	INTEL_WCL_IDS(ID),
+	0
+};
+
 static const struct platform_desc ptl_desc = {
 	PLATFORM(pantherlake),
+	.subplatforms = (const struct subplatform_desc[]) {
+		{
+			SUBPLATFORM(pantherlake, wildcatlake),
+			.pciidlist = wcl_ids,
+		},
+		{},
+	}
+};
+
+static const struct platform_desc nvl_desc = {
+	PLATFORM(novalake),
 };
 
 __diag_pop();
@@ -1453,6 +1498,9 @@ static const struct {
 	INTEL_LNL_IDS(INTEL_DISPLAY_DEVICE, &lnl_desc),
 	INTEL_BMG_IDS(INTEL_DISPLAY_DEVICE, &bmg_desc),
 	INTEL_PTL_IDS(INTEL_DISPLAY_DEVICE, &ptl_desc),
+	INTEL_WCL_IDS(INTEL_DISPLAY_DEVICE, &ptl_desc),
+	INTEL_NVLS_IDS(INTEL_DISPLAY_DEVICE, &nvl_desc),
+	INTEL_NVLP_IDS(INTEL_DISPLAY_DEVICE, &nvl_desc),
 };
 
 static const struct {
@@ -1464,6 +1512,8 @@ static const struct {
 	{ 14,  1, &xe2_hpd_display },
 	{ 20,  0, &xe2_lpd_display },
 	{ 30,  0, &xe2_lpd_display },
+	{ 30,  2, &wcl_display },
+	{ 35,  0, &xe2_lpd_display },
 };
 
 static const struct intel_display_device_info *
@@ -1475,7 +1525,7 @@ probe_gmdid_display(struct intel_display *display, struct intel_display_ip_ver *
 	u32 val;
 	int i;
 
-	addr = pci_iomap_range(pdev, 0, i915_mmio_reg_offset(GMD_ID_DISPLAY), sizeof(u32));
+	addr = pci_iomap_range(pdev, 0, intel_reg_offset(GMD_ID_DISPLAY), sizeof(u32));
 	if (!addr) {
 		drm_err(display->drm,
 			"Cannot map MMIO BAR to read display GMD_ID\n");
@@ -1490,9 +1540,9 @@ probe_gmdid_display(struct intel_display *display, struct intel_display_ip_ver *
 		return NULL;
 	}
 
-	gmd_id.ver = REG_FIELD_GET(GMD_ID_ARCH_MASK, val);
-	gmd_id.rel = REG_FIELD_GET(GMD_ID_RELEASE_MASK, val);
-	gmd_id.step = REG_FIELD_GET(GMD_ID_STEP, val);
+	gmd_id.ver = REG_FIELD_GET(GMD_ID_DISPLAY_ARCH_MASK, val);
+	gmd_id.rel = REG_FIELD_GET(GMD_ID_DISPLAY_RELEASE_MASK, val);
+	gmd_id.step = REG_FIELD_GET(GMD_ID_DISPLAY_STEP, val);
 
 	for (i = 0; i < ARRAY_SIZE(gmdid_display_map); i++) {
 		if (gmd_id.ver == gmdid_display_map[i].ver &&
@@ -1604,17 +1654,46 @@ static void display_platforms_or(struct intel_display_platforms *dst,
 	bitmap_or(dst->bitmap, dst->bitmap, src->bitmap, display_platforms_num_bits());
 }
 
-struct intel_display *intel_display_device_probe(struct pci_dev *pdev)
+#define __STEP_NAME(name) [STEP_##name] = #name,
+
+static void initialize_step(struct intel_display *display, enum intel_step step)
 {
-	struct intel_display *display = to_intel_display(pdev);
+	static const char step_names[][3] = {
+		STEP_NAME_LIST(__STEP_NAME)
+	};
+
+	DISPLAY_RUNTIME_INFO(display)->step = step;
+
+	/* Step name will remain an empty string if not applicable */
+	if (step >= 0 && step < ARRAY_SIZE(step_names))
+		strscpy(DISPLAY_RUNTIME_INFO(display)->step_name, step_names[step]);
+}
+
+#undef __STEP_NAME
+
+static const char *step_name(const struct intel_display_runtime_info *runtime)
+{
+	return strlen(runtime->step_name) ? runtime->step_name : "N/A";
+}
+
+struct intel_display *intel_display_device_probe(struct pci_dev *pdev,
+						 const struct intel_display_parent_interface *parent)
+{
+	struct intel_display *display;
 	const struct intel_display_device_info *info;
 	struct intel_display_ip_ver ip_ver = {};
 	const struct platform_desc *desc;
 	const struct subplatform_desc *subdesc;
 	enum intel_step step;
 
+	display = kzalloc_obj(*display);
+	if (!display)
+		return ERR_PTR(-ENOMEM);
+
 	/* Add drm device backpointer as early as possible. */
 	display->drm = pci_get_drvdata(pdev);
+
+	display->parent = parent;
 
 	intel_display_params_copy(&display->params);
 
@@ -1674,14 +1753,14 @@ struct intel_display *intel_display_device_probe(struct pci_dev *pdev)
 					  subdesc ? &subdesc->step_info : NULL);
 	}
 
-	DISPLAY_RUNTIME_INFO(display)->step = step;
+	initialize_step(display, step);
 
 	drm_info(display->drm, "Found %s%s%s (device ID %04x) %s display version %u.%02u stepping %s\n",
 		 desc->name, subdesc ? "/" : "", subdesc ? subdesc->name : "",
 		 pdev->device, display->platform.dgfx ? "discrete" : "integrated",
 		 DISPLAY_RUNTIME_INFO(display)->ip.ver,
 		 DISPLAY_RUNTIME_INFO(display)->ip.rel,
-		 step != STEP_NONE ? intel_step_name(step) : "N/A");
+		 step_name(DISPLAY_RUNTIME_INFO(display)));
 
 	return display;
 
@@ -1693,12 +1772,15 @@ no_display:
 
 void intel_display_device_remove(struct intel_display *display)
 {
+	if (!display)
+		return;
+
 	intel_display_params_free(&display->params);
+	kfree(display);
 }
 
 static void __intel_display_device_info_runtime_init(struct intel_display *display)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
 	struct intel_display_runtime_info *display_runtime = DISPLAY_RUNTIME_INFO(display);
 	enum pipe pipe;
 
@@ -1714,7 +1796,7 @@ static void __intel_display_device_info_runtime_init(struct intel_display *displ
 		display_runtime->port_mask |= BIT(PORT_F);
 
 	/* Wa_14011765242: adl-s A0,A1 */
-	if (display->platform.alderlake_s && IS_DISPLAY_STEP(display, STEP_A0, STEP_A2))
+	if (intel_display_wa(display, INTEL_DISPLAY_WA_14011765242))
 		for_each_pipe(display, pipe)
 			display_runtime->num_scalers[pipe] = 0;
 	else if (DISPLAY_VER(display) >= 11) {
@@ -1762,7 +1844,7 @@ static void __intel_display_device_info_runtime_init(struct intel_display *displ
 		goto display_fused_off;
 	}
 
-	if (IS_DISPLAY_VER(display, 7, 8) && HAS_PCH_SPLIT(i915)) {
+	if (IS_DISPLAY_VER(display, 7, 8) && HAS_PCH_SPLIT(display)) {
 		u32 fuse_strap = intel_de_read(display, FUSE_STRAP);
 		u32 sfuse_strap = intel_de_read(display, SFUSE_STRAP);
 
@@ -1777,7 +1859,7 @@ static void __intel_display_device_info_runtime_init(struct intel_display *displ
 		 */
 		if (fuse_strap & ILK_INTERNAL_DISPLAY_DISABLE ||
 		    sfuse_strap & SFUSE_STRAP_DISPLAY_DISABLED ||
-		    (HAS_PCH_CPT(i915) &&
+		    (HAS_PCH_CPT(display) &&
 		     !(sfuse_strap & SFUSE_STRAP_FUSE_LOCK))) {
 			drm_info(display->drm,
 				 "Display fused off, disabling\n");
@@ -1894,7 +1976,7 @@ void intel_display_device_info_print(const struct intel_display_device_info *inf
 		drm_printf(p, "display version: %u\n",
 			   runtime->ip.ver);
 
-	drm_printf(p, "display stepping: %s\n", intel_step_name(runtime->step));
+	drm_printf(p, "display stepping: %s\n", step_name(runtime));
 
 #define PRINT_FLAG(name) drm_printf(p, "%s: %s\n", #name, str_yes_no(info->name))
 	DEV_INFO_DISPLAY_FOR_EACH_FLAG(PRINT_FLAG);
@@ -1905,6 +1987,11 @@ void intel_display_device_info_print(const struct intel_display_device_info *inf
 	drm_printf(p, "has_dsc: %s\n", str_yes_no(runtime->has_dsc));
 
 	drm_printf(p, "rawclk rate: %u kHz\n", runtime->rawclk_freq);
+}
+
+bool intel_display_device_present(struct intel_display *display)
+{
+	return display && HAS_DISPLAY(display);
 }
 
 /*

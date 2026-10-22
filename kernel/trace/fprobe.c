@@ -4,12 +4,14 @@
  */
 #define pr_fmt(fmt) "fprobe: " fmt
 
+#include <linux/cleanup.h>
 #include <linux/err.h>
 #include <linux/fprobe.h>
 #include <linux/kallsyms.h>
 #include <linux/kprobes.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/rhashtable.h>
 #include <linux/slab.h>
 #include <linux/sort.h>
 
@@ -29,7 +31,7 @@
  * fprobe_table: hold 'fprobe_hlist::hlist' for checking the fprobe still
  *   exists. The key is the address of fprobe instance.
  * fprobe_ip_table: hold 'fprobe_hlist::array[*]' for searching the fprobe
- *   instance related to the funciton address. The key is the ftrace IP
+ *   instance related to the function address. The key is the ftrace IP
  *   address.
  *
  * When unregistering the fprobe, fprobe_hlist::fp and fprobe_hlist::array[*].fp
@@ -41,61 +43,69 @@
  *  - RCU hlist traversal under disabling preempt
  */
 static struct hlist_head fprobe_table[FPROBE_TABLE_SIZE];
-static struct hlist_head fprobe_ip_table[FPROBE_IP_TABLE_SIZE];
+static struct rhltable fprobe_ip_table;
 static DEFINE_MUTEX(fprobe_mutex);
+static struct fgraph_ops fprobe_graph_ops;
 
-/*
- * Find first fprobe in the hlist. It will be iterated twice in the entry
- * probe, once for correcting the total required size, the second time is
- * calling back the user handlers.
- * Thus the hlist in the fprobe_table must be sorted and new probe needs to
- * be added *before* the first fprobe.
- */
-static struct fprobe_hlist_node *find_first_fprobe_node(unsigned long ip)
+static u32 fprobe_node_hashfn(const void *data, u32 len, u32 seed)
 {
-	struct fprobe_hlist_node *node;
-	struct hlist_head *head;
-
-	head = &fprobe_ip_table[hash_ptr((void *)ip, FPROBE_IP_HASH_BITS)];
-	hlist_for_each_entry_rcu(node, head, hlist,
-				 lockdep_is_held(&fprobe_mutex)) {
-		if (node->addr == ip)
-			return node;
-	}
-	return NULL;
+	return hash_ptr(*(unsigned long **)data, 32);
 }
-NOKPROBE_SYMBOL(find_first_fprobe_node);
+
+static int fprobe_node_cmp(struct rhashtable_compare_arg *arg,
+			   const void *ptr)
+{
+	unsigned long key = *(unsigned long *)arg->key;
+	const struct fprobe_hlist_node *n = ptr;
+
+	return n->addr != key;
+}
+
+static u32 fprobe_node_obj_hashfn(const void *data, u32 len, u32 seed)
+{
+	const struct fprobe_hlist_node *n = data;
+
+	return hash_ptr((void *)n->addr, 32);
+}
+
+static const struct rhashtable_params fprobe_rht_params = {
+	.head_offset		= offsetof(struct fprobe_hlist_node, hlist),
+	.key_offset		= offsetof(struct fprobe_hlist_node, addr),
+	.key_len		= sizeof_field(struct fprobe_hlist_node, addr),
+	.hashfn			= fprobe_node_hashfn,
+	.obj_hashfn		= fprobe_node_obj_hashfn,
+	.obj_cmpfn		= fprobe_node_cmp,
+	.automatic_shrinking	= true,
+};
 
 /* Node insertion and deletion requires the fprobe_mutex */
-static void insert_fprobe_node(struct fprobe_hlist_node *node)
+static int __insert_fprobe_node(struct fprobe_hlist_node *node, struct fprobe *fp)
 {
-	unsigned long ip = node->addr;
-	struct fprobe_hlist_node *next;
-	struct hlist_head *head;
+	int ret;
 
 	lockdep_assert_held(&fprobe_mutex);
 
-	next = find_first_fprobe_node(ip);
-	if (next) {
-		hlist_add_before_rcu(&node->hlist, &next->hlist);
-		return;
-	}
-	head = &fprobe_ip_table[hash_ptr((void *)ip, FPROBE_IP_HASH_BITS)];
-	hlist_add_head_rcu(&node->hlist, head);
+	ret = rhltable_insert(&fprobe_ip_table, &node->hlist, fprobe_rht_params);
+	/* Set the fprobe pointer if insertion was successful. */
+	if (!ret)
+		WRITE_ONCE(node->fp, fp);
+	return ret;
 }
 
-/* Return true if there are synonims */
-static bool delete_fprobe_node(struct fprobe_hlist_node *node)
+static void __delete_fprobe_node(struct fprobe_hlist_node *node)
 {
 	lockdep_assert_held(&fprobe_mutex);
 
-	WRITE_ONCE(node->fp, NULL);
-	hlist_del_rcu(&node->hlist);
-	return !!find_first_fprobe_node(node->addr);
+	/* Avoid double deleting and non-inserted nodes */
+	if (READ_ONCE(node->fp) != NULL) {
+		WRITE_ONCE(node->fp, NULL);
+		rhltable_remove(&fprobe_ip_table, &node->hlist,
+				fprobe_rht_params);
+	}
 }
 
 /* Check existence of the fprobe */
-static bool is_fprobe_still_exist(struct fprobe *fp)
+static bool fprobe_registered(struct fprobe *fp)
 {
 	struct hlist_head *head;
 	struct fprobe_hlist *fph;
@@ -108,7 +118,7 @@ static bool is_fprobe_still_exist(struct fprobe *fp)
 	}
 	return false;
 }
-NOKPROBE_SYMBOL(is_fprobe_still_exist);
+NOKPROBE_SYMBOL(fprobe_registered);
 
 static int add_fprobe_hash(struct fprobe *fp)
 {
@@ -119,9 +129,6 @@ static int add_fprobe_hash(struct fprobe *fp)
 
 	if (WARN_ON_ONCE(!fph))
 		return -EINVAL;
-
-	if (is_fprobe_still_exist(fp))
-		return -EEXIST;
 
 	head = &fprobe_table[hash_ptr(fp, FPROBE_HASH_BITS)];
 	hlist_add_head_rcu(&fp->hlist_array->hlist, head);
@@ -137,7 +144,7 @@ static int del_fprobe_hash(struct fprobe *fp)
 	if (WARN_ON_ONCE(!fph))
 		return -EINVAL;
 
-	if (!is_fprobe_still_exist(fp))
+	if (!fprobe_registered(fp))
 		return -ENOENT;
 
 	fph->fp = NULL;
@@ -243,12 +250,314 @@ static inline int __fprobe_kprobe_handler(unsigned long ip, unsigned long parent
 	return ret;
 }
 
-static int fprobe_entry(struct ftrace_graph_ent *trace, struct fgraph_ops *gops,
-			struct ftrace_regs *fregs)
+static int fprobe_fgraph_entry(struct ftrace_graph_ent *trace, struct fgraph_ops *gops,
+			       struct ftrace_regs *fregs);
+static void fprobe_return(struct ftrace_graph_ret *trace,
+			  struct fgraph_ops *gops,
+			  struct ftrace_regs *fregs);
+
+static struct fgraph_ops fprobe_graph_ops = {
+	.entryfunc	= fprobe_fgraph_entry,
+	.retfunc	= fprobe_return,
+};
+/* Number of fgraph fprobe nodes */
+static int nr_fgraph_fprobes;
+/* Is fprobe_graph_ops registered? */
+static bool fprobe_graph_registered;
+
+/* Add @addrs to the ftrace filter and register fgraph if needed. */
+static int fprobe_graph_add_ips(unsigned long *addrs, int num)
 {
-	struct fprobe_hlist_node *node, *first;
+	int ret;
+
+	lockdep_assert_held(&fprobe_mutex);
+
+	ret = ftrace_set_filter_ips(&fprobe_graph_ops.ops, addrs, num, 0, 0);
+	if (ret)
+		return ret;
+
+	if (!fprobe_graph_registered) {
+		ret = register_ftrace_graph(&fprobe_graph_ops);
+		if (WARN_ON_ONCE(ret)) {
+			ftrace_free_filter(&fprobe_graph_ops.ops);
+			return ret;
+		}
+		fprobe_graph_registered = true;
+	}
+	return 0;
+}
+
+static void __fprobe_graph_unregister(void)
+{
+	if (fprobe_graph_registered) {
+		unregister_ftrace_graph(&fprobe_graph_ops);
+		ftrace_free_filter(&fprobe_graph_ops.ops);
+		fprobe_graph_registered = false;
+	}
+}
+
+/* Remove @addrs from the ftrace filter and unregister fgraph if possible. */
+static void fprobe_graph_remove_ips(unsigned long *addrs, int num)
+{
+	lockdep_assert_held(&fprobe_mutex);
+
+	if (!nr_fgraph_fprobes)
+		__fprobe_graph_unregister();
+	else if (num)
+		ftrace_set_filter_ips(&fprobe_graph_ops.ops, addrs, num, 1, 0);
+}
+
+#if defined(CONFIG_DYNAMIC_FTRACE_WITH_ARGS) || defined(CONFIG_DYNAMIC_FTRACE_WITH_REGS)
+
+/* ftrace_ops callback, this processes fprobes which have only entry_handler. */
+static void fprobe_ftrace_entry(unsigned long ip, unsigned long parent_ip,
+	struct ftrace_ops *ops, struct ftrace_regs *fregs)
+{
+	struct fprobe_hlist_node *node;
+	struct rhlist_head *head, *pos;
+	struct fprobe *fp;
+	int bit;
+
+	bit = ftrace_test_recursion_trylock(ip, parent_ip);
+	if (bit < 0)
+		return;
+
+	/*
+	 * ftrace_test_recursion_trylock() disables preemption, but
+	 * rhltable_lookup() checks whether rcu_read_lcok is held.
+	 * So we take rcu_read_lock() here.
+	 */
+	rcu_read_lock();
+	head = rhltable_lookup(&fprobe_ip_table, &ip, fprobe_rht_params);
+
+	rhl_for_each_entry_rcu(node, pos, head, hlist) {
+		if (node->addr != ip)
+			break;
+		fp = READ_ONCE(node->fp);
+		if (unlikely(!fp || fprobe_disabled(fp) || fp->exit_handler))
+			continue;
+
+		if (fprobe_shared_with_kprobes(fp))
+			__fprobe_kprobe_handler(ip, parent_ip, fp, fregs, NULL);
+		else
+			__fprobe_handler(ip, parent_ip, fp, fregs, NULL);
+	}
+	rcu_read_unlock();
+	ftrace_test_recursion_unlock(bit);
+}
+NOKPROBE_SYMBOL(fprobe_ftrace_entry);
+
+static struct ftrace_ops fprobe_ftrace_ops = {
+	.func	= fprobe_ftrace_entry,
+	.flags	= FTRACE_OPS_FL_SAVE_ARGS,
+};
+/* Number of ftrace fprobe nodes */
+static int nr_ftrace_fprobes;
+/* Is fprobe_ftrace_ops registered? */
+static bool fprobe_ftrace_registered;
+
+static int fprobe_ftrace_add_ips(unsigned long *addrs, int num)
+{
+	int ret;
+
+	lockdep_assert_held(&fprobe_mutex);
+
+	ret = ftrace_set_filter_ips(&fprobe_ftrace_ops, addrs, num, 0, 0);
+	if (ret)
+		return ret;
+
+	if (!fprobe_ftrace_registered) {
+		ret = register_ftrace_function(&fprobe_ftrace_ops);
+		if (ret) {
+			ftrace_free_filter(&fprobe_ftrace_ops);
+			return ret;
+		}
+		fprobe_ftrace_registered = true;
+	}
+	return 0;
+}
+
+static void __fprobe_ftrace_unregister(void)
+{
+	if (fprobe_ftrace_registered) {
+		unregister_ftrace_function(&fprobe_ftrace_ops);
+		ftrace_free_filter(&fprobe_ftrace_ops);
+		fprobe_ftrace_registered = false;
+	}
+}
+
+static void fprobe_ftrace_remove_ips(unsigned long *addrs, int num)
+{
+	lockdep_assert_held(&fprobe_mutex);
+
+	if (!nr_ftrace_fprobes)
+		__fprobe_ftrace_unregister();
+	else if (num)
+		ftrace_set_filter_ips(&fprobe_ftrace_ops, addrs, num, 1, 0);
+}
+
+static bool fprobe_is_ftrace(struct fprobe *fp)
+{
+	return !fp->exit_handler;
+}
+
+/* Node insertion and deletion requires the fprobe_mutex */
+static int insert_fprobe_node(struct fprobe_hlist_node *node, struct fprobe *fp)
+{
+	int ret;
+
+	lockdep_assert_held(&fprobe_mutex);
+
+	ret = __insert_fprobe_node(node, fp);
+	if (!ret) {
+		if (fprobe_is_ftrace(fp))
+			nr_ftrace_fprobes++;
+		else
+			nr_fgraph_fprobes++;
+	}
+
+	return ret;
+}
+
+static void delete_fprobe_node(struct fprobe_hlist_node *node)
+{
+	struct fprobe *fp;
+
+	lockdep_assert_held(&fprobe_mutex);
+
+	fp = READ_ONCE(node->fp);
+	if (fp) {
+		if (fprobe_is_ftrace(fp))
+			nr_ftrace_fprobes--;
+		else
+			nr_fgraph_fprobes--;
+	}
+	__delete_fprobe_node(node);
+}
+
+static bool fprobe_exists_on_hash(unsigned long ip, bool ftrace)
+{
+	struct rhlist_head *head, *pos;
+	struct fprobe_hlist_node *node;
+	struct fprobe *fp;
+
+	guard(rcu)();
+	head = rhltable_lookup(&fprobe_ip_table, &ip,
+				fprobe_rht_params);
+	if (!head)
+		return false;
+	/* We have to check the same type on the list. */
+	rhl_for_each_entry_rcu(node, pos, head, hlist) {
+		if (node->addr != ip)
+			break;
+		fp = READ_ONCE(node->fp);
+		if (likely(fp)) {
+			if ((!ftrace && fp->exit_handler) ||
+			    (ftrace && !fp->exit_handler))
+				return true;
+		}
+	}
+
+	return false;
+}
+
+#ifdef CONFIG_MODULES
+static void fprobe_remove_ips(unsigned long *ips, unsigned int cnt)
+{
+	if (!nr_fgraph_fprobes)
+		__fprobe_graph_unregister();
+	else if (cnt)
+		ftrace_set_filter_ips(&fprobe_graph_ops.ops, ips, cnt, 1, 0);
+
+	if (!nr_ftrace_fprobes)
+		__fprobe_ftrace_unregister();
+	else if (cnt)
+		ftrace_set_filter_ips(&fprobe_ftrace_ops, ips, cnt, 1, 0);
+}
+#endif
+#else
+static int fprobe_ftrace_add_ips(unsigned long *addrs, int num)
+{
+	return -ENOENT;
+}
+
+static void fprobe_ftrace_remove_ips(unsigned long *addrs, int num)
+{
+}
+
+static bool fprobe_is_ftrace(struct fprobe *fp)
+{
+	return false;
+}
+
+/* Node insertion and deletion requires the fprobe_mutex */
+static int insert_fprobe_node(struct fprobe_hlist_node *node, struct fprobe *fp)
+{
+	int ret;
+
+	lockdep_assert_held(&fprobe_mutex);
+
+	ret = __insert_fprobe_node(node, fp);
+	if (!ret)
+		nr_fgraph_fprobes++;
+
+	return ret;
+}
+
+static void delete_fprobe_node(struct fprobe_hlist_node *node)
+{
+	struct fprobe *fp;
+
+	lockdep_assert_held(&fprobe_mutex);
+
+	fp = READ_ONCE(node->fp);
+	if (fp)
+		nr_fgraph_fprobes--;
+	__delete_fprobe_node(node);
+}
+
+static bool fprobe_exists_on_hash(unsigned long ip, bool ftrace __maybe_unused)
+{
+	struct rhlist_head *head, *pos;
+	struct fprobe_hlist_node *node;
+	struct fprobe *fp;
+
+	guard(rcu)();
+	head = rhltable_lookup(&fprobe_ip_table, &ip,
+				fprobe_rht_params);
+	if (!head)
+		return false;
+	/* We only need to check fp is there. */
+	rhl_for_each_entry_rcu(node, pos, head, hlist) {
+		if (node->addr != ip)
+			break;
+		fp = READ_ONCE(node->fp);
+		if (likely(fp))
+			return true;
+	}
+
+	return false;
+}
+
+#ifdef CONFIG_MODULES
+static void fprobe_remove_ips(unsigned long *ips, unsigned int cnt)
+{
+	if (!nr_fgraph_fprobes)
+		__fprobe_graph_unregister();
+	else if (cnt)
+		ftrace_set_filter_ips(&fprobe_graph_ops.ops, ips, cnt, 1, 0);
+}
+#endif
+#endif /* !CONFIG_DYNAMIC_FTRACE_WITH_ARGS && !CONFIG_DYNAMIC_FTRACE_WITH_REGS */
+
+/* fgraph_ops callback, this processes fprobes which have exit_handler. */
+static int fprobe_fgraph_entry(struct ftrace_graph_ent *trace, struct fgraph_ops *gops,
+			       struct ftrace_regs *fregs)
+{
 	unsigned long *fgraph_data = NULL;
 	unsigned long func = trace->func;
+	struct fprobe_hlist_node *node;
+	struct rhlist_head *head, *pos;
 	unsigned long ret_ip;
 	int reserved_words;
 	struct fprobe *fp;
@@ -257,14 +566,12 @@ static int fprobe_entry(struct ftrace_graph_ent *trace, struct fgraph_ops *gops,
 	if (WARN_ON_ONCE(!fregs))
 		return 0;
 
-	first = node = find_first_fprobe_node(func);
-	if (unlikely(!first))
-		return 0;
-
+	guard(rcu)();
+	head = rhltable_lookup(&fprobe_ip_table, &func, fprobe_rht_params);
 	reserved_words = 0;
-	hlist_for_each_entry_from_rcu(node, hlist) {
+	rhl_for_each_entry_rcu(node, pos, head, hlist) {
 		if (node->addr != func)
-			break;
+			continue;
 		fp = READ_ONCE(node->fp);
 		if (!fp || !fp->exit_handler)
 			continue;
@@ -275,15 +582,14 @@ static int fprobe_entry(struct ftrace_graph_ent *trace, struct fgraph_ops *gops,
 		reserved_words +=
 			FPROBE_HEADER_SIZE_IN_LONG + SIZE_IN_LONG(fp->entry_data_size);
 	}
-	node = first;
 	if (reserved_words) {
 		fgraph_data = fgraph_reserve_data(gops->idx, reserved_words * sizeof(long));
 		if (unlikely(!fgraph_data)) {
-			hlist_for_each_entry_from_rcu(node, hlist) {
+			rhl_for_each_entry_rcu(node, pos, head, hlist) {
 				if (node->addr != func)
-					break;
+					continue;
 				fp = READ_ONCE(node->fp);
-				if (fp && !fprobe_disabled(fp))
+				if (fp && !fprobe_disabled(fp) && !fprobe_is_ftrace(fp))
 					fp->nmissed++;
 			}
 			return 0;
@@ -296,17 +602,27 @@ static int fprobe_entry(struct ftrace_graph_ent *trace, struct fgraph_ops *gops,
 	 */
 	ret_ip = ftrace_regs_get_return_address(fregs);
 	used = 0;
-	hlist_for_each_entry_from_rcu(node, hlist) {
+	rhl_for_each_entry_rcu(node, pos, head, hlist) {
 		int data_size;
 		void *data;
 
 		if (node->addr != func)
-			break;
+			continue;
 		fp = READ_ONCE(node->fp);
-		if (!fp || fprobe_disabled(fp))
+		if (unlikely(!fp || fprobe_disabled(fp) || fprobe_is_ftrace(fp)))
 			continue;
 
 		data_size = fp->entry_data_size;
+		/*
+		 * The list may have grown since it was sized, so this node
+		 * may not fit. Skip it as missed rather than overrun the
+		 * reservation.
+		 */
+		if (fp->exit_handler &&
+		    used + FPROBE_HEADER_SIZE_IN_LONG + SIZE_IN_LONG(data_size) > reserved_words) {
+			fp->nmissed++;
+			continue;
+		}
 		if (data_size && fp->exit_handler)
 			data = fgraph_data + used + FPROBE_HEADER_SIZE_IN_LONG;
 		else
@@ -325,13 +641,11 @@ static int fprobe_entry(struct ftrace_graph_ent *trace, struct fgraph_ops *gops,
 				used += FPROBE_HEADER_SIZE_IN_LONG + size_words;
 		}
 	}
-	if (used < reserved_words)
-		memset(fgraph_data + used, 0, reserved_words - used);
 
 	/* If any exit_handler is set, data must be used. */
 	return used != 0;
 }
-NOKPROBE_SYMBOL(fprobe_entry);
+NOKPROBE_SYMBOL(fprobe_fgraph_entry);
 
 static void fprobe_return(struct ftrace_graph_ret *trace,
 			  struct fgraph_ops *gops,
@@ -349,7 +663,7 @@ static void fprobe_return(struct ftrace_graph_ret *trace,
 	size_words = SIZE_IN_LONG(size);
 	ret_ip = ftrace_regs_get_instruction_pointer(fregs);
 
-	preempt_disable();
+	preempt_disable_notrace();
 
 	curr = 0;
 	while (size_words > curr) {
@@ -357,7 +671,7 @@ static void fprobe_return(struct ftrace_graph_ret *trace,
 		if (!fp)
 			break;
 		curr += FPROBE_HEADER_SIZE_IN_LONG;
-		if (is_fprobe_still_exist(fp) && !fprobe_disabled(fp)) {
+		if (fprobe_registered(fp) && !fprobe_disabled(fp)) {
 			if (WARN_ON_ONCE(curr + size > size_words))
 				break;
 			fp->exit_handler(fp, trace->func, ret_ip, fregs,
@@ -365,51 +679,113 @@ static void fprobe_return(struct ftrace_graph_ret *trace,
 		}
 		curr += size;
 	}
-	preempt_enable();
+	preempt_enable_notrace();
 }
 NOKPROBE_SYMBOL(fprobe_return);
 
-static struct fgraph_ops fprobe_graph_ops = {
-	.entryfunc	= fprobe_entry,
-	.retfunc	= fprobe_return,
+#ifdef CONFIG_MODULES
+
+#define FPROBE_IPS_BATCH_INIT 128
+/* instruction pointer address list */
+struct fprobe_addr_list {
+	int index;
+	int size;
+	unsigned long *addrs;
 };
-static int fprobe_graph_active;
 
-/* Add @addrs to the ftrace filter and register fgraph if needed. */
-static int fprobe_graph_add_ips(unsigned long *addrs, int num)
+static int fprobe_remove_node_in_module(struct module *mod, struct fprobe_hlist_node *node,
+					 struct fprobe_addr_list *alist)
 {
-	int ret;
+	lockdep_assert_in_rcu_read_lock();
 
-	lockdep_assert_held(&fprobe_mutex);
+	if (!within_module(node->addr, mod))
+		return 0;
 
-	ret = ftrace_set_filter_ips(&fprobe_graph_ops.ops, addrs, num, 0, 0);
-	if (ret)
-		return ret;
-
-	if (!fprobe_graph_active) {
-		ret = register_ftrace_graph(&fprobe_graph_ops);
-		if (WARN_ON_ONCE(ret)) {
-			ftrace_free_filter(&fprobe_graph_ops.ops);
-			return ret;
-		}
+	delete_fprobe_node(node);
+	/* If no address list is available, we can't track this address. */
+	if (!alist->addrs)
+		return 0;
+	/*
+	 * Don't care the type here, because all fprobes on the same
+	 * address must be removed eventually.
+	 */
+	if (!rhltable_lookup(&fprobe_ip_table, &node->addr, fprobe_rht_params)) {
+		alist->addrs[alist->index++] = node->addr;
+		if (alist->index == alist->size)
+			return -ENOSPC;
 	}
-	fprobe_graph_active++;
+
 	return 0;
 }
 
-/* Remove @addrs from the ftrace filter and unregister fgraph if possible. */
-static void fprobe_graph_remove_ips(unsigned long *addrs, int num)
+/* Handle module unloading to manage fprobe_ip_table. */
+static int fprobe_module_callback(struct notifier_block *nb,
+				  unsigned long val, void *data)
 {
-	lockdep_assert_held(&fprobe_mutex);
+	struct fprobe_addr_list alist = {.size = FPROBE_IPS_BATCH_INIT};
+	struct fprobe_hlist_node *node;
+	struct rhashtable_iter iter;
+	struct module *mod = data;
+	bool retry;
 
-	fprobe_graph_active--;
-	/* Q: should we unregister it ? */
-	if (!fprobe_graph_active)
-		unregister_ftrace_graph(&fprobe_graph_ops);
+	if (val != MODULE_STATE_GOING)
+		return NOTIFY_DONE;
 
-	if (num)
-		ftrace_set_filter_ips(&fprobe_graph_ops.ops, addrs, num, 1, 0);
+	alist.addrs = kcalloc(alist.size, sizeof(*alist.addrs), GFP_KERNEL);
+	/*
+	 * If failed to alloc memory, ftrace_ops will not be able to remove ips from
+	 * hash, but we can still remove nodes from fprobe_ip_table, so we can avoid
+	 * the potential wrong callback. So just print a warning here and try to
+	 * continue without address list.
+	 */
+	WARN_ONCE(!alist.addrs,
+		"Failed to allocate memory for fprobe_addr_list, ftrace_ops will not be updated");
+
+	mutex_lock(&fprobe_mutex);
+again:
+	retry = false;
+	alist.index = 0;
+	rhltable_walk_enter(&fprobe_ip_table, &iter);
+	do {
+		rhashtable_walk_start(&iter);
+
+		while ((node = rhashtable_walk_next(&iter)) && !IS_ERR(node))
+			if (fprobe_remove_node_in_module(mod, node, &alist) < 0) {
+				retry = true;
+				break;
+			}
+
+		rhashtable_walk_stop(&iter);
+	} while (node == ERR_PTR(-EAGAIN) && !retry);
+	rhashtable_walk_exit(&iter);
+	/* Remove any ips from hash table(s) */
+	fprobe_remove_ips(alist.addrs, alist.index);
+	/*
+	 * If we break rhashtable walk loop except for -EAGAIN, we need
+	 * to restart looping from start for safety. Anyway, this is
+	 * not a hotpath.
+	 */
+	if (retry)
+		goto again;
+
+	mutex_unlock(&fprobe_mutex);
+
+	kfree(alist.addrs);
+
+	return NOTIFY_DONE;
 }
+
+static struct notifier_block fprobe_module_nb = {
+	.notifier_call = fprobe_module_callback,
+	.priority = 0,
+};
+
+static int __init init_fprobe_module(void)
+{
+	return register_module_notifier(&fprobe_module_nb);
+}
+early_initcall(init_fprobe_module);
+#endif
 
 static int symbols_cmp(const void *a, const void *b)
 {
@@ -445,6 +821,7 @@ struct filter_match_data {
 	size_t index;
 	size_t size;
 	unsigned long *addrs;
+	struct module **mods;
 };
 
 static int filter_match_callback(void *data, const char *name, unsigned long addr)
@@ -458,30 +835,47 @@ static int filter_match_callback(void *data, const char *name, unsigned long add
 	if (!ftrace_location(addr))
 		return 0;
 
-	if (match->addrs)
-		match->addrs[match->index] = addr;
+	if (match->addrs) {
+		struct module *mod = __module_text_address(addr);
 
+		if (mod && !try_module_get(mod))
+			return 0;
+
+		match->mods[match->index] = mod;
+		match->addrs[match->index] = addr;
+	}
 	match->index++;
 	return match->index == match->size;
 }
 
 /*
  * Make IP list from the filter/no-filter glob patterns.
- * Return the number of matched symbols, or -ENOENT.
+ * Return the number of matched symbols, or errno.
+ * If @addrs == NULL, this just counts the number of matched symbols. If @addrs
+ * is passed with an array, we need to pass the an @mods array of the same size
+ * to increment the module refcount for each symbol.
+ * This means we also need to call `module_put` for each element of @mods after
+ * using the @addrs.
  */
-static int ip_list_from_filter(const char *filter, const char *notfilter,
-			       unsigned long *addrs, size_t size)
+static int get_ips_from_filter(const char *filter, const char *notfilter,
+			       unsigned long *addrs, struct module **mods,
+			       size_t size)
 {
 	struct filter_match_data match = { .filter = filter, .notfilter = notfilter,
-		.index = 0, .size = size, .addrs = addrs};
+		.index = 0, .size = size, .addrs = addrs, .mods = mods};
 	int ret;
+
+	if (addrs && !mods)
+		return -EINVAL;
 
 	ret = kallsyms_on_each_symbol(filter_match_callback, &match);
 	if (ret < 0)
 		return ret;
-	ret = module_kallsyms_on_each_symbol(NULL, filter_match_callback, &match);
-	if (ret < 0)
-		return ret;
+	if (IS_ENABLED(CONFIG_MODULES)) {
+		ret = module_kallsyms_on_each_symbol(NULL, filter_match_callback, &match);
+		if (ret < 0)
+			return ret;
+	}
 
 	return match.index ?: -ENOENT;
 }
@@ -507,7 +901,7 @@ static int fprobe_init(struct fprobe *fp, unsigned long *addrs, int num)
 		return -E2BIG;
 	fp->entry_data_size = size;
 
-	hlist_array = kzalloc(struct_size(hlist_array, array, num), GFP_KERNEL);
+	hlist_array = kzalloc_flex(*hlist_array, array, num);
 	if (!hlist_array)
 		return -ENOMEM;
 
@@ -517,7 +911,6 @@ static int fprobe_init(struct fprobe *fp, unsigned long *addrs, int num)
 	fp->hlist_array = hlist_array;
 	hlist_array->fp = fp;
 	for (i = 0; i < num; i++) {
-		hlist_array->array[i].fp = fp;
 		addr = ftrace_location(addrs[i]);
 		if (!addr) {
 			fprobe_fail_cleanup(fp);
@@ -529,6 +922,11 @@ static int fprobe_init(struct fprobe *fp, unsigned long *addrs, int num)
 }
 
 #define FPROBE_IPS_MAX	INT_MAX
+
+int fprobe_count_ips_from_filter(const char *filter, const char *notfilter)
+{
+	return get_ips_from_filter(filter, notfilter, NULL, NULL, FPROBE_IPS_MAX);
+}
 
 /**
  * register_fprobe() - Register fprobe to ftrace by pattern.
@@ -543,27 +941,38 @@ static int fprobe_init(struct fprobe *fp, unsigned long *addrs, int num)
  */
 int register_fprobe(struct fprobe *fp, const char *filter, const char *notfilter)
 {
-	unsigned long *addrs;
-	int ret;
+	unsigned long *addrs __free(kfree) = NULL;
+	struct module **mods __free(kfree) = NULL;
+	int ret, num;
 
 	if (!fp || !filter)
 		return -EINVAL;
 
-	ret = ip_list_from_filter(filter, notfilter, NULL, FPROBE_IPS_MAX);
-	if (ret < 0)
-		return ret;
+	num = get_ips_from_filter(filter, notfilter, NULL, NULL, FPROBE_IPS_MAX);
+	if (num < 0)
+		return num;
 
-	addrs = kcalloc(ret, sizeof(unsigned long), GFP_KERNEL);
+	addrs = kcalloc(num, sizeof(*addrs), GFP_KERNEL);
 	if (!addrs)
 		return -ENOMEM;
-	ret = ip_list_from_filter(filter, notfilter, addrs, ret);
-	if (ret > 0)
+
+	mods = kzalloc_objs(*mods, num);
+	if (!mods)
+		return -ENOMEM;
+
+	ret = get_ips_from_filter(filter, notfilter, addrs, mods, num);
+	if (ret >= 0)
 		ret = register_fprobe_ips(fp, addrs, ret);
 
-	kfree(addrs);
+	for (int i = 0; i < num; i++) {
+		if (mods[i])
+			module_put(mods[i]);
+	}
 	return ret;
 }
 EXPORT_SYMBOL_GPL(register_fprobe);
+
+static int unregister_fprobe_nolock(struct fprobe *fp);
 
 /**
  * register_fprobe_ips() - Register fprobe to ftrace by address.
@@ -583,23 +992,33 @@ int register_fprobe_ips(struct fprobe *fp, unsigned long *addrs, int num)
 	struct fprobe_hlist *hlist_array;
 	int ret, i;
 
+	guard(mutex)(&fprobe_mutex);
+	if (fprobe_registered(fp))
+		return -EEXIST;
+
 	ret = fprobe_init(fp, addrs, num);
 	if (ret)
 		return ret;
 
-	mutex_lock(&fprobe_mutex);
+	if (fprobe_is_ftrace(fp))
+		ret = fprobe_ftrace_add_ips(addrs, num);
+	else
+		ret = fprobe_graph_add_ips(addrs, num);
+	if (ret) {
+		fprobe_fail_cleanup(fp);
+		return ret;
+	}
 
 	hlist_array = fp->hlist_array;
-	ret = fprobe_graph_add_ips(addrs, num);
-	if (!ret) {
-		add_fprobe_hash(fp);
-		for (i = 0; i < hlist_array->size; i++)
-			insert_fprobe_node(&hlist_array->array[i]);
-	}
-	mutex_unlock(&fprobe_mutex);
+	ret = add_fprobe_hash(fp);
+	for (i = 0; i < hlist_array->size && !ret; i++)
+		ret = insert_fprobe_node(&hlist_array->array[i], fp);
 
-	if (ret)
-		fprobe_fail_cleanup(fp);
+	if (ret) {
+		unregister_fprobe_nolock(fp);
+		/* In error case, wait for clean up safely. */
+		synchronize_rcu();
+	}
 
 	return ret;
 }
@@ -643,50 +1062,84 @@ bool fprobe_is_registered(struct fprobe *fp)
 	return true;
 }
 
+static int unregister_fprobe_nolock(struct fprobe *fp)
+{
+	struct fprobe_hlist *hlist_array = fp->hlist_array;
+	unsigned long *addrs = NULL;
+	int i, count;
+
+	addrs = kcalloc(hlist_array->size, sizeof(unsigned long), GFP_KERNEL);
+	/*
+	 * This will remove fprobe_hash_node from the hash table even if
+	 * memory allocation fails. However, ftrace_ops will not be updated.
+	 * Anyway, when the last fprobe is unregistered, ftrace_ops is also
+	 * unregistered.
+	 */
+	if (!addrs)
+		pr_warn("Failed to allocate working array. ftrace_ops may not sync.\n");
+
+	/* Remove non-synonim ips from table and hash */
+	count = 0;
+	for (i = 0; i < hlist_array->size; i++) {
+		delete_fprobe_node(&hlist_array->array[i]);
+		if (addrs && !fprobe_exists_on_hash(hlist_array->array[i].addr,
+						    fprobe_is_ftrace(fp)))
+			addrs[count++] = hlist_array->array[i].addr;
+	}
+	del_fprobe_hash(fp);
+
+	if (fprobe_is_ftrace(fp))
+		fprobe_ftrace_remove_ips(addrs, count);
+	else
+		fprobe_graph_remove_ips(addrs, count);
+
+	kfree_rcu(hlist_array, rcu);
+	fp->hlist_array = NULL;
+	kfree(addrs);
+
+	return 0;
+}
+
 /**
- * unregister_fprobe() - Unregister fprobe.
+ * unregister_fprobe_async() - Unregister fprobe without RCU GP wait
  * @fp: A fprobe data structure to be unregistered.
  *
  * Unregister fprobe (and remove ftrace hooks from the function entries).
+ * This function will NOT wait until the fprobe is no longer used.
+ *
+ * Return 0 if @fp is unregistered successfully, -errno if not.
+ */
+int unregister_fprobe_async(struct fprobe *fp)
+{
+	guard(mutex)(&fprobe_mutex);
+	if (!fp || !fprobe_registered(fp))
+		return -EINVAL;
+
+	return unregister_fprobe_nolock(fp);
+}
+
+/**
+ * unregister_fprobe() - Unregister fprobe with RCU GP wait
+ * @fp: A fprobe data structure to be unregistered.
+ *
+ * Unregister fprobe (and remove ftrace hooks from the function entries).
+ * This function will block until the fprobe is no longer used.
  *
  * Return 0 if @fp is unregistered successfully, -errno if not.
  */
 int unregister_fprobe(struct fprobe *fp)
 {
-	struct fprobe_hlist *hlist_array;
-	unsigned long *addrs = NULL;
-	int ret = 0, i, count;
+	int ret = unregister_fprobe_async(fp);
 
-	mutex_lock(&fprobe_mutex);
-	if (!fp || !is_fprobe_still_exist(fp)) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	hlist_array = fp->hlist_array;
-	addrs = kcalloc(hlist_array->size, sizeof(unsigned long), GFP_KERNEL);
-	if (!addrs) {
-		ret = -ENOMEM;	/* TODO: Fallback to one-by-one loop */
-		goto out;
-	}
-
-	/* Remove non-synonim ips from table and hash */
-	count = 0;
-	for (i = 0; i < hlist_array->size; i++) {
-		if (!delete_fprobe_node(&hlist_array->array[i]))
-			addrs[count++] = hlist_array->array[i].addr;
-	}
-	del_fprobe_hash(fp);
-
-	fprobe_graph_remove_ips(addrs, count);
-
-	kfree_rcu(hlist_array, rcu);
-	fp->hlist_array = NULL;
-
-out:
-	mutex_unlock(&fprobe_mutex);
-
-	kfree(addrs);
+	if (!ret)
+		synchronize_rcu();
 	return ret;
 }
 EXPORT_SYMBOL_GPL(unregister_fprobe);
+
+static int __init fprobe_initcall(void)
+{
+	rhltable_init(&fprobe_ip_table, &fprobe_rht_params);
+	return 0;
+}
+core_initcall(fprobe_initcall);

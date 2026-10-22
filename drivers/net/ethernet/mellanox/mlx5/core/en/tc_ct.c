@@ -812,7 +812,7 @@ mlx5_tc_ct_entry_add_rule(struct mlx5_tc_ct_priv *ct_priv,
 
 	zone_rule->nat = nat;
 
-	spec = kvzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kvzalloc_obj(*spec);
 	if (!spec)
 		return -ENOMEM;
 
@@ -887,7 +887,7 @@ mlx5_tc_ct_entry_update_rule(struct mlx5_tc_ct_priv *ct_priv,
 	struct mlx5_flow_spec *spec;
 	int err;
 
-	spec = kvzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kvzalloc_obj(*spec);
 	if (!spec)
 		return -ENOMEM;
 
@@ -1021,7 +1021,7 @@ mlx5_tc_ct_counter_create(struct mlx5_tc_ct_priv *ct_priv)
 	struct mlx5_ct_counter *counter;
 	int ret;
 
-	counter = kzalloc(sizeof(*counter), GFP_KERNEL);
+	counter = kzalloc_obj(*counter);
 	if (!counter)
 		return ERR_PTR(-ENOMEM);
 
@@ -1195,6 +1195,7 @@ mlx5_tc_ct_block_flow_offload_add(struct mlx5_ct_ft *ft,
 	struct flow_action_entry *meta_action;
 	unsigned long cookie = flow->cookie;
 	struct mlx5_ct_entry *entry;
+	bool has_nat;
 	int err;
 
 	meta_action = mlx5_tc_ct_get_ct_metadata_action(flow_rule);
@@ -1218,7 +1219,7 @@ mlx5_tc_ct_block_flow_offload_add(struct mlx5_ct_ft *ft,
 	}
 	spin_unlock_bh(&ct_priv->ht_lock);
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc_obj(*entry);
 	if (!entry)
 		return -ENOMEM;
 
@@ -1236,6 +1237,8 @@ mlx5_tc_ct_block_flow_offload_add(struct mlx5_ct_ft *ft,
 	err = mlx5_tc_ct_rule_to_tuple_nat(&entry->tuple_nat, flow_rule);
 	if (err)
 		goto err_set;
+	has_nat = memcmp(&entry->tuple, &entry->tuple_nat,
+			 sizeof(entry->tuple));
 
 	spin_lock_bh(&ct_priv->ht_lock);
 
@@ -1244,7 +1247,7 @@ mlx5_tc_ct_block_flow_offload_add(struct mlx5_ct_ft *ft,
 	if (err)
 		goto err_entries;
 
-	if (memcmp(&entry->tuple, &entry->tuple_nat, sizeof(entry->tuple))) {
+	if (has_nat) {
 		err = rhashtable_lookup_insert_fast(&ct_priv->ct_tuples_nat_ht,
 						    &entry->tuple_nat_node,
 						    tuples_nat_ht_params);
@@ -1349,6 +1352,32 @@ mlx5_tc_ct_block_flow_offload_stats(struct mlx5_ct_ft *ft,
 	return 0;
 }
 
+static bool
+mlx5_tc_ct_filter_legacy_non_nic_flows(struct mlx5_ct_ft *ft,
+				       struct flow_cls_offload *flow)
+{
+	struct flow_rule *rule = flow_cls_offload_flow_rule(flow);
+	struct mlx5_tc_ct_priv *ct_priv = ft->ct_priv;
+	struct flow_match_meta match;
+	struct net_device *netdev;
+	bool same_dev = false;
+
+	if (!is_mdev_legacy_mode(ct_priv->dev) ||
+	    !flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META))
+		return true;
+
+	flow_rule_match_meta(rule, &match);
+
+	if (!(match.key->ingress_ifindex & match.mask->ingress_ifindex))
+		return true;
+
+	netdev = dev_get_by_index(&init_net, match.key->ingress_ifindex);
+	same_dev = ct_priv->netdev == netdev;
+	dev_put(netdev);
+
+	return same_dev;
+}
+
 static int
 mlx5_tc_ct_block_flow_offload(enum tc_setup_type type, void *type_data,
 			      void *cb_priv)
@@ -1361,6 +1390,9 @@ mlx5_tc_ct_block_flow_offload(enum tc_setup_type type, void *type_data,
 
 	switch (f->command) {
 	case FLOW_CLS_REPLACE:
+		if (!mlx5_tc_ct_filter_legacy_non_nic_flows(ft, f))
+			return -EOPNOTSUPP;
+
 		return mlx5_tc_ct_block_flow_offload_add(ft, f);
 	case FLOW_CLS_DESTROY:
 		return mlx5_tc_ct_block_flow_offload_del(ft, f);
@@ -1588,7 +1620,7 @@ static int tc_ct_pre_ct_add_rules(struct mlx5_ct_ft *ct_ft,
 	u16 zone;
 	int err;
 
-	spec = kvzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kvzalloc_obj(*spec);
 	if (!spec)
 		return -ENOMEM;
 
@@ -1824,7 +1856,7 @@ mlx5_tc_ct_add_ft_cb(struct mlx5_tc_ct_priv *ct_priv, u16 zone,
 		return ft;
 	}
 
-	ft = kzalloc(sizeof(*ft), GFP_KERNEL);
+	ft = kzalloc_obj(*ft);
 	if (!ft)
 		return ERR_PTR(-ENOMEM);
 
@@ -2255,9 +2287,10 @@ mlx5_tc_ct_init(struct mlx5e_priv *priv, struct mlx5_fs_chains *chains,
 		enum mlx5_flow_namespace_type ns_type,
 		struct mlx5e_post_act *post_act)
 {
+	u8 mapping_id[MLX5_SW_IMAGE_GUID_MAX_BYTES];
 	struct mlx5_tc_ct_priv *ct_priv;
 	struct mlx5_core_dev *dev;
-	u64 mapping_id;
+	u8 id_len;
 	int err;
 
 	dev = priv->mdev;
@@ -2265,20 +2298,22 @@ mlx5_tc_ct_init(struct mlx5e_priv *priv, struct mlx5_fs_chains *chains,
 	if (err)
 		goto err_support;
 
-	ct_priv = kzalloc(sizeof(*ct_priv), GFP_KERNEL);
+	ct_priv = kzalloc_obj(*ct_priv);
 	if (!ct_priv)
 		goto err_alloc;
 
-	mapping_id = mlx5_query_nic_system_image_guid(dev);
+	mlx5_query_nic_sw_system_image_guid(dev, mapping_id, &id_len);
 
-	ct_priv->zone_mapping = mapping_create_for_id(mapping_id, MAPPING_TYPE_ZONE,
+	ct_priv->zone_mapping = mapping_create_for_id(mapping_id, id_len,
+						      MAPPING_TYPE_ZONE,
 						      sizeof(u16), 0, true);
 	if (IS_ERR(ct_priv->zone_mapping)) {
 		err = PTR_ERR(ct_priv->zone_mapping);
 		goto err_mapping_zone;
 	}
 
-	ct_priv->labels_mapping = mapping_create_for_id(mapping_id, MAPPING_TYPE_LABELS,
+	ct_priv->labels_mapping = mapping_create_for_id(mapping_id, id_len,
+							MAPPING_TYPE_LABELS,
 							sizeof(u32) * 4, 0, true);
 	if (IS_ERR(ct_priv->labels_mapping)) {
 		err = PTR_ERR(ct_priv->labels_mapping);

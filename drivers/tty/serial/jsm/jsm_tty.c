@@ -391,7 +391,7 @@ int jsm_tty_init(struct jsm_board *brd)
 			 * Okay to malloc with GFP_KERNEL, we are not at
 			 * interrupt context, and there are no locks held.
 			 */
-			brd->channels[i] = kzalloc(sizeof(struct jsm_channel), GFP_KERNEL);
+			brd->channels[i] = kzalloc_obj(struct jsm_channel);
 			if (!brd->channels[i]) {
 				jsm_dbg(CORE, &brd->pci_dev,
 					"%s:%d Unable to allocate memory for channel struct\n",
@@ -451,6 +451,7 @@ int jsm_uart_port_init(struct jsm_board *brd)
 		if (!brd->channels[i])
 			continue;
 
+		brd->channels[i]->uart_port.dev = &brd->pci_dev->dev;
 		brd->channels[i]->uart_port.irq = brd->irq;
 		brd->channels[i]->uart_port.uartclk = 14745600;
 		brd->channels[i]->uart_port.type = PORT_JSM;

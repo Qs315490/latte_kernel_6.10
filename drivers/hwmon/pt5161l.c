@@ -63,7 +63,6 @@ struct pt5161l_fw_ver {
 /* Each client has this additional data */
 struct pt5161l_data {
 	struct i2c_client *client;
-	struct dentry *debugfs;
 	struct pt5161l_fw_ver fw_ver;
 	struct mutex lock; /* for atomic I2C transactions */
 	bool init_done;
@@ -71,8 +70,6 @@ struct pt5161l_data {
 	bool mm_heartbeat_okay; /* indicate if Main Micro heartbeat is good */
 	bool mm_wide_reg_access; /* MM assisted wide register access */
 };
-
-static struct dentry *pt5161l_debugfs_dir;
 
 /*
  * Write multiple data bytes to Aries over I2C
@@ -124,7 +121,7 @@ static int pt5161l_read_block_data(struct pt5161l_data *data, u32 address,
 	int ret, tries;
 	u8 remain_len = len;
 	u8 curr_len;
-	u8 wbuf[16], rbuf[24];
+	u8 wbuf[16], rbuf[I2C_SMBUS_BLOCK_MAX];
 	u8 cmd = 0x08; /* [7]:pec_en, [4:2]:func, [1]:start, [0]:end */
 	u8 config = 0x00; /* [6]:cfg_type, [4:1]:burst_len, [0]:address bit16 */
 
@@ -154,7 +151,7 @@ static int pt5161l_read_block_data(struct pt5161l_data *data, u32 address,
 				break;
 		}
 		if (tries >= 3)
-			return ret;
+			return ret < 0 ? ret : -EIO;
 
 		memcpy(val, rbuf, curr_len);
 		val += curr_len;
@@ -568,21 +565,16 @@ static const struct file_operations pt5161l_debugfs_ops_hb_sts = {
 	.open = simple_open,
 };
 
-static int pt5161l_init_debugfs(struct pt5161l_data *data)
+static void pt5161l_init_debugfs(struct i2c_client *client, struct pt5161l_data *data)
 {
-	data->debugfs = debugfs_create_dir(dev_name(&data->client->dev),
-					   pt5161l_debugfs_dir);
-
-	debugfs_create_file("fw_ver", 0444, data->debugfs, data,
+	debugfs_create_file("fw_ver", 0444, client->debugfs, data,
 			    &pt5161l_debugfs_ops_fw_ver);
 
-	debugfs_create_file("fw_load_status", 0444, data->debugfs, data,
+	debugfs_create_file("fw_load_status", 0444, client->debugfs, data,
 			    &pt5161l_debugfs_ops_fw_load_sts);
 
-	debugfs_create_file("heartbeat_status", 0444, data->debugfs, data,
+	debugfs_create_file("heartbeat_status", 0444, client->debugfs, data,
 			    &pt5161l_debugfs_ops_hb_sts);
-
-	return 0;
 }
 
 static int pt5161l_probe(struct i2c_client *client)
@@ -604,17 +596,12 @@ static int pt5161l_probe(struct i2c_client *client)
 							 data,
 							 &pt5161l_chip_info,
 							 NULL);
+	if (IS_ERR(hwmon_dev))
+		return PTR_ERR(hwmon_dev);
 
-	pt5161l_init_debugfs(data);
+	pt5161l_init_debugfs(client, data);
 
-	return PTR_ERR_OR_ZERO(hwmon_dev);
-}
-
-static void pt5161l_remove(struct i2c_client *client)
-{
-	struct pt5161l_data *data = i2c_get_clientdata(client);
-
-	debugfs_remove_recursive(data->debugfs);
+	return 0;
 }
 
 static const struct of_device_id __maybe_unused pt5161l_of_match[] = {
@@ -630,8 +617,8 @@ static const struct acpi_device_id __maybe_unused pt5161l_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, pt5161l_acpi_match);
 
 static const struct i2c_device_id pt5161l_id[] = {
-	{ "pt5161l" },
-	{}
+	{ .name = "pt5161l" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pt5161l_id);
 
@@ -643,24 +630,9 @@ static struct i2c_driver pt5161l_driver = {
 		.acpi_match_table = ACPI_PTR(pt5161l_acpi_match),
 	},
 	.probe = pt5161l_probe,
-	.remove = pt5161l_remove,
 	.id_table = pt5161l_id,
 };
-
-static int __init pt5161l_init(void)
-{
-	pt5161l_debugfs_dir = debugfs_create_dir("pt5161l", NULL);
-	return i2c_add_driver(&pt5161l_driver);
-}
-
-static void __exit pt5161l_exit(void)
-{
-	i2c_del_driver(&pt5161l_driver);
-	debugfs_remove_recursive(pt5161l_debugfs_dir);
-}
-
-module_init(pt5161l_init);
-module_exit(pt5161l_exit);
+module_i2c_driver(pt5161l_driver);
 
 MODULE_AUTHOR("Cosmo Chou <cosmo.chou@quantatw.com>");
 MODULE_DESCRIPTION("Hwmon driver for Astera Labs Aries PCIe retimer");

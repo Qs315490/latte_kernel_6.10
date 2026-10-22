@@ -7,20 +7,22 @@
 #include <linux/stop_machine.h>
 #include <linux/string_helpers.h>
 
+#include <drm/intel/mchbar_regs.h>
+#include <drm/intel/pci_config.h>
+
 #include "display/intel_display_reset.h"
 #include "display/intel_overlay.h"
-
 #include "gem/i915_gem_context.h"
-
 #include "gt/intel_gt_regs.h"
-
 #include "gt/uc/intel_gsc_fw.h"
+#include "uc/intel_guc.h"
 
 #include "i915_drv.h"
 #include "i915_file_private.h"
 #include "i915_gpu_error.h"
 #include "i915_irq.h"
 #include "i915_reg.h"
+#include "i915_wait_util.h"
 #include "intel_breadcrumbs.h"
 #include "intel_engine_pm.h"
 #include "intel_engine_regs.h"
@@ -28,11 +30,7 @@
 #include "intel_gt_pm.h"
 #include "intel_gt_print.h"
 #include "intel_gt_requests.h"
-#include "intel_mchbar_regs.h"
-#include "intel_pci_config.h"
 #include "intel_reset.h"
-
-#include "uc/intel_guc.h"
 
 #define RESET_MAX_RETRIES 3
 
@@ -135,7 +133,8 @@ void __i915_request_reset(struct i915_request *rq, bool guilty)
 	rcu_read_lock(); /* protect the GEM context */
 	if (guilty) {
 		i915_request_set_error_once(rq, -EIO);
-		__i915_request_skip(rq);
+		if (!i915_request_signaled(rq))
+			__i915_request_skip(rq);
 		banned = mark_guilty(rq);
 	} else {
 		i915_request_set_error_once(rq, -EAGAIN);
@@ -589,7 +588,7 @@ static int gen8_engine_reset_prepare(struct intel_engine_cs *engine)
 		return 0;
 	}
 
-	intel_uncore_write_fw(uncore, reg, _MASKED_BIT_ENABLE(request));
+	intel_uncore_write_fw(uncore, reg, REG_MASKED_FIELD_ENABLE(request));
 	ret = __intel_wait_for_register_fw(uncore, reg, mask, ack,
 					   700, 0, NULL);
 	if (ret)
@@ -605,7 +604,7 @@ static void gen8_engine_reset_cancel(struct intel_engine_cs *engine)
 {
 	intel_uncore_write_fw(engine->uncore,
 			      RING_RESET_CTL(engine->mmio_base),
-			      _MASKED_BIT_DISABLE(RESET_CTL_REQUEST_RESET));
+			      REG_MASKED_FIELD_DISABLE(RESET_CTL_REQUEST_RESET));
 }
 
 static int gen8_reset_engines(struct intel_gt *gt,
@@ -969,6 +968,7 @@ static void nop_submit_request(struct i915_request *request)
 
 static void __intel_gt_set_wedged(struct intel_gt *gt)
 {
+	struct intel_display *display = gt->i915->display;
 	struct intel_engine_cs *engine;
 	intel_engine_mask_t awake;
 	enum intel_engine_id id;
@@ -986,7 +986,8 @@ static void __intel_gt_set_wedged(struct intel_gt *gt)
 	awake = reset_prepare(gt);
 
 	/* Even if the GPU reset fails, it should still stop the engines */
-	if (!INTEL_INFO(gt->i915)->gpu_reset_clobbers_display)
+	if (!intel_gt_gpu_reset_clobbers_display(gt) &&
+	    !intel_display_reset_test(display))
 		intel_gt_reset_all_engines(gt);
 
 	for_each_engine(engine, gt, id)
@@ -1098,7 +1099,7 @@ static bool __intel_gt_unset_wedged(struct intel_gt *gt)
 		dma_fence_default_wait(fence, false, MAX_SCHEDULE_TIMEOUT);
 		dma_fence_put(fence);
 
-		/* Restart iteration after droping lock */
+		/* Restart iteration after dropping lock */
 		spin_lock(&timelines->lock);
 		tl = list_entry(&timelines->active_list, typeof(*tl), link);
 	}
@@ -1106,14 +1107,13 @@ static bool __intel_gt_unset_wedged(struct intel_gt *gt)
 
 	/* We must reset pending GPU events before restoring our submission */
 	ok = !HAS_EXECLISTS(gt->i915); /* XXX better agnosticism desired */
-	if (!INTEL_INFO(gt->i915)->gpu_reset_clobbers_display)
+	if (!intel_gt_gpu_reset_clobbers_display(gt))
 		ok = intel_gt_reset_all_engines(gt) == 0;
 	if (!ok) {
 		/*
 		 * Warn CI about the unrecoverable wedged condition.
 		 * Time for a reboot.
 		 */
-		gt_err(gt, "Unrecoverable wedged condition\n");
 		add_taint_for_CI(gt->i915, TAINT_WARN);
 		return false;
 	}
@@ -1178,6 +1178,13 @@ static int resume(struct intel_gt *gt)
 	return 0;
 }
 
+bool intel_gt_gpu_reset_clobbers_display(struct intel_gt *gt)
+{
+	struct drm_i915_private *i915 = gt->i915;
+
+	return INTEL_INFO(i915)->gpu_reset_clobbers_display;
+}
+
 /**
  * intel_gt_reset - reset chip after a hang
  * @gt: #intel_gt to reset
@@ -1199,7 +1206,7 @@ void intel_gt_reset(struct intel_gt *gt,
 		    intel_engine_mask_t stalled_mask,
 		    const char *reason)
 {
-	struct intel_display *display = &gt->i915->display;
+	struct intel_display *display = gt->i915->display;
 	intel_engine_mask_t awake;
 	int ret;
 
@@ -1234,7 +1241,7 @@ void intel_gt_reset(struct intel_gt *gt,
 		goto error;
 	}
 
-	if (INTEL_INFO(gt->i915)->gpu_reset_clobbers_display)
+	if (intel_gt_gpu_reset_clobbers_display(gt))
 		intel_irq_suspend(gt->i915);
 
 	if (do_reset(gt, stalled_mask)) {
@@ -1242,7 +1249,7 @@ void intel_gt_reset(struct intel_gt *gt,
 		goto taint;
 	}
 
-	if (INTEL_INFO(gt->i915)->gpu_reset_clobbers_display)
+	if (intel_gt_gpu_reset_clobbers_display(gt))
 		intel_irq_resume(gt->i915);
 
 	intel_overlay_reset(display);
@@ -1265,10 +1272,8 @@ void intel_gt_reset(struct intel_gt *gt,
 	}
 
 	ret = resume(gt);
-	if (ret) {
-		gt_err(gt, "Failed to resume (%d)\n", ret);
+	if (ret)
 		goto taint;
-	}
 
 finish:
 	reset_finish(gt, awake);
@@ -1413,15 +1418,43 @@ static void intel_gt_reset_global(struct intel_gt *gt,
 
 	/* Use a watchdog to ensure that our reset completes */
 	intel_wedge_on_timeout(&w, gt, 60 * HZ) {
-		intel_display_reset_prepare(gt->i915);
+		struct drm_i915_private *i915 = gt->i915;
+		struct intel_display *display = i915->display;
+		bool need_display_reset;
+		bool reset_display;
+
+		need_display_reset =
+			intel_display_reset_supported(display) &&
+			intel_gt_gpu_reset_clobbers_display(gt) &&
+			intel_has_gpu_reset(gt);
+
+		reset_display =
+			intel_display_reset_test(display) ||
+			need_display_reset;
+
+		if (reset_display) {
+			if (atomic_read(&i915->pending_fb_pin)) {
+				drm_dbg_kms(&i915->drm,
+					    "Modeset potentially stuck, unbreaking through wedging\n");
+
+				intel_gt_set_wedged(gt);
+			}
+
+			intel_display_reset_prepare(display);
+		}
 
 		intel_gt_reset(gt, engine_mask, reason);
 
-		intel_display_reset_finish(gt->i915);
+		if (reset_display)
+			intel_display_reset_finish(display, !need_display_reset);
 	}
 
 	if (!test_bit(I915_WEDGED, &gt->reset.flags))
 		kobject_uevent_env(kobj, KOBJ_CHANGE, reset_done_event);
+	else
+		drm_dev_wedged_event(&gt->i915->drm,
+				     DRM_WEDGE_RECOVERY_REBIND | DRM_WEDGE_RECOVERY_BUS_RESET,
+				     NULL);
 }
 
 /**
@@ -1476,13 +1509,14 @@ void intel_gt_handle_error(struct intel_gt *gt,
 
 	/*
 	 * Try engine reset when available. We fall back to full reset if
-	 * single reset fails.
+	 * single reset fails. Display reset test needs a full reset.
 	 */
-	if (!intel_uc_uses_guc_submission(&gt->uc) &&
+	if (!intel_display_reset_test(gt->i915->display) &&
+	    !intel_uc_uses_guc_submission(&gt->uc) &&
 	    intel_has_reset_engine(gt) && !intel_gt_is_wedged(gt)) {
 		local_bh_disable();
 		for_each_engine_masked(engine, gt, engine_mask, tmp) {
-			BUILD_BUG_ON(I915_RESET_MODESET >= I915_RESET_ENGINE);
+			BUILD_BUG_ON(I915_RESET_BACKOFF >= I915_RESET_ENGINE);
 			if (test_and_set_bit(I915_RESET_ENGINE + engine->id,
 					     &gt->reset.flags))
 				continue;
@@ -1611,7 +1645,6 @@ void intel_gt_set_wedged_on_init(struct intel_gt *gt)
 	set_bit(I915_WEDGED_ON_INIT, &gt->reset.flags);
 
 	/* Wedged on init is non-recoverable */
-	gt_err(gt, "Non-recoverable wedged on init\n");
 	add_taint_for_CI(gt->i915, TAINT_WARN);
 }
 

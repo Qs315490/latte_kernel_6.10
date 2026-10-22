@@ -1260,7 +1260,7 @@ static int maven_probe(struct i2c_client *client)
 					      I2C_FUNC_NOSTART |
 					      I2C_FUNC_PROTOCOL_MANGLING))
 		goto ERROR0;
-	if (!(data = kzalloc(sizeof(*data), GFP_KERNEL))) {
+	if (!(data = kzalloc_obj(*data))) {
 		err = -ENOMEM;
 		goto ERROR0;
 	}
@@ -1282,7 +1282,7 @@ static void maven_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id maven_id[] = {
-	{ "maven" },
+	{ .name = "maven" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, maven_id);

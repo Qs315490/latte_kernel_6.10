@@ -47,7 +47,7 @@
 #include "dcn30/dcn30_clk_mgr.h"
 
 #include "dc_dmub_srv.h"
-#include "link.h"
+#include "link_service.h"
 
 #include "logger_types.h"
 
@@ -93,6 +93,9 @@ static int dcn31_get_active_display_cnt_wa(
 		if (dc_is_dp_signal(stream->signal) && !stream->dpms_off)
 			display_count++;
 
+		/* FRL can't be tracked by DIG enablement */
+		if (dc_is_hdmi_frl_signal(stream->signal))
+			display_count++;
 	}
 
 	for (i = 0; i < dc->link_count; i++) {
@@ -114,7 +117,7 @@ static int dcn31_get_active_display_cnt_wa(
 static void dcn31_disable_otg_wa(struct clk_mgr *clk_mgr_base, struct dc_state *context, bool disable)
 {
 	struct dc *dc = clk_mgr_base->ctx->dc;
-	int i;
+	uint8_t i;
 
 	for (i = 0; i < dc->res_pool->pipe_count; ++i) {
 		struct pipe_ctx *pipe = &dc->current_state->res_ctx.pipe_ctx[i];
@@ -155,7 +158,6 @@ void dcn31_update_clocks(struct clk_mgr *clk_mgr_base,
 		if (new_clocks->zstate_support != DCN_ZSTATE_SUPPORT_DISALLOW &&
 				new_clocks->zstate_support != clk_mgr_base->clks.zstate_support) {
 			dcn31_smu_set_zstate_support(clk_mgr, new_clocks->zstate_support);
-			dm_helpers_enable_periodic_detection(clk_mgr_base->ctx, true);
 			clk_mgr_base->clks.zstate_support = new_clocks->zstate_support;
 		}
 
@@ -181,7 +183,6 @@ void dcn31_update_clocks(struct clk_mgr *clk_mgr_base,
 		if (new_clocks->zstate_support == DCN_ZSTATE_SUPPORT_DISALLOW &&
 				new_clocks->zstate_support != clk_mgr_base->clks.zstate_support) {
 			dcn31_smu_set_zstate_support(clk_mgr, DCN_ZSTATE_SUPPORT_DISALLOW);
-			dm_helpers_enable_periodic_detection(clk_mgr_base->ctx, false);
 			clk_mgr_base->clks.zstate_support = new_clocks->zstate_support;
 		}
 
@@ -329,6 +330,9 @@ bool dcn31_are_clock_states_equal(struct dc_clocks *a,
 static void dcn31_dump_clk_registers(struct clk_state_registers_and_bypass *regs_and_bypass,
 		struct clk_mgr *clk_mgr_base, struct clk_log_info *log_info)
 {
+	(void)regs_and_bypass;
+	(void)clk_mgr_base;
+	(void)log_info;
 	return;
 }
 
@@ -421,7 +425,7 @@ static struct dcn31_watermarks dummy_wms = { 0 };
 
 static void dcn31_build_watermark_ranges(struct clk_bw_params *bw_params, struct dcn31_watermarks *table)
 {
-	int i, num_valid_sets;
+	uint8_t i, num_valid_sets;
 
 	num_valid_sets = 0;
 
@@ -430,8 +434,10 @@ static void dcn31_build_watermark_ranges(struct clk_bw_params *bw_params, struct
 		if (!bw_params->wm_table.entries[i].valid)
 			continue;
 
-		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmSetting = bw_params->wm_table.entries[i].wm_inst;
-		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmType = bw_params->wm_table.entries[i].wm_type;
+		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmSetting =
+			(uint8_t)bw_params->wm_table.entries[i].wm_inst;
+		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmType =
+			(uint8_t)bw_params->wm_table.entries[i].wm_type;
 		/* We will not select WM based on fclk, so leave it as unconstrained */
 		table->WatermarkRow[WM_DCFCLK][num_valid_sets].MinClock = 0;
 		table->WatermarkRow[WM_DCFCLK][num_valid_sets].MaxClock = 0xFFFF;
@@ -442,10 +448,10 @@ static void dcn31_build_watermark_ranges(struct clk_bw_params *bw_params, struct
 			else {
 				/* add 1 to make it non-overlapping with next lvl */
 				table->WatermarkRow[WM_DCFCLK][num_valid_sets].MinMclk =
-						bw_params->clk_table.entries[i - 1].dcfclk_mhz + 1;
+						(uint16_t)(bw_params->clk_table.entries[i - 1].dcfclk_mhz + 1);
 			}
 			table->WatermarkRow[WM_DCFCLK][num_valid_sets].MaxMclk =
-					bw_params->clk_table.entries[i].dcfclk_mhz;
+					(uint16_t)bw_params->clk_table.entries[i].dcfclk_mhz;
 
 		} else {
 			/* unconstrained for memory retraining */
@@ -520,7 +526,7 @@ static void dcn31_get_dpm_table_from_smu(struct clk_mgr_internal *clk_mgr,
 static uint32_t find_max_clk_value(const uint32_t clocks[], uint32_t num_clocks)
 {
 	uint32_t max = 0;
-	int i;
+	uint32_t i;
 
 	for (i = 0; i < num_clocks; ++i) {
 		if (clocks[i] > max)
@@ -536,8 +542,8 @@ static unsigned int find_clk_for_voltage(
 		unsigned int voltage)
 {
 	int i;
-	int max_voltage = 0;
-	int clock = 0;
+	unsigned int max_voltage = 0;
+	unsigned int clock = 0;
 
 	for (i = 0; i < NUM_SOC_VOLTAGE_LEVELS; i++) {
 		if (clock_table->SocVoltage[i] == voltage) {
@@ -558,6 +564,7 @@ static void dcn31_clk_mgr_helper_populate_bw_params(struct clk_mgr_internal *clk
 						    const DpmClocks_t *clock_table)
 {
 	int i, j;
+	unsigned int entry_idx;
 	struct clk_bw_params *bw_params = clk_mgr->base.bw_params;
 	uint32_t max_dispclk = 0, max_dppclk = 0;
 
@@ -592,24 +599,24 @@ static void dcn31_clk_mgr_helper_populate_bw_params(struct clk_mgr_internal *clk
 		ASSERT(0);
 	}
 
-	for (i = 0; i < bw_params->clk_table.num_entries; i++, j--) {
-		bw_params->clk_table.entries[i].fclk_mhz = clock_table->DfPstateTable[j].FClk;
-		bw_params->clk_table.entries[i].memclk_mhz = clock_table->DfPstateTable[j].MemClk;
-		bw_params->clk_table.entries[i].voltage = clock_table->DfPstateTable[j].Voltage;
+	for (entry_idx = 0; entry_idx < bw_params->clk_table.num_entries; entry_idx++, j--) {
+		bw_params->clk_table.entries[entry_idx].fclk_mhz = clock_table->DfPstateTable[j].FClk;
+		bw_params->clk_table.entries[entry_idx].memclk_mhz = clock_table->DfPstateTable[j].MemClk;
+		bw_params->clk_table.entries[entry_idx].voltage = clock_table->DfPstateTable[j].Voltage;
 		switch (clock_table->DfPstateTable[j].WckRatio) {
 		case WCK_RATIO_1_2:
-			bw_params->clk_table.entries[i].wck_ratio = 2;
+			bw_params->clk_table.entries[entry_idx].wck_ratio = 2;
 			break;
 		case WCK_RATIO_1_4:
-			bw_params->clk_table.entries[i].wck_ratio = 4;
+			bw_params->clk_table.entries[entry_idx].wck_ratio = 4;
 			break;
 		default:
-			bw_params->clk_table.entries[i].wck_ratio = 1;
+			bw_params->clk_table.entries[entry_idx].wck_ratio = 1;
 		}
-		bw_params->clk_table.entries[i].dcfclk_mhz = find_clk_for_voltage(clock_table, clock_table->DcfClocks, clock_table->DfPstateTable[j].Voltage);
-		bw_params->clk_table.entries[i].socclk_mhz = find_clk_for_voltage(clock_table, clock_table->SocClocks, clock_table->DfPstateTable[j].Voltage);
-		bw_params->clk_table.entries[i].dispclk_mhz = max_dispclk;
-		bw_params->clk_table.entries[i].dppclk_mhz = max_dppclk;
+		bw_params->clk_table.entries[entry_idx].dcfclk_mhz = find_clk_for_voltage(clock_table, clock_table->DcfClocks, clock_table->DfPstateTable[j].Voltage);
+		bw_params->clk_table.entries[entry_idx].socclk_mhz = find_clk_for_voltage(clock_table, clock_table->SocClocks, clock_table->DfPstateTable[j].Voltage);
+		bw_params->clk_table.entries[entry_idx].dispclk_mhz = max_dispclk;
+		bw_params->clk_table.entries[entry_idx].dppclk_mhz = max_dppclk;
 	}
 
 	bw_params->vram_type = bios_info->memory_type;
@@ -617,16 +624,16 @@ static void dcn31_clk_mgr_helper_populate_bw_params(struct clk_mgr_internal *clk
 	bw_params->dram_channel_width_bytes = bios_info->memory_type == 0x22 ? 8 : 4;
 	//bw_params->dram_channel_width_bytes = dc->ctx->asic_id.vram_width;
 	bw_params->num_channels = bios_info->ma_channel_number ? bios_info->ma_channel_number : 4;
-	for (i = 0; i < WM_SET_COUNT; i++) {
-		bw_params->wm_table.entries[i].wm_inst = i;
+	for (entry_idx = 0; entry_idx < (unsigned int)WM_SET_COUNT; entry_idx++) {
+		bw_params->wm_table.entries[entry_idx].wm_inst = entry_idx;
 
-		if (i >= bw_params->clk_table.num_entries) {
-			bw_params->wm_table.entries[i].valid = false;
+		if (entry_idx >= bw_params->clk_table.num_entries) {
+			bw_params->wm_table.entries[entry_idx].valid = false;
 			continue;
 		}
 
-		bw_params->wm_table.entries[i].wm_type = WM_TYPE_PSTATE_CHG;
-		bw_params->wm_table.entries[i].valid = true;
+		bw_params->wm_table.entries[entry_idx].wm_type = WM_TYPE_PSTATE_CHG;
+		bw_params->wm_table.entries[entry_idx].valid = true;
 	}
 }
 
@@ -725,11 +732,12 @@ void dcn31_clk_mgr_construct(
 	/* TODO: Check we get what we expect during bringup */
 	clk_mgr->base.base.dentist_vco_freq_khz = get_vco_frequency_from_reg(&clk_mgr->base);
 
-	if (ctx->dc_bios->integrated_info->memory_type == LpDdr5MemType) {
+	if (ctx->dc_bios->integrated_info &&
+	    ctx->dc_bios->integrated_info->memory_type == LpDdr5MemType)
 		dcn31_bw_params.wm_table = lpddr5_wm_table;
-	} else {
+	else
 		dcn31_bw_params.wm_table = ddr5_wm_table;
-	}
+
 	/* Saved clocks configured at boot for debug purposes */
 	dcn31_dump_clk_registers(&clk_mgr->base.base.boot_snapshot,
 				 &clk_mgr->base.base, &log_info);

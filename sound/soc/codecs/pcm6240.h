@@ -199,18 +199,13 @@ struct pcmdevice_config_info {
 	unsigned int nblocks;
 	unsigned int real_nblocks;
 	unsigned char active_dev;
-	struct pcmdevice_block_data **blk_data;
+	struct pcmdevice_block_data *blk_data[] __counted_by(nblocks);
 };
 
 struct pcmdevice_regbin {
 	struct pcmdevice_regbin_hdr fw_hdr;
 	int ncfgs;
 	struct pcmdevice_config_info **cfg_info;
-};
-
-struct pcmdevice_irqinfo {
-	int gpio;
-	int nmb;
 };
 
 struct pcmdevice_priv {
@@ -221,7 +216,7 @@ struct pcmdevice_priv {
 	struct gpio_desc *hw_rst;
 	struct regmap *regmap;
 	struct pcmdevice_regbin regbin;
-	struct pcmdevice_irqinfo irq_info;
+	int irq;
 	unsigned int addr[PCMDEVICE_MAX_I2C_DEVICES];
 	unsigned int chip_id;
 	int cur_conf;

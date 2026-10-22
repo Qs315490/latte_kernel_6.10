@@ -11,26 +11,37 @@
 #include <linux/dmi.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
+#include <linux/platform_data/x86/amd-fch.h>
 
 #include "pmc.h"
 
 struct quirk_entry {
 	u32 s2idle_bug_mmio;
 	bool spurious_8042;
+	bool need_suspend_delay;
 };
 
 static struct quirk_entry quirk_s2idle_bug = {
-	.s2idle_bug_mmio = 0xfed80380,
+	.s2idle_bug_mmio = FCH_PM_BASE + FCH_PM_SCRATCH,
 };
 
 static struct quirk_entry quirk_spurious_8042 = {
 	.spurious_8042 = true,
 };
 
+static struct quirk_entry quirk_s2idle_spurious_8042 = {
+	.s2idle_bug_mmio = FCH_PM_BASE + FCH_PM_SCRATCH,
+	.spurious_8042 = true,
+};
+
+static struct quirk_entry quirk_s2idle_need_suspend_delay = {
+	.need_suspend_delay = true,
+};
+
 static const struct dmi_system_id fwbug_list[] = {
 	{
 		.ident = "L14 Gen2 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "20X5"),
@@ -38,7 +49,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "T14s Gen2 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "20XF"),
@@ -46,7 +57,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "X13 Gen2 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "20XH"),
@@ -54,7 +65,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "T14 Gen2 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "20XK"),
@@ -62,7 +73,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "T14 Gen1 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "20UD"),
@@ -70,7 +81,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "T14 Gen1 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "20UE"),
@@ -78,7 +89,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "T14s Gen1 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "20UH"),
@@ -86,7 +97,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "T14s Gen1 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "20UJ"),
@@ -94,7 +105,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "P14s Gen1 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "20Y1"),
@@ -102,7 +113,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "P14s Gen2 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "21A0"),
@@ -110,10 +121,18 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "P14s Gen2 AMD",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "21A1"),
+		}
+	},
+	{
+		.ident = "ROG Xbox Ally RC73YA",
+		.driver_data = &quirk_spurious_8042,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_BOARD_NAME, "RC73YA"),
 		}
 	},
 	/* https://bugzilla.kernel.org/show_bug.cgi?id=218024 */
@@ -151,7 +170,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "IdeaPad 1 14AMN7",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "82VF"),
@@ -159,7 +178,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "IdeaPad 1 15AMN7",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "82VG"),
@@ -167,7 +186,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "IdeaPad 1 15AMN7",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "82X5"),
@@ -175,7 +194,7 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "IdeaPad Slim 3 14AMN8",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "82XN"),
@@ -183,16 +202,80 @@ static const struct dmi_system_id fwbug_list[] = {
 	},
 	{
 		.ident = "IdeaPad Slim 3 15AMN8",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "82XQ"),
 		}
 	},
+	/* https://bugzilla.kernel.org/show_bug.cgi?id=221383 */
+	{
+		.ident = "Zen3-based IdeaPad Slim and similar",
+		.driver_data = &quirk_s2idle_need_suspend_delay,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			/*
+			 * Note: there are also some Zen2-based 82X* devices that
+			 * need different quirks, they're already handled above
+			 */
+			DMI_MATCH(DMI_PRODUCT_NAME, "82X"),
+		}
+	},
+	{
+		.ident = "Zen3+-based IdeaPad Slim and similar",
+		.driver_data = &quirk_s2idle_need_suspend_delay,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83K"),
+		}
+	},
+	{
+		.ident = "IdeaPad Slim 3 15ARP10 (83MM)",
+		.driver_data = &quirk_s2idle_need_suspend_delay,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83MM"),
+		}
+	},
+	/* https://bugzilla.kernel.org/show_bug.cgi?id=221273 */
+	{
+		.ident = "Thinkpad L14 Gen3",
+		.driver_data = &quirk_s2idle_bug,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "21C6"),
+		}
+	},
+	/* https://gitlab.freedesktop.org/drm/amd/-/issues/4434 */
+	{
+		.ident = "Lenovo Yoga 6 13ALC6",
+		.driver_data = &quirk_s2idle_spurious_8042,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "82ND"),
+		}
+	},
+	/* https://gitlab.freedesktop.org/drm/amd/-/issues/4618 */
+	{
+		.ident = "Lenovo Legion Go 2",
+		.driver_data = &quirk_s2idle_bug,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83N0"),
+		}
+	},
+	{
+		.ident = "Lenovo Legion Go 2",
+		.driver_data = &quirk_s2idle_bug,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83N1"),
+		}
+	},
 	/* https://gitlab.freedesktop.org/drm/amd/-/issues/2684 */
 	{
 		.ident = "HP Laptop 15s-eq2xxx",
-		.driver_data = &quirk_s2idle_bug,
+		.driver_data = &quirk_s2idle_spurious_8042,
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "HP"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "HP Laptop 15s-eq2xxx"),
@@ -215,6 +298,58 @@ static const struct dmi_system_id fwbug_list[] = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Framework"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "Laptop 13 (AMD Ryzen 7040Series)"),
 			DMI_MATCH(DMI_BIOS_VERSION, "03.05"),
+		}
+	},
+	{
+		.ident = "MECHREVO Wujie 14X (GX4HRXL)",
+		.driver_data = &quirk_spurious_8042,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_NAME, "WUJIE14-GX4HRXL"),
+		}
+	},
+	{
+		.ident = "MECHREVO Yilong15Pro Series GM5HG7A",
+		.driver_data = &quirk_spurious_8042,
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "MECHREVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Yilong15Pro Series GM5HG7A"),
+		}
+	},
+	/* https://bugzilla.kernel.org/show_bug.cgi?id=220116 */
+	{
+		.ident = "PCSpecialist Lafite Pro V 14M",
+		.driver_data = &quirk_spurious_8042,
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "PCSpecialist"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Lafite Pro V 14M"),
+		}
+	},
+	{
+		.ident = "TUXEDO Stellaris Slim 15 AMD Gen6",
+		.driver_data = &quirk_spurious_8042,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_NAME, "GMxHGxx"),
+		}
+	},
+	{
+		.ident = "TUXEDO InfinityBook Pro 14/15 AMD Gen10",
+		.driver_data = &quirk_spurious_8042,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_NAME, "XxHP4NAx"),
+		}
+	},
+	{
+		.ident = "TUXEDO InfinityBook Pro 14/15 AMD Gen10",
+		.driver_data = &quirk_spurious_8042,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_NAME, "XxKK4NAx_XxSP4NAx"),
+		}
+	},
+	{
+		.ident = "MECHREVO Wujie 15X Pro",
+		.driver_data = &quirk_spurious_8042,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_NAME, "WUJIE Series-X5SP4NAG"),
 		}
 	},
 	{}
@@ -255,10 +390,25 @@ void amd_pmc_process_restore_quirks(struct amd_pmc_dev *dev)
 		amd_pmc_skip_nvme_smi_handler(dev->quirks->s2idle_bug_mmio);
 }
 
+bool amd_pmc_quirk_need_suspend_delay(struct amd_pmc_dev *dev)
+{
+	return dev->quirks && dev->quirks->need_suspend_delay;
+}
+
 void amd_pmc_quirks_init(struct amd_pmc_dev *dev)
 {
 	const struct dmi_system_id *dmi_id;
 
+	/*
+	 * IRQ1 may cause an interrupt during resume even without a keyboard
+	 * press.
+	 *
+	 * Affects Renoir, Cezanne and Barcelo SoCs
+	 *
+	 * A solution is available in PMFW 64.66.0, but it must be activated by
+	 * SBIOS. If SBIOS is known to have the fix a quirk can be added for
+	 * a given system to avoid workaround.
+	 */
 	if (dev->cpu_id == AMD_CPU_ID_CZN)
 		dev->disable_8042_wakeup = true;
 
@@ -269,6 +419,5 @@ void amd_pmc_quirks_init(struct amd_pmc_dev *dev)
 	if (dev->quirks->s2idle_bug_mmio)
 		pr_info("Using s2idle quirk to avoid %s platform firmware bug\n",
 			dmi_id->ident);
-	if (dev->quirks->spurious_8042)
-		dev->disable_8042_wakeup = true;
+	dev->disable_8042_wakeup = dev->quirks->spurious_8042;
 }
