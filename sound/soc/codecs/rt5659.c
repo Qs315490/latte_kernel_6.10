@@ -2872,6 +2872,14 @@ static const struct snd_soc_dapm_route rt5659_dapm_routes[] = {
 	{ "I2S1", NULL, "I2S1 ASRC" },
 	{ "I2S2", NULL, "I2S2 ASRC" },
 	{ "I2S3", NULL, "I2S3 ASRC" },
+	/*
+	 * Digital DAC_REF -> I2S loopback can bypass every ADC/DAC filter.
+	 * The serial ports still consume SYSCLK; selecting PLL1 must therefore
+	 * power the PLL even when none of those filter widgets is active.
+	 */
+	{ "I2S1", NULL, "PLL", is_sys_clk_from_pll },
+	{ "I2S2", NULL, "PLL", is_sys_clk_from_pll },
+	{ "I2S3", NULL, "PLL", is_sys_clk_from_pll },
 
 	{ "DMIC1", NULL, "DMIC L1" },
 	{ "DMIC1", NULL, "DMIC R1" },
